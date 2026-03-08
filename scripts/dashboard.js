@@ -1627,6 +1627,9 @@ async function execDeletePerfis(cmd) {
   const many = Array.isArray(payload.profileNames) ? payload.profileNames.map(x => String(x || '').trim()).filter(Boolean) : [];
   const list = one ? [one] : many;
   if (!list.length) throw new Error('missing_profileNames');
+  const cmdId = String((cmd && cmd.id) || '').trim();
+  const opFromPayload = String(payload.operator || '').trim();
+  const operator = opFromPayload || (cmdId ? `ct_delete_perfis:${cmdId}` : 'ct_delete_perfis');
 
   const results = [];
   for (const nome of list) {
@@ -1637,7 +1640,10 @@ async function execDeletePerfis(cmd) {
       // - dados/perfis/<nome> (pastas órfãs)
       // - Chrome User Data/Conveniente/<nome> (best-effort)
       // A rota DELETE já faz esse cleanup. Portanto, NÃO short-circuit aqui.
-      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, { method: 'DELETE' });
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, {
+        method: 'DELETE',
+        headers: { 'x-operator': operator }
+      });
       if (!r || r.ok === false) {
         results.push({ nome, ok: false, error: (r && r.error) ? String(r.error) : 'delete_failed' });
       } else {
@@ -1809,6 +1815,10 @@ async function execStockProvision(cmd) {
   const normalizeErr = (e) => {
     const msg = (e && e.message) ? String(e.message) : String(e || '');
     return msg.trim().slice(0, 500);
+  };
+  const isSoftStockProvisionLoginRemediateError = (msg) => {
+    const m = String(msg || '').trim().toLowerCase();
+    return m === 'ui_blocked:dialog' || m === 'ui_blocked:unknown';
   };
   const isTransient = (msg) => {
     const m = String(msg || '').toLowerCase();
@@ -2202,7 +2212,50 @@ async function execStockProvision(cmd) {
           });
           if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'login_remediate_failed');
           // Se result.ok=false, consideramos falha (o worker já terá feito hold/ban/2fa conforme regra).
-          if (!r5.result || r5.result.ok !== true) throw new Error((r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed');
+          if (!r5.result || r5.result.ok !== true) {
+            const lrErr = (r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed';
+            // Falso-positivo observado em produção: profile criado+ativo, mas login_remediate retorna
+            // ui_blocked:* no fechamento do fluxo. Nesse caso, não marcar a ação como fail.
+            if (isSoftStockProvisionLoginRemediateError(lrErr)) {
+              let statusProbe = null;
+              let activeNow = false;
+              try {
+                const st = await getStatusSnapshot();
+                const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
+                statusProbe = arr.find(p => p && String(p.nome || '') === String(nome)) || null;
+                activeNow = !!(statusProbe && statusProbe.active === true);
+              } catch {}
+              if (activeNow) {
+                try {
+                  const tabs = Number(statusProbe && (statusProbe.abas || statusProbe.tabs || statusProbe.openPages || 0)) || 0;
+                  out.steps.push({
+                    step: 'login_remediate_softpass',
+                    at: Date.now(),
+                    reason: lrErr,
+                    active: true,
+                    virtusOnline: !!(statusProbe && statusProbe.virtusOnline === true),
+                    tabs
+                  });
+                } catch {}
+                try {
+                  provisionAudit.append({
+                    event: 'stock_provision_login_remediate_softpass',
+                    cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+                    batchId,
+                    profileName: nome,
+                    stockAccountId: stockAccountId || null,
+                    reason: lrErr
+                  });
+                } catch {}
+                return {
+                  ...r5,
+                  softPass: true,
+                  softPassReason: lrErr
+                };
+              }
+            }
+            throw new Error(lrErr);
+          }
           return r5;
         });
 

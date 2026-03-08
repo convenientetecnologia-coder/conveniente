@@ -326,7 +326,8 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/deactivate', async (req, res) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/deactivate chamada', { nome });
-    const op = String(req.headers['x-operator'] || 'unknown');
+    const opRaw = String(req.headers['x-operator'] || '').trim();
+    const op = opRaw || 'system_delete_perfis';
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       logger.warn('Tentativa de desativar perfil inexistente ou inválido', { nome, error: e && e.message });
@@ -1103,7 +1104,7 @@ module.exports = (app, workerClient, fileStore) => {
           } catch {}
 
           ct.attempted = true;
-          const reason = `manual_delete:${String(op || '').slice(0, 60)}`.slice(0, 120);
+          const reason = `manual_delete:${String(op || 'system_delete_perfis').slice(0, 60)}`.slice(0, 120);
           try {
             const Aborter = global.AbortController || require('node-abort-controller');
             const ac = new Aborter();
