@@ -64,16 +64,6 @@ function debounceWarn(msg, ms = 60000) {
   }
 }
 
-function isBenignAbortError(err) {
-  try {
-    const name = String(err && err.name || '').toLowerCase();
-    const msg = String((err && err.message) ? err.message : err || '').toLowerCase();
-    return name === 'aborterror' || msg.includes('operation was aborted') || msg.includes('aborted');
-  } catch {
-    return false;
-  }
-}
-
 function ensureDirSync(p) {
   try { fsSync.mkdirSync(p, { recursive: true }); } catch {}
 }
@@ -1578,9 +1568,6 @@ async function execLoginRemediate(cmd) {
     r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
       method: 'POST',
       headers: { 'x-operator': operator },
-      // Sem isso, a ponte local pode abortar antes do fluxo completar (falso fail).
-      timeoutMs,
-      retries: 0,
       body: { options: (payload && payload.options ? payload.options : {}), timeoutMs }
     }).catch(() => null);
 
@@ -1627,9 +1614,6 @@ async function execDeletePerfis(cmd) {
   const many = Array.isArray(payload.profileNames) ? payload.profileNames.map(x => String(x || '').trim()).filter(Boolean) : [];
   const list = one ? [one] : many;
   if (!list.length) throw new Error('missing_profileNames');
-  const cmdId = String((cmd && cmd.id) || '').trim();
-  const opFromPayload = String(payload.operator || '').trim();
-  const operator = opFromPayload || (cmdId ? `ct_delete_perfis:${cmdId}` : 'ct_delete_perfis');
 
   const results = [];
   for (const nome of list) {
@@ -1640,10 +1624,7 @@ async function execDeletePerfis(cmd) {
       // - dados/perfis/<nome> (pastas órfãs)
       // - Chrome User Data/Conveniente/<nome> (best-effort)
       // A rota DELETE já faz esse cleanup. Portanto, NÃO short-circuit aqui.
-      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, {
-        method: 'DELETE',
-        headers: { 'x-operator': operator }
-      });
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, { method: 'DELETE' });
       if (!r || r.ok === false) {
         results.push({ nome, ok: false, error: (r && r.error) ? String(r.error) : 'delete_failed' });
       } else {
@@ -2208,10 +2189,7 @@ async function execStockProvision(cmd) {
           });
           if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'login_remediate_failed');
           // Se result.ok=false, consideramos falha (o worker já terá feito hold/ban/2fa conforme regra).
-          if (!r5.result || r5.result.ok !== true) {
-            const lrErr = (r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed';
-            throw new Error(lrErr);
-          }
+          if (!r5.result || r5.result.ok !== true) throw new Error((r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed');
           return r5;
         });
 
@@ -2465,8 +2443,6 @@ function logsAllowlist() {
     status_node_5: path.join(base, 'status_node_5.json'),
     status_node_6: path.join(base, 'status_node_6.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
-    // Dossiê forense de queda/flapping por perfil (Lote 2 blindagem RM7)
-    fall_forensics: path.join(base, 'fall_forensics.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
@@ -3185,13 +3161,7 @@ async function tick(reason = 'interval') {
 
   } catch (e) {
     const m = e && e.message ? e.message : String(e);
-    // Timeout/abort em fetch é ruído operacional esperado em cenários transitórios.
-    // Não poluir terminal com WARN contínuo nesses casos.
-    if (!isBenignAbortError(e)) {
-      debounceWarn('Falha ao enviar status: ' + m);
-    } else if (process.env.DASHBOARD_DEBUG === '1') {
-      logger.info('[DASHBOARD] envio de status abortado (transitório)');
-    }
+    debounceWarn('Falha ao enviar status: ' + m);
   } finally {
     inFlight = false;
     lastTickDoneAt = Date.now();

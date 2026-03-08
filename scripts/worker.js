@@ -4330,7 +4330,6 @@ const HEALTH_CFG = {
   DEAD_NO_EVENT_MS: 45000,
   DEAD_NO_DOM_MS: 45000,
   DEAD_NO_NET_MS: 60000,
-  MIN_ACTION_GAP_MS: Math.max(30_000, Number(process.env.HEALTH_RECOVERY_MIN_ACTION_GAP_MS || 120_000) || 120_000),
   RECOVERY_COOLDOWN_MS: {
     reload: 30000,
     navHome: 45000,
@@ -4348,7 +4347,7 @@ const PHANTOM_CFG = {
   INITIAL_GRACE_MS: 9000,
   PERSIST_MS: 20000,
   CHECK_INTERVAL_MS: 5000,
-  COOLDOWN_BETWEEN_TRIES_MS: Math.max(30_000, Number(process.env.PHANTOM_COOLDOWN_BETWEEN_TRIES_MS || 120_000) || 120_000),
+  COOLDOWN_BETWEEN_TRIES_MS: 30000,
   MAX_PHTM_RELOADS_10M: 2,
   MAX_PHTM_NAV_10M: 2,
   MAX_PHTM_NEWPAGE_30M: 2,
@@ -4486,7 +4485,6 @@ function getHealth(nome) {
     healthState.set(nome, {
       lastOkAt: 0, lastDomEventAt: 0, lastNetEventAt: 0, lastConsoleErrorAt: 0,
       lastUrl: '', lastTitle: '', stage: 'ok', nextTryAt: 0,
-      lastRecoveryActionAt: 0,
       counters: { softReloads10m: [], navHomes10m: [], newPages30m: [], cyclesWithoutLife: 0 },
       newPageInFlight: false,
       lastNewPageAt: 0
@@ -8475,29 +8473,9 @@ const handlers = {
           const pages = await ctrl.browser.pages().catch(()=>[]);
           const p0 = pages && pages[0];
           if (!p0) throw new Error('no_page0');
-          const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
-          const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
-          const pickPage = (pred) => {
-            for (const pg of (pages || [])) {
-              try {
-                if (pred(safeUrl(pg), pg)) return pg;
-              } catch {}
-            }
-            return null;
-          };
 
-          // Fluxo stock_provision: manter as 3 abas abertas para não trocar de contexto desnecessariamente.
-          if (!isStockProvision) {
-            // UX HARDCORE padrão: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
-            try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
-          }
-
-          const pFbLogin = isStockProvision
-            ? (pickPage((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) || pickPage((u) => /facebook\.com/i.test(u)) || p0)
-            : p0;
-          const pMsgLogin = isStockProvision
-            ? (pickPage((u) => /messenger\.com/i.test(u)) || pFbLogin || p0)
-            : p0;
+          // UX HARDCORE: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
+          try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
 
           const man2 = await manifestStore.read(nome).catch(()=>null);
           const login2 = man2 && (man2.login || man2.email || man2.user || man2.username);
@@ -8508,98 +8486,65 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
-          let messengerLoginConfirmed = false;
-          const currentMsgReason = String((lrMessenger && lrMessenger.reason) || '').toLowerCase();
-          const needsMsgLoginNow = !!(lrMessenger && lrMessenger.loginRequired);
-          const needsFbLoginNow = !!(lrFacebook && lrFacebook.loginRequired);
-          const stockMsgFirst = isStockProvision && needsMsgLoginNow && currentMsgReason.includes('login_form');
+          // Facebook primeiro (tende a refletir no Messenger)
+          pushStep({ step: 'attempt2_login_fb_begin' });
+          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
+          pushStep({ step: 'attempt2_login_fb_done', result: rfb });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          const runFbLogin = async () => {
-            pushStep({ step: 'attempt2_login_fb_begin' });
-            // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
-            if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
-              await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
+          try {
+            const lrAfterFb = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
+              pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
+              await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
             }
-            await new Promise(r => setTimeout(r, 2600));
-            await browserHelper.ensureFbUiUnblocked(pFbLogin, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: pFbLogin, note: 'fb before submit' });
-            if (await checkAndAbortIfBanned(pFbLogin, 'before_login_fb')) return { ok: false, error: 'banned' };
-            const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(pFbLogin, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
-            pushStep({ step: 'attempt2_login_fb_done', result: rfb });
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: pFbLogin, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
-            if (await checkAndAbortIfBanned(pFbLogin, 'after_login_fb')) return { ok: false, error: 'banned' };
+          } catch {}
 
-            // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir.
-            try {
-              const lrAfterFb = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
-              if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
-                pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
-                await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
-                return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human') };
-              }
-            } catch {}
-            return { ok: true };
-          };
+          // Messenger depois (se necessário)
+          pushStep({ step: 'attempt2_login_msg_begin' });
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
+          pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          const runMsgLogin = async () => {
-            pushStep({ step: 'attempt2_login_msg_begin' });
-            if (!/messenger\.com/i.test(safeUrl(pMsgLogin))) {
-              await pMsgLogin.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Se Messenger cair em estado não automatizável, também fail-fast.
+          try {
+            const lrAfterMsg = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
+              pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
+              await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
             }
-            await new Promise(r => setTimeout(r, 2600));
-            await browserHelper.ensureFbUiUnblocked(pMsgLogin, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: pMsgLogin, note: 'msg before submit' });
-            if (await checkAndAbortIfBanned(pMsgLogin, 'before_login_msg')) return { ok: false, error: 'banned' };
-            const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(pMsgLogin, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
-            pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
-            messengerLoginConfirmed = !!(rmsg && rmsg.ok === true);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: pMsgLogin, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
-            if (await checkAndAbortIfBanned(pMsgLogin, 'after_login_msg')) return { ok: false, error: 'banned' };
-
-            // Se Messenger cair em estado não automatizável, também fail-fast.
-            try {
-              const lrAfterMsg = await browserHelper.detectLoginRequired(pMsgLogin).catch(()=>({ loginRequired:false }));
-              if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
-                pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
-                await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
-                return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human') };
-              }
-            } catch {}
-            return { ok: true };
-          };
-
-          // Stock provision: se o problema detectado primeiro é Messenger/login_form, resolve ali primeiro.
-          if (stockMsgFirst) {
-            const rMsgFirst = await runMsgLogin();
-            if (!rMsgFirst.ok) return { ok: false, error: rMsgFirst.error || 'login_msg_failed', steps, closedForRam, pausedVirtus };
-          }
-
-          // FB só precisa login quando o check inicial já mostrou loginRequired no lado FB.
-          if (needsFbLoginNow || (!stockMsgFirst && needsMsgLoginNow)) {
-            const rFb = await runFbLogin();
-            if (!rFb.ok) return { ok: false, error: rFb.error || 'login_fb_failed', steps, closedForRam, pausedVirtus };
-          }
-
-          // Se ainda houver loginRequired no Messenger (ou se não rodamos msg-first), tenta login no Messenger.
-          if (!stockMsgFirst || needsMsgLoginNow) {
-            const rMsg = await runMsgLogin();
-            if (!rMsg.ok) return { ok: false, error: rMsg.error || 'login_msg_failed', steps, closedForRam, pausedVirtus };
-          }
+          } catch {}
 
           // revalidar
           await new Promise(r => setTimeout(r, 1400));
-          lrMessenger = await browserHelper.detectLoginRequired(pMsgLogin).catch(()=>({ loginRequired:false }));
+          lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
 
           // Facebook: validar create/item (Robe real) — sem navegar para o feed.
-          const uiRetryUnblock = async (page, label, rounds = 4) => {
+          const uiRetryUnblock = async (label, rounds = 4) => {
             // Espera extra para evitar "unknown" por race de navegação/contexto
             await new Promise(r => setTimeout(r, 1600));
-            let ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+            let ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
             if (ui && ui.ok === false && ui.kind === 'unknown') {
               // Retry com reload: muitos "unknown" são contexto destruído durante redirect
-              try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+              try { await p0.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
               await new Promise(r => setTimeout(r, 1800));
-              ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+              ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
             }
             return ui;
           };
@@ -8607,15 +8552,13 @@ const handlers = {
           // Create item (Robe real)
           let uiCreate = null;
           let lrCreate = null;
-          if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
-            await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          }
-          uiCreate = await uiRetryUnblock(pFbLogin, 'post_login_create_item', 4);
-          if (await checkAndAbortIfBanned(pFbLogin, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          lrCreate = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          uiCreate = await uiRetryUnblock('post_login_create_item', 4);
+          if (await checkAndAbortIfBanned(p0, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          lrCreate = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: pFbLogin || p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
-          if (await checkAndAbortIfBanned(pFbLogin || p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
+          if (await checkAndAbortIfBanned(p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
           // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
           if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
@@ -10405,51 +10348,19 @@ async function appendIssueNurseDebounced(nome, type, message, key) {
 }
 
 const NURSE_CFG = {
-  INTERVAL_MS: Math.max(5_000, Number(process.env.NURSE_INTERVAL_MS || 10_000) || 10_000),
+  INTERVAL_MS: 5000,
   PAGE_EVAL_TIMEOUT_MS: 5000
-};
-
-const NURSE_OPEN_GUARD_CFG = {
-  minRetryMs: Math.max(15_000, Number(process.env.NURSE_OPEN_MIN_RETRY_MS || 60_000) || 60_000)
-};
-
-const LR_SCAN_CFG = {
-  baseMs: Math.max(60_000, Number(process.env.LR_SCAN_BASE_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)),
-  jitterMs: Math.max(0, Number(process.env.LR_SCAN_JITTER_MS || (2 * 60 * 1000)) || (2 * 60 * 1000))
-};
-
-const NURSE_OPEN_BACKOFF_CFG = {
-  minMs: Math.max(60_000, Number(process.env.NURSE_OPEN_BACKOFF_MIN_MS || (2 * 60 * 1000)) || (2 * 60 * 1000)),
-  maxMs: Math.max(5 * 60 * 1000, Number(process.env.NURSE_OPEN_BACKOFF_MAX_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)),
-  growth: Math.max(1.2, Number(process.env.NURSE_OPEN_BACKOFF_GROWTH || 2) || 2),
-  jitterMs: Math.max(0, Number(process.env.NURSE_OPEN_BACKOFF_JITTER_MS || 20_000) || 20_000)
 };
 
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
 
-function calcNurseDeniedBackoffMs(prevMs = 0) {
-  const minMs = Math.max(60_000, Number(NURSE_OPEN_BACKOFF_CFG.minMs || 0) || (2 * 60 * 1000));
-  const maxMs = Math.max(minMs, Number(NURSE_OPEN_BACKOFF_CFG.maxMs || 0) || (45 * 60 * 1000));
-  const growth = Math.max(1.2, Number(NURSE_OPEN_BACKOFF_CFG.growth || 0) || 2);
-  const base = prevMs > 0 ? Math.round(prevMs * growth) : minMs;
-  const jitter = Math.floor(Math.random() * ((Number(NURSE_OPEN_BACKOFF_CFG.jitterMs || 0) || 0) + 1));
-  return Math.min(maxMs, base + jitter);
-}
-
-function calcLrScanNextAt(now) {
-  const base = Number(LR_SCAN_CFG.baseMs || (10 * 60 * 1000)) || (10 * 60 * 1000);
-  const jitterCap = Number(LR_SCAN_CFG.jitterMs || 0) || 0;
-  const jitter = jitterCap > 0 ? Math.floor(Math.random() * (jitterCap + 1)) : 0;
-  return now + base + jitter;
-}
-
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
   RELOAD_TIMEOUT_MS: 10000,
   RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: 60_000, // anti-rajada: evita reabertura curta em loop
+  REOPEN_DELAY_SHORT_MS: 5000, // NOVO: Reduzido de 60s para 5s (reabertura quase imediata, supervisor controla velocidade)
   REOPEN_DELAY_RAMCPU_MS: 60000,
   FAIL_WINDOW_MS: 3*60*60*1000,
   FAIL_FREEZE_AFTER: 5,
@@ -10664,7 +10575,7 @@ const AUTO_LR_CFG = {
   enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
   tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
-  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)), // 10min
+  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
   backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
   totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
@@ -11760,12 +11671,6 @@ async function nurseTick() {
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
-        robeMeta[nome] = robeMeta[nome] || {};
-        const lastOpenAttemptAt = Number(robeMeta[nome].lastNurseOpenAttemptAt || 0) || 0;
-        if (lastOpenAttemptAt && (Date.now() - lastOpenAttemptAt) < NURSE_OPEN_GUARD_CFG.minRetryMs) {
-          continue;
-        }
-
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
           continue;
         }
@@ -11778,8 +11683,6 @@ async function nurseTick() {
         }
         slotsInUse++;
         try {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].lastNurseOpenAttemptAt = Date.now();
           let _flags = null;
           try { _flags = await readAccountFlags(nome).catch(()=>null); } catch {}
           if (_flags && _flags.appealSubmitted === true) {
@@ -11817,9 +11720,6 @@ async function nurseTick() {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
-                const minHoldUntil = Date.now() + NURSE_OPEN_GUARD_CFG.minRetryMs;
-                const curHoldUntil = Number(robeMeta[nome].activationHeldUntil || 0) || 0;
-                robeMeta[nome].activationHeldUntil = Math.max(curHoldUntil, minHoldUntil);
               } catch {}
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
@@ -11828,19 +11728,19 @@ async function nurseTick() {
 
                 if (!swapped) {
                   robeMeta[nome] = robeMeta[nome] || {};
-                  const prevBackoff = Number(robeMeta[nome].openBackoffMs || 0) || 0;
-                  const curBackoff = calcNurseDeniedBackoffMs(prevBackoff);
+                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
+                  const curBackoff = 3000;
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
-                  await issues.append(nome, 'mil_action', `open_backoff escalado ${Math.floor(curBackoff/1000)}s (ram_denied)`);
-                  logger.warn('[SWAP] open_backoff escalated', { nome, backoffMs: curBackoff, prevBackoffMs: prevBackoff, reason: err });
+                  await issues.append(nome, 'mil_action', `open_backoff set to ${Math.floor(curBackoff/1000)}s (fixed)`);
+                  logger.warn('[SWAP] open_backoff set', { nome, backoffMs: curBackoff, reason: err });
                 } else {
-                  try { robeMeta[nome].openBackoffMs = 0; } catch {}
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
               }
             } else {
-              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 0;
+              // NOVO: Backoff fixo de 3s ao invés de 15s
+              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.
               try {
                 const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
@@ -11986,29 +11886,7 @@ async function nurseTick() {
         };
         let lr = null;
         let lrPage = p0;
-        const nowLrScan = Date.now();
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].lrScanMeta = robeMeta[nome].lrScanMeta || {};
-        const lrMeta = robeMeta[nome].lrScanMeta;
-        let runLrScan = true;
-        const nextDueAt = Number(lrMeta.nextAt || 0) || 0;
-        if (nextDueAt && nowLrScan < nextDueAt) {
-          runLrScan = false;
-          const lastSkipLogAt = Number(lrMeta.lastSkipLogAt || 0) || 0;
-          if (!lastSkipLogAt || (nowLrScan - lastSkipLogAt) > (5 * 60 * 1000)) {
-            lrMeta.lastSkipLogAt = nowLrScan;
-            try {
-              provisionAudit.append({
-                ts: nowLrScan,
-                event: 'lr_scan_deferred',
-                nome: String(nome || ''),
-                nextAt: nextDueAt,
-                remainingMs: Math.max(0, nextDueAt - nowLrScan)
-              });
-            } catch {}
-          }
-        }
-        if (runLrScan) try {
+        try {
           const scan = [];
           let hasMessengerTab = false;
           let hasMessengerOk = false;
@@ -12210,22 +12088,7 @@ async function nurseTick() {
                 robeMeta[nome].lrAutoClearStreakTs = 0;
               } catch {}
             }
-          } catch {} finally {
-            if (runLrScan) {
-              const nextAt = calcLrScanNextAt(Date.now());
-              lrMeta.lastAt = nowLrScan;
-              lrMeta.nextAt = nextAt;
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'lr_scan_cadence_applied',
-                  nome: String(nome || ''),
-                  nextAt,
-                  waitMs: Math.max(0, nextAt - Date.now())
-                });
-              } catch {}
-            }
-          }
+          } catch {}
         } catch {}
 
         if (lr && lr.loginRequired) {
@@ -12927,10 +12790,8 @@ async function stockProvisionResumeTick() {
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
-const STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS = Math.max(2000, Number(process.env.STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS || 5000) || 5000);
-const STOCK_PROVISION_RESUME_INTERVAL_MS = Math.max(5000, Number(process.env.STOCK_PROVISION_RESUME_INTERVAL_MS || 10000) || 10000);
-setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS);
-setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, STOCK_PROVISION_RESUME_INTERVAL_MS);
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
 setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
@@ -12994,13 +12855,11 @@ async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;
-  if (st.lastRecoveryActionAt && (now - st.lastRecoveryActionAt) < HEALTH_CFG.MIN_ACTION_GAP_MS) return false;
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
     st.counters.softReloads10m.push(Date.now());
-    st.lastRecoveryActionAt = Date.now();
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.reload;
     try { await issues.append(nome, 'mil_action', 'health_recover:reload'); } catch {}
     return true;
@@ -13010,7 +12869,6 @@ async function recoveryStep(nome, page, step) {
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
     try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
-    st.lastRecoveryActionAt = Date.now();
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
     return true;
@@ -13034,7 +12892,6 @@ async function recoveryStep(nome, page, step) {
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);
       st.counters.newPages30m.push(Date.now());
-      st.lastRecoveryActionAt = Date.now();
       st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.newPage;
       st.lastNewPageAt = now;
       try { await issues.append(nome, 'mil_action', 'health_recover:newPage'); } catch {}
