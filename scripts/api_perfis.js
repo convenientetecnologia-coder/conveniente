@@ -315,8 +315,13 @@ module.exports = (app, workerClient, fileStore) => {
       return null;
     });
     if (!r || r.ok !== true) {
-      logger.error('Falha ao ativar perfil', { nome, error: (r && r.error) || 'activate_failed' });
-      return res.json({ ok: false, error: (r && r.error) || 'activate_failed' });
+      const activateErr = (r && r.error) || 'activate_failed';
+      if (/kill_guard_until/i.test(String(activateErr))) {
+        logger.warn('Ativação transitória bloqueada por kill_guard_until', { nome, error: activateErr });
+      } else {
+        logger.error('Falha ao ativar perfil', { nome, error: activateErr });
+      }
+      return res.json({ ok: false, error: activateErr });
     }
     logger.info('Perfil ativado por API', { nome });
     return res.json({ ok: true });
@@ -617,7 +622,12 @@ module.exports = (app, workerClient, fileStore) => {
     });
     if (!r1 || r1.ok !== true) {
       // PATCH — se falhar, segure activationHeldUntil 60s
-      logger.error('Falha ao ativar perfil para start_work', { nome, error: (r1 && r1.error) || 'activate_failed' });
+      const activateErr = (r1 && r1.error) || 'activate_failed';
+      if (/kill_guard_until/i.test(String(activateErr))) {
+        logger.warn('Ativação transitória bloqueada por kill_guard_until (start_work)', { nome, error: activateErr });
+      } else {
+        logger.error('Falha ao ativar perfil para start_work', { nome, error: activateErr });
+      }
       try {
         const statusPath = fileStore.statusPath || path.join(__dirname, '../dados/status.json');
         const st = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, 'utf8')) : null;
@@ -629,7 +639,7 @@ module.exports = (app, workerClient, fileStore) => {
       } catch (e) {
         logger.error('Falha ao atualizar activationHeldUntil em erro de activate/start_work', { nome, error: e && e.message }, e);
       }
-      return res.json({ ok: false, error: (r1 && r1.error) || 'activate_failed' });
+      return res.json({ ok: false, error: activateErr });
     }
     const r2 = await workerClient.sendWorkerCommand('start_work', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
       logger.error('Erro ao enviar start_work p/ worker', { nome, error: e && e.message }, e);
