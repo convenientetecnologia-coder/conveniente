@@ -7209,38 +7209,9 @@ async function start_work({ nome, operator }) {
         }
       } catch {}
 
-      // Enterprise: pós-provision (new_account) faz um check rápido do Marketplace
-      // em uma segunda aba e fecha logo em seguida. Mantém a aba 0 (Messenger/Virtus) como principal.
-      try {
-        const man = await manifestStore.read(nome).catch(()=>null);
-        const now = Date.now();
-        const until = man ? Number(man.robeCooldownUntil || 0) || 0 : 0;
-        const isNewAcc = !!(man && String(man.robePauseReason || '').toLowerCase() === 'new_account');
-        const longCooldown = (until > (now + (23 * 60 * 60 * 1000))); // ~24h
-        if (isNewAcc && longCooldown) {
-          // 0) garantir que a aba 0 está em Messenger (Virtus usa essa aba)
-          try {
-            const pages0 = await ctrl.browser.pages().catch(()=>[]);
-            if (pages0 && pages0[0]) {
-              await pages0[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-            }
-          } catch {}
-          // 1) abre aba 1, vai na rota REAL do Robe (Facebook create/item) só para confirmar sessão
-          try {
-            const p = await ctrl.browser.newPage().catch(()=>null);
-            if (p) {
-              await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-              let u = ''; let t = '';
-              try { u = (typeof p.url === 'function') ? (p.url() || '') : ''; } catch {}
-              try { t = (typeof p.title === 'function') ? (await p.title().catch(()=>'')) : ''; } catch {}
-              await issues.append(nome, 'mil_action', `post_provision_marketplace_check url=${String(u||'').slice(0,180)} title=${String(t||'').slice(0,80)}`);
-              try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-            }
-          } catch (e) {
-            try { await issues.append(nome, 'mil_action', `post_provision_marketplace_check_failed ${String(e && e.message || e).slice(0,160)}`); } catch {}
-          }
-        }
-      } catch {}
+      // Regra operacional atual:
+      // não abrir aba extra de Marketplace no pós-cadastro.
+      // Isso evita abrir/fechar aba 1 sem necessidade e reduz cutucada.
 
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
 
