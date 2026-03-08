@@ -2166,31 +2166,31 @@ async function execStockProvision(cmd) {
           return r4;
         });
 
-        // 5) Procedimento enterprise unificado:
-        // Em vez de "configure + fechar/reabrir + start_work", usamos o MESMO motor do login_required:
-        // login_remediate = cookies -> login/senha -> detecção -> (sucesso) desired active+virtus on
-        // Isso elimina divergência de comportamento e o ciclo "fechou/reabriu" observado.
-        await runStep('login_remediate', async () => {
-          // P0/P1 hardening: esse endpoint pode levar minutos (totalTimeoutMs do worker).
-          // O timeout HTTP local default (~8s) é curto demais e gera aborts falsos.
-          const longTimeoutMs = Math.max(60_000, Math.min(12 * 60 * 1000, budgetLeftMs() + 30_000));
-          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
+        // 5) Fluxo legado de cadastro (pré-modelo chromium): configure + start-work.
+        // Mantemos este caminho por estabilidade operacional de provisionamento.
+        await runStep('configure', async () => {
+          const longTimeoutMs = Math.max(60_000, Math.min(8 * 60 * 1000, budgetLeftMs() + 30_000));
+          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
             timeoutMs: longTimeoutMs,
             retries: 0,
-            body: {
-              // defaults do worker já são bons; só garantimos pós-sucesso: startAfterSuccess=true
-              totalTimeoutMs: 8 * 60 * 1000,
-              closeAfterSuccess: true,
-              startAfterSuccess: true,
-              reopenClosedForRam: true
-            }
+            body: {}
           });
-          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'login_remediate_failed');
-          // Se result.ok=false, consideramos falha (o worker já terá feito hold/ban/2fa conforme regra).
-          if (!r5.result || r5.result.ok !== true) throw new Error((r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed');
+          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
           return r5;
+        });
+        await runStep('start_work', async () => {
+          const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
+          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            timeoutMs: longTimeoutMs,
+            retries: 0,
+            body: {}
+          });
+          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
+          return r6;
         });
 
         out.ok = true;
