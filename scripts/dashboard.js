@@ -1816,10 +1816,6 @@ async function execStockProvision(cmd) {
     const msg = (e && e.message) ? String(e.message) : String(e || '');
     return msg.trim().slice(0, 500);
   };
-  const isSoftStockProvisionLoginRemediateError = (msg) => {
-    const m = String(msg || '').trim().toLowerCase();
-    return m === 'ui_blocked:dialog' || m === 'ui_blocked:unknown';
-  };
   const isTransient = (msg) => {
     const m = String(msg || '').toLowerCase();
     return (
@@ -2214,90 +2210,6 @@ async function execStockProvision(cmd) {
           // Se result.ok=false, consideramos falha (o worker já terá feito hold/ban/2fa conforme regra).
           if (!r5.result || r5.result.ok !== true) {
             const lrErr = (r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed';
-            // Falso-positivo observado em produção: profile criado+ativo, mas login_remediate retorna
-            // ui_blocked:* no fechamento do fluxo. Nesse caso, não marcar a ação como fail.
-            if (isSoftStockProvisionLoginRemediateError(lrErr)) {
-              let statusProbe = null;
-              let activeNow = false;
-              let tabs = 0;
-              try {
-                const target = String(nome || '').trim().toLowerCase();
-                // Em produção observamos corrida no /api/status logo após login_remediate.
-                // Fazemos algumas leituras curtas e match tolerante para não gerar falso fail.
-                for (let i = 0; i < 6; i += 1) {
-                  const st = await getStatusSnapshot();
-                  const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
-                  statusProbe = arr.find((p) => {
-                    if (!p) return false;
-                    const keys = [
-                      String(p.nome || '').trim().toLowerCase(),
-                      String(p.id || '').trim().toLowerCase(),
-                      String(p.profileName || '').trim().toLowerCase()
-                    ];
-                    return keys.includes(target);
-                  }) || null;
-                  if (statusProbe) {
-                    tabs = Number(statusProbe.abas || statusProbe.tabs || statusProbe.openPages || 0) || 0;
-                    const activeFlag = (statusProbe.active === true) || String(statusProbe.active || '').toLowerCase() === 'true';
-                    // Critério de segurança: só aceitar soft-pass quando o status confirma ACTIVE.
-                    // Abas abertas sozinhas não bastam para considerar cadastro saudável.
-                    activeNow = !!activeFlag;
-                    if (activeNow) break;
-                  }
-                  await sleep(600);
-                }
-              } catch {}
-              if (activeNow) {
-                // Guardrail crítico: soft-pass só é válido se o perfil entrar em trabalho.
-                // Isso evita ficar "parado com 3 abas" após login_remediate parcial.
-                let startWorkOk = false;
-                let startWorkErr = '';
-                try {
-                  const swTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
-                  const sw = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
-                    method: 'POST',
-                    headers: { 'x-operator': lockOwner },
-                    timeoutMs: swTimeoutMs,
-                    retries: 0,
-                    body: {}
-                  });
-                  startWorkOk = !!(sw && sw.ok === true);
-                  if (!startWorkOk) startWorkErr = (sw && sw.error) ? String(sw.error) : 'start_work_failed_after_softpass';
-                } catch (eSw) {
-                  startWorkErr = normalizeErr(eSw);
-                }
-                if (!startWorkOk) {
-                  throw new Error(startWorkErr || 'start_work_failed_after_softpass');
-                }
-                try {
-                  const tabsNow = Number(statusProbe && (statusProbe.abas || statusProbe.tabs || statusProbe.openPages || tabs || 0)) || 0;
-                  out.steps.push({
-                    step: 'login_remediate_softpass',
-                    at: Date.now(),
-                    reason: lrErr,
-                    active: true,
-                    virtusOnline: !!(statusProbe && statusProbe.virtusOnline === true),
-                    tabs: tabsNow,
-                    startWork: true
-                  });
-                } catch {}
-                try {
-                  provisionAudit.append({
-                    event: 'stock_provision_login_remediate_softpass',
-                    cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
-                    batchId,
-                    profileName: nome,
-                    stockAccountId: stockAccountId || null,
-                    reason: lrErr
-                  });
-                } catch {}
-                return {
-                  ...r5,
-                  softPass: true,
-                  softPassReason: lrErr
-                };
-              }
-            }
             throw new Error(lrErr);
           }
           return r5;
