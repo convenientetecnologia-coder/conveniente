@@ -2248,6 +2248,27 @@ async function execStockProvision(cmd) {
                 }
               } catch {}
               if (activeNow) {
+                // Guardrail crítico: soft-pass só é válido se o perfil entrar em trabalho.
+                // Isso evita ficar "parado com 3 abas" após login_remediate parcial.
+                let startWorkOk = false;
+                let startWorkErr = '';
+                try {
+                  const swTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
+                  const sw = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
+                    method: 'POST',
+                    headers: { 'x-operator': lockOwner },
+                    timeoutMs: swTimeoutMs,
+                    retries: 0,
+                    body: {}
+                  });
+                  startWorkOk = !!(sw && sw.ok === true);
+                  if (!startWorkOk) startWorkErr = (sw && sw.error) ? String(sw.error) : 'start_work_failed_after_softpass';
+                } catch (eSw) {
+                  startWorkErr = normalizeErr(eSw);
+                }
+                if (!startWorkOk) {
+                  throw new Error(startWorkErr || 'start_work_failed_after_softpass');
+                }
                 try {
                   const tabsNow = Number(statusProbe && (statusProbe.abas || statusProbe.tabs || statusProbe.openPages || tabs || 0)) || 0;
                   out.steps.push({
@@ -2256,7 +2277,8 @@ async function execStockProvision(cmd) {
                     reason: lrErr,
                     active: true,
                     virtusOnline: !!(statusProbe && statusProbe.virtusOnline === true),
-                    tabs: tabsNow
+                    tabs: tabsNow,
+                    startWork: true
                   });
                 } catch {}
                 try {
