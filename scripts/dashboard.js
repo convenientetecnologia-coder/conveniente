@@ -2195,16 +2195,26 @@ async function execStockProvision(cmd) {
           return r6;
         });
         await runStep('recycle_after_configure_activate', async () => {
-          const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
-          const r7 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
-            method: 'POST',
-            headers: { 'x-operator': lockOwner },
-            timeoutMs: longTimeoutMs,
-            retries: 0,
-            body: {}
-          });
-          if (!r7 || r7.ok === false) throw new Error((r7 && r7.error) ? String(r7.error) : 'recycle_activate_failed');
-          return r7;
+          const deadlineAt = Date.now() + Math.max(20_000, Math.min(90_000, budgetLeftMs() + 10_000));
+          let attempts = 0;
+          let lastErr = '';
+          while (Date.now() < deadlineAt) {
+            attempts++;
+            const longTimeoutMs = Math.max(20_000, Math.min(45_000, budgetLeftMs() + 10_000));
+            const r7 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
+              method: 'POST',
+              headers: { 'x-operator': lockOwner },
+              timeoutMs: longTimeoutMs,
+              retries: 0,
+              body: {}
+            });
+            if (r7 && r7.ok !== false) return { ...r7, attempts };
+            lastErr = (r7 && r7.error) ? String(r7.error) : 'recycle_activate_failed';
+            // Fechamento preservado aciona kill_guard transitório; aguarda e tenta de novo.
+            if (!/kill_guard_until/i.test(lastErr)) throw new Error(lastErr);
+            await sleep(2000);
+          }
+          throw new Error(lastErr || 'recycle_activate_failed_timeout');
         });
         await runStep('start_work', async () => {
           const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
