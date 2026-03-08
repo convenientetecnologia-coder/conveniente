@@ -8590,68 +8590,51 @@ const handlers = {
           await new Promise(r => setTimeout(r, 1400));
           lrMessenger = await browserHelper.detectLoginRequired(pMsgLogin).catch(()=>({ loginRequired:false }));
 
-          const stockSkipCreateRevalidation =
-            isStockProvision &&
-            messengerLoginConfirmed === true &&
-            !(lrMessenger && lrMessenger.loginRequired) &&
-            !(lrFacebook && lrFacebook.loginRequired);
-
-          if (stockSkipCreateRevalidation) {
-            pushStep({ step: 'stock_provision_skip_create_revalidation', reason: 'tabs_already_validated' });
-            await appendLoginRemediateEvidence({
-              nome,
-              operator: op,
-              step: 'final_check',
-              page: pMsgLogin || p0,
-              note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} skippedCreateRevalidation=true`
-            });
-          } else {
-            // Facebook: validar create/item (Robe real) — sem navegar para o feed.
-            const uiRetryUnblock = async (page, label, rounds = 4) => {
-              // Espera extra para evitar "unknown" por race de navegação/contexto
-              await new Promise(r => setTimeout(r, 1600));
-              let ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
-              if (ui && ui.ok === false && ui.kind === 'unknown') {
-                // Retry com reload: muitos "unknown" são contexto destruído durante redirect
-                try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-                await new Promise(r => setTimeout(r, 1800));
-                ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
-              }
-              return ui;
-            };
-
-            // Create item (Robe real)
-            let uiCreate = null;
-            let lrCreate = null;
-            if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
-              await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Facebook: validar create/item (Robe real) — sem navegar para o feed.
+          const uiRetryUnblock = async (page, label, rounds = 4) => {
+            // Espera extra para evitar "unknown" por race de navegação/contexto
+            await new Promise(r => setTimeout(r, 1600));
+            let ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+            if (ui && ui.ok === false && ui.kind === 'unknown') {
+              // Retry com reload: muitos "unknown" são contexto destruído durante redirect
+              try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+              await new Promise(r => setTimeout(r, 1800));
+              ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
             }
-            uiCreate = await uiRetryUnblock(pFbLogin, 'post_login_create_item', 4);
-            if (await checkAndAbortIfBanned(pFbLogin, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-            lrCreate = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
-            pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: pFbLogin || p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
-            if (await checkAndAbortIfBanned(pFbLogin || p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+            return ui;
+          };
 
-            // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
-            if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
-            if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
-            // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
-            // se o create/item (Robe real) já validou ok.
-            try {
-              const fbReason = String((lrFacebook && lrFacebook.reason) || '');
-              if (
-                lrFacebook &&
-                lrFacebook.loginRequired === true &&
-                fbReason === 'probe_failed' &&
-                lrCreate &&
-                lrCreate.loginRequired === false
-              ) {
-                pushStep({ step: 'fb_probe_failed_overridden_by_create', fbReason, lrCreate });
-                lrFacebook = lrCreate;
-              }
-            } catch {}
+          // Create item (Robe real)
+          let uiCreate = null;
+          let lrCreate = null;
+          if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
+            await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           }
+          uiCreate = await uiRetryUnblock(pFbLogin, 'post_login_create_item', 4);
+          if (await checkAndAbortIfBanned(pFbLogin, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          lrCreate = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
+          pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: pFbLogin || p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
+          if (await checkAndAbortIfBanned(pFbLogin || p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+
+          // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
+          if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
+          if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
+          // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
+          // se o create/item (Robe real) já validou ok.
+          try {
+            const fbReason = String((lrFacebook && lrFacebook.reason) || '');
+            if (
+              lrFacebook &&
+              lrFacebook.loginRequired === true &&
+              fbReason === 'probe_failed' &&
+              lrCreate &&
+              lrCreate.loginRequired === false
+            ) {
+              pushStep({ step: 'fb_probe_failed_overridden_by_create', fbReason, lrCreate });
+              lrFacebook = lrCreate;
+            }
+          } catch {}
 
         } catch (e) {
           pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });
