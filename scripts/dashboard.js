@@ -1534,6 +1534,174 @@ async function execProfilesRelinkOrphans(cmd) {
   };
 }
 
+// ===== NOVO: repair_perfis_json (reparo cirúrgico de corrupção) =====
+// Objetivo:
+// - recuperar perfis.json quando estiver inválido (JSON corrompido),
+// - sem fallback de leitura para "maquiar" dashboard,
+// - com escrita atômica + validação pós-write.
+//
+// Fontes de recuperação (ordem de preferência):
+// 1) perfis.json.old (se válido)
+// 2) perfis.json.bak_last (se válido)
+// 3) records em dados/perfis/*/perfil.json (best-effort, sem cookies)
+//
+// Segurança:
+// - Nunca apaga dados.
+// - Mantém snapshot forense do arquivo corrompido em dados/_ops_audit.
+// - Se não houver fonte válida, falha explicitamente (sem "inventar" lista).
+async function execRepairPerfisJson(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const allowRebuildFromRecords = (payload.allowRebuildFromRecords === true || payload.allowRebuildFromRecords === 1 || payload.allowRebuildFromRecords === '1');
+  const nowMs = Date.now();
+  const perfisFile = fileStore.perfisPath;
+  const oldFile = `${perfisFile}.old`;
+  const bakFile = `${perfisFile}.bak_last`;
+
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+
+  const readRaw = (fp) => {
+    try { return fsSync.readFileSync(fp, 'utf8'); } catch { return null; }
+  };
+  const parseArrayFile = (fp) => {
+    try {
+      if (!fp || !fsSync.existsSync(fp)) return { ok: false, error: 'not_found', path: fp };
+      const raw = String(fsSync.readFileSync(fp, 'utf8') || '').replace(/^\uFEFF/, '');
+      const j = JSON.parse(raw);
+      if (!Array.isArray(j)) return { ok: false, error: 'invalid_shape_not_array', path: fp };
+      const st = fsSync.statSync(fp);
+      return { ok: true, path: fp, arr: j, count: j.length, mtimeMs: Number(st && st.mtimeMs || 0) || 0 };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) ? String(e.message) : String(e), path: fp };
+    }
+  };
+  const desiredCount = (() => {
+    try {
+      const d = fileStore.readJsonSafe(fileStore.desiredPath, null);
+      const p = d && d.perfis && typeof d.perfis === 'object' ? d.perfis : {};
+      return Object.keys(p).length;
+    } catch { return null; }
+  })();
+
+  const current = parseArrayFile(perfisFile);
+  if (current.ok) {
+    return {
+      ok: true,
+      alreadyValid: true,
+      source: 'current',
+      count: current.count,
+      desiredCount
+    };
+  }
+
+  // Snapshot forense do arquivo atual inválido (se existir).
+  try {
+    const raw = readRaw(perfisFile);
+    if (raw !== null) {
+      fsSync.writeFileSync(path.join(outDir, `repair_perfis_corrupt_snapshot_${nowMs}_${String(cmd && cmd.id || 'cmd').slice(0, 18)}.txt`), raw, 'utf8');
+    }
+  } catch {}
+
+  const cOld = parseArrayFile(oldFile);
+  const cBak = parseArrayFile(bakFile);
+  const candidates = [cOld, cBak].filter(x => x && x.ok);
+  // Melhor backup: mais recente; empate por maior count.
+  candidates.sort((a, b) => {
+    const d1 = Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0);
+    if (d1 !== 0) return d1;
+    return Number(b.count || 0) - Number(a.count || 0);
+  });
+
+  let source = null;
+  let nextArr = null;
+  if (candidates.length > 0) {
+    source = candidates[0];
+    nextArr = Array.isArray(source.arr) ? source.arr : null;
+  } else if (allowRebuildFromRecords && fileStore.loadPerfisFromRecordsBestEffort) {
+    try {
+      const rebuilt = fileStore.loadPerfisFromRecordsBestEffort(10000) || [];
+      if (Array.isArray(rebuilt) && rebuilt.length > 0) {
+        source = { path: 'records_best_effort', count: rebuilt.length, mtimeMs: nowMs };
+        nextArr = rebuilt;
+      }
+    } catch {}
+  }
+
+  if (!Array.isArray(nextArr) || nextArr.length === 0) {
+    return {
+      ok: false,
+      error: 'no_valid_recovery_source',
+      currentError: current.error || 'invalid_current',
+      old: { ok: cOld.ok === true, error: cOld.error || null, count: cOld.count || 0 },
+      bak_last: { ok: cBak.ok === true, error: cBak.error || null, count: cBak.count || 0 },
+      desiredCount
+    };
+  }
+
+  // Lock simples (arquivo) para evitar concorrência na troca do perfis.json.
+  const lockPath = `${perfisFile}.lock`;
+  let lockFd = null;
+  try {
+    const maxTries = 240;
+    for (let i = 0; i < maxTries; i++) {
+      try {
+        lockFd = fsSync.openSync(lockPath, 'wx');
+        break;
+      } catch {
+        const now = Date.now();
+        try {
+          if (fsSync.existsSync(lockPath)) {
+            const st = fsSync.statSync(lockPath);
+            const age = now - (Number(st && st.mtimeMs || 0) || now);
+            if (age > 120000) {
+              try { fsSync.unlinkSync(lockPath); } catch {}
+            }
+          }
+        } catch {}
+        await sleep(25);
+      }
+    }
+    if (typeof lockFd !== 'number') {
+      return { ok: false, error: 'repair_perfis_lock_timeout', source: source ? source.path : null };
+    }
+    const okWrite = fileStore.writeJsonAtomic(perfisFile, nextArr);
+    if (!okWrite) {
+      return { ok: false, error: 'repair_write_failed', source: source ? source.path : null };
+    }
+  } finally {
+    try { if (typeof lockFd === 'number') fsSync.closeSync(lockFd); } catch {}
+    try { if (typeof lockFd === 'number') fsSync.unlinkSync(lockPath); } catch {}
+  }
+
+  const after = parseArrayFile(perfisFile);
+  if (!after.ok) {
+    return {
+      ok: false,
+      error: 'repair_post_validation_failed',
+      source: source ? source.path : null,
+      postError: after.error || 'invalid_after'
+    };
+  }
+
+  const report = {
+    ok: true,
+    ts: nowMs,
+    cmdId: cmd && cmd.id ? String(cmd.id) : null,
+    source: source ? source.path : null,
+    count: after.count,
+    desiredCount
+  };
+  try {
+    fsSync.writeFileSync(
+      path.join(outDir, `repair_perfis_json_${nowMs}_${String(cmd && cmd.id || 'cmd').slice(0, 18)}.json`),
+      JSON.stringify(report, null, 2),
+      'utf8'
+    );
+  } catch {}
+
+  return report;
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -3076,6 +3244,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_purge_dirs')  { ackDetails = await execProfilesPurgeDirs(c); }
       else if (c.type === 'profiles_manifest_probe') { ackDetails = await execProfilesManifestProbe(c); }
       else if (c.type === 'profiles_relink_orphans') { ackDetails = await execProfilesRelinkOrphans(c); }
+      else if (c.type === 'repair_perfis_json') { ackDetails = await execRepairPerfisJson(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
