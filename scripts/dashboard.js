@@ -585,11 +585,31 @@ async function execBackupRestoreMerge(cmd) {
 
       try { provisionAudit.append({ ts, event: 'backup_restore_apply_begin', owner: lockOwner, backupDir: rr.resolved, mergedPerfisCount, mergedDesiredCount }); } catch {}
 
-      const okPerfis = fileStore.writeJsonAtomic(fileStore.perfisPath, mergedPerfis);
+      // CRÍTICO: perfis.json deve passar pelo lock canônico para evitar corrida com outros escritores.
+      const wrPerfis = fileStore.withPerfisFileLockUpdate(() => mergedPerfis, {
+        caller: 'backup_restore_merge',
+        reason: `apply:${String(cmd && cmd.id || '').slice(0, 40)}`
+      });
+      const okPerfis = !!(wrPerfis && wrPerfis.ok === true);
       const okDesired = fileStore.writeJsonAtomic(fileStore.desiredPath, mergedDesired);
       if (!okPerfis || !okDesired) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_fail_write', owner: lockOwner, okPerfis: !!okPerfis, okDesired: !!okDesired }); } catch {}
-        return { ok: false, error: 'write_failed', okPerfis: !!okPerfis, okDesired: !!okDesired };
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'backup_restore_apply_fail_write',
+            owner: lockOwner,
+            okPerfis: !!okPerfis,
+            okDesired: !!okDesired,
+            perfisError: (wrPerfis && wrPerfis.error) ? String(wrPerfis.error) : null
+          });
+        } catch {}
+        return {
+          ok: false,
+          error: 'write_failed',
+          okPerfis: !!okPerfis,
+          okDesired: !!okDesired,
+          perfisError: (wrPerfis && wrPerfis.error) ? String(wrPerfis.error) : null
+        };
       }
 
       try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_ok', owner: lockOwner, mergedPerfisCount, mergedDesiredCount }); } catch {}

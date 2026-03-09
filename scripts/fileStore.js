@@ -98,7 +98,8 @@ function writeJsonAtomic(file, obj) {
   try {
     const dir = path.dirname(file);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const tmp = file + '.tmp';
+    // tmp único evita colisão entre escritores concorrentes no mesmo arquivo.
+    const tmp = `${file}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2, 8)}`;
     const old = file + '.old';
     const bakLast = file + '.bak_last';
     const fd = fs.openSync(tmp, 'w');
