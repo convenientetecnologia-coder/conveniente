@@ -295,7 +295,7 @@ function isChatRecente(tempoLabel) {
   if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
   if (/\b\d+\s*(min|m|mins?|minutes?)\b/.test(t)) return true;
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) { if (parseInt(mH[1],10) < 24) return true; }
+  if (mH) { if (parseInt(mH[1],10) < 8) return true; }
   return false;
 }
 
@@ -1023,11 +1023,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       await fs.access(HIST_FILE);
       await carregaHistorico();
       await reconcilePendingsIfAny();
-      log('Histórico existente carregado. Retomando pendentes <24h.');
+      log('Histórico existente carregado. Retomando pendentes <8h.');
       return;
     } catch {}
 
-    log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
+    log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <8h atuais como respondidos.');
     if (!running || !epochOk()) return;
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
@@ -1048,7 +1048,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await salvaHistorico();
     await carregaHistorico();
     await reconcilePendingsIfAny();
-    log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
+    log(`[SNAPSHOT] Concluído. ${recentes.length} chats <8h marcados como respondidos no primeiro boot.`);
   }
 
   // NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
@@ -1116,7 +1116,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     filaAnt.forEach(id => {
       const ts = respondedCache.get(id);
       if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
-        log(`[FILA] Chat ${id} removido da fila (já respondido <24h)`);
+        log(`[FILA] Chat ${id} removido da fila (já respondido <8h)`);
         mudancaFila = true;
       }
     });
@@ -1244,7 +1244,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
-          log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
+          log(`[GUARD-ID] Já respondido (ID ${chatId}) <8h. Pulando envio.`);
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
