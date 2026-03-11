@@ -1722,6 +1722,126 @@ async function execRepairPerfisJson(cmd) {
   return report;
 }
 
+// ===== NOVO: profiles_backfill_labels (recupera nome amigável em perfis existentes) =====
+// Objetivo:
+// - preencher `label` ausente em perfis já presentes no perfis.json;
+// - fonte canônica: dados/perfis/<nome>/perfil.json; fallback: manifest.json do userDataDir.
+// - não altera nome interno do perfil.
+async function execProfilesBackfillLabels(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const maxItems = Math.max(10, Math.min(2000, Number(payload.maxItems || 1000) || 1000));
+  const nowMs = Date.now();
+
+  const safeReadJson = (fp) => {
+    try { return JSON.parse(fsSync.readFileSync(fp, 'utf8')); } catch { return null; }
+  };
+
+  const perfisArr = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const beforeMissing = perfisArr.filter(p => !String((p && p.label) || '').trim()).length;
+
+  const targets = perfisArr
+    .filter(p => p && p.nome && !String(p.label || '').trim())
+    .slice(0, maxItems);
+
+  const updates = [];
+  const notFound = [];
+  for (const p of targets) {
+    const nome = String(p.nome || '').trim();
+    if (!nome) continue;
+    let nextLabel = '';
+    let source = '';
+
+    try {
+      const recPath = path.join(fileStore.perfisDir, nome, 'perfil.json');
+      const rec = safeReadJson(recPath);
+      const recLabel = String((rec && rec.label) || '').trim();
+      if (recLabel) {
+        nextLabel = recLabel;
+        source = 'perfil_record';
+      }
+    } catch {}
+
+    if (!nextLabel) {
+      try {
+        const udir = String((p && p.userDataDir) || '').trim();
+        if (udir) {
+          const man = safeReadJson(path.join(udir, 'manifest.json'));
+          const manLabel = String((man && man.label) || '').trim();
+          if (manLabel) {
+            nextLabel = manLabel;
+            source = 'manifest';
+          }
+        }
+      } catch {}
+    }
+
+    if (nextLabel) updates.push({ nome, label: nextLabel, source });
+    else notFound.push(nome);
+  }
+
+  let writeResult = { ok: true };
+  if (updates.length > 0) {
+    writeResult = fileStore.withPerfisFileLockUpdate((arr) => {
+      const list = Array.isArray(arr) ? arr.slice() : [];
+      const byNome = new Map(updates.map(u => [u.nome, u]));
+      for (let i = 0; i < list.length; i++) {
+        const it = list[i];
+        if (!it || !it.nome) continue;
+        if (String(it.label || '').trim()) continue;
+        const u = byNome.get(String(it.nome));
+        if (!u) continue;
+        list[i] = { ...it, label: u.label };
+      }
+      return list;
+    }, { caller: 'profiles_backfill_labels', reason: `cmd:${String(cmd && cmd.id || '').slice(0, 32)}` });
+    if (!writeResult || writeResult.ok === false) {
+      return {
+        ok: false,
+        error: (writeResult && writeResult.error) ? String(writeResult.error) : 'perfis_write_failed',
+        beforeMissing,
+        targeted: targets.length,
+        plannedUpdates: updates.length,
+        unresolved: notFound.length
+      };
+    }
+  }
+
+  // Record redundante: mantém alinhado com label recuperado.
+  for (const u of updates) {
+    try {
+      const recPath = path.join(fileStore.perfisDir, u.nome, 'perfil.json');
+      const rec = safeReadJson(recPath) || {};
+      rec.nome = rec.nome || u.nome;
+      rec.label = u.label;
+      rec.updatedAt = nowMs;
+      fsSync.mkdirSync(path.dirname(recPath), { recursive: true });
+      fsSync.writeFileSync(recPath, JSON.stringify(rec, null, 2), 'utf8');
+    } catch {}
+  }
+
+  const afterPerfis = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const afterMissing = afterPerfis.filter(p => !String((p && p.label) || '').trim()).length;
+
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+  const outPath = path.join(outDir, `profiles_backfill_labels_${nowMs}_${String(cmd && cmd.id || '').slice(0, 18) || 'cmd'}.json`);
+  const report = {
+    ok: true,
+    ts: nowMs,
+    cmdId: cmd && cmd.id ? String(cmd.id) : null,
+    beforeMissing,
+    targeted: targets.length,
+    updated: updates.length,
+    unresolved: notFound.length,
+    afterMissing,
+    sampleUpdated: updates.slice(0, 120),
+    sampleUnresolved: notFound.slice(0, 120)
+  };
+  try { fsSync.writeFileSync(outPath, JSON.stringify(report, null, 2), 'utf8'); } catch {}
+
+  return { ...report, reportPath: outPath };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -3265,6 +3385,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_manifest_probe') { ackDetails = await execProfilesManifestProbe(c); }
       else if (c.type === 'profiles_relink_orphans') { ackDetails = await execProfilesRelinkOrphans(c); }
       else if (c.type === 'repair_perfis_json') { ackDetails = await execRepairPerfisJson(c); }
+      else if (c.type === 'profiles_backfill_labels') { ackDetails = await execProfilesBackfillLabels(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
