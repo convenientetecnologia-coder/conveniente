@@ -173,6 +173,14 @@ Get-ChildItem C:\conveniente\dados\status_node_*.json | ForEach-Object {
 
 ---
 
+## Resolução (2026-03-18)
+
+- **Evidência:** Humano atualizou o dashboard no RM3; exibiu 95/0/0 e, após alguns segundos, passou a 95/95/95.
+- **Conclusão:** Provável bug de atraso de leitura (stale) — dados desatualizados no ciclo anterior; refresh/atualização corrigiu.
+- **Hipótese confirmada:** H3 (api/status timeout) ou H7 (snapshotStatusAndWrite event-driven sem refresh periódico) — dashboard exibindo cache/fallback antigo até novo ciclo.
+
+---
+
 ## Referências
 
 - Dossiê RM3 browser morto: `docs/checkups/checkup_2026-03-16_dossie_forense_rm3_browser_morto_12h.md`
