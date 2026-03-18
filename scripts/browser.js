@@ -20,11 +20,14 @@ puppeteer.use(StealthPlugin());
 async function bringWindowToFront(page) {
   try {
     await page.bringToFront();
+    if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) return;
     const client = await page.target().createCDPSession();
     const { windowId } = await client.send('Browser.getWindowForTarget');
     await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
     await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
   } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) — skip maximizar', { err: msg.slice(0, 80) });
     try { await page.bringToFront(); } catch {}
   }
 }
@@ -125,18 +128,23 @@ async function patchPage(nome, page, coords) {
   const hardwareConcurrency = manifest.fp?.hardwareConcurrency || 8;
 
   // --- PATCH FULL UA/UA-CH ---
+  // P0 enterprise: CDP pode falhar com "Target closed" ou "Network.enable timed out" quando
+  // página/navegador está fechando (ex.: RAM, governor). Guard + catch evita unhandledRejection.
   try { if (ua) await page.setUserAgent(ua); } catch {}
   if (ua && uaCh && uaCh.brands) {
     try {
+      if (!(page.isClosed && typeof page.isClosed === 'function' && page.isClosed())) {
       const client = await page.target().createCDPSession();
       await client.send('Network.setUserAgentOverride', {
         userAgent: ua,
         userAgentMetadata: uaCh,
       });
-    } catch(e) {
-      if (process.env.BROWSER_DEBUG === '1') {
-        logger.warn('[patchPage] Falha ao setar UA-CH: ' + (e && e.message));
       }
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      const isCdpFatal = /Target closed|Network\.enable|Protocol error|timed out/i.test(msg);
+      if (isCdpFatal) logger.warn('[patchPage] CDP UA-CH falhou (target/timeout) — continuando sem UA-CH', { nome: String(nome || '').slice(0, 40), err: msg.slice(0, 120) });
+      else if (process.env.BROWSER_DEBUG === '1') logger.warn('[patchPage] Falha ao setar UA-CH: ' + msg);
     }
   }
 

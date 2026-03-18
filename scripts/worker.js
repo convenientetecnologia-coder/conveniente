@@ -13319,13 +13319,48 @@ process.on('message', async (msg) => {
   }
 });
 
+// P0 enterprise: cleanup Chrome por userDataDir antes de exit — evita navegadores zumbi consumindo RAM.
+// UAFP: controle 110% do ciclo (abertura, trabalho, fechamento, recuperação).
+function fatalExitCleanupChrome() {
+  try {
+    const arr = fileStore.loadPerfisJson() || [];
+    if (!Array.isArray(arr)) return;
+    const udirByNome = {};
+    for (const p of arr) {
+      if (p && p.nome && p.userDataDir) udirByNome[String(p.nome)] = String(p.userDataDir).trim();
+    }
+    const toKill = new Set(controllers.keys());
+    try {
+      const shard = process.env.SHARD_PROFILES || '';
+      if (shard) {
+        const names = JSON.parse(shard);
+        if (Array.isArray(names)) for (const n of names) toKill.add(String(n));
+      }
+    } catch {}
+    let killed = 0;
+    for (const nome of toKill) {
+      const udir = udirByNome[nome];
+      if (udir) {
+        try {
+          browserHelper.killChromeProfileProcesses(udir);
+          killed++;
+        } catch {}
+      }
+    }
+    if (killed > 0) try { logger.warn('[FATAL][WORKER] cleanup Chrome antes de exit', { perfis: killed }); } catch {}
+  } catch {}
+}
+
 process.on('uncaughtException', (e) => {
   try { logger.error('[FATAL][WORKER] uncaughtException', { error: e && e.message || e }, e); } catch {}
   try {
-    // P1: política consistente. Por padrão não derruba sozinho (sem auto-restart no ambiente),
-    // mas pode ser habilitado para evitar estado corrompido.
-    if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {
-      setTimeout(() => { try { process.exit(1); } catch {} }, 800);
+    const msg = String((e && e.message) || e || '');
+    const isCdpFatal = /Target closed|Network\.enable|Protocol error.*Target|setUserAgentOverride/i.test(msg);
+    const forceExit = String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1';
+    if (forceExit || isCdpFatal) {
+      try { logger.warn('[FATAL][WORKER] exit para cluster respawnar', { isCdpFatal, forceExit }); } catch {}
+      fatalExitCleanupChrome();
+      setTimeout(() => { try { process.exit(1); } catch {} }, 1200);
     } else {
       try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
     }
@@ -13334,8 +13369,13 @@ process.on('uncaughtException', (e) => {
 process.on('unhandledRejection', (e) => {
   try { logger.error('[FATAL][WORKER] unhandledRejection', { error: (e && e.message) || e }, e); } catch {}
   try {
-    if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {
-      setTimeout(() => { try { process.exit(1); } catch {} }, 800);
+    const msg = String((e && e.message) || e || '');
+    const isCdpFatal = /Target closed|Network\.enable|Protocol error.*Target|setUserAgentOverride/i.test(msg);
+    const forceExit = String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1';
+    if (forceExit || isCdpFatal) {
+      try { logger.warn('[FATAL][WORKER] exit para cluster respawnar', { isCdpFatal, forceExit }); } catch {}
+      fatalExitCleanupChrome();
+      setTimeout(() => { try { process.exit(1); } catch {} }, 1200);
     } else {
       try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
     }
