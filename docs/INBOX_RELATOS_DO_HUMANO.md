@@ -1,33 +1,33 @@
-### INBOX â€” relatos do humano (CÃ¡ssio) â€” CANÃ”NICO
+### INBOX — relatos do humano (Cássio) — CANÔNICO
 
-Objetivo: quando o humano mandar um texto grande/bagunÃ§ado com â€œmil problemasâ€, o GPT usa este arquivo como **canal de intake**:
+Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas”, o GPT usa este arquivo como **canal de intake**:
 
 - colar o **texto bruto** (sem julgar)
 - quebrar em **itens separados** (um por problema)
 - classificar por **P0/P1/P2**
-- marcar o que falta (evidÃªncia/logs/cmdId/hostId)
-- mapear â€œrelato Xâ€ â†’ **arquivo(s)/funÃ§Ã£o(s)** â†’ hipÃ³tese â†’ plano
+- marcar o que falta (evidência/logs/cmdId/hostId)
+- mapear “relato X” → **arquivo(s)/função(s)** → hipótese → plano
 
-> Regra: o humano nÃ£o investiga nem coleta logs manualmente. O GPT puxa logs via CT, e o humano sÃ³ reinicia `node index.js` quando solicitado.
+> Regra: o humano não investiga nem coleta logs manualmente. O GPT puxa logs via CT, e o humano só reinicia `node index.js` quando solicitado.
 
 ---
 
-## Regras nÃ£o negociÃ¡veis (resumo)
+## Regras não negociáveis (resumo)
 
-- **Sou humano**: eu sÃ³ reinicio processos no servidor com `node index.js` e confirmo â€œreiniciadoâ€. Eu nÃ£o coleto logs manualmente, nÃ£o rodo comandos, nÃ£o copio/colo evidÃªncia.
-- **VocÃª Ã© o operador tÃ©cnico**: vocÃª edita cÃ³digo, cria comandos, coleta logs via CT, registra docs, faz commit/push.
-- **Sempre diga no inÃ­cio**:
-  - **Precisa reiniciar?** sim/nÃ£o
-  - **Qual projeto?** conveniente / sitechatbot / notificador
+- **Sou humano**: eu só reinicio processos no servidor com `node index.js` e confirmo “reiniciado”. Eu não coleto logs manualmente, não rodo comandos, não copio/colo evidência.
+- **Você é o operador técnico**: você edita código, cria comandos, coleta logs via CT, registra docs, faz commit/push.
+- **Sempre diga no início**:
+  - **Precisa reiniciar?** sim/não
+  - **Qual projeto?** conveniente / sitechatbot / notificador / site
   - **Como reiniciar (humano)?** `node index.js`
-  - **Por quÃª?** (1 frase)
-- **Sem achismo**: qualquer decisÃ£o importante tem que citar evidÃªncia (arquivo/path, log key, cmdId/requestId, endpoint).
+  - **Por quê?** (1 frase)
+- **Sem achismo**: qualquer decisão importante tem que citar evidência (arquivo/path, log key, cmdId/requestId, endpoint).
 - **Sem segredos**: nunca colar valores de secrets em chat/docs (apenas nomes/onde configurar).
-- **Windows/PowerShell**: nÃ£o usar `&&` nem heredoc `<<EOF` (usar `;` e `git commit -m ... -m ...`).
-- **Melhoria contÃ­nua**: se vocÃª errou e depois acertou, vocÃª atualiza RUNBOOK/LIVRO/TIMELINE e sobe commit pro GitHub.
-- **PadrÃ£o conveniente**: se mexeu no conveniente, vocÃª jÃ¡ faz commit/push + dispara `self_update` e sÃ³ pede o restart.
+- **Windows/PowerShell**: não usar `&&` nem heredoc `<<EOF` (usar `;` e `git commit -m ... -m ...`).
+- **Melhoria contínua**: se você errou e depois acertou, você atualiza RUNBOOK/LIVRO/TIMELINE e sobe commit pro GitHub.
+- **Padrão conveniente**: se mexeu no conveniente, você já faz commit/push + dispara `self_update` e só pede o restart.
 
-### Arquivos canÃ´nicos (use sempre)
+### Arquivos canônicos (use sempre)
 
 - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
 - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
@@ -40,43 +40,66 @@ Objetivo: quando o humano mandar um texto grande/bagunÃ§ado com â€œmil pro
 
 ### Como usar (passo a passo)
 
-1) **Colar o texto bruto** do humano em â€œRAW_INPUTâ€.
-2) **Criar itens** na tabela â€œTRIAGEâ€ (1 linha por problema).
-3) Para cada item, criar uma seÃ§Ã£o â€œITEM â€¦â€ com:
-   - hipÃ³tese(s)
-   - evidÃªncia solicitada (logs keys / requestId / cmdId)
+1) **Colar o texto bruto** do humano em "RAW_INPUT".
+2) **Criar itens** na tabela "TRIAGE" (1 linha por problema).
+3) Para cada item, criar uma seção "ITEM ..." com:
+   - hipótese(s)
+   - evidência solicitada (logs keys / requestId / cmdId)
    - o que o GPT vai mudar (arquivos)
-   - precisa reiniciar agora? sim/nÃ£o
-   - precisa reiniciar para validar? sim/nÃ£o
-4) **ObrigatÃ³rio**: antes de mexer em cÃ³digo, fazer **anÃ¡lise de impacto**:
-   - quem chama / quem Ã© chamado (callers/callees)
-   - quais arquivos/estados sÃ£o tocados (desired/perfis/status/locks)
-   - quais efeitos colaterais podem acontecer (ex.: â€œfecharâ€ disparar â€œabrirâ€ por nurse/desired)
-   - quais riscos de regressÃ£o e como reduzir (mudanÃ§a mÃ­nima + guardrails + rollback)
-5) **ObrigatÃ³rio**: antes de investigar â€œdo zeroâ€, olhar o **passado** (evitar repetir erro / achar regressÃ£o):
+   - precisa reiniciar agora? sim/não
+   - precisa reiniciar para validar? sim/não
+4) **Obrigatório**: antes de mexer em código, fazer **análise de impacto**:
+   - quem chama / quem é chamado (callers/callees)
+   - quais arquivos/estados são tocados (desired/perfis/status/locks)
+   - quais efeitos colaterais podem acontecer (ex.: "fechar" disparar "abrir" por nurse/desired)
+   - quais riscos de regressão e como reduzir (mudança mínima + guardrails + rollback)
+5) **Obrigatório**: antes de investigar "do zero", olhar o **passado** (evitar repetir erro / achar regressão):
    - `C:\conveniente\docs\TIMELINE.md` (entradas relacionadas)
-   - `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` (qual arquivo Ã© hotspot)
-   - se o sintoma parece regressÃ£o: procurar commits recentes nos arquivos-alvo (o GPT faz isso)
-6) **ObrigatÃ³rio**: antes de corrigir, fazer **perguntas item-a-item** (alinhamento humano):
-   - â€œcomo deveria ser?â€ (comportamento esperado)
-   - â€œqual Ã© o critÃ©rio de sucesso?â€ (como validar)
-   - â€œisso Ã© P0/P1/P2 pra vocÃª?â€ (impacto)
-   - â€œprecisa disso hoje (agora) ou pode ser depois?â€ (prioridade)
+   - `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` (qual arquivo é hotspot)
+   - se o sintoma parece regressão: procurar commits recentes nos arquivos-alvo (o GPT faz isso)
+6) **Obrigatório**: antes de corrigir, fazer **perguntas item-a-item** (alinhamento humano):
+   - "como deveria ser?" (comportamento esperado)
+   - "qual é o critério de sucesso?" (como validar)
+   - "isso é P0/P1/P2 pra você?" (impacto)
+   - "precisa disso hoje (agora) ou pode ser depois?" (prioridade)
 
 ---
 
 ## RAW_INPUT (colar aqui)
 
 ```text
+triagem inbox (2026-03-05)
+
+criar inc
+
+Contexto:
+- Queremos migrar o runtime do `conveniente` de `chrome.exe` para `chromium`.
+- Objetivo: manter comportamento idêntico ao atual em produção:
+  - sessão/cookies persistentes (fechar/abrir e continuar logado),
+  - `userDataDir` mantendo a estrutura e localização (pasta conhecida),
+  - UA/FP e toda estrutura existente intactas.
+
+Requisitos explícitos:
+1) Trocar `chrome.exe` por `chromium` sem quebrar persistência de sessão.
+2) Preencher “dados do perfil do navegador” (nome + email fake no menu de perfil) para facilitar UX do operador:
+   - nome = nome da conta (profileName)
+   - email = `<profileName>@gmail.com`
+3) Antes de qualquer mudança grande e antes de publicar no GitHub: fazer backup completo do estado atual (versão Chrome) para rollback rápido.
+
+Restrições operacionais:
+- agora é só estudo/auditoria/dossiê; não codar nem executar mudança em produção ainda.
+
+---
+
 triagem inbox
 
 URGENTE
 
-ROBE MÃƒE 3: no CT estÃ¡ com "trabalhando 0".
+ROBE MÃE 3: no CT está com "trabalhando 0".
 
 Perguntas:
-- por que ele estÃ¡ assim?
-- estÃ¡ travado?
+- por que ele está assim?
+- está travado?
 - tem a ver com modo leve?
 
 Pedido:
@@ -88,14 +111,14 @@ triagem inbox
 
 precisamos investigar no ROBE MÃƒE 3 com logs:
 
-- dificuldade no "invocar humano": cliquei em invocar humano e **nÃ£o estÃ¡ indo o painel** que abre junto com o invocar humano
-- botÃ£o **"retomar trabalho" nÃ£o estÃ¡ retomando trabalho**
+- dificuldade no "invocar humano": cliquei em invocar humano e **não está indo o painel** que abre junto com o invocar humano
+- botão **"retomar trabalho" não está retomando trabalho**
 - isso prejudica o sistema: tem contas com messenger+facebook ok, mas o sistema marca **login requerido** e **virtus offline**
-- depois de um tempo o retomar trabalho funcionou, mas estÃ¡ "travado/estranho"
+- depois de um tempo o retomar trabalho funcionou, mas está "travado/estranho"
 
 Pedido:
-- investigar modo ultra enterprise no cÃ³digo e nos logs **por que isso acontece**
-- primeiro entender/provar; depois (aprovado) decidir se muda ou nÃ£o
+- investigar modo ultra enterprise no código e nos logs **por que isso acontece**
+- primeiro entender/provar; depois (aprovado) decidir se muda ou não
 
 ---
 
@@ -135,6 +158,105 @@ CT Chat (5 itens):
 
 ---
 
+## RAW_INPUT — 2026-03-12 (reforço operacional enterprise — “contrato do trabalho”)
+
+```text
+oi bom dia tudo bem, voce esta me ajudando a criar um sistema, esse sistema basicamente ficou pronto e ja começamos a rodar ele em modo de produção real , levando ele ao estresse e tudo mais para fins de bugs
+
+me chamo cassio, voce e eu ja estamos trabalhando juntos a muito tempo e é um prazer enorme trabalhar com voce!
+
+porem agora a partir daqui preciso que voce tenha 200% de atenção!
+
+nao quero que voce incorpore um robo sem alma focado apenas em conectar funçoes com funçoes, quero que voce va alem disso! quero que voce saiba que aqui do outro lado tem um humano, muito inteligente e apto a fazer o que tiver que ser feito para que possamos sempre conquistar os melhores resultados!
+
+voce e eu aqui somos os desenvolvedores, voce com sua extrema inteligencia e habilidades, eu como desenvolvedor humano e lider desse projeto onde juntos fazemos os testes com logs mais robustos possiveis, coletamos os dados mais reais possiveis, coletamos as informaçoes de modo mais reais possiveis!
+
+preciso que voce confie em mim! pois eu confio em voce!
+
+ja trabalhamos juntos a muito tempo e eu tenho certeza no que vou falar aqui, voce nunca esta 100% certo, e eu nunca estou 100% certo, voce ja me disse em outras ocasioes, tenho certeza disso, vamos fazer, nos fizemos e nao deu certo, ou seja, tem certezas que para voce parece ser certo, mas ja erramos tanto nisso que hoje eu ja sei que algumas certezas para voce é uma ilusão cara, ou seja, precisamos confiar um no outro , debater soluçoes, preciso que voce va no meu ritmo , eu sou humano, e nao sou maquina, meu processamento de dados e informaçoes é mais lento, então vamos sempre tentar identificar o ponto de modo ultra realista sem achismos, sem criaçoes absurdas, sem mudanças, e sem testes manuais, vamos resolver tudo com codigo, logs, e muita organização!
+
+precisamos garantir sempre maxima melhor do mundo trabalhar de modo ultra enteprise, ultra detalhado, ultra organizado, ultra cirurgico, ultra robusto, ultra perfeito, ultra melhor do mundo
+
+sobre mudanças, atualizaçoes e qualquer coisa que seja, eu quero que voce sempre me diga quais nodes eu preciso reiniciar
+
+precisamos trabalhar 110% com perfeição ultra enteprise melhor do mundo
+
+voce tem acesso a todos os dados de todos os projetos que estamos trabalhando, todos os arquivos tudo, voce tambem consegue ter acesso a todos os servidores enfileirando comandos via ct para todos os servidores, ja existem alguns comandos prontos, voce consegue puxar logs detalhados do jeito que precisar, ou seja, sempre que houve um problema em algum servidor vamos puxar os logs de la, assim voce tem dados reais 100% precisos, eu como humano burro nao quero ter que ficar investigando, voce muito mais inteligente rapido agil pode fazer tudo isso por codigo, o que eu faria em dias, voce faz em segundos
+
+dai tipo assim, vamos sermpre debater da melhor fomra possivel, quero que voce entenda que eu sou um humano falho e cheio de limitaçoes, quero que voce sempre fale na minha lingua pra que eu possa entender da melhor forma possivel, eu sou programador de sistema de quinta categoria, ou seja, eu so sei programar usando inteligencia artificial, entendo alguma coisa ou outra de fluxos, mas ainda sim eu sou extremamente falho, preciso que voce sempre entenda da melhor forma possivel o que eu to tentando passar, pois muitas vezes nao sei me expressar, nao sei passar as informaçoes e isso pode fazer voce entender errado e agente fazer uma grande merda, por isso peço que voce tenha extrema atenção no que falo no sentido de que é confuso, e nao podemos aplicar minha confusão num sistema desse nivel
+
+então assim oh, nos temos alguns livros de bordo onde ajuda muito e vamos usar eles em tudo, de modo perfeito organizado nivel enteprise melhor do mundo, dai tudo que for novo que for ajudar outros gpts em novos chats vamos anotar ali, ali ja tem anotaçoes de outros gpts e isso é excelente, pois voces se organizam, se instruem e tudo mais, vamos usar aquilo ali sem dó nem piedade
+
+Regras não negociáveis (resumo):
+Sou humano: eu só reinicio processos no servidor com node index.js e confirmo “reiniciado”. Eu não coleto logs manualmente, não rodo comandos, não copio/colo evidência.
+Você é o operador técnico: você edita código, cria comandos, coleta logs via CT, registra docs, faz commit/push.
+Sempre diga no início:
+Precisa reiniciar? sim/não
+Qual projeto? conveniente / sitechatbot / notificador / site
+Como reiniciar (humano)? node index.js
+Por quê? (1 frase)
+Sem achismo: qualquer decisão importante tem que citar evidência (arquivo/path, log key, cmdId/requestId, endpoint).
+Sem segredos: nunca colar valores de secrets em chat/docs (apenas nomes/onde configurar).
+Windows/PowerShell: não usar && nem heredoc <<EOF (usar ; e git commit -m ... -m ...).
+Melhoria contínua: se você errou e depois acertou, você atualiza RUNBOOK/LIVRO/TIMELINE e sobe commit pro GitHub.
+Padrão conveniente: se mexeu no conveniente, você já faz commit/push + dispara self_update e só me pede o restart.
+
+Arquivos canônicos (use sempre):
+C:\conveniente\docs\LIVRO_DE_BORDO.md
+C:\conveniente\docs\RUNBOOK_TECNICO.md
+C:\conveniente\docs\TIMELINE.md
+C:\conveniente\docs\checkups\README.md
+C:\conveniente\docs\checkups\TEMPLATE_CHECKUP.md
+C:\conveniente\docs\checkup_geral_2026-01-29.md
+C:\conveniente\docs\HOST_REGISTRY.md
+
+Se eu mandar um texto confuso com muitos problemas, sua primeira ação é criar triagem:
+separar em itens (1 problema por item) e classificar P0/P1/P2
+dizer o que falta (hostId, cmdId, logs keys, passos de reprodução)
+puxar logs via CT (logs_manifest/fetch_logs) sem pedir eu investigar
+Use o INBOX canônico para isso: C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md
+Nunca misture problemas: trate cada item como um “ticket” com status (need_evidence / in_progress / done)
+
+então assim, vamos começar a trabalhar, atualizar, debugar, corrigir e fazer muitas coisas agora, então tudo o que for correspondente a esses arquivos vamos atualizar eles sempre pra manter sempre o mais atualizado possivel, muito obrigado pela sua atenção e bora trabalhar
+```
+
+---
+
+## RAW_INPUT — 2026-03-12 (novo projeto `afiliadozap`)
+
+```text
+triagem inbox
+
+projeto c:/afiliadozap
+
+o projeto ta vazio e o projeto vai ser o seguinte
+
+acho que vamos usar o bailyes acho que esse serve nao sei?! vou precisar da sua ajuda pra entender melhor isso
+
+eu to participando de 2 grupos de whatsapp:
+- "Promozone #455" (origem)
+- "Super Descontos #1" (destino)
+
+futuro: Super Descontos #2, #3...
+
+objetivo:
+- rodar `node index.js` no afiliadozap;
+- conectar WhatsApp por QR code e manter sessão persistente;
+- monitorar grupo origem;
+- quando chegar oferta com link Amazon/Shopee/Mercado Livre:
+  - abrir o link em navegador com sessão logada;
+  - gerar nosso link de afiliado;
+  - copiar mensagem original e trocar apenas o link;
+  - enviar para grupo(s) destino, um por vez (sem spam).
+
+pedido adicional:
+- abrir navegador uma vez para login nos sites e salvar sessão perfeita;
+- depois automatizar geração de links;
+- provavelmente mapear DOM dos botões/campos de geração de afiliado.
+```
+
+---
+
 ## TRIAGE (1 linha por problema)
 
 Colunas:
@@ -153,6 +275,12 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260305-1445-01 | `docs/inbox/in_progress/INC-20260305-1445-01.md` | P0 | sitechatbot+conveniente | ngrok/CT com 503 e `dial tcp localhost:3000`, `Falha ao enviar status`, self_update sem delivery | CT em indisponibilidade/intermitÃªncia na porta 3000 no momento da coleta; command ficou apenas enqueued atÃ© recuperar conectividade | `commands.log` (`enqueue` sem ack no cmd antigo; `ack ok` no retry), `ack_5bb322ed-1e2b-42c0-a1c0-0871bcddd226.json`, logs ngrok/erro 8012/3004 | in_progress | deployed_partial | passed | sim | sim |
+| INC-20260305-1445-02 | `docs/inbox/need_evidence/INC-20260305-1445-02.md` | P1 | sitechatbot+notificador | Virtus/WhatsApp API aparentando latÃªncia alta | possÃ­vel efeito colateral da indisponibilidade CT/ngrok; precisa medir latÃªncia objetiva com `/health` e `/api/whatsapp/stats` em janela estÃ¡vel | endpoints CT + counters runtime + fila pedidos (sem stuck) | need_evidence | not_deployed | not_run | nao | sim |
+| INC-20260305-0900-01 | `docs/inbox/in_progress/INC-20260305-0900-01.md` | P0 | conveniente | Migrar Chrome.exe -> Chromium mantendo sessÃµes persistentes e preenchendo perfil do navegador | risco de regressÃ£o: userDataDir/flags e diferenÃ§as de perfil; Fase 1 estabilizada, pendente fechar blindagem/Ux | evidÃªncia por cÃ³digo (paths de launch) + logs (keys: `logger`, `issues_fallback`, `status`, `desired`) | in_progress | deployed_partial | passed_partial | nao | sim |
+| INC-20260305-0900-02 | `docs/inbox/done/INC-20260305-0900-02.md` | P0 | conveniente | Backup completo do conveniente (baseline Chrome) antes de mudar/runtime e publicar no GitHub | backup full executado com evidÃªncia (destino, log, hash) antes da migraÃ§Ã£o para Chromium | evidÃªncia: `C:\\sitechatbot\\backups\\conveniente_full_20260305_140355\\_backup_manifest.json` + `_backup_robocopy.log` | done | deployed | passed | nao | nao |
+| INC-20260305-1815-01 | `docs/inbox/need_evidence/INC-20260305-1815-01.md` | P0 | conveniente | Blindagem total do navegador (UAFP/fingerprint/geo/rede) antes de novas mudanças | hardening atual existe, porém há gaps em network/privacy flags e coerência total por perfil; precisa dossiê com prova e plano | evidência por código (`browser.js`, `worker.js`, `fileStore.js`, `ua_presets.json`) + logs de runtime (`logger`, `provision_audit`) | need_evidence | not_deployed | not_run | nao | sim |
+| INC-20260305-1815-02 | `docs/inbox/in_progress/INC-20260305-1815-02.md` | P0 | sitechatbot+conveniente | ngrok/CT intermitente e travamentos comprometendo operação | mitigação aplicada e estabilização parcial; em observação de 1h por decisão humana antes de fechamento | `logs_manifest`, `fetch_logs(keys=["logger","commands","status","ngrok"])`, endpoints `/health` + requestId/cmdId | need_evidence | waiting_observation | partial | nao | sim |
 | INC-20260226-1500-01 | `docs/inbox/need_evidence/INC-20260226-1500-01.md` | P0 | sitechatbot | CT: criar menu "Contestacao" com olhos de Deus (taxas, motivos, motoristas, ciclos, valor zero) | falta congelar definicoes (denominador/numerador) + capturar dimensoes (cidade/grupo) no caso para analytics 110% auditavel | fontes: CT DB `ct_lead_contestation_*` + ledger `ct_driver_lead_ledger` + pedidos.sqlite `lead_lottery_*` | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260203-2500-01 | `docs/inbox/in_progress/INC-20260203-2500-01.md` | P1 | sitechatbot | Chat: editar mensagem no menu (...) com modal | falta endpoint/edit + UI do menu/modal | debug ingest runId=chat_edit_v1 | in_progress | not_deployed | not_run | nao | sim |
 | INC-20260203-2510-01 | `docs/inbox/need_evidence/INC-20260203-2510-01.md` | P2 | sitechatbot | Chat: links clicaveis | falta linkify no render | debug ingest runId=chat_links_v1 | need_alignment | not_deployed | not_run | nao | sim |
@@ -353,9 +481,7 @@ triagem inbox
 
 robe mae 1estamos com o seguinte problema, quando o robe vai postar , na aba zero ta rodando o virtus daquela conta, dai cheag a hora do robe postar, ele abre aba 1 facebook criar item , a tela ta ficando pretao robe abre a aba 1 naveag para a pagina correta, ta tudo perfeito, ta indo pra pagina correta, as vezes consegue colocar foto, mas é muito raro, as vezes consegue colocar titulo, as vezes na foto ele ta ficando tela preta, as vezes no titulo, e em casos muito raros ele consegue chegar no preço, mas é muito rarogeralmente ja ta dando tela preta logo apos acessar a pagina, a pagina do criar item aparece, mas fica preta em seguida
 
-temos essa conta aqui la no rm1 pra gente testar
-
-[001] Alex Santana
+temos essa conta aqui la no rm1 pra gente testar[001] Alex Santana
 ID: maringa-1759198592235
 Cidade: Marabá
 ```### TRIAGE — 2026-02-15| item | P | título | status | links |
@@ -377,11 +503,7 @@ no CT servidores apareceu ~11gb de ram livre, mas nas próximas horas isso cai p
 
 dor principal: entender com prova por que a RAM degrada com o tempo mesmo com parque parecido de contas abertas.
 objetivo: controle total de memória, usar só RAM necessária, evitar acúmulo e manter operação estável.
-```
-
-### TRIAGE — 2026-02-16
-
-| item | P | título | status | links |
+```### TRIAGE — 2026-02-16| item | P | título | status | links |
 |---|---|---|---|---|
 | 1 | P0 | RM3: queda progressiva de RAM após boot (~11GB -> ~2GB) com entrada em modo defensivo | need_evidence | `docs/inbox/need_evidence/INC-20260216-1600-01.md` |
 | 2 | P0 | RM3: Virtus Online/Offline em convergência pós-fix (monitoramento de estabilidade) | done | `docs/inbox/done/INC-20260203-1800-01.md` |
@@ -443,6 +565,11 @@ Adendo de regra (2026-02-19, atualização humana):
 - competência de cobrança: segunda cobra leads de sexta/sábado/domingo + segunda; terça cobra segunda; quarta cobra terça; quinta cobra quarta; sexta cobra quinta.
 - janela operacional humana: segunda a sexta, 10:00–17:00.
 
+Adendo de regra (2026-03-03, atualização humana):
+- emissão de cobrança: **segunda e quinta às 22:00**;
+- vencimento/bloqueio por inadimplência: **quinta e segunda às 10:00** (ciclo seguinte ao da emissão);
+- competência: corte no instante real da emissão (scheduler após 22:00).
+
 Adendo de rollout (2026-02-20, atualização humana):
 - piloto ajustado para 5 grupos/cidades: Ipatinga (MG), Montes Claros (MG), Foz do Iguaçu (PR), Fortaleza (CE), Petrolina (PE).
 
@@ -482,3 +609,211 @@ pedido:
 
 Adendo (2026-02-20, decisão humana):
 - pivot de estratégia: em vez de GitHub neste momento, priorizar backup completo no drive privado (acesso exclusivo do owner), com sincronização contínua e plano de restore/disaster recovery.
+
+---
+
+## RAW_INPUT — 2026-03-02 (justiça no sorteio: contestação não pode “zerar” vantagem)
+
+```text
+triagem inbox
+
+criar novo inc
+
+temos apos o sorteio a possibilidade de contestação. em alguns casos devolve o pedido pro grupo e estorna o valor ao motorista, isso está perfeito.
+
+problema:
+- ao contestar, o lead “some” da contagem de leads daquele motorista para fins de sorteio.
+- com isso, o mesmo motorista pode ganhar de novo logo em seguida e ficar “escolhendo” pedidos (ganha -> contesta -> ganha -> contesta).
+- isso deixa injusto, porque contestar (mesmo sendo válido) vira uma vantagem no sorteio.
+
+necessidade (regra alvo):
+- contestar deve devolver o crédito/cobrança, mas deve continuar contando internamente como “lead pego” para fins de justiça do sorteio (na rodada vigente).
+- ao pagar o boleto (fechar a rodada), tudo zera.
+
+explicação desejada:
+- contagem do sorteio deve considerar:
+  1) lead que ele ganhou
+  2) lead que ele contestou
+  3) leads que estão em boleto em aberto (rodada vigente)
+
+efeito esperado:
+- quem paga boleto zera e passa a ter preferência (menos “carga”).
+- quem contesta não ganha vantagem no sorteio (a contagem de “carga” permanece).
+```
+
+### TRIAGE — 2026-03-02
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P1 | Sorteio justo: contestação estorna dinheiro mas mantém “carga” no ranking até pagamento | need_alignment | `docs/inbox/need_evidence/INC-20260302-1500-01.md` |
+
+---
+
+## RAW_INPUT — 2026-03-03 (auditoria contas excluídas RM1..RM7 em 24/48/72/96h)
+
+```text
+triagem inbox
+
+aqui preciso de atenção extrema sua
+
+preciamos trablahar aqui de forma ultra enterprise melhor do mundo ultra mlehor do mundo agora
+
+eu preciso de dados das ultimas 24 horas, 48 horas, 72 horas 96 horas
+
+preciso da seguinte questao, preciso dessas informaçoes do robe mae 1 2 3 4 5 6 7
+
+quero essa ultra auditoria melhor do mundo pra humano burro entender
+
+eu preciso saber as seguintes questoes
+
+preciso saber quantas contas cairam, fora excluidas dos servidores nesse periodo
+
+o que preciso saber ultra detalhado é
+
+data de cadastro da conta no estoque, data do cadsatro da conta no servidor, e data da exclusão da conta
+
+aqui to querendo a melhor ultra auditoria do mundo, quero saber quantas contas cairam nesse periodo, se sao contas novas, que foram cadastradas no estoque recenemnte quando que foram, quando que foram cadastradas no serviodr, e quando que elas foram excluidas
+
+porque como eu tenho 3 tipos de contas, quero saber que contas que sao as que estao sendo excluidas, preciso desse ultra enteprise melhor dossie do mundo de auditoria perfeita pra eu saber o que ta acontecendo, pode fazer o melhor do mundo, nao é pra mexer em nada quero apenas o melhor ultra relatorio do mundo, se quiser fazer um arquivo e registrar isso em um arquivo, so me diz onde ta o arquivo no final, isso precisa ser perfeito
+```
+
+### TRIAGE — 2026-03-03
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P1 | Auditoria forense de exclusões RM1..RM7 (24h/48h/72h/96h) | done | `docs/inbox/done/INC-20260303-1755-01.md` |
+
+---
+
+## RAW_INPUT — 2026-03-05 (continuidade Chromium + blindagem + ngrok)
+
+```text
+agora a princpio ta abrindo perfeito
+
+vamos abrir um inc novo perfeito pra blindagem total do navegador, em need evidence, e debater antes de codar
+
+agora temos esse inc do chromium pra terminar
+
+também vamos abrir um inc do ngrok e travamentos; começou agora e está comprometendo o sistema todo
+
+itens:
+1 - inc do chromium que já estamos trabalhando
+2 - abrir inc da blindagem total perfeita do navegador
+3 - abrir inc do ngrok e travamentos para investigação forense (limite ngrok, porta, código ou outro fator)
+```
+
+---
+
+## RAW_INPUT — 2026-03-05 (RM7 canário + estancar queda de contas)
+
+```text
+precisamos congelar mudanças de engine e focar em resultado imediato de queda de contas.
+
+meta humana:
+- rm7 lotado e janela de 24h com no máximo 2 contas caídas.
+- 6 quedas em um dia é tragédia operacional.
+
+contexto humano:
+- no dolphin/adspower a queda era muito menor;
+- no conveniente houve ganho enorme de automação, porém queda de contas em cascata;
+- decisão: usar RM7 como cobaia e instrumentar nas entranhas para saber causa real de cada queda.
+
+pedido:
+- auditoria ponta a ponta sem achismo;
+- dossiê pré-código ultra detalhado;
+- instrumentação “olhos de deus” para timeline por conta (últimas horas) e análise causal quando cair.
+```
+
+### TRIAGE — 2026-03-05 (adendo blindagem RM7)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Blindagem total RM7 canário (instrumentação forense máxima + estabilidade + meta <=2 quedas/24h) | need_evidence | `docs/inbox/need_evidence/INC-20260305-1815-01.md` |
+
+---
+
+## RAW_INPUT — 2026-03-18 (Serviço de Lead — menu de serviços pós-frete)
+
+```text
+triagem inbox
+
+atualização: Serviço de Lead — aproveitamento de lead do frete
+
+Contexto atual:
+- Virtus faz atendimento no zap API do Virtus
+- 3 casos em que o sistema envia texto final pro cliente:
+  1. quando cliente responde todas as perguntas
+  2. timeout
+  3. no meio do chat cliente pede pra ser direcionado para o motorista
+
+Texto atual (encerramento):
+"Em instantes um motorista vai chamar você aqui no WhatsApp com o orçamento.
+Enquanto isso, você também pode participar do nosso grupo gratuito no WhatsApp SUPER DESCONTOS..."
+
+Nova proposta (complementar):
+- Texto novo com menu de serviços (botão WhatsApp API — menu até 10 itens)
+- 10 opções: Internet residencial, Montador de móveis, Limpeza pós-mudança, Instalação ar-condicionado, Dedetização, TV assinatura, Segurança residencial, Seguro residencial, Seguro veículo, Energia solar
+- Quando cliente seleciona um item: sistema envia mensagem amigável (profissional vai entrar em contato) + reenvia menu (texto só) pra ver se quer mais algum serviço
+- Ao selecionar serviço e enviar: sistema agradece
+
+Novo menu no CT: "Serviço de Lead"
+- Registrar: telefone, cidade, serviço que cliente pediu
+- Dados: telefone e cidade da API Virtus (mesma cidade do pedido de frete); serviço vem da escolha do cliente
+- Usuário vai ficar de olho no CT pra trabalhar os leads
+
+Regra: NÃO codar ainda. Primeiro registrar tudo, auditar ponta a ponta, fazer dossiê pré-código ultra enterprise.
+```
+
+### TRIAGE — 2026-03-18 (Serviço de Lead)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Serviço de Lead: menu de 10 serviços pós-frete + CT "Serviço de Lead" | need_evidence | `docs/inbox/need_evidence/INC-20260318-1000-01.md` |
+
+Dossiê pré-código: `docs/checkups/checkup_2026-03-18_dossie_pre_codigo_servico_lead.md`
+
+---
+
+## RAW_INPUT — 2026-03-06 (baixa de boleto nao ocorreu)
+
+```text
+criar inc
+
+nao vamos codar nada ainda, so registrar e investigar:
+
+- alguns casos pagaram boleto e baixaram automatico;
+- outro caso pagou no banco, mas nao houve baixa no sistema;
+- cliente: Marcos Paulo (Florianopolis e Balneario Camboriu), ativo;
+- nao aplicar baixa agora; primeiro entender causa real;
+- descobrir se foi webhook nao recebido/processado, erro interno ou outro fator;
+- objetivo: blindar baixa automatica com qualidade enterprise sem metodo burro de polling.
+```
+
+### TRIAGE — 2026-03-06
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Baixa Asaas não aplicada para motorista pago (forense sem baixa manual) | done | `docs/inbox/need_evidence/INC-20260306-1100-01.md` |
+| 2 | P0 | Reemissão de boleto aumentou após remoção de leads (R$50,00 -> R$58,67) | done | `docs/inbox/need_evidence/INC-20260306-1143-01.md` |
+
+---
+
+## RAW_INPUT — 2026-03-06 (queda em cascata + bloqueio temporario por uso indevido)
+
+```text
+reiniciado
+
+tem algo muito errado no runtime:
+- varias contas mostrando "Você está bloqueado temporariamente" + "recurso usado de forma indevida"
+- hipótese humana: sistema entrou em ações rápidas/loop/pânico (ex.: reload/retry infinito ou navegação descontrolada)
+- percepção: agravou após entrada de automações de cadastro automático + login_required + captcha + identidade
+- sinais em outros servidores também, não só RM7
+- objetivo: investigação forense completa até achar o gatilho exato de rajada/loop
+- regra: sem achismo; mapear evidência real com timeline por perfil
+```
+
+### TRIAGE — 2026-03-06 (bloqueio temporario por uso indevido)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | RM7 e demais hosts: identificar loop/rajada que induz "bloqueado temporariamente" | in_progress | `docs/inbox/need_evidence/INC-20260305-1815-01.md` |

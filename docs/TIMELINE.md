@@ -31,6 +31,22 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-18 — [DOCS][CT] Dossiê pré-código: Serviço de Lead (menu 10 serviços pós-frete)
+
+- **O que**:
+  - triagem INBOX + INC + dossiê pré-código para novo fluxo "Serviço de Lead";
+  - mapeamento dos 3 pontos onde texto final é enviado (completo, timeout, fast-track);
+  - especificação dos 10 serviços (Internet, Montador, Limpeza, Ar-condicionado, Dedetização, TV, Segurança, Seguro residencial, Seguro veículo, Energia solar);
+  - schema proposto `ct_lead_service_requests` e fluxo interativo (lead_service:1..10).
+- **Por quê**: humano solicitou aproveitamento de lead do frete com menu de serviços; regra de não codar antes de dossiê completo.
+- **Evidência**:
+  - INC: `docs/inbox/need_evidence/INC-20260318-1000-01.md`
+  - checkup: `docs/checkups/checkup_2026-03-18_dossie_pre_codigo_servico_lead.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter docs desta entrada se necessário.
+
+---
+
 #### 2026-03-16 — [CONV][OPS][DOCS] RM3: CDP hardening + recovery automática + cleanup UAFP (zero zumbi)
 
 - **O que**:
