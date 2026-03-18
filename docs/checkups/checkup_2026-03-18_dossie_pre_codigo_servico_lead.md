@@ -166,14 +166,22 @@ CREATE INDEX idx_lead_service_created ON ct_lead_service_requests(created_at);
 
 ## 6. Arquivos a tocar (resumo)
 
-| Arquivo | Alteração |
-|---------|-----------|
-| `whatsapp/lib/flow.js` | getFinalText → getFinalTextWithMenu ou novo helper; 3 pontos de envio (completo, fast-track); handler `lead_service:N` |
-| `whatsapp/lib/timeouts.js` | usar getFinalText centralizado ou novo helper; trocar text por list |
-| `whatsapp/lib/whatsappApi.js` | já tem buildListPayload — sem mudança |
-| `convenientetecnologia/lib/ctDb.js` | nova tabela ct_lead_service_requests |
-| `convenientetecnologia/` | nova rota/UI "Serviço de Lead" |
-| `convenientetecnologia/public/menu.html` | novo card "Serviço de Lead" |
+**Ordem de implementação (decisão humana):**
+1. **Fase 1**: CT menu "Serviço de Lead" — ver `checkup_2026-03-18_fase1_ct_menu_servico_lead.md`
+2. **Fase 2**: Virtus — texto + menu nos 3 pontos; handler `lead_service:N`
+
+| Arquivo | Fase | Alteração |
+|---------|------|-----------|
+| `convenientetecnologia/public/menu.html` | 1 | novo card "Serviço de Lead" |
+| `convenientetecnologia/index.js` | 1 | rota + API |
+| `convenientetecnologia/lib/ctDb.js` | 1 | nova tabela ct_lead_service_requests |
+| `convenientetecnologia/public/servico-lead.html` | 1 | nova página |
+| `convenientetecnologia/public/servico-lead.js` | 1 | nova UI |
+| `whatsapp/lib/flow.js` | 2 | 3 pontos de envio (texto+menu); handler `lead_service:N` |
+| `whatsapp/lib/timeouts.js` | 2 | trocar text por list (nos 3 pontos) |
+| `whatsapp/lib/whatsappApi.js` | — | já tem buildListPayload — sem mudança |
+
+**Regra**: NÃO centralizar getFinalText. Cada arquivo mantém sua lógica; mudança mínima.
 
 ---
 
@@ -181,8 +189,7 @@ CREATE INDEX idx_lead_service_created ON ct_lead_service_requests(created_at);
 
 | Risco | Mitigação |
 |-------|------------|
-| Duplicação getFinalText | Centralizar em flow.js e exportar; timeouts importar |
-| Regressão no texto atual | Manter WA_FINAL_TEXT como base; adicionar menu como segundo envio ou em payload list |
+| Regressão no texto atual | Fase 1 não toca Virtus; Fase 2 altera só onde envia (trocar payload) |
 | Cliente recebe 2 msgs (texto + menu) | WhatsApp permite; ou enviar tudo em 1 msg list (body com texto longo) |
 | Limite de caracteres no body da list | WhatsApp: body até 1024 chars; ajustar texto se necessário |
 
@@ -190,9 +197,9 @@ CREATE INDEX idx_lead_service_created ON ct_lead_service_requests(created_at);
 
 ## 8. Decisão / próximo passo
 
-- **Não codar** até alinhamento humano (perguntas do INC)
-- Validar: texto final exato, ordem dos serviços, copy das mensagens
-- Após aprovação: implementar em fases (1: texto+menu, 2: handler, 3: CT UI)
+- **Fase 1 primeiro**: CT menu "Serviço de Lead" — dossiê em `checkup_2026-03-18_fase1_ct_menu_servico_lead.md`
+- **Depois**: Virtus (texto + menu nos 3 pontos; handler)
+- Texto final e 10 opções: conforme especificação do humano (confirmado)
 
 ---
 

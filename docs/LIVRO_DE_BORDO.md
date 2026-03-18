@@ -67,7 +67,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Reativação tokenized + reset baseline financeiro (runbook canônico) — `docs/RUNBOOK_TECNICO.md` (seção “Reativação tokenized por praça + reset de baseline financeiro”)
   - **Migração de crédito (mensalidade → tokenized) + correção de sinal (ledger)** — `docs/RUNBOOK_TECNICO.md` (seção “Migração de crédito (mensalidade → tokenized) — CANÔNICO”)
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
-  - **Serviço de Lead (2026-03-18)**: menu 10 serviços pós-frete + CT — `docs/inbox/need_evidence/INC-20260318-1000-01.md`; dossiê pré-código — `docs/checkups/checkup_2026-03-18_dossie_pre_codigo_servico_lead.md`
+  - **Serviço de Lead (2026-03-18)**: Fase 1 = CT menu; Fase 2 = Virtus. INC — `docs/inbox/need_evidence/INC-20260318-1000-01.md`; dossiê — `docs/checkups/checkup_2026-03-18_dossie_pre_codigo_servico_lead.md`; Fase 1 CT — `docs/checkups/checkup_2026-03-18_fase1_ct_menu_servico_lead.md`
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
   - **RM3 CDP/recovery/UAFP (2026-03-16)**: dossiê forense + correção aplicada — `docs/checkups/checkup_2026-03-16_dossie_forense_rm3_browser_morto_12h.md`; investigação RM3 vs outros — `docs/checkups/checkup_2026-03-16_investigacao_rm3_vs_outros.md`; procedimento canônico — `docs/RUNBOOK_TECNICO.md` (seção "RM3: recovery CDP fatal")
