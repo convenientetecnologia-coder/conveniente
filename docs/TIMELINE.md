@@ -31,6 +31,23 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-16 — [CONV][OPS][DOCS] RM3: CDP hardening + recovery automática + cleanup UAFP (zero zumbi)
+
+- **O que**:
+  - `browser.js`: guard `page.isClosed()` antes de CDP em patchPage e bringWindowToFront; catch com log warn para erros CDP (Target closed, timeout);
+  - `worker.js`: exit(1) em unhandledRejection/uncaughtException quando erro contém "Target closed", "Network.enable", "Protocol error", "setUserAgentOverride" — cluster respawna em ~2s;
+  - `worker.js`: `fatalExitCleanupChrome()` antes de exit — mata Chrome por userDataDir para todos os perfis do shard (evita navegadores zumbi consumindo RAM);
+  - dossiê forense e checklist de investigação RM3 vs outros hosts;
+  - procedimento canônico no `RUNBOOK_TECNICO.md` (seção "RM3: recovery CDP fatal").
+- **Por quê**: RM3 apresentava erro recidivante (~12h): navegadores fechavam e não reabriam; worker em estado zombie (unhandledRejection sem exit). Garantir UAFP íntegro: ciclo completo abertura → trabalho → fechamento → recuperação.
+- **Evidência**:
+  - checkup: `docs/checkups/checkup_2026-03-16_dossie_forense_rm3_browser_morto_12h.md`
+  - investigação: `docs/checkups/checkup_2026-03-16_investigacao_rm3_vs_outros.md`
+  - código: `scripts/browser.js`, `scripts/worker.js`
+  - commit: `37dc194`
+- **Reinícios**: `conveniente` no RM3 (hostId `5d7c3309-8581-4a50-a421-e6cbb52d8070`) — aplicado e reiniciado em 2026-03-16.
+- **Rollback**: reverter commit `37dc194`, disparar `self_update` e reiniciar o runtime.
+
 #### 2026-03-07 — [CONV][OPS][DOCS] P2 safe-mode: recovery serial por perfil + fila 15–30min + robe 20–35min
 
 - **O que**:
@@ -2487,3 +2504,31 @@ Adendo (ajuste operacional aprovado pelo owner):
   - manter recuperação automática sem padrão de insistência e sem fallback de URL para chat.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-12 — [OPERACAO] Contrato operacional reforçado (cabeçalho obrigatório + triagem INBOX)
+
+- **Mudança**:
+  - promovido para canônico no runbook: “Cabeçalho obrigatório (sempre no início da resposta do GPT)”.
+  - RAW_INPUT do reforço operacional registrado no INBOX (fonte de verdade).
+- **Evidência**:
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Cabeçalho obrigatório…”)
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT 2026-03-12)
+- **Impacto operacional**:
+  - nenhum restart.
+
+#### 2026-03-12 — [AFILIADOZAP] Triagem + scaffold inicial do runtime (WhatsApp + browser persistente + pipeline)
+
+- **Mudança**:
+  - triagem registrada no INBOX e INC aberto para o projeto novo `C:\afiliadozap`.
+  - criado scaffold executável com:
+    - conexão WhatsApp via Baileys + sessão persistente;
+    - navegador persistente (Playwright) para manter login de marketplace;
+    - pipeline de captura de mensagem no grupo origem, geração de link afiliado e envio serial para grupos destino.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260312-1000-01.md`
+  - `C:\afiliadozap\index.js`
+  - `C:\afiliadozap\src\whatsappClient.js`
+  - `C:\afiliadozap\src\pipeline.js`
+  - `C:\afiliadozap\README.md`
+- **Impacto operacional**:
+  - para validar em runtime: iniciar `afiliadozap` com `node index.js`.

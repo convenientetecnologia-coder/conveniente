@@ -19,6 +19,27 @@ Regra adicional (obrigatória):
 
 ---
 
+### Cabeçalho obrigatório (sempre no início da resposta do GPT) — **CANÔNICO**
+
+Sempre começar com (4 linhas, sem exceção):
+
+- **Precisa reiniciar?** sim/não
+- **Qual projeto?** conveniente / sitechatbot / notificador / site *(ou outro projeto, ex.: `afiliadozap`)*
+- **Como reiniciar (humano)?** `node index.js`
+- **Por quê?** (1 frase objetiva)
+
+Regras acopladas (não negociar):
+
+- **Humano**: só reinicia processos com `node index.js` e responde “reiniciado”. Não coleta logs manualmente, não roda comandos, não copia/cola evidência.
+- **GPT**: edita código, cria comandos, coleta logs via CT, registra docs (RUNBOOK/LIVRO/TIMELINE) e faz commit/push quando aplicável.
+- **Sem achismo**: decisões importantes precisam citar **evidência** (arquivo/path, log key, cmdId/requestId, endpoint).
+- **Windows/PowerShell**: não usar `&&` nem heredoc `<<EOF` (usar `;` e `git commit -m ... -m ...`).
+- **Se mexeu no `conveniente`**: padrão é commit/push + disparar `self_update` e só então pedir restart ao humano.
+
+Motivo: evita desalinhamento e impede que um texto confuso vire mudança errada.
+
+---
+
 ### Reativação tokenized por praça + reset de baseline financeiro (CANÔNICO)
 
 Objetivo: reativar praças no tokenized sem carregar saldo/fatura legado da fase de testes.
@@ -218,6 +239,22 @@ O GPT **não** consegue reiniciar os seus processos remotos.
 - **Validar**:
   - enfileirar um comando simples + confirmar ACK
   - `sitechatbot/dados/commands.log` registrando `ack`
+
+---
+
+### RM3: recovery CDP fatal (navegadores não reabrem) — **CANÔNICO**
+
+Objetivo: quando RM3 apresentar "navegadores fecham e não reabrem" (~12h de uptime), o sistema agora se auto-recupera.
+
+**Comportamento (desde 2026-03-16):**
+- Erro CDP (Target closed, Network.enable timed out) → worker faz `exit(1)` → cluster respawna em ~2s.
+- Antes do exit: `fatalExitCleanupChrome()` mata Chrome por userDataDir (zero zumbi).
+- Dossiê: `docs/checkups/checkup_2026-03-16_dossie_forense_rm3_browser_morto_12h.md`
+
+**Se o humano reportar o sintoma:**
+1. O cluster deve respawnar automaticamente (verificar no CT se RM3 voltou a "trabalhando").
+2. Se não respawnou: reiniciar manualmente com `node index.js` no host RM3.
+3. Para investigar causa raiz (por que só RM3): usar checklist em `docs/checkups/checkup_2026-03-16_investigacao_rm3_vs_outros.md`.
 
 ---
 
