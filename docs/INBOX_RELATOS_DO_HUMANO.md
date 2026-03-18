@@ -68,6 +68,15 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 ## RAW_INPUT (colar aqui)
 
 ```text
+RAW_INPUT (2026-03-18) — RM3 dashboard 95 vs 70 navegadores
+
+"certo, vamos la, atenção extrema aqui, nao vamos codar nada , precisamos de ultra enpterise mlehor auditoria dossie de ponta a ponta do mundo sobre o que esta acontecendo, eu to la no rm3, ele ta bom 95 navegdors abertos, mas no dashboard ta marcando alguns navegdors fechados, e nao sei o que ta acontecendo, de fato tem 95 navegdors abertos, agora porque ta mostrando que so tem 70 no dashboard"
+
+TRIAGE: P1 (discrepância operacional, não bloqueante)
+STATUS: done — dossiê forense em docs/checkups/checkup_2026-03-18_dossie_forense_rm3_dashboard_95_vs_70_navegadores.md
+```
+
+```text
 triagem inbox (2026-03-05)
 
 criar inc

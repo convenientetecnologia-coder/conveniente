@@ -47,6 +47,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-18 — [DOCS][CONV] RM3: Dossiê forense dashboard 95 vs 70 navegadores
+
+- **O que**:
+  - auditoria ponta a ponta do fluxo de dados: worker → status_node_*.json → cluster → api/status → dashboard;
+  - mapeamento da definição "aberto" vs "fechado" (`active: controllers.has(nome)`);
+  - 8 hipóteses para discrepância (95 reais vs ~70 no dashboard) com prioridade;
+  - checklist de diagnóstico com comandos PowerShell para RM3.
+- **Por quê**: Humano reportou RM3 com 95 navegadores abertos na realidade, dashboard mostrando ~70 (alguns como fechados).
+- **Evidência**: checkup `docs/checkups/checkup_2026-03-18_dossie_forense_rm3_dashboard_95_vs_70_navegadores.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: N/A.
+
+---
+
 #### 2026-03-16 — [CONV][OPS][DOCS] RM3: CDP hardening + recovery automática + cleanup UAFP (zero zumbi)
 
 - **O que**:
