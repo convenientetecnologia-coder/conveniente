@@ -72,6 +72,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Checkups (relatórios) — `docs/checkups/`
   - **RM3 CDP/recovery/UAFP (2026-03-16)**: dossiê forense + correção aplicada — `docs/checkups/checkup_2026-03-16_dossie_forense_rm3_browser_morto_12h.md`; investigação RM3 vs outros — `docs/checkups/checkup_2026-03-16_investigacao_rm3_vs_outros.md`; procedimento canônico — `docs/RUNBOOK_TECNICO.md` (seção "RM3: recovery CDP fatal")
   - **RM3 dashboard 95 vs 70 navegadores (2026-03-18)**: dossiê forense ponta a ponta — `docs/checkups/checkup_2026-03-18_dossie_forense_rm3_dashboard_95_vs_70_navegadores.md` (fluxo de dados, hipóteses, checklist diagnóstico)
+  - **Tokenized WhatsApp Financeiro/Administrativo (2026-03-19)**: auditoria mensagens — `docs/checkups/checkup_2026-03-19_auditoria_tokenized_whatsapp_financeiro_administrativo.md`
 - **Sorteio justo por carga (contestação não zera prioridade até pagamento)** — `docs/inbox/done/INC-20260302-1500-01.md` (inclui evidências/tokens e auditoria)
   - **P0 (CT) Fonte Única da Verdade — validação**: ver `docs/inbox/done/INC-20260202-2000-01.md` (inclui verificador offline `C:\sitechatbot\tools\verify_virtus_groups_truth.js`)
   - **Playbook (FS) perfis órfãos/recovery/purge (RM1 validado)**: `docs/RUNBOOK_TECNICO.md` (seção “Alinhamento no disco…”) + checkup `docs/checkups/checkup_2026-02-13_rm1_profiles_orphans_alignment.md`

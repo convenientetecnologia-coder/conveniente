@@ -47,6 +47,18 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-19 — [DOCS][CROSS] Auditoria Tokenized WhatsApp: mensagens Financeiro e Administrativo
+
+- **O que**:
+  - auditoria ponta a ponta das mensagens enviadas ao clicar em "Falar financeiro" e "Falar administrativo";
+  - mapeamento de IDs → resposta canônica em todos os contextos (bloqueado, oi, boleto, sorteio).
+- **Por quê**: Humano solicitou auditoria para saber quais mensagens o sistema responde em cada opção.
+- **Evidência**: checkup `docs/checkups/checkup_2026-03-19_auditoria_tokenized_whatsapp_financeiro_administrativo.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: N/A.
+
+---
+
 #### 2026-03-18 — [DOCS][CONV] RM3: Dossiê forense dashboard 95 vs 70 navegadores
 
 - **O que**:
