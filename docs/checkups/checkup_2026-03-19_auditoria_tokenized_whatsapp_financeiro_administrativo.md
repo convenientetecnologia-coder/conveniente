@@ -19,7 +19,7 @@ Auditar de forma **enterprise** as mensagens que o sistema tokenized (WhatsApp A
 
 | Ação do motorista | Mensagem de resposta do sistema |
 |-------------------|----------------------------------|
-| **Clicar em "Falar financeiro"** | `Perfeito, vou direcionar você para o financeiro.\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui.` |
+| **Clicar em "Falar financeiro"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o financeiro, entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99124-6818\n\nLink direto 📲 https://wa.link/mgwet0` |
 | **Clicar em "Falar administrativo"** | `Perfeito, vou direcionar você para o administrativo (novo cadastro).\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui.` |
 
 **Conclusão:** As mensagens são **únicas e canônicas** — o mesmo texto é enviado em todos os contextos (bloqueado, oi, menu boleto, sorteio).
@@ -58,7 +58,7 @@ Auditar de forma **enterprise** as mensagens que o sistema tokenized (WhatsApp A
 
 | ID do botão/listagem | Keyword extraído | Mensagem de resposta |
 |----------------------|------------------|----------------------|
-| `op:financeiro` | `financeiro` | Perfeito, vou direcionar você para o financeiro.\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui. |
+| `op:financeiro` | `financeiro` | 🕒 Atendimento de segunda a sexta... + WhatsApp (48) 99124-6818 + link wa.link/mgwet0 |
 | `op:administrativo` | `administrativo` | Perfeito, vou direcionar você para o administrativo (novo cadastro).\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui. |
 | `boleto_select:financeiro` | `financeiro` | (mesma mensagem acima) |
 
@@ -95,3 +95,21 @@ WhatsApp Cloud API (webhook)
 ## Conclusão
 
 **Sim, é só isso.** As mensagens enviadas ao clicar em Financeiro e Administrativo são **únicas e fixas** no código, sem variação por contexto. O sistema responde sempre com o mesmo texto em todos os cenários.
+
+---
+
+## Atualização 2026-03-19 — Nova mensagem Financeiro
+
+Mensagem alterada para contato direto via WhatsApp:
+
+```
+🕒 Atendimento de segunda a sexta, das 10h às 17h.
+
+Para falar com o financeiro, entre em contato diretamente pelo WhatsApp abaixo:
+
+📞 (48) 99124-6818
+
+Link direto 📲 https://wa.link/mgwet0
+```
+
+**Arquivo:** `sitechatbot/whatsapp/lib/flow.js` linhas 3909–3911.
