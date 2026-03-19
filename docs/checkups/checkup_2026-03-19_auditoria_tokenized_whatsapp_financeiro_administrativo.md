@@ -20,7 +20,7 @@ Auditar de forma **enterprise** as mensagens que o sistema tokenized (WhatsApp A
 | Ação do motorista | Mensagem de resposta do sistema |
 |-------------------|----------------------------------|
 | **Clicar em "Falar financeiro"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o financeiro, entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99124-6818\n\nLink direto 📲 https://wa.link/mgwet0` |
-| **Clicar em "Falar administrativo"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o administrativo (novo cadastro), entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99219-6621\n\nLink direto 📲 https://wa.link/lbp8lc` |
+| **Clicar em "Falar administrativo"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o administrativo, entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99219-6621\n\nLink direto 📲 https://wa.link/lbp8lc` |
 
 **Conclusão:** As mensagens são **únicas e canônicas** — o mesmo texto é enviado em todos os contextos (bloqueado, oi, menu boleto, sorteio).
 
@@ -118,7 +118,7 @@ Link direto 📲 https://wa.link/mgwet0
 ```
 🕒 Atendimento de segunda a sexta, das 10h às 17h.
 
-Para falar com o administrativo (novo cadastro), entre em contato diretamente pelo WhatsApp abaixo:
+Para falar com o administrativo, entre em contato diretamente pelo WhatsApp abaixo:
 
 📞 (48) 99219-6621
 
