@@ -20,7 +20,7 @@ Auditar de forma **enterprise** as mensagens que o sistema tokenized (WhatsApp A
 | Ação do motorista | Mensagem de resposta do sistema |
 |-------------------|----------------------------------|
 | **Clicar em "Falar financeiro"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o financeiro, entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99124-6818\n\nLink direto 📲 https://wa.link/mgwet0` |
-| **Clicar em "Falar administrativo"** | `Perfeito, vou direcionar você para o administrativo (novo cadastro).\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui.` |
+| **Clicar em "Falar administrativo"** | `🕒 Atendimento de segunda a sexta, das 10h às 17h.\n\nPara falar com o administrativo (novo cadastro), entre em contato diretamente pelo WhatsApp abaixo:\n\n📞 (48) 99219-6621\n\nLink direto 📲 https://wa.link/lbp8lc` |
 
 **Conclusão:** As mensagens são **únicas e canônicas** — o mesmo texto é enviado em todos os contextos (bloqueado, oi, menu boleto, sorteio).
 
@@ -59,7 +59,7 @@ Auditar de forma **enterprise** as mensagens que o sistema tokenized (WhatsApp A
 | ID do botão/listagem | Keyword extraído | Mensagem de resposta |
 |----------------------|------------------|----------------------|
 | `op:financeiro` | `financeiro` | 🕒 Atendimento de segunda a sexta... + WhatsApp (48) 99124-6818 + link wa.link/mgwet0 |
-| `op:administrativo` | `administrativo` | Perfeito, vou direcionar você para o administrativo (novo cadastro).\nHorário de atendimento de segunda a sexta, das 10h às 17h. Aguarde nosso retorno por aqui. |
+| `op:administrativo` | `administrativo` | 🕒 Atendimento... + WhatsApp (48) 99219-6621 + link wa.link/lbp8lc |
 | `boleto_select:financeiro` | `financeiro` | (mesma mensagem acima) |
 
 ---
@@ -112,4 +112,15 @@ Para falar com o financeiro, entre em contato diretamente pelo WhatsApp abaixo:
 Link direto 📲 https://wa.link/mgwet0
 ```
 
-**Arquivo:** `sitechatbot/whatsapp/lib/flow.js` linhas 3909–3911.
+**Arquivos:** `sitechatbot/whatsapp/lib/flow.js` — Financeiro linhas 3909–3911; Administrativo linhas 3925–3927.
+
+**Administrativo (atualização):**
+```
+🕒 Atendimento de segunda a sexta, das 10h às 17h.
+
+Para falar com o administrativo (novo cadastro), entre em contato diretamente pelo WhatsApp abaixo:
+
+📞 (48) 99219-6621
+
+Link direto 📲 https://wa.link/lbp8lc
+```
