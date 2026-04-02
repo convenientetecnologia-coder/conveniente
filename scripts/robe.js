@@ -834,84 +834,128 @@ async function preencherPreco(page) {
   if (!ok) throw new Error(`Preço não ficou "0" (value="${val}").`);
 }
 
-// Categoria: Móveis (multi-modelo: novo input/search com fallback legacy)
-async function selecionarCategoriaMoveis(page) {
-  // Novo DOM: input/combobox de busca
-  const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
-  if (input) {
-    await input.click({ delay: jitter(ROBE_CLICK_DELAY_MIN_MS, ROBE_CLICK_DELAY_MAX_MS) }).catch(()=>{});
-    await sleep(120);
-    // No NOVO DOM: deve ser "Diversos"
-    const alvo = 'Diversos';
-    await input.type(alvo, { delay: jitter(ROBE_TYPE_DELAY_MIN_MS, ROBE_TYPE_DELAY_MAX_MS) }).catch(()=>{});
-    await sleep(700);
-    await page.keyboard.press('Enter');
-    await sleep(350);
-    // Validação assertiva do NOVO DOM (aceitou "Diversos"?)
-    const ok = await page.evaluate((alvoNorm) => {
-      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const inp = document.querySelector('input[aria-label="Categoria"]');
-      if (inp && norm(inp.value).includes(alvoNorm)) return true;
-      // fallback: às vezes a seleção aparece em label/summary ao lado
-      const lab = Array.from(document.querySelectorAll('label')).find(l=> (l.textContent||'').includes('Categoria'));
-      const txt = lab ? (lab.innerText||lab.textContent||'') : '';
-      return norm(txt).includes(alvoNorm);
-    }, 'diversos');
-    if (!ok) throw new Error('Falha ao selecionar a categoria "Diversos" no novo DOM.');
-    return;
-  }
+function _normCategory(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+}
 
-  // Legacy DOM (combobox/tab-enter): “Móveis”
+function _shuffleCopy(arr) {
+  const a = Array.isArray(arr) ? arr.slice() : [];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function _assertCategoriaApplied(page, alvo) {
+  const alvoNorm = _normCategory(alvo);
+  return await page.evaluate((alvoNormInner) => {
+    const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+    const inp = document.querySelector('input[aria-label="Categoria"]');
+    if (inp && norm(inp.value).includes(alvoNormInner)) return true;
+    const lab = Array.from(document.querySelectorAll('label')).find(l=> (l.textContent||'').includes('Categoria'));
+    const txt = lab ? (lab.innerText||lab.textContent||'') : '';
+    if (norm(txt).includes(alvoNormInner)) return true;
+    const lab2 = Array.from(document.querySelectorAll('label[role="combobox"]'))
+      .find(l => l.textContent && l.textContent.includes('Categoria'));
+    if (!lab2) return false;
+    const box = lab2.querySelector('.xjyslct, [class*="xjyslct"]');
+    if (!box) return false;
+    return norm(box.innerText || '').includes(alvoNormInner);
+  }, alvoNorm);
+}
+
+async function _selectCategoriaByTypingNewDom(page, alvo) {
+  const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
+  if (!input) return { ok: false, reason: 'no_new_dom_input' };
+  await input.click({ delay: jitter(ROBE_CLICK_DELAY_MIN_MS, ROBE_CLICK_DELAY_MAX_MS) }).catch(()=>{});
+  await sleep(120);
+  // limpa o campo
+  try { await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control'); } catch {}
+  try { await page.keyboard.press('Backspace'); } catch {}
+  await sleep(40);
+  await input.type(String(alvo || ''), { delay: jitter(ROBE_TYPE_DELAY_MIN_MS, ROBE_TYPE_DELAY_MAX_MS) }).catch(()=>{});
+  await sleep(520);
+  await page.keyboard.press('Enter');
+  await sleep(220);
+  const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+  return ok ? { ok: true, method: 'type_new_dom' } : { ok: false, reason: 'new_dom_not_applied' };
+}
+
+async function _selectCategoriaByTabsLegacyDom(page, alvo, tabsCount) {
   const combo = await findComboboxByLabel(page, 'Categoria', 7000);
-  if (!combo) throw new Error('Combobox "Categoria" não localizado.');
+  if (!combo) return { ok: false, reason: 'no_legacy_combo' };
   await combo.click();
-  await sleep(jitter(220, 380));
+  await sleep(jitter(160, 240));
+
+  // Regra do Cassio (legacy): Tab N vezes + Enter
+  // Timing controlado: manter rápido sem "insanidade" (alvo ~700ms total até Enter).
+  const perTabDelay = Math.max(15, parseInt(process.env.ROBE_CAT_TAB_DELAY_MS || '20', 10) || 20);
+  const n = Math.max(1, Math.min(24, parseInt(String(tabsCount || 1), 10) || 1));
   try {
-    await page.keyboard.press('Tab');
-    await sleep(jitter(120, 200));
+    for (let i = 0; i < n; i++) {
+      await page.keyboard.press('Tab');
+      await sleep(perTabDelay);
+    }
     await page.keyboard.press('Enter');
-    await sleep(jitter(220, 360));
   } catch {}
 
-  const ok1 = await page.evaluate(() => {
-    const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
-      .find(l => l.textContent && l.textContent.includes('Categoria'));
-    if (!lab) return false;
-    const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
-    if (!box) return false;
-    return /Móveis/.test(box.innerText || '');
-  });
-  if (ok1) return;
+  await sleep(jitter(220, 320));
+  const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+  return ok ? { ok: true, method: `tab_legacy_${n}` } : { ok: false, reason: 'legacy_tab_not_applied' };
+}
 
+async function _selectCategoriaByClickLegacyDom(page, alvo) {
+  const combo = await findComboboxByLabel(page, 'Categoria', 7000);
+  if (!combo) return { ok: false, reason: 'no_legacy_combo' };
   await combo.click();
-  await sleep(jitter(180, 300));
-  const clicked = await clickItemByText(page, 'Móveis', 2500);
-  if (!clicked) {
-    for (let i = 0; i < 20; i++) {
-      await page.keyboard.press('ArrowDown');
-      await sleep(60);
-      const focusedIsMoveis = await page.evaluate(() => {
-        const active = document.activeElement;
-        if (!active) return false;
-        const t = (active.innerText || active.textContent || '').trim();
-        return t === 'Móveis';
-      });
-      if (focusedIsMoveis) {
-        await page.keyboard.press('Enter');
-        break;
-      }
+  await sleep(jitter(160, 240));
+  const clicked = await clickItemByText(page, String(alvo || ''), 1800);
+  await sleep(jitter(220, 320));
+  const ok = clicked ? await _assertCategoriaApplied(page, alvo).catch(() => false) : false;
+  return ok ? { ok: true, method: 'click_legacy' } : { ok: false, reason: 'legacy_click_not_applied' };
+}
+
+// Categoria (multi-modelo):
+// - Novo DOM: digitar (random entre 5 categorias)
+// - Legacy: TAB controlado (random entre 4 categorias, mapeadas por número de TABs)
+async function selecionarCategoriaMoveis(page) {
+  // Novo DOM (digitar)
+  const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
+  if (input) {
+    const opcoes = [
+      'Móveis',
+      'Ferramentas',
+      'Diversos',
+      'Utilidades domésticas',
+      'Venda de garagem'
+    ];
+    const candidatos = _shuffleCopy(opcoes);
+    for (const alvo of candidatos) {
+      const r = await _selectCategoriaByTypingNewDom(page, alvo);
+      if (r && r.ok) return { ok: true, value: alvo, method: r.method };
     }
+    throw new Error(`Falha ao selecionar categoria no novo DOM (digitar). tried=${JSON.stringify(candidatos)}`);
   }
-  await sleep(jitter(250, 380));
-  const ok2 = await page.evaluate(() => {
-    const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
-      .find(l => l.textContent && l.textContent.includes('Categoria'));
-    if (!lab) return false;
-    const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
-    if (!box) return false;
-    return /Móveis/.test(box.innerText || '');
-  });
-  if (!ok2) throw new Error('Falha ao selecionar a categoria "Móveis".');
+
+  // Legacy DOM (TAB)
+  const legacyMap = [
+    { value: 'Móveis', tabs: 1 },
+    { value: 'Utilidades domésticas', tabs: 2 },
+    { value: 'Venda de garagem', tabs: 23 },
+    { value: 'Diversos', tabs: 24 }
+  ];
+  const legacyCandidates = _shuffleCopy(legacyMap);
+  for (const it of legacyCandidates) {
+    // Primeiro tenta click por texto (se funcionar, é mais seguro do que 23/24 TABs)
+    const c = await _selectCategoriaByClickLegacyDom(page, it.value);
+    if (c && c.ok) return { ok: true, value: it.value, method: c.method };
+
+    const r = await _selectCategoriaByTabsLegacyDom(page, it.value, it.tabs);
+    if (r && r.ok) return { ok: true, value: it.value, method: r.method };
+  }
+
+  throw new Error(`Falha ao selecionar categoria no legacy DOM (TAB/click). tried=${JSON.stringify(legacyCandidates.map(x=>x.value))}`);
 }
 
 // Condição: Novo (timings otimizados)
@@ -2285,8 +2329,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'price_ok', value: '0' });
 
     // CATEGORIA
-    await selecionarCategoriaMoveis(page);
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'category_ok', value: 'Móveis' });
+    const cat = await selecionarCategoriaMoveis(page);
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'category_ok',
+      value: (cat && cat.value) ? cat.value : 'unknown',
+      method: (cat && cat.method) ? cat.method : 'unknown'
+    });
 
     // CONDIÇÃO
     await selecionarCondicaoNovo(page);
