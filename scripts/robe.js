@@ -868,8 +868,34 @@ async function preencherDescricaoItem(page) {
   const tx = await findTextareaByLabel(page, 'Descrição', 7000);
   let el = tx;
   if (!el) {
-    // fallback: qualquer textarea visível
-    el = await page.$('textarea').catch(()=>null);
+    // fallback robusto: textarea visível, priorizando seção próxima do texto "Descrição"
+    const h = await page.evaluateHandle((labelText) => {
+      const norm = s => String(s || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g,'')
+        .trim()
+        .toLowerCase();
+      const isVisible = node => {
+        if (!node) return false;
+        const st = window.getComputedStyle(node);
+        if (!st) return false;
+        if (st.display === 'none' || st.visibility === 'hidden') return false;
+        const r = node.getBoundingClientRect();
+        return !!(r && r.width > 8 && r.height > 8);
+      };
+      const wanted = norm(labelText);
+      const spans = Array.from(document.querySelectorAll('span,div,label'))
+        .filter(n => norm(n.textContent || '') === wanted);
+      for (const s of spans) {
+        const box = s.closest('div,section,fieldset,form,label') || s.parentElement;
+        if (!box) continue;
+        const txs = Array.from(box.querySelectorAll('textarea')).filter(isVisible);
+        if (txs[0]) return txs[0];
+      }
+      const allVisible = Array.from(document.querySelectorAll('textarea')).filter(isVisible);
+      return allVisible[0] || null;
+    }, 'Descrição').catch(() => null);
+    el = h && h.asElement ? h.asElement() : null;
   }
   if (!el) return { ok: false, reason: 'no_textarea' };
 
@@ -931,6 +957,56 @@ async function _assertCategoriaApplied(page, alvo) {
   }, alvoNorm);
 }
 
+async function _clickCategoriaSuggestionByText(page, alvo) {
+  const targetNorm = _normCategory(alvo);
+  if (!targetNorm) return false;
+  return await page.evaluate((targetNormInner) => {
+    const norm = s => String(s || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g,'')
+      .replace(/[\u2013\u2014]/g, '-')
+      .replace(/[“”"']/g, '')
+      .replace(/[^\w\s-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const isVisible = el => {
+      if (!el) return false;
+      const st = window.getComputedStyle(el);
+      if (!st) return false;
+      if (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none') return false;
+      const r = el.getBoundingClientRect();
+      return !!(r && r.width > 4 && r.height > 4);
+    };
+    const clickNode = node => {
+      if (!node) return false;
+      const host = node.closest('[role="option"], [role="radio"], [role="button"], li, div') || node;
+      if (!isVisible(host)) return false;
+      host.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'nearest' });
+      host.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      host.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      host.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      host.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      return true;
+    };
+
+    // Prioridade 1: opções de listas abertas
+    const nodes = Array.from(document.querySelectorAll('[role="option"], [role="radio"], [role="button"], li, span, div'));
+    const hit = nodes.find(el => {
+      if (!isVisible(el)) return false;
+      const txt = norm(el.innerText || el.textContent || '');
+      return !!txt && (txt === targetNormInner || txt.includes(targetNormInner));
+    });
+    if (hit && clickNode(hit)) return true;
+
+    // Prioridade 2: spans com texto exato
+    const sp = Array.from(document.querySelectorAll('span'))
+      .find(s => norm(s.textContent || '') === targetNormInner);
+    if (sp && clickNode(sp)) return true;
+    return false;
+  }, targetNorm).catch(() => false);
+}
+
 async function _selectCategoriaByTypingNewDom(page, alvo) {
   const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
   if (!input) return { ok: false, reason: 'no_new_dom_input' };
@@ -941,11 +1017,23 @@ async function _selectCategoriaByTypingNewDom(page, alvo) {
   try { await page.keyboard.press('Backspace'); } catch {}
   await sleep(40);
   await input.type(String(alvo || ''), { delay: jitter(ROBE_TYPE_DELAY_MIN_MS, ROBE_TYPE_DELAY_MAX_MS) }).catch(()=>{});
-  await sleep(520);
-  await page.keyboard.press('Enter');
-  await sleep(220);
+  await sleep(380);
+  // Regra crítica: no modelo de digitação, precisa clicar na opção "Diversos" (ou alvo) para selecionar de fato.
+  let clicked = await _clickCategoriaSuggestionByText(page, alvo).catch(() => false);
+  if (!clicked) {
+    // fallback leve caso a lista demore a abrir/renderizar
+    await sleep(260);
+    clicked = await _clickCategoriaSuggestionByText(page, alvo).catch(() => false);
+  }
+  if (!clicked) {
+    // último fallback: seta + enter
+    try { await page.keyboard.press('ArrowDown'); } catch {}
+    await sleep(80);
+    try { await page.keyboard.press('Enter'); } catch {}
+  }
+  await sleep(260);
   const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
-  return ok ? { ok: true, method: 'type_new_dom' } : { ok: false, reason: 'new_dom_not_applied' };
+  return ok ? { ok: true, method: clicked ? 'type_new_dom_click' : 'type_new_dom_enter' } : { ok: false, reason: 'new_dom_not_applied' };
 }
 
 async function _selectCategoriaByTabsLegacyDom(page, alvo, tabsCount) {
@@ -1279,7 +1367,18 @@ async function preencherLocalizacao(page, cidade) {
     await sleep(300);
     inp = await findInputByLabel(page, 'Localização', 3500) || await page.$('input[aria-label="Localização"]');
   }
-  if (!inp) throw new Error('Campo Localização não localizado.');
+  // Alguns fluxos movem Localização para a próxima etapa; tenta "Avançar" e revalida.
+  if (!inp) {
+    for (let step = 0; step < 2 && !inp; step++) {
+      const btnAv = await findEnabledButton(page, 'Avançar', 1400).catch(() => null);
+      if (!btnAv) break;
+      await clickExactCenter(page, btnAv).catch(() => {});
+      await sleep(jitter(420, 620));
+      await ensureMaisDetalhesAberto(page, 2500).catch(() => false);
+      inp = await findInputByLabel(page, 'Localização', 2500) || await page.$('input[aria-label="Localização"]');
+    }
+  }
+  if (!inp) throw new Error('Campo Localização não localizado (nem após avançar etapa).');
 
   // Anti-loop: controle de sessões
   const visited = new Set();
