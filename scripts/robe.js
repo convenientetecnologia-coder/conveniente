@@ -835,7 +835,19 @@ async function preencherPreco(page) {
 }
 
 function _normCategory(s) {
-  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+  // Normalização robusta para comparar texto do DOM:
+  // - remove acentos
+  // - unifica hífen/minus e travessões (–/—) para "-"
+  // - remove pontuação/duplicidade de espaços
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .replace(/[\u2013\u2014]/g, '-') // – —
+    .replace(/[“”"']/g, '')
+    .replace(/[^\w\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function _shuffleCopy(arr) {
