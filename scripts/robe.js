@@ -958,7 +958,24 @@ async function selecionarCategoriaMoveis(page) {
   throw new Error(`Falha ao selecionar categoria no legacy DOM (TAB/click). tried=${JSON.stringify(legacyCandidates.map(x=>x.value))}`);
 }
 
-// Condição: Novo (timings otimizados)
+async function _assertCondicaoApplied(page, alvo) {
+  const alvoNorm = _normCategory(alvo);
+  return await page.evaluate((alvoNormInner) => {
+    const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+    const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
+      .find(l => l.textContent && l.textContent.includes('Condição'));
+    if (!lab) return false;
+    const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
+    if (!box) return false;
+    return norm(box.innerText || '').includes(alvoNormInner);
+  }, alvoNorm);
+}
+
+// Condição (random): setas pra baixo conforme mapeamento do Cássio.
+// 1 seta  = Novo
+// 2 setas = Usado - estado de novo
+// 3 setas = Usado - em boas condições
+// 4 setas = Usado - em condições razoáveis
 async function selecionarCondicaoNovo(page) {
   const combo = await findComboboxByLabel(page, 'Condição', 7000);
   if (!combo) throw new Error('Combobox "Condição" não localizado.');
@@ -966,19 +983,39 @@ async function selecionarCondicaoNovo(page) {
   await sleep(jitter(200, 320));
   await page.keyboard.press('Enter');
   await sleep(jitter(180, 260));
-  await page.keyboard.press('ArrowDown');
-  await sleep(60);
-  await page.keyboard.press('Enter');
-  await sleep(jitter(220, 360));
-  const ok = await page.evaluate(() => {
-    const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
-      .find(l => l.textContent && l.textContent.includes('Condição'));
-    if (!lab) return false;
-    const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
-    if (!box) return false;
-    return /Novo/.test(box.innerText || '');
-  });
-  if (!ok) throw new Error('Falha ao selecionar a condição "Novo".');
+
+  const opcoes = _shuffleCopy([
+    { value: 'Novo', arrows: 1 },
+    { value: 'Usado - estado de novo', arrows: 2 },
+    { value: 'Usado - em boas condições', arrows: 3 },
+    { value: 'Usado - em condições razoáveis', arrows: 4 }
+  ]);
+
+  const perArrowDelay = Math.max(20, parseInt(process.env.ROBE_COND_ARROW_DELAY_MS || '45', 10) || 45);
+  const tried = [];
+  for (const it of opcoes) {
+    tried.push(it.value);
+    try {
+      for (let i = 0; i < it.arrows; i++) {
+        await page.keyboard.press('ArrowDown');
+        await sleep(perArrowDelay);
+      }
+      await page.keyboard.press('Enter');
+    } catch {}
+    await sleep(jitter(220, 360));
+    const ok = await _assertCondicaoApplied(page, it.value).catch(() => false);
+    if (ok) return { ok: true, value: it.value, method: `arrowdown_${it.arrows}`, tried };
+
+    // reset: reabre o combo para tentar outra opção (evita "somar setas" em sequência)
+    try {
+      await combo.click();
+      await sleep(jitter(160, 240));
+      await page.keyboard.press('Enter');
+      await sleep(jitter(120, 200));
+    } catch {}
+  }
+
+  throw new Error(`Falha ao selecionar condição (random). tried=${JSON.stringify(tried)}`);
 }
 
 // Garantir “Mais detalhes” aberto
@@ -2338,8 +2375,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     });
 
     // CONDIÇÃO
-    await selecionarCondicaoNovo(page);
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'condition_ok', value: 'Novo' });
+    const cond = await selecionarCondicaoNovo(page);
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'condition_ok',
+      value: (cond && cond.value) ? cond.value : 'unknown',
+      method: (cond && cond.method) ? cond.method : 'unknown'
+    });
 
     // LOCALIZAÇÃO
     cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
