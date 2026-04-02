@@ -22,6 +22,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260402-0900-01 | P0 | need_evidence | not_deployed | not_run | RM5: Robe postagem falha “sem foto” apesar de pool grande (~1700) | `need_evidence/INC-20260402-0900-01.md` |
 | INC-20260318-1000-01 | P0 | need_evidence | not_deployed | not_run | Serviço de Lead: menu 10 serviços pós-frete + CT "Serviço de Lead" | `need_evidence/INC-20260318-1000-01.md` |
 | INC-20260312-1000-01 | P0 | in_progress | not_deployed | not_run | Projeto `afiliadozap`: ingestão WhatsApp + geração de links afiliados + redistribuição controlada | `in_progress/INC-20260312-1000-01.md` |
 | INC-20260306-1143-01 | P0 | done | needs_restart | not_run | Reemissão de boleto aumentou após remover leads (forense) | `need_evidence/INC-20260306-1143-01.md` |

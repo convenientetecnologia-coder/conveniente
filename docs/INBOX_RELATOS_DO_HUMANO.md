@@ -77,6 +77,187 @@ STATUS: done — dossiê forense em docs/checkups/checkup_2026-03-18_dossie_fore
 ```
 
 ```text
+RAW_INPUT (2026-03-30) — reforço operacional enterprise (“contrato do trabalho”, reiterado)
+
+Nota: conteúdo já registrado integralmente em RAW_INPUT (2026-03-12) neste mesmo arquivo.
+Reiteração de regras chave:
+- humano: só reinicia com `node index.js` e confirma “reiniciado”; não coleta logs/manual.
+- GPT: operador técnico (código + comandos + logs via CT + docs + commit/push quando aplicável).
+- sem achismo: decisões importantes exigem evidência (path/log key/cmdId/requestId/endpoint).
+- sempre iniciar resposta com cabeçalho 4 linhas (reinício/projeto/comando/por quê).
+- Windows/PowerShell: sem `&&` e sem heredoc.
+```
+
+```text
+RAW_INPUT (2026-04-02) — reforço operacional enterprise (reiteração)
+
+Nota: reiteração do mesmo “contrato do trabalho” e regras não-negociáveis, já registradas integralmente em:
+- RAW_INPUT — 2026-03-12 (neste arquivo)
+- RAW_INPUT (2026-03-30) — reforço operacional enterprise (reiteração curta)
+```
+
+```text
+RAW_INPUT (2026-04-02) — RM5 (Robe Mãe 5): Robe postagem falha “sem foto” apesar de ~1700 fotos
+
+triagem imbox
+
+robe mae 5 como base de teste
+
+estamos com problema no robe, tem alguma coisa de muito errado que nao ta certo, eu to la no robe mae 5, eu fechei tudo e deixei apenas 1 navegador aberto pra teste, porque tem algo de muito errado que nao ta certo
+
+eu cliquei em liberar robe pra postagem e ta dando erro que nao tem foto para aquela conta, mas isso nao faz sentido porque tem ~1700 fotos naquele servidor e nao teria como aquela conta ter postado tudo isso
+
+o sistema registra as fotos para as contas para todas as contas postagem aquela mesma foto, mas nao repetir as fotos por conta, e é feito um reigstro, mas em algum momoento a foto é apagada, e o registro tambem tem que ser apagado, eu nao sei onde estamos com o problema, mas precisamos investigar isso de modo ultra enteprise forense melhor do mundo, preciamso auditar isso de ponta a ponta pra entender o que ta acontecendo
+```
+
+```text
+RAW_INPUT (2026-03-30) — triagem inbox (rateio 29 cidades + 121 cobranças Asaas dia 1 + abortar tokenized)
+
+triagem imbox 
+
+certo, vamos la, aqui eu preicso que voce tenha extrema atenção ultra melhor do mundo aqui
+
+voce é 1 milhao de vezes mais inteligente do mundo e eu sou humano burro
+
+seguinte, eu sou humano burro e muitas vzes nao sei exprssar o que estou passando, o que estamos passando oq ue esta acontecendo e isso é muito ruim, porque eu sou burro, e voce é 1 milhao de vezes mais inteligente do mundo 
+
+seguinte, temos hoje o sistema atual que os pedidos estao chegando nos grupos
+
+hoje temos 67 grupos que recebem pedidos de fretes e tudo mais
+
+todos esses grupos sao modelo legacy ate onde eu sei 
+
+certo, ate aqui é facil de entender
+
+porque assim, e aqui preciso que voce tenha extrema atenção pra isso nao virar mais bagunça, porque eu to muito confuso , cansado, estressado irritado com medo entende
+
+por isso preicsamos ser ultra enteprrise melhor do mudnoa qui pra entender tudo o que ta acontecendo, tudo o que aconteceu, e tudo que precisa ser feito pra gente conseguir deixar isso utlra alinhado melhor do mundo 
+
+então assim, vou tentar ser o mais direto possivel pra voce entender, porque eu to com dificuldades em expressar 
+
+
+1 - temos 67 grupos que recebem pedido legacy perfeitametne, esses pedidos vao com numero e link pra chamar o cliente diretametne
+
+2 - desses 67 grupos cidades, 29 foram selecionadas para um teste novo 
+
+então assim, essas aqui sao essas cidades 
+
+1	Ipatinga (MG)
+2	Montes Claros (MG)
+3	Foz do Iguaçu (PR)
+4	Fortaleza (CE)
+5	Petrolina (PE)
+6	Balneário Camboriú (SC)
+7	Boa Vista (RR)
+8	Jundiaí (SP)
+9	Limeira (SP)
+10	Rio Branco (AC)
+11	Rio Verde (GO)
+12	Santa Maria (RS)
+13	Campos dos Goytacazes (RJ)
+14	Macapá (AP)
+15	Aracaju (SE)
+16	Imperatriz (MA)
+17	Indaiatuba (SP)
+18	Bauru (SP)
+19	Campina Grande (PB)
+20	Campo Grande (MS)
+21	Caruaru (PE)
+22	Franca (SP)
+23	Juazeiro do Norte (CE)
+24	Marabá (PA)
+25	Piracicaba (SP)
+26	Porto Velho (RO)
+27	Taubaté (SP)
+28	Maceió (AL)
+29	Sorocaba (SP)
+
+então assim, onde que ta a confusão toda
+
+nosso sistema primordial sempre foi 67 grupos ciaddes, trabalhando em modo legacy perfeito, onde todos os pedidos vao completos pros grupos
+
+então agente criou o sistema tokenized, e é aqui que ta gerando toda a bagunça
+
+no sistema tokenized os pedidos nao iam completos nos grupos, os motoristas acessavam um link para particiapr do sorteio, dai o sistema gerava valores pra eles, era uma confusao danada, compelxidade alta, bagunça generalizada, mas agente tinha criação de boeltos autoamtizado, tudo configurado e tudo rodando, o sistema em si a funcioannlidade em si do sistema tava perfeita
+
+porquem nao foi aprovado, os motoristas odiaram esse sistema, isso deu uma merda fodida, e infelismente itvemos que abortar a continuação desse sistema
+
+e ai o que fizemos , pegamos esses 29 cidades grupos e trouxemos elas novamente para o modo legacy
+
+e o que aconteceu foi o seguinte
+
+todas as 67 cidades grupos eram legacy com assinatura
+
+dai escolhemos 29 cidades pra passar pra tokenizes com boletos avulsos 
+
+nao foi aprovado e voltamos essas 29 cidades para o modo legacy novamente, porem sem assinatura, e é aqui que ta a bagunça
+
+no caso é diferente, nao vai ser assinatura pra essas cidades, mas sim cobranças por valor do lead
+
+ao inves de colocar o motorista no grupo pra trabalhar com os leads, e cobrar mensalidade fixa dele
+
+agora toda segunda feira agente fecha todo o engajamento que deu durante 1 semana , multiplica por 5, adciona 30% em cima do valor total + 1.99 que é o valor pra gerar o boleto
+
+e então isso ficou uma bagunça completa
+
+porque ai temos a criação de boeltos bloqueios e tudo mais dentro do sistema interno que era gerado pelo sistema tokenized que foi abortado nao vamos mais usar, mas agente ainda quer continuar criando boletos
+
+certo, ate aqui é isso que ta acontecendo
+
+no dia 23/3 ate o dia 29/3 foram gerados leads nesses 29 grupos, hoje é dia 30 segunda feira, e fizemos o calculo e tudo mais dos motorisats desses 29 grupos, calculmaos tudo e deu isso aqui 
+
+rateio_motoristas_2026-03-23_a_2026-03-29_com_30porcento.md
+
+esse resultado aqui, ta nesse arquivo
+
+certo, e o que foi feito, eu tava falando com o gpt em outro chat, so que aquele chat ta uma bagunça generalizada, e ele começou a fazer um monte de merda, fe zuma bagunça generalizada tambem, quando eu pedi pra gerar boletos, ele usou meio que o sistema otkenized, dai deu uma bagunça generalizada
+
+dai ele gerou boletos para o dia 1, e fez boletos duplicado e tudo mais, ou seja uma bagunça generalizada das grandes
+
+e cara eu to quase chorando aqui, porque eu to completamente perdido
+
+dai eu pedi pra ele excluir os boletos em aberto do dia 2, porque era boletos duplicados que ele fez pro dia 1 tambem, dai tinha 54 boletos no dia 2 , que eram os mesmos valores pro dia 1 e uma merda genelzalida
+
+e no dia 1 , se olhar no sistema interno e asaas temos 121 boletos
+
+certo, ate aqui ta tudo bem, todos os demais boletos que tinha ele excluiu, inclusive boletos da epoca do sistema tokenized que agente tava em negociação com os motoriatas, mas cara , serio , eu nao to nem ai pra isso, eu to com tanto problema pra resolver que isso agora é o de menos pra mim, acreditoq ue o prejuizo foi pequno em compração com o prejuizo emocional e mental que to tendo com toda essa bagunça
+
+eu nao qeuro mais o sistema tokenized, tudo do sistema tokenized nao vai ser usado
+
+mas vamos precisar gerar boletos ainda via sistema para centenas de motorisats e tudo mais
+
+e hoje foi o primeiro dia que fechamos a semana de leads, gerou um valor X pra cada grupo um valor Y para cada motorista contando se o motorisats ja tava dsde o incio da mudanças, ou se era motorisats novo que entoru no meio do caminho, enfim
+
+o outro gpt ele usou o sistema tokenized aparetnemetne pra gerar as cobranças, tem cobrança, ele usou o sistema ct sistema interno de boletos eu acho, mas isso nao é mais necessarios , nao agora
+
+porque eu so precisava fazer isso manualmente mesmo, via codigo aqui essa geração de boletos e o gpt começou a fazer tudo errado
+
+cara eu to muito estressado, triste, com dores, quase chorando, apavorado, eu to virado em desespero total aqui , porque isso ta parecendo uma bagunça generalizada e eu nao sei o que fazer
+
+temos esses 29 grupos, ja foram gerados as cobranças deles
+
+e aqui ja temos 1 problema, eu fui la no asaas e abri um desses boletos do dia 1 e eu percebi que os boletos foram gerados cobranças com notificação via SMS
+
+e nao é pra acontecer isos
+
+ou seja, eu preciso muito da sua ajuda, precisamos ultra enpterisae melhro do mundo resolver isso d emodo utlra organizado, muita coisa vai precisar ser desfeita, muita coisa nova vai precisar ser feita, mas agora é hora de resolver o probelam porque eu to em desespero total
+
+o que eu preciso 
+
+1 - excluir todas essas 121 cobranças la do asaas
+
+so que isso preicsa ser atomico perfeito, porque o outro gpt tava fazendo um mont de merda entende
+
+ele removia as cobranças no CT , mas la do assas elas continuavam la, dai ele fez um monte de merda, tambem criou cobranças no ct que nao geravam boletos, assim ele fez uma merda do caralho, quando no caso eu so queria criar os boletos com os valores coforme o arquivo do rateio, mas tudo foi complicado, foi virando uma bola de neve e agora eu to aqui surtado, apavorado, desesperado, agoniado, quase chorando, negocio ta complexo pra mim 
+
+então primeiro passo, remover todas as 121 cobranças do dia 1, esse é o primeiro passo
+
+vamos fazer isso de modo ultra perfeito ? vamos deixar isso ultra alinahdo perfeito melhor do mundo? porque preicsmaos limpar o lixo, reorganizar, depois corrigir e limpar codigo, e criar coisas novas para o novo metodo, sem essa coisa de tokenized
+
+precismaos agora garantirq ue vamos exlfcuir do ct e do asaas todos esses boletos, depois vemos o proximo passo
+```
+
+```text
 triagem inbox (2026-03-05)
 
 criar inc
@@ -284,6 +465,7 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260402-0900-01 | `docs/inbox/need_evidence/INC-20260402-0900-01.md` | P0 | conveniente | RM5: “liberar Robe pra postagem” falha com erro “sem foto”, apesar de existir um pool grande (~1700 fotos) | contagem/registro de fotos por conta está inconsistente (registro aponta para arquivo apagado, ou limpeza removeu fotos sem limpar registry, ou lookup usa key errada e “esgota” falsamente) | hostId `1b0f6f98-46bf-40c6-a0f9-dad6e1965c22`; logs: `logger`, `robe*`, `photos*`, `provision_audit` (evento “no_photo_*”) | need_evidence | not_deployed | not_run | nao | nao |
 | INC-20260305-1445-01 | `docs/inbox/in_progress/INC-20260305-1445-01.md` | P0 | sitechatbot+conveniente | ngrok/CT com 503 e `dial tcp localhost:3000`, `Falha ao enviar status`, self_update sem delivery | CT em indisponibilidade/intermitÃªncia na porta 3000 no momento da coleta; command ficou apenas enqueued atÃ© recuperar conectividade | `commands.log` (`enqueue` sem ack no cmd antigo; `ack ok` no retry), `ack_5bb322ed-1e2b-42c0-a1c0-0871bcddd226.json`, logs ngrok/erro 8012/3004 | in_progress | deployed_partial | passed | sim | sim |
 | INC-20260305-1445-02 | `docs/inbox/need_evidence/INC-20260305-1445-02.md` | P1 | sitechatbot+notificador | Virtus/WhatsApp API aparentando latÃªncia alta | possÃ­vel efeito colateral da indisponibilidade CT/ngrok; precisa medir latÃªncia objetiva com `/health` e `/api/whatsapp/stats` em janela estÃ¡vel | endpoints CT + counters runtime + fila pedidos (sem stuck) | need_evidence | not_deployed | not_run | nao | sim |
 | INC-20260305-0900-01 | `docs/inbox/in_progress/INC-20260305-0900-01.md` | P0 | conveniente | Migrar Chrome.exe -> Chromium mantendo sessÃµes persistentes e preenchendo perfil do navegador | risco de regressÃ£o: userDataDir/flags e diferenÃ§as de perfil; Fase 1 estabilizada, pendente fechar blindagem/Ux | evidÃªncia por cÃ³digo (paths de launch) + logs (keys: `logger`, `issues_fallback`, `status`, `desired`) | in_progress | deployed_partial | passed_partial | nao | sim |
@@ -820,6 +1002,22 @@ tem algo muito errado no runtime:
 - objetivo: investigação forense completa até achar o gatilho exato de rajada/loop
 - regra: sem achismo; mapear evidência real com timeline por perfil
 ```
+
+---
+
+## RAW_INPUT — 2026-03-26 (CT: cadastro em teste "sumiu")
+
+```text
+sidney dias telefone 13974118730 cidade santos
+
+tem esse cadastro no ct sistema interno, que foi criado pra ele um teste e tudo mais, mas ele nao ta aparecendo nem em testes em andamento nem testes encerrados, parece que sumiu nao sei, e isso é um problema serio e grave , porque assim ele fica em teste pra sempre e agente nunca cobra ele pra saber se ele quer continuar ou nao
+```
+
+### TRIAGE — 2026-03-26 (CT testes)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | CT: driver em status `test` sem registro em `ct_tests` (não aparece em andamento/encerrados) | in_progress | evidência: `sitechatbot/dados/convenientetecnologia.sqlite` (`ct_drivers.id=1853`, `ct_tests` vazio) |
 
 ### TRIAGE — 2026-03-06 (bloqueio temporario por uso indevido)
 

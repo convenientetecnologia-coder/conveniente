@@ -236,6 +236,9 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
             // Verifique se o arquivo ainda existe:
             const abs = path.join(dir, k);
             if (fs.existsSync(abs)) {
+              try {
+                logger.info('[FOTOS][pickPhotoForAccount] reserva existente reutilizada', { conta: nomeConta, file: k });
+              } catch {}
               return { ok: true, file: k, absPath: abs };
             } else {
               // O arquivo não existe mais, limpe a reserva e continue
@@ -257,6 +260,7 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
 
       const all = listAllPhotosSortedByMtimeAsc();
       let changed = false;
+      const stats = { total: all.length, skippedPosted: 0, skippedReservedOther: 0, picked: 0 };
 
       for (const item of all) {
         const { name, abs, stat } = item;
@@ -294,16 +298,21 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         }
 
         // 2. Depois: Se já postada por esta conta, pule
-        if (rec.postedBy.map(canonName).includes(nomeConta)) continue;
+        if (rec.postedBy.map(canonName).includes(nomeConta)) { stats.skippedPosted++; continue; }
 
         // 3. Depois: Se reservado por OUTRA conta, pule
-        if (Object.keys(rec.reservedBy).length > 0) continue;
+        if (Object.keys(rec.reservedBy).length > 0) { stats.skippedReservedOther++; continue; }
 
-        // Reserva AGORA e COMMITA a tentativa (postedBy é marcado junto sempre!)
+        // Reserva AGORA e COMMITA (NÃO marca postedBy aqui).
+        // Motivo: postedBy deve representar postagem/uso confirmado (via markPostedAndMaybeDelete),
+        // senão retentativas/erros técnicos podem "esgotar" foto por conta sem ter postado de fato.
         rec.reservedBy[nomeConta] = { ts: Date.now() };
-        if (!rec.postedBy.map(canonName).includes(nomeConta)) rec.postedBy.push(nomeConta);
         saveIndex(idx);
 
+        stats.picked++;
+        try {
+          logger.info('[FOTOS][pickPhotoForAccount] foto reservada', { conta: nomeConta, file: name, stats });
+        } catch {}
         return { ok: true, file: name, absPath: abs };
       }
 
@@ -318,6 +327,9 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
       }
       if (removed || changed) saveIndex(idx);
 
+      try {
+        logger.warn('[FOTOS][pickPhotoForAccount] no-photo-available', { conta: nomeConta, stats, indexSize: Object.keys(idx || {}).length });
+      } catch {}
       return { ok: false, error: 'no-photo-available' };
     } catch (e) {
       logger.error('[FOTOS][pickPhotoForAccount] Erro inesperado', { error: e && e.message || e, stack: e && e.stack });
@@ -565,11 +577,63 @@ async function getIndexSnapshot() {
   });
 }
 
+/**
+ * Remove histórico de "postedBy" e reservas de uma conta em todo o índice.
+ * Usar somente como auto-heal quando a conta ficar "sem foto" apesar de pool existir.
+ *
+ * @param {string} nomeConta
+ * @returns {Promise<{ok:true, clearedPostedRefs:number, clearedReservations:number}>|{ok:false,error:string}>}
+ */
+async function clearAccountHistory(nomeConta) {
+  nomeConta = canonName(nomeConta);
+  if (!nomeConta) return { ok: false, error: 'invalid_account' };
+
+  return _serialize(async () => {
+    const lockFd = await acquireIndexLock();
+    try {
+      const dir = resolveFotosDir();
+      if (!fs.existsSync(dir)) return { ok: false, error: 'fotos_dir_missing' };
+      let idx = loadIndex();
+      let clearedPostedRefs = 0;
+      let clearedReservations = 0;
+      let changed = false;
+
+      for (const rec of Object.values(idx)) {
+        if (!rec || typeof rec !== 'object') continue;
+        if (rec.reservedBy && typeof rec.reservedBy === 'object' && rec.reservedBy[nomeConta]) {
+          delete rec.reservedBy[nomeConta];
+          clearedReservations++;
+          changed = true;
+        }
+        if (Array.isArray(rec.postedBy) && rec.postedBy.length) {
+          const before = rec.postedBy.length;
+          rec.postedBy = rec.postedBy.filter(n => canonName(n) !== nomeConta);
+          const after = rec.postedBy.length;
+          if (after !== before) {
+            clearedPostedRefs += (before - after);
+            changed = true;
+          }
+        }
+      }
+
+      if (changed) saveIndex(idx);
+      logger.warn('[FOTOS][clearAccountHistory] auto-heal executado', { conta: nomeConta, clearedPostedRefs, clearedReservations });
+      return { ok: true, clearedPostedRefs, clearedReservations };
+    } catch (e) {
+      logger.error('[FOTOS][clearAccountHistory] Erro inesperado', { conta: nomeConta, error: e && e.message || e, stack: e && e.stack });
+      return { ok: false, error: 'internal-error' };
+    } finally {
+      releaseIndexLock(lockFd);
+    }
+  });
+}
+
 module.exports = {
   resolveFotosDir,
   pickPhotoForAccount,
   markPostedAndMaybeDelete,
   releaseReservation,
   gcSweep,
-  getIndexSnapshot
+  getIndexSnapshot,
+  clearAccountHistory
 };

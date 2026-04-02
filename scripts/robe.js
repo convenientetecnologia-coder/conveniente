@@ -1933,6 +1933,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
   let fotoNome = null;
   let fotoPath = null;
+  let fotoUploaded = false;
   let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
   let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
 
@@ -1996,7 +1997,24 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     const coords = utils.getCoords(manifest.cidade || '');
     // Pré-seleciona foto antes de abrir/create para reduzir janela de degradação entre recovery e upload.
     const photoPickStartedAt = Date.now();
-    const pick = await fotos.pickPhotoForAccount(nome, workingNames);
+    let pick = await fotos.pickPhotoForAccount(nome, workingNames);
+    // Auto-heal: se a conta entrou em "sem foto" apesar do pool existir, limpar histórico dela no índice e tentar 1x.
+    // Isso evita travar operação por inconsistência do registry (ex.: consumo indevido por falhas antigas).
+    if (!pick.ok && pick.error === 'no-photo-available') {
+      try {
+        const heal = await fotos.clearAccountHistory(nome).catch(() => null);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'dbg_robe_no_photo_auto_heal',
+            nome: String(nome || ''),
+            attId: String(attId || ''),
+            heal
+          });
+        } catch {}
+      } catch {}
+      pick = await fotos.pickPhotoForAccount(nome, workingNames);
+    }
     if (!pick.ok) {
       const reason = pick.error || 'no-photo-available';
       throw new Error(`Sem foto disponível para esta conta (${reason}).`);
@@ -2252,6 +2270,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
+    fotoUploaded = true;
     await sleep(jitter(250, 450));
 
     // TÍTULO
@@ -2353,8 +2372,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // LOG: evento de sucesso (uma mensagem por account/turno já é suficiente)
     try { await logIssue(nome, 'robe_success', 'Publicação concluída com sucesso.'); } catch {}
 
-  // ATENÇÃO: MARCAR FOTO COMO USADA (SEM REUSAR JAMAIS NA MESMA CONTA), MESMO SE ERRO/TIMEOUT/BUG.
-  // GARANTE FAIL-CLOSED: NUNCA DUPLICA PARA A MESMA CONTA!
+  // Contrato atual (enterprise):
+  // - "postedBy" só é commitado quando há publicação confirmada (published=true).
+  // - em falha/abort sem publicação, apenas liberamos a reserva para não travar o pool.
+  // Isso evita "esgotar" fotos por retentativas/erros técnicos.
   } catch (e) {
     logger.error('Erro em fluxo Robe', { nome }, e);
     if (e && e.LIMIT_POSTING === true) {
@@ -2401,15 +2422,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       } catch {}
     } catch {}
 
-    // P2 ULTRA ROBUSTO: MARCAR COMO USADA MESMO EM FALHA!!!
+    // Em falha: NÃO consumir foto como "postada". Apenas libera a reserva para evitar lock/stuck.
+    // Se a foto foi realmente publicada, o commit ocorre no caminho de sucesso (published=true).
+    // Se falhou após upload (fotoUploaded=true), permitir reuso é preferível a "esgotar" foto por conta por falhas técnicas.
     try {
-      if (fotoNome) {
-        const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
-        await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
-      }
-    } catch (e) {
-      stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);
-    }
+      if (fotoNome) await fotos.releaseReservation(nome, fotoNome);
+    } catch {}
 
     // ADEQUAÇÃO: "tentou ⇒ consumiu" para localização mesmo em erro
     try {
@@ -2421,6 +2439,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     return { ok: false, error: errMsg, retryable: isMarketplaceRateLimit, errorCode: isMarketplaceRateLimit ? MARKETPLACE_RATE_LIMIT_ERR : null, log: stepLogArr };
 
   } finally {
+    // Sempre liberar a reserva quando não houve publicação confirmada.
+    // (Isso evita que uma foto fique reservada indefinidamente para uma conta e bloqueie o pool para outras.)
+    try {
+      if (fotoNome && !published) await fotos.releaseReservation(nome, fotoNome);
+    } catch {}
+
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
     if (limitPostingHit) {
       try { if (page) await safeClosePage(page); } catch {}
