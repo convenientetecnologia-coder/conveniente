@@ -982,32 +982,18 @@ async function _selectCategoriaByClickLegacyDom(page, alvo) {
   return ok ? { ok: true, method: 'click_legacy' } : { ok: false, reason: 'legacy_click_not_applied' };
 }
 
-async function _selectCategoriaDiversosRadioModel(page) {
-  // Modelo alternativo observado: lista de categorias como opções (role="radio"/"button"),
-  // sem input search e sem combobox tab-enter do legacy. Neste caso, queremos selecionar apenas "Diversos".
-  const alvo = 'Diversos';
+async function _selectCategoriaRadioModelRandom(page, opcoes) {
+  // Modelo alternativo observado: lista de categorias em cards (role="button"/"radio"),
+  // sem input search visível no estado inicial. Nesse modelo, usar categorias random (não fixar Diversos).
+  const candidatos = _shuffleCopy(Array.isArray(opcoes) ? opcoes.slice() : []);
+  if (!candidatos.length) return { ok: false, reason: 'no_radio_candidates' };
 
-  async function findDiversosOption() {
-    const xp = `//*[@role="radio" or @role="button"][.//span[normalize-space()="${alvo}"] or normalize-space()="${alvo}"]`;
-    try {
-      const els = await page.$x(xp);
-      return (els && els[0]) ? els[0] : null;
-    } catch {
-      return null;
-    }
-  }
-
-  // 1) Se já está renderizado/aberto, clique direto
-  let opt = await findDiversosOption();
-
-  // 2) Se não achou, tenta abrir o seletor de categoria e procurar de novo
-  if (!opt) {
+  async function ensureCategoriaOpened() {
     try {
       const combo = await findComboboxByLabel(page, 'Categoria', 1200).catch(() => null);
       if (combo) {
         try { await combo.click(); } catch {}
       } else {
-        // fallback: clicar no host que contém o texto "Categoria"
         await page.evaluate(() => {
           const span = Array.from(document.querySelectorAll('span')).find(s => (s.textContent || '').trim() === 'Categoria');
           if (!span) return;
@@ -1021,61 +1007,67 @@ async function _selectCategoriaDiversosRadioModel(page) {
       }
       await sleep(jitter(220, 340));
     } catch {}
-
-    opt = await findDiversosOption();
   }
 
-  if (!opt) return { ok: false, reason: 'no_radio_model' };
+  await ensureCategoriaOpened();
 
-  try { await opt.click(); } catch {}
-  await sleep(jitter(220, 340));
+  async function clickOptionByNorm(alvo) {
+    const alvoNorm = _normCategory(alvo);
+    return await page.evaluate((targetNorm) => {
+      const norm = s => String(s || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g,'')
+        .replace(/[\u2013\u2014]/g,'-')
+        .replace(/[“”"']/g, '')
+        .replace(/[^\w\s-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      const nodes = Array.from(document.querySelectorAll('[role="radio"], [role="button"]'));
+      const hit = nodes.find(el => norm(el.innerText || el.textContent || '').includes(targetNorm));
+      if (!hit) return false;
+      hit.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      hit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      return true;
+    }, alvoNorm).catch(() => false);
+  }
 
-  // Verifica se a opção "Diversos" ficou marcada (aria-checked/aria-selected) ou se o campo reflete o valor.
-  const ok = await page.evaluate((alvoTxt) => {
-    const norm = s => (s || '').trim();
-    const candidates = Array.from(document.querySelectorAll('[role="radio"], [role="button"]'));
-    for (const el of candidates) {
-      const t = norm(el.innerText || el.textContent || '');
-      if (!t) continue;
-      if (t.includes(alvoTxt)) {
-        const ac = el.getAttribute('aria-checked');
-        const as = el.getAttribute('aria-selected');
-        if (ac === 'true' || as === 'true') return true;
-      }
-    }
-    return false;
-  }, alvo).catch(() => false);
-
-  const ok2 = await _assertCategoriaApplied(page, alvo).catch(() => false);
-  if (ok || ok2) return { ok: true, value: alvo, method: 'radio_model_diversos' };
+  for (const alvo of candidatos) {
+    const clicked = await clickOptionByNorm(alvo);
+    if (!clicked) continue;
+    await sleep(jitter(220, 340));
+    const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+    if (ok) return { ok: true, value: alvo, method: 'radio_model_random' };
+  }
 
   return { ok: false, reason: 'radio_click_not_applied' };
 }
 
 // Categoria (multi-modelo):
-// - Novo DOM: digitar (random entre 5 categorias)
-// - Legacy: TAB controlado (random entre 4 categorias, mapeadas por número de TABs)
+// - Input search (type=search): fixar somente "Diversos"
+// - Modelo em lista/radio (sem input): random entre 5 categorias
+// - Legacy TAB: random entre 4 categorias (compatibilidade antiga)
 async function selecionarCategoriaMoveis(page) {
-  // Novo DOM (digitar)
+  const opcoes = [
+    'Móveis',
+    'Ferramentas',
+    'Diversos',
+    'Utilidades domésticas',
+    'Venda de garagem'
+  ];
+
+  // Modelo com input de busca: fixar somente "Diversos"
   const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
   if (input) {
-    const opcoes = [
-      'Móveis',
-      'Ferramentas',
-      'Diversos',
-      'Utilidades domésticas',
-      'Venda de garagem'
-    ];
-    const candidatos = _shuffleCopy(opcoes);
-    for (const alvo of candidatos) {
-      const r = await _selectCategoriaByTypingNewDom(page, alvo);
-      if (r && r.ok) return { ok: true, value: alvo, method: r.method };
-    }
-    throw new Error(`Falha ao selecionar categoria no novo DOM (digitar). tried=${JSON.stringify(candidatos)}`);
+    const r = await _selectCategoriaByTypingNewDom(page, 'Diversos');
+    if (r && r.ok) return { ok: true, value: 'Diversos', method: r.method };
+    throw new Error('Falha ao selecionar categoria "Diversos" no modelo com input search.');
   }
 
-  // Modelo alternativo (lista/radio): selecionar apenas "Diversos"
-  const radio = await _selectCategoriaDiversosRadioModel(page).catch(() => ({ ok: false }));
+  // Modelo alternativo (lista/radio): random entre categorias
+  const radio = await _selectCategoriaRadioModelRandom(page, opcoes).catch(() => ({ ok: false }));
   if (radio && radio.ok) return { ok: true, value: radio.value, method: radio.method };
 
   // Legacy DOM (TAB)
