@@ -1017,23 +1017,30 @@ async function _selectCategoriaByTypingNewDom(page, alvo) {
   try { await page.keyboard.press('Backspace'); } catch {}
   await sleep(40);
   await input.type(String(alvo || ''), { delay: jitter(ROBE_TYPE_DELAY_MIN_MS, ROBE_TYPE_DELAY_MAX_MS) }).catch(()=>{});
-  await sleep(380);
-  // Regra crítica: no modelo de digitação, precisa clicar na opção "Diversos" (ou alvo) para selecionar de fato.
-  let clicked = await _clickCategoriaSuggestionByText(page, alvo).catch(() => false);
-  if (!clicked) {
-    // fallback leve caso a lista demore a abrir/renderizar
-    await sleep(260);
-    clicked = await _clickCategoriaSuggestionByText(page, alvo).catch(() => false);
-  }
-  if (!clicked) {
-    // último fallback: seta + enter
-    try { await page.keyboard.press('ArrowDown'); } catch {}
-    await sleep(80);
-    try { await page.keyboard.press('Enter'); } catch {}
-  }
   await sleep(260);
-  const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
-  return ok ? { ok: true, method: clicked ? 'type_new_dom_click' : 'type_new_dom_enter' } : { ok: false, reason: 'new_dom_not_applied' };
+  // Estratégia principal validada em produção: com única sugestão visível, ArrowDown + Enter seleciona corretamente.
+  try { await page.keyboard.press('ArrowDown'); } catch {}
+  await sleep(90);
+  try { await page.keyboard.press('Enter'); } catch {}
+  await sleep(260);
+
+  let ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+  if (ok) return { ok: true, method: 'type_new_dom_arrow_enter' };
+
+  // Fallback 1: repetir ArrowDown+Enter caso a lista tenha aberto com atraso.
+  await sleep(220);
+  try { await page.keyboard.press('ArrowDown'); } catch {}
+  await sleep(90);
+  try { await page.keyboard.press('Enter'); } catch {}
+  await sleep(240);
+  ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+  if (ok) return { ok: true, method: 'type_new_dom_arrow_enter_retry' };
+
+  // Fallback 2: clique textual na opção.
+  const clicked = await _clickCategoriaSuggestionByText(page, alvo).catch(() => false);
+  await sleep(240);
+  ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+  return ok ? { ok: true, method: clicked ? 'type_new_dom_click_fallback' : 'type_new_dom_fallback_unknown' } : { ok: false, reason: 'new_dom_not_applied' };
 }
 
 async function _selectCategoriaByTabsLegacyDom(page, alvo, tabsCount) {
