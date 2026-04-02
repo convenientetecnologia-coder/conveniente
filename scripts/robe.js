@@ -972,8 +972,23 @@ async function selecionarCategoriaMoveis(page) {
 
 async function _assertCondicaoApplied(page, alvo) {
   const alvoNorm = _normCategory(alvo);
+  // 1) Preferir ler do próprio combobox (mais confiável que procurar classes internas voláteis)
+  try {
+    const combo = await findComboboxByLabel(page, 'Condição', 2500).catch(() => null);
+    if (combo) {
+      const txt = await page.evaluate(el => (el.innerText || el.textContent || ''), combo).catch(() => '');
+      if (_normCategory(txt).includes(alvoNorm)) return true;
+    }
+  } catch {}
+
+  // 2) Fallback: heurística antiga (caso o combobox esteja fora da viewport / handle falhe)
   return await page.evaluate((alvoNormInner) => {
-    const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+    const norm = s => (s||'')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g,'')
+      .replace(/[\u2013\u2014]/g,'-')
+      .trim()
+      .toLowerCase();
     const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
       .find(l => l.textContent && l.textContent.includes('Condição'));
     if (!lab) return false;
@@ -981,6 +996,25 @@ async function _assertCondicaoApplied(page, alvo) {
     if (!box) return false;
     return norm(box.innerText || '').includes(alvoNormInner);
   }, alvoNorm);
+}
+
+const ROBE_CONDICOES = [
+  'Novo',
+  'Usado - estado de novo',
+  'Usado - em boas condições',
+  'Usado - em condições razoáveis'
+];
+
+async function _readCondicaoFromCombo(page) {
+  const combo = await findComboboxByLabel(page, 'Condição', 2500).catch(() => null);
+  if (!combo) return null;
+  const txt = await page.evaluate(el => (el.innerText || el.textContent || ''), combo).catch(() => '');
+  const norm = _normCategory(txt);
+  if (!norm) return null;
+  for (const opt of ROBE_CONDICOES) {
+    if (norm.includes(_normCategory(opt))) return opt;
+  }
+  return String(txt || '').trim() || null;
 }
 
 // Condição (random): setas pra baixo conforme mapeamento do Cássio.
@@ -997,10 +1031,10 @@ async function selecionarCondicaoNovo(page) {
   await sleep(jitter(180, 260));
 
   const opcoes = _shuffleCopy([
-    { value: 'Novo', arrows: 1 },
-    { value: 'Usado - estado de novo', arrows: 2 },
-    { value: 'Usado - em boas condições', arrows: 3 },
-    { value: 'Usado - em condições razoáveis', arrows: 4 }
+    { value: ROBE_CONDICOES[0], arrows: 1 },
+    { value: ROBE_CONDICOES[1], arrows: 2 },
+    { value: ROBE_CONDICOES[2], arrows: 3 },
+    { value: ROBE_CONDICOES[3], arrows: 4 }
   ]);
 
   const perArrowDelay = Math.max(20, parseInt(process.env.ROBE_COND_ARROW_DELAY_MS || '45', 10) || 45);
@@ -1017,6 +1051,12 @@ async function selecionarCondicaoNovo(page) {
     await sleep(jitter(220, 360));
     const ok = await _assertCondicaoApplied(page, it.value).catch(() => false);
     if (ok) return { ok: true, value: it.value, method: `arrowdown_${it.arrows}`, tried };
+
+    // Se o assert falhar por DOM/label, mas o combobox já mostra uma das condições esperadas, aceite e siga.
+    const seen = await _readCondicaoFromCombo(page).catch(() => null);
+    if (seen && ROBE_CONDICOES.map(_normCategory).includes(_normCategory(seen))) {
+      return { ok: true, value: seen, method: 'combo_readback', tried };
+    }
 
     // reset: reabre o combo para tentar outra opção (evita "somar setas" em sequência)
     try {
