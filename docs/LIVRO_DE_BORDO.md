@@ -656,3 +656,16 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - `worker`: guardrails adicionais de tempo mínimo entre ações de recovery e cooldown maior em phantom fix.
 - Objetivo:
   - reduzir cutucada sistemática sem quebrar rota de recuperação automática.
+
+## 2026-04-02 — Robe criar item (multi-modelo) + update canônico
+
+- Frente Robe estabilizada para contas com DOMs distintos no criar item:
+  - categoria por input search (fixar `Diversos` com seleção real),
+  - categoria por cards/radio (randomizada conforme regra),
+  - condição randomizada,
+  - descrição via `dados/descricaoItens.json`,
+  - localização com fallback para etapa seguinte quando necessário.
+- Regra operacional reforçada:
+  - em conta com input de categoria por digitação e sugestão única de `Diversos`, priorizar `ArrowDown + Enter` para seleção efetiva.
+- Governança de deploy mantida:
+  - mudança em `conveniente` = commit/push + `self_update` via CT + restart manual humano com `node index.js`.

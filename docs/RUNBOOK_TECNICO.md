@@ -240,6 +240,18 @@ O GPT **não** consegue reiniciar os seus processos remotos.
   - enfileirar um comando simples + confirmar ACK
   - `sitechatbot/dados/commands.log` registrando `ack`
 
+##### CT — UI de Boletos/Cobranças (CANÔNICO, pós-aborto tokenized/pay-per-lead)
+
+- **Onde ver os boletos de um motorista**:
+  - `Cadastros` → buscar → abrir cadastro → botão **`Boletos / Cobranças`**
+  - (alternativo) aba `Boletos` → filtrar/achar pelo nome/telefone
+- **Ação correta para “apagar/cancelar”**:
+  - usar **`Excluir cobrança`** (cancela no Asaas + marca cancelado no CT; pede motivo obrigatório).
+- **O que NÃO usar (obsoleto)**:
+  - fluxos de “editar leads / excluir boleto / cancelar boleto / reemitir” do pay-per-lead (removidos da UI para reduzir risco).
+- **Evidência (código UI)**:
+  - `C:\sitechatbot\convenientetecnologia\public\ct.js`
+
 ---
 
 ### RM3: recovery CDP fatal (navegadores não reabrem) — **CANÔNICO**
@@ -1352,3 +1364,45 @@ Mudança técnica:
 
 Resultado esperado:
 - menor assinatura de insistência em recuperação e eliminação de navegação forçada para chat.
+
+---
+
+## Robe criar item — categoria/descrição/localização em DOM variável (CANÔNICO, 2026-04-02)
+
+Objetivo:
+- manter o fluxo de publicação estável mesmo quando o Facebook muda o layout entre contas.
+
+Regras canônicas de seleção de **categoria**:
+
+1) **Modelo com input search** (`input[aria-label="Categoria"][type="search"]`):
+- digitar `Diversos`;
+- priorizar seleção efetiva com `ArrowDown` + `Enter` (com retry curto);
+- validar que a categoria foi realmente aplicada (não apenas texto digitado no input).
+
+2) **Modelo por cards/lista** (`role="radio"`/`role="button"` sem input search):
+- escolher categoria randomizada da lista aprovada;
+- clicar opção por texto normalizado;
+- validar aplicação no combobox/estado da tela.
+
+3) **Modelo legacy TAB**:
+- manter mapeamento controlado de tabs (1/2/23/24) com fallback por clique textual;
+- evitar sequência de TAB agressiva.
+
+Regras canônicas de **descrição**:
+- preencher antes de localização;
+- fonte: `C:\conveniente\dados\descricaoItens.json`;
+- localizar textarea por label `Descrição`; se não achar, usar fallback por textarea visível próxima da seção.
+
+Regras canônicas de **localização**:
+- tentar localizar na etapa atual normalmente;
+- se não existir, clicar `Avançar` (até 2 etapas), reabrir `Mais detalhes` e tentar novamente;
+- só falhar após esse fallback explícito.
+
+Evidência operacional mínima:
+- logs do Robe com `step`:
+  - `category_ok` (com `method`),
+  - `description_try`,
+  - `location_ok`.
+
+Rollback:
+- `git revert` dos commits da rodada Robe e novo `self_update` + restart manual do `conveniente`.

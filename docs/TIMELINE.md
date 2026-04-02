@@ -31,6 +31,57 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-30 — [CT][OPS][CROSS] Saneamento Asaas: cancelamento atômico das 121 cobranças do dia 1 (rateio_121_dia1)
+
+- **O que**:
+  - canceladas 121 cobranças do lote `force_rateio121_20260323_20260329_v1_*` no Asaas e marcadas como `canceled` no CT;
+  - criado script seguro com preflight e dupla intenção (`--apply --confirm`).
+- **Por quê**: havia boletos indevidos/duplicados gerados no caos tokenized; precisava limpar para recomeçar a cobrança semanal sem lixo.
+- **Evidência**:
+  - lista do lote: `docs/financeiro_boletos_121_forcados_FINAL.csv`
+  - relatório cleanup: `docs/auditoria_cleanup_121_dia1_2026-03-30.md`
+  - INC: `docs/inbox/done/INC-20260330-0900-01.md`
+  - script: `C:\sitechatbot\tools\cancel_forced121_day1_safe.js`
+- **Reinícios**: nenhum.
+- **Rollback**: não aplicável (cancelamento é destrutivo; “voltar” só reemitindo um novo lote).
+- **THREAD**: `TH-2026-03-30-saneamento-asaas-avulsas`
+
+---
+
+#### 2026-03-30 — [CT][OPS][CROSS] Asaas: tentativa de habilitar WhatsApp-only por API falhou; rollback para notificationDisabled=true
+
+- **O que**:
+  - tentativa de configurar notificações “WhatsApp only” via `/v3/notifications/batch` para os 121 clientes do lote;
+  - Asaas recusou com erro `Evento inválido para ativação da notificação por WhatsApp.`;
+  - aplicado rollback: `notificationDisabled=true` novamente nos 121 clientes (garantia anti-SMS/email).
+- **Por quê**: objetivo era aumentar eficiência de cobrança com lembretes automáticos do Asaas via WhatsApp, sem SMS/email.
+- **Evidência**:
+  - auditoria: `docs/auditoria_asaas_whatsapp_policy_attempt_2026-03-30.md`
+  - INC: `docs/inbox/need_evidence/INC-20260330-0910-01.md`
+  - scripts: `C:\sitechatbot\tools\asaas_policy_whatsapp_only_forced121.js`, `C:\sitechatbot\tools\asaas_set_customer_notification_disabled_forced121.js`
+- **Reinícios**: nenhum.
+- **Rollback**: já aplicado (notificationDisabled=true).
+- **THREAD**: `TH-2026-03-30-saneamento-asaas-avulsas`
+
+---
+
+#### 2026-03-30 — [CT][OPS][CROSS] Asaas: policy “WhatsApp only” aplicado com exceção de SEND_LINHA_DIGITAVEL (sucesso 121/121)
+
+- **O que**:
+  - identificado que o erro era o evento `SEND_LINHA_DIGITAVEL` (WhatsApp incompatível);
+  - aplicado policy “WhatsApp only” nos 121 clientes, com:
+    - `SEND_LINHA_DIGITAVEL.enabled=false`
+    - WhatsApp on nos demais eventos
+    - SMS/email off
+    - `PAYMENT_OVERDUE scheduleOffset=7 -> 1` (atraso diário)
+- **Por quê**: permitir que o Asaas notifique no WhatsApp na criação e no atraso, sem SMS/email.
+- **Evidência**:
+  - dossiê: `docs/auditoria_asaas_whatsapp_policy_success_2026-03-30.md`
+  - scripts: `C:\sitechatbot\tools\asaas_policy_whatsapp_only_forced121.js`, `C:\sitechatbot\tools\asaas_whatsapp_probe_one_customer.js`, `C:\sitechatbot\tools\asaas_dump_customer_notifications.js`
+- **Reinícios**: nenhum.
+- **Rollback**: reativar `notificationDisabled=true` por script (se necessário).
+- **THREAD**: `TH-2026-03-30-saneamento-asaas-avulsas`
+
 #### 2026-03-18 — [DOCS][CT] Dossiê pré-código: Serviço de Lead (menu 10 serviços pós-frete)
 
 - **O que**:
@@ -2574,3 +2625,49 @@ Adendo (ajuste operacional aprovado pelo owner):
   - `C:\afiliadozap\README.md`
 - **Impacto operacional**:
   - para validar em runtime: iniciar `afiliadozap` com `node index.js`.
+
+#### 2026-03-30 — [SITECHATBOT][CT] Simplificação da UI de Boletos/Cobranças (pós-aborto tokenized/pay-per-lead)
+
+- **Mudança (UI CT)**:
+  - arquivo: `C:\sitechatbot\convenientetecnologia\public\ct.js`
+  - removidos da UI (obsoletos do pay-per-lead): `Editar leads`, `Reemitir`, `Cancelar boleto`, `Excluir boleto`, blocos de *carteira/leads/lançamentos*.
+  - mantido/normalizado: ação **`Excluir cobrança`** (cancela no Asaas + marca cancelado no CT, sem mexer em leads).
+  - no modal de **Cadastro**: adicionado botão **`Boletos / Cobranças`** para abrir a tela/modal de boletos do motorista (atalho humano-proof).
+- **Por quê**:
+  - reduzir confusão operacional e risco (tokenized/pay-per-lead foi descontinuado; a operação agora é por cobrança simples).
+- **Impacto operacional**:
+  - requer restart do `sitechatbot` (`node index.js`) e, na UI, se parecer “antigo”, fazer hard refresh (`Ctrl+F5`).
+- **Rollback**:
+  - `git revert` do(s) commit(s) que alteraram `C:\sitechatbot\convenientetecnologia\public\ct.js` e reiniciar `sitechatbot`.
+
+#### 2026-04-02 — [CONVENIENTE][ROBE] Correção de categoria por input: seleção real após digitar "Diversos"
+
+- **Mudança**:
+  - no fluxo Robe com categoria por digitação, reforçado que a seleção precisa ser efetiva no dropdown/sugestão;
+  - ajuste no `scripts/robe.js` para reduzir falso positivo de “digitou mas não selecionou”.
+- **Evidência**:
+  - commit `d1f815c` (`fix: reforcar selecao categoria e fallback de localizacao`);
+  - update RM5 via CT: `requestId=self_update_host_1b0f6f98-46bf-40c6-a0f9-dad6e1965c22_1775155632731`, `commandId=66eeb47c-aff7-46e8-be6a-edf66d8a5f7a`.
+- **Impacto operacional**:
+  - requer restart do `conveniente` no host RM5 para carregar runtime novo.
+
+#### 2026-04-02 — [CONVENIENTE][ROBE] Conta 2: estratégia principal `ArrowDown + Enter` para "Diversos"
+
+- **Mudança**:
+  - após validação em campo, a seleção no modelo de digitação passou a priorizar `ArrowDown + Enter` após digitar `Diversos`, com retry e fallback de clique textual.
+- **Evidência**:
+  - commit `8ebbdce` (`fix: priorizar seta+enter na categoria diversos`);
+  - update RM5 via CT: `requestId=self_update_host_1b0f6f98-46bf-40c6-a0f9-dad6e1965c22_1775155922478`, `commandId=2696abc7-f2d5-42b3-aa3f-700f3dd70f70`.
+- **Impacto operacional**:
+  - requer restart do `conveniente` no host RM5 para aplicar.
+
+#### 2026-04-02 — [CONVENIENTE][DADOS] Atualização manual de títulos do Robe + rollout global
+
+- **Mudança**:
+  - atualização de `C:\conveniente\dados\titulos.json` com novos títulos informados pelo operador.
+- **Evidência**:
+  - commit `16bc924` (`dados: atualizar titulos do robe`);
+  - push em `main`;
+  - self-update global via CT: `requestId=self_update_all_1775157653271`, `commandsCount=8`.
+- **Impacto operacional**:
+  - requer restart do `conveniente` em todos os hosts atualizados para carregar o arquivo novo no runtime.
