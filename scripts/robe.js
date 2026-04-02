@@ -360,6 +360,28 @@ async function findInputByLabel(page, labelText, timeout = 8000) {
   return null;
 }
 
+// Helper: localizar textarea por label (ex.: "Descrição")
+async function findTextareaByLabel(page, labelText, timeout = 8000) {
+  const started = Date.now();
+  const xpaths = [
+    `//div[.//span[normalize-space()="${labelText}"]]//textarea`,
+    `//label[.//span[normalize-space()="${labelText}"]]//textarea`,
+    `//span[normalize-space()="${labelText}"]/ancestor::*[self::div or self::label][1]//textarea`,
+    `//textarea[@aria-label="${labelText}"]`,
+    `//textarea[contains(@aria-label,"${labelText}")]`
+  ];
+  while (Date.now() - started < timeout) {
+    for (const xp of xpaths) {
+      try {
+        const els = await page.$x(xp);
+        if (els && els[0]) return els[0];
+      } catch {}
+    }
+    await sleep(180);
+  }
+  return null;
+}
+
 // Busca robusta por combobox (role=combobox) a partir do rótulo
 async function findComboboxByLabel(page, labelText, timeout = 8000) {
   const xp = `//label[@role="combobox" and .//span[normalize-space()="${labelText}"]]`;
@@ -832,6 +854,38 @@ async function preencherPreco(page) {
   const val = await page.evaluate(el => el.value, inp);
   const ok = val && (val.trim() === '0' || /(^R\$?\s*0(,00)?$)/.test(val.trim()));
   if (!ok) throw new Error(`Preço não ficou "0" (value="${val}").`);
+}
+
+async function preencherDescricaoItem(page) {
+  const arquivo = path.join(__dirname, '..', 'dados', 'descricaoItens.json');
+  const arr = readJsonSafe(arquivo, []);
+  let descricao = '';
+  if (Array.isArray(arr) && arr.length) {
+    descricao = String(arr[Math.floor(Math.random() * arr.length)] || '').trim();
+  }
+  if (!descricao) return { ok: false, reason: 'no_descriptions' };
+
+  const tx = await findTextareaByLabel(page, 'Descrição', 7000);
+  let el = tx;
+  if (!el) {
+    // fallback: qualquer textarea visível
+    el = await page.$('textarea').catch(()=>null);
+  }
+  if (!el) return { ok: false, reason: 'no_textarea' };
+
+  try { await el.click({ clickCount: 1 }); } catch {}
+  await sleep(jitter(100, 180));
+  // limpar
+  try { await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control'); } catch {}
+  try { await page.keyboard.press('Backspace'); } catch {}
+  await sleep(50);
+  try { await el.type(descricao, { delay: jitter(4, 9) }); } catch {}
+  await sleep(jitter(120, 220));
+
+  // validação simples: tem algum texto
+  const got = await page.evaluate(e => (e.value || '').trim(), el).catch(()=> '');
+  if (!got) return { ok: false, reason: 'desc_empty_after_type' };
+  return { ok: true, len: got.length };
 }
 
 function _normCategory(s) {
@@ -2433,6 +2487,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       step: 'condition_ok',
       value: (cond && cond.value) ? cond.value : 'unknown',
       method: (cond && cond.method) ? cond.method : 'unknown'
+    });
+
+    // DESCRIÇÃO (antes de Localização)
+    const desc = await preencherDescricaoItem(page).catch(() => ({ ok: false, reason: 'exception' }));
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'description_try',
+      ok: !!(desc && desc.ok),
+      len: (desc && typeof desc.len === 'number') ? desc.len : null,
+      reason: (desc && !desc.ok) ? String(desc.reason || 'unknown') : null
     });
 
     // LOCALIZAÇÃO
