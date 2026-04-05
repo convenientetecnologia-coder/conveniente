@@ -344,7 +344,8 @@ module.exports = (app, workerClient, fileStore) => {
     // para que o servidor possa liberar RAM temporariamente sem alterar o estado declarativo do usuário.
     const reqPolicy = String(req?.body?.policy || '').trim() || null; // ex.: 'preserveDesired'
     const reqReason = String(req?.body?.reason || '').trim() || null;
-    const allowPolicy = (op && String(op).toLowerCase().startsWith('stock_provision'));
+    const opNorm = String(op || '').toLowerCase();
+    const allowPolicy = !!(opNorm.startsWith('stock_provision') || opNorm.startsWith('gateway_recycle'));
     const policy = (allowPolicy && reqPolicy) ? reqPolicy : null;
     const reason = (allowPolicy && reqReason) ? reqReason : 'admin';
 

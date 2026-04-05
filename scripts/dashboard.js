@@ -3186,14 +3186,107 @@ async function execSetGroqConfig(cmd) {
   return { ok: true };
 }
 
+function gatewayNeedsRecycle(beforeRuntime, afterRuntime) {
+  const b = (beforeRuntime && typeof beforeRuntime === 'object') ? beforeRuntime : {};
+  const a = (afterRuntime && typeof afterRuntime === 'object') ? afterRuntime : {};
+  const reasons = [];
+  if (String(b.inventoryVersion || '') !== String(a.inventoryVersion || '')) reasons.push('inventory_version_changed');
+  if (!!b.globalEnabled !== !!a.globalEnabled) reasons.push('global_toggle');
+  if (!!b.hostEnabled !== !!a.hostEnabled) reasons.push('host_toggle');
+  if (!!b.hasTrafficCreds !== !!a.hasTrafficCreds) reasons.push('traffic_creds_changed');
+  if (Number(b.slotsCount || 0) !== Number(a.slotsCount || 0)) reasons.push('slots_count_changed');
+  return { needed: reasons.length > 0, reasons };
+}
+
+async function listActiveGatewayProfiles() {
+  const st = await httpJson('/api/status', { timeoutMs: 45_000, retries: 1 });
+  const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+  return perfis
+    .filter((p) => p && p.active === true)
+    .map((p) => String(p && p.nome || '').trim())
+    .filter(Boolean);
+}
+
+async function recycleGatewayProfile(nome, reasonTag) {
+  const operator = `gateway_recycle:${String(reasonTag || 'gateway_update').slice(0, 80)}`;
+  const deactivate = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+    method: 'POST',
+    headers: { 'x-operator': operator },
+    body: { policy: 'preserveDesired', reason: 'gateway_recycle' },
+    timeoutMs: 90_000,
+    retries: 1
+  });
+  if (!deactivate || deactivate.ok !== true) {
+    return { ok: false, stage: 'deactivate', error: (deactivate && deactivate.error) ? String(deactivate.error) : 'deactivate_failed' };
+  }
+  await sleep(Math.max(200, Number(process.env.GATEWAY_RECYCLE_STEP_WAIT_MS || 350) || 350));
+
+  let lastErr = null;
+  const activateTries = Math.max(1, Math.min(5, Number(process.env.GATEWAY_RECYCLE_ACTIVATE_RETRIES || 3) || 3));
+  for (let i = 0; i < activateTries; i++) {
+    const activate = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
+      method: 'POST',
+      headers: { 'x-operator': operator },
+      timeoutMs: 90_000,
+      retries: 1
+    });
+    if (activate && activate.ok === true) return { ok: true };
+    lastErr = (activate && activate.error) ? String(activate.error) : 'activate_failed';
+    await sleep(700 + (i * 600));
+  }
+  return { ok: false, stage: 'activate', error: lastErr || 'activate_failed' };
+}
+
+async function recycleGatewayActives({ reasonTag = 'gateway_update', limit = null } = {}) {
+  const names = await listActiveGatewayProfiles();
+  const targets = (limit && Number(limit) > 0)
+    ? names.slice(0, Number(limit))
+    : names;
+  if (!targets.length) return { ok: true, total: 0, okCount: 0, failCount: 0, failures: [] };
+
+  const concurrency = Math.max(1, Math.min(12, Number(process.env.GATEWAY_RECYCLE_CONCURRENCY || 4) || 4));
+  let idx = 0;
+  const out = [];
+  const workers = Array.from({ length: Math.min(concurrency, targets.length) }).map(async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= targets.length) break;
+      const nome = targets[i];
+      try {
+        const rr = await recycleGatewayProfile(nome, reasonTag);
+        out.push({ nome, ...(rr || { ok: false, error: 'recycle_failed' }) });
+      } catch (e) {
+        out.push({ nome, ok: false, error: (e && e.message) ? String(e.message) : String(e) });
+      }
+    }
+  });
+  await Promise.all(workers);
+  const okCount = out.filter((x) => x && x.ok === true).length;
+  const failures = out.filter((x) => !x || x.ok !== true).slice(0, 30);
+  const failCount = out.length - okCount;
+  return { ok: failCount === 0, total: out.length, okCount, failCount, failures };
+}
+
 async function execGatewaySetProxies(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const before = gatewayProxy.getRuntimeSummary();
   const r = gatewayProxy.applyGatewayPayload(payload);
   if (!r || r.ok !== true) throw new Error('gateway_set_proxies_failed');
+  const after = gatewayProxy.getRuntimeSummary();
+  const recycleCheck = gatewayNeedsRecycle(before, after);
+  let recycle = { ok: true, skipped: true, reason: 'no_gateway_change' };
+  if (recycleCheck.needed) {
+    recycle = await recycleGatewayActives({ reasonTag: recycleCheck.reasons.join('+') || 'gateway_changed' });
+  }
   return {
     ok: true,
     inventoryVersion: String(r.inventoryVersion || ''),
-    slotsCount: Number(r.slotsCount || 0) || 0
+    slotsCount: Number(r.slotsCount || 0) || 0,
+    recycle: {
+      triggered: !!recycleCheck.needed,
+      reasons: recycleCheck.reasons,
+      result: recycle
+    }
   };
 }
 
