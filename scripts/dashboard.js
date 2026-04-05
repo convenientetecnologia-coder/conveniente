@@ -20,6 +20,7 @@ const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); 
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const ACK_PENDING_PATH = path.join(__dirname, '..', 'dados', 'acks_pending.json');
+const GATEWAY_RECYCLE_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'gateway_recycle_queue.json');
 
 // Endpoint do notificador (centralizado)
 const { resolveEndpoints } = require('./notifierEndpoints');
@@ -30,6 +31,7 @@ let inFlight = false;
 let pending = false;
 let lastWarnAt = 0;
 let lastTickDoneAt = 0;
+let gatewayRecycleQueueInFlight = false;
 
 // ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
 let hostIdCache = null;
@@ -3186,18 +3188,6 @@ async function execSetGroqConfig(cmd) {
   return { ok: true };
 }
 
-function gatewayNeedsRecycle(beforeRuntime, afterRuntime) {
-  const b = (beforeRuntime && typeof beforeRuntime === 'object') ? beforeRuntime : {};
-  const a = (afterRuntime && typeof afterRuntime === 'object') ? afterRuntime : {};
-  const reasons = [];
-  if (String(b.inventoryVersion || '') !== String(a.inventoryVersion || '')) reasons.push('inventory_version_changed');
-  if (!!b.globalEnabled !== !!a.globalEnabled) reasons.push('global_toggle');
-  if (!!b.hostEnabled !== !!a.hostEnabled) reasons.push('host_toggle');
-  if (!!b.hasTrafficCreds !== !!a.hasTrafficCreds) reasons.push('traffic_creds_changed');
-  if (Number(b.slotsCount || 0) !== Number(a.slotsCount || 0)) reasons.push('slots_count_changed');
-  return { needed: reasons.length > 0, reasons };
-}
-
 async function listActiveGatewayProfiles() {
   const st = await httpJson('/api/status', { timeoutMs: 45_000, retries: 1 });
   const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
@@ -3205,6 +3195,50 @@ async function listActiveGatewayProfiles() {
     .filter((p) => p && p.active === true)
     .map((p) => String(p && p.nome || '').trim())
     .filter(Boolean);
+}
+
+async function getProfileManifest(nome) {
+  try {
+    const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/manifest`, { timeoutMs: 45_000, retries: 1 });
+    if (!r || r.ok !== true || !r.manifest || typeof r.manifest !== 'object') return null;
+    return r.manifest;
+  } catch {
+    return null;
+  }
+}
+
+function gatewayResolvedSignature(resolved) {
+  if (!resolved || resolved.enabled !== true) return `off:${String(resolved && resolved.reason || 'disabled')}`;
+  const slotId = String(resolved && resolved.slot && resolved.slot.slotId || '').trim();
+  const ip = String(resolved && resolved.slot && resolved.slot.ipCurrent || '').trim();
+  const proxyServer = String(resolved && resolved.proxyServer || '').trim();
+  return `on:${slotId}:${ip}:${proxyServer}`;
+}
+
+async function collectGatewayResolutionSnapshot(profileNames) {
+  const names = Array.isArray(profileNames) ? profileNames : [];
+  const out = new Map();
+  if (!names.length) return out;
+  const concurrency = Math.max(1, Math.min(12, Number(process.env.GATEWAY_RESOLVE_SNAPSHOT_CONCURRENCY || 6) || 6));
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, names.length) }).map(async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= names.length) break;
+      const nome = names[i];
+      const manifest = await getProfileManifest(nome);
+      const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+      out.set(nome, {
+        nome,
+        signature: gatewayResolvedSignature(resolved),
+        enabled: !!(resolved && resolved.enabled === true),
+        slotId: String(resolved && resolved.slot && resolved.slot.slotId || '').trim() || null,
+        reason: String(resolved && resolved.reason || '').trim() || null
+      });
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 async function recycleGatewayProfile(nome, reasonTag) {
@@ -3237,8 +3271,8 @@ async function recycleGatewayProfile(nome, reasonTag) {
   return { ok: false, stage: 'activate', error: lastErr || 'activate_failed' };
 }
 
-async function recycleGatewayActives({ reasonTag = 'gateway_update', limit = null } = {}) {
-  const names = await listActiveGatewayProfiles();
+async function recycleGatewayActives({ reasonTag = 'gateway_update', profileNames = null, limit = null } = {}) {
+  const names = Array.isArray(profileNames) ? profileNames : await listActiveGatewayProfiles();
   const targets = (limit && Number(limit) > 0)
     ? names.slice(0, Number(limit))
     : names;
@@ -3262,29 +3296,182 @@ async function recycleGatewayActives({ reasonTag = 'gateway_update', limit = nul
   });
   await Promise.all(workers);
   const okCount = out.filter((x) => x && x.ok === true).length;
-  const failures = out.filter((x) => !x || x.ok !== true).slice(0, 30);
+  const failures = out.filter((x) => !x || x.ok !== true);
   const failCount = out.length - okCount;
   return { ok: failCount === 0, total: out.length, okCount, failCount, failures };
 }
 
+function readGatewayRecycleQueue() {
+  try {
+    if (!fsSync.existsSync(GATEWAY_RECYCLE_QUEUE_PATH)) return { version: 1, pending: [], updatedAt: 0 };
+    const raw = String(fsSync.readFileSync(GATEWAY_RECYCLE_QUEUE_PATH, 'utf8') || '');
+    const j = raw ? JSON.parse(raw) : null;
+    return {
+      version: 1,
+      pending: Array.isArray(j && j.pending) ? j.pending : [],
+      updatedAt: Number(j && j.updatedAt || 0) || 0
+    };
+  } catch {
+    return { version: 1, pending: [], updatedAt: 0 };
+  }
+}
+
+function writeGatewayRecycleQueue(state) {
+  const st = (state && typeof state === 'object') ? state : {};
+  const next = {
+    version: 1,
+    pending: Array.isArray(st.pending) ? st.pending : [],
+    updatedAt: Date.now()
+  };
+  ensureDirSync(path.dirname(GATEWAY_RECYCLE_QUEUE_PATH));
+  const tmp = `${GATEWAY_RECYCLE_QUEUE_PATH}.tmp`;
+  fsSync.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
+  fsSync.renameSync(tmp, GATEWAY_RECYCLE_QUEUE_PATH);
+}
+
+function enqueueGatewayRecycleProfiles(profileNames, reason = 'gateway_retry') {
+  const names = Array.isArray(profileNames) ? profileNames.map((x) => String(x || '').trim()).filter(Boolean) : [];
+  if (!names.length) return { ok: true, enqueued: 0 };
+  const q = readGatewayRecycleQueue();
+  const nowTs = Date.now();
+  const byNome = new Map();
+  for (const row of (q.pending || [])) {
+    const nome = String(row && row.nome || '').trim();
+    if (!nome) continue;
+    byNome.set(nome, {
+      nome,
+      firstSeenAt: Number(row.firstSeenAt || nowTs) || nowTs,
+      attempts: Number(row.attempts || 0) || 0,
+      nextRetryAt: Number(row.nextRetryAt || 0) || 0,
+      lastError: row && row.lastError ? String(row.lastError).slice(0, 220) : null,
+      reason: row && row.reason ? String(row.reason).slice(0, 80) : String(reason).slice(0, 80),
+      updatedAt: Number(row.updatedAt || nowTs) || nowTs
+    });
+  }
+  let inserted = 0;
+  for (const nome of names) {
+    const cur = byNome.get(nome);
+    if (cur) {
+      cur.reason = String(reason || cur.reason || 'gateway_retry').slice(0, 80);
+      cur.updatedAt = nowTs;
+      byNome.set(nome, cur);
+      continue;
+    }
+    inserted += 1;
+    byNome.set(nome, {
+      nome,
+      firstSeenAt: nowTs,
+      attempts: 0,
+      nextRetryAt: 0,
+      lastError: null,
+      reason: String(reason || 'gateway_retry').slice(0, 80),
+      updatedAt: nowTs
+    });
+  }
+  writeGatewayRecycleQueue({ pending: Array.from(byNome.values()) });
+  return { ok: true, enqueued: inserted };
+}
+
+async function processGatewayRecycleQueue({ maxProfiles = null } = {}) {
+  if (gatewayRecycleQueueInFlight) return { ok: true, skipped: true, reason: 'queue_inflight' };
+  gatewayRecycleQueueInFlight = true;
+  try {
+    const q = readGatewayRecycleQueue();
+    const pendingRows = Array.isArray(q.pending) ? q.pending : [];
+    if (!pendingRows.length) return { ok: true, skipped: true, reason: 'queue_empty' };
+
+    const activeNames = await listActiveGatewayProfiles();
+    const activeSet = new Set(activeNames);
+    const nowTs = Date.now();
+    const eligibleNames = pendingRows
+      .filter((row) => {
+        const nome = String(row && row.nome || '').trim();
+        if (!nome || !activeSet.has(nome)) return false;
+        const nextRetryAt = Number(row && row.nextRetryAt || 0) || 0;
+        return nextRetryAt <= nowTs;
+      })
+      .map((row) => String(row && row.nome || '').trim());
+
+    const batchLimit = Math.max(1, Math.min(120, Number(maxProfiles || process.env.GATEWAY_RECYCLE_QUEUE_BATCH || 30) || 30));
+    const runNames = eligibleNames.slice(0, batchLimit);
+    if (!runNames.length) return { ok: true, skipped: true, reason: 'no_eligible_profiles' };
+
+    const rr = await recycleGatewayActives({ reasonTag: 'gateway_retry', profileNames: runNames });
+    const failMap = new Map();
+    for (const f of (Array.isArray(rr && rr.failures) ? rr.failures : [])) {
+      const nome = String(f && f.nome || '').trim();
+      if (!nome) continue;
+      failMap.set(nome, String(f && f.error || 'recycle_failed').slice(0, 220));
+    }
+
+    const runSet = new Set(runNames);
+    const baseMs = Math.max(15 * 1000, Number(process.env.GATEWAY_RECYCLE_RETRY_BASE_MS || 30 * 1000) || (30 * 1000));
+    const maxMs = Math.max(baseMs, Number(process.env.GATEWAY_RECYCLE_RETRY_MAX_MS || (15 * 60 * 1000)) || (15 * 60 * 1000));
+    const nextPending = [];
+    for (const row of pendingRows) {
+      const nome = String(row && row.nome || '').trim();
+      if (!nome) continue;
+      if (!runSet.has(nome)) {
+        nextPending.push(row);
+        continue;
+      }
+      const failErr = failMap.get(nome);
+      if (!failErr) continue;
+      const attempts = (Number(row && row.attempts || 0) || 0) + 1;
+      const retryInMs = Math.min(maxMs, baseMs * Math.max(1, attempts));
+      nextPending.push({
+        nome,
+        firstSeenAt: Number(row && row.firstSeenAt || nowTs) || nowTs,
+        attempts,
+        nextRetryAt: nowTs + retryInMs,
+        lastError: failErr,
+        reason: String(row && row.reason || 'gateway_retry').slice(0, 80),
+        updatedAt: nowTs
+      });
+    }
+    writeGatewayRecycleQueue({ pending: nextPending });
+    return { ok: true, processed: runNames.length, failed: failMap.size, queueRemaining: nextPending.length };
+  } finally {
+    gatewayRecycleQueueInFlight = false;
+  }
+}
+
 async function execGatewaySetProxies(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
-  const before = gatewayProxy.getRuntimeSummary();
+  const activeNames = await listActiveGatewayProfiles();
+  const beforeMap = await collectGatewayResolutionSnapshot(activeNames);
   const r = gatewayProxy.applyGatewayPayload(payload);
   if (!r || r.ok !== true) throw new Error('gateway_set_proxies_failed');
-  const after = gatewayProxy.getRuntimeSummary();
-  const recycleCheck = gatewayNeedsRecycle(before, after);
-  let recycle = { ok: true, skipped: true, reason: 'no_gateway_change' };
-  if (recycleCheck.needed) {
-    recycle = await recycleGatewayActives({ reasonTag: recycleCheck.reasons.join('+') || 'gateway_changed' });
+  const afterMap = await collectGatewayResolutionSnapshot(activeNames);
+
+  const changed = [];
+  for (const nome of activeNames) {
+    const b = beforeMap.get(nome);
+    const a = afterMap.get(nome);
+    const sigBefore = String(b && b.signature || 'off:missing');
+    const sigAfter = String(a && a.signature || 'off:missing');
+    if (sigBefore !== sigAfter) changed.push(nome);
+  }
+
+  let recycle = { ok: true, skipped: true, reason: 'no_profile_proxy_change' };
+  if (changed.length > 0) {
+    recycle = await recycleGatewayActives({ reasonTag: 'gateway_changed', profileNames: changed });
+    const failedNames = (Array.isArray(recycle && recycle.failures) ? recycle.failures : [])
+      .map((f) => String(f && f.nome || '').trim())
+      .filter(Boolean);
+    if (failedNames.length > 0) {
+      try { enqueueGatewayRecycleProfiles(failedNames, 'gateway_changed_retry'); } catch {}
+    }
   }
   return {
     ok: true,
     inventoryVersion: String(r.inventoryVersion || ''),
     slotsCount: Number(r.slotsCount || 0) || 0,
     recycle: {
-      triggered: !!recycleCheck.needed,
-      reasons: recycleCheck.reasons,
+      triggered: changed.length > 0,
+      totalActive: activeNames.length,
+      changedProfiles: changed.length,
+      changedSample: changed.slice(0, 25),
       result: recycle
     }
   };
@@ -3610,6 +3797,8 @@ async function tick(reason = 'interval') {
     if (resp && Array.isArray(resp.commands) && resp.commands.length) {
       await applyCommands(resp.commands);
     }
+    // Retry contínuo de perfis pendentes de recycle de gateway.
+    try { await processGatewayRecycleQueue({ maxProfiles: 40 }); } catch {}
     // Nova drenagem após executar comandos (captura ACKs recém-encolados por falha transitória).
     try { await flushPendingAcks({ limit: 40 }); } catch {}
     if (process.env.DASHBOARD_DEBUG === '1') {

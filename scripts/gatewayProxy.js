@@ -45,11 +45,9 @@ function normalizeSlots(slots) {
       country: String(s && s.country || "").trim().toLowerCase() || null
     });
   }
-  out.sort((a, b) => {
-    if (a.zone !== b.zone) return a.zone.localeCompare(b.zone);
-    if (a.ipCurrent !== b.ipCurrent) return a.ipCurrent.localeCompare(b.ipCurrent);
-    return a.slotId.localeCompare(b.slotId);
-  });
+  // Ordem canônica por slotId (id lógico estável), para reduzir reshuffle
+  // quando apenas o IP do slot muda.
+  out.sort((a, b) => a.slotId.localeCompare(b.slotId));
   return out;
 }
 
@@ -119,8 +117,13 @@ function resolveProxyForProfile({ profileName, manifest }) {
   if (!slots.length) return { enabled: false, reason: "no_slots" };
 
   const byId = new Map(slots.map((s) => [s.slotId, s]));
-  const currentSlotId = String(manifest && manifest.gatewayProxy && manifest.gatewayProxy.slotId || "").trim();
-  let slot = currentSlotId ? (byId.get(currentSlotId) || null) : null;
+  const manifestGp = (manifest && manifest.gatewayProxy && typeof manifest.gatewayProxy === "object") ? manifest.gatewayProxy : null;
+  const currentSlotId = String(manifestGp && manifestGp.slotId || "").trim();
+  const currentInventoryVersion = String(manifestGp && manifestGp.inventoryVersion || "").trim();
+  // Sticky forte: mantém slot apenas se o inventário não mudou.
+  // Mudou inventário => recalcula de forma determinística para reequilibrar.
+  const canKeepSticky = !!(currentSlotId && currentInventoryVersion && currentInventoryVersion === String(st.inventoryVersion || ""));
+  let slot = canKeepSticky ? (byId.get(currentSlotId) || null) : null;
   if (!slot) {
     const idx = profileHash(profileName) % slots.length;
     slot = slots[idx];
