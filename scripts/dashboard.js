@@ -13,6 +13,7 @@ const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
 const fileStore = require('./fileStore.js');
 const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqConfig');
+const gatewayProxy = require('./gatewayProxy');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -3185,6 +3186,17 @@ async function execSetGroqConfig(cmd) {
   return { ok: true };
 }
 
+async function execGatewaySetProxies(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const r = gatewayProxy.applyGatewayPayload(payload);
+  if (!r || r.ok !== true) throw new Error('gateway_set_proxies_failed');
+  return {
+    ok: true,
+    inventoryVersion: String(r.inventoryVersion || ''),
+    slotsCount: Number(r.slotsCount || 0) || 0
+  };
+}
+
 // ===== NOVO: Exportar perfis para o estoque =====
 async function execStockExportProfiles(cmd) {
   try {
@@ -3392,6 +3404,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'health_bundle')    { await execHealthBundle(c); }
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
       else if (c.type === 'set_groq_config')  { ackDetails = await execSetGroqConfig(c); }
+      else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { ackDetails = await execGatewaySetProxies(c); }
       else if (c.type === 'rotate_logs')      { ackDetails = await execRotateLogs(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
@@ -3470,12 +3483,15 @@ async function tick(reason = 'interval') {
       !(groqMeta && groqMeta.effectiveModelPresent) ||
       (!!expectedGroqModel && !!(groqMeta && groqMeta.effectiveModel) && String(groqMeta.effectiveModel) !== String(expectedGroqModel));
 
+    const gatewayNeeds = gatewayProxy.getNeedsFlags();
     const payload = {
       hostname: quick.system.hostname,
       hostId,
       sentAt: now(),
       needsConfig: needsConfig, // Flag para CT saber que precisa enviar set_ct_config
       needsGroqConfig: needsGroqConfig, // Flag para CT saber que precisa enviar set_groq_config
+      needsGatewayInventory: !!gatewayNeeds.needsGatewayInventory,
+      needsGatewayProxyTrafficCreds: !!gatewayNeeds.needsGatewayProxyTrafficCreds,
       groq: {
         expectedModel: String(expectedGroqModel || '').slice(0, 140),
         effectiveSource: groqMeta && groqMeta.effectiveSource ? String(groqMeta.effectiveSource) : 'unknown',

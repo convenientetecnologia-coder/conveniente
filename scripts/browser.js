@@ -10,6 +10,7 @@ const logger = require('./logger.js');
 const gptFallback = require('./gptFallback.js');
 const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
+const gatewayProxy = require('./gatewayProxy');
 
 puppeteer.use(StealthPlugin());
 
@@ -1027,6 +1028,15 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let pruneTimer = null;
   try {
     const coords = utils.getCoords(manifest.cidade || '');
+    const gatewayResolved = gatewayProxy.resolveProxyForProfile({
+      profileName: manifest && manifest.nome ? manifest.nome : nome,
+      manifest
+    });
+    try {
+      if (gatewayResolved && gatewayResolved.enabled) {
+        await gatewayProxy.persistManifestAssignment(manifest && manifest.nome ? manifest.nome : nome, gatewayResolved);
+      }
+    } catch {}
 
     // GUARDA: RAM, userDataDir correto
     ensureUserDataDirUnderChrome(manifest);
@@ -1075,6 +1085,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       launchArgs.push('--use-fake-ui-for-media-stream');
     }
 
+    if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer) {
+      launchArgs.push(`--proxy-server=${gatewayResolved.proxyServer}`);
+    }
+
     // ENV para adicionar argumentos de debug
     const extraArgsEnv = (process.env.CHROME_EXTRA_ARGS || '').trim();
     if (extraArgsEnv) {
@@ -1117,6 +1131,23 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         }
         return b;
       } catch (e) {
+        try {
+          const em = String((e && e.message) || e || '').toLowerCase();
+          const proxyRelated =
+            em.includes('proxy') ||
+            em.includes('tunnel') ||
+            em.includes('407') ||
+            em.includes('403') ||
+            em.includes('net::err') ||
+            em.includes('timed out');
+          if (proxyRelated && gatewayResolved && gatewayResolved.enabled) {
+            await gatewayProxy.reportProxyIssue({
+              resolved: gatewayResolved,
+              reason: 'launch_failed_proxy',
+              context: { stage: 'launch', error: String((e && e.message) || e || '').slice(0, 220), tag: String(tag || '').slice(0, 60) }
+            });
+          }
+        } catch {}
         if (process.env.BROWSER_DEBUG === '1') {
           logger.error(`[BROWSER][CRASH][${tag}]`, {}, e);
           printChromeLog(chromeLogFile, tag);
@@ -1187,6 +1218,22 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try {
       const setDefaults = async (p) => {
         try {
+          if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.auth) {
+            try {
+              await p.authenticate({
+                username: String(gatewayResolved.auth.username || ''),
+                password: String(gatewayResolved.auth.password || '')
+              });
+            } catch (e) {
+              try {
+                await gatewayProxy.reportProxyIssue({
+                  resolved: gatewayResolved,
+                  reason: 'page_auth_proxy_failed',
+                  context: { stage: 'authenticate', error: String((e && e.message) || e || '').slice(0, 220) }
+                });
+              } catch {}
+            }
+          }
           p.setDefaultTimeout(30000); // 30s ações padrão
           p.setDefaultNavigationTimeout(45000); // 45s navegação
           p.on('dialog', async (dlg) => {
