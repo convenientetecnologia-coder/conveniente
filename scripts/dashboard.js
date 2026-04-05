@@ -3484,6 +3484,7 @@ async function tick(reason = 'interval') {
       (!!expectedGroqModel && !!(groqMeta && groqMeta.effectiveModel) && String(groqMeta.effectiveModel) !== String(expectedGroqModel));
 
     const gatewayNeeds = gatewayProxy.getNeedsFlags();
+    const gatewayRuntime = gatewayProxy.getRuntimeSummary();
     const payload = {
       hostname: quick.system.hostname,
       hostId,
@@ -3507,6 +3508,7 @@ async function tick(reason = 'interval') {
       },
       status: {
         ...status,
+        gateway: gatewayRuntime,
         _dashboard: quick
       }
     };

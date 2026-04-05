@@ -174,6 +174,31 @@ function getNeedsFlags() {
   };
 }
 
+function getRuntimeSummary() {
+  const st = readState();
+  const zones = Array.isArray(st.slots) ? Array.from(new Set(st.slots.map((s) => String(s.zone || "").trim()).filter(Boolean))) : [];
+  let hasTrafficCreds = true;
+  try {
+    hasTrafficCreds = zones.every((z) => {
+      const rec = st.trafficAuthByZone && st.trafficAuthByZone[z];
+      const u = String(rec && rec.username || "").trim();
+      const p = String(rec && rec.password || "").trim();
+      return !!(u && p);
+    });
+  } catch {
+    hasTrafficCreds = false;
+  }
+  return {
+    globalEnabled: !!st.globalEnabled,
+    hostEnabled: !!st.hostEnabled,
+    inventoryVersion: String(st.inventoryVersion || ""),
+    slotsCount: Array.isArray(st.slots) ? st.slots.length : 0,
+    zonesCount: zones.length,
+    hasTrafficCreds: !!hasTrafficCreds,
+    updatedAt: Number(st.updatedAt || 0) || 0
+  };
+}
+
 function readHostIdSafe() {
   try {
     if (!fs.existsSync(HOSTID_PATH)) return "";
@@ -238,6 +263,7 @@ module.exports = {
   resolveProxyForProfile,
   persistManifestAssignment,
   getNeedsFlags,
+  getRuntimeSummary,
   reportProxyIssue
 };
 
