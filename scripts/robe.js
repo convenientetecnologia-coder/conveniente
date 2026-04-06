@@ -1879,6 +1879,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try {
         const manifest = await manifestStore.read(nome);
         gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+        if (gatewayProxy.isStrictProxyRequired() && (!gatewayResolved || gatewayResolved.enabled !== true)) {
+          const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
+          throw new Error(`gateway_proxy_required:${reason}`);
+        }
         if (
           gatewayResolved &&
           gatewayResolved.enabled === true &&

@@ -1032,6 +1032,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       profileName: manifest && manifest.nome ? manifest.nome : nome,
       manifest
     });
+    const strictGateway = gatewayProxy.isStrictProxyRequired();
+    if (strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
+      const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
+      throw new Error(`gateway_proxy_required:${reason}`);
+    }
     try {
       if (gatewayResolved && gatewayResolved.enabled) {
         await gatewayProxy.persistManifestAssignment(manifest && manifest.nome ? manifest.nome : nome, gatewayResolved);

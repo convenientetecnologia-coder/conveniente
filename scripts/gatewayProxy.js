@@ -40,12 +40,24 @@ function normalizeSlots(slots) {
     const zone = String(s && s.zone || "").trim();
     const ip = String(s && s.ipCurrent || "").trim();
     if (!slotId || !zone || !ip) continue;
-    out.push({
+    const proxy = (s && s.proxy && typeof s.proxy === "object") ? s.proxy : null;
+    const row = {
       slotId,
       zone,
       ipCurrent: ip,
       country: String(s && s.country || "").trim().toLowerCase() || null
-    });
+    };
+    if (proxy) {
+      const host = String(proxy.host || "").trim();
+      const port = Number(proxy.port || 0) || 0;
+      const scheme = String(proxy.scheme || "http").trim().toLowerCase() || "http";
+      const username = String(proxy.username || "").trim();
+      const password = String(proxy.password || "").trim();
+      if (host && port > 0 && username && password) {
+        row.proxy = { scheme, host, port, username, password };
+      }
+    }
+    out.push(row);
   }
   // Ordem canônica por slotId (id lógico estável), para reduzir reshuffle
   // quando apenas o IP do slot muda.
@@ -55,6 +67,7 @@ function normalizeSlots(slots) {
 
 function defaultState() {
   return {
+    provider: "proxycheap",
     globalEnabled: false,
     hostEnabled: false,
     inventoryVersion: "",
@@ -238,6 +251,7 @@ function reconcileAssignments(nextState, prevState) {
 
 function readState() {
   const j = safeReadJson(STATE_PATH, defaultState()) || defaultState();
+  j.provider = String(j.provider || "proxycheap").trim().toLowerCase() || "proxycheap";
   j.globalEnabled = !!j.globalEnabled;
   j.hostEnabled = !!j.hostEnabled;
   j.inventoryVersion = String(j.inventoryVersion || "").trim();
@@ -260,6 +274,7 @@ function applyGatewayPayload(payload) {
   const prev = readState();
   const p = (payload && typeof payload === "object") ? payload : {};
   const next = defaultState();
+  next.provider = String(p.provider || prev.provider || "proxycheap").trim().toLowerCase() || "proxycheap";
   next.globalEnabled = !!p.globalEnabled;
   next.hostEnabled = !!p.hostEnabled;
   next.slots = normalizeSlots(p.slots);
@@ -291,7 +306,8 @@ function profileHash(profileName) {
 function resolveProxyForProfile({ profileName, manifest }) {
   const st = readState();
   if (!st.globalEnabled || !st.hostEnabled) return { enabled: false, reason: "gateway_disabled" };
-  if (!st.superProxy || !st.superProxy.host || !st.superProxy.port) return { enabled: false, reason: "missing_superproxy" };
+  const provider = String(st.provider || "proxycheap").trim().toLowerCase();
+  if (provider !== "proxycheap") return { enabled: false, reason: "unsupported_provider" };
   const slots = st.slots || [];
   if (!slots.length) return { enabled: false, reason: "no_slots" };
 
@@ -350,18 +366,22 @@ function resolveProxyForProfile({ profileName, manifest }) {
     }
   } catch {}
 
-  const auth = st.trafficAuthByZone && st.trafficAuthByZone[slot.zone];
-  const username = String(auth && auth.username || "").trim();
-  const password = String(auth && auth.password || "").trim();
-  if (!username || !password) return { enabled: false, reason: "missing_zone_auth", slot };
-
-  const proxyServer = `${st.superProxy.scheme || "http"}://${st.superProxy.host}:${st.superProxy.port}`;
-  const userWithIp = `${username}-ip-${slot.ipCurrent}`;
+  let proxyServer = "";
+  let auth = null;
+  const slotProxy = (slot && slot.proxy && typeof slot.proxy === "object") ? slot.proxy : null;
+  if (!slotProxy || !slotProxy.host || !slotProxy.port) return { enabled: false, reason: "missing_slot_proxy", slot };
+  proxyServer = `${slotProxy.scheme || "http"}://${slotProxy.host}:${slotProxy.port}`;
+  auth = {
+    username: String(slotProxy.username || "").trim(),
+    password: String(slotProxy.password || "").trim()
+  };
+  if (!auth || !auth.username || !auth.password) return { enabled: false, reason: "missing_slot_auth", slot };
   return {
     enabled: true,
     slot,
+    provider,
     proxyServer,
-    auth: { username: userWithIp, password },
+    auth,
     inventoryVersion: st.inventoryVersion || ""
   };
 }
@@ -387,7 +407,11 @@ function getNeedsFlags() {
   const needsGatewayInventory = !Array.isArray(st.slots) || st.slots.length === 0;
   let needsGatewayProxyTrafficCreds = true;
   try {
-    needsGatewayProxyTrafficCreds = !(st.trafficAuthByZone && Object.keys(st.trafficAuthByZone).length > 0);
+    const hasSlotCreds = Array.isArray(st.slots) && st.slots.length > 0 && st.slots.every((s) => {
+      const p = s && s.proxy && typeof s.proxy === "object" ? s.proxy : null;
+      return !!(p && p.host && p.port && p.username && p.password);
+    });
+    needsGatewayProxyTrafficCreds = !hasSlotCreds;
   } catch {
     needsGatewayProxyTrafficCreds = true;
   }
@@ -400,18 +424,19 @@ function getNeedsFlags() {
 function getRuntimeSummary() {
   const st = readState();
   const zones = Array.isArray(st.slots) ? Array.from(new Set(st.slots.map((s) => String(s.zone || "").trim()).filter(Boolean))) : [];
+  const provider = String(st.provider || "proxycheap").trim().toLowerCase();
   let hasTrafficCreds = true;
   try {
-    hasTrafficCreds = zones.every((z) => {
-      const rec = st.trafficAuthByZone && st.trafficAuthByZone[z];
-      const u = String(rec && rec.username || "").trim();
-      const p = String(rec && rec.password || "").trim();
-      return !!(u && p);
+    const hasSlotCreds = Array.isArray(st.slots) && st.slots.length > 0 && st.slots.every((s) => {
+      const p = s && s.proxy && typeof s.proxy === "object" ? s.proxy : null;
+      return !!(p && p.host && p.port && p.username && p.password);
     });
+    hasTrafficCreds = hasSlotCreds;
   } catch {
     hasTrafficCreds = false;
   }
   return {
+    provider,
     globalEnabled: !!st.globalEnabled,
     hostEnabled: !!st.hostEnabled,
     inventoryVersion: String(st.inventoryVersion || ""),
@@ -420,6 +445,11 @@ function getRuntimeSummary() {
     hasTrafficCreds: !!hasTrafficCreds,
     updatedAt: Number(st.updatedAt || 0) || 0
   };
+}
+
+function isStrictProxyRequired() {
+  const st = readState();
+  return !!(st && st.globalEnabled === true && st.hostEnabled === true);
 }
 
 function readHostIdSafe() {
@@ -485,6 +515,7 @@ module.exports = {
   applyGatewayPayload,
   resolveProxyForProfile,
   persistManifestAssignment,
+  isStrictProxyRequired,
   getNeedsFlags,
   getRuntimeSummary,
   reportProxyIssue
