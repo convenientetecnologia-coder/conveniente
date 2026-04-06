@@ -425,6 +425,8 @@ function getRuntimeSummary() {
   const st = readState();
   const zones = Array.isArray(st.slots) ? Array.from(new Set(st.slots.map((s) => String(s.zone || "").trim()).filter(Boolean))) : [];
   const provider = String(st.provider || "proxycheap").trim().toLowerCase();
+  const inv = String(st.inventoryVersion || "");
+  const byId = new Map((Array.isArray(st.slots) ? st.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
   let hasTrafficCreds = true;
   try {
     const hasSlotCreds = Array.isArray(st.slots) && st.slots.length > 0 && st.slots.every((s) => {
@@ -435,6 +437,19 @@ function getRuntimeSummary() {
   } catch {
     hasTrafficCreds = false;
   }
+  const slotUsageBySlot = {};
+  let assignedActiveCount = 0;
+  try {
+    const activeNames = new Set(listActiveProfileNames());
+    for (const [profileName, rec] of Object.entries(st.assignments || {})) {
+      if (!activeNames.has(String(profileName || "").trim())) continue;
+      if (String(rec && rec.inventoryVersion || "") !== inv) continue;
+      const sid = String(rec && rec.slotId || "").trim();
+      if (!sid || !byId.has(sid)) continue;
+      slotUsageBySlot[sid] = (Number(slotUsageBySlot[sid] || 0) || 0) + 1;
+      assignedActiveCount += 1;
+    }
+  } catch {}
   return {
     provider,
     globalEnabled: !!st.globalEnabled,
@@ -443,6 +458,8 @@ function getRuntimeSummary() {
     slotsCount: Array.isArray(st.slots) ? st.slots.length : 0,
     zonesCount: zones.length,
     hasTrafficCreds: !!hasTrafficCreds,
+    assignedActiveCount,
+    slotUsageBySlot,
     updatedAt: Number(st.updatedAt || 0) || 0
   };
 }

@@ -997,6 +997,20 @@
       return null;
     }
 
+    function buildGatewayProxyPills(p) {
+      const gp = (p && p.gatewayProxy && typeof p.gatewayProxy === 'object') ? p.gatewayProxy : null;
+      if (!gp) return [];
+      const pills = [];
+      const enabled = gp.enabled === true;
+      pills.push(buildPill(`Proxy ${enabled ? 'ON' : 'OFF'}`, enabled ? 'good' : 'warn'));
+      if (gp.slotId) pills.push(buildPill(`Slot: ${gp.slotId}`, 'info'));
+      if (gp.ipCurrent) pills.push(buildPill(`IP: ${gp.ipCurrent}`, 'info'));
+      if (!enabled && gp.reason && gp.reason !== 'gateway_disabled') {
+        pills.push(buildPill(`Proxy: ${String(gp.reason)}`, 'warn'));
+      }
+      return pills;
+    }
+
     // NOVOS HELPERS (Gordo, Última manutenção, Δ última)
     function buildGordoPill(p) {
       // Suprimido conforme instrução Uptime First — não exibir pill "Gordo"
@@ -1381,6 +1395,8 @@
         titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
         if (p.robeMode === 'veiculos') titleRow.append(buildPill('Modo: Veículos', 'info'));
         else titleRow.append(buildPill('Modo: Itens', 'info'));
+        const gatewayPills = buildGatewayProxyPills(p);
+        for (const gp of gatewayPills) titleRow.append(gp);
         // PILL: Mensagem Personalizada Virtus
         if (
           p.customVirtusMessageEnabled &&

@@ -3,6 +3,7 @@
 
 module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
+const gatewayProxy = require('./gatewayProxy.js');
 // Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
@@ -413,7 +414,35 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   }
 
   // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
-  const perfisFinalINST = Array.from(baseMap.values());
+  const gatewayRuntime = (() => {
+    try { return gatewayProxy.readState(); } catch { return null; }
+  })();
+  const gatewaySlotsById = new Map(
+    Array.isArray(gatewayRuntime && gatewayRuntime.slots)
+      ? gatewayRuntime.slots.map((s) => [String(s && s.slotId || '').trim(), s])
+      : []
+  );
+  const gatewayEnabled = !!(gatewayRuntime && gatewayRuntime.globalEnabled === true && gatewayRuntime.hostEnabled === true);
+  const gatewayInv = String(gatewayRuntime && gatewayRuntime.inventoryVersion || '').trim();
+  const gatewayProvider = String(gatewayRuntime && gatewayRuntime.provider || 'proxycheap').trim().toLowerCase() || 'proxycheap';
+  const perfisFinalINST = Array.from(baseMap.values()).map((p) => {
+    const nome = String(p && p.nome || '').trim();
+    const rec = (gatewayRuntime && gatewayRuntime.assignments && nome) ? gatewayRuntime.assignments[nome] : null;
+    const recInv = String(rec && rec.inventoryVersion || '').trim();
+    const slotId = String(rec && rec.slotId || '').trim();
+    const slot = (slotId && recInv === gatewayInv) ? gatewaySlotsById.get(slotId) : null;
+    const gatewayProxyInfo = {
+      required: gatewayEnabled,
+      enabled: !!(gatewayEnabled && slot),
+      reason: gatewayEnabled ? (slot ? 'ok' : 'missing_slot_assignment') : 'gateway_disabled',
+      provider: gatewayProvider,
+      slotId: slot ? String(slot.slotId || '') : '',
+      zone: slot ? String(slot.zone || '') : '',
+      ipCurrent: slot ? String(slot.ipCurrent || '') : '',
+      inventoryVersion: gatewayInv
+    };
+    return Object.assign({}, p, { gatewayProxy: gatewayProxyInfo });
+  });
   // Progresso do "Abrir Todos" (sequenciador do desired.json) — para o dashboard acompanhar inFlight/idx/total.
   let openAll = null;
   let autoOpen = null;
