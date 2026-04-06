@@ -18,6 +18,7 @@ const reloadManager = require('./reloadManager.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
+const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
@@ -1789,6 +1790,25 @@ const APPEAL_CFG = {
 // - não engole falhas silenciosamente
 // - fallback: goto(url atual) e, se necessário, goto('https://www.facebook.com/')
 // - logs explícitos para auditoria (prova 110% do que aconteceu)
+function isProxyTunnelLikeError(msg) {
+  const m = String(msg || '');
+  return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out|proxy/i.test(m);
+}
+
+async function reportWorkerProxyIssueByName(nome, reason, context = {}) {
+  try {
+    if (!nome) return;
+    const manifest = await manifestStore.read(nome).catch(() => null);
+    const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+    if (!resolved || resolved.enabled !== true) return;
+    await gatewayProxy.reportProxyIssue({
+      resolved,
+      reason: String(reason || 'worker_proxy_issue').slice(0, 120),
+      context
+    });
+  } catch {}
+}
+
 async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs = 45_000 } = {}) {
   const t0 = Date.now();
   const safeUrl = () => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
@@ -1811,24 +1831,30 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
     try {
       const u = safeUrl() || u0;
       if (u && !/^about:/i.test(u)) {
-        await pg.goto(u, { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 60_000) }).catch(()=>{});
+        await pg.goto(u, { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 60_000) });
         ok = true;
         method = 'goto_same_url';
         error = null;
       }
     } catch (e2) {
       error = (e2 && e2.message) ? String(e2.message).slice(0, 180) : String(e2).slice(0, 180);
+      if (isProxyTunnelLikeError(error)) {
+        await reportWorkerProxyIssueByName(nome, 'worker_reload_goto_same_failed', { tag: String(tag || '').slice(0, 60), error: String(error || '').slice(0, 220) });
+      }
     }
   }
   if (!ok) {
     // Fallback 2: navegação determinística (estado real do FB)
     try {
-      await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 70_000) }).catch(()=>{});
+      await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 70_000) });
       ok = true;
       method = 'goto_facebook_home';
       error = null;
     } catch (e3) {
       error = (e3 && e3.message) ? String(e3.message).slice(0, 180) : String(e3).slice(0, 180);
+      if (isProxyTunnelLikeError(error)) {
+        await reportWorkerProxyIssueByName(nome, 'worker_reload_home_failed', { tag: String(tag || '').slice(0, 60), error: String(error || '').slice(0, 220) });
+      }
     }
   }
   // Pós-navegação: alguns fluxos do FB abrem modal "Você está de volta ao Facebook".
@@ -1918,7 +1944,19 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       (prefer === 'messenger')
         ? 'https://www.messenger.com/marketplace'
         : 'https://www.facebook.com/';
-    await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    try {
+      await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch (eNav) {
+      const em = (eNav && eNav.message) ? String(eNav.message) : String(eNav || '');
+      if (isProxyTunnelLikeError(em)) {
+        await reportWorkerProxyIssueByName(nome, 'worker_human_entry_nav_failed', {
+          stage: 'ensure_human_non_blank_entry',
+          targetUrl: String(targetUrl || '').slice(0, 180),
+          error: em.slice(0, 220)
+        });
+      }
+      throw eNav;
+    }
     await sleep(900);
 
     // Destravar UI (fecha modais, etc)
