@@ -189,7 +189,7 @@ function reconcileAssignments(nextState, prevState) {
 
   const prevAssignments = normalizeAssignments(prevState && prevState.assignments, slotsById);
   const knownProfiles = new Set(listKnownProfileNames());
-  const activeProfiles = listActiveProfileNames();
+  const activeProfiles = Array.from(knownProfiles);
 
   const keptAssignments = {};
   for (const [profileName, rec] of Object.entries(prevAssignments)) {
@@ -327,11 +327,8 @@ function resolveProxyForProfile({ profileName, manifest }) {
     slot = byId.get(currentSlotId);
   }
   if (!slot) {
-    const activeNames = listActiveProfileNames();
-    const activeSet = new Set(activeNames);
     const activeAssignments = {};
     for (const [pname, rec] of Object.entries(st.assignments || {})) {
-      if (!activeSet.has(pname)) continue;
       if (String(rec && rec.inventoryVersion || "") !== inv) continue;
       const sid = String(rec && rec.slotId || "");
       if (!byId.has(sid)) continue;
@@ -440,9 +437,7 @@ function getRuntimeSummary() {
   const slotUsageBySlot = {};
   let assignedActiveCount = 0;
   try {
-    const activeNames = new Set(listActiveProfileNames());
-    for (const [profileName, rec] of Object.entries(st.assignments || {})) {
-      if (!activeNames.has(String(profileName || "").trim())) continue;
+    for (const [, rec] of Object.entries(st.assignments || {})) {
       if (String(rec && rec.inventoryVersion || "") !== inv) continue;
       const sid = String(rec && rec.slotId || "").trim();
       if (!sid || !byId.has(sid)) continue;
