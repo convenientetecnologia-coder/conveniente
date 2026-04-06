@@ -364,6 +364,27 @@ function applyGatewayPayload(payload) {
   } : null;
   next.trafficAuthByZone = (p.trafficAuthByZone && typeof p.trafficAuthByZone === "object") ? p.trafficAuthByZone : {};
   next.assignments = reconcileAssignments(next, prev);
+  // Plano vindo do CT (controle global): quando presente, prevalece por perfil.
+  try {
+    const slotsById = new Map((Array.isArray(next.slots) ? next.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
+    const plannedRaw = (p.assignments && typeof p.assignments === "object") ? p.assignments : {};
+    const normalizedPlan = {};
+    for (const [profileNameRaw, recRaw] of Object.entries(plannedRaw)) {
+      const profileName = String(profileNameRaw || "").trim();
+      if (!profileName) continue;
+      const rec = (recRaw && typeof recRaw === "object") ? recRaw : {};
+      const slotId = String(rec.slotId || "").trim();
+      if (!slotId || !slotsById.has(slotId)) continue;
+      normalizedPlan[profileName] = {
+        slotId,
+        inventoryVersion: String(next.inventoryVersion || ""),
+        updatedAt: Date.now()
+      };
+    }
+    if (Object.keys(normalizedPlan).length > 0) {
+      next.assignments = Object.assign({}, next.assignments || {}, normalizedPlan);
+    }
+  } catch {}
   next.plannerVersion = ASSIGNMENT_PLANNER_VERSION;
   next.updatedAt = Date.now();
   writeJsonAtomic(STATE_PATH, next);
@@ -516,15 +537,20 @@ function getRuntimeSummary() {
   }
   const slotUsageBySlot = {};
   let assignedActiveCount = 0;
+  const parts = [];
   try {
-    for (const [, rec] of Object.entries(st.assignments || {})) {
+    for (const [profileName, rec] of Object.entries(st.assignments || {})) {
       if (String(rec && rec.inventoryVersion || "") !== inv) continue;
       const sid = String(rec && rec.slotId || "").trim();
       if (!sid || !byId.has(sid)) continue;
       slotUsageBySlot[sid] = (Number(slotUsageBySlot[sid] || 0) || 0) + 1;
       assignedActiveCount += 1;
+      const p = String(profileName || "").trim();
+      if (p) parts.push(`${p}:${sid}`);
     }
   } catch {}
+  parts.sort((a, b) => a.localeCompare(b));
+  const assignmentSignature = parts.join("|");
   return {
     provider,
     globalEnabled: !!st.globalEnabled,
@@ -534,6 +560,7 @@ function getRuntimeSummary() {
     zonesCount: zones.length,
     hasTrafficCreds: !!hasTrafficCreds,
     assignedActiveCount,
+    assignmentSignature,
     slotUsageBySlot,
     updatedAt: Number(st.updatedAt || 0) || 0
   };
