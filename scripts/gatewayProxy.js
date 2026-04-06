@@ -8,7 +8,9 @@ const { readCtConfig } = require("./ctConfig");
 
 const STATE_PATH = path.join(__dirname, "..", "dados", "gateway_proxy_state.json");
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
+const PERFIS_PATH = path.join(__dirname, "..", "dados", "perfis.json");
 const issueThrottleBySlot = new Map();
+const ASSIGNMENT_PLANNER_VERSION = "v2_unique_first";
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -59,8 +61,179 @@ function defaultState() {
     slots: [],
     superProxy: null,
     trafficAuthByZone: {},
+    assignments: {},
+    plannerVersion: "",
     updatedAt: 0
   };
+}
+
+function normalizeAssignments(input, slotsById) {
+  const src = (input && typeof input === "object") ? input : {};
+  const out = {};
+  for (const [profileNameRaw, rec] of Object.entries(src)) {
+    const profileName = String(profileNameRaw || "").trim();
+    if (!profileName) continue;
+    const slotId = String(rec && rec.slotId || "").trim();
+    const inventoryVersion = String(rec && rec.inventoryVersion || "").trim();
+    if (!slotId || !inventoryVersion) continue;
+    if (!slotsById.has(slotId)) continue;
+    out[profileName] = {
+      slotId,
+      inventoryVersion,
+      updatedAt: Number(rec && rec.updatedAt || 0) || 0
+    };
+  }
+  return out;
+}
+
+function readPerfisRows() {
+  const arr = safeReadJson(PERFIS_PATH, []);
+  return Array.isArray(arr) ? arr : [];
+}
+
+function listKnownProfileNames() {
+  const rows = readPerfisRows();
+  const out = [];
+  for (const r of rows) {
+    const nome = String(r && r.nome || "").trim();
+    if (!nome) continue;
+    out.push(nome);
+  }
+  return out;
+}
+
+function listActiveProfileNames() {
+  const rows = readPerfisRows();
+  const out = [];
+  for (const r of rows) {
+    const nome = String(r && r.nome || "").trim();
+    if (!nome) continue;
+    if (r && r.active === true) out.push(nome);
+  }
+  return out;
+}
+
+function readManifestGatewayProxy(profileName) {
+  try {
+    const manPath = manifestStore.getManifestPath(profileName);
+    const man = safeReadJson(manPath, {}) || {};
+    const gp = (man && man.gatewayProxy && typeof man.gatewayProxy === "object") ? man.gatewayProxy : null;
+    if (!gp) return null;
+    const slotId = String(gp.slotId || "").trim();
+    const inventoryVersion = String(gp.inventoryVersion || "").trim();
+    if (!slotId || !inventoryVersion) return null;
+    return { slotId, inventoryVersion };
+  } catch {
+    return null;
+  }
+}
+
+function buildSlotProfileMap(activeAssignments) {
+  const m = new Map();
+  for (const [profileName, slotId] of Object.entries(activeAssignments || {})) {
+    if (!m.has(slotId)) m.set(slotId, []);
+    m.get(slotId).push(profileName);
+  }
+  return m;
+}
+
+function firstFreeSlotId(slotIds, activeAssignments) {
+  const used = new Set(Object.values(activeAssignments || {}));
+  for (const sid of slotIds) {
+    if (!used.has(sid)) return sid;
+  }
+  return "";
+}
+
+function chooseLeastLoadedSlot(slotIds, activeAssignments, profileName) {
+  const counts = new Map();
+  for (const sid of slotIds) counts.set(sid, 0);
+  for (const sid of Object.values(activeAssignments || {})) {
+    if (counts.has(sid)) counts.set(sid, (counts.get(sid) || 0) + 1);
+  }
+  let min = Infinity;
+  let candidates = [];
+  for (const sid of slotIds) {
+    const c = counts.get(sid) || 0;
+    if (c < min) {
+      min = c;
+      candidates = [sid];
+    } else if (c === min) {
+      candidates.push(sid);
+    }
+  }
+  if (!candidates.length) return slotIds[0] || "";
+  const idx = profileHash(profileName) % candidates.length;
+  return candidates[idx];
+}
+
+function reconcileAssignments(nextState, prevState) {
+  const slots = Array.isArray(nextState && nextState.slots) ? nextState.slots : [];
+  const slotIds = slots.map((s) => String(s && s.slotId || "").trim()).filter(Boolean);
+  const slotsById = new Map(slots.map((s) => [s.slotId, s]));
+  const inv = String(nextState && nextState.inventoryVersion || "").trim();
+  const now = Date.now();
+
+  const prevAssignments = normalizeAssignments(prevState && prevState.assignments, slotsById);
+  const knownProfiles = new Set(listKnownProfileNames());
+  const activeProfiles = listActiveProfileNames();
+
+  const keptAssignments = {};
+  for (const [profileName, rec] of Object.entries(prevAssignments)) {
+    if (!knownProfiles.has(profileName)) continue;
+    if (rec.inventoryVersion !== inv) continue;
+    keptAssignments[profileName] = { slotId: rec.slotId, inventoryVersion: inv, updatedAt: rec.updatedAt || now };
+  }
+
+  // Manifest sticky é fonte de verdade por perfil (quando válido para inventário atual).
+  for (const profileName of knownProfiles) {
+    const gp = readManifestGatewayProxy(profileName);
+    if (!gp) continue;
+    if (gp.inventoryVersion !== inv) continue;
+    if (!slotsById.has(gp.slotId)) continue;
+    keptAssignments[profileName] = { slotId: gp.slotId, inventoryVersion: inv, updatedAt: now };
+  }
+
+  const activeAssignments = {};
+  for (const profileName of activeProfiles) {
+    const rec = keptAssignments[profileName];
+    if (!rec || !slotsById.has(rec.slotId)) continue;
+    activeAssignments[profileName] = rec.slotId;
+  }
+
+  // Unique-first: se há slot livre, desmonta colisões mantendo 1 dono por slot.
+  if (slotIds.length > 0) {
+    const bySlot = buildSlotProfileMap(activeAssignments);
+    for (const sid of slotIds) {
+      const holders = (bySlot.get(sid) || []).slice();
+      if (holders.length <= 1) continue;
+      holders.sort((a, b) => profileHash(a) - profileHash(b) || a.localeCompare(b));
+      const keep = holders[0];
+      for (let i = 1; i < holders.length; i++) {
+        const p = holders[i];
+        const freeSid = firstFreeSlotId(slotIds, activeAssignments);
+        if (!freeSid) break;
+        if (freeSid === activeAssignments[keep]) continue;
+        activeAssignments[p] = freeSid;
+      }
+    }
+  }
+
+  // Perfis ativos sem slot: usa slots livres primeiro, depois menor carga.
+  for (const profileName of activeProfiles) {
+    if (activeAssignments[profileName]) continue;
+    let sid = firstFreeSlotId(slotIds, activeAssignments);
+    if (!sid) sid = chooseLeastLoadedSlot(slotIds, activeAssignments, profileName);
+    if (!sid) continue;
+    activeAssignments[profileName] = sid;
+  }
+
+  const out = Object.assign({}, keptAssignments);
+  for (const [profileName, sid] of Object.entries(activeAssignments)) {
+    if (!sid || !slotsById.has(sid)) continue;
+    out[profileName] = { slotId: sid, inventoryVersion: inv, updatedAt: now };
+  }
+  return out;
 }
 
 function readState() {
@@ -69,8 +242,11 @@ function readState() {
   j.hostEnabled = !!j.hostEnabled;
   j.inventoryVersion = String(j.inventoryVersion || "").trim();
   j.slots = normalizeSlots(j.slots);
+  const slotsById = new Map(j.slots.map((s) => [s.slotId, s]));
   j.superProxy = j.superProxy && typeof j.superProxy === "object" ? j.superProxy : null;
   j.trafficAuthByZone = (j.trafficAuthByZone && typeof j.trafficAuthByZone === "object") ? j.trafficAuthByZone : {};
+  j.assignments = normalizeAssignments(j.assignments, slotsById);
+  j.plannerVersion = String(j.plannerVersion || "").trim();
   j.updatedAt = Number(j.updatedAt || 0) || 0;
   return j;
 }
@@ -81,6 +257,7 @@ function computeInventoryVersion(slots) {
 }
 
 function applyGatewayPayload(payload) {
+  const prev = readState();
   const p = (payload && typeof payload === "object") ? payload : {};
   const next = defaultState();
   next.globalEnabled = !!p.globalEnabled;
@@ -93,6 +270,8 @@ function applyGatewayPayload(payload) {
     scheme: String(p.superProxy.scheme || "http").trim().toLowerCase() || "http"
   } : null;
   next.trafficAuthByZone = (p.trafficAuthByZone && typeof p.trafficAuthByZone === "object") ? p.trafficAuthByZone : {};
+  next.assignments = reconcileAssignments(next, prev);
+  next.plannerVersion = ASSIGNMENT_PLANNER_VERSION;
   next.updatedAt = Date.now();
   writeJsonAtomic(STATE_PATH, next);
   return { ok: true, slotsCount: next.slots.length, inventoryVersion: next.inventoryVersion };
@@ -123,12 +302,53 @@ function resolveProxyForProfile({ profileName, manifest }) {
   // Sticky forte: mantém slot apenas se o inventário não mudou.
   // Mudou inventário => recalcula de forma determinística para reequilibrar.
   const canKeepSticky = !!(currentSlotId && currentInventoryVersion && currentInventoryVersion === String(st.inventoryVersion || ""));
-  let slot = canKeepSticky ? (byId.get(currentSlotId) || null) : null;
+  const inv = String(st.inventoryVersion || "");
+  const assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
+  let slot = null;
+  if (assigned && assigned.inventoryVersion === inv && byId.has(assigned.slotId)) {
+    slot = byId.get(assigned.slotId);
+  } else if (canKeepSticky && byId.has(currentSlotId)) {
+    slot = byId.get(currentSlotId);
+  }
   if (!slot) {
-    const idx = profileHash(profileName) % slots.length;
-    slot = slots[idx];
+    const activeNames = listActiveProfileNames();
+    const activeSet = new Set(activeNames);
+    const activeAssignments = {};
+    for (const [pname, rec] of Object.entries(st.assignments || {})) {
+      if (!activeSet.has(pname)) continue;
+      if (String(rec && rec.inventoryVersion || "") !== inv) continue;
+      const sid = String(rec && rec.slotId || "");
+      if (!byId.has(sid)) continue;
+      activeAssignments[pname] = sid;
+    }
+    let chosenSlotId = "";
+    const freeSid = firstFreeSlotId(slots.map((s) => s.slotId), activeAssignments);
+    if (freeSid) chosenSlotId = freeSid;
+    else chosenSlotId = chooseLeastLoadedSlot(slots.map((s) => s.slotId), activeAssignments, profileName);
+    if (chosenSlotId && byId.has(chosenSlotId)) slot = byId.get(chosenSlotId);
+    if (!slot) {
+      const idx = profileHash(profileName) % slots.length;
+      slot = slots[idx];
+    }
   }
   if (!slot) return { enabled: false, reason: "slot_unresolved" };
+
+  // Persistência sticky por conta: guarda slot desejado em estado local.
+  try {
+    const rec = st.assignments && st.assignments[profileName];
+    if (!rec || rec.slotId !== slot.slotId || rec.inventoryVersion !== inv || st.plannerVersion !== ASSIGNMENT_PLANNER_VERSION) {
+      const next = Object.assign({}, st);
+      next.assignments = Object.assign({}, st.assignments || {}, {
+        [profileName]: {
+          slotId: String(slot.slotId),
+          inventoryVersion: inv,
+          updatedAt: Date.now()
+        }
+      });
+      next.plannerVersion = ASSIGNMENT_PLANNER_VERSION;
+      writeJsonAtomic(STATE_PATH, next);
+    }
+  } catch {}
 
   const auth = st.trafficAuthByZone && st.trafficAuthByZone[slot.zone];
   const username = String(auth && auth.username || "").trim();
