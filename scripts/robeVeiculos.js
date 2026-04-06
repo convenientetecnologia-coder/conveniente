@@ -1090,7 +1090,6 @@ async function safeClosePage(page) {
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
-  const attemptedSlotIds = new Set();
   for (let attempt = 1; attempt <= 3; attempt++) {
     let p = null;
     let gatewayResolved = null;
@@ -1105,11 +1104,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // Evita corrida de autenticação no proxy da nova aba (mesmo padrão do robe de itens).
       try {
         const manifest = await manifestStore.read(nome);
-        gatewayResolved = gatewayProxy.resolveProxyForProfile({
-          profileName: nome,
-          manifest,
-          avoidSlotIds: Array.from(attemptedSlotIds)
-        });
+        gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
         if (
           gatewayResolved &&
           gatewayResolved.enabled === true &&
@@ -1142,7 +1137,6 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
         try {
           const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
-          if (sid) attemptedSlotIds.add(sid);
           if (gatewayResolved && gatewayResolved.enabled === true) {
             await gatewayProxy.reportProxyIssue({
               resolved: gatewayResolved,
