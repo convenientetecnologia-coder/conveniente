@@ -3241,18 +3241,18 @@ async function collectGatewayResolutionSnapshot(profileNames) {
   return out;
 }
 
-async function recycleGatewayProfile(nome, reasonTag) {
+async function recycleGatewayProfile(nome, reasonTag, { allowBusy = false } = {}) {
   // Fail-safe: se kill guard estiver ativo, não desativa o perfil agora.
   // Evita derrubar browser ativo e deixar o perfil offline por bloqueio transitório.
   try {
     const st = await httpJson('/api/status', { timeoutMs: 30_000, retries: 1 });
     const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
     const p = perfis.find((x) => String(x && x.nome || '').trim() === String(nome || '').trim());
-    if (p && p.trabalhando === true) {
+    if (!allowBusy && p && p.trabalhando === true) {
       return { ok: false, stage: 'precheck', error: 'profile_busy' };
     }
     const killGuardUntil = Number((p && p.killGuardUntil) || 0) || 0;
-    if (killGuardUntil > Date.now()) {
+    if (!allowBusy && killGuardUntil > Date.now()) {
       return { ok: false, stage: 'precheck', error: 'kill_guard_until', retryAt: killGuardUntil };
     }
   } catch {}
@@ -3286,7 +3286,7 @@ async function recycleGatewayProfile(nome, reasonTag) {
   return { ok: false, stage: 'activate', error: lastErr || 'activate_failed' };
 }
 
-async function recycleGatewayActives({ reasonTag = 'gateway_update', profileNames = null, limit = null } = {}) {
+async function recycleGatewayActives({ reasonTag = 'gateway_update', profileNames = null, limit = null, allowBusy = false } = {}) {
   const names = Array.isArray(profileNames) ? profileNames : await listActiveGatewayProfiles();
   const targets = (limit && Number(limit) > 0)
     ? names.slice(0, Number(limit))
@@ -3302,7 +3302,7 @@ async function recycleGatewayActives({ reasonTag = 'gateway_update', profileName
       if (i >= targets.length) break;
       const nome = targets[i];
       try {
-        const rr = await recycleGatewayProfile(nome, reasonTag);
+        const rr = await recycleGatewayProfile(nome, reasonTag, { allowBusy: !!allowBusy });
         out.push({ nome, ...(rr || { ok: false, error: 'recycle_failed' }) });
       } catch (e) {
         out.push({ nome, ok: false, error: (e && e.message) ? String(e.message) : String(e) });
@@ -3423,7 +3423,7 @@ async function processGatewayRecycleQueue({ maxProfiles = null } = {}) {
     const runNames = eligibleNames.slice(0, batchLimit);
     if (!runNames.length) return { ok: true, skipped: true, reason: 'no_eligible_profiles' };
 
-    const rr = await recycleGatewayActives({ reasonTag: 'gateway_retry', profileNames: runNames });
+    const rr = await recycleGatewayActives({ reasonTag: 'gateway_retry', profileNames: runNames, allowBusy: true });
     const failMap = new Map();
     for (const f of (Array.isArray(rr && rr.failures) ? rr.failures : [])) {
       const nome = String(f && f.nome || '').trim();
@@ -3482,7 +3482,7 @@ async function execGatewaySetProxies(cmd) {
 
   let recycle = { ok: true, skipped: true, reason: 'no_profile_proxy_change' };
   if (changed.length > 0) {
-    recycle = await recycleGatewayActives({ reasonTag: 'gateway_changed', profileNames: changed });
+    recycle = await recycleGatewayActives({ reasonTag: 'gateway_changed', profileNames: changed, allowBusy: true });
     const failedNames = (Array.isArray(recycle && recycle.failures) ? recycle.failures : [])
       .map((f) => String(f && f.nome || '').trim())
       .filter(Boolean);
