@@ -11,6 +11,7 @@ const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const provisionAudit = require('./provisionAudit.js');
+const gatewayProxy = require('./gatewayProxy.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -1861,6 +1862,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     let p = null;
+    let gatewayResolved = null;
     try {
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_attempt', nome: String(nome || ''), attempt: Number(attempt || 0), baseAttId: String(baseAttId || '') }); } catch {}
@@ -1872,6 +1874,23 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
 
       await ensureXPathPolyfill(p);
       await patchPage(nome, p, coords);
+      // Importante: autentica o proxy da aba ANTES do primeiro goto para evitar race
+      // com o handler assíncrono de targetcreated (que às vezes autentica tarde demais).
+      try {
+        const manifest = await manifestStore.read(nome);
+        gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+        if (
+          gatewayResolved &&
+          gatewayResolved.enabled === true &&
+          gatewayResolved.auth &&
+          typeof p.authenticate === 'function'
+        ) {
+          await p.authenticate({
+            username: String(gatewayResolved.auth.username || ''),
+            password: String(gatewayResolved.auth.password || '')
+          });
+        }
+      } catch {}
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
@@ -1922,6 +1941,25 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
       // #endregion
       try { await safeClosePage(p); } catch {}
+      if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
+        try {
+          if (gatewayResolved && gatewayResolved.enabled === true) {
+            await gatewayProxy.reportProxyIssue({
+              resolved: gatewayResolved,
+              reason: 'robe_open_create_tunnel_failed',
+              context: {
+                stage: 'open_create',
+                attempt: Number(attempt || 0),
+                error: String(msg || '').slice(0, 220)
+              }
+            });
+          }
+        } catch {}
+        if (attempt < 3) {
+          await new Promise(r => setTimeout(r, 600 * attempt));
+          continue;
+        }
+      }
       if (e && e.ROBE_PROBE_FAILED === true) {
         await new Promise(r => setTimeout(r, 350));
         continue; // retry da ação sem classificar como login_required
