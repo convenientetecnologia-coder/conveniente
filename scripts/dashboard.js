@@ -3248,6 +3248,9 @@ async function recycleGatewayProfile(nome, reasonTag) {
     const st = await httpJson('/api/status', { timeoutMs: 30_000, retries: 1 });
     const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
     const p = perfis.find((x) => String(x && x.nome || '').trim() === String(nome || '').trim());
+    if (p && p.trabalhando === true) {
+      return { ok: false, stage: 'precheck', error: 'profile_busy' };
+    }
     const killGuardUntil = Number((p && p.killGuardUntil) || 0) || 0;
     if (killGuardUntil > Date.now()) {
       return { ok: false, stage: 'precheck', error: 'kill_guard_until', retryAt: killGuardUntil };
@@ -3392,19 +3395,31 @@ async function processGatewayRecycleQueue({ maxProfiles = null } = {}) {
     const pendingRows = Array.isArray(q.pending) ? q.pending : [];
     if (!pendingRows.length) return { ok: true, skipped: true, reason: 'queue_empty' };
 
+    let status = null;
+    try { status = await httpJson('/api/status', { timeoutMs: 45_000, retries: 1 }); } catch {}
+    const openAllActive = !!(status && status.openAll && status.openAll.active === true);
+    if (openAllActive) return { ok: true, skipped: true, reason: 'open_all_active' };
+
     const activeNames = await listActiveGatewayProfiles();
     const activeSet = new Set(activeNames);
+    const workingSet = new Set(
+      (Array.isArray(status && status.perfis) ? status.perfis : [])
+        .filter((p) => p && p.active === true && p.trabalhando === true)
+        .map((p) => String(p && p.nome || '').trim())
+        .filter(Boolean)
+    );
     const nowTs = Date.now();
     const eligibleNames = pendingRows
       .filter((row) => {
         const nome = String(row && row.nome || '').trim();
         if (!nome || !activeSet.has(nome)) return false;
+        if (workingSet.has(nome)) return false;
         const nextRetryAt = Number(row && row.nextRetryAt || 0) || 0;
         return nextRetryAt <= nowTs;
       })
       .map((row) => String(row && row.nome || '').trim());
 
-    const batchLimit = Math.max(1, Math.min(120, Number(maxProfiles || process.env.GATEWAY_RECYCLE_QUEUE_BATCH || 30) || 30));
+    const batchLimit = Math.max(1, Math.min(20, Number(maxProfiles || process.env.GATEWAY_RECYCLE_QUEUE_BATCH || 3) || 3));
     const runNames = eligibleNames.slice(0, batchLimit);
     if (!runNames.length) return { ok: true, skipped: true, reason: 'no_eligible_profiles' };
 
@@ -3810,7 +3825,8 @@ async function tick(reason = 'interval') {
       await applyCommands(resp.commands);
     }
     // Retry contínuo de perfis pendentes de recycle de gateway.
-    try { await processGatewayRecycleQueue({ maxProfiles: 40 }); } catch {}
+    const queueTickBatch = Math.max(1, Math.min(20, Number(process.env.GATEWAY_RECYCLE_QUEUE_TICK_BATCH || 3) || 3));
+    try { await processGatewayRecycleQueue({ maxProfiles: queueTickBatch }); } catch {}
     // Nova drenagem após executar comandos (captura ACKs recém-encolados por falha transitória).
     try { await flushPendingAcks({ limit: 40 }); } catch {}
     if (process.env.DASHBOARD_DEBUG === '1') {
