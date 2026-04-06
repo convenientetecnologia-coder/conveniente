@@ -1090,6 +1090,7 @@ async function safeClosePage(page) {
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
+  const attemptedSlotIds = new Set();
   for (let attempt = 1; attempt <= 3; attempt++) {
     let p = null;
     let gatewayResolved = null;
@@ -1104,7 +1105,11 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // Evita corrida de autenticação no proxy da nova aba (mesmo padrão do robe de itens).
       try {
         const manifest = await manifestStore.read(nome);
-        gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+        gatewayResolved = gatewayProxy.resolveProxyForProfile({
+          profileName: nome,
+          manifest,
+          avoidSlotIds: Array.from(attemptedSlotIds)
+        });
         if (
           gatewayResolved &&
           gatewayResolved.enabled === true &&
@@ -1116,6 +1121,16 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
             password: String(gatewayResolved.auth.password || '')
           });
         }
+        try {
+          const slot = gatewayResolved && gatewayResolved.slot ? gatewayResolved.slot : null;
+          logger.info('[ROBE_V][proxy_resolved]', {
+            nome,
+            attempt,
+            slotId: slot ? String(slot.slotId || '') : null,
+            zone: slot ? String(slot.zone || '') : null,
+            ipCurrent: slot ? String(slot.ipCurrent || '') : null
+          });
+        } catch {}
       } catch {}
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/vehicle', { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1126,6 +1141,8 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try { await safeClosePage(p); } catch {}
       if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
         try {
+          const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
+          if (sid) attemptedSlotIds.add(sid);
           if (gatewayResolved && gatewayResolved.enabled === true) {
             await gatewayProxy.reportProxyIssue({
               resolved: gatewayResolved,
@@ -1133,6 +1150,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
               context: {
                 stage: 'open_create_vehicle',
                 attempt: Number(attempt || 0),
+                slotId: sid || null,
                 error: String(msg || '').slice(0, 220)
               }
             });

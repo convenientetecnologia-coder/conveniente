@@ -288,7 +288,7 @@ function profileHash(profileName) {
   return h >>> 0;
 }
 
-function resolveProxyForProfile({ profileName, manifest }) {
+function resolveProxyForProfile({ profileName, manifest, avoidSlotIds = [] }) {
   const st = readState();
   if (!st.globalEnabled || !st.hostEnabled) return { enabled: false, reason: "gateway_disabled" };
   if (!st.superProxy || !st.superProxy.host || !st.superProxy.port) return { enabled: false, reason: "missing_superproxy" };
@@ -296,6 +296,14 @@ function resolveProxyForProfile({ profileName, manifest }) {
   if (!slots.length) return { enabled: false, reason: "no_slots" };
 
   const byId = new Map(slots.map((s) => [s.slotId, s]));
+  const avoidSet = new Set((Array.isArray(avoidSlotIds) ? avoidSlotIds : []).map((s) => String(s || "").trim()).filter(Boolean));
+  const isAllowedSlotId = (sid) => {
+    const id = String(sid || "").trim();
+    if (!id) return false;
+    if (!byId.has(id)) return false;
+    if (avoidSet.has(id)) return false;
+    return true;
+  };
   const manifestGp = (manifest && manifest.gatewayProxy && typeof manifest.gatewayProxy === "object") ? manifest.gatewayProxy : null;
   const currentSlotId = String(manifestGp && manifestGp.slotId || "").trim();
   const currentInventoryVersion = String(manifestGp && manifestGp.inventoryVersion || "").trim();
@@ -305,9 +313,9 @@ function resolveProxyForProfile({ profileName, manifest }) {
   const inv = String(st.inventoryVersion || "");
   const assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
   let slot = null;
-  if (assigned && assigned.inventoryVersion === inv && byId.has(assigned.slotId)) {
+  if (assigned && assigned.inventoryVersion === inv && isAllowedSlotId(assigned.slotId)) {
     slot = byId.get(assigned.slotId);
-  } else if (canKeepSticky && byId.has(currentSlotId)) {
+  } else if (canKeepSticky && isAllowedSlotId(currentSlotId)) {
     slot = byId.get(currentSlotId);
   }
   if (!slot) {
@@ -318,17 +326,26 @@ function resolveProxyForProfile({ profileName, manifest }) {
       if (!activeSet.has(pname)) continue;
       if (String(rec && rec.inventoryVersion || "") !== inv) continue;
       const sid = String(rec && rec.slotId || "");
-      if (!byId.has(sid)) continue;
+      if (!isAllowedSlotId(sid)) continue;
       activeAssignments[pname] = sid;
     }
+    // Evita "auto-bloqueio": se este perfil já ocupa um slot evitado, remove da visão de carga.
+    try { delete activeAssignments[profileName]; } catch {}
     let chosenSlotId = "";
-    const freeSid = firstFreeSlotId(slots.map((s) => s.slotId), activeAssignments);
+    const candidateSlotIds = slots.map((s) => s.slotId).filter((sid) => isAllowedSlotId(sid));
+    const freeSid = firstFreeSlotId(candidateSlotIds, activeAssignments);
     if (freeSid) chosenSlotId = freeSid;
-    else chosenSlotId = chooseLeastLoadedSlot(slots.map((s) => s.slotId), activeAssignments, profileName);
+    else chosenSlotId = chooseLeastLoadedSlot(candidateSlotIds, activeAssignments, profileName);
     if (chosenSlotId && byId.has(chosenSlotId)) slot = byId.get(chosenSlotId);
     if (!slot) {
-      const idx = profileHash(profileName) % slots.length;
-      slot = slots[idx];
+      const allowedSlots = slots.filter((s) => isAllowedSlotId(s && s.slotId));
+      if (allowedSlots.length > 0) {
+        const idx = profileHash(profileName) % allowedSlots.length;
+        slot = allowedSlots[idx];
+      } else {
+        const idx = profileHash(profileName) % slots.length;
+        slot = slots[idx];
+      }
     }
   }
   if (!slot) return { enabled: false, reason: "slot_unresolved" };
