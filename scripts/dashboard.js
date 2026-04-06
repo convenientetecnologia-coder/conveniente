@@ -3242,6 +3242,18 @@ async function collectGatewayResolutionSnapshot(profileNames) {
 }
 
 async function recycleGatewayProfile(nome, reasonTag) {
+  // Fail-safe: se kill guard estiver ativo, não desativa o perfil agora.
+  // Evita derrubar browser ativo e deixar o perfil offline por bloqueio transitório.
+  try {
+    const st = await httpJson('/api/status', { timeoutMs: 30_000, retries: 1 });
+    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    const p = perfis.find((x) => String(x && x.nome || '').trim() === String(nome || '').trim());
+    const killGuardUntil = Number((p && p.killGuardUntil) || 0) || 0;
+    if (killGuardUntil > Date.now()) {
+      return { ok: false, stage: 'precheck', error: 'kill_guard_until', retryAt: killGuardUntil };
+    }
+  } catch {}
+
   const operator = `gateway_recycle:${String(reasonTag || 'gateway_update').slice(0, 80)}`;
   const deactivate = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
     method: 'POST',
