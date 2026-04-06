@@ -180,6 +180,67 @@ function chooseLeastLoadedSlot(slotIds, activeAssignments, profileName) {
   return candidates[idx];
 }
 
+function buildTargetLoadBySlot(slotIds, totalAssigned) {
+  const ids = Array.isArray(slotIds) ? slotIds.slice() : [];
+  const total = Math.max(0, Number(totalAssigned || 0) || 0);
+  const n = ids.length;
+  const out = new Map();
+  if (n <= 0) return out;
+  const base = Math.floor(total / n);
+  const rem = total % n;
+  for (let i = 0; i < ids.length; i++) {
+    out.set(ids[i], base + (i < rem ? 1 : 0));
+  }
+  return out;
+}
+
+function rebalanceAssignmentsToTargets(slotIds, assignments) {
+  const ids = Array.isArray(slotIds) ? slotIds.slice() : [];
+  const src = (assignments && typeof assignments === "object") ? assignments : {};
+  if (!ids.length) return Object.assign({}, src);
+  const out = Object.assign({}, src);
+  const counts = new Map(ids.map((sid) => [sid, 0]));
+  for (const sid of Object.values(out)) {
+    if (!counts.has(sid)) continue;
+    counts.set(sid, (counts.get(sid) || 0) + 1);
+  }
+  const target = buildTargetLoadBySlot(ids, Object.keys(out).length);
+  const bySlot = () => buildSlotProfileMap(out);
+  const maxMoves = Math.max(0, Object.keys(out).length * 2);
+  let moves = 0;
+  while (moves < maxMoves) {
+    let sourceSid = "";
+    let sourceExcess = 0;
+    for (const sid of ids) {
+      const excess = (counts.get(sid) || 0) - (target.get(sid) || 0);
+      if (excess > sourceExcess) {
+        sourceExcess = excess;
+        sourceSid = sid;
+      }
+    }
+    let destSid = "";
+    let destLack = 0;
+    for (const sid of ids) {
+      const lack = (target.get(sid) || 0) - (counts.get(sid) || 0);
+      if (lack > destLack) {
+        destLack = lack;
+        destSid = sid;
+      }
+    }
+    if (!sourceSid || !destSid || sourceExcess <= 0 || destLack <= 0 || sourceSid === destSid) break;
+    const holders = (bySlot().get(sourceSid) || []).slice();
+    if (!holders.length) break;
+    // Determinístico: move primeiro quem "menos combina" com o slot atual.
+    holders.sort((a, b) => profileHash(b) - profileHash(a) || b.localeCompare(a));
+    const chosen = holders[0];
+    out[chosen] = destSid;
+    counts.set(sourceSid, Math.max(0, (counts.get(sourceSid) || 0) - 1));
+    counts.set(destSid, (counts.get(destSid) || 0) + 1);
+    moves += 1;
+  }
+  return out;
+}
+
 function reconcileAssignments(nextState, prevState) {
   const slots = Array.isArray(nextState && nextState.slots) ? nextState.slots : [];
   const slotIds = slots.map((s) => String(s && s.slotId || "").trim()).filter(Boolean);
@@ -241,8 +302,12 @@ function reconcileAssignments(nextState, prevState) {
     activeAssignments[profileName] = sid;
   }
 
+  // Balanceamento final: garante distribuição aproximada ideal (diferença <= 1 entre slots),
+  // mantendo decisão determinística para evitar oscilação entre ciclos.
+  const balancedAssignments = rebalanceAssignmentsToTargets(slotIds, activeAssignments);
+
   const out = Object.assign({}, keptAssignments);
-  for (const [profileName, sid] of Object.entries(activeAssignments)) {
+  for (const [profileName, sid] of Object.entries(balancedAssignments)) {
     if (!sid || !slotsById.has(sid)) continue;
     out[profileName] = { slotId: sid, inventoryVersion: inv, updatedAt: now };
   }
