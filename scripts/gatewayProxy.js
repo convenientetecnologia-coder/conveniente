@@ -180,6 +180,18 @@ function chooseLeastLoadedSlot(slotIds, activeAssignments, profileName) {
   return candidates[idx];
 }
 
+function orderedSlotIdsForHost(slotIds) {
+  const ids = Array.isArray(slotIds) ? slotIds.slice() : [];
+  if (ids.length <= 1) return ids;
+  let hostId = "";
+  try { hostId = readHostIdSafe(); } catch {}
+  hostId = String(hostId || "").trim();
+  if (!hostId) return ids;
+  const offset = profileHash(hostId) % ids.length;
+  if (!offset) return ids;
+  return ids.slice(offset).concat(ids.slice(0, offset));
+}
+
 function buildTargetLoadBySlot(slotIds, totalAssigned) {
   const ids = Array.isArray(slotIds) ? slotIds.slice() : [];
   const total = Math.max(0, Number(totalAssigned || 0) || 0);
@@ -244,6 +256,7 @@ function rebalanceAssignmentsToTargets(slotIds, assignments) {
 function reconcileAssignments(nextState, prevState) {
   const slots = Array.isArray(nextState && nextState.slots) ? nextState.slots : [];
   const slotIds = slots.map((s) => String(s && s.slotId || "").trim()).filter(Boolean);
+  const slotIdsHost = orderedSlotIdsForHost(slotIds);
   const slotsById = new Map(slots.map((s) => [s.slotId, s]));
   const inv = String(nextState && nextState.inventoryVersion || "").trim();
   const now = Date.now();
@@ -276,16 +289,16 @@ function reconcileAssignments(nextState, prevState) {
   }
 
   // Unique-first: se há slot livre, desmonta colisões mantendo 1 dono por slot.
-  if (slotIds.length > 0) {
+  if (slotIdsHost.length > 0) {
     const bySlot = buildSlotProfileMap(activeAssignments);
-    for (const sid of slotIds) {
+    for (const sid of slotIdsHost) {
       const holders = (bySlot.get(sid) || []).slice();
       if (holders.length <= 1) continue;
       holders.sort((a, b) => profileHash(a) - profileHash(b) || a.localeCompare(b));
       const keep = holders[0];
       for (let i = 1; i < holders.length; i++) {
         const p = holders[i];
-        const freeSid = firstFreeSlotId(slotIds, activeAssignments);
+        const freeSid = firstFreeSlotId(slotIdsHost, activeAssignments);
         if (!freeSid) break;
         if (freeSid === activeAssignments[keep]) continue;
         activeAssignments[p] = freeSid;
@@ -296,15 +309,15 @@ function reconcileAssignments(nextState, prevState) {
   // Perfis ativos sem slot: usa slots livres primeiro, depois menor carga.
   for (const profileName of activeProfiles) {
     if (activeAssignments[profileName]) continue;
-    let sid = firstFreeSlotId(slotIds, activeAssignments);
-    if (!sid) sid = chooseLeastLoadedSlot(slotIds, activeAssignments, profileName);
+    let sid = firstFreeSlotId(slotIdsHost, activeAssignments);
+    if (!sid) sid = chooseLeastLoadedSlot(slotIdsHost, activeAssignments, profileName);
     if (!sid) continue;
     activeAssignments[profileName] = sid;
   }
 
   // Balanceamento final: garante distribuição aproximada ideal (diferença <= 1 entre slots),
   // mantendo decisão determinística para evitar oscilação entre ciclos.
-  const balancedAssignments = rebalanceAssignmentsToTargets(slotIds, activeAssignments);
+  const balancedAssignments = rebalanceAssignmentsToTargets(slotIdsHost, activeAssignments);
 
   const out = Object.assign({}, keptAssignments);
   for (const [profileName, sid] of Object.entries(balancedAssignments)) {
@@ -375,6 +388,7 @@ function resolveProxyForProfile({ profileName, manifest }) {
   if (provider !== "proxycheap") return { enabled: false, reason: "unsupported_provider" };
   const slots = st.slots || [];
   if (!slots.length) return { enabled: false, reason: "no_slots" };
+  const slotIdsHost = orderedSlotIdsForHost(slots.map((s) => String(s && s.slotId || "").trim()).filter(Boolean));
 
   const byId = new Map(slots.map((s) => [s.slotId, s]));
   const manifestGp = (manifest && manifest.gatewayProxy && typeof manifest.gatewayProxy === "object") ? manifest.gatewayProxy : null;
@@ -400,13 +414,14 @@ function resolveProxyForProfile({ profileName, manifest }) {
       activeAssignments[pname] = sid;
     }
     let chosenSlotId = "";
-    const freeSid = firstFreeSlotId(slots.map((s) => s.slotId), activeAssignments);
+    const freeSid = firstFreeSlotId(slotIdsHost, activeAssignments);
     if (freeSid) chosenSlotId = freeSid;
-    else chosenSlotId = chooseLeastLoadedSlot(slots.map((s) => s.slotId), activeAssignments, profileName);
+    else chosenSlotId = chooseLeastLoadedSlot(slotIdsHost, activeAssignments, profileName);
     if (chosenSlotId && byId.has(chosenSlotId)) slot = byId.get(chosenSlotId);
     if (!slot) {
-      const idx = profileHash(profileName) % slots.length;
-      slot = slots[idx];
+      const idx = profileHash(profileName) % Math.max(1, slotIdsHost.length);
+      const fallbackSlotId = slotIdsHost[idx];
+      slot = byId.get(fallbackSlotId) || slots[0];
     }
   }
   if (!slot) return { enabled: false, reason: "slot_unresolved" };
