@@ -2113,6 +2113,10 @@ async function execStockProvision(cmd) {
     return (
       m.includes('timeout') ||
       m.includes('already_opening') ||
+      // Gateway strict mode: perfil novo pode existir alguns segundos antes do
+      // assignment do CT chegar; nesse intervalo, activate deve retryar.
+      m.includes('gateway_proxy_required:missing_slot_assignment') ||
+      m.includes('gateway_proxy_required:assigned_slot_unavailable') ||
       m.includes('supervisor_denied:slots') ||
       m.includes('supervisor_denied:ram_low') ||
       m.includes('supervisor_denied:maintenance_provision') ||
