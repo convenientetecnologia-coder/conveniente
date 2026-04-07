@@ -2,9 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
+const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
-const utils = require('./utils.js');
 const fotosV = require('./fotosVeiculos.js');       // autoridade central de fotos (VEÍCULOS)
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
@@ -1860,7 +1859,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
-    const coords = utils.getCoords(manifest.cidade || '');
+    const coords = resolvePatchCoordsForProfile(nome, manifest || {});
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe (veículos)`);
 

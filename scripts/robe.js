@@ -2,9 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
+const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectLoginRequired } = require('./browser.js');
-const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
@@ -2409,7 +2408,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
-    const coords = utils.getCoords(manifest.cidade || '');
+    const coords = resolvePatchCoordsForProfile(nome, manifest || {});
     // Pré-seleciona foto antes de abrir/create para reduzir janela de degradação entre recovery e upload.
     const photoPickStartedAt = Date.now();
     let pick = await fotos.pickPhotoForAccount(nome, workingNames);

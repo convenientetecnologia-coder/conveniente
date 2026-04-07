@@ -2117,6 +2117,9 @@ async function execStockProvision(cmd) {
       // assignment do CT chegar; nesse intervalo, activate deve retryar.
       m.includes('gateway_proxy_required:missing_slot_assignment') ||
       m.includes('gateway_proxy_required:assigned_slot_unavailable') ||
+      m.includes('gateway_geo_required:missing_slot_geo') ||
+      m.includes('gateway_geo_required:missing_slot_assignment') ||
+      m.includes('gateway_geo_required:assigned_slot_unavailable') ||
       m.includes('supervisor_denied:slots') ||
       m.includes('supervisor_denied:ram_low') ||
       m.includes('supervisor_denied:maintenance_provision') ||

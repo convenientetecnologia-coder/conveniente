@@ -1933,7 +1933,8 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       if (p0) {
         try {
           const man = await manifestStore.read(nome).catch(()=>null);
-          await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
+          const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
+          await browserHelper.patchPage(nome, p0, coords).catch(()=>{});
         } catch {}
       }
     }
@@ -2134,7 +2135,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           } catch {}
           // PatchPage na aba 1 para consistência (coords/UA/stealth hooks)
           try {
-            const coords = utils.getCoords((man && man.cidade) ? String(man.cidade) : '');
+            const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
             await browserHelper.patchPage(nome, p, coords).catch(()=>{});
           } catch {}
           const tNav0 = Date.now();
@@ -5848,17 +5849,12 @@ function savePerfisJson(arr) {
 }
 
 function pickUaPreset() {
-  const presets = JSON.parse(fs.readFileSync(presetsPath, 'utf8'));
-  const perfis = loadPerfisJson();
-  const count = {};
-  for (const p of presets) count[p.id] = 0;
-  for (const pf of perfis) {
-    if (pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1;
+  try {
+    // Fonte única de escolha: fileStore (usa política ponderada/curada).
+    return fileStore.pickUaPreset();
+  } catch {
+    return null;
   }
-  let min = Math.min(...Object.values(count));
-  const candidates = presets.filter(p => count[p.id] === min);
-  candidates.sort(() => Math.random() - 0.5);
-  return candidates[0];
 }
 
 async function normalizeCooldown(nome) {
@@ -9788,12 +9784,16 @@ const handlers = {
 
       try {
         const man = await manifestStore.read(nome).catch(()=>null);
-        const cidade = man && man.cidade || '';
-        const coords = require('./utils.js').getCoords(cidade || '');
-
+        let coords = null;
+        try {
+          coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
+        } catch (eGeo) {
+          const mGeo = (eGeo && eGeo.message) ? String(eGeo.message) : String(eGeo || '');
+          await issues.append(nome, 'mil_action', `apply_city_skip ${mGeo.slice(0, 180)}`);
+          return { ok: false, error: mGeo || 'coords_unavailable' };
+        }
         if (!coords || !coords.latitude || !coords.longitude) {
-          await issues.append(nome, 'mil_action', `apply_city_skip coords_unavailable cidade="${cidade||''}"`);
-
+          await issues.append(nome, 'mil_action', 'apply_city_skip coords_unavailable');
           return { ok: false, error: 'coords_unavailable' };
         }
 
@@ -9804,7 +9804,7 @@ const handlers = {
           try { await p.setGeolocation(coords); applied++; } catch {}
         }
 
-        await issues.append(nome, 'mil_action', `apply_city_runtime_ok cidade="${cidade}" pages=${applied}`);
+        await issues.append(nome, 'mil_action', `apply_city_runtime_ok pages=${applied}`);
 
         // Optionally: update status snapshot
         try { await snapshotStatusAndWrite(); } catch {}
@@ -13018,7 +13018,8 @@ async function recoveryStep(nome, page, step) {
       const np = await ctrl.browser.newPage();
       try {
         const man = await manifestStore.read(nome).catch(() => null);
-        await browserHelper.patchPage(nome, np, utils.getCoords((man && man.cidade) || ''));
+        const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
+        await browserHelper.patchPage(nome, np, coords);
       } catch {}
       await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}

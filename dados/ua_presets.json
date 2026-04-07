@@ -1,1685 +1,5 @@
 [
   {
-    "id": "win10-chrome-100-1366x768-084",
-    "label": "Win10 Chrome 100 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.128 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "100"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "100"
-        }
-      ],
-      "fullVersion": "100.0.4896.128",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 4
-  },
-  {
-    "id": "win11-chrome-100-1920x1080-083",
-    "label": "Win11 Chrome 100 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "100"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "100"
-        }
-      ],
-      "fullVersion": "100.0.4896.127",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-101-1920x1080-081",
-    "label": "Win11 Chrome 101 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.100 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "101"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "101"
-        }
-      ],
-      "fullVersion": "101.0.4951.100",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-101-1920x1080-082",
-    "label": "Win11 Chrome 101 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.101 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "101"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "101"
-        }
-      ],
-      "fullVersion": "101.0.4951.101",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-102-1920x1080-079",
-    "label": "Win10 Chrome 102 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.115 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "102"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "102"
-        }
-      ],
-      "fullVersion": "102.0.5005.115",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win10-chrome-102-3840x2160-080",
-    "label": "Win10 Chrome 102 (3840x2160)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.116 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "102"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "102"
-        }
-      ],
-      "fullVersion": "102.0.5005.116",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 3840,
-      "height": 2160
-    },
-    "dpr": 2,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-103-1920x1080-077",
-    "label": "Win11 Chrome 103 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5005.115 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "103"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "103"
-        }
-      ],
-      "fullVersion": "103.0.5005.115",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-103-1920x1080-078",
-    "label": "Win11 Chrome 103 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5005.116 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "103"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "103"
-        }
-      ],
-      "fullVersion": "103.0.5005.116",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-104-1680x1050-075",
-    "label": "Win10 Chrome 104 (1680x1050)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.101 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "104"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "104"
-        }
-      ],
-      "fullVersion": "104.0.5112.101",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1680,
-      "height": 1050
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-104-1920x1200-076",
-    "label": "Win11 Chrome 104 (1920x1200)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.102 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "104"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "104"
-        }
-      ],
-      "fullVersion": "104.0.5112.102",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1200
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-105-1440x900-074",
-    "label": "Win10 Chrome 105 (1440x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.5195.116 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "105"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "105"
-        }
-      ],
-      "fullVersion": "105.0.5195.116",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1440,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-105-1536x864-073",
-    "label": "Win11 Chrome 105 (1536x864)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.5195.115 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "105"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "105"
-        }
-      ],
-      "fullVersion": "105.0.5195.115",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1536,
-      "height": 864
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-106-1600x900-071",
-    "label": "Win11 Chrome 106 (1600x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.5249.119 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "106"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "106"
-        }
-      ],
-      "fullVersion": "106.0.5249.119",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1600,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-106-1600x900-072",
-    "label": "Win11 Chrome 106 (1600x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.5249.120 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "106"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "106"
-        }
-      ],
-      "fullVersion": "106.0.5249.120",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1600,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-107-2560x1440-069",
-    "label": "Win10 Chrome 107 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.121 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "107"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "107"
-        }
-      ],
-      "fullVersion": "107.0.5304.121",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win10-chrome-107-2560x1440-070",
-    "label": "Win10 Chrome 107 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.122 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "107"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "107"
-        }
-      ],
-      "fullVersion": "107.0.5304.122",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-108-1366x768-067",
-    "label": "Win11 Chrome 108 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.5359.125 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "108"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "108"
-        }
-      ],
-      "fullVersion": "108.0.5359.125",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-108-2560x1440-068",
-    "label": "Win11 Chrome 108 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.5359.126 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "108"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "108"
-        }
-      ],
-      "fullVersion": "108.0.5359.126",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-109-1366x768-065",
-    "label": "Win10 Chrome 109 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.119 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "109"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "109"
-        }
-      ],
-      "fullVersion": "109.0.5414.119",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-109-1366x768-066",
-    "label": "Win11 Chrome 109 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.120 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "109"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "109"
-        }
-      ],
-      "fullVersion": "109.0.5414.120",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-110-1366x768-064",
-    "label": "Win10 Chrome 110 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.101 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "110"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "110"
-        }
-      ],
-      "fullVersion": "110.0.5481.101",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 4
-  },
-  {
-    "id": "win11-chrome-110-1920x1080-063",
-    "label": "Win11 Chrome 110 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.100 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "110"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "110"
-        }
-      ],
-      "fullVersion": "110.0.5481.100",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-111-1920x1080-061",
-    "label": "Win11 Chrome 111 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.5563.145 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "111"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "111"
-        }
-      ],
-      "fullVersion": "111.0.5563.145",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-111-1920x1080-062",
-    "label": "Win11 Chrome 111 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.5563.146 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "111"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "111"
-        }
-      ],
-      "fullVersion": "111.0.5563.146",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-112-1920x1080-059",
-    "label": "Win10 Chrome 112 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.138 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "112"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "112"
-        }
-      ],
-      "fullVersion": "112.0.5615.138",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win10-chrome-112-3840x2160-060",
-    "label": "Win10 Chrome 112 (3840x2160)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.139 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "112"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "112"
-        }
-      ],
-      "fullVersion": "112.0.5615.139",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 3840,
-      "height": 2160
-    },
-    "dpr": 2,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-113-1920x1080-057",
-    "label": "Win11 Chrome 113 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.126 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "113"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "113"
-        }
-      ],
-      "fullVersion": "113.0.5672.126",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-113-1920x1080-058",
-    "label": "Win11 Chrome 113 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.127 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "113"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "113"
-        }
-      ],
-      "fullVersion": "113.0.5672.127",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-114-1680x1050-055",
-    "label": "Win10 Chrome 114 (1680x1050)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.133 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "114"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "114"
-        }
-      ],
-      "fullVersion": "114.0.5735.133",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1680,
-      "height": 1050
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-114-1920x1200-056",
-    "label": "Win11 Chrome 114 (1920x1200)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.134 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "114"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "114"
-        }
-      ],
-      "fullVersion": "114.0.5735.134",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1200
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-115-1440x900-054",
-    "label": "Win10 Chrome 115 (1440x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.5790.99 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "115"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "115"
-        }
-      ],
-      "fullVersion": "115.0.5790.99",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1440,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-115-1536x864-053",
-    "label": "Win11 Chrome 115 (1536x864)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.5790.98 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "115"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "115"
-        }
-      ],
-      "fullVersion": "115.0.5790.98",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1536,
-      "height": 864
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-116-1600x900-051",
-    "label": "Win11 Chrome 116 (1600x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.97 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "116"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "116"
-        }
-      ],
-      "fullVersion": "116.0.5845.97",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1600,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-116-1600x900-052",
-    "label": "Win11 Chrome 116 (1600x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.98 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "116"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "116"
-        }
-      ],
-      "fullVersion": "116.0.5845.98",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1600,
-      "height": 900
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-117-2560x1440-049",
-    "label": "Win10 Chrome 117 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5878.118 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "117"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "117"
-        }
-      ],
-      "fullVersion": "117.0.5878.118",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win10-chrome-117-2560x1440-050",
-    "label": "Win10 Chrome 117 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5878.119 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "117"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "117"
-        }
-      ],
-      "fullVersion": "117.0.5878.119",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-118-1366x768-047",
-    "label": "Win11 Chrome 118 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.117 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "118"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "118"
-        }
-      ],
-      "fullVersion": "118.0.5993.117",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-118-2560x1440-048",
-    "label": "Win11 Chrome 118 (2560x1440)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.118 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "118"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "118"
-        }
-      ],
-      "fullVersion": "118.0.5993.118",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 2560,
-      "height": 1440
-    },
-    "dpr": 1.5,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win10-chrome-119-1366x768-045",
-    "label": "Win10 Chrome 119 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6093.101 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "119"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "119"
-        }
-      ],
-      "fullVersion": "119.0.6093.101",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 6
-  },
-  {
-    "id": "win11-chrome-119-1366x768-046",
-    "label": "Win11 Chrome 119 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6093.102 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "119"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "119"
-        }
-      ],
-      "fullVersion": "119.0.6093.102",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-120-1366x768-044",
-    "label": "Win10 Chrome 120 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6118.131 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "120"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "120"
-        }
-      ],
-      "fullVersion": "120.0.6118.131",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1366,
-      "height": 768
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 4
-  },
-  {
-    "id": "win11-chrome-120-1920x1080-043",
-    "label": "Win11 Chrome 120 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6118.130 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "120"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "120"
-        }
-      ],
-      "fullVersion": "120.0.6118.130",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-121-1920x1080-041",
-    "label": "Win11 Chrome 121 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6128.129 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "121"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "121"
-        }
-      ],
-      "fullVersion": "121.0.6128.129",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 12
-  },
-  {
-    "id": "win11-chrome-121-1920x1080-042",
-    "label": "Win11 Chrome 121 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6128.130 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "121"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "121"
-        }
-      ],
-      "fullVersion": "121.0.6128.130",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win10-chrome-122-1920x1080-039",
-    "label": "Win10 Chrome 122 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6175.97 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "122"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "122"
-        }
-      ],
-      "fullVersion": "122.0.6175.97",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win10-chrome-122-3840x2160-040",
-    "label": "Win10 Chrome 122 (3840x2160)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6175.98 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "122"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "122"
-        }
-      ],
-      "fullVersion": "122.0.6175.98",
-      "platform": "Windows",
-      "platformVersion": "10.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 3840,
-      "height": 2160
-    },
-    "dpr": 2,
-    "hardwareConcurrency": 16
-  },
-  {
-    "id": "win11-chrome-123-1920x1080-037",
-    "label": "Win11 Chrome 123 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6278.112 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "123"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "123"
-        }
-      ],
-      "fullVersion": "123.0.6278.112",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1,
-    "hardwareConcurrency": 8
-  },
-  {
-    "id": "win11-chrome-123-1920x1080-038",
-    "label": "Win11 Chrome 123 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6278.113 Safari/537.36",
-    "uaCh": {
-      "brands": [
-        {
-          "brand": "Chromium",
-          "version": "123"
-        },
-        {
-          "brand": "Not A;Brand",
-          "version": "24"
-        },
-        {
-          "brand": "Google Chrome",
-          "version": "123"
-        }
-      ],
-      "fullVersion": "123.0.6278.113",
-      "platform": "Windows",
-      "platformVersion": "15.0.0",
-      "architecture": "x86",
-      "bitness": "64",
-      "model": "",
-      "wow64": false,
-      "mobile": false
-    },
-    "viewport": {
-      "width": 1920,
-      "height": 1080
-    },
-    "dpr": 1.25,
-    "hardwareConcurrency": 12
-  },
-  {
     "id": "win10-chrome-124-1680x1050-035",
     "label": "Win10 Chrome 124 (1680x1050)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36",
@@ -2032,7 +352,7 @@
   {
     "id": "win10-chrome-129-1366x768-025",
     "label": "Win10 Chrome 129 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6732.118 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.103 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2048,7 +368,7 @@
           "version": "129"
         }
       ],
-      "fullVersion": "129.0.6732.118",
+      "fullVersion": "129.0.6668.103",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2067,7 +387,7 @@
   {
     "id": "win11-chrome-129-1366x768-026",
     "label": "Win11 Chrome 129 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6732.119 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.102 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2083,7 +403,7 @@
           "version": "129"
         }
       ],
-      "fullVersion": "129.0.6732.119",
+      "fullVersion": "129.0.6668.102",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2102,7 +422,7 @@
   {
     "id": "win10-chrome-130-1366x768-024",
     "label": "Win10 Chrome 130 (1366x768)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6743.123 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.119 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2118,7 +438,7 @@
           "version": "130"
         }
       ],
-      "fullVersion": "130.0.6743.123",
+      "fullVersion": "130.0.6723.119",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2137,7 +457,7 @@
   {
     "id": "win11-chrome-130-1920x1080-023",
     "label": "Win11 Chrome 130 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6743.122 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.118 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2153,7 +473,7 @@
           "version": "130"
         }
       ],
-      "fullVersion": "130.0.6743.122",
+      "fullVersion": "130.0.6723.118",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2172,7 +492,7 @@
   {
     "id": "win11-chrome-131-1920x1080-021",
     "label": "Win11 Chrome 131 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6823.118 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.267 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2188,7 +508,7 @@
           "version": "131"
         }
       ],
-      "fullVersion": "131.0.6823.118",
+      "fullVersion": "131.0.6778.267",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2207,7 +527,7 @@
   {
     "id": "win11-chrome-131-1920x1080-022",
     "label": "Win11 Chrome 131 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6823.119 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.266 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2223,7 +543,7 @@
           "version": "131"
         }
       ],
-      "fullVersion": "131.0.6823.119",
+      "fullVersion": "131.0.6778.266",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2242,7 +562,7 @@
   {
     "id": "win10-chrome-132-1920x1080-019",
     "label": "Win10 Chrome 132 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.241 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.197 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2258,7 +578,7 @@
           "version": "132"
         }
       ],
-      "fullVersion": "132.0.6834.241",
+      "fullVersion": "132.0.6834.197",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2277,7 +597,7 @@
   {
     "id": "win10-chrome-132-3840x2160-020",
     "label": "Win10 Chrome 132 (3840x2160)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.242 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.196 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2293,7 +613,7 @@
           "version": "132"
         }
       ],
-      "fullVersion": "132.0.6834.242",
+      "fullVersion": "132.0.6834.196",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2312,7 +632,7 @@
   {
     "id": "win11-chrome-133-1920x1080-017",
     "label": "Win11 Chrome 133 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6925.121 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6943.143 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2328,7 +648,7 @@
           "version": "133"
         }
       ],
-      "fullVersion": "133.0.6925.121",
+      "fullVersion": "133.0.6943.143",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2347,7 +667,7 @@
   {
     "id": "win11-chrome-133-1920x1080-018",
     "label": "Win11 Chrome 133 (1920x1080)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6925.122 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6943.142 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2363,7 +683,7 @@
           "version": "133"
         }
       ],
-      "fullVersion": "133.0.6925.122",
+      "fullVersion": "133.0.6943.142",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2382,7 +702,7 @@
   {
     "id": "win10-chrome-134-1680x1050-015",
     "label": "Win10 Chrome 134 (1680x1050)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6906.118 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.179 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2398,7 +718,7 @@
           "version": "134"
         }
       ],
-      "fullVersion": "134.0.6906.118",
+      "fullVersion": "134.0.6998.179",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2417,7 +737,7 @@
   {
     "id": "win11-chrome-134-1920x1200-016",
     "label": "Win11 Chrome 134 (1920x1200)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6906.119 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.178 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2433,7 +753,7 @@
           "version": "134"
         }
       ],
-      "fullVersion": "134.0.6906.119",
+      "fullVersion": "134.0.6998.178",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",
@@ -2452,7 +772,7 @@
   {
     "id": "win10-chrome-135-1440x900-014",
     "label": "Win10 Chrome 135 (1440x900)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.6963.135 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.7049.117 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2468,7 +788,7 @@
           "version": "135"
         }
       ],
-      "fullVersion": "135.0.6963.135",
+      "fullVersion": "135.0.7049.117",
       "platform": "Windows",
       "platformVersion": "10.0.0",
       "architecture": "x86",
@@ -2487,7 +807,7 @@
   {
     "id": "win11-chrome-135-1536x864-013",
     "label": "Win11 Chrome 135 (1536x864)",
-    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.6963.134 Safari/537.36",
+    "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.7049.116 Safari/537.36",
     "uaCh": {
       "brands": [
         {
@@ -2503,7 +823,7 @@
           "version": "135"
         }
       ],
-      "fullVersion": "135.0.6963.134",
+      "fullVersion": "135.0.7049.116",
       "platform": "Windows",
       "platformVersion": "15.0.0",
       "architecture": "x86",

@@ -11,6 +11,11 @@ const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
 const PERFIS_PATH = path.join(__dirname, "..", "dados", "perfis.json");
 const issueThrottleBySlot = new Map();
 const ASSIGNMENT_PLANNER_VERSION = "v2_unique_first";
+const COUNTRY_GEO_ANCHORS = {
+  // Ancora por pais (derivado do proxy) para quando slot.geo ainda nao vier no payload.
+  // Nao usa cidade da conta.
+  br: { latitude: -15.7801, longitude: -47.9292, accuracy: 450000 }
+};
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -47,6 +52,19 @@ function normalizeSlots(slots) {
       ipCurrent: ip,
       country: String(s && s.country || "").trim().toLowerCase() || null
     };
+    const geo = (s && s.geo && typeof s.geo === "object") ? s.geo : null;
+    if (geo) {
+      const latitude = Number(geo.latitude);
+      const longitude = Number(geo.longitude);
+      const accuracy = Number(geo.accuracy || 0) || 0;
+      if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        row.geo = {
+          latitude,
+          longitude,
+          accuracy: accuracy > 0 ? accuracy : 3000
+        };
+      }
+    }
     if (proxy) {
       const host = String(proxy.host || "").trim();
       const port = Number(proxy.port || 0) || 0;
@@ -63,6 +81,28 @@ function normalizeSlots(slots) {
   // quando apenas o IP do slot muda.
   out.sort((a, b) => a.slotId.localeCompare(b.slotId));
   return out;
+}
+
+function normalizeCoordsLike(input) {
+  if (!input || typeof input !== "object") return null;
+  const latitude = Number(input.latitude);
+  const longitude = Number(input.longitude);
+  const accuracyRaw = Number(input.accuracy || 0) || 0;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return {
+    latitude,
+    longitude,
+    accuracy: accuracyRaw > 0 ? accuracyRaw : 3000
+  };
+}
+
+function resolveGeoFromSlot(slot) {
+  const slotGeo = normalizeCoordsLike(slot && slot.geo);
+  if (slotGeo) return { ok: true, coords: slotGeo, source: "slot_geo" };
+  const country = String(slot && slot.country || "").trim().toLowerCase();
+  const anchor = normalizeCoordsLike(COUNTRY_GEO_ANCHORS[country]);
+  if (anchor) return { ok: true, coords: anchor, source: `slot_country_anchor:${country}` };
+  return { ok: false, reason: "missing_slot_geo" };
 }
 
 function defaultState() {
@@ -444,6 +484,38 @@ function resolveProxyForProfile({ profileName, manifest }) {
   };
 }
 
+function resolveGeoForProfile({ profileName, manifest }) {
+  const resolved = resolveProxyForProfile({ profileName, manifest });
+  if (!resolved || resolved.enabled !== true) {
+    return {
+      enabled: false,
+      reason: String(resolved && resolved.reason || "geo_proxy_unresolved").trim() || "geo_proxy_unresolved"
+    };
+  }
+  const slot = resolved.slot || null;
+  if (!slot) return { enabled: false, reason: "missing_slot_assignment" };
+  const geo = resolveGeoFromSlot(slot);
+  if (!geo.ok || !geo.coords) {
+    return {
+      enabled: false,
+      reason: String(geo.reason || "missing_slot_geo"),
+      slotId: String(slot.slotId || ""),
+      zone: String(slot.zone || ""),
+      ipCurrent: String(slot.ipCurrent || "")
+    };
+  }
+  return {
+    enabled: true,
+    coords: geo.coords,
+    source: String(geo.source || "slot_geo"),
+    slotId: String(slot.slotId || ""),
+    zone: String(slot.zone || ""),
+    ipCurrent: String(slot.ipCurrent || ""),
+    provider: String(resolved.provider || ""),
+    inventoryVersion: String(resolved.inventoryVersion || "")
+  };
+}
+
 async function persistManifestAssignment(profileName, resolved) {
   if (!resolved || !resolved.enabled || !resolved.slot) return;
   const slot = resolved.slot;
@@ -593,6 +665,7 @@ module.exports = {
   readState,
   applyGatewayPayload,
   resolveProxyForProfile,
+  resolveGeoForProfile,
   persistManifestAssignment,
   isStrictProxyRequired,
   getNeedsFlags,

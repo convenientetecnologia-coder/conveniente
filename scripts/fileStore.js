@@ -14,6 +14,7 @@ const dadosDir    = path.join(__dirname, '../dados');
 const perfisPath  = path.join(dadosDir, 'perfis.json');
 const perfisDir   = path.join(dadosDir, 'perfis');
 const presetsPath = path.join(dadosDir, 'ua_presets.json');
+const presetsPolicyPath = path.join(dadosDir, 'ua_presets_policy.json');
 const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
 const tombstonesDir = path.join(dadosDir, 'tombstones');
@@ -211,19 +212,96 @@ function savePerfisJson(arr) {
   return writeJsonAtomic(perfisPath, next);
 }
 
-//// UA PRESET: balanceado sempre que criar ////
+function extractChromeMajorFromUa(uaString) {
+  const s = String(uaString || '');
+  const m = s.match(/Chrome\/(\d+)\./);
+  return m ? (Number(m[1]) || 0) : 0;
+}
+
+function buildDefaultUaPolicy(presets) {
+  const list = Array.isArray(presets) ? presets : [];
+  let maxMajor = 0;
+  for (const p of list) {
+    const m = extractChromeMajorFromUa(p && p.uaString);
+    if (m > maxMajor) maxMajor = m;
+  }
+  const tiersByPresetId = {};
+  for (const p of list) {
+    const id = String(p && p.id || '').trim();
+    if (!id) continue;
+    const major = extractChromeMajorFromUa(p && p.uaString);
+    const delta = Math.max(0, maxMajor - major);
+    let tier = 'aprovado';
+    // Regra padrão enterprise: manter diversidade sem saturar presets muito antigos.
+    if (delta > 16) tier = 'retirar';
+    else if (delta > 6) tier = 'ajustar';
+    const weight = tier === 'aprovado' ? 1.0 : (tier === 'ajustar' ? 0.45 : 0.08);
+    tiersByPresetId[id] = {
+      tier,
+      major,
+      delta,
+      weight,
+      enabledForNewProfiles: true
+    };
+  }
+  return {
+    version: 1,
+    generatedAt: Date.now(),
+    criteria: { approvedDeltaMax: 6, adjustDeltaMax: 16, maxMajor },
+    tiersByPresetId
+  };
+}
+
+function loadUaPolicy(presets) {
+  try {
+    const raw = readJsonSafe(presetsPolicyPath, null);
+    if (!raw || typeof raw !== 'object') return buildDefaultUaPolicy(presets);
+    const tiers = (raw.tiersByPresetId && typeof raw.tiersByPresetId === 'object') ? raw.tiersByPresetId : {};
+    return {
+      version: Number(raw.version || 1) || 1,
+      generatedAt: Number(raw.generatedAt || Date.now()) || Date.now(),
+      criteria: raw.criteria || {},
+      tiersByPresetId: tiers
+    };
+  } catch {
+    return buildDefaultUaPolicy(presets);
+  }
+}
+
+//// UA PRESET: balanceado/ponderado para criar novos perfis ////
 function pickUaPreset() {
   try {
     const presets = readJsonSafe(presetsPath, []);
-    const perfis  = loadPerfisJson();
+    const perfis = loadPerfisJson();
     if (!Array.isArray(presets) || presets.length === 0) return null;
+    const policy = loadUaPolicy(presets);
+
     const count = {};
-    presets.forEach(p => count[p.id] = 0);
+    for (const p of presets) count[p.id] = 0;
     for (const pf of perfis) {
-      if (pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1;
+      if (pf && pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1;
     }
-    const min = Math.min(...Object.values(count));
-    const candidates = presets.filter(p => count[p.id] === min);
+
+    let bestScore = Number.POSITIVE_INFINITY;
+    let candidates = [];
+    for (const p of presets) {
+      const id = String(p && p.id || '').trim();
+      if (!id) continue;
+      const row = policy && policy.tiersByPresetId ? policy.tiersByPresetId[id] : null;
+      const enabled = !(row && row.enabledForNewProfiles === false);
+      if (!enabled) continue;
+      const w = Number(row && row.weight || 1) || 1;
+      const weight = Math.max(0.01, w);
+      const usage = Number(count[id] || 0) || 0;
+      const score = usage / weight;
+      if (score < bestScore - 1e-9) {
+        bestScore = score;
+        candidates = [p];
+      } else if (Math.abs(score - bestScore) <= 1e-9) {
+        candidates.push(p);
+      }
+    }
+    if (!candidates.length) return null;
     candidates.sort(() => Math.random() - 0.5);
     return candidates[0] || null;
   } catch { return null; }

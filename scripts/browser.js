@@ -4,6 +4,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
@@ -94,6 +95,276 @@ async function injectCookies(page, cookies) {
 // patchPage agora usa leitura correta do manifest
 // ===============================
 const manifestStore = require('./manifestStore.js');
+const cohortLedgerPath = path.join(__dirname, '..', 'dados', 'cohort_ledger.json');
+
+const COUNTRY_LOCALE_PROFILES = {
+  br: {
+    timezones: ['America/Sao_Paulo', 'America/Fortaleza', 'America/Manaus', 'America/Belem'],
+    languages: [
+      { navigatorLanguage: 'pt-BR', navigatorLanguages: ['pt-BR', 'pt', 'en-US', 'en'], acceptLanguage: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' },
+      { navigatorLanguage: 'pt-BR', navigatorLanguages: ['pt-BR', 'pt', 'en'], acceptLanguage: 'pt-BR,pt;q=0.9,en;q=0.7' }
+    ]
+  },
+  us: {
+    timezones: ['America/New_York', 'America/Chicago', 'America/Los_Angeles'],
+    languages: [
+      { navigatorLanguage: 'en-US', navigatorLanguages: ['en-US', 'en'], acceptLanguage: 'en-US,en;q=0.9' }
+    ]
+  }
+};
+
+const FINGERPRINT_COHORTS = [
+  {
+    id: 'intel_hd_520',
+    webglVendor: 'Intel Inc.',
+    webglRenderer: 'Intel(R) HD Graphics 520',
+    deviceMemory: 4,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Verdana']
+  },
+  {
+    id: 'intel_uhd_620',
+    webglVendor: 'Intel Inc.',
+    webglRenderer: 'Intel(R) UHD Graphics 620',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Times New Roman', 'Verdana']
+  },
+  {
+    id: 'intel_uhd_630',
+    webglVendor: 'Intel Inc.',
+    webglRenderer: 'Intel(R) UHD Graphics 630',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Times New Roman', 'Trebuchet MS']
+  },
+  {
+    id: 'intel_iris_xe',
+    webglVendor: 'Intel Inc.',
+    webglRenderer: 'Intel(R) Iris(R) Xe Graphics',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Roboto', 'Verdana']
+  },
+  {
+    id: 'amd_vega_8',
+    webglVendor: 'ATI Technologies Inc.',
+    webglRenderer: 'AMD Radeon(TM) Vega 8 Graphics',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Trebuchet MS']
+  },
+  {
+    id: 'amd_rx_560',
+    webglVendor: 'ATI Technologies Inc.',
+    webglRenderer: 'AMD Radeon RX 560 Series',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Verdana']
+  },
+  {
+    id: 'nvidia_gtx_1060',
+    webglVendor: 'NVIDIA Corporation',
+    webglRenderer: 'NVIDIA GeForce GTX 1060 6GB/PCIe/SSE2',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Verdana']
+  },
+  {
+    id: 'nvidia_gtx_1650',
+    webglVendor: 'NVIDIA Corporation',
+    webglRenderer: 'NVIDIA GeForce GTX 1650/PCIe/SSE2',
+    deviceMemory: 8,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Verdana']
+  },
+  {
+    id: 'nvidia_rtx_2060',
+    webglVendor: 'NVIDIA Corporation',
+    webglRenderer: 'NVIDIA GeForce RTX 2060/PCIe/SSE2',
+    deviceMemory: 16,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Verdana']
+  },
+  {
+    id: 'amd_rx_580',
+    webglVendor: 'ATI Technologies Inc.',
+    webglRenderer: 'AMD Radeon RX 580 Series',
+    deviceMemory: 16,
+    maxTouchPoints: 0,
+    plugins: ['Chrome PDF Viewer', 'Chromium PDF Viewer', 'Native Client'],
+    fonts: ['Arial', 'Calibri', 'Segoe UI', 'Tahoma', 'Trebuchet MS']
+  }
+];
+
+function readCohortLedgerSafe() {
+  try {
+    const raw = fs.readFileSync(cohortLedgerPath, 'utf8');
+    const j = JSON.parse(raw);
+    if (j && typeof j === 'object' && j.profiles && typeof j.profiles === 'object') return j;
+  } catch {}
+  return { version: 1, updatedAt: 0, profiles: {} };
+}
+
+function writeCohortLedgerSafe(ledger) {
+  try {
+    const dir = path.dirname(cohortLedgerPath);
+    try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const tmp = `${cohortLedgerPath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
+    fs.renameSync(tmp, cohortLedgerPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildCohortCounts(ledger) {
+  const counts = {};
+  const profiles = (ledger && ledger.profiles && typeof ledger.profiles === 'object') ? ledger.profiles : {};
+  for (const row of Object.values(profiles)) {
+    const id = String(row && row.cohortId || '').trim();
+    if (!id) continue;
+    counts[id] = (counts[id] || 0) + 1;
+  }
+  return counts;
+}
+
+function hashToUInt32(input) {
+  const h = crypto.createHash('sha256').update(String(input || ''), 'utf8').digest();
+  return h.readUInt32BE(0) >>> 0;
+}
+
+function pickBySeed(arr, seed) {
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const idx = Math.abs(Number(seed || 0)) % arr.length;
+  return arr[idx];
+}
+
+function resolveLocaleByCountry({ country, seed }) {
+  const cc = String(country || 'br').trim().toLowerCase();
+  const profile = COUNTRY_LOCALE_PROFILES[cc] || COUNTRY_LOCALE_PROFILES.br;
+  const tz = pickBySeed(profile.timezones, seed) || 'America/Sao_Paulo';
+  const langPack = pickBySeed(profile.languages, seed >> 1) || profile.languages[0];
+  return {
+    country: cc,
+    timezone: String(tz || 'America/Sao_Paulo'),
+    navigatorLanguage: String(langPack.navigatorLanguage || 'pt-BR'),
+    navigatorLanguages: Array.isArray(langPack.navigatorLanguages) ? langPack.navigatorLanguages.slice() : ['pt-BR', 'pt', 'en-US', 'en'],
+    acceptLanguage: String(langPack.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7')
+  };
+}
+
+function resolveCohortByProfile({ manifest, seed }) {
+  const m = (manifest && typeof manifest === 'object') ? manifest : {};
+  const profileName = String(m.nome || '').trim();
+  const vp = (m.fp && m.fp.viewport && typeof m.fp.viewport === 'object') ? m.fp.viewport : {};
+  const hc = Number(m.fp && m.fp.hardwareConcurrency || 8) || 8;
+  const width = Number(vp.width || 1366) || 1366;
+  const uaMajor = Number((String(m.uaString || '').match(/Chrome\/(\d+)\./) || [])[1] || 0) || 0;
+  // Coorte técnica plausível: hardware + viewport direcionam GPU provável.
+  const bucket = (() => {
+    if (hc <= 4 || width <= 1366) return ['intel_hd_520', 'intel_uhd_620'];
+    if (hc <= 8 && width <= 1600) return ['intel_uhd_620', 'intel_uhd_630', 'amd_vega_8'];
+    if (hc <= 12 && width <= 1920) return ['intel_iris_xe', 'nvidia_gtx_1060', 'nvidia_gtx_1650', 'amd_rx_560'];
+    if (hc <= 16) return ['nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'];
+    return ['nvidia_rtx_2060', 'amd_rx_580'];
+  })();
+  let pool = FINGERPRINT_COHORTS.filter((c) => bucket.includes(c.id));
+  // Leve amarra com geração do navegador: majors mais novos tendem a hardware mais novo.
+  if (uaMajor >= 136) {
+    const newer = pool.filter((c) => ['intel_iris_xe', 'nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'].includes(c.id));
+    if (newer.length) pool = newer;
+  }
+  const candidates = pool.length ? pool : FINGERPRINT_COHORTS;
+  if (!profileName) return pickBySeed(candidates, seed) || FINGERPRINT_COHORTS[0];
+
+  // Sticky + diversidade global: usa ledger persistente de coortes por perfil.
+  // Regra: reutiliza coorte já atribuída; se novo perfil, escolhe a menos usada.
+  const ledger = readCohortLedgerSafe();
+  const profiles = (ledger.profiles && typeof ledger.profiles === 'object') ? ledger.profiles : {};
+  const existing = profiles[profileName] && String(profiles[profileName].cohortId || '').trim();
+  if (existing) {
+    const keep = candidates.find((c) => c.id === existing);
+    if (keep) return keep;
+  }
+
+  const counts = buildCohortCounts(ledger);
+  const byId = new Map(candidates.map((c) => [c.id, c]));
+  let min = Number.POSITIVE_INFINITY;
+  let bestIds = [];
+  for (const c of candidates) {
+    const n = Number(counts[c.id] || 0) || 0;
+    if (n < min) {
+      min = n;
+      bestIds = [c.id];
+    } else if (n === min) {
+      bestIds.push(c.id);
+    }
+  }
+  const chosenId = pickBySeed(bestIds, seed) || bestIds[0] || candidates[0].id;
+  const chosen = byId.get(chosenId) || candidates[0];
+  profiles[profileName] = { cohortId: chosen.id, updatedAt: Date.now() };
+  const nextLedger = { version: 1, updatedAt: Date.now(), profiles };
+  writeCohortLedgerSafe(nextLedger);
+  return chosen;
+}
+
+async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
+  const m0 = (manifest && typeof manifest === 'object') ? manifest : {};
+  const anti = (m0.antiDetect && typeof m0.antiDetect === 'object') ? { ...m0.antiDetect } : {};
+  let seed = Number(anti.seed || 0) || 0;
+  if (!seed) {
+    const cUser = (() => {
+      try {
+        const cookies = Array.isArray(m0.cookies) ? m0.cookies : [];
+        const row = cookies.find((c) => c && c.name === 'c_user');
+        return String((row && row.value) || '');
+      } catch { return ''; }
+    })();
+    seed = hashToUInt32(`${nome}|${m0.uaPresetId || ''}|${cUser || ''}|${m0.createdAt || ''}`);
+  }
+  if (!seed) seed = hashToUInt32(nome || 'profile');
+  const locale = resolveLocaleByCountry({ country: proxyCountry || anti.country || 'br', seed });
+  const cohort = resolveCohortByProfile({ manifest: m0, seed });
+  const canvasNoise = Number((seed % 9) + 1);
+  const audioNoise = Number((seed % 13) + 1) / 100000;
+  const state = {
+    seed,
+    country: locale.country,
+    timezone: locale.timezone,
+    navigatorLanguage: locale.navigatorLanguage,
+    navigatorLanguages: locale.navigatorLanguages,
+    acceptLanguage: locale.acceptLanguage,
+    cohortId: cohort.id,
+    webglVendor: cohort.webglVendor,
+    webglRenderer: cohort.webglRenderer,
+    plugins: cohort.plugins,
+    fonts: cohort.fonts,
+    deviceMemory: Number(cohort.deviceMemory || 8) || 8,
+    maxTouchPoints: Number(cohort.maxTouchPoints || 0) || 0,
+    canvasNoise,
+    audioNoise,
+    updatedAt: Date.now()
+  };
+  try {
+    await manifestStore.update(nome, (cur) => {
+      const next = Object.assign({}, cur || {});
+      next.antiDetect = Object.assign({}, next.antiDetect || {}, state);
+      return next;
+    });
+  } catch {}
+  return state;
+}
 
 async function patchPage(nome, page, coords) {
   // BLINDAGEM: nome obrigatório
@@ -127,6 +398,9 @@ async function patchPage(nome, page, coords) {
   const viewport = manifest.fp?.viewport || { width: 1366, height: 768 };
   const dpr = manifest.fp?.dpr || 1;
   const hardwareConcurrency = manifest.fp?.hardwareConcurrency || 8;
+  const proxyResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+  const proxyCountry = String(proxyResolved && proxyResolved.slot && proxyResolved.slot.country || '').trim().toLowerCase() || 'br';
+  const antiState = await ensureFingerprintProfileState({ nome, manifest, proxyCountry });
 
   // --- PATCH FULL UA/UA-CH ---
   // P0 enterprise: CDP pode falhar com "Target closed" ou "Network.enable timed out" quando
@@ -151,8 +425,8 @@ async function patchPage(nome, page, coords) {
 
   // --- IDIOMA E REGION ---
   // ATENÇÃO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
-  const patchLang = process.env.BROWSER_LANG || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
-  const patchTz = process.env.BROWSER_TZ || 'America/Sao_Paulo';
+  const patchLang = process.env.BROWSER_LANG || antiState.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
+  const patchTz = process.env.BROWSER_TZ || antiState.timezone || 'America/Sao_Paulo';
   try { await page.setExtraHTTPHeaders({ 'accept-language': patchLang }); } catch {}
   try { await page.emulateTimezone(patchTz); } catch {}
 
@@ -164,16 +438,164 @@ async function patchPage(nome, page, coords) {
   }, hardwareConcurrency);
 
   // --- LANGUAGE/PLATFORM PATCH anti-detect ---
-  await page.evaluateOnNewDocument(() => {
+  const fingerprintCfg = {
+    navigatorLanguage: antiState.navigatorLanguage,
+    navigatorLanguages: antiState.navigatorLanguages,
+    timezone: patchTz,
+    webglVendor: antiState.webglVendor,
+    webglRenderer: antiState.webglRenderer,
+    canvasNoise: antiState.canvasNoise,
+    audioNoise: antiState.audioNoise,
+    plugins: antiState.plugins,
+    fonts: antiState.fonts,
+    deviceMemory: antiState.deviceMemory,
+    maxTouchPoints: antiState.maxTouchPoints
+  };
+
+  await page.evaluateOnNewDocument((cfg) => {
     const safeDefine = (obj, key, getter) => {
       try {
         Object.defineProperty(obj, key, { get: getter, configurable: true });
       } catch {}
     };
-    safeDefine(navigator, 'language', () => 'pt-BR');
-    safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
+    safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
+    safeDefine(navigator, 'languages', () => cfg.navigatorLanguages.slice());
     safeDefine(navigator, 'platform', () => 'Win32');
     safeDefine(navigator, 'webdriver', () => undefined);
+    safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
+    safeDefine(navigator, 'maxTouchPoints', () => cfg.maxTouchPoints);
+    const ro = Intl.DateTimeFormat.prototype.resolvedOptions;
+    if (typeof ro === 'function') {
+      Intl.DateTimeFormat.prototype.resolvedOptions = function () {
+        const out = ro.apply(this, arguments);
+        return Object.assign({}, out, { timeZone: cfg.timezone, locale: cfg.navigatorLanguage });
+      };
+    }
+
+    const fakePlugins = (cfg.plugins || []).map((name, idx) => ({
+      name,
+      filename: `internal-${idx}.dll`,
+      description: name
+    }));
+    const pluginArray = Object.assign(fakePlugins.slice(), {
+      item: (i) => fakePlugins[i] || null,
+      namedItem: (n) => fakePlugins.find((p) => p && p.name === n) || null,
+      refresh: () => {}
+    });
+    safeDefine(navigator, 'plugins', () => pluginArray);
+    safeDefine(navigator, 'mimeTypes', () => ({ length: 0, item: () => null, namedItem: () => null }));
+
+    // WebGL determinístico por perfil/coorte
+    const patchWebGl = (Proto) => {
+      if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
+      const originalGetParameter = Proto.prototype.getParameter;
+      const originalGetExtension = Proto.prototype.getExtension;
+      const wrappedGetParameter = function (param) {
+        if (param === 37445) return cfg.webglVendor;   // UNMASKED_VENDOR_WEBGL
+        if (param === 37446) return cfg.webglRenderer; // UNMASKED_RENDERER_WEBGL
+        return originalGetParameter.apply(this, arguments);
+      };
+      const wrappedGetExtension = function (name) {
+        const n = String(name || '').toUpperCase();
+        if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+          return {
+            UNMASKED_VENDOR_WEBGL: 37445,
+            UNMASKED_RENDERER_WEBGL: 37446
+          };
+        }
+        return originalGetExtension ? originalGetExtension.apply(this, arguments) : null;
+      };
+      try {
+        Object.defineProperty(Proto.prototype, 'getParameter', { value: wrappedGetParameter, configurable: true });
+      } catch {
+        try { Proto.prototype.getParameter = wrappedGetParameter; } catch {}
+      }
+      try {
+        Object.defineProperty(Proto.prototype, 'getExtension', { value: wrappedGetExtension, configurable: true });
+      } catch {
+        try { Proto.prototype.getExtension = wrappedGetExtension; } catch {}
+      }
+    };
+    const installWebglContextWrapper = () => {
+      try {
+        const proto = window.HTMLCanvasElement && window.HTMLCanvasElement.prototype;
+        if (!proto || proto.__adWebglCtxWrapped) return;
+        const originalGetContext = proto.getContext;
+        proto.getContext = function (type) {
+          const ctx = originalGetContext.apply(this, arguments);
+          const t = String(type || '').toLowerCase();
+          if (ctx && (t === 'webgl' || t === 'experimental-webgl' || t === 'webgl2')) {
+            try {
+              const gp = ctx.getParameter && ctx.getParameter.bind(ctx);
+              const ge = ctx.getExtension && ctx.getExtension.bind(ctx);
+              if (gp) {
+                ctx.getParameter = function (param) {
+                  if (param === 37445) return cfg.webglVendor;
+                  if (param === 37446) return cfg.webglRenderer;
+                  return gp(param);
+                };
+              }
+              if (ge) {
+                ctx.getExtension = function (name) {
+                  const n = String(name || '').toUpperCase();
+                  if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+                    return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+                  }
+                  return ge(name);
+                };
+              }
+            } catch {}
+          }
+          return ctx;
+        };
+        proto.__adWebglCtxWrapped = true;
+      } catch {}
+    };
+    patchWebGl(window.WebGLRenderingContext);
+    patchWebGl(window.WebGL2RenderingContext);
+    installWebglContextWrapper();
+
+    // Canvas determinístico estável (ruído mínimo por seed)
+    if (window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype && window.CanvasRenderingContext2D.prototype.getImageData) {
+      const originalGetImageData = window.CanvasRenderingContext2D.prototype.getImageData;
+      window.CanvasRenderingContext2D.prototype.getImageData = function () {
+        const imageData = originalGetImageData.apply(this, arguments);
+        try {
+          if (imageData && imageData.data && imageData.data.length >= 4) {
+            imageData.data[0] = (imageData.data[0] + cfg.canvasNoise) % 255;
+          }
+        } catch {}
+        return imageData;
+      };
+    }
+
+    // Audio fingerprint determinístico estável (offset minúsculo)
+    if (window.AudioBuffer && window.AudioBuffer.prototype && window.AudioBuffer.prototype.getChannelData) {
+      const originalGetChannelData = window.AudioBuffer.prototype.getChannelData;
+      window.AudioBuffer.prototype.getChannelData = function () {
+        const data = originalGetChannelData.apply(this, arguments);
+        try {
+          if (data && data.length > 8) data[0] = data[0] + cfg.audioNoise;
+        } catch {}
+        return data;
+      };
+    }
+
+    // Fonts (sinal plausível + estável)
+    try {
+      const fonts = Array.isArray(cfg.fonts) ? cfg.fonts.map((x) => String(x || '').toLowerCase()) : [];
+      if (document.fonts && typeof document.fonts.check === 'function') {
+        const originalCheck = document.fonts.check.bind(document.fonts);
+        document.fonts.check = function (font) {
+          try {
+            const family = String(font || '').toLowerCase();
+            if (fonts.some((f) => family.includes(f))) return true;
+          } catch {}
+          return originalCheck.apply(this, arguments);
+        };
+      }
+    } catch {}
+
     window.chrome = window.chrome || { runtime: {} };
     // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
     // We force denied semantics, so behavior stays non-intrusive.
@@ -191,7 +613,80 @@ async function patchPage(nome, page, coords) {
         });
       } catch {}
     }
-  });
+  }, fingerprintCfg);
+
+  // Aplicar também no documento corrente (não apenas em navegações futuras).
+  try {
+    await page.evaluate((cfg) => {
+      const safeDefine = (obj, key, getter) => {
+        try { Object.defineProperty(obj, key, { get: getter, configurable: true }); } catch {}
+      };
+      safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
+      safeDefine(navigator, 'languages', () => cfg.navigatorLanguages.slice());
+      safeDefine(navigator, 'platform', () => 'Win32');
+      safeDefine(navigator, 'webdriver', () => undefined);
+      safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
+      safeDefine(navigator, 'maxTouchPoints', () => cfg.maxTouchPoints);
+
+      const patchWebGl = (Proto) => {
+        if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
+        const originalGetParameter = Proto.prototype.getParameter;
+        const originalGetExtension = Proto.prototype.getExtension;
+        const wrappedGetParameter = function (param) {
+          if (param === 37445) return cfg.webglVendor;
+          if (param === 37446) return cfg.webglRenderer;
+          return originalGetParameter.apply(this, arguments);
+        };
+        const wrappedGetExtension = function (name) {
+          const n = String(name || '').toUpperCase();
+          if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+            return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+          }
+          return originalGetExtension ? originalGetExtension.apply(this, arguments) : null;
+        };
+        try { Object.defineProperty(Proto.prototype, 'getParameter', { value: wrappedGetParameter, configurable: true }); } catch {}
+        try { Object.defineProperty(Proto.prototype, 'getExtension', { value: wrappedGetExtension, configurable: true }); } catch {}
+      };
+      const installWebglContextWrapper = () => {
+        try {
+          const proto = window.HTMLCanvasElement && window.HTMLCanvasElement.prototype;
+          if (!proto || proto.__adWebglCtxWrappedNow) return;
+          const originalGetContext = proto.getContext;
+          proto.getContext = function (type) {
+            const ctx = originalGetContext.apply(this, arguments);
+            const t = String(type || '').toLowerCase();
+            if (ctx && (t === 'webgl' || t === 'experimental-webgl' || t === 'webgl2')) {
+              try {
+                const gp = ctx.getParameter && ctx.getParameter.bind(ctx);
+                const ge = ctx.getExtension && ctx.getExtension.bind(ctx);
+                if (gp) {
+                  ctx.getParameter = function (param) {
+                    if (param === 37445) return cfg.webglVendor;
+                    if (param === 37446) return cfg.webglRenderer;
+                    return gp(param);
+                  };
+                }
+                if (ge) {
+                  ctx.getExtension = function (name) {
+                    const n = String(name || '').toUpperCase();
+                    if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+                      return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+                    }
+                    return ge(name);
+                  };
+                }
+              } catch {}
+            }
+            return ctx;
+          };
+          proto.__adWebglCtxWrappedNow = true;
+        } catch {}
+      };
+      patchWebGl(window.WebGLRenderingContext);
+      patchWebGl(window.WebGL2RenderingContext);
+      installWebglContextWrapper();
+    }, fingerprintCfg);
+  } catch {}
 
   // --- GEOLOCALIZAÇÃO ---
   if (coords && coords.latitude) {
@@ -351,6 +846,31 @@ async function patchPage(nome, page, coords) {
     } catch {}
     return { loginRequired: true, reason: 'probe_failed' };
   }
+}
+
+function resolvePatchCoordsForProfile(profileName, manifest) {
+  const nome = String(profileName || '').trim();
+  const strictGateway = gatewayProxy.isStrictProxyRequired();
+  const geoProxy = gatewayProxy.resolveGeoForProfile({ profileName: nome, manifest });
+  if (strictGateway) {
+    if (!geoProxy || geoProxy.enabled !== true || !geoProxy.coords) {
+      const reason = String(geoProxy && geoProxy.reason || 'geo_proxy_unresolved').trim() || 'geo_proxy_unresolved';
+      throw new Error(`gateway_geo_required:${reason}`);
+    }
+    try {
+      logger.info('[GEO_PROXY][strict]', {
+        nome,
+        slotId: String(geoProxy.slotId || ''),
+        source: String(geoProxy.source || 'slot_geo'),
+        ipCurrent: String(geoProxy.ipCurrent || '')
+      });
+    } catch {}
+    return geoProxy.coords;
+  }
+  if (geoProxy && geoProxy.enabled === true && geoProxy.coords) {
+    return geoProxy.coords;
+  }
+  return utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
 }
 
 // Minimização suave
@@ -1027,7 +1547,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let browser = null;
   let pruneTimer = null;
   try {
-    const coords = utils.getCoords(manifest.cidade || '');
+    const coords = resolvePatchCoordsForProfile(manifest && manifest.nome ? manifest.nome : nome, manifest);
     const gatewayResolved = gatewayProxy.resolveProxyForProfile({
       profileName: manifest && manifest.nome ? manifest.nome : nome,
       manifest
@@ -2300,7 +2820,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch {}
 
-  // Ler manifest (fonte de verdade) + fallback de cidade via perfis.json só para coords
+    // Ler manifest (fonte de verdade) + definição de coords por política do gateway.
   let manifest = null;
   let coords = null;
   let robeMode = 'itens';
@@ -2309,12 +2829,19 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (manifest && manifest.robeMode) robeMode = String(manifest.robeMode);
   } catch {}
   try {
-    // fallback cidade para coords (não bloqueante)
-    const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-    const perfil = perfisArr.find(p => p && p.nome === nome);
-    const city = (manifest && manifest.cidade) ? String(manifest.cidade) : String((perfil && perfil.cidade) || '');
-    coords = utils.getCoords(city || '');
-  } catch {}
+    // Sem fallback para cidade da conta quando gateway estrito está ON.
+    coords = resolvePatchCoordsForProfile(nome, manifest || {});
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e || '');
+    if (/gateway_geo_required:/i.test(msg)) throw e;
+    // Fora do modo estrito, mantém robustez sem travar o fluxo.
+    try {
+      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
+      const perfil = perfisArr.find(p => p && p.nome === nome);
+      const city = (manifest && manifest.cidade) ? String(manifest.cidade) : String((perfil && perfil.cidade) || '');
+      coords = utils.getCoords(city || '');
+    } catch {}
+  }
 
   const cookies = Array.isArray(cookiesOverride) && cookiesOverride.length
     ? cookiesOverride
@@ -4723,6 +5250,7 @@ module.exports = {
   configureProfile,
   invocarHumano,
   patchPage,
+  resolvePatchCoordsForProfile,
   injectCookies,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)

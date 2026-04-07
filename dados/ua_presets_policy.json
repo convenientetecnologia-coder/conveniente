@@ -1,0 +1,271 @@
+{
+  "version": 3,
+  "generatedAt": 1775590497329,
+  "mode": "enterprise_curated_pool_all_approved",
+  "criteria": {
+    "maxMajor": 139,
+    "approvedDeltaMax": 16,
+    "adjustDeltaMax": 16,
+    "targetPoolSize": 36,
+    "perKeyCap": 2
+  },
+  "tiersByPresetId": {
+    "win10-chrome-124-1680x1050-035": {
+      "tier": "aprovado",
+      "major": 124,
+      "delta": 15,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-124-1920x1200-036": {
+      "tier": "aprovado",
+      "major": 124,
+      "delta": 15,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-125-1440x900-034": {
+      "tier": "aprovado",
+      "major": 125,
+      "delta": 14,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-125-1536x864-033": {
+      "tier": "aprovado",
+      "major": 125,
+      "delta": 14,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-126-1600x900-031": {
+      "tier": "aprovado",
+      "major": 126,
+      "delta": 13,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-126-1600x900-032": {
+      "tier": "aprovado",
+      "major": 126,
+      "delta": 13,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-127-2560x1440-029": {
+      "tier": "aprovado",
+      "major": 127,
+      "delta": 12,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-127-2560x1440-030": {
+      "tier": "aprovado",
+      "major": 127,
+      "delta": 12,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-128-1366x768-027": {
+      "tier": "aprovado",
+      "major": 128,
+      "delta": 11,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-128-2560x1440-028": {
+      "tier": "aprovado",
+      "major": 128,
+      "delta": 11,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-129-1366x768-025": {
+      "tier": "aprovado",
+      "major": 129,
+      "delta": 10,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-129-1366x768-026": {
+      "tier": "aprovado",
+      "major": 129,
+      "delta": 10,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-130-1366x768-024": {
+      "tier": "aprovado",
+      "major": 130,
+      "delta": 9,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-130-1920x1080-023": {
+      "tier": "aprovado",
+      "major": 130,
+      "delta": 9,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-131-1920x1080-021": {
+      "tier": "aprovado",
+      "major": 131,
+      "delta": 8,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-131-1920x1080-022": {
+      "tier": "aprovado",
+      "major": 131,
+      "delta": 8,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-132-1920x1080-019": {
+      "tier": "aprovado",
+      "major": 132,
+      "delta": 7,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-132-3840x2160-020": {
+      "tier": "aprovado",
+      "major": 132,
+      "delta": 7,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-133-1920x1080-017": {
+      "tier": "aprovado",
+      "major": 133,
+      "delta": 6,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-133-1920x1080-018": {
+      "tier": "aprovado",
+      "major": 133,
+      "delta": 6,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-134-1680x1050-015": {
+      "tier": "aprovado",
+      "major": 134,
+      "delta": 5,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-134-1920x1200-016": {
+      "tier": "aprovado",
+      "major": 134,
+      "delta": 5,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-135-1440x900-014": {
+      "tier": "aprovado",
+      "major": 135,
+      "delta": 4,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-135-1536x864-013": {
+      "tier": "aprovado",
+      "major": 135,
+      "delta": 4,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-136-1600x900-011": {
+      "tier": "aprovado",
+      "major": 136,
+      "delta": 3,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-136-1600x900-012": {
+      "tier": "aprovado",
+      "major": 136,
+      "delta": 3,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-137-2560x1440-010": {
+      "tier": "aprovado",
+      "major": 137,
+      "delta": 2,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-138-1366x768-004": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-138-1366x768-005": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-138-2560x1440-009": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-138-1366x768-006": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-138-1366x768-007": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-138-2560x1440-008": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-139-1920x1080-001": {
+      "tier": "aprovado",
+      "major": 139,
+      "delta": 0,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-139-1920x1080-002": {
+      "tier": "aprovado",
+      "major": 139,
+      "delta": 0,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-139-1920x1080-003": {
+      "tier": "aprovado",
+      "major": 139,
+      "delta": 0,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    }
+  },
+  "cleanedAt": 1775590507057,
+  "originalTotal": 84,
+  "cleanedTotal": 36,
+  "removedTotal": 48,
+  "updatedAt": 1775590704138
+}
