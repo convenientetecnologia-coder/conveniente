@@ -363,12 +363,12 @@ function applyGatewayPayload(payload) {
     scheme: String(p.superProxy.scheme || "http").trim().toLowerCase() || "http"
   } : null;
   next.trafficAuthByZone = (p.trafficAuthByZone && typeof p.trafficAuthByZone === "object") ? p.trafficAuthByZone : {};
+  const slotsById = new Map((Array.isArray(next.slots) ? next.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
   // CT é o maestro: mantém assignments existentes e aplica plano vindo do CT.
   // Não redistribui localmente no host.
   next.assignments = normalizeAssignments(prev && prev.assignments, slotsById);
   // Plano vindo do CT (controle global): quando presente, prevalece por perfil.
   try {
-    const slotsById = new Map((Array.isArray(next.slots) ? next.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
     const plannedRaw = (p.assignments && typeof p.assignments === "object") ? p.assignments : {};
     const normalizedPlan = {};
     for (const [profileNameRaw, recRaw] of Object.entries(plannedRaw)) {
