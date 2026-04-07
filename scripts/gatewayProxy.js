@@ -363,7 +363,9 @@ function applyGatewayPayload(payload) {
     scheme: String(p.superProxy.scheme || "http").trim().toLowerCase() || "http"
   } : null;
   next.trafficAuthByZone = (p.trafficAuthByZone && typeof p.trafficAuthByZone === "object") ? p.trafficAuthByZone : {};
-  next.assignments = reconcileAssignments(next, prev);
+  // CT é o maestro: mantém assignments existentes e aplica plano vindo do CT.
+  // Não redistribui localmente no host.
+  next.assignments = normalizeAssignments(prev && prev.assignments, slotsById);
   // Plano vindo do CT (controle global): quando presente, prevalece por perfil.
   try {
     const slotsById = new Map((Array.isArray(next.slots) ? next.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
@@ -409,60 +411,18 @@ function resolveProxyForProfile({ profileName, manifest }) {
   if (provider !== "proxycheap") return { enabled: false, reason: "unsupported_provider" };
   const slots = st.slots || [];
   if (!slots.length) return { enabled: false, reason: "no_slots" };
-  const slotIdsHost = orderedSlotIdsForHost(slots.map((s) => String(s && s.slotId || "").trim()).filter(Boolean));
 
   const byId = new Map(slots.map((s) => [s.slotId, s]));
-  const manifestGp = (manifest && manifest.gatewayProxy && typeof manifest.gatewayProxy === "object") ? manifest.gatewayProxy : null;
-  const currentSlotId = String(manifestGp && manifestGp.slotId || "").trim();
-  const currentInventoryVersion = String(manifestGp && manifestGp.inventoryVersion || "").trim();
-  // Sticky forte: mantém slot apenas se o inventário não mudou.
-  // Mudou inventário => recalcula de forma determinística para reequilibrar.
-  const canKeepSticky = !!(currentSlotId && currentInventoryVersion && currentInventoryVersion === String(st.inventoryVersion || ""));
   const inv = String(st.inventoryVersion || "");
   const assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
   let slot = null;
   if (assigned && assigned.inventoryVersion === inv && byId.has(assigned.slotId)) {
     slot = byId.get(assigned.slotId);
-  } else if (canKeepSticky && byId.has(currentSlotId)) {
-    slot = byId.get(currentSlotId);
   }
-  if (!slot) {
-    const activeAssignments = {};
-    for (const [pname, rec] of Object.entries(st.assignments || {})) {
-      if (String(rec && rec.inventoryVersion || "") !== inv) continue;
-      const sid = String(rec && rec.slotId || "");
-      if (!byId.has(sid)) continue;
-      activeAssignments[pname] = sid;
-    }
-    let chosenSlotId = "";
-    const freeSid = firstFreeSlotId(slotIdsHost, activeAssignments);
-    if (freeSid) chosenSlotId = freeSid;
-    else chosenSlotId = chooseLeastLoadedSlot(slotIdsHost, activeAssignments, profileName);
-    if (chosenSlotId && byId.has(chosenSlotId)) slot = byId.get(chosenSlotId);
-    if (!slot) {
-      const idx = profileHash(profileName) % Math.max(1, slotIdsHost.length);
-      const fallbackSlotId = slotIdsHost[idx];
-      slot = byId.get(fallbackSlotId) || slots[0];
-    }
+  if (!assigned || String(assigned.inventoryVersion || "") !== inv) {
+    return { enabled: false, reason: "missing_slot_assignment" };
   }
-  if (!slot) return { enabled: false, reason: "slot_unresolved" };
-
-  // Persistência sticky por conta: guarda slot desejado em estado local.
-  try {
-    const rec = st.assignments && st.assignments[profileName];
-    if (!rec || rec.slotId !== slot.slotId || rec.inventoryVersion !== inv || st.plannerVersion !== ASSIGNMENT_PLANNER_VERSION) {
-      const next = Object.assign({}, st);
-      next.assignments = Object.assign({}, st.assignments || {}, {
-        [profileName]: {
-          slotId: String(slot.slotId),
-          inventoryVersion: inv,
-          updatedAt: Date.now()
-        }
-      });
-      next.plannerVersion = ASSIGNMENT_PLANNER_VERSION;
-      writeJsonAtomic(STATE_PATH, next);
-    }
-  } catch {}
+  if (!slot) return { enabled: false, reason: "assigned_slot_unavailable" };
 
   let proxyServer = "";
   let auth = null;
