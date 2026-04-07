@@ -130,9 +130,12 @@ function normalizeAssignments(input, slotsById) {
     const inventoryVersion = String(rec && rec.inventoryVersion || "").trim();
     if (!slotId || !inventoryVersion) continue;
     if (!slotsById.has(slotId)) continue;
+    const cohortIdRaw = String(rec && rec.cohortId || "").trim();
+    const cohortId = /^[a-z0-9_:-]{1,64}$/i.test(cohortIdRaw) ? cohortIdRaw : "";
     out[profileName] = {
       slotId,
       inventoryVersion,
+      cohortId,
       updatedAt: Number(rec && rec.updatedAt || 0) || 0
     };
   }
@@ -410,6 +413,7 @@ function applyGatewayPayload(payload) {
   // Plano vindo do CT (controle global): quando presente, prevalece por perfil.
   try {
     const plannedRaw = (p.assignments && typeof p.assignments === "object") ? p.assignments : {};
+    const cohortRaw = (p.cohortAssignments && typeof p.cohortAssignments === "object") ? p.cohortAssignments : {};
     const normalizedPlan = {};
     for (const [profileNameRaw, recRaw] of Object.entries(plannedRaw)) {
       const profileName = String(profileNameRaw || "").trim();
@@ -417,11 +421,34 @@ function applyGatewayPayload(payload) {
       const rec = (recRaw && typeof recRaw === "object") ? recRaw : {};
       const slotId = String(rec.slotId || "").trim();
       if (!slotId || !slotsById.has(slotId)) continue;
+      const cohortIdRaw = String(rec.cohortId || "").trim();
+      const cohortId = /^[a-z0-9_:-]{1,64}$/i.test(cohortIdRaw) ? cohortIdRaw : "";
       normalizedPlan[profileName] = {
         slotId,
         inventoryVersion: String(next.inventoryVersion || ""),
+        cohortId,
         updatedAt: Date.now()
       };
+    }
+    for (const [profileNameRaw, recRaw] of Object.entries(cohortRaw)) {
+      const profileName = String(profileNameRaw || "").trim();
+      if (!profileName) continue;
+      const rec = (recRaw && typeof recRaw === "object") ? recRaw : {};
+      const cohortIdRaw = String(rec.cohortId || "").trim();
+      const cohortId = /^[a-z0-9_:-]{1,64}$/i.test(cohortIdRaw) ? cohortIdRaw : "";
+      if (!cohortId) continue;
+      if (!normalizedPlan[profileName]) {
+        const prevRec = next.assignments && next.assignments[profileName] ? next.assignments[profileName] : null;
+        if (!prevRec) continue;
+        normalizedPlan[profileName] = {
+          slotId: String(prevRec.slotId || "").trim(),
+          inventoryVersion: String(next.inventoryVersion || ""),
+          cohortId,
+          updatedAt: Date.now()
+        };
+        continue;
+      }
+      normalizedPlan[profileName].cohortId = cohortId;
     }
     if (Object.keys(normalizedPlan).length > 0) {
       next.assignments = Object.assign({}, next.assignments || {}, normalizedPlan);
@@ -431,6 +458,19 @@ function applyGatewayPayload(payload) {
   next.updatedAt = Date.now();
   writeJsonAtomic(STATE_PATH, next);
   return { ok: true, slotsCount: next.slots.length, inventoryVersion: next.inventoryVersion };
+}
+
+function resolveCohortForProfile({ profileName, manifest }) {
+  const st = readState();
+  if (!st.globalEnabled || !st.hostEnabled) return { enabled: false, reason: "gateway_disabled" };
+  const inv = String(st.inventoryVersion || "");
+  const assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
+  if (!assigned || String(assigned.inventoryVersion || "") !== inv) {
+    return { enabled: false, reason: "missing_slot_assignment" };
+  }
+  const cohortId = String(assigned.cohortId || "").trim();
+  if (!cohortId) return { enabled: false, reason: "missing_cohort_assignment" };
+  return { enabled: true, cohortId };
 }
 
 function profileHash(profileName) {
@@ -665,6 +705,7 @@ module.exports = {
   readState,
   applyGatewayPayload,
   resolveProxyForProfile,
+  resolveCohortForProfile,
   resolveGeoForProfile,
   persistManifestAssignment,
   isStrictProxyRequired,

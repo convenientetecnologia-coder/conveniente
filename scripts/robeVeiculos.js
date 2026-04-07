@@ -812,7 +812,9 @@ async function preencherPreco(page) {
   await inp.press('Enter');
   await sleep(jitter(200, 320));
   const val = await page.evaluate(el => el.value, inp);
-  const ok = val && (val.trim() === '0' || /(^R\$?\s*0(,00)?$)/.test(val.trim()));
+  const txt = String(val || '').trim();
+  const onlyDigits = txt.replace(/\D/g, '');
+  const ok = !!txt && !!onlyDigits && !/[1-9]/.test(onlyDigits);
   if (!ok) throw new Error(`Preço não ficou "0" (value="${val}").`);
 }
 

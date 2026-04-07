@@ -264,7 +264,7 @@ function resolveLocaleByCountry({ country, seed }) {
   };
 }
 
-function resolveCohortByProfile({ manifest, seed }) {
+function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
   const m = (manifest && typeof manifest === 'object') ? manifest : {};
   const profileName = String(m.nome || '').trim();
   const vp = (m.fp && m.fp.viewport && typeof m.fp.viewport === 'object') ? m.fp.viewport : {};
@@ -286,6 +286,19 @@ function resolveCohortByProfile({ manifest, seed }) {
     if (newer.length) pool = newer;
   }
   const candidates = pool.length ? pool : FINGERPRINT_COHORTS;
+  const forced = String(forcedCohortId || '').trim();
+  if (forced) {
+    const forcedHit = FINGERPRINT_COHORTS.find((c) => c.id === forced);
+    if (forcedHit) {
+      if (profileName) {
+        const ledger = readCohortLedgerSafe();
+        const profiles = (ledger.profiles && typeof ledger.profiles === 'object') ? ledger.profiles : {};
+        profiles[profileName] = { cohortId: forcedHit.id, updatedAt: Date.now() };
+        writeCohortLedgerSafe({ version: 1, updatedAt: Date.now(), profiles });
+      }
+      return forcedHit;
+    }
+  }
   if (!profileName) return pickBySeed(candidates, seed) || FINGERPRINT_COHORTS[0];
 
   // Sticky + diversidade global: usa ledger persistente de coortes por perfil.
@@ -335,7 +348,12 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
   }
   if (!seed) seed = hashToUInt32(nome || 'profile');
   const locale = resolveLocaleByCountry({ country: proxyCountry || anti.country || 'br', seed });
-  const cohort = resolveCohortByProfile({ manifest: m0, seed });
+  let forcedCohortId = '';
+  try {
+    const byCt = gatewayProxy.resolveCohortForProfile({ profileName: nome, manifest: m0 });
+    if (byCt && byCt.enabled === true) forcedCohortId = String(byCt.cohortId || '').trim();
+  } catch {}
+  const cohort = resolveCohortByProfile({ manifest: m0, seed, forcedCohortId });
   const canvasNoise = Number((seed % 9) + 1);
   const audioNoise = Number((seed % 13) + 1) / 100000;
   const state = {
