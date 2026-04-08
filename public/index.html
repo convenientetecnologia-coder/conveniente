@@ -1006,6 +1006,24 @@
       if (!s.inWindowNow && s.nextWindowLabel) out.push(buildPill(`Próx: ${s.nextWindowLabel}`, 'info'));
       return out;
     }
+    function buildRobeSessionPills(summary) {
+      const out = [];
+      const s = (summary && typeof summary === 'object') ? summary : null;
+      if (!s || s.featureEnabled === false || s.enabled !== true) return out;
+      const state = String(s.state || '').toLowerCase();
+      const planned = Math.max(0, Number(s.plannedPosts || 0) || 0);
+      const posted = Math.max(0, Number(s.postedPosts || 0) || 0);
+      if (planned > 0) out.push(buildPill(`Sessão: ${posted}/${planned} posts`, 'info'));
+      if (state === 'posting') {
+        const rem = Math.max(0, Number(s.remainingInAction || 0) || 0);
+        out.push(buildPill(`Sessão: postando${rem > 0 ? ` (${rem} no lote)` : ''}`, 'good'));
+      } else if (state === 'pause') {
+        out.push(buildPill(`Sessão: pausa${s.nextAtLabel ? ` até ${s.nextAtLabel}` : ''}`, 'warn'));
+      } else if (state === 'done') {
+        out.push(buildPill('Sessão: bloco concluído', 'info'));
+      }
+      return out;
+    }
 
     // Helper Abas/pages por navegador
     function buildAbasPill(numPages) {
@@ -1317,6 +1335,7 @@
         const robeStatus = robes[p.nome] || {};
         const robeCooldownSec = robeStatus.cooldownSec || 0;
         const robeDailyPlan = (p && p.robeDailyPlanSummary && typeof p.robeDailyPlanSummary === 'object') ? p.robeDailyPlanSummary : null;
+        const robeSession = (p && p.robeSessionSummary && typeof p.robeSessionSummary === 'object') ? p.robeSessionSummary : null;
         const robeDailyGateClosed = !!(robeDailyPlan && robeDailyPlan.featureEnabled !== false && (robeDailyPlan.enabled !== true || robeDailyPlan.inWindowNow !== true));
         const fila = robeQueue || [];
         const inQueue = fila.includes(p.nome);
@@ -1547,6 +1566,7 @@
           titleRow.append(buildRobeEstadoPill(robeStatus.estado));
         }
         for (const pp of buildRobeDailyPlanPills(robeDailyPlan)) titleRow.append(pp);
+        for (const sp of buildRobeSessionPills(robeSession)) titleRow.append(sp);
 
         // Opcional: Adicione pill/status visual "Modo Humano"
         if (p.humanControl || p.humanHold) {

@@ -93,7 +93,8 @@ async function montarPerfisBaseline() {
     messengerPin: false,
     messengerPinReason: null,
     problem: false, // <<< ALTERAÇÃO AQUI
-    robeDailyPlanSummary: null
+    robeDailyPlanSummary: null,
+    robeSessionSummary: null
   }));
 }
 
@@ -163,7 +164,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     messengerPin: false,
     messengerPinReason: null,
     problem: false, // <<< ALTERAÇÃO AQUI
-    robeDailyPlanSummary: null
+    robeDailyPlanSummary: null,
+    robeSessionSummary: null
   }));
 
   // Overlay dos perfis atuais vindos do status (worker ou fallback)
@@ -372,7 +374,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     messengerPin: false,
     messengerPinReason: null,
     problem: false, // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 1)
-    robeDailyPlanSummary: null
+    robeDailyPlanSummary: null,
+    robeSessionSummary: null
     // outros campos militares do shape retrocompatível
   }]));
   let warningINST = undefined;
@@ -540,7 +543,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       messengerPin: false,
       messengerPinReason: null,
       problem: false, // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
-      robeDailyPlanSummary: null
+      robeDailyPlanSummary: null,
+      robeSessionSummary: null
     }));
   } catch(e2) {
     perfisSkeleton = Array.isArray(_lastBaselinePerfis) ? _lastBaselinePerfis : [];

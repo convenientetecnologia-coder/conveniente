@@ -1283,3 +1283,34 @@ Conta citada para teste:
   - sync de report passa `plannedCohorts` junto com `plannedAssignments` no payload desejado;
   - quando host sinaliza `needsGatewayInventory/needsGatewayProxyTrafficCreds`, envio segue `force=true` (nao bloqueado por cooldown).
 - Resultado esperado: fim da tempestade de reenvio identico; gateway so reenfila em mudanca real, pedido explicito do host ou apos cooldown de seguranca.
+
+---
+
+## RAW_INPUT — 2026-04-08 (Robe: postagem “frenética” 24/7 + sinais de automação)
+
+```text
+Contexto operacional (humano):
+
+- Temos hosts com ~120 contas no mesmo servidor.
+- O Robe está sempre com 2/3/4/5 contas na fila, postando ininterruptamente:
+  - uma conta posta → entra em cooldown;
+  - outras seguem postando;
+  - quando o cooldown termina, a conta entra na fila novamente e normalmente já entra na posição 3/4/5.
+- Mudança recente positiva: antes era ~120 navegadores no mesmo proxy; agora está ~120 navegadores distribuídos por ~12 proxies.
+  - Resultado percebido: algumas contas começaram a engajar após 2–3 dias.
+- Ainda assim: está ocorrendo captcha e deslog em algumas contas.
+- Ao relogar, algumas contas mostram mensagem do Facebook indicando suspeita de comportamento automatizado.
+
+Diretriz operacional:
+- foco agora é 110% no Robe (reduzir “cara de automação” sem quebrar produção).
+
+Nota:
+- humano vai enviar proposta de “humanização” escrita por outro GPT para debate e implementação segura.
+```
+
+### TRIAGE — 2026-04-08 (Robe: anti‑cluster/humanização)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Robe: postagem 24/7 “frenética” com cluster (fila sempre cheia) + captcha/deslog + aviso “suspeita de automação” | need_evidence | `docs/inbox/need_evidence/INC-20260408-1400-01.md` |
+| 2 | P0 | Robe V2: sessões/lotes/pausas dentro do bloco (substituir padrão de cooldown fixo por post) | in_progress | `docs/inbox/need_evidence/INC-20260408-1400-01.md` |

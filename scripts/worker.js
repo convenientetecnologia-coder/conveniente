@@ -5846,6 +5846,26 @@ const ROBE_DAILY_PLAN_CFG = {
   gateLogEveryMs: Math.max(60_000, Number(process.env.ROBE_DAILY_PLAN_GATE_LOG_EVERY_MS || 10 * 60_000) || 10 * 60_000),
   vtag: 'robe_daily_plan_v1'
 };
+const ROBE_SESSION_V2_CFG = {
+  enabled: true,
+  minPostsPerHour: 2.2,
+  maxPostsPerHour: 3.4,
+  jitterMin: 0.85,
+  jitterMax: 1.15,
+  lotMin: 1,
+  lotMax: 5,
+  pauseShortMin: 10,
+  pauseShortMax: 30,
+  pauseMediumMin: 30,
+  pauseMediumMax: 90,
+  pauseLongMin: 90,
+  pauseLongMax: 180,
+  longPauseChance: 0.12,
+  mediumPauseChance: 0.40,
+  techPauseMinMs: 15_000,
+  techPauseMaxMs: 90_000,
+  vtag: 'robe_block_session_v2'
+};
 const _robeDailyPlanCache = new Map();
 const _robeDailyPlanInFlight = new Map();
 const _robeDailyGateState = new Map();
@@ -5881,6 +5901,15 @@ function _robeRandInt(rng, min, max) {
   const hi = Math.max(min, max);
   return lo + Math.floor(rng() * (hi - lo + 1));
 }
+function _robeRandFloat(rng, min, max) {
+  const lo = Math.min(Number(min || 0), Number(max || 0));
+  const hi = Math.max(Number(min || 0), Number(max || 0));
+  return lo + (rng() * (hi - lo));
+}
+function _robeClamp(v, lo, hi) {
+  const n = Number(v || 0);
+  return Math.max(Number(lo || 0), Math.min(Number(hi || 0), n));
+}
 function _robeSplitMinutes(total, count, minEach, rng) {
   const n = Math.max(1, Number(count || 1) || 1);
   let each = Math.max(1, Number(minEach || 1) || 1);
@@ -5893,6 +5922,258 @@ function _robeSplitMinutes(total, count, minEach, rng) {
     rem -= 1;
   }
   return out;
+}
+function _robeFindCurrentBlockIndex(plan, nowMin) {
+  if (!plan || !plan.enabled || !Array.isArray(plan.blocks)) return -1;
+  for (let i = 0; i < plan.blocks.length; i++) {
+    const b = plan.blocks[i] || {};
+    const s = Number(b.startMin || 0) || 0;
+    const e = Number(b.endMin || 0) || 0;
+    if (nowMin >= s && nowMin < e) return i;
+  }
+  return -1;
+}
+function _isValidRobeSessionV2(sess, date, blockIndex) {
+  if (!sess || typeof sess !== 'object') return false;
+  if (String(sess.version || '') !== String(ROBE_SESSION_V2_CFG.vtag)) return false;
+  if (String(sess.date || '') !== String(date || '')) return false;
+  if (Number(sess.blockIndex) !== Number(blockIndex)) return false;
+  if (!Array.isArray(sess.actions) || sess.actions.length < 1) return false;
+  if (!Number.isFinite(Number(sess.ptr || 0))) return false;
+  return true;
+}
+function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, hostIdOpt = '') {
+  const sMin = Number(block && block.startMin || 0) || 0;
+  const eMin = Number(block && block.endMin || 0) || 0;
+  const durationMin = Math.max(1, eMin - sMin);
+  const durationHours = durationMin / 60;
+  const seedInput = `${ROBE_SESSION_V2_CFG.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(blockIndex || 0)}|${String(sMin)}|${String(eMin)}|${String(hostIdOpt || '')}`;
+  const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
+  const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
+  const rng = _robeMulberry32(seedInt);
+  const ratePerHour = _robeRandFloat(rng, ROBE_SESSION_V2_CFG.minPostsPerHour, ROBE_SESSION_V2_CFG.maxPostsPerHour);
+  const jitter = _robeRandFloat(rng, ROBE_SESSION_V2_CFG.jitterMin, ROBE_SESSION_V2_CFG.jitterMax);
+  const rawTarget = durationHours * ratePerHour * jitter;
+  const hardMax = Math.max(1, Math.round(durationHours * 5.2));
+  const targetPosts = Math.max(1, Math.min(hardMax, Math.round(rawTarget)));
+  let rem = targetPosts;
+  const actions = [];
+  while (rem > 0) {
+    let lot = _robeRandInt(rng, ROBE_SESSION_V2_CFG.lotMin, ROBE_SESSION_V2_CFG.lotMax);
+    if (lot > rem) lot = rem;
+    actions.push({ type: 'post', count: lot });
+    rem -= lot;
+    if (rem <= 0) break;
+    const r = rng();
+    let pauseMin = 0;
+    if (r < ROBE_SESSION_V2_CFG.longPauseChance) {
+      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseLongMin, ROBE_SESSION_V2_CFG.pauseLongMax);
+    } else if (r < (ROBE_SESSION_V2_CFG.longPauseChance + ROBE_SESSION_V2_CFG.mediumPauseChance)) {
+      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseMediumMin, ROBE_SESSION_V2_CFG.pauseMediumMax);
+    } else {
+      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseShortMin, ROBE_SESSION_V2_CFG.pauseShortMax);
+    }
+    actions.push({ type: 'pause', min: pauseMin });
+  }
+  const first = actions[0] || {};
+  return {
+    version: ROBE_SESSION_V2_CFG.vtag,
+    date: String(dateYmd || ''),
+    blockIndex: Number(blockIndex || 0) || 0,
+    blockStartMin: sMin,
+    blockEndMin: eMin,
+    plannedPosts: targetPosts,
+    postedPosts: 0,
+    ptr: 0,
+    remainingInAction: Number(first.count || 0) || 0,
+    pauseUntil: 0,
+    actions,
+    seed: seedHex,
+    ratePerHour: Number(ratePerHour.toFixed(3)),
+    lastAdvanceAt: Date.now()
+  };
+}
+function _advanceRobeSessionRuntime(session, nowMs = Date.now()) {
+  const out = session && typeof session === 'object' ? session : null;
+  if (!out || !Array.isArray(out.actions)) return { state: out, changed: false, allowPost: false, reason: 'invalid' };
+  let changed = false;
+  let guard = 0;
+  while (guard < 24) {
+    guard += 1;
+    const ptr = Number(out.ptr || 0) || 0;
+    const action = out.actions[ptr];
+    if (!action) {
+      return { state: out, changed, allowPost: false, reason: 'session_done' };
+    }
+    if (action.type === 'pause') {
+      const pMin = Math.max(1, Number(action.min || 0) || 1);
+      const pauseUntil = Number(out.pauseUntil || 0) || 0;
+      if (pauseUntil <= 0) {
+        out.pauseUntil = Number(nowMs) + (pMin * 60_000);
+        out.lastAdvanceAt = Number(nowMs) || Date.now();
+        changed = true;
+      }
+      if (Number(out.pauseUntil || 0) > Number(nowMs || 0)) {
+        return { state: out, changed, allowPost: false, reason: 'in_pause' };
+      }
+      out.ptr = ptr + 1;
+      out.pauseUntil = 0;
+      const next = out.actions[out.ptr];
+      if (next && next.type === 'post') out.remainingInAction = Math.max(1, Number(next.count || 0) || 1);
+      else out.remainingInAction = 0;
+      out.lastAdvanceAt = Number(nowMs) || Date.now();
+      changed = true;
+      continue;
+    }
+    if (action.type === 'post') {
+      if (!Number.isFinite(Number(out.remainingInAction || 0)) || Number(out.remainingInAction || 0) <= 0) {
+        out.remainingInAction = Math.max(1, Number(action.count || 0) || 1);
+        changed = true;
+      }
+      if (Number(out.remainingInAction || 0) > 0) return { state: out, changed, allowPost: true, reason: 'post_window' };
+      out.ptr = ptr + 1;
+      out.lastAdvanceAt = Number(nowMs) || Date.now();
+      changed = true;
+      continue;
+    }
+    out.ptr = ptr + 1;
+    changed = true;
+  }
+  return { state: out, changed, allowPost: false, reason: 'guard_stop' };
+}
+function _robeSessionTechnicalPauseMs() {
+  const span = Math.max(1, ROBE_SESSION_V2_CFG.techPauseMaxMs - ROBE_SESSION_V2_CFG.techPauseMinMs);
+  return ROBE_SESSION_V2_CFG.techPauseMinMs + Math.floor(Math.random() * span);
+}
+function _robeSessionSummary(session, nowMs = Date.now()) {
+  if (!session || typeof session !== 'object') {
+    return {
+      featureEnabled: true,
+      enabled: false,
+      state: 'none',
+      plannedPosts: 0,
+      postedPosts: 0,
+      remainingInAction: 0,
+      pauseUntil: null,
+      nextAtLabel: null
+    };
+  }
+  const ptr = Number(session.ptr || 0) || 0;
+  const action = Array.isArray(session.actions) ? session.actions[ptr] : null;
+  const pauseUntil = Number(session.pauseUntil || 0) || 0;
+  const state = !action
+    ? 'done'
+    : (action.type === 'pause'
+      ? ((pauseUntil > Number(nowMs || 0)) ? 'pause' : 'pause_ready')
+      : 'posting');
+  const nextAtLabel = pauseUntil > 0 ? new Date(pauseUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
+  return {
+    featureEnabled: true,
+    enabled: true,
+    date: String(session.date || ''),
+    blockIndex: Number(session.blockIndex || 0) || 0,
+    state,
+    plannedPosts: Number(session.plannedPosts || 0) || 0,
+    postedPosts: Number(session.postedPosts || 0) || 0,
+    remainingInAction: Math.max(0, Number(session.remainingInAction || 0) || 0),
+    pauseUntil: pauseUntil > 0 ? pauseUntil : null,
+    nextAtLabel
+  };
+}
+async function getOrCreateRobeSessionGate(nome, nowMs = Date.now(), planHint = null, manifestHint = null) {
+  if (!ROBE_SESSION_V2_CFG.enabled) {
+    return { featureEnabled: false, allowPost: true, reason: 'disabled', technicalPauseMs: _robeSessionTechnicalPauseMs(), summary: _robeSessionSummary(null, nowMs) };
+  }
+  const plan = planHint || await getOrCreateRobeDailyPlan(nome, nowMs, manifestHint).catch(() => null);
+  const nowMin = _robeDailyNowMin(nowMs);
+  const idx = _robeFindCurrentBlockIndex(plan, nowMin);
+  if (!plan || !plan.enabled || idx < 0) {
+    return {
+      featureEnabled: true,
+      allowPost: false,
+      reason: 'outside_block',
+      technicalPauseMs: 0,
+      summary: { featureEnabled: true, enabled: true, state: 'out_of_block', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null }
+    };
+  }
+  const block = (plan.blocks && plan.blocks[idx]) || null;
+  const date = _robeDailyDateYmd(nowMs);
+  const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
+  let man = manifestHint || await manifestStore.read(nome).catch(() => null);
+  let sess = man && man.robeBlockSessionV2 ? man.robeBlockSessionV2 : null;
+  if (!_isValidRobeSessionV2(sess, date, idx)) {
+    sess = _buildRobeSessionPlanDeterministic(nome, date, block, idx, hostId);
+    try {
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.robeBlockSessionV2 = sess;
+        return m;
+      });
+    } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robe_v2_session_plan_generated',
+        nome: String(nome || ''),
+        date: String(date || ''),
+        blockIndex: Number(idx || 0),
+        plannedPosts: Number(sess.plannedPosts || 0) || 0
+      });
+    } catch {}
+  }
+  const evalRes = _advanceRobeSessionRuntime(sess, nowMs);
+  if (evalRes.changed) {
+    try {
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.robeBlockSessionV2 = evalRes.state;
+        return m;
+      });
+    } catch {}
+  }
+  const summary = _robeSessionSummary(evalRes.state, nowMs);
+  return {
+    featureEnabled: true,
+    allowPost: !!evalRes.allowPost,
+    reason: String(evalRes.reason || ''),
+    technicalPauseMs: evalRes.allowPost ? _robeSessionTechnicalPauseMs() : 0,
+    session: evalRes.state,
+    summary
+  };
+}
+async function markRobeSessionPostConsumed(nome, nowMs = Date.now()) {
+  if (!ROBE_SESSION_V2_CFG.enabled) return;
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      const sess = (m && m.robeBlockSessionV2 && typeof m.robeBlockSessionV2 === 'object') ? m.robeBlockSessionV2 : null;
+      if (!sess || !Array.isArray(sess.actions)) return m;
+      const ptr = Number(sess.ptr || 0) || 0;
+      const action = sess.actions[ptr];
+      if (!action || action.type !== 'post') return m;
+      const rem = Math.max(0, (Number(sess.remainingInAction || 0) || 0) - 1);
+      sess.remainingInAction = rem;
+      sess.postedPosts = (Number(sess.postedPosts || 0) || 0) + 1;
+      if (rem <= 0) {
+        sess.ptr = ptr + 1;
+        const next = sess.actions[sess.ptr];
+        if (next && next.type === 'pause') {
+          const pauseMin = Math.max(1, Number(next.min || 0) || 1);
+          sess.pauseUntil = Number(nowMs || Date.now()) + (pauseMin * 60_000);
+          sess.remainingInAction = 0;
+        } else if (next && next.type === 'post') {
+          sess.pauseUntil = 0;
+          sess.remainingInAction = Math.max(1, Number(next.count || 0) || 1);
+        } else {
+          sess.pauseUntil = 0;
+          sess.remainingInAction = 0;
+        }
+      }
+      sess.lastAdvanceAt = Number(nowMs) || Date.now();
+      m.robeBlockSessionV2 = sess;
+      return m;
+    });
+  } catch {}
 }
 function _isValidRobeDailyPlan(plan, date) {
   if (!plan || typeof plan !== 'object') return false;
@@ -6872,6 +7153,7 @@ async function robeTickGlobal() {
   }
 
   const perfisArr = loadPerfisJson();
+  const sessionGateByNome = new Map();
   const nomesAll = perfisArr.map(p => p.nome);
   const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
     if (isFrozenNow(nome)) return null;
@@ -6880,15 +7162,25 @@ async function robeTickGlobal() {
     }
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
-    const dailyGateOpen = await isRobeWindowOpenNow(nome).catch(() => true);
+    const nowMs = Date.now();
+    const manGate = await manifestStore.read(nome).catch(()=>null);
+    const dailyPlan = await getOrCreateRobeDailyPlan(nome, nowMs, manGate).catch(()=>null);
+    const dailyGate = _robeDailyPlanSummary(dailyPlan, nowMs);
+    const dailyGateOpen = !!(dailyGate && dailyGate.enabled === true && dailyGate.inWindowNow === true);
     if (!dailyGateOpen) return null;
+    const sessionGate = await getOrCreateRobeSessionGate(nome, nowMs, dailyPlan, manGate).catch(() => ({ allowPost: true, technicalPauseMs: _robeSessionTechnicalPauseMs(), summary: null }));
+    if (sessionGate && sessionGate.summary) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].robeSessionSummary = sessionGate.summary;
+    }
+    if (!sessionGate || sessionGate.allowPost !== true) return null;
+    sessionGateByNome.set(nome, sessionGate);
     // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
     // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
     try { await unfreezeCooldownIfWorking(nome); } catch {}
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
     const exec = robeQueue.isActive(nome);
-    const manGate = await manifestStore.read(nome).catch(()=>null);
     if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > Date.now()) {
       try { await issues.append(nome, 'mil_action', 'skip_robe_enqueue_due_limit_posting_active'); } catch {}
       return null;
@@ -6944,7 +7236,10 @@ async function robeTickGlobal() {
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
-        const robePauseMs = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+        const gateInfo = sessionGateByNome.get(nome) || null;
+        const robePauseMs = (gateInfo && Number(gateInfo.technicalPauseMs || 0) > 0)
+          ? Number(gateInfo.technicalPauseMs || 0)
+          : ((15 + Math.floor(Math.random() * 16)) * 60 * 1000);
 
         let res;
         try {
@@ -6977,6 +7272,7 @@ async function robeTickGlobal() {
         }
 
         if (res && res.ok) {
+          await markRobeSessionPostConsumed(nome, Date.now());
           try {
             await manifestStore.update(nome, (m) => {
               m = m || {};
@@ -10156,6 +10452,14 @@ const handlers = {
           return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
         }
       })();
+      const robeSessionSummary = await (async () => {
+        try {
+          const gate = await getOrCreateRobeSessionGate(nome, Date.now(), null, man0);
+          return gate && gate.summary ? gate.summary : { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
+        } catch {
+          return { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
+        }
+      })();
 
       // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
       const ctrl = controllers.get(nome);
@@ -10235,7 +10539,8 @@ const handlers = {
         messengerPinReason,
         problem,
         robeMode,
-        robeDailyPlanSummary
+        robeDailyPlanSummary,
+        robeSessionSummary
       });
     }
     const robes = {};
@@ -10476,6 +10781,14 @@ const robeDailyPlanSummary = await (async () => {
     return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
   }
 })();
+const robeSessionSummary = await (async () => {
+  try {
+    const gate = await getOrCreateRobeSessionGate(nome, Date.now(), null, man0);
+    return gate && gate.summary ? gate.summary : { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
+  } catch {
+    return { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
+  }
+})();
 
 perfis.push({
   nome,
@@ -10528,7 +10841,8 @@ perfis.push({
   problem,
   robeMode,
   stockAccountId,
-  robeDailyPlanSummary
+  robeDailyPlanSummary,
+  robeSessionSummary
 });
 }
 
