@@ -3262,6 +3262,14 @@ async function recycleGatewayProfile(nome, reasonTag, { allowBusy = false } = {}
     if (!allowBusy && p && p.trabalhando === true) {
       return { ok: false, stage: 'precheck', error: 'profile_busy' };
     }
+    // Guardrail: nunca reciclar proxy no meio de provision/configuração.
+    // Isso evita trocar IP/fingerprint durante o fluxo de cadastro.
+    if (!allowBusy && p && p.configurando === true) {
+      return { ok: false, stage: 'precheck', error: 'profile_configuring' };
+    }
+    if (!allowBusy && p && p.humanControl === true) {
+      return { ok: false, stage: 'precheck', error: 'profile_human_control' };
+    }
     const killGuardUntil = Number((p && p.killGuardUntil) || 0) || 0;
     if (!allowBusy && killGuardUntil > Date.now()) {
       return { ok: false, stage: 'precheck', error: 'kill_guard_until', retryAt: killGuardUntil };
@@ -3434,7 +3442,8 @@ async function processGatewayRecycleQueue({ maxProfiles = null } = {}) {
     const runNames = eligibleNames.slice(0, batchLimit);
     if (!runNames.length) return { ok: true, skipped: true, reason: 'no_eligible_profiles' };
 
-    const rr = await recycleGatewayActives({ reasonTag: 'gateway_retry', profileNames: runNames, allowBusy: true });
+    // Retry de fila também deve respeitar fase de configuração/human control.
+    const rr = await recycleGatewayActives({ reasonTag: 'gateway_retry', profileNames: runNames, allowBusy: false });
     const failMap = new Map();
     for (const f of (Array.isArray(rr && rr.failures) ? rr.failures : [])) {
       const nome = String(f && f.nome || '').trim();
@@ -3493,7 +3502,9 @@ async function execGatewaySetProxies(cmd) {
 
   let recycle = { ok: true, skipped: true, reason: 'no_profile_proxy_change' };
   if (changed.length > 0) {
-    recycle = await recycleGatewayActives({ reasonTag: 'gateway_changed', profileNames: changed, allowBusy: true });
+    // Importante: não forçar recycle durante stock_provision/login em andamento.
+    // Perfis ocupados entram em retry queue e reciclam depois.
+    recycle = await recycleGatewayActives({ reasonTag: 'gateway_changed', profileNames: changed, allowBusy: false });
     const failedNames = (Array.isArray(recycle && recycle.failures) ? recycle.failures : [])
       .map((f) => String(f && f.nome || '').trim())
       .filter(Boolean);
