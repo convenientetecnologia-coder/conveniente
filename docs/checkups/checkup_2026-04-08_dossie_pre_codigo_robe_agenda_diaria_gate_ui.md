@@ -45,9 +45,9 @@ Dossiê do fluxo do Robe (ponta a ponta):
    - Restart não pode “embaralhar o dia”.
    - Regra: se o plano não existir ou a data mudou, gerar/regerar de forma determinística.
 
-3) **Feature‑flag + rollout + rollback**
-   - Default OFF (ativar por host/coorte).
-   - Rollout controlado.
+3) **Ativação global + rollback**
+   - Sempre ON no código (sem feature-flag).
+   - Rollout por update/restart dos hosts.
    - Rollback = revert único + restart (`node index.js`).
 
 4) **UX enterprise no pill**
@@ -170,8 +170,8 @@ Sem teste manual:
 
 ## 7) Rollout/rollback (enterprise)
 
-- Feature‑flag default OFF.
-- Rollout por host (canário 1 host → 2 hosts → todos).
+- Ativação sempre ON no código (sem feature-flag).
+- Rollout por update/restart dos hosts.
 - Rollback:
   - `git revert` do commit
   - restart: `node index.js`

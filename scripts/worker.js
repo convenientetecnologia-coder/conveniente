@@ -5837,7 +5837,7 @@ function loadPerfisJson() {
   } catch { return []; }
 }
 const ROBE_DAILY_PLAN_CFG = {
-  enabled: String(process.env.ROBE_DAILY_PLAN_ENABLED || '0').trim() === '1',
+  enabled: true,
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
   offdayRatio: 0.25,
@@ -5967,7 +5967,6 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
   };
 }
 async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
-  if (!ROBE_DAILY_PLAN_CFG.enabled) return null;
   const date = _robeDailyDateYmd(nowMs);
   const c = _robeDailyPlanCache.get(nome);
   if (c && c.date === date && c.plan) return c.plan;
@@ -6011,7 +6010,7 @@ async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint =
 }
 function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
   const nowMin = _robeDailyNowMin(nowMs);
-  if (!plan) return { featureEnabled: false };
+  if (!plan) return { featureEnabled: true, enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
   const blocks = Array.isArray(plan.blocks) ? plan.blocks : [];
   const inWindowNow = !!(plan.enabled && blocks.some((b) => nowMin >= Number(b.startMin || 0) && nowMin < Number(b.endMin || 0)));
   let nextWindowStartMin = null;
@@ -6038,7 +6037,6 @@ function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
   };
 }
 async function isRobeWindowOpenNow(nome, nowMs = Date.now()) {
-  if (!ROBE_DAILY_PLAN_CFG.enabled) return true;
   const plan = await getOrCreateRobeDailyPlan(nome, nowMs).catch(()=>null);
   const s = _robeDailyPlanSummary(plan, nowMs);
   const allow = !!(s && s.enabled === true && s.inWindowNow === true);
@@ -10462,7 +10460,6 @@ const stockAccountId = (() => {
   } catch { return null; }
 })();
 const robeDailyPlanSummary = await (async () => {
-  if (!ROBE_DAILY_PLAN_CFG.enabled) return { featureEnabled: false };
   try {
     const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
     return _robeDailyPlanSummary(plan, Date.now());

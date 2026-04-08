@@ -32,7 +32,7 @@
 3) **Renovação diária** (padrão muda a cada dia)  
 4) **25% OFF por dia**  
 5) Das contas ON: **60% em 6–12h** e **40% em extremos (1–6 / 12–14)**  
-6) **Feature flag + rollout + rollback**
+6) **Ativação global + rollback**
 
 ---
 
@@ -214,12 +214,10 @@ Regras anti-spam:
 
 ## 9) Rollout/rollback (operacional)
 
-- Feature flag:
-  - `ROBE_DAILY_PLAN_ENABLED=0/1`
+- Ativação:
+  - **sempre ON** no código (sem feature-flag).
 - Rollout:
-  1) 1 host canário
-  2) 2 hosts
-  3) todos os hosts
+  - por update/restart dos hosts (entra no runtime quando subir código novo).
 - Rollback:
   - revert commit
   - restart `node index.js`
