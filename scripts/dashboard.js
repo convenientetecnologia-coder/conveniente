@@ -3659,7 +3659,53 @@ async function execProvisionUnlock(cmd) {
 
 // ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
-  for (const c of cmds) {
+  const incoming = Array.isArray(cmds) ? cmds.filter(Boolean) : [];
+  if (!incoming.length) return;
+
+  // Enterprise: em lotes com tempestade de gateway, processar só o último comando
+  // de gateway no lote atual (os anteriores ficam superseded) para não atrasar provision.
+  const gatewayTypes = new Set(['gateway_set_proxies', 'gateway_reconcile']);
+  let lastGatewayIdx = -1;
+  for (let i = incoming.length - 1; i >= 0; i--) {
+    const t = String(incoming[i] && incoming[i].type || '').trim();
+    if (gatewayTypes.has(t)) { lastGatewayIdx = i; break; }
+  }
+
+  const collapsed = [];
+  const superseded = [];
+  for (let i = 0; i < incoming.length; i++) {
+    const c = incoming[i];
+    const t = String(c && c.type || '').trim();
+    if (gatewayTypes.has(t) && lastGatewayIdx >= 0 && i !== lastGatewayIdx) {
+      superseded.push(c);
+      continue;
+    }
+    collapsed.push(c);
+  }
+
+  // Prioridade operacional: cadastro/login primeiro; gateway depois.
+  const highPriorityTypes = new Set(['stock_provision', 'login_remediate', 'stock_push_account_update']);
+  const prioritized = [];
+  const regular = [];
+  for (const c of collapsed) {
+    const t = String(c && c.type || '').trim();
+    if (highPriorityTypes.has(t)) prioritized.push(c);
+    else regular.push(c);
+  }
+  const ordered = [...prioritized, ...regular];
+
+  // ACK imediato dos gateway superseded (evita fila/ACK pendente sem execução útil).
+  for (const c of superseded) {
+    try {
+      await ackCommand(c && c.id, true, null, {
+        ok: true,
+        skipped: true,
+        reason: 'superseded_by_newer_gateway_command_in_same_batch'
+      });
+    } catch {}
+  }
+
+  for (const c of ordered) {
     try {
       if (!c || !c.type) continue;
       let ackDetails = null;
