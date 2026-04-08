@@ -371,7 +371,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     bannedText: null,
     messengerPin: false,
     messengerPinReason: null,
-    problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 1)
+    problem: false, // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 1)
+    robeDailyPlanSummary: null
     // outros campos militares do shape retrocompatível
   }]));
   let warningINST = undefined;

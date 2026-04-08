@@ -10148,6 +10148,14 @@ const handlers = {
         : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
+      const robeDailyPlanSummary = await (async () => {
+        try {
+          const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
+          return _robeDailyPlanSummary(plan, Date.now());
+        } catch {
+          return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
+        }
+      })();
 
       // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
       const ctrl = controllers.get(nome);
@@ -10226,7 +10234,8 @@ const handlers = {
         messengerPin,
         messengerPinReason,
         problem,
-        robeMode
+        robeMode,
+        robeDailyPlanSummary
       });
     }
     const robes = {};
