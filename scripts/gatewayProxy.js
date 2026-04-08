@@ -484,6 +484,55 @@ function profileHash(profileName) {
   return h >>> 0;
 }
 
+function ensureLocalAssignmentForProfile({ profileName, state, slotsById }) {
+  const nome = String(profileName || "").trim();
+  if (!nome) return null;
+  const st = (state && typeof state === "object") ? state : readState();
+  const byId = (slotsById instanceof Map) ? slotsById : new Map((Array.isArray(st.slots) ? st.slots : []).map((s) => [String(s && s.slotId || "").trim(), s]));
+  const inv = String(st.inventoryVersion || "").trim();
+  if (!inv || byId.size <= 0) return null;
+
+  const current = (st.assignments && st.assignments[nome]) ? st.assignments[nome] : null;
+  if (current && String(current.inventoryVersion || "") === inv && byId.has(String(current.slotId || "").trim())) {
+    return current;
+  }
+
+  const activeAssignments = {};
+  for (const [pnameRaw, recRaw] of Object.entries(st.assignments || {})) {
+    const pname = String(pnameRaw || "").trim();
+    if (!pname) continue;
+    const rec = (recRaw && typeof recRaw === "object") ? recRaw : {};
+    const sid = String(rec.slotId || "").trim();
+    if (!sid || !byId.has(sid)) continue;
+    if (String(rec.inventoryVersion || "") !== inv) continue;
+    activeAssignments[pname] = sid;
+  }
+
+  const orderedSlotIds = orderedSlotIdsForHost(Array.from(byId.keys()));
+  let pickedSlotId = "";
+  // Preferência: manter slot antigo do próprio perfil quando ainda disponível.
+  const legacySlotId = String(current && current.slotId || "").trim();
+  if (legacySlotId && byId.has(legacySlotId)) {
+    pickedSlotId = legacySlotId;
+  }
+  if (!pickedSlotId) pickedSlotId = firstFreeSlotId(orderedSlotIds, activeAssignments);
+  if (!pickedSlotId) pickedSlotId = chooseLeastLoadedSlot(orderedSlotIds, activeAssignments, nome);
+  if (!pickedSlotId || !byId.has(pickedSlotId)) return null;
+
+  const now = Date.now();
+  const nextAssignments = Object.assign({}, st.assignments || {}, {
+    [nome]: {
+      slotId: pickedSlotId,
+      inventoryVersion: inv,
+      cohortId: String(current && current.cohortId || "").trim(),
+      updatedAt: now
+    }
+  });
+  const nextState = Object.assign({}, st, { assignments: nextAssignments, updatedAt: now });
+  try { writeJsonAtomic(STATE_PATH, nextState); } catch {}
+  return nextAssignments[nome] || null;
+}
+
 function resolveProxyForProfile({ profileName, manifest }) {
   const st = readState();
   if (!st.globalEnabled || !st.hostEnabled) return { enabled: false, reason: "gateway_disabled" };
@@ -494,14 +543,21 @@ function resolveProxyForProfile({ profileName, manifest }) {
 
   const byId = new Map(slots.map((s) => [s.slotId, s]));
   const inv = String(st.inventoryVersion || "");
-  const assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
+  let assigned = (st.assignments && st.assignments[profileName]) ? st.assignments[profileName] : null;
   let slot = null;
   if (assigned && assigned.inventoryVersion === inv && byId.has(assigned.slotId)) {
     slot = byId.get(assigned.slotId);
   }
-  if (!assigned || String(assigned.inventoryVersion || "") !== inv) {
-    return { enabled: false, reason: "missing_slot_assignment" };
+  if (!assigned || String(assigned.inventoryVersion || "") !== inv || !slot) {
+    const recovered = ensureLocalAssignmentForProfile({ profileName, state: st, slotsById: byId });
+    if (recovered) {
+      assigned = recovered;
+      if (String(assigned.inventoryVersion || "") === inv && byId.has(assigned.slotId)) {
+        slot = byId.get(assigned.slotId);
+      }
+    }
   }
+  if (!assigned || String(assigned.inventoryVersion || "") !== inv) return { enabled: false, reason: "missing_slot_assignment" };
   if (!slot) return { enabled: false, reason: "assigned_slot_unavailable" };
 
   let proxyServer = "";

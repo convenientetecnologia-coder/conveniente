@@ -309,11 +309,38 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro ao patchDesired para ativação', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
     }
-    // Chama worker para ativar imediatamente:
-    const r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
-      logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
-      return null;
-    });
+    const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+    const isTransientActivateError = (msg) => {
+      const m = String(msg || '').toLowerCase();
+      return (
+        m.includes('timeout') ||
+        m.includes('already_opening') ||
+        m.includes('gateway_proxy_required:missing_slot_assignment') ||
+        m.includes('gateway_proxy_required:assigned_slot_unavailable') ||
+        m.includes('gateway_geo_required:missing_slot_geo') ||
+        m.includes('gateway_geo_required:missing_slot_assignment') ||
+        m.includes('gateway_geo_required:assigned_slot_unavailable') ||
+        m.includes('supervisor_denied:cooldown') ||
+        m.includes('supervisor_denied:slots') ||
+        m.includes('supervisor_denied:ram_low') ||
+        m.includes('supervisor_denied:maintenance_provision') ||
+        m.includes('maintenance_provision') ||
+        m.includes('supervisor_unreachable')
+      );
+    };
+    const activateRetries = [0, 1200, 2200, 3500, 5000];
+    let r = null;
+    for (let attempt = 0; attempt < activateRetries.length; attempt++) {
+      if (attempt > 0) await sleepMs(activateRetries[attempt]);
+      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
+        logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', attempt: attempt + 1, error: e && e.message }, e);
+        return { ok: false, error: (e && e.message) ? String(e.message) : 'activate_failed' };
+      });
+      if (r && r.ok === true) break;
+      const errNow = (r && r.error) ? String(r.error) : 'activate_failed';
+      if (!isTransientActivateError(errNow)) break;
+      logger.warn('Ativação com erro transitório; retryando', { nome, attempt: attempt + 1, error: errNow });
+    }
     if (!r || r.ok !== true) {
       const activateErr = (r && r.error) || 'activate_failed';
       if (/kill_guard_until/i.test(String(activateErr))) {
