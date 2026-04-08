@@ -2120,6 +2120,10 @@ async function execStockProvision(cmd) {
       m.includes('gateway_geo_required:missing_slot_geo') ||
       m.includes('gateway_geo_required:missing_slot_assignment') ||
       m.includes('gateway_geo_required:assigned_slot_unavailable') ||
+      // Provision pode pegar cooldown curto após tentativa de activate
+      // enquanto o assignment de gateway ainda está propagando do CT.
+      // Nesse caso precisamos continuar retryando dentro do budget.
+      m.includes('supervisor_denied:cooldown') ||
       m.includes('supervisor_denied:slots') ||
       m.includes('supervisor_denied:ram_low') ||
       m.includes('supervisor_denied:maintenance_provision') ||
