@@ -986,6 +986,26 @@
       else if (/fila/.test(robeEstado)) cls='info';
       return buildPill(`Robe: ${txt}`, cls);
     }
+    function buildRobeDailyPlanPills(summary) {
+      const out = [];
+      const s = (summary && typeof summary === 'object') ? summary : null;
+      if (!s || s.featureEnabled === false) return out;
+      if (s.enabled !== true) {
+        out.push(buildPill('Robe hoje: OFF', 'warn'));
+        return out;
+      }
+      const h = Number(s.dailyHours || 0) || 0;
+      const bc = Number(s.blocksCount || 0) || 0;
+      const info = buildPill(`Robe hoje: ${h}h (${bc} bloco${bc === 1 ? '' : 's'})`, 'info');
+      try {
+        const labels = Array.isArray(s.blocks) ? s.blocks.map(b => String((b && b.label) || '').trim()).filter(Boolean) : [];
+        if (labels.length) info.title = `Blocos: ${labels.join(', ')}`;
+      } catch {}
+      out.push(info);
+      out.push(buildPill(s.inWindowNow ? 'Robe: dentro do bloco' : 'Robe: fora do bloco', s.inWindowNow ? 'good' : 'warn'));
+      if (!s.inWindowNow && s.nextWindowLabel) out.push(buildPill(`Próx: ${s.nextWindowLabel}`, 'info'));
+      return out;
+    }
 
     // Helper Abas/pages por navegador
     function buildAbasPill(numPages) {
@@ -1296,6 +1316,8 @@
       filtered.forEach((p, idx) => {
         const robeStatus = robes[p.nome] || {};
         const robeCooldownSec = robeStatus.cooldownSec || 0;
+        const robeDailyPlan = (p && p.robeDailyPlanSummary && typeof p.robeDailyPlanSummary === 'object') ? p.robeDailyPlanSummary : null;
+        const robeDailyGateClosed = !!(robeDailyPlan && robeDailyPlan.featureEnabled !== false && (robeDailyPlan.enabled !== true || robeDailyPlan.inWindowNow !== true));
         const fila = robeQueue || [];
         const inQueue = fila.includes(p.nome);
         const isNext = (fila[0] === p.nome);
@@ -1514,7 +1536,8 @@
         if (robeCooldownSec > 0) {
           titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
         } else {
-          if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
+          if (robeDailyGateClosed) titleRow.append(buildPill('Robe: fora da janela diária', 'warn'));
+          else if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
           else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
           else titleRow.append(buildPill('Robe: Pronto', 'good'));
         }
@@ -1523,6 +1546,7 @@
         if (robeStatus && robeStatus.estado) {
           titleRow.append(buildRobeEstadoPill(robeStatus.estado));
         }
+        for (const pp of buildRobeDailyPlanPills(robeDailyPlan)) titleRow.append(pp);
 
         // Opcional: Adicione pill/status visual "Modo Humano"
         if (p.humanControl || p.humanHold) {

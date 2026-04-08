@@ -23,6 +23,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
 | INC-20260408-0900-01 | P0 | done | operational_fix | passed | RM6/RM7: “Facebook não abre / Sorry…” era cookies inválidos (falso positivo) | `done/INC-20260408-0900-01.md` |
+| INC-20260408-1400-01 | P0 | in_progress | needs_restart | not_run | Robe: postagem 24/7 "frenética" + cluster (fila sempre cheia) -> captcha/deslog + aviso "suspeita de automação" | `need_evidence/INC-20260408-1400-01.md` |
 | INC-20260407-1600-01 | P0 | in_progress | not_deployed | not_run | Geo de fingerprint por proxy (sem quebrar cidade de negócio) | `in_progress/INC-20260407-1600-01.md` |
 | INC-20260407-1610-01 | P1 | need_evidence | not_deployed | not_run | Timezone/idioma por coerência de proxy (anti-cluster) | `need_evidence/INC-20260407-1610-01.md` |
 | INC-20260407-1620-01 | P0 | done | not_deployed | run_ok | Auditoria/validacao dos presets UA/UA-CH atuais | `need_evidence/INC-20260407-1620-01.md` |

@@ -5836,6 +5836,233 @@ function loadPerfisJson() {
     return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
+const ROBE_DAILY_PLAN_CFG = {
+  enabled: String(process.env.ROBE_DAILY_PLAN_ENABLED || '0').trim() === '1',
+  windowStartMin: 6 * 60,
+  windowEndMin: 23 * 60,
+  offdayRatio: 0.25,
+  mainHoursRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
+  minGapMin: Math.max(10, Number(process.env.ROBE_DAILY_PLAN_MIN_GAP_MIN || 20) || 20),
+  gateLogEveryMs: Math.max(60_000, Number(process.env.ROBE_DAILY_PLAN_GATE_LOG_EVERY_MS || 10 * 60_000) || 10 * 60_000),
+  vtag: 'robe_daily_plan_v1'
+};
+const _robeDailyPlanCache = new Map();
+const _robeDailyPlanInFlight = new Map();
+const _robeDailyGateState = new Map();
+function _robeDailyDateYmd(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function _robeDailyNowMin(ts = Date.now()) {
+  const d = new Date(ts);
+  return (d.getHours() * 60) + d.getMinutes();
+}
+function _robeDailyHhmm(min) {
+  const m = Math.max(0, Math.min(1439, Number(min || 0) || 0));
+  const hh = String(Math.floor(m / 60)).padStart(2, '0');
+  const mm = String(m % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+function _robeMulberry32(seed) {
+  let a = (seed >>> 0) || 1;
+  return function rand() {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function _robeRandInt(rng, min, max) {
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  return lo + Math.floor(rng() * (hi - lo + 1));
+}
+function _robeSplitMinutes(total, count, minEach, rng) {
+  const n = Math.max(1, Number(count || 1) || 1);
+  let each = Math.max(1, Number(minEach || 1) || 1);
+  if ((each * n) > total) each = Math.max(1, Math.floor(total / n) || 1);
+  const out = Array.from({ length: n }, () => each);
+  let rem = Math.max(0, total - (each * n));
+  while (rem > 0) {
+    const i = _robeRandInt(rng, 0, n - 1);
+    out[i] += 1;
+    rem -= 1;
+  }
+  return out;
+}
+function _isValidRobeDailyPlan(plan, date) {
+  if (!plan || typeof plan !== 'object') return false;
+  if (String(plan.date || '') !== String(date || '')) return false;
+  if (typeof plan.enabled !== 'boolean') return false;
+  if (!plan.enabled) return true;
+  if (!Array.isArray(plan.blocks) || plan.blocks.length < 1 || plan.blocks.length > 3) return false;
+  for (const b of plan.blocks) {
+    if (!b || typeof b !== 'object') return false;
+    const s = Number(b.startMin || 0);
+    const e = Number(b.endMin || 0);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || e <= s || e > 24 * 60) return false;
+  }
+  return true;
+}
+function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
+  const seedInput = `${ROBE_DAILY_PLAN_CFG.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
+  const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
+  const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
+  const rng = _robeMulberry32(seedInt);
+  const shouldWork = !(rng() < ROBE_DAILY_PLAN_CFG.offdayRatio);
+  if (!shouldWork) {
+    return {
+      version: ROBE_DAILY_PLAN_CFG.vtag,
+      date: String(dateYmd || ''),
+      enabled: false,
+      dailyHours: 0,
+      blocks: [],
+      seed: seedHex
+    };
+  }
+  const isMainBand = rng() < ROBE_DAILY_PLAN_CFG.mainHoursRatio;
+  let dailyHours = 0;
+  if (isMainBand) {
+    dailyHours = _robeRandInt(rng, 6, 12);
+  } else {
+    const lowExtreme = rng() < 0.60;
+    dailyHours = lowExtreme ? _robeRandInt(rng, 1, 6) : _robeRandInt(rng, 12, 14);
+  }
+  let blocksCount = 1;
+  if (dailyHours <= 3) blocksCount = 1;
+  else if (dailyHours <= 8) blocksCount = (rng() < 0.60 ? 1 : 2);
+  else blocksCount = (rng() < 0.50 ? 2 : 3);
+  const totalMin = Math.max(60, dailyHours * 60);
+  const windowLen = Math.max(1, ROBE_DAILY_PLAN_CFG.windowEndMin - ROBE_DAILY_PLAN_CFG.windowStartMin);
+  while (blocksCount > 1 && (totalMin + (ROBE_DAILY_PLAN_CFG.minGapMin * (blocksCount - 1))) > windowLen) {
+    blocksCount -= 1;
+  }
+  blocksCount = Math.max(1, Math.min(3, blocksCount));
+  const durations = _robeSplitMinutes(totalMin, blocksCount, 45, rng);
+  const required = durations.reduce((a, b) => a + b, 0) + (ROBE_DAILY_PLAN_CFG.minGapMin * (blocksCount - 1));
+  const slack = Math.max(0, windowLen - required);
+  const slackChunks = _robeSplitMinutes(slack, blocksCount + 1, 0, rng);
+  const blocks = [];
+  let cursor = ROBE_DAILY_PLAN_CFG.windowStartMin + (slackChunks[0] || 0);
+  for (let i = 0; i < blocksCount; i++) {
+    const d = durations[i] || 0;
+    const s = cursor;
+    const e = Math.min(ROBE_DAILY_PLAN_CFG.windowEndMin, s + d);
+    blocks.push({ startMin: s, endMin: e });
+    if (i < blocksCount - 1) {
+      cursor = e + ROBE_DAILY_PLAN_CFG.minGapMin + (slackChunks[i + 1] || 0);
+    }
+  }
+  return {
+    version: ROBE_DAILY_PLAN_CFG.vtag,
+    date: String(dateYmd || ''),
+    enabled: true,
+    dailyHours,
+    blocks,
+    seed: seedHex
+  };
+}
+async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
+  if (!ROBE_DAILY_PLAN_CFG.enabled) return null;
+  const date = _robeDailyDateYmd(nowMs);
+  const c = _robeDailyPlanCache.get(nome);
+  if (c && c.date === date && c.plan) return c.plan;
+  const inflight = _robeDailyPlanInFlight.get(nome);
+  if (inflight) {
+    try { await inflight; } catch {}
+    const c2 = _robeDailyPlanCache.get(nome);
+    if (c2 && c2.date === date && c2.plan) return c2.plan;
+  }
+  const job = (async () => {
+    const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
+    const man = manifestHint || await manifestStore.read(nome).catch(()=>null);
+    let plan = man && man.robeDailyPlanV1 ? man.robeDailyPlanV1 : null;
+    if (!_isValidRobeDailyPlan(plan, date)) {
+      plan = _buildRobeDailyPlanDeterministic(nome, date, hostId);
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.robeDailyPlanV1 = plan;
+          return m;
+        });
+      } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'robe_plan_generated',
+          nome: String(nome || ''),
+          date: String(date || ''),
+          enabled: !!plan.enabled,
+          dailyHours: Number(plan.dailyHours || 0) || 0,
+          blocksCount: Array.isArray(plan.blocks) ? plan.blocks.length : 0
+        });
+      } catch {}
+    }
+    _robeDailyPlanCache.set(nome, { date, plan });
+    return plan;
+  })();
+  _robeDailyPlanInFlight.set(nome, job);
+  try { return await job; }
+  finally { _robeDailyPlanInFlight.delete(nome); }
+}
+function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
+  const nowMin = _robeDailyNowMin(nowMs);
+  if (!plan) return { featureEnabled: false };
+  const blocks = Array.isArray(plan.blocks) ? plan.blocks : [];
+  const inWindowNow = !!(plan.enabled && blocks.some((b) => nowMin >= Number(b.startMin || 0) && nowMin < Number(b.endMin || 0)));
+  let nextWindowStartMin = null;
+  if (plan.enabled) {
+    for (const b of blocks) {
+      const s = Number(b.startMin || 0);
+      if (s > nowMin) { nextWindowStartMin = s; break; }
+    }
+  }
+  return {
+    featureEnabled: true,
+    date: String(plan.date || ''),
+    enabled: !!plan.enabled,
+    dailyHours: Number(plan.dailyHours || 0) || 0,
+    blocksCount: blocks.length,
+    blocks: blocks.map((b) => ({
+      startMin: Number(b.startMin || 0) || 0,
+      endMin: Number(b.endMin || 0) || 0,
+      label: `${_robeDailyHhmm(Number(b.startMin || 0) || 0)}-${_robeDailyHhmm(Number(b.endMin || 0) || 0)}`
+    })),
+    inWindowNow,
+    nextWindowStartMin: nextWindowStartMin == null ? null : nextWindowStartMin,
+    nextWindowLabel: nextWindowStartMin == null ? null : _robeDailyHhmm(nextWindowStartMin)
+  };
+}
+async function isRobeWindowOpenNow(nome, nowMs = Date.now()) {
+  if (!ROBE_DAILY_PLAN_CFG.enabled) return true;
+  const plan = await getOrCreateRobeDailyPlan(nome, nowMs).catch(()=>null);
+  const s = _robeDailyPlanSummary(plan, nowMs);
+  const allow = !!(s && s.enabled === true && s.inWindowNow === true);
+  const reason = (!s || s.enabled !== true) ? 'offday' : (s.inWindowNow ? 'in_window' : 'outside_window');
+  try {
+    const prev = _robeDailyGateState.get(nome) || {};
+    const now = Date.now();
+    const changed = (prev.allow !== allow);
+    const due = !prev.lastLogAt || (now - Number(prev.lastLogAt || 0)) >= ROBE_DAILY_PLAN_CFG.gateLogEveryMs;
+    if (changed || due) {
+      provisionAudit.append({
+        ts: now,
+        event: allow ? 'robe_gate_open' : 'robe_gate_closed',
+        nome: String(nome || ''),
+        reason,
+        date: String((s && s.date) || ''),
+        dailyHours: Number((s && s.dailyHours) || 0) || 0,
+        blocksCount: Number((s && s.blocksCount) || 0) || 0
+      });
+      _robeDailyGateState.set(nome, { allow, lastLogAt: now });
+    }
+  } catch {}
+  return allow;
+}
 function savePerfisJson(arr) {
   // CRÍTICO (cluster): nunca permitir que um worker shard sobrescreva o perfis.json global.
   // Manter esta função apenas por compatibilidade com trechos antigos (não deve ser usada para writes shard).
@@ -6655,6 +6882,8 @@ async function robeTickGlobal() {
     }
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
+    const dailyGateOpen = await isRobeWindowOpenNow(nome).catch(() => true);
+    if (!dailyGateOpen) return null;
     // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
     // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
     try { await unfreezeCooldownIfWorking(nome); } catch {}
@@ -10232,6 +10461,15 @@ const stockAccountId = (() => {
     return sid > 0 ? sid : null;
   } catch { return null; }
 })();
+const robeDailyPlanSummary = await (async () => {
+  if (!ROBE_DAILY_PLAN_CFG.enabled) return { featureEnabled: false };
+  try {
+    const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
+    return _robeDailyPlanSummary(plan, Date.now());
+  } catch {
+    return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
+  }
+})();
 
 perfis.push({
   nome,
@@ -10283,7 +10521,8 @@ perfis.push({
   messengerPinReason,
   problem,
   robeMode,
-  stockAccountId
+  stockAccountId,
+  robeDailyPlanSummary
 });
 }
 

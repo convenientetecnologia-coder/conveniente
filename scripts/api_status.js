@@ -92,7 +92,8 @@ async function montarPerfisBaseline() {
     bannedText: null,
     messengerPin: false,
     messengerPinReason: null,
-    problem: false // <<< ALTERAÇÃO AQUI
+    problem: false, // <<< ALTERAÇÃO AQUI
+    robeDailyPlanSummary: null
   }));
 }
 
@@ -161,7 +162,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     bannedText: null,
     messengerPin: false,
     messengerPinReason: null,
-    problem: false // <<< ALTERAÇÃO AQUI
+    problem: false, // <<< ALTERAÇÃO AQUI
+    robeDailyPlanSummary: null
   }));
 
   // Overlay dos perfis atuais vindos do status (worker ou fallback)
@@ -536,7 +538,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       bannedText: null,
       messengerPin: false,
       messengerPinReason: null,
-      problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
+      problem: false, // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
+      robeDailyPlanSummary: null
     }));
   } catch(e2) {
     perfisSkeleton = Array.isArray(_lastBaselinePerfis) ? _lastBaselinePerfis : [];
