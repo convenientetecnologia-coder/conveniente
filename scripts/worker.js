@@ -7970,6 +7970,39 @@ const handlers = {
             });
           } catch {}
           if (after && after.loginRequired) {
+            // Enterprise: quando o configure falha por "still_login_required", precisamos de evidência real
+            // (HTML + screenshot) centralizada no CT, sem pedir logs manuais ao humano.
+            try {
+              robeMeta[nome] = robeMeta[nome] || {};
+              const now = Date.now();
+              const last = Number(robeMeta[nome].lastConfigureFbGptResolveAt || 0) || 0;
+              if (!last || (now - last) > (10 * 60 * 1000)) {
+                const pg = bestPage || (await ctrl.browser.pages().then(ps => ps && ps[0]).catch(() => null));
+                const urlNow = pg && typeof pg.url === 'function' ? String(pg.url() || '') : '';
+                const titleNow = pg && typeof pg.title === 'function' ? await pg.title().catch(() => '') : '';
+                const html = pg ? await pg.content().catch(() => '') : '';
+                const screenshotBase64 = pg ? await pg.screenshot({ type: 'jpeg', quality: 60, encoding: 'base64', fullPage: false }).catch(() => '') : '';
+                await gptFallback.resolveFbGpt({
+                  perfil: nome,
+                  url: (after && after.url) ? String(after.url) : urlNow,
+                  title: (after && after.title) ? String(after.title) : titleNow,
+                  html: html || '',
+                  screenshotBase64: screenshotBase64 || '',
+                  reason: `configure_still_login_required:${String(after && after.reason || 'login')}`,
+                  source: `configure:${String(after && after.domain || 'unknown')}`,
+                  history: [
+                    {
+                      ts: now,
+                      stage: 'configure_still_login_required',
+                      url: (after && after.url) ? String(after.url) : urlNow,
+                      title: (after && after.title) ? String(after.title) : titleNow,
+                      note: 'snapshot'
+                    }
+                  ]
+                }).catch(() => {});
+                robeMeta[nome].lastConfigureFbGptResolveAt = now;
+              }
+            } catch {}
             await invokeHumanForConfigure(`still_login_required:${String(after.reason||'login')}`);
             return { ok: false, error: `still_login_required:${String(after.reason||'login')}` };
           }
@@ -12254,7 +12287,9 @@ async function nurseTick() {
             // - rate-limit 30min por perfil+reason (no cliente e também no servidor central)
             try {
               // Evita custo se não houver chance real de envio
-              if (String(process.env.LOG_INGEST_SECRET || '').trim()) {
+              const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
+              const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
+              if (secret) {
                 robeMeta[nome] = robeMeta[nome] || {};
                 const now = Date.now();
                 const last = Number(robeMeta[nome].lastFbGptIngestAt || 0) || 0;
