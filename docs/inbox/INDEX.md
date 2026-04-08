@@ -22,6 +22,14 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260408-0900-01 | P0 | done | operational_fix | passed | RM6/RM7: “Facebook não abre / Sorry…” era cookies inválidos (falso positivo) | `done/INC-20260408-0900-01.md` |
+| INC-20260407-1600-01 | P0 | in_progress | not_deployed | not_run | Geo de fingerprint por proxy (sem quebrar cidade de negócio) | `in_progress/INC-20260407-1600-01.md` |
+| INC-20260407-1610-01 | P1 | need_evidence | not_deployed | not_run | Timezone/idioma por coerência de proxy (anti-cluster) | `need_evidence/INC-20260407-1610-01.md` |
+| INC-20260407-1620-01 | P0 | done | not_deployed | run_ok | Auditoria/validacao dos presets UA/UA-CH atuais | `need_evidence/INC-20260407-1620-01.md` |
+| INC-20260407-1630-01 | P0 | need_evidence | not_deployed | not_run | Fingerprint avancado (WebGL/Canvas/Audio/fonts/plugins) | `need_evidence/INC-20260407-1630-01.md` |
+| INC-20260407-1640-01 | P1 | need_evidence | not_deployed | not_run | Coortes de plataforma/pacote tecnico para reduzir cluster | `need_evidence/INC-20260407-1640-01.md` |
+| INC-20260407-1650-01 | P0 | need_evidence | not_deployed | not_run | Score de coerencia por perfil (observacao -> soft -> hard) | `need_evidence/INC-20260407-1650-01.md` |
+| INC-20260407-1700-01 | P2 | need_alignment | not_deployed | not_run | Comportamento humano avancado (fase final) | `need_evidence/INC-20260407-1700-01.md` |
 | INC-20260402-0900-01 | P0 | done | deployed | passed | RM5: Robe postagem falha “sem foto” apesar de pool grande (~1700) | `done/INC-20260402-0900-01.md` |
 | INC-20260318-1000-01 | P0 | need_evidence | not_deployed | not_run | Serviço de Lead: menu 10 serviços pós-frete + CT "Serviço de Lead" | `need_evidence/INC-20260318-1000-01.md` |
 | INC-20260312-1000-01 | P0 | in_progress | not_deployed | not_run | Projeto `afiliadozap`: ingestão WhatsApp + geração de links afiliados + redistribuição controlada | `in_progress/INC-20260312-1000-01.md` |

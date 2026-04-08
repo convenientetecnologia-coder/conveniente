@@ -74,7 +74,41 @@ RAW_INPUT (2026-03-18) — RM3 dashboard 95 vs 70 navegadores
 
 TRIAGE: P1 (discrepância operacional, não bloqueante)
 STATUS: done — dossiê forense em docs/checkups/checkup_2026-03-18_dossie_forense_rm3_dashboard_95_vs_70_navegadores.md
+``` 
+
+---
+
+## RAW_INPUT — 2026-04-07 (elevar anti-detect para nível enterprise, por fases)
+
+```text
+triagem inbox
+
+registrar tudo para execução organizada, sem quebrar produção:
+
+escopo aprovado:
+1) geo de fingerprint deve seguir IP/proxy (sem mexer na cidade de negócio da conta)
+2) timezone/idioma com coerência por proxy (evitar pacote repetido em massa)
+3) validar qualidade real dos presets UA/UA-CH atuais; se insuficiente, avaliar fonte externa
+4) fortalecer fingerprint avançado (webgl/canvas/audio/fonts/plugins)
+5) reduzir uniformidade/cluster (platform e pacote técnico por coortes coerentes)
+6) criar score de coerência por perfil com rollout seguro (observação -> soft -> hard) sem travar produção
+7) comportamento humano fica para o fim, com debate dedicado
+
+requisito operacional:
+- ultra organizado, execução item a item, evidência e simulação antes de expandir.
 ```
+
+### TRIAGE — 2026-04-07 (Programa Anti-Detect Enterprise)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Geo de fingerprint por proxy (preservando cidade de negócio) | in_progress | `docs/inbox/in_progress/INC-20260407-1600-01.md` |
+| 2 | P1 | Timezone/idioma por coerência de proxy (anti-cluster) | need_evidence | `docs/inbox/need_evidence/INC-20260407-1610-01.md` |
+| 3 | P0 | Auditoria/validação dos presets UA/UA-CH atuais | need_evidence | `docs/inbox/need_evidence/INC-20260407-1620-01.md` |
+| 4 | P0 | Fingerprint avançado: WebGL/Canvas/Audio/fonts/plugins | need_evidence | `docs/inbox/need_evidence/INC-20260407-1630-01.md` |
+| 5 | P1 | Coortes de plataforma/pacote técnico para reduzir cluster | need_evidence | `docs/inbox/need_evidence/INC-20260407-1640-01.md` |
+| 6 | P0 | Score de coerência por perfil (CT maestro: observação -> soft -> hard) | need_evidence | `docs/inbox/need_evidence/INC-20260407-1650-01.md` |
+| 7 | P2 | Comportamento humano avançado (fase final, debate dedicado) | need_alignment | `docs/inbox/need_evidence/INC-20260407-1700-01.md` |
 
 ```text
 RAW_INPUT (2026-03-30) — reforço operacional enterprise (“contrato do trabalho”, reiterado)
@@ -94,6 +128,40 @@ RAW_INPUT (2026-04-02) — reforço operacional enterprise (reiteração)
 Nota: reiteração do mesmo “contrato do trabalho” e regras não-negociáveis, já registradas integralmente em:
 - RAW_INPUT — 2026-03-12 (neste arquivo)
 - RAW_INPUT (2026-03-30) — reforço operacional enterprise (reiteração curta)
+```
+
+```text
+RAW_INPUT (2026-04-04) — reforço operacional enterprise (reiteração + reforço de postura)
+
+Nota: reiteração do mesmo “contrato do trabalho” e regras não-negociáveis, já registradas integralmente em:
+- RAW_INPUT — 2026-03-12 (neste arquivo; texto integral)
+- RAW_INPUT (2026-03-30) — reforço operacional enterprise (reiteração curta)
+- RAW_INPUT (2026-04-02) — reforço operacional enterprise (reiteração)
+
+Reforços explícitos do humano nesta reiteração:
+- operar sem achismo, com evidência (path/log key/cmdId/requestId/endpoint);
+- humano não executa comandos nem coleta logs; só reinicia `node index.js` quando solicitado e confirma “reiniciado”;
+- GPT é o operador técnico: código + coleta via CT + organização em RUNBOOK/LIVRO/TIMELINE;
+- sempre dizer quais processos/nodes precisam de restart;
+- evitar mudanças grandes/absurdas; preferir mudança mínima, logs robustos e organização.
+```
+
+```text
+RAW_INPUT (2026-04-06) — reforço operacional enterprise (reiteração + início de nova rodada de stress em produção)
+
+Nota: reiteração do mesmo “contrato do trabalho” e regras não-negociáveis, já registradas integralmente em:
+- RAW_INPUT — 2026-03-12 (neste arquivo; texto integral)
+- RAW_INPUT (2026-03-30) — reforço operacional enterprise (reiteração curta)
+- RAW_INPUT (2026-04-02) — reforço operacional enterprise (reiteração)
+- RAW_INPUT (2026-04-04) — reforço operacional enterprise (reiteração + reforço de postura)
+
+Reforços explícitos do humano nesta reiteração:
+- operar 110% enterprise (organização + evidência + mudança mínima);
+- tratar 1 problema por ticket (sem misturar assuntos);
+- o humano não investiga nem coleta logs manualmente (o GPT coleta via CT);
+- o humano só reinicia com `node index.js` quando o GPT pedir e confirma “reiniciado”;
+- sempre declarar no início: precisa reiniciar? / qual projeto? / como reiniciar? / por quê (1 frase);
+- sempre declarar quais nodes/processos precisam de restart (ou “nenhum”).
 ```
 
 ```text
@@ -465,6 +533,7 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260405-0900-01 | `docs/inbox/need_evidence/INC-20260405-0900-01.md` | P0 | sitechatbot+conveniente | Implementar gateway de proxies ISP com sticky por conta, distribuição equilibrada e controle total no CT (liga/desliga global e por servidor) | precisa de novo contrato CT⇄hosts (config+estado+ACK) e algoritmo de atribuição estável com redistribuição mínima; rollout por feature-flag | evidência por código (CT menus+comandos; conveniente launch) + ACKs `ack_<cmdId>.json` + logs `provision_audit/logger/commands` | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260402-0900-01 | `docs/inbox/done/INC-20260402-0900-01.md` | P0 | conveniente | RM5: “liberar Robe pra postagem” falha com erro “sem foto”, apesar de existir um pool grande (~1700 fotos) | consumo indevido por tentativa/registry inconsistente; corrigido: reserva não consome + auto-heal + liberação de reserva em falha | hostId `1b0f6f98-46bf-40c6-a0f9-dad6e1965c22`; cmdId self_update `e335b5bb-3f16-4f7d-89da-a26d899882fd` (ack ok) | done | deployed | passed | nao | nao |
 | INC-20260305-1445-01 | `docs/inbox/in_progress/INC-20260305-1445-01.md` | P0 | sitechatbot+conveniente | ngrok/CT com 503 e `dial tcp localhost:3000`, `Falha ao enviar status`, self_update sem delivery | CT em indisponibilidade/intermitÃªncia na porta 3000 no momento da coleta; command ficou apenas enqueued atÃ© recuperar conectividade | `commands.log` (`enqueue` sem ack no cmd antigo; `ack ok` no retry), `ack_5bb322ed-1e2b-42c0-a1c0-0871bcddd226.json`, logs ngrok/erro 8012/3004 | in_progress | deployed_partial | passed | sim | sim |
 | INC-20260305-1445-02 | `docs/inbox/need_evidence/INC-20260305-1445-02.md` | P1 | sitechatbot+notificador | Virtus/WhatsApp API aparentando latÃªncia alta | possÃ­vel efeito colateral da indisponibilidade CT/ngrok; precisa medir latÃªncia objetiva com `/health` e `/api/whatsapp/stats` em janela estÃ¡vel | endpoints CT + counters runtime + fila pedidos (sem stuck) | need_evidence | not_deployed | not_run | nao | sim |
@@ -1024,3 +1093,193 @@ tem esse cadastro no ct sistema interno, que foi criado pra ele um teste e tudo 
 | item | P | título | status | links |
 |---|---|---|---|---|
 | 1 | P0 | RM7 e demais hosts: identificar loop/rajada que induz "bloqueado temporariamente" | in_progress | `docs/inbox/need_evidence/INC-20260305-1815-01.md` |
+
+---
+
+## RAW_INPUT — 2026-03-30 (CT: exclusão de cobrança não atômica)
+
+```text
+certo, vamos la, aqui atenção utlra enteprise extrema melhor do mundo
+
+eu fui no ct no cadastro excluir boleto, so consegui excluir na quarta tentativa, nao ta atomivo perfeito isso aqui
+
+Leo Junior de Piracicaba
+
+e desse aqui nao consegui excluir, tem algo de muito errado que nao ta certo
+
+Rohsael - Caruaru
+
+isso precisa ser atomico ultra entperis emelhor perfeito do mundo 110%
+```
+
+### TRIAGE — 2026-03-30 (CT: cancelamento/exclusão de cobrança)
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | CT: “Excluir cobrança” exige múltiplas tentativas (transiente Asaas / falta de retry/estado) — Leo Junior (Piracicaba) | in_progress | evidência: `C:\sitechatbot\convenientetecnologia\lib\ctLeadLedgerStore.js` (`cancelInvoice`) + logs/ct_events (a coletar) |
+| 2 | P0 | CT: “Excluir cobrança” falha e não cancela — Rohsael (Caruaru) | in_progress | evidência: logs/ct_events (a coletar) + estado do invoice no SQLite (a coletar) |
+
+---
+
+## RAW_INPUT — 2026-04-05 (novo: Gateway/Proxy ISP com sticky por conta + CT controle total)
+
+```text
+triagem imbox
+
+sistema conveniente com gateway de proxy com distribuição equilibrada e persistencia do mesmo proxy para a mesma conta
+
+atualmente o sistema conveniente nao tem gateway ou uso de proxy, ou seja vamos mudar uma coisa muito importante no sistema
+
+atualmente eu tenho varios servidores, vou te dar exemplo, o rm3 ele tem 64gb de ram e trabalha com ate 120 navegadores , e esse servidor ele ta conectado a 1 moldem ou seja 1 ip , e isso ta uma merda
+
+agora quero fazer um sistema de gateway inteligente perfeito melhor do mundo onde vamos adquirir alguns proxys ISP , eu ja to vendo isso com uma empresa de proxy, a principio vou pegar 20 proxys assim que agente tiver configurado o sistema, mas vamos escalar isso a nivel ultra enterprise melhor do mundo podendo ter 40 50 70 proxys em breve, ou seja, isso vai precisar ser ultra perfeito
+
+eu pensei em agente ter um menu la junto com os menus do ct
+
+Sistema Interno
+Cadastro, testes, repescagem, banidos e histórico
+Servidores
+Monitoramento em tempo real
+Virtus
+Painel de pedidos e grupos
+Grupos
+IDs, categorias, urgência e migrações
+Contas
+Lista por servidor/conta com problemas por categoria
+Diagnósticos (GPT)
+Auditoria, padrões e investigação de mudanças de DOM
+Estoque
+Importar contas (.txt), deduplicar e provisionar automaticamente por servidor/categoria
+Site
+Cidades no ar, links e métricas de acesso + cliques no WhatsApp
+Contestação
+Olhos de Deus das contestações: período, cidade, volume e qualidade
+Serviço de Lead
+Leads de serviços pós-frete: telefone, cidade e serviço escolhido
+
+aqui ter um de Gateway , algo assim, onde la eu adiciono o proxye , sempre que remover ou adicionar novo proxy , o sistema ct faz o envio para os servidores começarem a usar
+
+e redistribui igualitariamente ne
+
+então o que eu pensei é, configurar o sistema conveniente pra usar proxy e isso preicsa ser ultra perfeito melhor do mundo , cada conta naveagdor precisa usar sempre o mesmo proxy, salvo quando o agente adicionar ou remover o proxy o ct avisa todos os servidores e eles se auto corrigem, mas em grosso modo, todos vao usar sempre um proxy fixo que o sistema definiu para aquela conta ne
+
+pensei no painel gateway no ct, ter um botao do tipo , ativar proxyes então o ct envia isso para os servidores e a partir dai 110% dos servidores passam apenas a operar usando o proxy, se eu desativar pxoryes, os servidores passam a usar a rede normal deles, dai no caso vamos precisar que cada servidor seja possivel ativar ou desativar, por exemplo, ter um botao de ligar e desligar proxyes por exmeplo, e ter ao lado de cada servidor no ct ativar ou desativar o uso de proxy por aquele servidor, porque as vezes eu tenho o servidor instalado em um servidor de teste e nao quero que ele use os proxyes entende, dai eu consigo ligar proxyes, perfeito agora ta ligado proxys podendo os servidores usar, dai eu posso ativar ou desativar um servidor especificio se ele vai usar proxye ou nao, tudo ultra atomico perfeito, com confirmação no painel , algo como , eu clico em ligar, otimo proxy ta ligado, dai agora eu seleciono um servidor e clico em ativar, sistema ct faz envio dessa ifnormação pro srvidor, espera o servidor responder que deu tudo certo, e então sistema altera status daquele servidor pra gateway ON , algo assim , tudo isso precisa ser atomico perfeito
+
+e la no servidor ele recebe todos os proxyes disponiveis define de forma igualitaria qual conta vai usar qual proxye, e vai usar aquele proxy pra aquela conta idefinidamente
+
+caso eu adicione ou remova proxyes no ct gateway, isso é refletido no servidor, e ele se auto redistibui, mas isso precisa ser de forma inteligente, se tem 30 proxyes, e eu removi 5, o sistema nao precisa mudar os outros 25 proxyes das outras contas de forma burra, ele apenas precisa identificar quais as contas que estao sem proxy e dar proxyes fixo pra aquela conta de forma ultra intelignete melhor do mundo
+
+se eu adicionar mais proxyes, ai sim, servidor precisa distribuir novamente os proxyes, de forma igualitaria ultra perfeito tambem de forma ultra inteligente tentando tocar o minimo em contas que ja tem proxy, so pra distribuição perfeita ne, se tem 100 naveagdores usando 10 proxyes, sao 10 naveagdeores usando o mesmo proxyes, se eu adicionar mais 10 proxyes, o sistema nao precisa reentregar tudo denovo pra todos, apenas escolhe 5 contas de cada proxyes pra mudar de proxy, mas as outras 5 mantem o mesmo ne
+
+nao é dificil, o que eu quero é sistema conveniente no servidor ultra inteligente melhor do mundo ultra perfeito 110% perfeito usando sistema gateway com proxy ultra perfeito melhor do mundo sabendo distribuir e readequar sempre que necesssarios os proxyes de forma igualitaria nas contas daquele servidor tocando o minimo possivel nos proxyes das contas, e sempre o uso por naveagdor é fixo atomico para cada conta/proxye fixo perfeito
+
+e no ct um menu onde eu tenha total ultra contorle perfeito do mundo pra adicoinar novos proxyes, remover proxyes, ligar e desligar uso de proxyes ativar ou desativar servidores especificos , se possivel monitoramento de proxy ruim que parou de funcionar enfim, quero um manu painel onde eu tenha 110% de perfeito controle pra administrar isso, adicionar novos proxyes e tudo mais, dai podendo adciionar proxyes em lote, tipo um local de adicionar proxy, dai ele abre outro menu e eu vou adicionando 1 a 1 , dai eu adiciono 10 proxyes por exemplo, e quando eu clicar em salvar, dai sim, o sistema salva os 10 de uma vez so, e ja faz envio para os servidores
+
+tambem seria bom eu acho que ao inciiar um sistema node index.js no servidor, ele ja faz uma requisição pra saber sobre os proxyes se ta tudo certo, e tudo mais, se ele ta marcado la
+
+tambem a questao de servidor novo, servidor novo se conectou, ele ja entra com proxy desativado daquele servidor, dai eu tenho que ir la e ativar ele, sempre servidor novo entra como desativado, tendo que fazer a ativação manual no ct, enfim deixar isso ultra melhor do mundo
+
+como voce é 1 milhao de vezes mais inteligente do mundo, e voce tem acesso a todos os arquivos do sistema do conveniente e do sitechatbot, como voce tem acesso a tudo e conhece tudo, se tiver sugestoes debates, agora é hora de agente alinhar tudo deixar isso ultra perfeito melhor do mundo, nao vamos codar nada agora, vamos fazer auditoria de ponta a ponta, dossie ultra enterprise melhor do mundo antes de começar a codar, agora é hora de olhar as entrnahas olhar tudo, ver se ja temos base pra isso, enfim, precisamos fazer o melhor do melhor do mundo entre uso de proxy /  contorle total disso no ct
+```
+
+---
+
+## RAW_INPUT — 2026-04-07 (elevar anti-detect para nivel enterprise, por fases)
+
+```text
+triagem inbox
+
+registrar tudo para execucao organizada, sem quebrar producao:
+
+escopo aprovado:
+1) geo de fingerprint deve seguir IP/proxy (sem mexer na cidade de negocio da conta)
+2) timezone/idioma com coerencia por proxy (evitar pacote repetido em massa)
+3) validar qualidade real dos presets UA/UA-CH atuais; se insuficiente, avaliar fonte externa
+4) fortalecer fingerprint avancado (webgl/canvas/audio/fonts/plugins)
+5) reduzir uniformidade/cluster (platform e pacote tecnico por coortes coerentes)
+6) criar score de coerencia por perfil com rollout seguro (observacao -> soft -> hard) sem travar producao
+7) comportamento humano fica para o fim, com debate dedicado
+
+requisito operacional:
+- ultra organizado, execucao item a item, evidencia e simulacao antes de expandir.
+```
+
+### TRIAGE — 2026-04-07 (Programa Anti-Detect Enterprise)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Geo de fingerprint por proxy (preservando cidade de negocio) | in_progress | `docs/inbox/in_progress/INC-20260407-1600-01.md` |
+| 2 | P1 | Timezone/idioma por coerencia de proxy (anti-cluster) | need_evidence | `docs/inbox/need_evidence/INC-20260407-1610-01.md` |
+| 3 | P0 | Auditoria/validacao dos presets UA/UA-CH atuais | need_evidence | `docs/inbox/need_evidence/INC-20260407-1620-01.md` |
+| 4 | P0 | Fingerprint avancado: WebGL/Canvas/Audio/fonts/plugins | need_evidence | `docs/inbox/need_evidence/INC-20260407-1630-01.md` |
+| 5 | P1 | Coortes de plataforma/pacote tecnico para reduzir cluster | need_evidence | `docs/inbox/need_evidence/INC-20260407-1640-01.md` |
+| 6 | P0 | Score de coerencia por perfil (CT maestro: observacao -> soft -> hard) | need_evidence | `docs/inbox/need_evidence/INC-20260407-1650-01.md` |
+| 7 | P2 | Comportamento humano avancado (fase final, debate dedicado) | need_alignment | `docs/inbox/need_evidence/INC-20260407-1700-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-08 (RM6/RM7: Facebook "Sorry, something went wrong" + painel oscilando)
+
+```text
+no RM6 e RM7 (com proxy + fingerprint novos), ao cadastrar conta o navegador abre e as paginas do Facebook aparecem com:
+"Sorry, something went wrong. We're working on getting this fixed as soon as we can."
+
+google abre normalmente.
+
+no CT aparece contagem (ex.: 30) e no host oscila (27/28/29/30).
+ha percepcao de congestionamento de ACK e chegada parcelada de contas.
+```
+
+```text
+RAW_INPUT (2026-04-08) — RM6: após mudanças de fingerprint (WebGL/canvas/etc) cadastro até pode ocorrer,
+mas o navegador "não consegue mais ir pro Facebook" / fluxo de login/configure fica quebrado.
+
+Pedido operacional:
+- usar o "Conveniente Lab" para reproduzir e entender causa real (sem desativar proxy/anti-detect).
+
+Conta citada para teste:
+- 2178 — Renato Matos — 82956343520 — disponível no estoque.
+```
+
+### TRIAGE — 2026-04-08 (RM6/RM7 cadastro quebrado)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | RM6/RM7: “Facebook não abre / Sorry…” | done | postmortem: `docs/inbox/done/INC-20260408-0900-01.md` + evidência: `sitechatbot/dados/logs/aba80611-8b8a-46ed-a852-f5f0d573c03b/ack_6a007033-823a-41c5-8899-c91b0ce19045.json` |
+| 2 | P1 | RM6: contagem de contas oscilando entre CT e host dashboard | done | observado durante a crise; sem reproduzir após estabilização operacional |
+| 3 | P1 | RM6/RM7: suspeita de congestionamento por excesso de comandos `gateway_set_proxies`/ACK | done | mitigado pelos patches prévios (dedupe/cooldown no CT + priorização/collapse no host); manter em observação |
+
+#### RESOLUÇÃO (confirmada pelo humano)
+
+- Causa raiz do “Facebook não abre / Sorry…”: **cookies inválidos nas contas específicas**.
+- Validação: humano testou **3 contas com cookies válidos** e o cadastro/login ocorreu normalmente.
+
+#### UPDATE TECNICO — 2026-04-08 (fluxo de entrega CT -> host + priorizacao de comandos)
+
+- Evidencia de entrega de conta em pacote unico (`stock_provision`): `sitechatbot/index.js` (`/api/stock/provision/manual`, `/api/stock/provision/from_account_secret`) envia `login`, `password`, `cookies`, `city`, `category` no mesmo payload por acao.
+- Evidencia de execucao no host em transacao unica: `conveniente/scripts/dashboard.js` (`execStockProvision`) processa `create_profile -> activate -> configure -> recycle -> start_work` no mesmo comando/lock.
+- Evidencia de falha atual no cadastro (nao "conta parcelada"): `sitechatbot/dados/logs/aba80611-8b8a-46ed-a852-f5f0d573c03b/ack_b47be4b4-3978-4e78-906a-b416386cae9a.json` e `ack_31f08857-59a9-4e67-a342-00349044e20b.json` com `still_login_required:checkpoint_interstitial` apos `configure`.
+- Acao de mitigacao aplicada no host (sem desligar proxy): `conveniente/scripts/dashboard.js` agora:
+  - prioriza `stock_provision/login_remediate` antes de comandos de gateway no mesmo lote;
+  - colapsa `gateway_set_proxies/gateway_reconcile` redundantes no mesmo lote (ACK `skipped` com motivo `superseded_by_newer_gateway_command_in_same_batch`).
+- Objetivo da mitigacao: reduzir atraso de cadastro por backlog de gateway e impedir sensacao de operacao "parcelada" durante tempestade de comandos.
+
+#### UPDATE FORENSE — 2026-04-08 (perfil Renato Matos: troca de proxy durante cadastro)
+
+- Evidencia do erro de cadastro no profile alvo: `sitechatbot/dados/logs/aba80611-8b8a-46ed-a852-f5f0d573c03b/ack_d8edcb9d-5357-4f98-83d1-7066fb7bda67.json` com `still_login_required:checkpoint_interstitial` em `configure`.
+- Evidencia de recycle de gateway logo em seguida no mesmo profile: `sitechatbot/dados/logs/aba80611-8b8a-46ed-a852-f5f0d573c03b/ack_5465bb03-0780-4181-b397-1c5d59e29a77.json` (`changedSample` inclui `campos_dos_goytacazes-1775658025686`).
+- Causa operacional confirmada: `gateway_set_proxies` tentou recycle do perfil recem-provisionado durante janela de `kill_guard/configurando`, abrindo risco de troca de proxy no meio do fluxo.
+- Correcao aplicada no host (`conveniente/scripts/dashboard.js`):
+  - bloqueia recycle quando perfil esta `configurando` ou `humanControl`;
+  - `execGatewaySetProxies` e fila de retry (`processGatewayRecycleQueue`) passam a reciclar com `allowBusy=false` (respeita prechecks, reencola retry).
+- Resultado esperado: manter proxy/fingerprint estaveis durante cadastro/login e reciclar apenas apos sair da janela critica.
+
+#### UPDATE FORENSE/CT — 2026-04-08 (por que `gateway_set_proxies` repetia sem mudanca real)
+
+- Causa raiz identificada: reconciliacao por `report_reconcile/auto_reconcile` no CT podia reenfileirar o mesmo payload repetidamente quando o host permanecia em mismatch (ex.: profile em `kill_guard/configurando`) e sem comando pendente no momento.
+- Evidencia de volume: `sitechatbot/dados/commands.json` com sequencias longas de `type: gateway_set_proxies` para host habilitado; ACKs recorrentes em `sitechatbot/dados/logs/<hostId>/ack_*.json`.
+- Correcao aplicada no CT (`sitechatbot/index.js`):
+  - dedupe temporal por payload normalizado (remove `issuedAt`) com cooldown (`CT_GATEWAY_SAME_PAYLOAD_RESEND_COOLDOWN_MS`, default 5 min);
+  - sync de report passa `plannedCohorts` junto com `plannedAssignments` no payload desejado;
+  - quando host sinaliza `needsGatewayInventory/needsGatewayProxyTrafficCreds`, envio segue `force=true` (nao bloqueado por cooldown).
+- Resultado esperado: fim da tempestade de reenvio identico; gateway so reenfila em mudanca real, pedido explicito do host ou apos cooldown de seguranca.
