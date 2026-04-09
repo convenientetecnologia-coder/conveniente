@@ -1369,3 +1369,37 @@ certo, agente tava tentando resolver uma questao que o composer fez merda nao fo
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Worker fecha navegadores em massa (loop de derruba/reabre, captcha/deslog) | in_progress | `docs/inbox/need_evidence/INC-20260409-1000-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-09 (Robe: humanizacao da criacao de classificado 1-2 min)
+
+```text
+triagem inbox
+
+tema: postagem do Robe (fluxo de classificado) ja existe e funciona:
+1) foto
+2) titulo
+3) preco
+4) categoria
+5) condicao
+6) descricao
+7) localizacao
+
+preocupacao principal:
+- hoje o fluxo esta rapido demais e com ritmo parecido (aprox. 20s do inicio ao publicar).
+- risco: assinatura automatizada por cadencia muito curta e repetitiva.
+
+pedido:
+- nao codar agora.
+- abrir incidente e fazer auditoria/dossie de ponta a ponta, com extrema cautela para nao quebrar o sistema.
+- desenhar humanizacao com tempo total randomizado entre 1-2 minutos por postagem (da foto ate publicar),
+  distribuindo pausas de forma inteligente por etapa (as vezes mais rapido em titulo, as vezes mais lento em categoria etc).
+- garantir que nao fique 100% igual entre posts.
+```
+
+### TRIAGE — 2026-04-09 (Robe: humanizacao da criacao/publicacao)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Robe: fluxo de criacao/publicacao rapido e repetitivo (~20s) precisa janela humana randomizada de 1-2 min sem regressao | in_progress | `docs/inbox/need_evidence/INC-20260409-1400-01.md` |

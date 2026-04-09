@@ -208,6 +208,82 @@ function toHumanPauseMs(ms) {
 const sleep = (ms) => new Promise(r => setTimeout(r, toHumanPauseMs(ms)));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
+// Humanização da criação do classificado (bloco formulário):
+// alvo de tempo entre página pronta + upload até o clique em "Publicar".
+const ROBE_POST_HUMANIZE_ENABLED = String(process.env.ROBE_POST_HUMANIZE_ENABLED || '1').trim() !== '0';
+const ROBE_POST_COMPOSE_MIN_MS = Math.max(15_000, parseInt(process.env.ROBE_POST_COMPOSE_MIN_MS || '60000', 10) || 60000);
+const ROBE_POST_COMPOSE_MAX_MS = Math.max(ROBE_POST_COMPOSE_MIN_MS, parseInt(process.env.ROBE_POST_COMPOSE_MAX_MS || '120000', 10) || 120000);
+const ROBE_POST_ACTION_DELAY_MIN_MS = Math.max(120, parseInt(process.env.ROBE_POST_ACTION_DELAY_MIN_MS || '900', 10) || 900);
+const ROBE_POST_ACTION_DELAY_MAX_MS = Math.max(ROBE_POST_ACTION_DELAY_MIN_MS, parseInt(process.env.ROBE_POST_ACTION_DELAY_MAX_MS || '4200', 10) || 4200);
+
+function createComposeTimingPlan() {
+  if (!ROBE_POST_HUMANIZE_ENABLED) return null;
+  return {
+    enabled: true,
+    targetMs: jitter(ROBE_POST_COMPOSE_MIN_MS, ROBE_POST_COMPOSE_MAX_MS),
+    actionMinMs: ROBE_POST_ACTION_DELAY_MIN_MS,
+    actionMaxMs: ROBE_POST_ACTION_DELAY_MAX_MS,
+    startedAt: 0
+  };
+}
+
+function markComposeStart(plan) {
+  if (!plan || !plan.enabled) return;
+  plan.startedAt = Date.now();
+}
+
+async function humanizeStepPause(plan, stepName, { nome = '', attId = '' } = {}) {
+  if (!plan || !plan.enabled || !plan.startedAt) return;
+  const now = Date.now();
+  const elapsed = now - plan.startedAt;
+  const remaining = Math.max(0, plan.targetMs - elapsed);
+  if (remaining <= 0) return;
+
+  const maxPause = Math.min(plan.actionMaxMs, remaining);
+  const minPause = Math.min(plan.actionMinMs, maxPause);
+  if (maxPause <= 80) return;
+  const waitMs = jitter(Math.max(60, minPause), maxPause);
+  try {
+    stepLog.appendJSONL(nome || 'system', 'robe', {
+      attempt: attId || undefined,
+      step: 'humanize_compose_pause',
+      phase: stepName || 'unknown',
+      waitMs,
+      remainingBeforeMs: remaining,
+      elapsedMs: elapsed,
+      targetMs: plan.targetMs
+    });
+  } catch {}
+  await sleep(waitMs);
+}
+
+async function ensureComposeBudgetBeforePublish(plan, { nome = '', attId = '' } = {}) {
+  if (!plan || !plan.enabled || !plan.startedAt) return;
+  const elapsed = Date.now() - plan.startedAt;
+  const remaining = Math.max(0, plan.targetMs - elapsed);
+  if (remaining <= 0) {
+    try {
+      stepLog.appendJSONL(nome || 'system', 'robe', {
+        attempt: attId || undefined,
+        step: 'humanize_compose_budget_hit',
+        elapsedMs: elapsed,
+        targetMs: plan.targetMs
+      });
+    } catch {}
+    return;
+  }
+  try {
+    stepLog.appendJSONL(nome || 'system', 'robe', {
+      attempt: attId || undefined,
+      step: 'humanize_compose_budget_wait',
+      waitMs: remaining,
+      elapsedMs: elapsed,
+      targetMs: plan.targetMs
+    });
+  } catch {}
+  await sleep(remaining);
+}
+
 // PATCH MILITAR — Constantes de limit_posting
 const LIMIT_POSTING_REASON = 'limit_posting';
 const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
@@ -2594,6 +2670,20 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
     })().catch(()=>{});
 
+    const composePlan = createComposeTimingPlan();
+    if (composePlan && composePlan.enabled) {
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'humanize_compose_plan',
+          targetMs: composePlan.targetMs,
+          actionMinMs: composePlan.actionMinMs,
+          actionMaxMs: composePlan.actionMaxMs
+        });
+      } catch {}
+      markComposeStart(composePlan);
+    }
+
     // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
     // Se a tela degradar nesse ponto (após fastlane), recarrega create/item 1x para retentativa real.
     let inputFoto = null;
@@ -2698,6 +2788,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await inputFoto.uploadFile(fotoPath);
     fotoUploaded = true;
     await sleep(jitter(250, 450));
+    await humanizeStepPause(composePlan, 'after_upload', { nome, attId });
 
     // TÍTULO
     const titulos = readJsonSafe(path.join(__dirname, '..', 'dados', 'titulos.json'), []);
@@ -2705,10 +2796,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await preencherTitulo(page, titulo);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'title_ok', value: titulo });
     await sleep(jitter(120, 220));
+    await humanizeStepPause(composePlan, 'after_title', { nome, attId });
 
     // PREÇO
     await preencherPreco(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'price_ok', value: '0' });
+    await humanizeStepPause(composePlan, 'after_price', { nome, attId });
 
     // CATEGORIA
     const cat = await selecionarCategoriaMoveis(page);
@@ -2718,6 +2811,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       value: (cat && cat.value) ? cat.value : 'unknown',
       method: (cat && cat.method) ? cat.method : 'unknown'
     });
+    await humanizeStepPause(composePlan, 'after_category', { nome, attId });
 
     // CONDIÇÃO
     const cond = await selecionarCondicaoNovo(page);
@@ -2727,6 +2821,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       value: (cond && cond.value) ? cond.value : 'unknown',
       method: (cond && cond.method) ? cond.method : 'unknown'
     });
+    await humanizeStepPause(composePlan, 'after_condition', { nome, attId });
 
     // DESCRIÇÃO (antes de Localização)
     const desc = await preencherDescricaoItem(page).catch(() => ({ ok: false, reason: 'exception' }));
@@ -2737,11 +2832,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       len: (desc && typeof desc.len === 'number') ? desc.len : null,
       reason: (desc && !desc.ok) ? String(desc.reason || 'unknown') : null
     });
+    await humanizeStepPause(composePlan, 'after_description', { nome, attId });
 
     // LOCALIZAÇÃO
     cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
     localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
+    await humanizeStepPause(composePlan, 'after_location', { nome, attId });
+    await ensureComposeBudgetBeforePublish(composePlan, { nome, attId });
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
 

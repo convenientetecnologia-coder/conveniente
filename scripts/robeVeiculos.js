@@ -191,6 +191,82 @@ function toHumanPauseMs(ms) {
 const sleep = (ms) => new Promise(r => setTimeout(r, toHumanPauseMs(ms)));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
+// Humanização da criação do classificado (veículos):
+// alvo de tempo entre página pronta + upload até o clique em "Publicar".
+const ROBE_POST_HUMANIZE_ENABLED = String(process.env.ROBE_POST_HUMANIZE_ENABLED || '1').trim() !== '0';
+const ROBE_POST_COMPOSE_MIN_MS = Math.max(15_000, parseInt(process.env.ROBE_POST_COMPOSE_MIN_MS || '60000', 10) || 60000);
+const ROBE_POST_COMPOSE_MAX_MS = Math.max(ROBE_POST_COMPOSE_MIN_MS, parseInt(process.env.ROBE_POST_COMPOSE_MAX_MS || '120000', 10) || 120000);
+const ROBE_POST_ACTION_DELAY_MIN_MS = Math.max(120, parseInt(process.env.ROBE_POST_ACTION_DELAY_MIN_MS || '900', 10) || 900);
+const ROBE_POST_ACTION_DELAY_MAX_MS = Math.max(ROBE_POST_ACTION_DELAY_MIN_MS, parseInt(process.env.ROBE_POST_ACTION_DELAY_MAX_MS || '4200', 10) || 4200);
+
+function createComposeTimingPlan() {
+  if (!ROBE_POST_HUMANIZE_ENABLED) return null;
+  return {
+    enabled: true,
+    targetMs: jitter(ROBE_POST_COMPOSE_MIN_MS, ROBE_POST_COMPOSE_MAX_MS),
+    actionMinMs: ROBE_POST_ACTION_DELAY_MIN_MS,
+    actionMaxMs: ROBE_POST_ACTION_DELAY_MAX_MS,
+    startedAt: 0
+  };
+}
+
+function markComposeStart(plan) {
+  if (!plan || !plan.enabled) return;
+  plan.startedAt = Date.now();
+}
+
+async function humanizeStepPause(plan, stepName, { nome = '', attId = '' } = {}) {
+  if (!plan || !plan.enabled || !plan.startedAt) return;
+  const now = Date.now();
+  const elapsed = now - plan.startedAt;
+  const remaining = Math.max(0, plan.targetMs - elapsed);
+  if (remaining <= 0) return;
+
+  const maxPause = Math.min(plan.actionMaxMs, remaining);
+  const minPause = Math.min(plan.actionMinMs, maxPause);
+  if (maxPause <= 80) return;
+  const waitMs = jitter(Math.max(60, minPause), maxPause);
+  try {
+    stepLog.appendJSONL(nome || 'system', 'robe', {
+      attempt: attId || undefined,
+      step: 'humanize_compose_pause',
+      phase: stepName || 'unknown',
+      waitMs,
+      remainingBeforeMs: remaining,
+      elapsedMs: elapsed,
+      targetMs: plan.targetMs
+    });
+  } catch {}
+  await sleep(waitMs);
+}
+
+async function ensureComposeBudgetBeforePublish(plan, { nome = '', attId = '' } = {}) {
+  if (!plan || !plan.enabled || !plan.startedAt) return;
+  const elapsed = Date.now() - plan.startedAt;
+  const remaining = Math.max(0, plan.targetMs - elapsed);
+  if (remaining <= 0) {
+    try {
+      stepLog.appendJSONL(nome || 'system', 'robe', {
+        attempt: attId || undefined,
+        step: 'humanize_compose_budget_hit',
+        elapsedMs: elapsed,
+        targetMs: plan.targetMs
+      });
+    } catch {}
+    return;
+  }
+  try {
+    stepLog.appendJSONL(nome || 'system', 'robe', {
+      attempt: attId || undefined,
+      step: 'humanize_compose_budget_wait',
+      waitMs: remaining,
+      elapsedMs: elapsed,
+      targetMs: plan.targetMs
+    });
+  } catch {}
+  await sleep(remaining);
+}
+
 // PATCH MILITAR — Constantes de limit_posting
 const LIMIT_POSTING_REASON = 'limit_posting';
 const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
@@ -1975,6 +2051,20 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
     })().catch(()=>{});
 
+    const composePlan = createComposeTimingPlan();
+    if (composePlan && composePlan.enabled) {
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'humanize_compose_plan',
+          targetMs: composePlan.targetMs,
+          actionMinMs: composePlan.actionMinMs,
+          actionMaxMs: composePlan.actionMaxMs
+        });
+      } catch {}
+      markComposeStart(composePlan);
+    }
+
     // FOTO — via fotosVeiculos.js
     const pick = await fotosV.pickPhotoForAccount(nome, workingNames);
     if (!pick.ok) {
@@ -2008,37 +2098,45 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     await sleep(jitter(250, 450));
+    await humanizeStepPause(composePlan, 'after_upload', { nome, attId });
 
     // CAMPOS DE VEÍCULO
     // Tipo de veículo: "Outro"
     const tipoVeiculo = await selecionarTipoVeiculo(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_type_ok', value: tipoVeiculo });
     await sleep(jitter(120, 220));
+    await humanizeStepPause(composePlan, 'after_vehicle_type', { nome, attId });
 
     // LOCALIZAÇÃO (preenchida imediatamente após Tipo de veículo)
     cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
     localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await sleep(jitter(120, 220));
+    await humanizeStepPause(composePlan, 'after_location', { nome, attId });
 
     // Ano: random [atual-10..atual]
     const anoVeiculo = await selecionarAnoVeiculo(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_year_ok', value: anoVeiculo });
     await sleep(jitter(120, 220));
+    await humanizeStepPause(composePlan, 'after_vehicle_year', { nome, attId });
 
     // Fabricante / Modelo — AGORA por modeloSelecionado
     const { fabricante, modelo } = await preencherFabricanteModelo(page, modeloSelecionado);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_make_model_ok', fabricante, modelo, modeloSelecionado });
     await sleep(jitter(120, 220));
+    await humanizeStepPause(composePlan, 'after_make_model', { nome, attId });
 
     // Preço: random 1..3000
     const precoInt = 1 + Math.floor(Math.random() * 3000);
     await preencherPrecoVeiculo(page, precoInt);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_price_ok', value: precoInt });
+    await humanizeStepPause(composePlan, 'after_price', { nome, attId });
     
     // DESCRIÇÃO — NOVO: preenche após o preço
     await preencherDescricaoVeiculo(page, modeloSelecionado);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_description_ok' });
+    await humanizeStepPause(composePlan, 'after_description', { nome, attId });
+    await ensureComposeBudgetBeforePublish(composePlan, { nome, attId });
 
     // "Título" não existe em veículos — PARA COMPATIBILIDADE das verificações, geramos um pseudo-título
     const titulo = `${fabricante} ${modelo} ${anoVeiculo}`.trim();
