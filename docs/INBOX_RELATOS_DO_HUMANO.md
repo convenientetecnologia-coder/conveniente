@@ -533,6 +533,7 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260409-1000-01 | `docs/inbox/need_evidence/INC-20260409-1000-01.md` | P0 | conveniente | Worker fecha navegadores em massa (agressivo), gerando deslog e quebrando operação (inclusive ao “Retomar trabalho”) | possível regressão: `scripts/worker.js` passou a dar `process.exit(1)` em “CDP fatal” (regex ampla) e executa `fatalExitCleanupChrome()` que mata múltiplos perfis; isso pode virar loop de derruba/reabre | evidência inicial (git): commit `37dc194` (2026-03-18); evidência runtime a coletar: `fetch_logs_query(keys=["logger","service_stderr","service_stdout"], patterns=["[FATAL][WORKER] exit para cluster respawnar","cleanup Chrome antes de exit","Target closed","Network.enable","Protocol error"])` | need_evidence | deployed | not_run | nao | sim |
 | INC-20260405-0900-01 | `docs/inbox/need_evidence/INC-20260405-0900-01.md` | P0 | sitechatbot+conveniente | Implementar gateway de proxies ISP com sticky por conta, distribuição equilibrada e controle total no CT (liga/desliga global e por servidor) | precisa de novo contrato CT⇄hosts (config+estado+ACK) e algoritmo de atribuição estável com redistribuição mínima; rollout por feature-flag | evidência por código (CT menus+comandos; conveniente launch) + ACKs `ack_<cmdId>.json` + logs `provision_audit/logger/commands` | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260402-0900-01 | `docs/inbox/done/INC-20260402-0900-01.md` | P0 | conveniente | RM5: “liberar Robe pra postagem” falha com erro “sem foto”, apesar de existir um pool grande (~1700 fotos) | consumo indevido por tentativa/registry inconsistente; corrigido: reserva não consome + auto-heal + liberação de reserva em falha | hostId `1b0f6f98-46bf-40c6-a0f9-dad6e1965c22`; cmdId self_update `e335b5bb-3f16-4f7d-89da-a26d899882fd` (ack ok) | done | deployed | passed | nao | nao |
 | INC-20260305-1445-01 | `docs/inbox/in_progress/INC-20260305-1445-01.md` | P0 | sitechatbot+conveniente | ngrok/CT com 503 e `dial tcp localhost:3000`, `Falha ao enviar status`, self_update sem delivery | CT em indisponibilidade/intermitÃªncia na porta 3000 no momento da coleta; command ficou apenas enqueued atÃ© recuperar conectividade | `commands.log` (`enqueue` sem ack no cmd antigo; `ack ok` no retry), `ack_5bb322ed-1e2b-42c0-a1c0-0871bcddd226.json`, logs ngrok/erro 8012/3004 | in_progress | deployed_partial | passed | sim | sim |
@@ -1314,3 +1315,57 @@ Nota:
 |---|---|---|---|---|
 | 1 | P0 | Robe: postagem 24/7 “frenética” com cluster (fila sempre cheia) + captcha/deslog + aviso “suspeita de automação” | need_evidence | `docs/inbox/need_evidence/INC-20260408-1400-01.md` |
 | 2 | P0 | Robe V2: sessões/lotes/pausas dentro do bloco (substituir padrão de cooldown fixo por post) | in_progress | `docs/inbox/need_evidence/INC-20260408-1400-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-09 (reforço operacional enterprise — reiteração + início de nova rodada)
+
+```text
+Nota: este relato é uma reiteração do “contrato do trabalho” e regras não-negociáveis, já registrado integralmente em:
+- RAW_INPUT — 2026-03-12 (neste arquivo; texto integral)
+
+Reforços explícitos nesta reiteração:
+- operar sem achismo, com evidência citável (path/log key/cmdId/requestId/endpoint);
+- humano não executa comandos nem coleta logs; só reinicia `node index.js` quando solicitado e confirma “reiniciado”;
+- GPT é o operador técnico: código + coleta via CT + organização em RUNBOOK/LIVRO/TIMELINE;
+- sempre declarar no início: precisa reiniciar? / qual projeto? / como reiniciar? / por quê (1 frase);
+- sempre declarar quais nodes/processos precisam de restart (ou “nenhum”);
+- mudança mínima + logs robustos + organização; tratar 1 problema por ticket.
+```
+
+---
+
+## RAW_INPUT — 2026-04-09 (worker fecha navegadores agressivamente / deslog em massa)
+
+```text
+triagem inbox
+
+um tempo atraz (~3 semanas) fiz uma atualização pelo Cursor mas estava usando o Composer (IA do próprio Cursor) e ele mexeu (acho que no worker) e fez uma merda grande.
+
+sintoma:
+- do nada o sistema está trabalhando e o worker fecha vários navegadores de modo agressivo (o dia todo)
+- ao invocar humano e depois clicar em “Retomar trabalho”, às vezes acontece a mesma coisa (fecha vários navegadores)
+- contas voltando deslogadas
+
+hipótese humana:
+- na época existia algum problema de browser fechado / erro puppeteer / sessão viva que não reabria
+- “solução” do composer parece ter sido matar o worker inteiro (remendo brutal) e isso está quebrando a operação
+
+pedido:
+- investigar de ponta a ponta, com auditoria/dossiê ultra enterprise, antes de codar
+- descobrir o que foi feito, por quê, qual era o problema original e por que virou comportamento agressivo
+```
+
+---
+
+## RAW_INPUT — 2026-04-09 (continuidade: fechamento em massa no worker após mudanças do Composer)
+
+```text
+certo, agente tava tentando resolver uma questao que o composer fez merda nao foi , o fechamento em massa que o worker ta fazendo , se nao me engano a ultima coisa que vc tava fazendo era puxando os logs do rm3 algo assim, porque essa configuração do worker ai que o composer fez foi uma merda fodida, ele quebrou tudo, toda hora varios navegadores sao fechados, reabre tudo, as vezes eu invoco humano, e quando clico em retomar tudo, denovo, varios navegadores fechados, e isso ta dando capthca nas contas, banimento, deslogadr, ta uma merda, preicsamos urgente resolver isso, voce conseguiu ler tudo desse chat?
+```
+
+### TRIAGE — 2026-04-09 (continuidade incidente worker fecha navegadores em massa)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Worker fecha navegadores em massa (loop de derruba/reabre, captcha/deslog) | in_progress | `docs/inbox/need_evidence/INC-20260409-1000-01.md` |

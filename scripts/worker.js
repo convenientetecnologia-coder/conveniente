@@ -13952,35 +13952,58 @@ process.on('message', async (msg) => {
   }
 });
 
-// P0 enterprise: cleanup Chrome por userDataDir antes de exit — evita navegadores zumbi consumindo RAM.
-// UAFP: controle 110% do ciclo (abertura, trabalho, fechamento, recuperação).
-function fatalExitCleanupChrome() {
+const CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS = Math.max(5000, parseInt(process.env.CONVENIENTE_CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS || '15000', 10) || 15000);
+let _lastCdpFatalRecoverySweepAt = 0;
+
+async function runCdpFatalRecoverySweep({ source = '', msg = '' } = {}) {
   try {
-    const arr = fileStore.loadPerfisJson() || [];
-    if (!Array.isArray(arr)) return;
-    const udirByNome = {};
-    for (const p of arr) {
-      if (p && p.nome && p.userDataDir) udirByNome[String(p.nome)] = String(p.userDataDir).trim();
+    const now = Date.now();
+    if ((now - _lastCdpFatalRecoverySweepAt) < CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS) {
+      try {
+        logger.warn('[FATAL][WORKER] cdp_recovery_sweep_debounced', {
+          source: String(source || ''),
+          cooldownMs: CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS
+        });
+      } catch {}
+      return;
     }
-    const toKill = new Set(controllers.keys());
+    _lastCdpFatalRecoverySweepAt = now;
+    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+    const entries = Array.from(controllers.entries());
+    let scanned = 0;
+    let recovered = 0;
+    for (const [nome, ctrl] of entries) {
+      scanned++;
+      let connected = true;
+      try {
+        connected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' ? ctrl.browser.isConnected() : true);
+      } catch {
+        connected = false;
+      }
+      if (connected) continue;
+      try { await hardCloseController(nome, ctrl, { reason: 'cdp_fatal_soft_recover', allowKillUserDataDir: true }); } catch {}
+      try { controllers.delete(nome); } catch {}
+      try {
+        const isDesiredActive = desired.perfis?.[nome]?.active === true;
+        const isHold = desired.perfis?.[nome]?.humanHold === true;
+        if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+          robeMeta[nome].closingReason = 'cdp_fatal_soft_recover';
+          setKillGuard(nome, 5000);
+          recovered++;
+        }
+      } catch {}
+    }
     try {
-      const shard = process.env.SHARD_PROFILES || '';
-      if (shard) {
-        const names = JSON.parse(shard);
-        if (Array.isArray(names)) for (const n of names) toKill.add(String(n));
-      }
+      logger.warn('[FATAL][WORKER] cdp_recovery_sweep_done', {
+        source: String(source || ''),
+        scanned,
+        recovered,
+        msg: String(msg || '').slice(0, 220)
+      });
     } catch {}
-    let killed = 0;
-    for (const nome of toKill) {
-      const udir = udirByNome[nome];
-      if (udir) {
-        try {
-          browserHelper.killChromeProfileProcesses(udir);
-          killed++;
-        } catch {}
-      }
-    }
-    if (killed > 0) try { logger.warn('[FATAL][WORKER] cleanup Chrome antes de exit', { perfis: killed }); } catch {}
+    try { await snapshotStatusAndWrite(); } catch {}
   } catch {}
 }
 
@@ -13989,13 +14012,11 @@ process.on('uncaughtException', (e) => {
   try {
     const msg = String((e && e.message) || e || '');
     const isCdpFatal = /Target closed|Network\.enable|Protocol error.*Target|setUserAgentOverride/i.test(msg);
-    const forceExit = String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1';
-    if (forceExit || isCdpFatal) {
-      try { logger.warn('[FATAL][WORKER] exit para cluster respawnar', { isCdpFatal, forceExit }); } catch {}
-      fatalExitCleanupChrome();
-      setTimeout(() => { try { process.exit(1); } catch {} }, 1200);
+    if (isCdpFatal) {
+      try { logger.warn('[FATAL][WORKER] CDP fatal detectado (sem exit de worker)', { source: 'uncaughtException' }); } catch {}
+      runCdpFatalRecoverySweep({ source: 'uncaughtException', msg }).catch(() => {});
     } else {
-      try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
+      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automático). Humano deve reiniciar: node index.js'); } catch {}
     }
   } catch {}
 });
@@ -14004,13 +14025,11 @@ process.on('unhandledRejection', (e) => {
   try {
     const msg = String((e && e.message) || e || '');
     const isCdpFatal = /Target closed|Network\.enable|Protocol error.*Target|setUserAgentOverride/i.test(msg);
-    const forceExit = String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1';
-    if (forceExit || isCdpFatal) {
-      try { logger.warn('[FATAL][WORKER] exit para cluster respawnar', { isCdpFatal, forceExit }); } catch {}
-      fatalExitCleanupChrome();
-      setTimeout(() => { try { process.exit(1); } catch {} }, 1200);
+    if (isCdpFatal) {
+      try { logger.warn('[FATAL][WORKER] CDP fatal detectado (sem exit de worker)', { source: 'unhandledRejection' }); } catch {}
+      runCdpFatalRecoverySweep({ source: 'unhandledRejection', msg }).catch(() => {});
     } else {
-      try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
+      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automático). Humano deve reiniciar: node index.js'); } catch {}
     }
   } catch {}
 });
