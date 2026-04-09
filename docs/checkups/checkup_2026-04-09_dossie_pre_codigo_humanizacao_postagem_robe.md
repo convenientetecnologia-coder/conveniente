@@ -150,3 +150,23 @@ Metricas de aceite propostas (objetivas):
 ## Relacao com incidente
 
 - Incidente principal: `docs/inbox/need_evidence/INC-20260409-1400-01.md`.
+
+## Addendum tecnico (2026-04-09b)
+
+Aprendizado da primeira rodada:
+- A estrategia de "budget com sobra final" elevou o tempo total, porem concentrou espera perto do publish.
+- Esse padrao nao atende o objetivo de ritmo humano no preenchimento.
+
+Ajuste aplicado:
+- Novo modelo de compose com distribuicao aleatoria de budget em timers **pre-acao** (nao no final).
+- Janela default do budget pre-acao: `30..90s` (`ROBE_POST_COMPOSE_MIN_MS=30000`, `ROBE_POST_COMPOSE_MAX_MS=90000`).
+- Fases de espera (itens): upload, titulo, preco, categoria, condicao, descricao, localizacao, publicar.
+- Fases de espera (veiculos): upload, tipo, localizacao, ano, fabricante/modelo, preco, descricao, publicar.
+
+Complemento de humanizacao:
+- Digitacao desacelerada em titulo/preco/descricao/localizacao com ranges dedicados por campo.
+- Em ~20% dos casos de titulo/descricao, simulacao de typo com correcao via backspace.
+
+Observabilidade revisada:
+- `humanize_compose_plan` (slots por fase).
+- `humanize_compose_pre_action_wait`.

@@ -192,20 +192,66 @@ const sleep = (ms) => new Promise(r => setTimeout(r, toHumanPauseMs(ms)));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
 // Humanização da criação do classificado (veículos):
-// alvo de tempo entre página pronta + upload até o clique em "Publicar".
+// distribui budget (30..90s por padrão) em timers ANTES das ações do formulário.
 const ROBE_POST_HUMANIZE_ENABLED = String(process.env.ROBE_POST_HUMANIZE_ENABLED || '1').trim() !== '0';
-const ROBE_POST_COMPOSE_MIN_MS = Math.max(15_000, parseInt(process.env.ROBE_POST_COMPOSE_MIN_MS || '60000', 10) || 60000);
-const ROBE_POST_COMPOSE_MAX_MS = Math.max(ROBE_POST_COMPOSE_MIN_MS, parseInt(process.env.ROBE_POST_COMPOSE_MAX_MS || '120000', 10) || 120000);
-const ROBE_POST_ACTION_DELAY_MIN_MS = Math.max(120, parseInt(process.env.ROBE_POST_ACTION_DELAY_MIN_MS || '900', 10) || 900);
-const ROBE_POST_ACTION_DELAY_MAX_MS = Math.max(ROBE_POST_ACTION_DELAY_MIN_MS, parseInt(process.env.ROBE_POST_ACTION_DELAY_MAX_MS || '4200', 10) || 4200);
+const ROBE_POST_COMPOSE_MIN_MS = Math.max(8_000, parseInt(process.env.ROBE_POST_COMPOSE_MIN_MS || '30000', 10) || 30000);
+const ROBE_POST_COMPOSE_MAX_MS = Math.max(ROBE_POST_COMPOSE_MIN_MS, parseInt(process.env.ROBE_POST_COMPOSE_MAX_MS || '90000', 10) || 90000);
+const ROBE_POST_PHASE_MIN_MS = Math.max(0, parseInt(process.env.ROBE_POST_PHASE_MIN_MS || '500', 10) || 500);
+const ROBE_TITLE_TYPE_DELAY_MIN_MS = Math.max(20, parseInt(process.env.ROBE_TITLE_TYPE_DELAY_MIN_MS || '45', 10) || 45);
+const ROBE_TITLE_TYPE_DELAY_MAX_MS = Math.max(ROBE_TITLE_TYPE_DELAY_MIN_MS, parseInt(process.env.ROBE_TITLE_TYPE_DELAY_MAX_MS || '125', 10) || 125);
+const ROBE_PRICE_TYPE_DELAY_MIN_MS = Math.max(12, parseInt(process.env.ROBE_PRICE_TYPE_DELAY_MIN_MS || '35', 10) || 35);
+const ROBE_PRICE_TYPE_DELAY_MAX_MS = Math.max(ROBE_PRICE_TYPE_DELAY_MIN_MS, parseInt(process.env.ROBE_PRICE_TYPE_DELAY_MAX_MS || '90', 10) || 90);
+const ROBE_DESC_TYPE_DELAY_MIN_MS = Math.max(8, parseInt(process.env.ROBE_DESC_TYPE_DELAY_MIN_MS || '24', 10) || 24);
+const ROBE_DESC_TYPE_DELAY_MAX_MS = Math.max(ROBE_DESC_TYPE_DELAY_MIN_MS, parseInt(process.env.ROBE_DESC_TYPE_DELAY_MAX_MS || '70', 10) || 70);
+const ROBE_LOCATION_TYPE_DELAY_MIN_MS = Math.max(8, parseInt(process.env.ROBE_LOCATION_TYPE_DELAY_MIN_MS || '26', 10) || 26);
+const ROBE_LOCATION_TYPE_DELAY_MAX_MS = Math.max(ROBE_LOCATION_TYPE_DELAY_MIN_MS, parseInt(process.env.ROBE_LOCATION_TYPE_DELAY_MAX_MS || '72', 10) || 72);
+
+const ROBE_COMPOSE_PHASES = [
+  'before_upload',
+  'before_vehicle_type',
+  'before_location',
+  'before_vehicle_year',
+  'before_make_model',
+  'before_price',
+  'before_description',
+  'before_publish'
+];
 
 function createComposeTimingPlan() {
   if (!ROBE_POST_HUMANIZE_ENABLED) return null;
+  const phaseCount = ROBE_COMPOSE_PHASES.length;
+  const targetMs = jitter(ROBE_POST_COMPOSE_MIN_MS, ROBE_POST_COMPOSE_MAX_MS);
+  const minPerPhase = Math.max(0, ROBE_POST_PHASE_MIN_MS);
+  const base = minPerPhase * phaseCount;
+  const total = Math.max(targetMs, base);
+  const remaining = Math.max(0, total - base);
+  const weights = ROBE_COMPOSE_PHASES.map(() => Math.max(0.0001, Math.random()));
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  const slots = {};
+  let assigned = 0;
+
+  for (let i = 0; i < ROBE_COMPOSE_PHASES.length; i++) {
+    const phase = ROBE_COMPOSE_PHASES[i];
+    const fraction = weights[i] / weightSum;
+    const extra = Math.floor(remaining * fraction);
+    const ms = minPerPhase + extra;
+    slots[phase] = ms;
+    assigned += ms;
+  }
+
+  let leftover = total - assigned;
+  let idx = 0;
+  while (leftover > 0) {
+    const phase = ROBE_COMPOSE_PHASES[idx % ROBE_COMPOSE_PHASES.length];
+    slots[phase] += 1;
+    leftover -= 1;
+    idx += 1;
+  }
+
   return {
     enabled: true,
-    targetMs: jitter(ROBE_POST_COMPOSE_MIN_MS, ROBE_POST_COMPOSE_MAX_MS),
-    actionMinMs: ROBE_POST_ACTION_DELAY_MIN_MS,
-    actionMaxMs: ROBE_POST_ACTION_DELAY_MAX_MS,
+    totalTargetMs: total,
+    slots,
     startedAt: 0
   };
 }
@@ -215,56 +261,22 @@ function markComposeStart(plan) {
   plan.startedAt = Date.now();
 }
 
-async function humanizeStepPause(plan, stepName, { nome = '', attId = '' } = {}) {
-  if (!plan || !plan.enabled || !plan.startedAt) return;
-  const now = Date.now();
-  const elapsed = now - plan.startedAt;
-  const remaining = Math.max(0, plan.targetMs - elapsed);
-  if (remaining <= 0) return;
-
-  const maxPause = Math.min(plan.actionMaxMs, remaining);
-  const minPause = Math.min(plan.actionMinMs, maxPause);
-  if (maxPause <= 80) return;
-  const waitMs = jitter(Math.max(60, minPause), maxPause);
+async function waitBeforeComposeAction(plan, phase, { nome = '', attId = '' } = {}) {
+  if (!plan || !plan.enabled) return;
+  const waitMs = Math.max(0, Number((plan.slots && plan.slots[phase]) || 0));
+  if (waitMs <= 0) return;
+  const elapsedBeforeMs = plan.startedAt ? Math.max(0, Date.now() - plan.startedAt) : null;
   try {
     stepLog.appendJSONL(nome || 'system', 'robe', {
       attempt: attId || undefined,
-      step: 'humanize_compose_pause',
-      phase: stepName || 'unknown',
+      step: 'humanize_compose_pre_action_wait',
+      phase: String(phase || 'unknown'),
       waitMs,
-      remainingBeforeMs: remaining,
-      elapsedMs: elapsed,
-      targetMs: plan.targetMs
+      elapsedBeforeMs,
+      totalTargetMs: Number(plan.totalTargetMs || 0)
     });
   } catch {}
   await sleep(waitMs);
-}
-
-async function ensureComposeBudgetBeforePublish(plan, { nome = '', attId = '' } = {}) {
-  if (!plan || !plan.enabled || !plan.startedAt) return;
-  const elapsed = Date.now() - plan.startedAt;
-  const remaining = Math.max(0, plan.targetMs - elapsed);
-  if (remaining <= 0) {
-    try {
-      stepLog.appendJSONL(nome || 'system', 'robe', {
-        attempt: attId || undefined,
-        step: 'humanize_compose_budget_hit',
-        elapsedMs: elapsed,
-        targetMs: plan.targetMs
-      });
-    } catch {}
-    return;
-  }
-  try {
-    stepLog.appendJSONL(nome || 'system', 'robe', {
-      attempt: attId || undefined,
-      step: 'humanize_compose_budget_wait',
-      waitMs: remaining,
-      elapsedMs: elapsed,
-      targetMs: plan.targetMs
-    });
-  } catch {}
-  await sleep(remaining);
 }
 
 // PATCH MILITAR — Constantes de limit_posting
@@ -865,13 +877,52 @@ function pickLocalizacaoAleatoria(cidade) {
   return lista[Math.floor(Math.random() * lista.length)];
 }
 
+async function humanTypeText(page, inputHandle, text, {
+  minDelayMs,
+  maxDelayMs,
+  allowTypo = false,
+  typoChance = 0.2
+} = {}) {
+  const payload = String(text || '');
+  if (!payload) return;
+  const min = Math.max(1, Number(minDelayMs) || 1);
+  const max = Math.max(min, Number(maxDelayMs) || min);
+  const shouldTypo = !!allowTypo && payload.length >= 6 && Math.random() < typoChance;
+  if (!shouldTypo) {
+    await inputHandle.type(payload, { delay: jitter(min, max) });
+    return;
+  }
+
+  const typoChars = 'aeioubcdfghjklmnpqrstvwxyz';
+  const typoIndex = Math.max(1, Math.min(payload.length - 1, jitter(2, Math.min(10, payload.length - 1))));
+  const prefix = payload.slice(0, typoIndex);
+  const suffix = payload.slice(typoIndex);
+  const typoChar = typoChars[Math.floor(Math.random() * typoChars.length)];
+
+  await inputHandle.type(prefix, { delay: jitter(min, max) });
+  await inputHandle.type(typoChar, { delay: jitter(min, max) });
+  await sleep(jitter(120, 380));
+  try {
+    await inputHandle.press('Backspace');
+  } catch {
+    try { await page.keyboard.press('Backspace'); } catch {}
+  }
+  await sleep(jitter(90, 260));
+  await inputHandle.type(suffix, { delay: jitter(min, max) });
+}
+
 // Preenche Título e confere (timings otimizados)
 async function preencherTitulo(page, titulo) {
   const inp = await findInputByLabel(page, 'Título', 7000);
   if (!inp) throw new Error('Campo Título não localizado.');
   await inp.click({ clickCount: 3 });
   await sleep(jitter(120, 220));
-  await inp.type(titulo, { delay: jitter(12, 20) });
+  await humanTypeText(page, inp, titulo, {
+    minDelayMs: ROBE_TITLE_TYPE_DELAY_MIN_MS,
+    maxDelayMs: ROBE_TITLE_TYPE_DELAY_MAX_MS,
+    allowTypo: true,
+    typoChance: 0.2
+  });
   await sleep(jitter(120, 200));
   const val = await page.evaluate(el => el.value, inp);
   if (!val || !String(val).trim()) throw new Error('Falha ao preencher Título (value vazio).');
@@ -883,7 +934,7 @@ async function preencherPreco(page) {
   if (!inp) throw new Error('Campo Preço não localizado.');
   await inp.click({ clickCount: 3 });
   await sleep(jitter(120, 220));
-  await inp.type('0', { delay: jitter(8, 15) });
+  await inp.type('0', { delay: jitter(ROBE_PRICE_TYPE_DELAY_MIN_MS, ROBE_PRICE_TYPE_DELAY_MAX_MS) });
   await sleep(jitter(100, 180));
   await inp.press('Enter');
   await sleep(jitter(200, 320));
@@ -1111,7 +1162,7 @@ async function preencherLocalizacao(page, cidade) {
     await sleep(jitter(100, 180));
     try { await page.keyboard.press('Backspace'); } catch {}
     await sleep(jitter(100, 160));
-    await inp.type(cand, { delay: jitter(10, 18) });
+    await inp.type(cand, { delay: jitter(ROBE_LOCATION_TYPE_DELAY_MIN_MS, ROBE_LOCATION_TYPE_DELAY_MAX_MS) });
     await sleep(jitter(600, 900));
 
     for (let idx = 0; idx < 2; idx++) {
@@ -1798,7 +1849,7 @@ async function preencherPrecoVeiculo(page, valorInt) {
   if (!inp) throw new Error('Campo Preço não localizado.');
   await inp.click({ clickCount: 3 });
   await sleep(jitter(120, 220));
-  await inp.type(val, { delay: jitter(8, 15) });
+  await inp.type(val, { delay: jitter(ROBE_PRICE_TYPE_DELAY_MIN_MS, ROBE_PRICE_TYPE_DELAY_MAX_MS) });
   await sleep(jitter(100, 180));
   try { await inp.press('Enter'); } catch {}
   await sleep(jitter(200, 320));
@@ -1852,14 +1903,26 @@ async function preencherDescricaoVeiculo(page, modeloKey) {
     if (!el) return false;
     try { await el.click({ clickCount: 1 }); } catch {}
     await sleep(jitter(100, 180));
-    try { await el.type(descricao, { delay: jitter(4, 9) }); } catch {}
+    try {
+      await humanTypeText(page, el, descricao, {
+        minDelayMs: ROBE_DESC_TYPE_DELAY_MIN_MS,
+        maxDelayMs: ROBE_DESC_TYPE_DELAY_MAX_MS,
+        allowTypo: true,
+        typoChance: 0.2
+      });
+    } catch {}
     await sleep(jitter(80, 160));
     return true;
   }
   
   try { await tx.click({ clickCount: 1 }); } catch {}
   await sleep(jitter(100, 180));
-  await tx.type(descricao, { delay: jitter(4, 9) });
+  await humanTypeText(page, tx, descricao, {
+    minDelayMs: ROBE_DESC_TYPE_DELAY_MIN_MS,
+    maxDelayMs: ROBE_DESC_TYPE_DELAY_MAX_MS,
+    allowTypo: true,
+    typoChance: 0.2
+  });
   await sleep(jitter(120, 220));
   return true;
 }
@@ -2057,9 +2120,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
           step: 'humanize_compose_plan',
-          targetMs: composePlan.targetMs,
-          actionMinMs: composePlan.actionMinMs,
-          actionMaxMs: composePlan.actionMaxMs
+          totalTargetMs: composePlan.totalTargetMs,
+          phaseSlotsMs: composePlan.slots
         });
       } catch {}
       markComposeStart(composePlan);
@@ -2095,48 +2157,48 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
+    await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     await sleep(jitter(250, 450));
-    await humanizeStepPause(composePlan, 'after_upload', { nome, attId });
 
     // CAMPOS DE VEÍCULO
     // Tipo de veículo: "Outro"
+    await waitBeforeComposeAction(composePlan, 'before_vehicle_type', { nome, attId });
     const tipoVeiculo = await selecionarTipoVeiculo(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_type_ok', value: tipoVeiculo });
     await sleep(jitter(120, 220));
-    await humanizeStepPause(composePlan, 'after_vehicle_type', { nome, attId });
 
     // LOCALIZAÇÃO (preenchida imediatamente após Tipo de veículo)
     cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
     localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await sleep(jitter(120, 220));
-    await humanizeStepPause(composePlan, 'after_location', { nome, attId });
 
     // Ano: random [atual-10..atual]
+    await waitBeforeComposeAction(composePlan, 'before_vehicle_year', { nome, attId });
     const anoVeiculo = await selecionarAnoVeiculo(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_year_ok', value: anoVeiculo });
     await sleep(jitter(120, 220));
-    await humanizeStepPause(composePlan, 'after_vehicle_year', { nome, attId });
 
     // Fabricante / Modelo — AGORA por modeloSelecionado
+    await waitBeforeComposeAction(composePlan, 'before_make_model', { nome, attId });
     const { fabricante, modelo } = await preencherFabricanteModelo(page, modeloSelecionado);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_make_model_ok', fabricante, modelo, modeloSelecionado });
     await sleep(jitter(120, 220));
-    await humanizeStepPause(composePlan, 'after_make_model', { nome, attId });
 
     // Preço: random 1..3000
     const precoInt = 1 + Math.floor(Math.random() * 3000);
+    await waitBeforeComposeAction(composePlan, 'before_price', { nome, attId });
     await preencherPrecoVeiculo(page, precoInt);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_price_ok', value: precoInt });
-    await humanizeStepPause(composePlan, 'after_price', { nome, attId });
     
     // DESCRIÇÃO — NOVO: preenche após o preço
+    await waitBeforeComposeAction(composePlan, 'before_description', { nome, attId });
     await preencherDescricaoVeiculo(page, modeloSelecionado);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_description_ok' });
-    await humanizeStepPause(composePlan, 'after_description', { nome, attId });
-    await ensureComposeBudgetBeforePublish(composePlan, { nome, attId });
+    await waitBeforeComposeAction(composePlan, 'before_publish', { nome, attId });
 
     // "Título" não existe em veículos — PARA COMPATIBILIDADE das verificações, geramos um pseudo-título
     const titulo = `${fabricante} ${modelo} ${anoVeiculo}`.trim();
