@@ -2037,6 +2037,8 @@ async function execStockProvision(cmd) {
 
   const tBatch0 = Date.now();
   const sleepMs = (ms) => new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)));
+  const stockAuthModeRaw = String(process.env.STOCK_PROVISION_AUTH_MODE || 'password_first').trim().toLowerCase();
+  const stockAuthMode = (stockAuthModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
 
   // Hardening: lock global com TTL para isolamento total durante provisão.
   // Evita concorrência (already_opening / slot storms) e permite hard-recovery com segurança.
@@ -2090,6 +2092,7 @@ async function execStockProvision(cmd) {
       cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
       batchId,
       actionsCount: actions.length,
+      stockAuthMode,
       minFreeMB,
       maxHardDeactivations,
       lockOwner,
@@ -2488,20 +2491,50 @@ async function execStockProvision(cmd) {
           return r4;
         });
 
-        // 5) Fluxo legado de cadastro (pré-modelo chromium): configure + start-work.
-        // Mantemos este caminho por estabilidade operacional de provisionamento.
-        await runStep('configure', async () => {
-          const longTimeoutMs = Math.max(60_000, Math.min(8 * 60 * 1000, budgetLeftMs() + 30_000));
-          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {
-            method: 'POST',
-            headers: { 'x-operator': lockOwner },
-            timeoutMs: longTimeoutMs,
-            retries: 0,
-            body: {}
+        // 5) Cadastro por modo de autenticação (flag runtime):
+        // - cookies_first (canônico atual): /configure
+        // - password_first (novo): /login-remediate com authMode=password_first
+        if (stockAuthMode === 'password_first') {
+          await runStep('login_remediate_password_first', async () => {
+            const longTimeoutMs = Math.max(120_000, Math.min(10 * 60 * 1000, budgetLeftMs() + 45_000));
+            const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
+              method: 'POST',
+              headers: { 'x-operator': lockOwner },
+              timeoutMs: longTimeoutMs,
+              retries: 0,
+              body: {
+                options: {
+                  authMode: 'password_first',
+                  skipAttempt1InjectCookies: true,
+                  overrideHumanHold: true
+                }
+              }
+            });
+            const rr = (r5 && r5.result && typeof r5.result === 'object') ? r5.result : r5;
+            if (!r5 || r5.ok === false || !rr || rr.ok === false) {
+              const err = String(
+                (rr && rr.error) ||
+                (r5 && r5.error) ||
+                'login_remediate_failed'
+              );
+              throw new Error(err);
+            }
+            return r5;
           });
-          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
-          return r5;
-        });
+        } else {
+          await runStep('configure', async () => {
+            const longTimeoutMs = Math.max(60_000, Math.min(8 * 60 * 1000, budgetLeftMs() + 30_000));
+            const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {
+              method: 'POST',
+              headers: { 'x-operator': lockOwner },
+              timeoutMs: longTimeoutMs,
+              retries: 0,
+              body: {}
+            });
+            if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
+            return r5;
+          });
+        }
         // Ciclo legado pós-cadastro:
         // fecha/reabre o perfil alvo para garantir entrada limpa em modo trabalho.
         await runStep('recycle_after_configure_deactivate', async () => {

@@ -8680,6 +8680,13 @@ const handlers = {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
+      const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'password_first').trim().toLowerCase();
+      const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
+      const skipAttempt1InjectCookies = (
+        authMode === 'password_first' ||
+        opts.skipAttempt1InjectCookies === true ||
+        String(opts.skipAttempt1InjectCookies || '').toLowerCase() === 'true'
+      );
       const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
       const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
       const overrideHumanHold = (opts.overrideHumanHold === true || opts.overrideHumanHold === 1 || String(opts.overrideHumanHold || '').toLowerCase() === 'true');
@@ -8800,7 +8807,9 @@ const handlers = {
           waitBusyMs,
           totalTimeoutMs,
           stageTimeoutMs,
-          overrideHumanHold
+          overrideHumanHold,
+          authMode,
+          skipAttempt1InjectCookies
         });
       } catch {}
 
@@ -8925,28 +8934,33 @@ const handlers = {
       }
 
       // 4) tentativa 1: reinjetar cookies (configureProfile)
-      try {
-        const man0 = await manifestStore.read(nome).catch(()=>null);
-        const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
-        if (!cookies.length) {
-          pushStep({ step: 'missing_cookies_in_manifest' });
-          await failFastToHuman('missing_cookies_in_manifest');
-          return { ok: false, error: 'missing_cookies_in_manifest', steps };
-        }
-        // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
+      if (!skipAttempt1InjectCookies) {
         try {
-          const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
-          guard[nome] = Date.now() + (6 * 60 * 1000);
-        } catch {}
-        pushStep({ step: 'attempt1_inject_cookies_begin' });
-        await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
-        pushStep({ step: 'attempt1_inject_cookies_done' });
-      } catch (e) {
-        pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
-      } finally {
-        // Não desativar configurando aqui: a validação pós-injeção ainda precisa das 3 abas vivas.
-        // O reset acontece no finally global do login_remediate (abaixo).
-        // Também não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
+          const man0 = await manifestStore.read(nome).catch(()=>null);
+          const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
+          if (!cookies.length) {
+            pushStep({ step: 'missing_cookies_in_manifest' });
+            await failFastToHuman('missing_cookies_in_manifest');
+            return { ok: false, error: 'missing_cookies_in_manifest', steps };
+          }
+          // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
+          try {
+            const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
+            guard[nome] = Date.now() + (6 * 60 * 1000);
+          } catch {}
+          pushStep({ step: 'attempt1_inject_cookies_begin' });
+          await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
+          pushStep({ step: 'attempt1_inject_cookies_done' });
+        } catch (e) {
+          pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
+        } finally {
+          // Não desativar configurando aqui: a validação pós-injeção ainda precisa das 3 abas vivas.
+          // O reset acontece no finally global do login_remediate (abaixo).
+          // Também não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
+        }
+      } else {
+        // Modo password_first: pula injeção e vai direto para login/senha.
+        pushStep({ step: 'attempt1_inject_cookies_skipped', authMode, reason: 'password_first' });
       }
 
       // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
@@ -9026,13 +9040,17 @@ const handlers = {
       pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook, uiMessenger, uiFacebook });
 
       // Blindagem: se não conseguimos validar os 2 lados (Messenger + Facebook), NÃO pode dar sucesso.
+      // Exceção: no modo password_first essa validação inicial pode vir incompleta por não abrir 3 abas via configureProfile.
       if (!lrMessenger || !lrFacebook) {
-        pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook });
-        await failFastToHuman('validation_incomplete_missing_tabs');
-        return { ok: false, error: 'validation_incomplete_missing_tabs', steps, closedForRam, pausedVirtus };
+        pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook, authMode });
+        if (!skipAttempt1InjectCookies) {
+          await failFastToHuman('validation_incomplete_missing_tabs');
+          return { ok: false, error: 'validation_incomplete_missing_tabs', steps, closedForRam, pausedVirtus };
+        }
       }
 
       const needsLogin =
+        skipAttempt1InjectCookies ||
         (lrMessenger && lrMessenger.loginRequired) ||
         (lrFacebook && lrFacebook.loginRequired);
 
