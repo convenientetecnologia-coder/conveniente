@@ -17,11 +17,11 @@ function getTotalMemMB() {
   try { return mb(os.totalmem() / (1024 * 1024)); } catch { return 0; }
 }
 
-// Heurística atual do projeto: 1 node a cada 16GB (ceil)
+// Heurística atual do projeto: 1 node a cada 8GB (ceil)
 function calcNodesByTotalMemMB(totalMB) {
   const total = mb(totalMB);
   const gb = total / 1024;
-  const nodes = Math.max(1, Math.ceil(gb / 16));
+  const nodes = Math.max(1, Math.ceil(gb / 8));
   return nodes;
 }
 

@@ -31,6 +31,39 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-10 — [CONV][OPS] Capacidade aplicada no runtime: 1 worker por 8GB com 15 contas por worker
+
+- **O que**:
+  - `ramPolicy.js`: cálculo de nodes alterado para `ceil(GB/8)`;
+  - `memoryPlan.js`: segmentação alterada para `8GB` por node e limite de `15` perfis por node;
+  - `dashboard.js`: allowlist de `status_node_N` tornou-se dinâmica (default até 16) para manter observabilidade com mais workers.
+- **Por quê**: manter `30 contas/16GB` com topologia mais estável (`2 workers x 15`) e menor blast radius por worker.
+- **Evidência**:
+  - `C:\conveniente\scripts\ramPolicy.js`
+  - `C:\conveniente\scripts\memoryPlan.js`
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1930-01.md`
+- **Reinícios**: `conveniente` (host alvo) para carregar nova política.
+- **Rollback**:
+  - restaurar `16GB/worker` e `30 contas/worker` nos arquivos citados;
+  - aplicar update e reiniciar `conveniente`.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Capacidade fase D aberta: auditoria 8GB/worker (15 contas/worker) pré-código
+
+- **O que**:
+  - aberto INC dedicado para capacidade com alvo `1 worker/8GB` mantendo `30 contas/16GB` via `2 workers x 15 contas`;
+  - registrada auditoria ponta a ponta dos pontos de impacto (`ramPolicy`, `memoryPlan`, `worker` shard/runtime e `dashboard` status/logs por node);
+  - formalizado plano de canário e rollback para validação controlada antes de qualquer patch de runtime.
+- **Por quê**: reduzir risco de auto-instabilidade em host de 16GB sem perder capacidade total, com mudança mínima e governada.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1930-01.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_capacidade_8gb_worker_pre_codigo.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (rodada de documentação/auditoria).
+- **Rollback**:
+  - manter baseline atual (`16GB/worker`, `30 contas/worker`) até implementação aprovada;
+  - se necessário, encerrar a trilha via status `cancelled` no INC.
+
 #### 2026-04-10 — [CROSS][CONV][CT][OPS] P1-C iniciado no runtime: hardening de ACK/sync para stock_provision
 
 - **O que**:

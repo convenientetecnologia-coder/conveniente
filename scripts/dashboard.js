@@ -2852,19 +2852,13 @@ function logsSecret() {
 function logsAllowlist() {
   const base = path.join(__dirname, '..', 'dados');
   const repo = path.join(__dirname, '..');
-  return {
+  const allow = {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
     // Auditoria de estado (enterprise): permite verificar “sobras” de desired/perfis/status
     desired: path.join(base, 'desired.json'),
     perfis: path.join(base, 'perfis.json'),
     status: path.join(base, 'status.json'),
-    status_node_1: path.join(base, 'status_node_1.json'),
-    status_node_2: path.join(base, 'status_node_2.json'),
-    status_node_3: path.join(base, 'status_node_3.json'),
-    status_node_4: path.join(base, 'status_node_4.json'),
-    status_node_5: path.join(base, 'status_node_5.json'),
-    status_node_6: path.join(base, 'status_node_6.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
@@ -2884,6 +2878,11 @@ function logsAllowlist() {
     service_stdout: path.join(base, 'service_stdout.log'),
     service_stderr: path.join(base, 'service_stderr.log')
   };
+  const statusNodeMax = Math.max(6, parseInt(process.env.STATUS_NODE_ALLOWLIST_MAX || '16', 10) || 16);
+  for (let i = 1; i <= statusNodeMax; i += 1) {
+    allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
+  }
+  return allow;
 }
 function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
   try {

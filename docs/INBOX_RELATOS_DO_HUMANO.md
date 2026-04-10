@@ -1403,3 +1403,105 @@ pedido:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Robe: fluxo de criacao/publicacao rapido e repetitivo (~20s) precisa janela humana randomizada de 1-2 min sem regressao | in_progress | `docs/inbox/need_evidence/INC-20260409-1400-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-09 (Cadastro de conta: alternar cookies/login+senha com flag)
+
+```text
+tema: cadastro de contas no stock_provision
+
+objetivo:
+- manter fluxo atual por cookies funcionando
+- criar modo novo por login/senha como principal para testes
+- controlar por flag para rollback rapido sem novo patch
+
+regras:
+- sem achismo, sem teste manual cego
+- se login falhar: parar conta e invocar humano
+- batch deve continuar para as proximas contas
+- auditoria ponta a ponta antes de codar
+```
+
+### TRIAGE — 2026-04-09 (Cadastro stock_provision auth mode)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Stock provision: alternar auth por flag (`cookies_first`/`password_first`) com fallback humano e batch continuo | in_progress | `docs/inbox/in_progress/INC-20260409-2000-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-09 (Puppeteer/CDP: reconnect vs restart; limitar CDP pesado)
+
+```text
+tema: estabilidade do sistema de automação (Puppeteer/CDP) em produção real
+
+contexto:
+- observação operacional: quando o navegador está vivo/ok e o sistema fecha/reabre, muitas vezes volta em captcha
+- hipótese: parte disso é restart desnecessário quando o Chrome ainda está vivo mas o controle CDP caiu
+- foi sugerido: implementar reconnect via browser.wsEndpoint() + puppeteer.connect, reduzir restart, e rever uso de CDP pesado (Tracing/IO.read)
+
+medos/constraints:
+- NÃO codar agora
+- fazer auditoria ponta a ponta com evidência
+- mudanças devem ser incrementais, com canário (1 host) e rollback fácil
+
+focos imediatos do debate:
+1) reconnect CDP seguro (evitar restart desnecessário)
+2) “limitar CDP pesado” (tracing/IO/comandos frequentes) — entender onde isso existe e como reduzir sem quebrar
+```
+
+### TRIAGE — 2026-04-09 (Puppeteer/CDP reconnect + CDP pesado)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Estabilidade: evitar restart desnecessário via reconnect CDP + hardening do uso de CDP pesado (Tracing/IO) | in_progress | `docs/inbox/need_evidence/INC-20260409-2300-01.md` |
+
+Dossie pre-codigo: `docs/checkups/checkup_2026-04-09_dossie_pre_codigo_reconnect_stay_open.md`
+
+---
+
+## RAW_INPUT — 2026-04-10 (RAM/CDP/workers: plano estrutural pós-validação do cadastro)
+
+```text
+cadastro validado com sucesso (stay-open sem fecha/reabre), mas preocupação principal segue em estabilidade estrutural:
+
+- entender o que no sistema hoje pressiona CDP e pode levar a perda de conexão/controlador;
+- discutir "CDP pesado" (tracing/IO/comandos frequentes) com foco no que realmente pesa;
+- investigar degradação de RAM ao longo das horas no trabalho real (Virtus/Messenger);
+- revisar capacidade por worker (ex.: 1 worker por 16 GB vs 1 worker por 8 GB);
+- hipótese operacional: mudança simples de sharding pode reduzir comportamento auto-destrutivo e melhorar capacidade útil;
+- organizar tudo em INC para investigação e decisão faseada, sem codar agora.
+```
+
+### TRIAGE — 2026-04-10 (estrutura e estabilidade de longo prazo)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Estabilidade estrutural: CDP reconnect x RAM x capacidade por worker (forense + plano faseado) | need_evidence | `docs/inbox/need_evidence/INC-20260410-1500-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-10 (capacidade: 8GB por worker mantendo 30 contas em 16GB)
+
+```text
+objetivo:
+- manter a regra de densidade atual (30 contas por 16GB), mas mudar a topologia para 1 worker por 8GB.
+- na prática: host 16GB passa a operar com 2 workers e 15 contas por worker.
+
+pedido:
+- abrir INC dedicado para esta frente;
+- auditar ponta a ponta o código e funções relacionadas (ramPolicy, memoryPlan, shard/runtime, status por node, guardrails);
+- desenhar plano de teste controlado (canário) para validar se melhora estabilidade sem perder throughput.
+
+restrições:
+- sem achismo;
+- sem mudança brusca sem rollback;
+- preservar integridade de provisão e dados.
+```
+
+### TRIAGE — 2026-04-10 (capacidade 8GB/worker com 15 contas por worker)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Capacidade: migrar heurística para 1 worker por 8GB (15 contas/worker), mantendo 30 contas em 16GB com 2 workers | in_progress | `docs/inbox/in_progress/INC-20260410-1930-01.md` |
