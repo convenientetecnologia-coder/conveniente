@@ -2711,6 +2711,16 @@ async function sendAckOnce({ base, payload, timeoutMs = 3000 } = {}) {
   }
 }
 
+function getAckTimeoutMs(cmdType, phase = 'direct') {
+  const t = String(cmdType || '').trim().toLowerCase();
+  const baseDefault = Math.max(1000, Number(process.env.DASHBOARD_ACK_TIMEOUT_MS || 3000) || 3000);
+  const retryDefault = Math.max(baseDefault, Number(process.env.DASHBOARD_ACK_TIMEOUT_RETRY_MS || 4000) || 4000);
+  const stockDirectDefault = Math.max(baseDefault, Number(process.env.DASHBOARD_ACK_TIMEOUT_STOCK_PROVISION_MS || 8000) || 8000);
+  const stockRetryDefault = Math.max(stockDirectDefault, Number(process.env.DASHBOARD_ACK_TIMEOUT_STOCK_PROVISION_RETRY_MS || 10000) || 10000);
+  if (t === 'stock_provision') return phase === 'retry' ? stockRetryDefault : stockDirectDefault;
+  return phase === 'retry' ? retryDefault : baseDefault;
+}
+
 async function flushPendingAcks({ limit = 20 } = {}) {
   try {
     const base = notifierBaseFromEndpoints();
@@ -2734,7 +2744,8 @@ async function flushPendingAcks({ limit = 20 } = {}) {
         error: rec.error ? String(rec.error) : null,
         details: (rec.details && typeof rec.details === 'object') ? rec.details : null
       };
-      const r = await sendAckOnce({ base, payload, timeoutMs: 4000 });
+      const cmdType = String(rec && rec.cmdType || '').trim().toLowerCase();
+      const r = await sendAckOnce({ base, payload, timeoutMs: getAckTimeoutMs(cmdType, 'retry') });
       rec.lastAttemptAt = Date.now();
       rec.attempts = attempts + 1;
       changed = true;
@@ -2752,7 +2763,7 @@ async function flushPendingAcks({ limit = 20 } = {}) {
   }
 }
 
-async function ackCommand(cmdId, ok, errorMsg, details) {
+async function ackCommand(cmdId, ok, errorMsg, details, cmdType = '') {
   try {
     const base = notifierBaseFromEndpoints();
     if (!cmdId) return;
@@ -2768,12 +2779,18 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
       error: errorMsg ? String(errorMsg) : null,
       details: (details && typeof details === 'object') ? details : null
     };
-    const r = await sendAckOnce({ base, payload, timeoutMs: 3000 });
+    const normalizedType = String(cmdType || '').trim().toLowerCase();
+    let r = await sendAckOnce({ base, payload, timeoutMs: getAckTimeoutMs(normalizedType, 'direct') });
+    // Provision é crítico: tenta uma segunda vez imediata antes de enfileirar retry.
+    if ((!r || !r.ok) && normalizedType === 'stock_provision') {
+      r = await sendAckOnce({ base, payload, timeoutMs: getAckTimeoutMs(normalizedType, 'retry') });
+    }
     if (!r || !r.ok) {
       upsertAckPending({
         hostId: String(payload.hostId),
         id: String(payload.id),
         ok: !!payload.ok,
+        cmdType: normalizedType || null,
         error: payload.error,
         details: payload.details,
         createdAt: Date.now(),
@@ -2788,6 +2805,7 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
             event: 'ack_queued_for_retry',
             hostId: hostIdCache,
             cmdId,
+            cmdType: normalizedType || null,
             ok: !!ok,
             httpStatus: r ? r.status : null
           }) + '\n');
@@ -2805,6 +2823,7 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
           via: 'direct',
           hostId: hostIdCache,
           cmdId,
+          cmdType: normalizedType || null,
           ackOk: !!ok,
           httpStatus: r ? Number(r.status || 0) : null,
           httpOk: true
@@ -3758,7 +3777,7 @@ async function applyCommands(cmds = []) {
         ok: true,
         skipped: true,
         reason: 'superseded_by_newer_gateway_command_in_same_batch'
-      });
+      }, c && c.type);
     } catch {}
   }
 
@@ -3770,7 +3789,7 @@ async function applyCommands(cmds = []) {
         // Ultra enterprise: close_all só pode ser executado quando explicitamente humano (UI / operador).
         // Qualquer close_all “automático” (deploy/script) é bloqueado para evitar side-effects e instabilidade.
         if (!isHumanCloseAll(c)) {
-          try { await ackCommand(c.id, false, 'close_all_blocked_not_human', { blocked: true }); } catch {}
+          try { await ackCommand(c.id, false, 'close_all_blocked_not_human', { blocked: true }, c && c.type); } catch {}
           continue;
         }
         // Guardrail: nunca executar close_all automaticamente no meio de provisão.
@@ -3784,12 +3803,12 @@ async function applyCommands(cmds = []) {
               logger.warn('[DASH][CMD] close_all deferido (provision_lock ativo)', { cmdId: deferredCloseAllCmdId });
             } else {
               // Já existe um deferido; para evitar “fila infinita” de close_all durante provisão.
-              try { await ackCommand(c.id, false, 'close_all_deferred_already_exists', { deferredExistingCmdId: deferredCloseAllCmdId }); } catch {}
+              try { await ackCommand(c.id, false, 'close_all_deferred_already_exists', { deferredExistingCmdId: deferredCloseAllCmdId }, c && c.type); } catch {}
             }
             continue;
           }
           // Não-humano: bloqueia e ACK erro imediato (não pode existir close_all “surpresa”)
-          try { await ackCommand(c.id, false, 'close_all_blocked_due_provision', { blocked: true, reason: 'provision_lock' }); } catch {}
+          try { await ackCommand(c.id, false, 'close_all_blocked_due_provision', { blocked: true, reason: 'provision_lock' }, c && c.type); } catch {}
           continue;
         }
         await execCloseAll(c);
@@ -3839,15 +3858,15 @@ async function applyCommands(cmds = []) {
               : (ackDetails.okCount !== undefined || ackDetails.failCount !== undefined)
               ? `fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`
               : (ackDetails.error ? String(ackDetails.error) : 'fail');
-          await ackCommand(c.id, false, msg, ackDetails);
+          await ackCommand(c.id, false, msg, ackDetails, c && c.type);
         } catch {}
       } else {
-        try { await ackCommand(c.id, true, null, ackDetails); } catch {}
+        try { await ackCommand(c.id, true, null, ackDetails, c && c.type); } catch {}
       }
     } catch (e) {
       logger.warn('[DASH][CMD] falha ao executar ' + (c && c.type), { error: e && e.message || e });
       // ACK de erro
-      try { await ackCommand(c && c.id, false, (e && e.message) || String(e), null); } catch {}
+      try { await ackCommand(c && c.id, false, (e && e.message) || String(e), null, c && c.type); } catch {}
     }
   }
 }

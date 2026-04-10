@@ -31,6 +31,37 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-10 — [CROSS][CONV][CT][OPS] P1-C iniciado no runtime: hardening de ACK/sync para stock_provision
+
+- **O que**:
+  - `dashboard.js` (`conveniente`): ACK com timeout dinâmico por tipo de comando, retry imediato para `stock_provision` e `cmdType` persistido em `acks_pending`;
+  - `index.js` (`sitechatbot`): timeout default de `expireStaleStockProvisionInflightNoAck` ajustado para 30 min (fallback) para reduzir expiração prematura.
+- **Por quê**: reduzir risco de perda/descompasso de provisão em cenários de ACK lento ou provision mais longo.
+- **Evidência**:
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\sitechatbot\index.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1730-01.md`
+- **Reinícios**: `conveniente` e `sitechatbot` para carregar política nova de ACK/sync.
+- **Rollback**:
+  - restaurar timeouts antigos via env (`DASHBOARD_ACK_TIMEOUT_*`, `CT_STOCK_PROVISION_ACK_TIMEOUT_MS`) e reiniciar;
+  - se necessário, reverter patches em `dashboard.js`/`index.js`.
+
+#### 2026-04-10 — [CONV][OPS] P1-B iniciado no runtime: orçamento global de CDP pesado (Tracing/IO) com backoff
+
+- **O que**:
+  - `worker.js`: adicionado budget global para CDP pesado com janela (`CDP_HEAVY_WINDOW_MS`), limite (`CDP_HEAVY_MAX_PER_WINDOW`), gap (`CDP_HEAVY_MIN_GAP_MS`) e cooldown progressivo em falhas;
+  - `worker.js`: `readIOStreamChunks` passou a respeitar caps de bytes/chunks para reduzir risco de leitura excessiva de stream;
+  - telemetria de budget/CDP pesado adicionada em `_ramDiagCounters` e `_ramDiagLast.heavyBudget`.
+- **Por quê**: reduzir pressão de protocolo e custo de monitor RAM sob carga sem perder continuidade operacional.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1730-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: `conveniente` (workers) para carregar as novas flags de runtime.
+- **Rollback**:
+  - setar `CDP_HEAVY_BUDGET_ENABLED=0` e reiniciar `conveniente`;
+  - se necessário, reverter alteração em `worker.js`.
+
 #### 2026-04-10 — [CONV][OPS] P1-A iniciado no runtime: swap controlado de aba no Virtus com guardrails anti-conflito
 
 - **O que**:

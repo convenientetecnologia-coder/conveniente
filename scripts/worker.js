@@ -6742,13 +6742,76 @@ const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '180000'
 const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '160', 10);       // amostra curta
 const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '1', 10);
 const PIDS_TRACE_HARD_TIMEOUT_MS = parseInt(process.env.RAM_PIDS_TRACE_HARD_TIMEOUT_MS || '3000', 10);
+const CDP_HEAVY_BUDGET_ENABLED = String(process.env.CDP_HEAVY_BUDGET_ENABLED || '1').trim() !== '0';
+const CDP_HEAVY_WINDOW_MS = Math.max(60000, parseInt(process.env.CDP_HEAVY_WINDOW_MS || '900000', 10) || 900000);
+const CDP_HEAVY_MAX_PER_WINDOW = Math.max(1, parseInt(process.env.CDP_HEAVY_MAX_PER_WINDOW || '2', 10) || 2);
+const CDP_HEAVY_MIN_GAP_MS = Math.max(10000, parseInt(process.env.CDP_HEAVY_MIN_GAP_MS || '180000', 10) || 180000);
+const CDP_HEAVY_BACKOFF_BASE_MS = Math.max(10000, parseInt(process.env.CDP_HEAVY_BACKOFF_BASE_MS || '30000', 10) || 30000);
+const CDP_HEAVY_BACKOFF_MAX_MS = Math.max(CDP_HEAVY_BACKOFF_BASE_MS, parseInt(process.env.CDP_HEAVY_BACKOFF_MAX_MS || '600000', 10) || 600000);
+const CDP_IO_READ_CHUNK_SIZE = Math.max(64 * 1024, parseInt(process.env.CDP_IO_READ_CHUNK_SIZE || String(1 << 20), 10) || (1 << 20));
+const CDP_IO_READ_MAX_CHUNKS = Math.max(4, parseInt(process.env.CDP_IO_READ_MAX_CHUNKS || '64', 10) || 64);
+const CDP_IO_READ_MAX_BYTES = Math.max(1024 * 1024, parseInt(process.env.CDP_IO_READ_MAX_BYTES || String(32 * 1024 * 1024), 10) || (32 * 1024 * 1024));
+const _cdpHeavyBudget = { events: [], lastAt: 0, cooldownUntil: 0, consecutiveFailures: 0 };
+
+function pruneCdpHeavyEvents(nowMs) {
+  const now = Number(nowMs || Date.now()) || Date.now();
+  while (_cdpHeavyBudget.events.length && (now - Number(_cdpHeavyBudget.events[0] || 0)) > CDP_HEAVY_WINDOW_MS) {
+    _cdpHeavyBudget.events.shift();
+  }
+}
+
+function canRunHeavyCdp(nowMs) {
+  const now = Number(nowMs || Date.now()) || Date.now();
+  if (!CDP_HEAVY_BUDGET_ENABLED) return { ok: true, reason: 'disabled', count: 0, waitMs: 0 };
+  pruneCdpHeavyEvents(now);
+  if (Number(_cdpHeavyBudget.cooldownUntil || 0) > now) {
+    return { ok: false, reason: 'cooldown', count: _cdpHeavyBudget.events.length, waitMs: Number(_cdpHeavyBudget.cooldownUntil || 0) - now };
+  }
+  if (Number(_cdpHeavyBudget.lastAt || 0) > 0 && (now - Number(_cdpHeavyBudget.lastAt || 0)) < CDP_HEAVY_MIN_GAP_MS) {
+    return { ok: false, reason: 'min_gap', count: _cdpHeavyBudget.events.length, waitMs: CDP_HEAVY_MIN_GAP_MS - (now - Number(_cdpHeavyBudget.lastAt || 0)) };
+  }
+  if (_cdpHeavyBudget.events.length >= CDP_HEAVY_MAX_PER_WINDOW) {
+    const oldest = Number(_cdpHeavyBudget.events[0] || 0) || now;
+    return { ok: false, reason: 'window_budget', count: _cdpHeavyBudget.events.length, waitMs: Math.max(0, CDP_HEAVY_WINDOW_MS - (now - oldest)) };
+  }
+  return { ok: true, reason: 'ok', count: _cdpHeavyBudget.events.length, waitMs: 0 };
+}
+
+function markHeavyCdpStart(nowMs) {
+  const now = Number(nowMs || Date.now()) || Date.now();
+  _cdpHeavyBudget.lastAt = now;
+  _cdpHeavyBudget.events.push(now);
+  pruneCdpHeavyEvents(now);
+}
+
+function markHeavyCdpSuccess() {
+  _cdpHeavyBudget.consecutiveFailures = 0;
+  _cdpHeavyBudget.cooldownUntil = 0;
+}
+
+function markHeavyCdpFailure(nowMs) {
+  const now = Number(nowMs || Date.now()) || Date.now();
+  _cdpHeavyBudget.consecutiveFailures = Math.min(8, Number(_cdpHeavyBudget.consecutiveFailures || 0) + 1);
+  const backoffMs = Math.min(CDP_HEAVY_BACKOFF_MAX_MS, CDP_HEAVY_BACKOFF_BASE_MS * (2 ** Math.max(0, _cdpHeavyBudget.consecutiveFailures - 1)));
+  _cdpHeavyBudget.cooldownUntil = now + backoffMs;
+}
 
 async function readIOStreamChunks(session, stream) {
   const chunks = [];
+  let chunkCount = 0;
+  let totalBytes = 0;
   while (true) {
-    const chunk = await session.send('IO.read', { handle: stream, size: 1 << 20 }).catch(()=>null);
+    const chunk = await session.send('IO.read', { handle: stream, size: CDP_IO_READ_CHUNK_SIZE }).catch(()=>null);
     if (!chunk) break;
-    if (chunk.data) chunks.push(chunk.data);
+    chunkCount += 1;
+    if (chunk.data) {
+      totalBytes += Buffer.byteLength(String(chunk.data), 'utf8');
+      chunks.push(chunk.data);
+    }
+    if (chunkCount >= CDP_IO_READ_MAX_CHUNKS || totalBytes >= CDP_IO_READ_MAX_BYTES) {
+      _ramDiagCounters.heavyIoReadTruncated = Number(_ramDiagCounters.heavyIoReadTruncated || 0) + 1;
+      break;
+    }
     if (chunk.eof) break;
   }
   try { await session.send('IO.close', { handle: stream }).catch(()=>{}); } catch {}
@@ -6756,6 +6819,17 @@ async function readIOStreamChunks(session, stream) {
 }
 
 async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS } = {}) {
+  const heavyBudget = canRunHeavyCdp(Date.now());
+  _ramDiagCounters.heavyBudgetCalls = Number(_ramDiagCounters.heavyBudgetCalls || 0) + 1;
+  if (!heavyBudget.ok) {
+    _ramDiagCounters.heavyBudgetSkips = Number(_ramDiagCounters.heavyBudgetSkips || 0) + 1;
+    if (heavyBudget.reason === 'cooldown') _ramDiagCounters.heavyBudgetCooldownSkips = Number(_ramDiagCounters.heavyBudgetCooldownSkips || 0) + 1;
+    if (heavyBudget.reason === 'min_gap') _ramDiagCounters.heavyBudgetGapSkips = Number(_ramDiagCounters.heavyBudgetGapSkips || 0) + 1;
+    if (heavyBudget.reason === 'window_budget') _ramDiagCounters.heavyBudgetWindowSkips = Number(_ramDiagCounters.heavyBudgetWindowSkips || 0) + 1;
+    return [];
+  }
+  markHeavyCdpStart(Date.now());
+  _ramDiagCounters.heavyBudgetStarts = Number(_ramDiagCounters.heavyBudgetStarts || 0) + 1;
   try {
     if (!browser || !browser.isConnected || (browser.isConnected && browser.isConnected() === false)) return [];
     const target = browser.target();
@@ -6799,9 +6873,16 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
       new Promise((resolve) => setTimeout(() => resolve(timeoutSentinel), timeoutMs))
     ]);
     try { await session.detach && session.detach().catch(()=>{}); } catch {}
-    if (res === timeoutSentinel) return [];
+    if (res === timeoutSentinel) {
+      _ramDiagCounters.heavyTraceTimeouts = Number(_ramDiagCounters.heavyTraceTimeouts || 0) + 1;
+      markHeavyCdpFailure(Date.now());
+      return [];
+    }
+    markHeavyCdpSuccess();
     return Array.isArray(res) ? res : [];
   } catch {
+    _ramDiagCounters.heavyTraceErrors = Number(_ramDiagCounters.heavyTraceErrors || 0) + 1;
+    markHeavyCdpFailure(Date.now());
     return [];
   }
 }
@@ -6857,7 +6938,16 @@ const _ramDiagCounters = {
   refreshes: 0,
   refreshErrors: 0,
   refreshMsTotal: 0,
-  lastRefreshMs: 0
+  lastRefreshMs: 0,
+  heavyBudgetCalls: 0,
+  heavyBudgetStarts: 0,
+  heavyBudgetSkips: 0,
+  heavyBudgetGapSkips: 0,
+  heavyBudgetWindowSkips: 0,
+  heavyBudgetCooldownSkips: 0,
+  heavyTraceTimeouts: 0,
+  heavyTraceErrors: 0,
+  heavyIoReadTruncated: 0
 };
 
 async function ramCpuMonitorTick() {
@@ -6895,7 +6985,16 @@ async function ramCpuMonitorTick() {
         pidCacheTtlMs: PIDS_CACHE_TTL_MS,
         pidsRefreshPerTick: PIDS_REFRESH_PER_TICK,
         tickIntervalMs: INTERVAL_MS,
-        counters: { ..._ramDiagCounters }
+        counters: { ..._ramDiagCounters },
+        heavyBudget: {
+          enabled: CDP_HEAVY_BUDGET_ENABLED,
+          windowMs: CDP_HEAVY_WINDOW_MS,
+          maxPerWindow: CDP_HEAVY_MAX_PER_WINDOW,
+          minGapMs: CDP_HEAVY_MIN_GAP_MS,
+          cooldownUntil: Number(_cdpHeavyBudget.cooldownUntil || 0),
+          eventsInWindow: Array.isArray(_cdpHeavyBudget.events) ? _cdpHeavyBudget.events.length : 0,
+          consecutiveFailures: Number(_cdpHeavyBudget.consecutiveFailures || 0)
+        }
       };
       for (const nome of Object.keys(robeMeta)) {
         robeMeta[nome] = robeMeta[nome] || {};
@@ -7002,7 +7101,16 @@ async function ramCpuMonitorTick() {
       pidCacheTtlMs: PIDS_CACHE_TTL_MS,
       pidsRefreshPerTick: PIDS_REFRESH_PER_TICK,
       tickIntervalMs: INTERVAL_MS,
-      counters: { ..._ramDiagCounters }
+      counters: { ..._ramDiagCounters },
+      heavyBudget: {
+        enabled: CDP_HEAVY_BUDGET_ENABLED,
+        windowMs: CDP_HEAVY_WINDOW_MS,
+        maxPerWindow: CDP_HEAVY_MAX_PER_WINDOW,
+        minGapMs: CDP_HEAVY_MIN_GAP_MS,
+        cooldownUntil: Number(_cdpHeavyBudget.cooldownUntil || 0),
+        eventsInWindow: Array.isArray(_cdpHeavyBudget.events) ? _cdpHeavyBudget.events.length : 0,
+        consecutiveFailures: Number(_cdpHeavyBudget.consecutiveFailures || 0)
+      }
     };
     if (_ramDiagLast && (_ramDiagLast.tickMs >= 12000 || Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0) > 0)) {
       // #region agent log
@@ -7016,6 +7124,8 @@ async function ramCpuMonitorTick() {
           refreshBudget: _ramDiagLast.refreshBudget,
           forcedRefreshCount: _ramDiagLast.forcedRefreshCount,
           forcedRefreshMsTotal: _ramDiagLast.forcedRefreshMsTotal,
+          heavyBudgetSkips: Number(_ramDiagLast.counters && _ramDiagLast.counters.heavyBudgetSkips || 0),
+          heavyTraceTimeouts: Number(_ramDiagLast.counters && _ramDiagLast.counters.heavyTraceTimeouts || 0),
           staleHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0),
           cacheHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.cacheHits || 0),
           refreshes: Number(_ramDiagLast.counters && _ramDiagLast.counters.refreshes || 0),
