@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
@@ -5575,6 +5576,13 @@ async function activateOnce(nome, source = '', operator = '') {
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
+        try {
+          const ws = (typeof browser.wsEndpoint === 'function') ? String(browser.wsEndpoint() || '') : '';
+          if (ws) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].wsEndpoint = ws;
+          }
+        } catch {}
         const proc = browser.process && browser.process();
         if (proc && proc.pid && Number.isFinite(proc.pid)) {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -7505,6 +7513,16 @@ logger.info('[WORKER][BROWSER] disconnected', { nome });
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 const ctrl = controllers.get(nome);
+if (ctrl && ctrl.browser === browser) {
+  try {
+    const rc = await tryReconnectAfterDisconnected(nome, ctrl);
+    if (rc && rc.ok) {
+      try { issues.append(nome, 'mil_action', `reconnect_success attempt=${Number(rc.attempt || 0)}`).catch(()=>{}); } catch {}
+      return;
+    }
+    try { issues.append(nome, 'mil_action', `restart_fallback reason=${String((rc && rc.reason) || 'unknown')}`).catch(()=>{}); } catch {}
+  } catch {}
+}
 if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
 try {
   provisionAudit.append({
@@ -7582,10 +7600,10 @@ try {
 
   if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
     if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
-      robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+      const reopenDelayMs = getControlledReopenDelayMs('disconnected');
+      robeMeta[nome].reopenAt = now + reopenDelayMs;
       robeMeta[nome].closingReason = 'disconnected';
-      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
-      // NOVO: Reduzido de 30s para 5s (reabertura quase imediata, supervisor controla velocidade)
+      issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected) in ${Math.round(reopenDelayMs / 1000)}s`).catch(()=>{});
       setKillGuard(nome, 5000);
     } else {
       issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
@@ -7975,13 +7993,7 @@ const handlers = {
   let reopenDelayMs = 0;
   if (preserve) {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
-    if (reason === 'ramKill' || reason === 'cpuKill') {
-      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
-    } else if (reason === 'virtus_block') {
-      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
-    } else {
-      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-    }
+    reopenDelayMs = getControlledReopenDelayMs(reason || 'preserve');
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
@@ -9488,7 +9500,7 @@ const handlers = {
       // - reabrir e iniciar trabalho do perfil alvo (se solicitado)
       try {
         const opts2 = (options && typeof options === 'object') ? options : {};
-        const closeAfterSuccess = !(opts2.closeAfterSuccess === false || opts2.closeAfterSuccess === 0 || String(opts2.closeAfterSuccess||'').toLowerCase()==='false');
+        const closeAfterSuccess = shouldCloseAfterLoginRemediateSuccess(opts2);
         const startAfterSuccess = !(opts2.startAfterSuccess === false || opts2.startAfterSuccess === 0 || String(opts2.startAfterSuccess||'').toLowerCase()==='false');
         const reopenClosedForRam = !(opts2.reopenClosedForRam === false || opts2.reopenClosedForRam === 0 || String(opts2.reopenClosedForRam||'').toLowerCase()==='false');
 
@@ -11111,6 +11123,125 @@ const ULTRA_RECOVERY = {
   REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000
 };
 
+const CDP_RECONNECT_CFG = {
+  enabled: String(process.env.CDP_RECONNECT_ENABLED || '1').trim() !== '0',
+  attempts: Math.max(1, Math.min(5, Number(process.env.CDP_RECONNECT_ATTEMPTS || 3) || 3)),
+  delaysMs: [2000, 5000, 10000]
+};
+
+function _envMs(name, fallback) {
+  return Math.max(0, Number(process.env[name] || fallback) || fallback);
+}
+
+function getControlledReopenDelayMs(reason = '') {
+  const r = String(reason || '').toLowerCase();
+  const controlled = String(process.env.CONTROLLED_REOPEN_ENABLED || '1').trim() !== '0';
+  if (!controlled) return ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+  if (r === 'ramkill' || r === 'cpukill') return ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random() * 120000);
+  if (r === 'virtus_block') return ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+  const minMs = _envMs('REOPEN_NON_RAM_MIN_MS', 5 * 60 * 1000);
+  const maxMs = Math.max(minMs, _envMs('REOPEN_NON_RAM_MAX_MS', 15 * 60 * 1000));
+  return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+}
+
+function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
+  const hasExplicit = (
+    Object.prototype.hasOwnProperty.call(opts, 'closeAfterSuccess') ||
+    Object.prototype.hasOwnProperty.call(opts, 'stayOpenAfterSuccess')
+  );
+  if (hasExplicit) {
+    if (Object.prototype.hasOwnProperty.call(opts, 'stayOpenAfterSuccess')) {
+      const stay = (opts.stayOpenAfterSuccess === true || opts.stayOpenAfterSuccess === 1 || String(opts.stayOpenAfterSuccess || '').toLowerCase() === 'true');
+      return !stay;
+    }
+    return !(opts.closeAfterSuccess === false || opts.closeAfterSuccess === 0 || String(opts.closeAfterSuccess || '').toLowerCase() === 'false');
+  }
+  const stayOpenDefault = String(process.env.LOGIN_REMEDIATE_STAY_OPEN_AFTER_SUCCESS || '1').trim() !== '0';
+  return !stayOpenDefault;
+}
+
+async function tryReconnectAfterDisconnected(nome, prevCtrl) {
+  const startedAt = Date.now();
+  const flowId = newFlowId('reconnect');
+  if (!CDP_RECONNECT_CFG.enabled) return { ok: false, reason: 'disabled', flowId };
+  const wsEndpoint = (
+    (robeMeta[nome] && typeof robeMeta[nome].wsEndpoint === 'string' && robeMeta[nome].wsEndpoint) ||
+    (prevCtrl && prevCtrl.browser && typeof prevCtrl.browser.wsEndpoint === 'function' ? String(prevCtrl.browser.wsEndpoint() || '') : '')
+  );
+  if (!wsEndpoint) return { ok: false, reason: 'missing_ws_endpoint', flowId };
+
+  const rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
+  if (rootPid && !isPidAlive(rootPid)) {
+    return { ok: false, reason: 'root_pid_not_alive', flowId, rootPid };
+  }
+
+  for (let attempt = 1; attempt <= CDP_RECONNECT_CFG.attempts; attempt++) {
+    const delayMs = CDP_RECONNECT_CFG.delaysMs[Math.min(CDP_RECONNECT_CFG.delaysMs.length - 1, Math.max(0, attempt - 1))];
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'reconnect_attempt',
+        nome: String(nome || ''),
+        flowId,
+        attempt,
+        wsPresent: true,
+        rootPid: rootPid || null,
+        pidAlive: rootPid ? isPidAlive(rootPid) : null
+      });
+    } catch {}
+    try {
+      const b = await puppeteer.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: null,
+        protocolTimeout: 60000
+      });
+      if (b && b.isConnected && b.isConnected()) {
+        const pages = await b.pages().catch(() => []);
+        const current = controllers.get(nome);
+        const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
+        controllers.set(nome, nextCtrl);
+        try { attachBrowserLifecycle(nome, b); } catch {}
+        try {
+          if (pages && pages[0]) {
+            nextCtrl.mainPage = pages[0];
+            await wirePageObservers(nome, nextCtrl.mainPage).catch(() => {});
+            maybeStartPruneLoop(nome, nextCtrl.browser, nextCtrl.mainPage);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'reconnect_success',
+            nome: String(nome || ''),
+            flowId,
+            attempt,
+            pagesCount: Array.isArray(pages) ? pages.length : null,
+            durationMs: Date.now() - startedAt
+          });
+        } catch {}
+        return { ok: true, flowId, attempt, pagesCount: Array.isArray(pages) ? pages.length : null };
+      }
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'reconnect_fail',
+          nome: String(nome || ''),
+          flowId,
+          attempt,
+          error: msg.slice(0, 200),
+          rootPid: rootPid || null,
+          pidAliveAfter: rootPid ? isPidAlive(rootPid) : null
+        });
+      } catch {}
+    }
+    if (attempt < CDP_RECONNECT_CFG.attempts) await sleep(delayMs);
+  }
+  return { ok: false, reason: 'exhausted', flowId, durationMs: Date.now() - startedAt };
+}
+
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
   const ctrl = controllers.get(nome);
   if (!ctrl) return;
@@ -11499,7 +11630,7 @@ async function autoLoginRemediateTick() {
         // Autopilot nunca quebra "humanHold" automaticamente.
         overrideHumanHold: false,
         // Pós-sucesso enterprise: fecha, reabre mínimos e inicia Virtus.
-        closeAfterSuccess: true,
+        closeAfterSuccess: (String(process.env.AUTO_LOGIN_REMEDIATE_CLOSE_AFTER_SUCCESS || '0').trim() === '1'),
         startAfterSuccess: true,
         reopenClosedForRam: true,
         // Guardrails (não fechar muito)
