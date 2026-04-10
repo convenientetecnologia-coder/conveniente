@@ -5733,15 +5733,21 @@ async function activateOnce(nome, source = '', operator = '') {
                   const rm = robeMeta[nome] || {};
                   const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
                   const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true));
+                  const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+                  const isVirtusSwap = swapUntil > Date.now();
+                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true || isVirtusSwap === true));
                 },
                 maxPagesWhenAllow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
                   const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
                   const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+                  const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+                  const isVirtusSwap = swapUntil > Date.now();
                   // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
                   if (c && c.humanControl === true) return 1;
+                  // Swap controlado do Virtus precisa no máximo 2 abas (nova + antiga) por poucos segundos.
+                  if (isVirtusSwap) return 2;
                   // CRÍTICO (provision/injetar cookies): durante configuração precisamos 3 abas estáveis:
                   // 0) FB base  1) FB create (item|vehicle)  2) Messenger
                   // Se bootstrap limitar para 2, ele fecha uma aba e causa exatamente o "atropelo" (Messenger sendo puxado pro create).
@@ -5756,7 +5762,10 @@ async function activateOnce(nome, source = '', operator = '') {
                     const rm = robeMeta[nome] || {};
                     const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
                     const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+                    const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+                    const isVirtusSwap = swapUntil > Date.now();
                     if (c && c.humanControl === true) return 'human';
+                    if (isVirtusSwap) return 'virtus_swap';
                     if (c && c.configurando === true) return 'config';
                     if (rm && rm.emExecucao === true) return 'robe';
                     if (isBootstrap) return 'bootstrap';
@@ -6505,8 +6514,9 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
+    const inVirtusSwap = !!(browser && browser._virtusSwapUntil && Number(browser._virtusSwapUntil[nome] || 0) > Date.now());
 
-    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
+    if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
       for (const p of pages) {
         try {
           if (mainPage && p === mainPage) continue;
@@ -6520,7 +6530,7 @@ async function closeExtraPages(browser, mainPage, nome) {
       }
     }
 
-    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
+    if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
       const again = await browser.pages();
       for (const p of again) {
         if (mainPage && p === mainPage) continue;

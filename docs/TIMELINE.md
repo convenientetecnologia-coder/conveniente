@@ -31,6 +31,230 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-10 — [CONV][OPS] P1-A iniciado no runtime: swap controlado de aba no Virtus com guardrails anti-conflito
+
+- **O que**:
+  - `virtus.js`: adicionado caminho opcional de recycle por swap de aba (`VIRTUS_PAGE_SWAP_RECYCLE_ENABLED`) com janela temporária de proteção e fallback para recycle atual;
+  - `worker.js`: `closeExtraPages` e `installOneTabGuard` passaram a respeitar janela de swap (`browser._virtusSwapUntil[nome]`) para evitar prune durante troca;
+  - mantido fluxo de segurança existente (`idleSafe`, lock global de recycle, heavy guard, rollback automático para aba anterior em falha de swap).
+- **Por quê**: reduzir retenção de memória da aba longa do Messenger sem gerar churn de fecha/reabre de navegador inteiro.
+- **Evidência**:
+  - `C:\conveniente\scripts\virtus.js`
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1730-01.md`
+- **Reinícios**: `conveniente` (workers) para carregar nova política de runtime.
+- **Rollback**:
+  - setar `VIRTUS_PAGE_SWAP_RECYCLE_ENABLED=0` e reiniciar `conveniente`;
+  - se necessário, reverter alterações em `virtus.js`/`worker.js`.
+
+#### 2026-04-10 — [DOCS][CONV][CT][OPS] Auditoria P1 integrada aberta (Virtus swap + CDP budget + ACK/sync), pré-código
+
+- **O que**:
+  - aberto INC dedicado para P1 com as três frentes priorizadas e ligadas ao plano estrutural;
+  - consolidada auditoria ponta a ponta por função/arquivo para P1-A, P1-B e P1-C;
+  - definido pacote técnico pré-código (critérios de aceite + rollback por frente).
+- **Por quê**: iniciar implementação P1 com evidência real e menor risco operacional, sem ações em pânico.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260410-1730-01.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_p1_auditoria_ponta_a_ponta_virtus_cdp_ack.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: nenhum (fase de auditoria/documentação).
+- **Rollback**: reverter apenas as entradas/documentos desta atualização.
+
+#### 2026-04-10 — [CONV][OPS] Fase P0 aplicada no Virtus: anti-pânico + idle inteligente + governança de recycle
+
+- **O que**:
+  - adicionado modo de idle (`warm_idle`, `cold_idle`, `deep_idle`) para reduzir keepalive/scroll quando conta fica muito tempo sem conversa;
+  - implementado orçamento anti-pânico para ações pesadas (janela temporal, limite por janela e gap mínimo entre recycles);
+  - habilitado gatilho opcional de recycle por volume de respostas (`VIRTUS_PAGE_RECYCLE_REPLY_COUNT`) com reset após recycle;
+  - mantida proteção de recycle por pressão de RAM, adicionando política para não reciclar conta `deep_idle` sem pressão real.
+- **Por quê**: reduzir churn de manutenção, conter consumo/instabilidade autogerada e manter host mais estável em jornadas longas.
+- **Evidência**:
+  - `C:\conveniente\scripts\virtus.js`
+- **Reinícios**: `conveniente` (workers que executam `startVirtus`) para carregar novas flags de runtime.
+- **Rollback**: reverter `C:\conveniente\scripts\virtus.js` para a revisão anterior e reiniciar o `conveniente`.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Auditoria “olhos de deus” de funções/código concluída (base para iniciar codificação faseada)
+
+- **O que**:
+  - auditado fluxo real ponta a ponta no código (`start_work`, `startVirtus`, `filaManagerLoop`, prune/guards de abas, monitor RAM/CDP);
+  - mapeado comportamento por tipo de conta (fria, moderada, quente) e diferenças entre estado atual vs objetivo;
+  - listadas funções-alvo por prioridade (P0/P1/P2) para implementação faseada com canário.
+- **Por quê**: iniciar codificação com precisão cirúrgica, evitando achismo e reduzindo risco de regressão operacional.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_auditoria_funcoes_codigo_ponta_a_ponta_pre_codigo.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: nenhum (fase de auditoria/documentação).
+- **Rollback**: reverter atualização documental desta entrada.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Plano faseado pre-código fechado com cenários práticos ponta a ponta (RAM/CDP)
+
+- **O que**:
+  - formalizado plano faseado de execução (Fase 0 -> Fase 5) para estabilidade RAM/CDP sem pânico;
+  - incluídos exemplos práticos de operação real (conta idle, demanda moderada, degradação progressiva, host pressionado, evento crítico);
+  - definidos sinais esperados de melhoria e gates de avanço por fase.
+- **Por quê**: dar previsibilidade operacional antes de codar, com validação objetiva e rollback controlado.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_plano_faseado_execucao_estabilidade_ram_cdp.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: nenhum (fase de auditoria/documentação).
+- **Rollback**: reverter atualização documental desta entrada.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Dossie estratégico pre-código fechado: RAM/CDP sem pânico (Go/Caution/Stop + canário)
+
+- **O que**:
+  - consolidada matriz de decisão operacional (`Go/Caution/Stop`) para estabilidade de RAM/CDP sem ações em rajada;
+  - formalizados princípios canônicos: anti-pânico, anti-churn, operação inteligente para contas idle e escada de intervenção;
+  - definido protocolo de validação dos próximos dias com gates de stop/rollback, sem codificação nesta etapa.
+- **Por quê**: reduzir pressão autogerada do runtime e evitar que manutenção excessiva aumente bloqueio/captcha.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_matriz_estrategica_estabilidade_ram_cdp_sem_panico.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: nenhum (fase de auditoria/documentação).
+- **Rollback**: reverter atualização documental desta entrada.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Triagem canônica aberta: estabilidade estrutural (CDP/RAM/workers/capacidade)
+
+- **O que**:
+  - registrado RAW_INPUT e triagem formal para frente estrutural pós-validação do cadastro;
+  - aberto INC dedicado para investigação forense de CDP x RAM x sharding por worker.
+- **Por quê**: priorizar estabilidade de longo prazo e reduzir comportamento auto-destrutivo sob carga, com decisões baseadas em evidência.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-1500-01.md`
+- **Reinícios**: nenhum (fase de triagem/auditoria).
+- **Rollback**: reverter atualização documental desta entrada.
+
+#### 2026-04-10 — [CROSS][CT][CONV][OPS] Validação canário: cadastro concluído sem fecha/reabre (stay-open efetivo)
+
+- **O que**:
+  - canário operacional confirmou que o fluxo de cadastro concluiu e seguiu em trabalho sem fechar/reabrir navegador;
+  - comportamento validado após `conveniente` com Fase 1 (reconnect + stay-open + reopen controlado) e ajuste de recycle no `stock_provision`.
+- **Por quê**: comprovar no runtime real que o “fecha/abre desnecessário” foi removido no caminho principal de cadastro.
+- **Evidência**:
+  - validação humana em produção canário (operador);
+  - código ativo: `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\dashboard.js`.
+- **Reinícios**: nenhum adicional nesta validação (já reiniciado antes do teste).
+- **Rollback**:
+  - `LOGIN_REMEDIATE_STAY_OPEN_AFTER_SUCCESS=0` e/ou `STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE=1` + restart `conveniente`.
+- **THREAD**: `TH-2026-04-09-reconnect-stay-open`
+
+#### 2026-04-10 — [CT][OPS] Anti-travamento de estoque: timeout de inflight sem ACK + liberação automática de reservado
+
+- **O que**:
+  - `sitechatbot/index.js`: adicionado guardrail `expireStaleStockProvisionInflightNoAck` para expirar `stock_provision` inflight sem ACK e reconciliar DB;
+  - jobs `provision` expirados recebem erro `ack_timeout_stock_provision` e a conta `reserved` vinculada é liberada;
+  - scheduler passou a considerar running por host com `olderThanMs=0` (não mascara job recente);
+  - endpoint `POST /api/stock/servers/release_all` passou a executar sweep de timeout e retornar resumo `timeoutSweep`.
+- **Por quê**: evitar conta presa em `reserved` quando um host recebe comando e não confirma ACK no tempo esperado.
+- **Evidência**:
+  - código: `C:\sitechatbot\index.js`;
+  - runtime: caso real com `stock_provision` inflight sem ACK por ~22 min, conta presa em `reserved`, seguido de desbloqueio com reconciliação.
+- **Reinícios**: `sitechatbot` no host alvo para carregar o guardrail (`node index.js`).
+- **Rollback**:
+  - aumentar timeout via env (`CT_STOCK_PROVISION_ACK_TIMEOUT_MS`) ou reverter patch do `sitechatbot/index.js`.
+
+#### 2026-04-09 — [CONV][OPS] Fase 1 inicial aplicada: reconnect no disconnected + stay-open no pós-sucesso + reopen não-RAM controlado
+
+- **O que**:
+  - `worker.js`: adicionado reconnect via `puppeteer.connect` no `browser.disconnected` (com retries e fallback);
+  - `worker.js`: captura de `wsEndpoint` na ativação (`activateOnce`);
+  - `worker.js`: `login_remediate` pós-sucesso passa a respeitar política `stay-open` por default (sem hard close desnecessário);
+  - `worker.js`: autopilot alinhado para não fechar por padrão após sucesso;
+  - `worker.js`: delay de reopen não-RAM migrado para política controlada por faixa aleatória (5-15 min default).
+- **Por quê**: reduzir captcha/deslog e quebrar padrão agressivo de fecha/reabre sem perder fallback de segurança.
+- **Evidência**:
+  - código: `C:\conveniente\scripts\worker.js`
+  - dossiê/base de decisão: `C:\conveniente\docs\checkups\checkup_2026-04-09_dossie_pre_codigo_reconnect_stay_open.md`
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260409-2300-01.md`
+- **Reinícios**: `conveniente` no(s) host(s) alvo para aplicar as novas flags/comportamentos (`node index.js`).
+- **Rollback**:
+  - por env: `CDP_RECONNECT_ENABLED=0`, `LOGIN_REMEDIATE_STAY_OPEN_AFTER_SUCCESS=0`, `AUTO_LOGIN_REMEDIATE_CLOSE_AFTER_SUCCESS=1`, `CONTROLLED_REOPEN_ENABLED=0`;
+  - se necessário, reverter commit desta mudança e reiniciar o runtime.
+
+#### 2026-04-09 — [CONV][OPS] Correção do stock_provision: remover recycle obrigatório pós-cadastro (fecha/reabre)
+
+- **O que**:
+  - `dashboard.js`: o bloco legado `deactivate + activate` pós-cadastro passou a ser opcional por flag;
+  - default novo evita fecha/reabre desnecessário e mantém fluxo direto para `start_work`.
+- **Por quê**: eliminar fechamento/reabertura mesmo após cadastro bem-sucedido (causa direta do captcha relatado no canário).
+- **Evidência**:
+  - código: `C:\conveniente\scripts\dashboard.js`
+  - runbook: `C:\conveniente\docs\RUNBOOK_TECNICO.md` (flag `STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE`)
+- **Reinícios**: `conveniente` no host canário (`node index.js`).
+- **Rollback**:
+  - setar `STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE=1` e reiniciar;
+  - ou reverter commit desta correção.
+
+#### 2026-04-09 — [DOCS][CONV][OPS] P0 pré-código: mapa forense do kill/reopen agressivo e contrato da Fase 1 (reconnect seguro)
+
+
+- **O que**:
+  - consolidado mapa técnico de gatilhos que levam a fechamento/reabertura (`disconnected`, `deactivate preserveDesired`, pós-sucesso `login_remediate`);
+  - evidenciado que `REOPEN_DELAY_SHORT_MS=5000` está ativo em caminhos críticos, favorecendo reopen rápido;
+  - formalizado contrato operacional da Fase 1: tentar reconnect CDP antes de restart, com fallback e observabilidade;
+  - formalizada política proposta de reabertura controlada para falhas não-RAM (janela aleatória com jitter, em vez de reopen imediato).
+- **Por quê**: reduzir captcha/deslog pós-retomada humana e eliminar restart desnecessário quando Chrome ainda está vivo.
+- **Evidência**:
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260409-2300-01.md`
+  - código auditado: `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\browser.js`
+- **Reinícios**: nenhum (somente auditoria/documentação pré-código).
+- **Rollback**: reverter a atualização documental deste INC/timeline.
+
+#### 2026-04-09 — [DOCS][CONV][OPS] Auditoria complementar: close vs kill e estratégia “stay-open-after-success” no login_remediate
+
+- **O que**:
+  - confirmado por evidência que `hardCloseController` tenta `browser.close()` e pode escalar para kill por PID se necessário;
+  - confirmado que no pós-sucesso de `login_remediate` existe fechamento condicionado por `closeAfterSuccess` (default atual ligado);
+  - registrado desenho pré-código para evitar fecha/abre desnecessário após login: manter browser, fechar extras e iniciar Virtus no mesmo controller.
+- **Por quê**: reduzir captcha/deslog após retomar humano e diminuir ciclos agressivos de fechamento/reabertura.
+- **Evidência**:
+  - INC atualizado: `C:\conveniente\docs\inbox\need_evidence\INC-20260409-2300-01.md`
+  - código auditado: `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\dashboard.js`
+- **Reinícios**: nenhum (somente auditoria/documentação pré-código).
+- **Rollback**: reverter atualização documental desta entrada.
+
+#### 2026-04-09 — [DOCS][CONV][OPS] Dossie pre-codigo fechado: reconnect inteligente + eliminacao do fecha/abre desnecessario
+
+- **O que**:
+  - consolidado checkup canônico com contrato Fase 1A/1B/1C: reconnect primeiro, stay-open após login bem-sucedido, reopen controlado em falha inevitável;
+  - formalizada matriz go/no-go por cenário (`disconnected`, `login_remediate` sucesso, falha não-RAM, PID vivo/morto);
+  - definidos critérios de aceite e validação de canário antes de codar.
+- **Por quê**: reduzir captcha/deslog e estabilizar o lifecycle sem mudança estrutural grande.
+- **Evidência**:
+  - checkup: `C:\conveniente\docs\checkups\checkup_2026-04-09_dossie_pre_codigo_reconnect_stay_open.md`
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260409-2300-01.md`
+- **Reinícios**: nenhum (somente auditoria/documentação pré-código).
+- **Rollback**: reverter os arquivos de documentação desta entrada.
+
+#### 2026-04-09 — [DOCS][CONV][OPS] Contrato final executavel (pre-codigo) para Fase 1A/1B/1C
+
+- **O que**:
+  - formalizado checklist executavel de aprovacao pre-codigo (go/no-go), com gates de stop e rollback;
+  - formalizada ordem de execucao recomendada: reconnect -> stay-open no sucesso -> reopen controlado;
+  - fechado o escopo minimo sem refatoracao estrutural nesta primeira rodada.
+- **Por quê**: garantir implementacao cirurgica com risco controlado, canario e rollback simples.
+- **Evidência**:
+  - checkup atualizado: `C:\conveniente\docs\checkups\checkup_2026-04-09_dossie_pre_codigo_reconnect_stay_open.md`
+- **Reinícios**: nenhum (somente auditoria/documentação pré-código).
+- **Rollback**: reverter a atualização documental desta entrada.
+
+---
+
+#### 2026-04-08 — [DOCS][OPS][CROSS] Contrato operacional vigente (humano ⇄ GPT): evidência, triagem, restart e PowerShell
+
+- **O que**:
+  - reafirmado e mantido como canônico o “contrato operacional” (humano só reinicia; GPT opera via código/CT/logs);
+  - consolidado o padrão de resposta com cabeçalho obrigatório + indicação explícita de reinícios (ou “nenhum”);
+  - reforçado o padrão de triagem (“texto-bomba” vira intake no INBOX com itens P0/P1/P2) sem pedir coleta manual de logs.
+- **Por quê**: reduzir risco operacional em produção real, evitando achismo e garantindo rastreabilidade auditável.
+- **Evidência**:
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md` (Regras 110% enterprise)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (Cabeçalho obrigatório + Intake de texto-bomba + PowerShell)
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (Regras não negociáveis + TRIAGE)
+- **Reinícios**: nenhum.
+- **Rollback**: N/A (documentação).
+
 #### 2026-03-30 — [CT][OPS][CROSS] Saneamento Asaas: cancelamento atômico das 121 cobranças do dia 1 (rateio_121_dia1)
 
 - **O que**:
@@ -2640,6 +2864,32 @@ Adendo (ajuste operacional aprovado pelo owner):
 - **Rollback**:
   - `git revert` do(s) commit(s) que alteraram `C:\sitechatbot\convenientetecnologia\public\ct.js` e reiniciar `sitechatbot`.
 
+#### 2026-03-30 — [SITECHATBOT][CT][P0] Auditoria e hardening do “Excluir cobrança” sob `Asaas circuit breaker`
+
+- **Problema reportado**:
+  - cancelamento intermitente exigindo múltiplas tentativas (`Falha ao cancelar no Asaas; retry automático agendado...`).
+- **Evidência forense**:
+  - DB CT: `C:\sitechatbot\dados\convenientetecnologia.sqlite`
+  - script: `C:\sitechatbot\tools\audit_cancel_exclude_failures.js`
+  - checkup completo: `C:\conveniente\docs\checkups\checkup_2026-03-30_auditoria_cancelamento_asaas_circuit_breaker.md`
+- **Correção aplicada**:
+  - `ctLeadLedgerStore.cancelInvoice`: estados `pending_cancel/error_cancel`, retry automático por worker, mensagens humanas e eventos auditáveis.
+  - `ctAsaasClient.cancelPayment`: bypass do breaker local para `DELETE/GET` de cancelamento (operação crítica), mantendo validação de erro real do Asaas.
+  - trava de atomicidade: quando `asaas_enabled=false` ou `asaas_payment_id` ausente, o backend bloqueia cancelamento/exclusão local (não permite “só CT”).
+  - UI `ct.js`: processamento para `pending_cancel/error_cancel` e mensagem operacional clara.
+- **Impacto operacional**:
+  - requer restart do `sitechatbot` (`node index.js`) para ativar o hardening.
+- **Blindagem adicional de espelho (CT x Asaas)**:
+  - worker periódico de auditoria de cancelados (`reconcileCanceledInvoicesMirror`) para detectar mismatch:
+    - se CT estiver `canceled` mas Asaas não estiver `deleted`, a invoice é reaberta (`open/error_cancel`) e volta ao retry controlado.
+  - objetivo: eliminar persistência de “falso cancelado local”.
+
+- **Ação operacional assistida (reteste solicitado pelo owner)**:
+  - invoice restaurada no CT para novo teste controlado de exclusão:
+    - motorista: `Italo (Fortaleza)` (`driver_id=1866`)
+    - `invoice_id=499`, `asaas_payment_id=pay_wdcz2meloef4ka7p`
+    - utilitário: `C:\sitechatbot\tools\restore_invoice_for_retest.js`
+
 #### 2026-04-02 — [CONVENIENTE][ROBE] Correção de categoria por input: seleção real após digitar "Diversos"
 
 - **Mudança**:
@@ -2671,3 +2921,67 @@ Adendo (ajuste operacional aprovado pelo owner):
   - self-update global via CT: `requestId=self_update_all_1775157653271`, `commandsCount=8`.
 - **Impacto operacional**:
   - requer restart do `conveniente` em todos os hosts atualizados para carregar o arquivo novo no runtime.
+
+#### 2026-04-04 — [OPERACAO] Revalidação do contrato operacional enterprise (reiteração)
+
+- **Mudança**:
+  - reiteração do “contrato do trabalho” (postura enterprise, sem achismo, com evidência; humano só reinicia; GPT opera por código/CT + docs).
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT 2026-04-04; referência ao texto integral 2026-03-12)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Cabeçalho obrigatório…” + “Intake de texto bomba”)
+- **Impacto operacional**:
+  - nenhum restart.
+
+#### 2026-04-05 — [PLANEJAMENTO][GATEWAY] Dossiê pré‑código: Gateway/Proxy ISP (sticky por conta) + CT controle total
+
+- **Mudança**:
+  - abertura da frente arquitetural para introduzir gateway/proxy ISP com sticky por conta, distribuição equilibrada e controle total via CT (liga/desliga global e por host).
+- **Evidência**:
+  - INC canônico: `C:\conveniente\docs\inbox\need_evidence\INC-20260405-0900-01.md`
+  - dossiê/checkup: `C:\conveniente\docs\checkups\checkup_2026-04-05_gateway_proxy_dossie_pre_codigo.md`
+- **Impacto operacional**:
+  - nenhum restart (pré‑código).
+
+#### 2026-04-07 — [OPERACAO][LAB] Ambiente local separado para testes sem poluir repo canônico
+
+- **Mudança**:
+  - formalização do modelo de trabalho com runtime LAB separado:
+    - canônico: `C:\conveniente`
+    - teste/execução: `C:\conveniente_lab`
+  - criação de script de sync seguro `C:\conveniente\tools\lab_sync.ps1`.
+- **Evidência**:
+  - guia operacional: `C:\conveniente\docs\LAB_AMBIENTE_LOCAL.md`
+  - runbook canônico atualizado: `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Ambiente LAB local separado”).
+- **Impacto operacional**:
+  - nenhum restart obrigatório (mudança de processo e tooling local).
+
+#### 2026-04-09 — [CONVENIENTE][STOCK_PROVISION] Flag de autenticação `cookies_first|password_first` + branch para `login_remediate`
+
+- **Mudança**:
+  - `scripts/dashboard.js`: `stock_provision` passou a ler `STOCK_PROVISION_AUTH_MODE`:
+    - `cookies_first` mantém `configure` (legado);
+    - `password_first` usa `POST /api/perfis/:nome/login-remediate` com `authMode=password_first`.
+  - `scripts/worker.js`: `login_remediate` passou a suportar `authMode=password_first`/`skipAttempt1InjectCookies` sem quebrar o caminho atual.
+  - default runtime (sem env): `password_first`.
+- **Evidência (código/path)**:
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\conveniente\scripts\worker.js`
+  - documentação operacional atualizada em `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção da flag).
+- **Impacto operacional**:
+  - requer restart do `conveniente` para o runtime ler a nova flag/branch.
+- **Rollback**:
+  - setar `STOCK_PROVISION_AUTH_MODE=cookies_first`;
+  - reiniciar `conveniente` com `node index.js`.
+
+#### 2026-04-09 — [CONVENIENTE][P0][PRE-CODIGO] Auditoria: evitar restart desnecessário (reconnect CDP) + rever uso de CDP pesado
+
+- **Motivação**:
+  - em produção real, reinícios/reaberturas desnecessárias tendem a aumentar captcha/deslog;
+  - hipótese: parte dos incidentes ocorre quando o Chrome está vivo mas o controle CDP cai.
+- **Escopo**:
+  - auditoria ponta a ponta + INC canônico (sem implementação nesta fase).
+- **Evidência**:
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260409-2300-01.md`
+  - auditoria técnica base: `C:\conveniente\docs\auditoria_tecnica_puppeteer_cdp_lifecycle_2026-04-09.md`
+- **Impacto operacional**:
+  - nenhum restart (pré‑código).

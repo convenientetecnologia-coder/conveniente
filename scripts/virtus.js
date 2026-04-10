@@ -95,6 +95,16 @@ const VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS = parseInt(process.env.VIRTUS_PAGE_REC
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS || '60000', 10); // 1 min
 const VIRTUS_RECYCLE_GLOBAL_GAP_MS = parseInt(process.env.VIRTUS_RECYCLE_GLOBAL_GAP_MS || '4000', 10);
 const VIRTUS_RECYCLE_LOCK_TTL_MS = parseInt(process.env.VIRTUS_RECYCLE_LOCK_TTL_MS || '45000', 10);
+const VIRTUS_IDLE_COLD_MS = parseInt(process.env.VIRTUS_IDLE_COLD_MS || '3600000', 10); // 1h
+const VIRTUS_IDLE_DEEP_MS = parseInt(process.env.VIRTUS_IDLE_DEEP_MS || '10800000', 10); // 3h
+const VIRTUS_IDLE_SKIP_RECYCLE_UNTIL_PRESSURE = String(process.env.VIRTUS_IDLE_SKIP_RECYCLE_UNTIL_PRESSURE || '1').trim() !== '0';
+const VIRTUS_PAGE_RECYCLE_REPLY_COUNT = Math.max(0, parseInt(process.env.VIRTUS_PAGE_RECYCLE_REPLY_COUNT || '0', 10) || 0);
+const VIRTUS_HEAVY_ACTION_WINDOW_MS = Math.max(60000, parseInt(process.env.VIRTUS_HEAVY_ACTION_WINDOW_MS || '900000', 10) || 900000); // 15 min
+const VIRTUS_HEAVY_ACTION_MAX_PER_WINDOW = Math.max(1, parseInt(process.env.VIRTUS_HEAVY_ACTION_MAX_PER_WINDOW || '2', 10) || 2);
+const VIRTUS_HEAVY_ACTION_MIN_GAP_MS = Math.max(10000, parseInt(process.env.VIRTUS_HEAVY_ACTION_MIN_GAP_MS || '180000', 10) || 180000); // 3 min
+const VIRTUS_PAGE_SWAP_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_SWAP_RECYCLE_ENABLED || '0').trim() === '1';
+const VIRTUS_PAGE_SWAP_WINDOW_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_WINDOW_MS || '25000', 10) || 25000);
+const VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS || '20000', 10) || 20000);
 const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
@@ -640,6 +650,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   let lastScrollToTop = 0;
   let lastKeepaliveAt = 0;
+  let lastReplyAtMs = Date.now();
+  let lastHeavyActionAt = 0;
+  let repliesSinceRecycle = 0;
+  const heavyActionTimes = [];
 
   // trackers
   let saveChain = Promise.resolve();
@@ -697,6 +711,43 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         __virtusGlobalRecycle.lastReleaseAt = Date.now();
       }
     } catch {}
+  }
+
+  function pruneHeavyActionWindow(nowMs) {
+    const now = Number(nowMs || Date.now()) || Date.now();
+    while (heavyActionTimes.length && (now - Number(heavyActionTimes[0] || 0)) > VIRTUS_HEAVY_ACTION_WINDOW_MS) {
+      heavyActionTimes.shift();
+    }
+  }
+
+  function canRunHeavyAction(nowMs) {
+    const now = Number(nowMs || Date.now()) || Date.now();
+    pruneHeavyActionWindow(now);
+    if (lastHeavyActionAt > 0 && (now - lastHeavyActionAt) < VIRTUS_HEAVY_ACTION_MIN_GAP_MS) {
+      return { ok: false, reason: 'min_gap', waitMs: VIRTUS_HEAVY_ACTION_MIN_GAP_MS - (now - lastHeavyActionAt), count: heavyActionTimes.length };
+    }
+    if (heavyActionTimes.length >= VIRTUS_HEAVY_ACTION_MAX_PER_WINDOW) {
+      const oldest = Number(heavyActionTimes[0] || 0) || now;
+      const waitMs = Math.max(0, VIRTUS_HEAVY_ACTION_WINDOW_MS - (now - oldest));
+      return { ok: false, reason: 'window_budget', waitMs, count: heavyActionTimes.length };
+    }
+    return { ok: true, reason: 'ok', waitMs: 0, count: heavyActionTimes.length };
+  }
+
+  function markHeavyAction(nowMs) {
+    const now = Number(nowMs || Date.now()) || Date.now();
+    lastHeavyActionAt = now;
+    heavyActionTimes.push(now);
+    pruneHeavyActionWindow(now);
+  }
+
+  function getIdleMode(nowMs) {
+    const now = Number(nowMs || Date.now()) || Date.now();
+    if (chatAtivo || (Array.isArray(fila) && fila.length > 0)) return 'active';
+    const idleForMs = Math.max(0, now - Number(lastReplyAtMs || 0));
+    if (idleForMs >= VIRTUS_IDLE_DEEP_MS) return 'deep_idle';
+    if (idleForMs >= VIRTUS_IDLE_COLD_MS) return 'cold_idle';
+    return 'warm_idle';
   }
 
   // Persistência segura no Windows
@@ -968,7 +1019,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function coletaChatsMarketplaceRecentes() {
     try {
       if (!running || !epochOk()) return [];
-      const p = await ensurePage();
+      let p = await ensurePage();
       if (!p) return [];
       try {
         if (!running || !epochOk()) return [];
@@ -1471,6 +1522,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         historico[chatId] = tsNow;
         setResponded(chatId, tsNow);
         await salvaHistorico();
+        lastReplyAtMs = Date.now();
+        repliesSinceRecycle += 1;
 
       } catch (err) {
         const msgErr = (err && err.message) ? err.message : String(err);
@@ -1590,8 +1643,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // Não dispare keepalive durante inserção de mensagem
       if (!isVirtusLocked(nome)) {
+        const idleModeKeepalive = getIdleMode(Date.now());
+        const allowKeepalive = (idleModeKeepalive !== 'deep_idle');
         const nowKeepalive = Date.now();
-        if ((nowKeepalive - Number(lastKeepaliveAt || 0)) >= KEEPALIVE_MIN_GAP_MS) {
+        if (allowKeepalive && (nowKeepalive - Number(lastKeepaliveAt || 0)) >= KEEPALIVE_MIN_GAP_MS) {
           lastKeepaliveAt = nowKeepalive;
         try {
           await p.evaluate(() => {
@@ -1616,7 +1671,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (scrollInterval == null) {
         scrollInterval = setInterval(async () => {
           if (!running || !epochOk()) return;
-          const shouldScroll = (Array.isArray(fila) && fila.length > 0) || ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS);
+          const idleModeScroll = getIdleMode(Date.now());
+          const allowIdleScroll = (idleModeScroll !== 'deep_idle');
+          const shouldScroll = (Array.isArray(fila) && fila.length > 0) || (allowIdleScroll && ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS));
           if (!shouldScroll) return;
           try {
             const ok = await scrollChatsToTop(p, nome);
@@ -1628,7 +1685,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }, SCROLL_TOP_INTERVAL_MS);
       }
       try {
-        const shouldScrollNow = (Array.isArray(fila) && fila.length > 0) || ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS);
+        const idleModeScrollNow = getIdleMode(Date.now());
+        const allowIdleScrollNow = (idleModeScrollNow !== 'deep_idle');
+        const shouldScrollNow = (Array.isArray(fila) && fila.length > 0) || (allowIdleScrollNow && ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS));
         if (shouldScrollNow) {
           const scrolled = await scrollChatsToTop(p, nome);
           if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
@@ -1768,9 +1827,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           (heapUsed >= thresholdHeap) ||
           (nodesUsed >= thresholdNodes)
         );
+        const hasReplyCountTrigger = (VIRTUS_PAGE_RECYCLE_REPLY_COUNT > 0 && repliesSinceRecycle >= VIRTUS_PAGE_RECYCLE_REPLY_COUNT);
         const cooldownOk = (nowMs - Number(lastPageRecycleAt || 0)) >= cooldownMs;
         const idleSafe = !chatAtivo && Array.isArray(fila) && fila.length === 0 && !isVirtusLocked(nome);
-        if (hasAdaptivePressure && cooldownOk) {
+        const idleMode = getIdleMode(nowMs);
+        const skipByIdlePolicy = (VIRTUS_IDLE_SKIP_RECYCLE_UNTIL_PRESSURE && idleMode === 'deep_idle' && !hasAdaptivePressure);
+        if ((hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk) {
           __virtusAgentLog(
             'H11',
             'virtus.js:filaManagerLoop',
@@ -1784,6 +1846,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               thresholdHeap,
               thresholdNodes,
               cooldownMs,
+              idleMode,
+              hasReplyCountTrigger,
+              repliesSinceRecycle,
+              recycleReplyCountThreshold: VIRTUS_PAGE_RECYCLE_REPLY_COUNT,
+              skipByIdlePolicy,
               idleSafe,
               cooldownOk,
               filaSize: Array.isArray(fila) ? fila.length : 0,
@@ -1793,7 +1860,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             30000
           );
         }
-        if (hasAdaptivePressure && cooldownOk && idleSafe) {
+        if ((hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk && idleSafe && !skipByIdlePolicy) {
+          const heavyGuard = canRunHeavyAction(nowMs);
+          if (!heavyGuard.ok) {
+            __virtusAgentLog(
+              'H18',
+              'virtus.js:filaManagerLoop',
+              'virtus_recycle_skipped_heavy_guard',
+              {
+                nome: String(nome || ''),
+                reason: String(heavyGuard.reason || ''),
+                waitMs: Number(heavyGuard.waitMs || 0),
+                countInWindow: Number(heavyGuard.count || 0),
+                idleMode,
+                pressureMode
+              },
+              `virtus.page.recycle.skip.heavy.${String(nome || '')}`,
+              15000
+            );
+          }
+          if (heavyGuard.ok) {
           const globalSlot = tryAcquireGlobalRecycle(nome, nowMs);
           if (!globalSlot.ok) {
             __virtusAgentLog(
@@ -1813,13 +1899,50 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             );
           }
           if (globalSlot.ok) {
+            markHeavyAction(nowMs);
             const t0 = Date.now();
             try {
             const preUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
-            const navTimeoutMs = pressureMode === 'critical' ? 12000 : (pressureMode === 'low' ? 18000 : 30000);
+            let navTimeoutMs = pressureMode === 'critical' ? 12000 : (pressureMode === 'low' ? 18000 : 30000);
             let navStatus = null;
             let navMethod = 'goto';
             let postUrl = '';
+            let swapOldPage = null;
+            let swapCandidatePage = null;
+            let swapWindowArmed = false;
+            const useSwapRecycle = VIRTUS_PAGE_SWAP_RECYCLE_ENABLED === true && pressureMode !== 'critical';
+            if (useSwapRecycle) {
+              navTimeoutMs = Math.max(8000, Math.min(navTimeoutMs, VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS));
+              try {
+                if (browser) {
+                  browser._virtusSwapUntil = (browser._virtusSwapUntil && typeof browser._virtusSwapUntil === 'object') ? browser._virtusSwapUntil : {};
+                  browser._virtusSwapUntil[nome] = Date.now() + VIRTUS_PAGE_SWAP_WINDOW_MS;
+                  swapWindowArmed = true;
+                }
+              } catch {}
+              try {
+                swapCandidatePage = await browser.newPage();
+                try {
+                  const manifest = await manifestStore.read(nome);
+                  const coords = utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
+                  await patchPage(nome, swapCandidatePage, coords);
+                  await ensureMinimizedWindowForPage(swapCandidatePage);
+                } catch (swapPatchErr) {
+                  logger.warn('virtus swap recycle: falha patch/minimize', { nome }, swapPatchErr);
+                }
+                swapOldPage = p;
+                p = swapCandidatePage;
+                page = swapCandidatePage;
+                try {
+                  const swapRef = swapCandidatePage;
+                  swapRef.once && swapRef.once('close', () => { if (page === swapRef) page = null; });
+                } catch {}
+                navMethod = 'swap_page';
+              } catch (swapPrepareErr) {
+                try { if (swapCandidatePage && !swapCandidatePage.isClosed?.()) await swapCandidatePage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+                throw new Error(`swap_prepare_failed:${String(swapPrepareErr && swapPrepareErr.message ? swapPrepareErr.message : swapPrepareErr)}`);
+              }
+            }
             try {
               const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
               postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
@@ -1905,6 +2028,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
             }
             lastPageRecycleAt = Date.now();
+            repliesSinceRecycle = 0;
             __virtusAgentLog(
               'H11',
               'virtus.js:filaManagerLoop',
@@ -1961,7 +2085,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 30000
               );
             } catch {}
+            if (swapOldPage && swapOldPage !== p) {
+              try {
+                await swapOldPage.close({ runBeforeUnload: false }).catch(() => {});
+              } catch {}
+            }
             } catch (recycleErr) {
+              let swapRecovered = false;
+              if (swapOldPage && page === swapCandidatePage) {
+                try {
+                  if (!swapOldPage.isClosed?.()) {
+                    p = swapOldPage;
+                    page = swapOldPage;
+                    swapRecovered = true;
+                  }
+                } catch {}
+              }
+              if (swapCandidatePage && swapCandidatePage !== swapOldPage) {
+                try { if (!swapCandidatePage.isClosed?.()) await swapCandidatePage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+              }
               __virtusAgentLog(
                 'H11',
                 'virtus.js:filaManagerLoop',
@@ -1970,14 +2112,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   nome: String(nome || ''),
                   heapUsedBefore: heapUsed,
                   nodesBefore: nodesUsed,
-                  error: String(recycleErr && recycleErr.message ? recycleErr.message : recycleErr)
+                  error: String(recycleErr && recycleErr.message ? recycleErr.message : recycleErr),
+                  swapMode: useSwapRecycle ? 'enabled' : 'disabled',
+                  swapRecovered
                 },
                 `virtus.page.recycle.fail.${String(nome || '')}`,
                 30000
               );
             } finally {
+              if (swapWindowArmed && browser && browser._virtusSwapUntil && browser._virtusSwapUntil[nome]) {
+                try { delete browser._virtusSwapUntil[nome]; } catch {}
+              }
               releaseGlobalRecycle(nome);
             }
+          }
           }
         }
       } catch {}
