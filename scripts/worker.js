@@ -8680,7 +8680,7 @@ const handlers = {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
-      const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'password_first').trim().toLowerCase();
+      const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
       const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
       const skipAttempt1InjectCookies = (
         authMode === 'password_first' ||

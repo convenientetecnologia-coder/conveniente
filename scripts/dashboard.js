@@ -2037,7 +2037,7 @@ async function execStockProvision(cmd) {
 
   const tBatch0 = Date.now();
   const sleepMs = (ms) => new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)));
-  const stockAuthModeRaw = String(process.env.STOCK_PROVISION_AUTH_MODE || 'password_first').trim().toLowerCase();
+  const stockAuthModeRaw = String(process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
   const stockAuthMode = (stockAuthModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
 
   // Hardening: lock global com TTL para isolamento total durante provisão.
