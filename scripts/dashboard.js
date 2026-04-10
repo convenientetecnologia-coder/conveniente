@@ -2535,42 +2535,55 @@ async function execStockProvision(cmd) {
             return r5;
           });
         }
-        // Ciclo legado pós-cadastro:
-        // fecha/reabre o perfil alvo para garantir entrada limpa em modo trabalho.
-        await runStep('recycle_after_configure_deactivate', async () => {
-          const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
-          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
-            method: 'POST',
-            headers: { 'x-operator': lockOwner },
-            timeoutMs: longTimeoutMs,
-            retries: 0,
-            body: { reason: 'stock_provision_post_configure_recycle', policy: 'preserveDesired' }
-          });
-          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'recycle_deactivate_failed');
-          return r6;
-        });
-        await runStep('recycle_after_configure_activate', async () => {
-          const deadlineAt = Date.now() + Math.max(20_000, Math.min(90_000, budgetLeftMs() + 10_000));
-          let attempts = 0;
-          let lastErr = '';
-          while (Date.now() < deadlineAt) {
-            attempts++;
-            const longTimeoutMs = Math.max(20_000, Math.min(45_000, budgetLeftMs() + 10_000));
-            const r7 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
+        // Ciclo legado pós-cadastro (fallback):
+        // por padrão NÃO fecha/reabre mais; manter browser aberto reduz captcha/deslog.
+        // Se precisar voltar ao comportamento antigo, ativar STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE=1.
+        const recycleAfterConfigure = (String(process.env.STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE || '0').trim() === '1');
+        if (recycleAfterConfigure) {
+          await runStep('recycle_after_configure_deactivate', async () => {
+            const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
+            const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
               method: 'POST',
               headers: { 'x-operator': lockOwner },
               timeoutMs: longTimeoutMs,
               retries: 0,
-              body: {}
+              body: { reason: 'stock_provision_post_configure_recycle', policy: 'preserveDesired' }
             });
-            if (r7 && r7.ok !== false) return { ...r7, attempts };
-            lastErr = (r7 && r7.error) ? String(r7.error) : 'recycle_activate_failed';
-            // Fechamento preservado aciona kill_guard transitório; aguarda e tenta de novo.
-            if (!/kill_guard_until/i.test(lastErr)) throw new Error(lastErr);
-            await sleep(2000);
-          }
-          throw new Error(lastErr || 'recycle_activate_failed_timeout');
-        });
+            if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'recycle_deactivate_failed');
+            return r6;
+          });
+          await runStep('recycle_after_configure_activate', async () => {
+            const deadlineAt = Date.now() + Math.max(20_000, Math.min(90_000, budgetLeftMs() + 10_000));
+            let attempts = 0;
+            let lastErr = '';
+            while (Date.now() < deadlineAt) {
+              attempts++;
+              const longTimeoutMs = Math.max(20_000, Math.min(45_000, budgetLeftMs() + 10_000));
+              const r7 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
+                method: 'POST',
+                headers: { 'x-operator': lockOwner },
+                timeoutMs: longTimeoutMs,
+                retries: 0,
+                body: {}
+              });
+              if (r7 && r7.ok !== false) return { ...r7, attempts };
+              lastErr = (r7 && r7.error) ? String(r7.error) : 'recycle_activate_failed';
+              if (!/kill_guard_until/i.test(lastErr)) throw new Error(lastErr);
+              await sleep(2000);
+            }
+            throw new Error(lastErr || 'recycle_activate_failed_timeout');
+          });
+        } else {
+          out.steps.push({ step: 'recycle_after_configure_skipped', at: Date.now() });
+          try {
+            provisionAudit.append({
+              event: 'stock_provision_recycle_skipped',
+              cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+              batchId,
+              profileName: nome
+            });
+          } catch {}
+        }
         await runStep('start_work', async () => {
           const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
           const r8 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
