@@ -1946,7 +1946,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
   let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
 
-  // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
+  // V2: cooldown preferencial vem do worker (sessão/lote) em robePauseMs.
+  // Fallback legado permanece para segurança em caso de ausência do plano.
+  const robePauseMsSafe = (() => {
+    const n = Number(robePauseMs || 0);
+    if (!Number.isFinite(n)) return 0;
+    if (n < 15_000) return 0;
+    if (n > (6 * 60 * 60 * 1000)) return 0;
+    return Math.floor(n);
+  })();
+
+  // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 15–30min.
   const stepLogArr = [];
 
   const attId = stepLog.attemptId();
@@ -2317,9 +2327,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // PATCH MILITAR — Se houve limit_posting neste ciclo, retorna imediatamente sem aplicar cooldown curto.
     if (limitPostingHit) return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
 
-    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
+    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 15–30min.
     try {
-      const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+      const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((15 + Math.floor(Math.random() * 16)) * 60 * 1000);
       await manifestStore.update(nome, m => {
         m.robeCooldownUntil = Date.now() + pause;
         return m;
@@ -2354,11 +2364,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
+    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 15–30min.
     // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {
       if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
-        const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((15 + Math.floor(Math.random() * 16)) * 60 * 1000);
         await manifestStore.update(nome, m => {
           m.robeCooldownUntil = Date.now() + pause;
           return m;
