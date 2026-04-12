@@ -31,6 +31,53 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-10 — [CONV][OPS] Dashboard: PIL com idade da conta em dias (patch mínimo)
+
+- **O que**:
+  - `public/index.html`: adicionado helper para resolver data de cadastro e novo pill `Idade: N dia(s)` no cabeçalho de cada conta;
+  - prioridade de cálculo: `profileCreatedAt/createdAt` quando disponível, com fallback para timestamp no slug do perfil (`cidade-<epoch_ms>`);
+  - fallback visual seguro para perfis legados sem timestamp: `Idade: --`.
+- **Por quê**: dar leitura operacional imediata de tempo de cadastro por conta, em formato compacto e sem alterar fluxo de trabalho.
+- **Evidência**:
+  - `C:\conveniente\public\index.html`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-2110-01.md`
+- **Reinícios**: `conveniente` (host alvo) para garantir carregamento uniforme do frontend atualizado.
+- **Rollback**:
+  - remover inserção de `buildAccountAgePill` em `public/index.html`;
+  - reiniciar `conveniente`.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Auditoria aberta: PIL do dashboard com idade da conta em dias
+
+- **O que**:
+  - aberto INC dedicado para mapear inclusão do campo visual "idade da conta" no PIL do dashboard;
+  - concluída auditoria pré-código dos pontos de render (`public/index.html`) e origem de dados (`/api/perfis` + `/api/status`);
+  - formalizada recomendação em duas fases: entrega rápida por inferência do slug e consolidação canônica com campo persistido (`profileCreatedAt`).
+- **Por quê**: dar visibilidade operacional do tempo de cadastro por conta com formato compacto (somente dias) e baixo risco.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-2110-01.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_pil_idade_conta_dias_pre_codigo.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (rodada de auditoria/documentação).
+- **Rollback**:
+  - encerrar o INC sem patch de runtime, caso a demanda seja re-priorizada;
+  - nenhuma ação técnica necessária nesta fase.
+
+#### 2026-04-10 — [DOCS][CONV][OPS] Auditoria aberta: conta nova com cooldown 24h vs "Robe hoje" no status
+
+- **O que**:
+  - aberto INC dedicado para investigar semântica operacional de conta nova (pausa 24h) versus leitura de status;
+  - consolidada auditoria ponta a ponta do fluxo `stock_provision -> configure/login_remediate -> robeTickGlobal`;
+  - concluído diagnóstico: plano diário e permissão de postagem são camadas distintas (sem furo funcional identificado no gate de cooldown).
+- **Por quê**: eliminar dúvida operacional sobre risco de conta nova postar antes de 24h e formalizar evidência antes de qualquer patch.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260410-2040-01.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-10_conta_nova_cooldown_24h_auditoria_pre_codigo.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (rodada de auditoria/documentação).
+- **Rollback**:
+  - encerrar INC como `done` após validação em logs, sem alteração de runtime nesta fase;
+  - se houver divergência em evidência de produção, reabrir como subfase de correção.
+
 #### 2026-04-10 — [CONV][OPS] Capacidade aplicada no runtime: 1 worker por 8GB com 15 contas por worker
 
 - **O que**:

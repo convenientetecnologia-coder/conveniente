@@ -22,6 +22,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260410-2110-01 | P0 | in_progress | not_deployed | not_run | Dashboard: exibir idade da conta (dias) no PIL | `need_evidence/INC-20260410-2110-01.md` |
 | INC-20260409-1400-01 | P0 | in_progress | not_deployed | not_run | Robe: humanizacao da criacao/publicacao (1-2 min random por anuncio, sem quebrar fluxo) | `need_evidence/INC-20260409-1400-01.md` |
 | INC-20260409-1000-01 | P0 | need_evidence | deployed | not_run | Worker fecha navegadores em massa (exit CDP fatal + cleanup Chrome) e quebra produção | `need_evidence/INC-20260409-1000-01.md` |
 | INC-20260408-0900-01 | P0 | done | operational_fix | passed | RM6/RM7: “Facebook não abre / Sorry…” era cookies inválidos (falso positivo) | `done/INC-20260408-0900-01.md` |

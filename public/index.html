@@ -1025,6 +1025,26 @@
       return out;
     }
 
+    function resolveAccountCreatedAtMs(p) {
+      const prof = (p && typeof p === 'object') ? p : {};
+      const explicit = Number(prof.profileCreatedAt || prof.createdAt || 0) || 0;
+      if (explicit > 0) return explicit;
+      const nome = String(prof.nome || '').trim();
+      const m = nome.match(/-(\d{13})$/);
+      if (!m) return 0;
+      const ts = Number(m[1]) || 0;
+      return ts > 0 ? ts : 0;
+    }
+
+    function buildAccountAgePill(p) {
+      const createdAtMs = resolveAccountCreatedAtMs(p);
+      if (!createdAtMs) return buildPill('Idade: --', 'info');
+      const ageDays = Math.max(0, Math.floor((Date.now() - createdAtMs) / 86400000));
+      const pill = buildPill(`Idade: ${ageDays} dia${ageDays === 1 ? '' : 's'}`, 'info');
+      try { pill.title = `Cadastro: ${new Date(createdAtMs).toLocaleString()}`; } catch {}
+      return pill;
+    }
+
     // Helper Abas/pages por navegador
     function buildAbasPill(numPages) {
       if (numPages === null || numPages === undefined) return null;
@@ -1430,6 +1450,9 @@
           };
           titleRow.append(idPill);
         } catch {}
+
+        const agePill = buildAccountAgePill(p);
+        if (agePill) titleRow.append(agePill);
 
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));

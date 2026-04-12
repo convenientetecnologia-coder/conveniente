@@ -1505,3 +1505,54 @@ restrições:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Capacidade: migrar heurística para 1 worker por 8GB (15 contas/worker), mantendo 30 contas em 16GB com 2 workers | in_progress | `docs/inbox/in_progress/INC-20260410-1930-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-10 (conta nova: cooldown 24h x "Robe hoje" no status)
+
+```text
+triagem inbox
+
+cenário observado no RM2:
+- conta nova chegou via cadastro (stock_provision) e cadastrou corretamente;
+- status mostrou cooldown ~24h e, ao mesmo tempo, "Robe hoje: 6h (2 blocos)".
+
+dúvida crítica:
+- essa conta nova vai trabalhar/postar mesmo com cooldown de 24h?
+- ou o cooldown de ~24h realmente bloqueia postagem até vencer?
+
+diretriz do humano:
+- conta nova deve esperar 24h antes de postar (evitar assinatura suspeita);
+- idealmente "conta nova" já entrar com Robe hoje OFF (ou sem ambiguidade visual);
+- não codar agora;
+- abrir INC e fazer auditoria ponta a ponta com evidência.
+```
+
+### TRIAGE — 2026-04-10 (conta nova, cooldown 24h e semântica de status)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Validar contrato "conta nova pausa 24h" e explicar divergência visual entre `cooldown` e `Robe hoje` | in_progress | `docs/inbox/need_evidence/INC-20260410-2040-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-10 (PIL: idade da conta em dias no dashboard)
+
+```text
+triagem inbox
+
+pedido:
+- no PIL da conta (dashboard servidores), exibir "idade da conta" em dias;
+- regra de visual: mostrar somente em dias (ex.: 0, 1, 669), sem formato composto;
+- objetivo operacional: usuário saber há quanto tempo a conta está cadastrada no servidor.
+
+restrição:
+- não codar agora;
+- abrir INC e fazer auditoria ponta a ponta com dossiê pré-código.
+```
+
+### TRIAGE — 2026-04-10 (dashboard PIL: idade da conta em dias)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Exibir idade da conta (dias) no PIL do dashboard com fonte canônica e sem ambiguidade | in_progress | `docs/inbox/need_evidence/INC-20260410-2110-01.md` |
