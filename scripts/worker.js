@@ -5950,6 +5950,46 @@ function _robeDailyHhmm(min) {
   const mm = String(m % 60).padStart(2, '0');
   return `${hh}:${mm}`;
 }
+function _robeDateShiftYmd(dateYmd, days) {
+  try {
+    const d = new Date(`${String(dateYmd || '')}T12:00:00`);
+    if (!Number.isFinite(d.getTime())) return '';
+    d.setDate(d.getDate() + Number(days || 0));
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  } catch {
+    return '';
+  }
+}
+function _robeGetLimitPostingRecoveryDays() {
+  const n = Number.parseInt(process.env.ROBE_LIMIT_POSTING_RECOVERY_DAYS || '15', 10);
+  if (!Number.isFinite(n)) return 15;
+  return Math.max(1, Math.min(60, n));
+}
+function _robeGetLimitPostingLastAt(man = null, nowMs = Date.now()) {
+  try {
+    const base = Math.max(
+      Number(man && man.robeLimitPostingLastAt || 0) || 0,
+      Number(man && man.limitPostingLastAt || 0) || 0
+    );
+    const pauseReason = String(man && man.robePauseReason || '').toLowerCase();
+    const active = pauseReason === 'limit_posting' && (
+      (Number(man && man.robeCooldownUntil || 0) > Number(nowMs || 0)) ||
+      (Number(man && man.robeCooldownRemainingMs || 0) > 0)
+    );
+    return active ? Math.max(base, Number(nowMs || 0) || 0) : base;
+  } catch {
+    return 0;
+  }
+}
+function _robeIsLimitPostingRecoveryMode(man = null, nowMs = Date.now()) {
+  const lastAt = _robeGetLimitPostingLastAt(man, nowMs);
+  if (!(lastAt > 0)) return false;
+  const winMs = _robeGetLimitPostingRecoveryDays() * 24 * 60 * 60 * 1000;
+  return (Number(nowMs || 0) - lastAt) <= winMs;
+}
 function _robeMulberry32(seed) {
   let a = (seed >>> 0) || 1;
   return function rand() {
@@ -6007,7 +6047,7 @@ function _isValidRobeSessionV2(sess, date, blockIndex) {
   if (!Number.isFinite(Number(sess.ptr || 0))) return false;
   return true;
 }
-function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, hostIdOpt = '') {
+function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, hostIdOpt = '', options = null) {
   const cfg = getRobeSessionV2Cfg();
   const sMin = Number(block && block.startMin || 0) || 0;
   const eMin = Number(block && block.endMin || 0) || 0;
@@ -6017,13 +6057,20 @@ function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, ho
   const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
   const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
   const rng = _robeMulberry32(seedInt);
+  const isLimitPostingRecovery = !!(options && options.limitPostingRecovery);
   const ratePerHour = _robeRandFloat(rng, cfg.minPostsPerHour, cfg.maxPostsPerHour);
   const jitter = _robeRandFloat(rng, cfg.jitterMin, cfg.jitterMax);
   const rawTarget = durationHours * ratePerHour * jitter;
   const hardMax = Math.max(1, Math.round(durationHours * 5.2));
-  const targetPosts = Math.max(1, Math.min(hardMax, Math.round(rawTarget)));
+  const targetPosts = isLimitPostingRecovery
+    ? 1
+    : Math.max(1, Math.min(hardMax, Math.round(rawTarget)));
   let rem = targetPosts;
   const actions = [];
+  if (isLimitPostingRecovery) {
+    actions.push({ type: 'post', count: 1 });
+    rem = 0;
+  }
   while (rem > 0) {
     let lot = _robeRandInt(rng, cfg.lotMin, cfg.lotMax);
     if (lot > rem) lot = rem;
@@ -6056,6 +6103,7 @@ function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, ho
     actions,
     seed: seedHex,
     ratePerHour: Number(ratePerHour.toFixed(3)),
+    mode: isLimitPostingRecovery ? 'limit_posting_recovery' : 'normal',
     lastAdvanceAt: Date.now()
   };
 }
@@ -6170,7 +6218,9 @@ async function getOrCreateRobeSessionGate(nome, nowMs = Date.now(), planHint = n
   let man = manifestHint || await manifestStore.read(nome).catch(() => null);
   let sess = man && man.robeBlockSessionV2 ? man.robeBlockSessionV2 : null;
   if (!_isValidRobeSessionV2(sess, date, idx)) {
-    sess = _buildRobeSessionPlanDeterministic(nome, date, block, idx, hostId);
+    sess = _buildRobeSessionPlanDeterministic(nome, date, block, idx, hostId, {
+      limitPostingRecovery: !!(plan && plan.limitPostingRecovery)
+    });
     try {
       await manifestStore.update(nome, (m) => {
         m = m || {};
@@ -6259,13 +6309,16 @@ function _isValidRobeDailyPlan(plan, date) {
   }
   return true;
 }
-function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
+function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '', options = null) {
   const cfg = getRobeDailyPlanCfg();
   const seedInput = `${cfg.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
   const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
   const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
   const rng = _robeMulberry32(seedInt);
-  const shouldWork = !(rng() < cfg.offdayRatio);
+  const forceOn = !!(options && options.forceOn);
+  const forceDailyHours = Number(options && options.forceDailyHours || 0) || 0;
+  const offRoll = rng();
+  const shouldWork = forceOn ? true : !(offRoll < cfg.offdayRatio);
   if (!shouldWork) {
     return {
       version: cfg.vtag,
@@ -6283,6 +6336,9 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
   } else {
     const lowExtreme = rng() < 0.60;
     dailyHours = lowExtreme ? _robeRandInt(rng, 1, 6) : _robeRandInt(rng, 12, 14);
+  }
+  if (forceDailyHours > 0) {
+    dailyHours = Math.max(1, Math.round(forceDailyHours));
   }
   dailyHours = Math.max(cfg.dailyHoursMin, Math.min(cfg.dailyHoursMax, dailyHours));
   let blocksCount = 1;
@@ -6316,7 +6372,31 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
     enabled: true,
     dailyHours,
     blocks,
-    seed: seedHex
+    seed: seedHex,
+    forceOn: forceOn === true
+  };
+}
+function _applyRobeDailyHardRules(nome, dateYmd, hostId, basePlan, prevPlan, man, nowMs = Date.now()) {
+  const prevDate = _robeDateShiftYmd(dateYmd, -1);
+  const prevWasOff = !!(prevPlan && String(prevPlan.date || '') === prevDate && prevPlan.enabled === false);
+  const limitRecovery = _robeIsLimitPostingRecoveryMode(man, nowMs);
+  const shouldForceOn = !!(prevWasOff || limitRecovery);
+  let out = basePlan && typeof basePlan === 'object' ? { ...basePlan } : null;
+  if (!out) return { plan: out, flags: { prevWasOff, limitRecovery, forcedOn: false }, limitLastAt: _robeGetLimitPostingLastAt(man, nowMs) };
+  if (shouldForceOn && out.enabled !== true) {
+    const forceHours = limitRecovery ? 1 : 6;
+    out = _buildRobeDailyPlanDeterministic(nome, dateYmd, hostId, { forceOn: true, forceDailyHours: forceHours });
+  }
+  if (out.enabled === true && limitRecovery) {
+    out.limitPostingRecovery = true;
+  }
+  out.decisionReason = limitRecovery
+    ? 'forced_on_limit_posting_recovery'
+    : (prevWasOff ? 'forced_on_prev_day_off' : 'deterministic_daily_plan');
+  return {
+    plan: out,
+    flags: { prevWasOff, limitRecovery, forcedOn: shouldForceOn && out.enabled === true },
+    limitLastAt: _robeGetLimitPostingLastAt(man, nowMs)
   };
 }
 async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
@@ -6332,13 +6412,17 @@ async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint =
   const job = (async () => {
     const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
     const man = manifestHint || await manifestStore.read(nome).catch(()=>null);
-    let plan = man && man.robeDailyPlanV1 ? man.robeDailyPlanV1 : null;
+    const prevPlan = man && man.robeDailyPlanV1 ? man.robeDailyPlanV1 : null;
+    let plan = prevPlan;
     if (!_isValidRobeDailyPlan(plan, date)) {
-      plan = _buildRobeDailyPlanDeterministic(nome, date, hostId);
+      const basePlan = _buildRobeDailyPlanDeterministic(nome, date, hostId);
+      const hard = _applyRobeDailyHardRules(nome, date, hostId, basePlan, prevPlan, man, nowMs);
+      plan = hard.plan;
       try {
         await manifestStore.update(nome, (m) => {
           m = m || {};
           m.robeDailyPlanV1 = plan;
+          if (hard.limitLastAt > 0) m.robeLimitPostingLastAt = hard.limitLastAt;
           return m;
         });
       } catch {}
@@ -6350,7 +6434,10 @@ async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint =
           date: String(date || ''),
           enabled: !!plan.enabled,
           dailyHours: Number(plan.dailyHours || 0) || 0,
-          blocksCount: Array.isArray(plan.blocks) ? plan.blocks.length : 0
+          blocksCount: Array.isArray(plan.blocks) ? plan.blocks.length : 0,
+          decisionReason: String(plan && plan.decisionReason || 'deterministic_daily_plan'),
+          limitPostingRecovery: !!(plan && plan.limitPostingRecovery),
+          forcedOn: !!(hard.flags && hard.flags.forcedOn)
         });
       } catch {}
     }
@@ -6378,6 +6465,8 @@ function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
     date: String(plan.date || ''),
     enabled: !!plan.enabled,
     dailyHours: Number(plan.dailyHours || 0) || 0,
+    decisionReason: String(plan.decisionReason || 'deterministic_daily_plan'),
+    limitPostingRecovery: !!plan.limitPostingRecovery,
     blocksCount: blocks.length,
     blocks: blocks.map((b) => ({
       startMin: Number(b.startMin || 0) || 0,

@@ -22,6 +22,8 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260413-1800-01 | P0 | in_progress | not_deployed | not_run | Robe: anti-OFF consecutivo e exceção diária para contas em limite excedido | `in_progress/INC-20260413-1800-01.md` |
+| INC-20260413-1700-01 | P0 | in_progress | not_deployed | not_run | Configuração por servidor no dashboard (capacidade + Robe) com sincronização CT↔host | `need_evidence/INC-20260413-1700-01.md` |
 | INC-20260413-1600-01 | P0 | in_progress | not_deployed | not_run | Robe V2 como orquestrador principal da cadencia de postagens (cooldown legado como excecao) | `in_progress/INC-20260413-1600-01.md` |
 | INC-20260410-2110-01 | P0 | in_progress | not_deployed | not_run | Dashboard: exibir idade da conta (dias) no PIL | `need_evidence/INC-20260410-2110-01.md` |
 | INC-20260409-1400-01 | P0 | in_progress | not_deployed | not_run | Robe: humanizacao da criacao/publicacao (1-2 min random por anuncio, sem quebrar fluxo) | `need_evidence/INC-20260409-1400-01.md` |

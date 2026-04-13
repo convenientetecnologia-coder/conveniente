@@ -342,6 +342,7 @@ async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnap
   // Pause hard 24h
   await manifestStore.update(nome, m => {
     m = m || {};
+    m.robeLimitPostingLastAt = Date.now();
     m.robeCooldownUntil = Date.now() + LIMIT_POSTING_MS;
     m.robeCooldownRemainingMs = 0;
     m.robePauseReason = LIMIT_POSTING_REASON;

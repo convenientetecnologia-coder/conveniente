@@ -1592,3 +1592,64 @@ restricoes:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Robe V2 como orquestrador principal de cadencia (cooldown legado como excecao), mantendo `robe-play` | in_progress | `docs/inbox/in_progress/INC-20260413-1600-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-13 (configuração por servidor no dashboard: capacidade + Robe, com propagação até CT)
+
+```text
+triagem inbox
+
+objetivo:
+- cada servidor precisa ter configuração própria, alterável no dashboard local;
+- salvar e aplicar de forma atômica no servidor e refletir no CT (estoque/servidores).
+
+pedidos principais:
+1) capacidade configurável de cadastro por servidor:
+   - hoje base é 15 contas por 8GB;
+   - permitir ajuste (ex.: 12 por 8GB) ou teto absoluto por servidor;
+   - CT deve respeitar novo limite para liberar/segurar provisionamento.
+2) janela global de Robe configurável (hoje 06:00–23:00), incluindo opção 24h.
+3) horas de trabalho por conta configuráveis (hoje faixa dinâmica 1..14h), com opção até 24h.
+4) ritmo de classificados por hora configurável (faixa usada pelo planejador/session gate).
+
+requisitos de execução:
+- UX simples no dashboard (abrir configuração, editar, salvar);
+- aplicação rápida e consistente;
+- auditoria ponta a ponta antes de codar;
+- sem alteração de runtime nesta etapa.
+```
+
+### TRIAGE — 2026-04-13 (configuração atômica por servidor + propagação CT)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Configuração por servidor no dashboard (capacidade + Robe) com contrato de sincronização CT↔host | in_progress | `docs/inbox/need_evidence/INC-20260413-1700-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-13 (Robe: anti-off consecutivo + exceção obrigatória para limite excedido)
+
+```text
+triagem inbox
+
+contexto:
+- usuário reporta contas em "Robe hoje OFF" por dias seguidos e baixa aderência de postagem;
+- pede regra atômica para impedir OFF em dias consecutivos para a mesma conta;
+- pede regra atômica para contas em limite excedido: não podem cair em OFF e devem tentar 1 postagem diária.
+
+regras pedidas:
+1) nunca permitir a mesma conta em `Robe hoje OFF` dois dias seguidos;
+2) conta em estado de limite excedido deve ser elegível para 1 tentativa diária e não entrar em OFF;
+3) manter robustez operacional (sem quebrar fila global, guardrails e `robe-play`);
+4) fase atual: auditoria/dossiê pré-código, sem alterar runtime agora.
+
+objetivo de negócio:
+- recuperar aderência de postagem e reduzir defasagem operacional durante janela de aquecimento de contas.
+```
+
+### TRIAGE — 2026-04-13 (Robe: fairness OFF + política para limite excedido)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Garantir anti-off consecutivo e exceção de OFF para contas em limite excedido (com 1 tentativa diária) | in_progress | `docs/inbox/in_progress/INC-20260413-1800-01.md` |
