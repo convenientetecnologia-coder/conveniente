@@ -31,6 +31,122 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-13 — [CONV][OPS] Fase C aplicada: configuração passa a afetar runtime real (Robe + capacidade local)
+
+- **O que**:
+  - `worker.js`: Robe diário/sessão passa a usar `serverConfig` efetiva (janela, horas/dia e posts/hora);
+  - adicionada assinatura/versionamento dinâmico dos planos para aplicar mudança sem reboot lógico de plano antigo;
+  - `memoryPlan.js`: planejamento de shards usa `maxAccountsEffective` do host;
+  - `api_perfis.js`: criação de perfil bloqueada quando atingir capacidade efetiva configurada (`capacity_limit_reached`).
+- **Por quê**: transformar configuração do dashboard em comportamento operacional real no host (não só exibição).
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\scripts\memoryPlan.js`
+  - `C:\conveniente\scripts\api_perfis.js`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: `conveniente` no host alvo.
+- **Rollback**:
+  - restaurar uso de parâmetros fixos em `worker.js`/`memoryPlan.js`;
+  - remover guardrail de capacidade em `api_perfis.js`;
+  - reiniciar `conveniente`.
+
+#### 2026-04-13 — [CONV][OPS] Fase B aplicada: UI de configuração do servidor no dashboard
+
+- **O que**:
+  - adicionado botão `Config Servidor` na toolbar;
+  - implementado modal para editar capacidade e parâmetros do Robe;
+  - integração direta com `GET/POST /api/server-config` para leitura/salvamento imediato.
+- **Por quê**: permitir ajuste operacional por host no próprio dashboard, sem edição manual de arquivo/env.
+- **Evidência**:
+  - `C:\conveniente\public\index.html`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: `conveniente` no host alvo.
+- **Rollback**:
+  - remover botão/modal e bind `serverConfigBtn` em `public/index.html`;
+  - reiniciar `conveniente`.
+
+#### 2026-04-13 — [CONV][OPS] Fase A aplicada: engine de configuração por servidor + API + status
+
+- **O que**:
+  - criado `scripts/serverConfig.js` com defaults canônicos, validação de payload, escrita atômica e cálculo de `maxAccountsEffective`;
+  - publicados `GET /api/server-config` e `POST /api/server-config` no host;
+  - incluído bloco `serverConfig` em `/api/status` e no snapshot de status do worker;
+  - allowlist de logs atualizada para incluir `server_runtime_config.json`.
+- **Por quê**: habilitar base estável da configuração por servidor (Fase A), sem aplicar ainda mudanças de comportamento do runtime.
+- **Evidência**:
+  - `C:\conveniente\scripts\serverConfig.js`
+  - `C:\conveniente\scripts\api_perfis.js`
+  - `C:\conveniente\scripts\api_status.js`
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: `conveniente` no host alvo.
+- **Rollback**:
+  - remover endpoints/bloco `serverConfig` e o módulo `serverConfig.js`;
+  - reiniciar `conveniente`.
+
+#### 2026-04-13 — [DOCS][CONV][OPS] Fase A detalhada: plano de patch por arquivo (pré-código)
+
+- **O que**:
+  - criado plano “mão na massa” da Fase A com ordem técnica de patch por arquivo;
+  - definidos escopo exato da fase (engine de config, endpoints, status e auditoria local);
+  - formalizados checklist de aceite e rollback específicos da Fase A.
+- **Por quê**: reduzir ambiguidade na hora de começar a codar e garantir execução controlada.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-13_fase_a_plano_patch_modo_execucao_pre_codigo.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: nenhum (documentação/auditoria).
+- **Rollback**:
+  - manter somente plano/INC e não iniciar codificação até aprovação final;
+  - nenhuma alteração de runtime nesta fase.
+
+#### 2026-04-13 — [DOCS][CONV][OPS] Runbook operacional fechado para execução A->E (configuração por servidor)
+
+- **O que**:
+  - criado runbook operacional diário por fase (A->E) com checklist padrão de execução;
+  - definidos critérios objetivos Go/Caution/Stop e evidências obrigatórias por host/CT;
+  - consolidado checklist de cenários mínimos de validação funcional (capacidade, janela Robe, horas/dia e ritmo/hora).
+- **Por quê**: garantir rollout controlado e repetível, evitando mudanças “no escuro”.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-13_runbook_operacional_fases_config_servidor_pre_codigo.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: nenhum (documentação/auditoria).
+- **Rollback**:
+  - manter o runbook como referência e pausar execução até aprovação final;
+  - nenhuma alteração de runtime nesta fase.
+
+#### 2026-04-13 — [DOCS][CONV][CT][OPS] Plano faseado fechado (A->E): configuração por servidor no dashboard
+
+- **O que**:
+  - consolidado plano executável pré-código para configuração por servidor (capacidade + Robe), cobrindo host e sincronização CT;
+  - definidos critérios de aceite/rollback por fase e protocolo canário único Go/Caution/Stop;
+  - formalizado critério de “pronto para codar” com contrato de dados e validações obrigatórias.
+- **Por quê**: reduzir risco de mudança estrutural, garantir aplicação atômica e evitar regressão operacional durante rollout.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-13_plano_implementacao_config_servidor_dashboard_faseado_pre_codigo.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: nenhum (documentação/auditoria).
+- **Rollback**:
+  - manter somente dossiê/INC e pausar execução até nova aprovação;
+  - nenhuma alteração de runtime nesta fase.
+
+#### 2026-04-13 — [DOCS][CONV][CT][OPS] Auditoria aberta: configuração por servidor no dashboard (capacidade + Robe) com contrato CT↔host
+
+- **O que**:
+  - aberto INC dedicado para tornar parâmetros por servidor configuráveis no dashboard local (capacidade e Robe);
+  - concluída auditoria pré-código do estado atual: limites hardcoded no host e heurística de capacidade por RAM no CT;
+  - proposto contrato faseado com modelo canônico de config, aplicação atômica no host e propagação da configuração efetiva para o CT.
+- **Por quê**: permitir ajuste fino por máquina/host sem depender de configuração fixa global, preservando segurança operacional.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-13_configuracao_servidor_dashboard_pre_codigo.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\sitechatbot\_backup_auto_root\20260413_160251\index.js`
+- **Reinícios**: nenhum (rodada de auditoria/documentação).
+- **Rollback**:
+  - encerrar INC sem patch de runtime caso a priorização mude;
+  - nenhuma ação técnica necessária nesta fase.
+
 #### 2026-04-10 — [CONV][OPS] Dashboard: PIL com idade da conta em dias (patch mínimo)
 
 - **O que**:

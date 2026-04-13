@@ -23,6 +23,7 @@ const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
+const serverConfig = require('./serverConfig.js');
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -5853,7 +5854,7 @@ function loadPerfisJson() {
     return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
-const ROBE_DAILY_PLAN_CFG = {
+const ROBE_DAILY_PLAN_BASE_CFG = {
   enabled: true,
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
@@ -5861,9 +5862,11 @@ const ROBE_DAILY_PLAN_CFG = {
   mainHoursRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
   minGapMin: Math.max(10, Number(process.env.ROBE_DAILY_PLAN_MIN_GAP_MIN || 20) || 20),
   gateLogEveryMs: Math.max(60_000, Number(process.env.ROBE_DAILY_PLAN_GATE_LOG_EVERY_MS || 10 * 60_000) || 10 * 60_000),
-  vtag: 'robe_daily_plan_v1'
+  dailyHoursMin: 1,
+  dailyHoursMax: 14,
+  vtagBase: 'robe_daily_plan_v2'
 };
-const ROBE_SESSION_V2_CFG = {
+const ROBE_SESSION_V2_BASE_CFG = {
   enabled: true,
   minPostsPerHour: 2.2,
   maxPostsPerHour: 3.4,
@@ -5881,8 +5884,52 @@ const ROBE_SESSION_V2_CFG = {
   mediumPauseChance: 0.40,
   techPauseMinMs: 15_000,
   techPauseMaxMs: 90_000,
-  vtag: 'robe_block_session_v2'
+  vtagBase: 'robe_block_session_v3'
 };
+let _runtimeServerConfigCache = { at: 0, totalMemMB: 0, value: null };
+function getRuntimeServerConfig(totalMemMB = 0) {
+  const now = Date.now();
+  const tmb = Number(totalMemMB || 0) || Math.round(os.totalmem() / (1024 * 1024));
+  const stale = (now - Number(_runtimeServerConfigCache.at || 0)) > 10_000;
+  const memDrift = Math.abs((Number(_runtimeServerConfigCache.totalMemMB || 0)) - tmb) > 256;
+  if (!stale && !memDrift && _runtimeServerConfigCache.value) return _runtimeServerConfigCache.value;
+  let cfg = null;
+  try { cfg = serverConfig.readServerConfigEffective({ totalMemMB: tmb }); } catch {}
+  _runtimeServerConfigCache = { at: now, totalMemMB: tmb, value: cfg };
+  return cfg;
+}
+function getRobeDailyPlanCfg(totalMemMB = 0) {
+  const base = ROBE_DAILY_PLAN_BASE_CFG;
+  const eff = getRuntimeServerConfig(totalMemMB);
+  const robe = eff && eff.robe ? eff.robe : {};
+  const dMin = Math.max(1, Math.min(24, Number(robe.dailyHoursMin || base.dailyHoursMin) || base.dailyHoursMin));
+  const dMax = Math.max(dMin, Math.min(24, Number(robe.dailyHoursMax || base.dailyHoursMax) || base.dailyHoursMax));
+  const wStart = Math.max(0, Math.min(1439, Number(robe.windowStartMin || base.windowStartMin) || base.windowStartMin));
+  const wEnd = Math.max(wStart + 1, Math.min(1440, Number(robe.windowEndMin || base.windowEndMin) || base.windowEndMin));
+  const sig = `${wStart}-${wEnd}-${dMin}-${dMax}`;
+  return {
+    ...base,
+    windowStartMin: wStart,
+    windowEndMin: wEnd,
+    dailyHoursMin: dMin,
+    dailyHoursMax: dMax,
+    vtag: `${base.vtagBase}:${sig}`
+  };
+}
+function getRobeSessionV2Cfg(totalMemMB = 0) {
+  const base = ROBE_SESSION_V2_BASE_CFG;
+  const eff = getRuntimeServerConfig(totalMemMB);
+  const robe = eff && eff.robe ? eff.robe : {};
+  const pMin = Math.max(0.1, Math.min(12, Number(robe.postsPerHourMin || base.minPostsPerHour) || base.minPostsPerHour));
+  const pMax = Math.max(pMin, Math.min(12, Number(robe.postsPerHourMax || base.maxPostsPerHour) || base.maxPostsPerHour));
+  const sig = `${pMin.toFixed(3)}-${pMax.toFixed(3)}`;
+  return {
+    ...base,
+    minPostsPerHour: pMin,
+    maxPostsPerHour: pMax,
+    vtag: `${base.vtagBase}:${sig}`
+  };
+}
 const _robeDailyPlanCache = new Map();
 const _robeDailyPlanInFlight = new Map();
 const _robeDailyGateState = new Map();
@@ -5951,8 +5998,9 @@ function _robeFindCurrentBlockIndex(plan, nowMin) {
   return -1;
 }
 function _isValidRobeSessionV2(sess, date, blockIndex) {
+  const cfg = getRobeSessionV2Cfg();
   if (!sess || typeof sess !== 'object') return false;
-  if (String(sess.version || '') !== String(ROBE_SESSION_V2_CFG.vtag)) return false;
+  if (String(sess.version || '') !== String(cfg.vtag)) return false;
   if (String(sess.date || '') !== String(date || '')) return false;
   if (Number(sess.blockIndex) !== Number(blockIndex)) return false;
   if (!Array.isArray(sess.actions) || sess.actions.length < 1) return false;
@@ -5960,41 +6008,42 @@ function _isValidRobeSessionV2(sess, date, blockIndex) {
   return true;
 }
 function _buildRobeSessionPlanDeterministic(nome, dateYmd, block, blockIndex, hostIdOpt = '') {
+  const cfg = getRobeSessionV2Cfg();
   const sMin = Number(block && block.startMin || 0) || 0;
   const eMin = Number(block && block.endMin || 0) || 0;
   const durationMin = Math.max(1, eMin - sMin);
   const durationHours = durationMin / 60;
-  const seedInput = `${ROBE_SESSION_V2_CFG.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(blockIndex || 0)}|${String(sMin)}|${String(eMin)}|${String(hostIdOpt || '')}`;
+  const seedInput = `${cfg.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(blockIndex || 0)}|${String(sMin)}|${String(eMin)}|${String(hostIdOpt || '')}`;
   const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
   const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
   const rng = _robeMulberry32(seedInt);
-  const ratePerHour = _robeRandFloat(rng, ROBE_SESSION_V2_CFG.minPostsPerHour, ROBE_SESSION_V2_CFG.maxPostsPerHour);
-  const jitter = _robeRandFloat(rng, ROBE_SESSION_V2_CFG.jitterMin, ROBE_SESSION_V2_CFG.jitterMax);
+  const ratePerHour = _robeRandFloat(rng, cfg.minPostsPerHour, cfg.maxPostsPerHour);
+  const jitter = _robeRandFloat(rng, cfg.jitterMin, cfg.jitterMax);
   const rawTarget = durationHours * ratePerHour * jitter;
   const hardMax = Math.max(1, Math.round(durationHours * 5.2));
   const targetPosts = Math.max(1, Math.min(hardMax, Math.round(rawTarget)));
   let rem = targetPosts;
   const actions = [];
   while (rem > 0) {
-    let lot = _robeRandInt(rng, ROBE_SESSION_V2_CFG.lotMin, ROBE_SESSION_V2_CFG.lotMax);
+    let lot = _robeRandInt(rng, cfg.lotMin, cfg.lotMax);
     if (lot > rem) lot = rem;
     actions.push({ type: 'post', count: lot });
     rem -= lot;
     if (rem <= 0) break;
     const r = rng();
     let pauseMin = 0;
-    if (r < ROBE_SESSION_V2_CFG.longPauseChance) {
-      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseLongMin, ROBE_SESSION_V2_CFG.pauseLongMax);
-    } else if (r < (ROBE_SESSION_V2_CFG.longPauseChance + ROBE_SESSION_V2_CFG.mediumPauseChance)) {
-      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseMediumMin, ROBE_SESSION_V2_CFG.pauseMediumMax);
+    if (r < cfg.longPauseChance) {
+      pauseMin = _robeRandInt(rng, cfg.pauseLongMin, cfg.pauseLongMax);
+    } else if (r < (cfg.longPauseChance + cfg.mediumPauseChance)) {
+      pauseMin = _robeRandInt(rng, cfg.pauseMediumMin, cfg.pauseMediumMax);
     } else {
-      pauseMin = _robeRandInt(rng, ROBE_SESSION_V2_CFG.pauseShortMin, ROBE_SESSION_V2_CFG.pauseShortMax);
+      pauseMin = _robeRandInt(rng, cfg.pauseShortMin, cfg.pauseShortMax);
     }
     actions.push({ type: 'pause', min: pauseMin });
   }
   const first = actions[0] || {};
   return {
-    version: ROBE_SESSION_V2_CFG.vtag,
+    version: cfg.vtag,
     date: String(dateYmd || ''),
     blockIndex: Number(blockIndex || 0) || 0,
     blockStartMin: sMin,
@@ -6059,8 +6108,9 @@ function _advanceRobeSessionRuntime(session, nowMs = Date.now()) {
   return { state: out, changed, allowPost: false, reason: 'guard_stop' };
 }
 function _robeSessionTechnicalPauseMs() {
-  const span = Math.max(1, ROBE_SESSION_V2_CFG.techPauseMaxMs - ROBE_SESSION_V2_CFG.techPauseMinMs);
-  return ROBE_SESSION_V2_CFG.techPauseMinMs + Math.floor(Math.random() * span);
+  const cfg = getRobeSessionV2Cfg();
+  const span = Math.max(1, cfg.techPauseMaxMs - cfg.techPauseMinMs);
+  return cfg.techPauseMinMs + Math.floor(Math.random() * span);
 }
 function _robeSessionSummary(session, nowMs = Date.now()) {
   if (!session || typeof session !== 'object') {
@@ -6098,7 +6148,8 @@ function _robeSessionSummary(session, nowMs = Date.now()) {
   };
 }
 async function getOrCreateRobeSessionGate(nome, nowMs = Date.now(), planHint = null, manifestHint = null) {
-  if (!ROBE_SESSION_V2_CFG.enabled) {
+  const cfg = getRobeSessionV2Cfg();
+  if (!cfg.enabled) {
     return { featureEnabled: false, allowPost: true, reason: 'disabled', technicalPauseMs: _robeSessionTechnicalPauseMs(), summary: _robeSessionSummary(null, nowMs) };
   }
   const plan = planHint || await getOrCreateRobeDailyPlan(nome, nowMs, manifestHint).catch(() => null);
@@ -6159,7 +6210,7 @@ async function getOrCreateRobeSessionGate(nome, nowMs = Date.now(), planHint = n
   };
 }
 async function markRobeSessionPostConsumed(nome, nowMs = Date.now()) {
-  if (!ROBE_SESSION_V2_CFG.enabled) return;
+  if (!getRobeSessionV2Cfg().enabled) return;
   try {
     await manifestStore.update(nome, (m) => {
       m = m || {};
@@ -6193,7 +6244,9 @@ async function markRobeSessionPostConsumed(nome, nowMs = Date.now()) {
   } catch {}
 }
 function _isValidRobeDailyPlan(plan, date) {
+  const cfg = getRobeDailyPlanCfg();
   if (!plan || typeof plan !== 'object') return false;
+  if (String(plan.version || '') !== String(cfg.vtag)) return false;
   if (String(plan.date || '') !== String(date || '')) return false;
   if (typeof plan.enabled !== 'boolean') return false;
   if (!plan.enabled) return true;
@@ -6207,14 +6260,15 @@ function _isValidRobeDailyPlan(plan, date) {
   return true;
 }
 function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
-  const seedInput = `${ROBE_DAILY_PLAN_CFG.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
+  const cfg = getRobeDailyPlanCfg();
+  const seedInput = `${cfg.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
   const seedHex = crypto.createHash('sha256').update(seedInput).digest('hex').slice(0, 8);
   const seedInt = (parseInt(seedHex, 16) >>> 0) || 1;
   const rng = _robeMulberry32(seedInt);
-  const shouldWork = !(rng() < ROBE_DAILY_PLAN_CFG.offdayRatio);
+  const shouldWork = !(rng() < cfg.offdayRatio);
   if (!shouldWork) {
     return {
-      version: ROBE_DAILY_PLAN_CFG.vtag,
+      version: cfg.vtag,
       date: String(dateYmd || ''),
       enabled: false,
       dailyHours: 0,
@@ -6222,7 +6276,7 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
       seed: seedHex
     };
   }
-  const isMainBand = rng() < ROBE_DAILY_PLAN_CFG.mainHoursRatio;
+  const isMainBand = rng() < cfg.mainHoursRatio;
   let dailyHours = 0;
   if (isMainBand) {
     dailyHours = _robeRandInt(rng, 6, 12);
@@ -6230,33 +6284,34 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
     const lowExtreme = rng() < 0.60;
     dailyHours = lowExtreme ? _robeRandInt(rng, 1, 6) : _robeRandInt(rng, 12, 14);
   }
+  dailyHours = Math.max(cfg.dailyHoursMin, Math.min(cfg.dailyHoursMax, dailyHours));
   let blocksCount = 1;
   if (dailyHours <= 3) blocksCount = 1;
   else if (dailyHours <= 8) blocksCount = (rng() < 0.60 ? 1 : 2);
   else blocksCount = (rng() < 0.50 ? 2 : 3);
   const totalMin = Math.max(60, dailyHours * 60);
-  const windowLen = Math.max(1, ROBE_DAILY_PLAN_CFG.windowEndMin - ROBE_DAILY_PLAN_CFG.windowStartMin);
-  while (blocksCount > 1 && (totalMin + (ROBE_DAILY_PLAN_CFG.minGapMin * (blocksCount - 1))) > windowLen) {
+  const windowLen = Math.max(1, cfg.windowEndMin - cfg.windowStartMin);
+  while (blocksCount > 1 && (totalMin + (cfg.minGapMin * (blocksCount - 1))) > windowLen) {
     blocksCount -= 1;
   }
   blocksCount = Math.max(1, Math.min(3, blocksCount));
   const durations = _robeSplitMinutes(totalMin, blocksCount, 45, rng);
-  const required = durations.reduce((a, b) => a + b, 0) + (ROBE_DAILY_PLAN_CFG.minGapMin * (blocksCount - 1));
+  const required = durations.reduce((a, b) => a + b, 0) + (cfg.minGapMin * (blocksCount - 1));
   const slack = Math.max(0, windowLen - required);
   const slackChunks = _robeSplitMinutes(slack, blocksCount + 1, 0, rng);
   const blocks = [];
-  let cursor = ROBE_DAILY_PLAN_CFG.windowStartMin + (slackChunks[0] || 0);
+  let cursor = cfg.windowStartMin + (slackChunks[0] || 0);
   for (let i = 0; i < blocksCount; i++) {
     const d = durations[i] || 0;
     const s = cursor;
-    const e = Math.min(ROBE_DAILY_PLAN_CFG.windowEndMin, s + d);
+    const e = Math.min(cfg.windowEndMin, s + d);
     blocks.push({ startMin: s, endMin: e });
     if (i < blocksCount - 1) {
-      cursor = e + ROBE_DAILY_PLAN_CFG.minGapMin + (slackChunks[i + 1] || 0);
+      cursor = e + cfg.minGapMin + (slackChunks[i + 1] || 0);
     }
   }
   return {
-    version: ROBE_DAILY_PLAN_CFG.vtag,
+    version: cfg.vtag,
     date: String(dateYmd || ''),
     enabled: true,
     dailyHours,
@@ -6267,12 +6322,12 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '') {
 async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
   const date = _robeDailyDateYmd(nowMs);
   const c = _robeDailyPlanCache.get(nome);
-  if (c && c.date === date && c.plan) return c.plan;
+  if (c && c.date === date && c.plan && _isValidRobeDailyPlan(c.plan, date)) return c.plan;
   const inflight = _robeDailyPlanInFlight.get(nome);
   if (inflight) {
     try { await inflight; } catch {}
     const c2 = _robeDailyPlanCache.get(nome);
-    if (c2 && c2.date === date && c2.plan) return c2.plan;
+    if (c2 && c2.date === date && c2.plan && _isValidRobeDailyPlan(c2.plan, date)) return c2.plan;
   }
   const job = (async () => {
     const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
@@ -6343,7 +6398,8 @@ async function isRobeWindowOpenNow(nome, nowMs = Date.now()) {
     const prev = _robeDailyGateState.get(nome) || {};
     const now = Date.now();
     const changed = (prev.allow !== allow);
-    const due = !prev.lastLogAt || (now - Number(prev.lastLogAt || 0)) >= ROBE_DAILY_PLAN_CFG.gateLogEveryMs;
+    const cfg = getRobeDailyPlanCfg();
+    const due = !prev.lastLogAt || (now - Number(prev.lastLogAt || 0)) >= cfg.gateLogEveryMs;
     if (changed || due) {
       provisionAudit.append({
         ts: now,
@@ -10791,6 +10847,9 @@ const handlers = {
       robeQueue: robeQueueList,
       autoMode,
       sys,
+      serverConfig: (() => {
+        try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
+      })(),
       // Diagnóstico enterprise: ajuda a provar quando o dashboard está “cego” porque não há controllers vivos.
       _debug: {
         pid: process && process.pid ? process.pid : null,
@@ -11231,7 +11290,18 @@ const sys = {
   residualMBLocal: _residualMBLocal,
   ramDiagLast: _ramDiagLast
 };
-const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null), ts: Date.now() };
+const statusObj = {
+  perfis,
+  robes,
+  robeQueue: robeQueueList,
+  autoMode,
+  sys,
+  serverConfig: (() => {
+    try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
+  })(),
+  build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null),
+  ts: Date.now()
+};
 
 // LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
 try {

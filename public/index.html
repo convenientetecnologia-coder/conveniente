@@ -274,6 +274,7 @@
   <div class="toolbar toolbar-sticky">
     <button class="add-btn" id="addPerfilBtn">+Nova Conta</button>
     <button class="btn" id="citiesCountBtn">Cidades</button>
+    <button class="btn btn-cinza" id="serverConfigBtn">Config Servidor</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
     <button class="btn btn-cinza" id="autoOpenBtn">Tudo aberto: OFF</button>
@@ -313,7 +314,7 @@
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
+      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn','serverConfigBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -779,6 +780,171 @@
         } finally {
           btn.disabled = false; btn.classList.remove('loading');
           btn.innerHTML = btn.dataset.idleHtml;
+        }
+      };
+    }
+
+    function pad2(n){ return String(Math.max(0, Number(n) || 0)).padStart(2, '0'); }
+    function minToHHMM(totalMin) {
+      const m = Math.max(0, Math.min(1439, Number(totalMin) || 0));
+      const h = Math.floor(m / 60);
+      const mm = m % 60;
+      return `${pad2(h)}:${pad2(mm)}`;
+    }
+    function hhmmToMin(v, fallback = 0) {
+      const s = String(v || '').trim();
+      const m = s.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return fallback;
+      const h = Number(m[1]);
+      const mm = Number(m[2]);
+      if (!Number.isFinite(h) || !Number.isFinite(mm)) return fallback;
+      if (h < 0 || h > 23 || mm < 0 || mm > 59) return fallback;
+      return (h * 60) + mm;
+    }
+    function modeLabel(m) {
+      const x = String(m || '').toLowerCase();
+      if (x === 'absolute') return 'Absoluto';
+      if (x === 'auto_by_ram') return 'Auto por RAM';
+      return 'Por 8GB';
+    }
+    async function getServerConfig() {
+      const r = await fetch('/api/server-config').then(x => x.json()).catch(() => null);
+      if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_get_failed');
+      return r;
+    }
+    async function saveServerConfig(payload) {
+      const r = await fetch('/api/server-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_server_config' },
+        body: JSON.stringify(payload || {})
+      }).then(x => x.json()).catch(() => null);
+      if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_save_failed');
+      return r;
+    }
+    function showServerConfigModal() {
+      const overlay = document.createElement('div'); overlay.className = 'modal-ov';
+      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth = '760px';
+      box.innerHTML = `
+        <h2>Configuração do Servidor</h2>
+        <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
+        <div class="form-row">
+          <label>Capacidade — modo</label>
+          <select id="srvCapMode">
+            <option value="per_8gb">Por 8GB de RAM</option>
+            <option value="absolute">Teto absoluto de contas</option>
+            <option value="auto_by_ram">Auto por RAM (legado)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Contas por 8GB</label>
+          <input type="number" id="srvAccountsPer8Gb" min="1" max="40" step="1" />
+        </div>
+        <div class="form-row">
+          <label>Teto absoluto (opcional)</label>
+          <input type="number" id="srvMaxOverride" min="1" max="500" step="1" placeholder="Ex.: 30" />
+        </div>
+        <div class="form-row">
+          <label>Robe — janela global (início / fim)</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input type="time" id="srvWindowStart" />
+            <input type="time" id="srvWindowEnd" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Robe — horas por conta (mín / máx)</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input type="number" id="srvDailyHoursMin" min="1" max="24" step="1" />
+            <input type="number" id="srvDailyHoursMax" min="1" max="24" step="1" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Robe — classificados por hora (mín / máx)</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input type="number" id="srvPostsMin" min="0.1" max="12" step="0.1" />
+            <input type="number" id="srvPostsMax" min="0.1" max="12" step="0.1" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="srvCfgClose">Fechar</button>
+          <button class="btn primary" id="srvCfgSave">Salvar</button>
+        </div>
+      `;
+      overlay.append(box);
+      document.body.append(overlay);
+      const infoEl = box.querySelector('#serverCfgInfo');
+      const modeEl = box.querySelector('#srvCapMode');
+      const per8El = box.querySelector('#srvAccountsPer8Gb');
+      const absEl = box.querySelector('#srvMaxOverride');
+      const wsEl = box.querySelector('#srvWindowStart');
+      const weEl = box.querySelector('#srvWindowEnd');
+      const dminEl = box.querySelector('#srvDailyHoursMin');
+      const dmaxEl = box.querySelector('#srvDailyHoursMax');
+      const pminEl = box.querySelector('#srvPostsMin');
+      const pmaxEl = box.querySelector('#srvPostsMax');
+      const closeBtn = box.querySelector('#srvCfgClose');
+      const saveBtn = box.querySelector('#srvCfgSave');
+
+      const updateCapInputs = () => {
+        const mode = String(modeEl.value || '').toLowerCase();
+        per8El.disabled = !(mode === 'per_8gb');
+        absEl.disabled = !(mode === 'absolute');
+      };
+      modeEl.addEventListener('change', updateCapInputs);
+
+      const fillFromConfig = (cfg) => {
+        const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
+        const robe = (cfg && cfg.robe) ? cfg.robe : {};
+        modeEl.value = String(cap.mode || 'per_8gb');
+        per8El.value = Number(cap.accountsPer8Gb || 15);
+        absEl.value = (cap.maxAccountsOverride == null) ? '' : Number(cap.maxAccountsOverride);
+        wsEl.value = minToHHMM(Number(robe.windowStartMin || 360));
+        weEl.value = minToHHMM(Math.max(1, Math.min(1439, Number(robe.windowEndMin || 1380) - 1)));
+        dminEl.value = Number(robe.dailyHoursMin || 1);
+        dmaxEl.value = Number(robe.dailyHoursMax || 14);
+        pminEl.value = Number(robe.postsPerHourMin || 2.2);
+        pmaxEl.value = Number(robe.postsPerHourMax || 3.4);
+        updateCapInputs();
+        infoEl.className = 'pill info';
+        infoEl.innerHTML = `<span class="dot"></span>Modo: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
+      };
+
+      (async () => {
+        try {
+          const r = await getServerConfig();
+          fillFromConfig(r.config);
+        } catch (e) {
+          infoEl.className = 'pill bad';
+          infoEl.innerHTML = `<span class="dot"></span>Falha ao carregar configuração: ${String(e && e.message || e)}`;
+        }
+      })();
+
+      closeBtn.onclick = () => overlay.remove();
+      saveBtn.onclick = async () => {
+        try {
+          const payload = {
+            capacity: {
+              mode: String(modeEl.value || 'per_8gb'),
+              accountsPer8Gb: Number(per8El.value || 15),
+              maxAccountsOverride: (String(absEl.value || '').trim() === '') ? null : Number(absEl.value)
+            },
+            robe: {
+              windowStartMin: hhmmToMin(wsEl.value, 360),
+              windowEndMin: hhmmToMin(weEl.value, 1380) + 1,
+              dailyHoursMin: Number(dminEl.value || 1),
+              dailyHoursMax: Number(dmaxEl.value || 14),
+              postsPerHourMin: Number(pminEl.value || 2.2),
+              postsPerHourMax: Number(pmaxEl.value || 3.4)
+            }
+          };
+          setBtnLoading(saveBtn, true, 'Salvando...');
+          const r = await saveServerConfig(payload);
+          fillFromConfig(r.config);
+          alert('Configuração do servidor salva com sucesso.');
+          try { await reloadPerfis(); } catch {}
+        } catch (e) {
+          alert('Falha ao salvar configuração do servidor: ' + (e && e.message || e));
+        } finally {
+          setBtnLoading(saveBtn, false);
         }
       };
     }
@@ -2092,6 +2258,15 @@
         } catch (e) {
           alert('Falha ao carregar contagem de cidades: ' + (e && e.message || e));
         }
+      };
+    })();
+
+    (function bindServerConfigBtn(){
+      const btn = document.getElementById('serverConfigBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        showServerConfigModal();
       };
     })();
 

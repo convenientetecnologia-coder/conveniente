@@ -4,6 +4,7 @@
 module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
 const gatewayProxy = require('./gatewayProxy.js');
+const serverConfig = require('./serverConfig.js');
 // Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
@@ -464,6 +465,16 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       changedBy: (ao && ao.changedBy) ? String(ao.changedBy) : null
     };
   } catch { openAll = null; }
+  const serverConfigEffective = (() => {
+    try {
+      const totalMemMB = (overlayINST && overlayINST.sys && typeof overlayINST.sys.totalMB === 'number')
+        ? Number(overlayINST.sys.totalMB)
+        : serverConfig.getTotalMemMB();
+      return serverConfig.readServerConfigEffective({ totalMemMB });
+    } catch {
+      return serverConfig.readServerConfigEffective({});
+    }
+  })();
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -476,6 +487,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     warning: warningINST,
     openAll,
     autoOpen,
+    serverConfig: serverConfigEffective,
     ts: Date.now()
   });
   return;
@@ -549,6 +561,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   } catch(e2) {
     perfisSkeleton = Array.isArray(_lastBaselinePerfis) ? _lastBaselinePerfis : [];
   }
+  const serverConfigEffective = (() => {
+    try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+  })();
   res.json({
     perfis: perfisSkeleton,
     robes: {},
@@ -578,7 +593,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
           changedBy: (ao && ao.changedBy) ? String(ao.changedBy) : null
         };
       } catch { return { enabled: false, changedAt: 0, changedBy: null }; }
-    })()
+    })(),
+    serverConfig: serverConfigEffective
   });
 }
 

@@ -1,6 +1,7 @@
 // scripts/memoryPlan.js
 
 const os = require('os');
+const serverConfig = require('./serverConfig.js');
 
 /**
  * Converte bytes em MB.
@@ -26,8 +27,11 @@ function planMemoryAndShards({ totalProfiles }) {
   const cushionMB = Math.max(Math.floor(totalMB * 0.10), 2048); // 10% colchão, min 2GB
   const NODE_SEG_MB = 8192; // 8GB por Node
   const NODE_OVERHEAD_MB = 2048; // 2GB por Node
-  const MAX_PER_NODE = 15;
   const CHROME_AVG_MB = 600;
+  const runtimeCfg = (() => {
+    try { return serverConfig.readServerConfigEffective({ totalMemMB: totalMB }); } catch { return null; }
+  })();
+  const configuredGlobalCap = Math.max(1, Number(runtimeCfg && runtimeCfg.capacity && runtimeCfg.capacity.maxAccountsEffective || 0) || 1);
 
   // 1) Nodes exatos PELO HARDWARE, independente de RAM livre
   let nodes = Math.ceil(totalMB / NODE_SEG_MB);
@@ -35,7 +39,7 @@ function planMemoryAndShards({ totalProfiles }) {
 
   // 2) Limite para não rodar mais nodes do que perfis disponíveis
   // (mas nunca limita nodes por RAM SOBRANTE/livre, só por máximo necessário para os perfis)
-  const nodesByProfiles = Math.max(1, Math.ceil(totalProfiles / MAX_PER_NODE));
+  const nodesByProfiles = Math.max(1, Math.ceil(totalProfiles / Math.max(1, Math.ceil(configuredGlobalCap / Math.max(1, nodes)))));
   nodes = Math.min(nodes, nodesByProfiles);
 
   // 3) RAM útil para Chrome: colchão e overhead só para calcular máximo de Chromes globais
@@ -46,12 +50,14 @@ function planMemoryAndShards({ totalProfiles }) {
   // 4) Limite global de quantos Chrome (bots) o host aguenta (cap global por RAM sobra/dentro do hardware)
   const maxChromesPossibleGlobal = Math.min(
     totalProfiles,
+    configuredGlobalCap,
     Math.floor(remainingForChromesMB / CHROME_AVG_MB)
   );
 
   // 5) Limite por Node
+  const maxPerNodeByConfig = Math.max(1, Math.ceil(configuredGlobalCap / Math.max(1, nodes)));
   const targetPerNode = Math.min(
-    MAX_PER_NODE,
+    maxPerNodeByConfig,
     Math.max(1, Math.ceil(maxChromesPossibleGlobal / nodes))
   );
 
@@ -67,6 +73,10 @@ function planMemoryAndShards({ totalProfiles }) {
       reservedForOverheadMB,
       remainingForChromesMB,
       chromeAvgMB: CHROME_AVG_MB
+    },
+    serverConfig: {
+      capacityMode: runtimeCfg && runtimeCfg.capacity ? runtimeCfg.capacity.mode : 'unknown',
+      maxAccountsEffective: configuredGlobalCap
     }
   };
 }

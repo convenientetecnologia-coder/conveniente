@@ -34,6 +34,7 @@ const pLimit = pLimitImport.default || pLimitImport;
 const manifestStore = require('./manifestStore.js');
 const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
+const serverConfig = require('./serverConfig.js');
 
 module.exports = (app, workerClient, fileStore) => {
   // ===== Maintenance: provision lock =====
@@ -93,6 +94,50 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro fatal na rota listagem de perfis', { rota: '/api/perfis', error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  app.get('/api/server-config', (req, res) => {
+    try {
+      const totalMemMB = serverConfig.getTotalMemMB();
+      const effective = serverConfig.readServerConfigEffective({ totalMemMB });
+      return res.json({
+        ok: true,
+        config: effective,
+        meta: {
+          source: effective.source,
+          path: serverConfig.CONFIG_PATH,
+          totalMemMB
+        }
+      });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  app.post('/api/server-config', (req, res) => {
+    try {
+      const operator = String(req.headers['x-operator'] || 'dashboard').slice(0, 180);
+      const payload = (req.body && typeof req.body === 'object')
+        ? ((req.body.config && typeof req.body.config === 'object') ? req.body.config : req.body)
+        : {};
+      const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
+      if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+      const totalMemMB = serverConfig.getTotalMemMB();
+      const effective = serverConfig.readServerConfigEffective({ totalMemMB });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'server_config_updated',
+          by: operator,
+          source: effective.source,
+          capacityMode: effective && effective.capacity ? effective.capacity.mode : null,
+          maxAccountsEffective: effective && effective.capacity ? effective.capacity.maxAccountsEffective : null
+        });
+      } catch {}
+      return res.json({ ok: true, config: effective });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
 
@@ -201,8 +246,15 @@ module.exports = (app, workerClient, fileStore) => {
       };
 
       // Atualiza perfis.json (serializado e atômico; evita corrida em cluster)
+      const capacityEffective = (() => {
+        try { return serverConfig.readServerConfigEffective({ totalMemMB: serverConfig.getTotalMemMB() }); } catch { return null; }
+      })();
+      const capacityMax = Math.max(1, Number(capacityEffective && capacityEffective.capacity && capacityEffective.capacity.maxAccountsEffective || 0) || 1);
       const wr = fileStore.withPerfisFileLockUpdate((arr) => {
         const next = Array.isArray(arr) ? arr.slice() : [];
+        if (next.length >= capacityMax) {
+          throw new Error(`capacity_limit_reached:${next.length}/${capacityMax}`);
+        }
         const extractCUser = (p) => {
           try {
             const list = Array.isArray(p && p.cookies) ? p.cookies : [];
@@ -230,6 +282,9 @@ module.exports = (app, workerClient, fileStore) => {
       }, { caller: 'api_perfis_create', reason: `create:${nome}` });
       if (!wr || wr.ok === false) {
         const e = String((wr && wr.error) ? wr.error : '');
+        if (e.startsWith('capacity_limit_reached:')) {
+          return res.json({ ok: false, error: 'capacity_limit_reached', details: e.slice('capacity_limit_reached:'.length) || null });
+        }
         if (e.startsWith('duplicate_c_user:')) {
           return res.json({ ok: false, error: 'duplicate_c_user', existingProfile: e.slice('duplicate_c_user:'.length) || null });
         }

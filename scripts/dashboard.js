@@ -2860,6 +2860,7 @@ function logsAllowlist() {
     perfis: path.join(base, 'perfis.json'),
     status: path.join(base, 'status.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
+    server_runtime_config: path.join(base, 'server_runtime_config.json'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
