@@ -807,6 +807,41 @@
       if (x === 'auto_by_ram') return 'Auto por RAM';
       return 'Por 8GB';
     }
+    function hourLabelToMin(v, fallback = 0) {
+      const s = String(v || '').trim();
+      if (!s) return fallback;
+      if (s === '24:00') return 1440;
+      const m = s.match(/^(\d{2}):00$/);
+      if (!m) return fallback;
+      const h = Number(m[1]);
+      if (!Number.isFinite(h) || h < 0 || h > 23) return fallback;
+      return h * 60;
+    }
+    function minToHourLabel(min, { end = false } = {}) {
+      const n = Number(min || 0) || 0;
+      if (end && n >= 1440) return '24:00';
+      const h = Math.max(0, Math.min(23, Math.floor(n / 60)));
+      return `${pad2(h)}:00`;
+    }
+    function buildHourOptions({ end = false } = {}) {
+      const out = [];
+      const start = end ? 1 : 0;
+      const stop = end ? 24 : 23;
+      for (let h = start; h <= stop; h += 1) {
+        const label = (h === 24) ? '24:00' : `${pad2(h)}:00`;
+        out.push(`<option value="${label}">${label}</option>`);
+      }
+      return out.join('');
+    }
+    function buildRangeOptions(min, max) {
+      const out = [];
+      const lo = Math.max(1, Number(min || 1) || 1);
+      const hi = Math.max(lo, Number(max || lo) || lo);
+      for (let i = lo; i <= hi; i += 1) {
+        out.push(`<option value="${i}">${i}h</option>`);
+      }
+      return out.join('');
+    }
     async function getServerConfig() {
       const r = await fetch('/api/server-config').then(x => x.json()).catch(() => null);
       if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_get_failed');
@@ -818,7 +853,11 @@
         headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_server_config' },
         body: JSON.stringify(payload || {})
       }).then(x => x.json()).catch(() => null);
-      if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_save_failed');
+      if (!r || r.ok !== true || !r.config) {
+        const base = (r && r.error) ? String(r.error) : 'server_config_save_failed';
+        const details = Array.isArray(r && r.details) ? r.details.join(', ') : '';
+        throw new Error(details ? `${base} (${details})` : base);
+      }
       return r;
     }
     function showServerConfigModal() {
@@ -846,15 +885,15 @@
         <div class="form-row">
           <label>Robe — janela global (início / fim)</label>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="time" id="srvWindowStart" />
-            <input type="time" id="srvWindowEnd" />
+            <select id="srvWindowStart">${buildHourOptions({ end: false })}</select>
+            <select id="srvWindowEnd">${buildHourOptions({ end: true })}</select>
           </div>
         </div>
         <div class="form-row">
           <label>Robe — horas por conta (mín / máx)</label>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="number" id="srvDailyHoursMin" min="1" max="24" step="1" />
-            <input type="number" id="srvDailyHoursMax" min="1" max="24" step="1" />
+            <select id="srvDailyHoursMin">${buildRangeOptions(1,24)}</select>
+            <select id="srvDailyHoursMax">${buildRangeOptions(1,24)}</select>
           </div>
         </div>
         <div class="form-row">
@@ -897,8 +936,8 @@
         modeEl.value = String(cap.mode || 'per_8gb');
         per8El.value = Number(cap.accountsPer8Gb || 15);
         absEl.value = (cap.maxAccountsOverride == null) ? '' : Number(cap.maxAccountsOverride);
-        wsEl.value = minToHHMM(Number(robe.windowStartMin || 360));
-        weEl.value = minToHHMM(Math.max(1, Math.min(1439, Number(robe.windowEndMin || 1380) - 1)));
+        wsEl.value = minToHourLabel(Number(robe.windowStartMin || 360), { end: false });
+        weEl.value = minToHourLabel(Number(robe.windowEndMin || 1380), { end: true });
         dminEl.value = Number(robe.dailyHoursMin || 1);
         dmaxEl.value = Number(robe.dailyHoursMax || 14);
         pminEl.value = Number(robe.postsPerHourMin || 2.2);
@@ -921,6 +960,12 @@
       closeBtn.onclick = () => overlay.remove();
       saveBtn.onclick = async () => {
         try {
+          const startMin = hourLabelToMin(wsEl.value, 360);
+          const endMin = hourLabelToMin(weEl.value, 1380);
+          if (endMin <= startMin) {
+            alert('Janela global inválida: horário final precisa ser maior que o inicial.');
+            return;
+          }
           const payload = {
             capacity: {
               mode: String(modeEl.value || 'per_8gb'),
@@ -928,8 +973,8 @@
               maxAccountsOverride: (String(absEl.value || '').trim() === '') ? null : Number(absEl.value)
             },
             robe: {
-              windowStartMin: hhmmToMin(wsEl.value, 360),
-              windowEndMin: hhmmToMin(weEl.value, 1380) + 1,
+              windowStartMin: startMin,
+              windowEndMin: endMin,
               dailyHoursMin: Number(dminEl.value || 1),
               dailyHoursMax: Number(dmaxEl.value || 14),
               postsPerHourMin: Number(pminEl.value || 2.2),
@@ -942,7 +987,8 @@
           alert('Configuração do servidor salva com sucesso.');
           try { await reloadPerfis(); } catch {}
         } catch (e) {
-          alert('Falha ao salvar configuração do servidor: ' + (e && e.message || e));
+          const msg = String(e && e.message || e || 'erro');
+          alert('Falha ao salvar configuração do servidor: ' + msg);
         } finally {
           setBtnLoading(saveBtn, false);
         }

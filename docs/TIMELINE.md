@@ -31,6 +31,21 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-13 — [CONV][OPS] Hotfix pós-teste: modal de configuração com seletores fixos e erro detalhado
+
+- **O que**:
+  - `public/index.html`: janela global do Robe migrou para seletores por hora com suporte a `24:00` no fim;
+  - `public/index.html`: horas por conta migrou para seletores fixos (`1h..24h`);
+  - `public/index.html`: erro de salvamento passou a mostrar detalhes de validação da API.
+- **Por quê**: eliminar `validation_failed` por input ambíguo e reduzir erro operacional no uso do dashboard.
+- **Evidência**:
+  - `C:\conveniente\public\index.html`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260413-1700-01.md`
+- **Reinícios**: `conveniente` no host alvo.
+- **Rollback**:
+  - restaurar inputs livres anteriores do modal;
+  - reiniciar `conveniente`.
+
 #### 2026-04-13 — [CONV][OPS] Fase C aplicada: configuração passa a afetar runtime real (Robe + capacidade local)
 
 - **O que**:
