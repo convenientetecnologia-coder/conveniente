@@ -1556,3 +1556,39 @@ restrição:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Exibir idade da conta (dias) no PIL do dashboard com fonte canônica e sem ambiguidade | in_progress | `docs/inbox/need_evidence/INC-20260410-2110-01.md` |
+
+---
+
+## RAW_INPUT — 2026-04-13 (Robe V2 como orquestrador principal; remover bloqueio estrutural por cooldown legado)
+
+```text
+triagem inbox
+
+contexto:
+- sistema V2 ja define plano diario: offday ~25%, horas totais, blocos e ritmo medio de postagens.
+- na pratica operacional, contas em janela/bloco e com sessao "postando" podem nao executar na fila no momento esperado.
+- sintoma observado em conta exemplo: dentro do bloco, sessao 0/21 e estado "postando (3 no lote)", mas sem postagem efetiva.
+
+hipotese do humano:
+- cooldown legado (camada antiga) esta engessando o plano V2;
+- V2 deveria ser a autoridade principal para orquestrar quando enfileirar/postar;
+- cooldown deveria virar mecanismo de excecao/seguranca, nao regua principal de cadencia.
+
+diretrizes pedidas:
+1) manter janela operacional (06:00-23:00), horas/blocos e aleatoriedade humanizada;
+2) evitar regra fixa de sequencia (2/3/4 seguidos obrigatorios);
+3) estudar agenda pre-definida de postagens por conta/dia/bloco (com jitter);
+4) preservar botao robe-play como override humano (sempre enfileirar para teste);
+5) tirar gargalo que atrasa o V2 sem quebrar guardrails (limit_posting, erros, login_required, fila global).
+
+restricoes:
+- nao codar agora;
+- produzir dossie/auditoria ponta a ponta pre-codigo;
+- sem achismo, com evidencias citaveis.
+```
+
+### TRIAGE — 2026-04-13 (Robe V2 maestro operacional de postagem)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Robe V2 como orquestrador principal de cadencia (cooldown legado como excecao), mantendo `robe-play` | in_progress | `docs/inbox/in_progress/INC-20260413-1600-01.md` |

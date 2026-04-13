@@ -6427,6 +6427,21 @@ async function normalizeCooldown(nome) {
   } catch { return 0; }
 }
 
+function _robeBlockedByFromMeta(robeEntry = {}) {
+  try {
+    const cooldownSec = Number(robeEntry && robeEntry.cooldownSec || 0) || 0;
+    const pauseReason = String((robeEntry && robeEntry.pauseReason) || '').trim().toLowerCase();
+    if (robeEntry && robeEntry.emExecucao) return 'executing';
+    if (robeEntry && robeEntry.emFila) return 'queue_busy';
+    if (pauseReason === 'limit_posting') return 'limit_posting';
+    if (cooldownSec > 0 && pauseReason) return `pause_${pauseReason}`;
+    if (cooldownSec > 0) return 'legacy_cooldown';
+    return 'none';
+  } catch {
+    return 'none';
+  }
+}
+
 async function releaseLimitPostingIfExpired(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
@@ -7306,11 +7321,34 @@ async function robeTickGlobal() {
     // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
     // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
     try { await unfreezeCooldownIfWorking(nome); } catch {}
-    const cooldown = await normalizeCooldown(nome);
+    let cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
     const exec = robeQueue.isActive(nome);
-    if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > Date.now()) {
+    const nowForGate = Date.now();
+    const pauseReason = String((manGate && manGate.robePauseReason) || '').trim().toLowerCase();
+    const hasPauseReason = pauseReason.length > 0;
+    const hasHardPauseWithCooldown = hasPauseReason && (
+      (Number(manGate && manGate.robeCooldownUntil || 0) > nowForGate) ||
+      (Number(manGate && manGate.robeCooldownRemainingMs || 0) > 0)
+    );
+    if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > nowForGate) {
       try { await issues.append(nome, 'mil_action', 'skip_robe_enqueue_due_limit_posting_active'); } catch {}
+      return null;
+    }
+    // V2 maestro no caminho feliz:
+    // se houver cooldown legado sem pauseReason explícita, limpar para não travar enqueue.
+    if (cooldown > 0 && !hasHardPauseWithCooldown) {
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.robeCooldownUntil = nowForGate;
+          m.robeCooldownRemainingMs = 0;
+          return m;
+        });
+        cooldown = 0;
+      } catch {}
+    }
+    if (cooldown > 0 && hasHardPauseWithCooldown) {
       return null;
     }
     return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
@@ -10720,6 +10758,7 @@ const handlers = {
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         pauseReason: robeMeta[nome]?.pauseReason || null,
+        blockedBy: null,
         lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
       };
       const pauseActive = await (async () => {
@@ -10737,6 +10776,7 @@ const handlers = {
         robes[nome].estado = 'paused_limit';
         await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
       }
+      robes[nome].blockedBy = _robeBlockedByFromMeta(robes[nome]);
     }
     const robeQueueList = robeQueue.queueList();
     const sys = {
@@ -11131,6 +11171,7 @@ robes[nome] = {
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   pauseReason: robeMeta[nome]?.pauseReason || null,
+  blockedBy: null,
   lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
 };
 try {
@@ -11156,6 +11197,7 @@ if (pauseActive) {
   robes[nome].pauseReason = 'limit_posting';
   await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
 }
+robes[nome].blockedBy = _robeBlockedByFromMeta(robes[nome]);
 }
 const robeQueueList = robeQueue.queueList();
 const _nodeMu = (() => { try { return process.memoryUsage(); } catch { return null; } })();
