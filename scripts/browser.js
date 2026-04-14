@@ -2085,6 +2085,15 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
   if (!page || typeof page.url !== 'function') throw new Error('invalid_page');
   const waitMs = Math.max(8000, Number(timeoutMs || 0) || 45000);
   const isTargetUrl = (u) => /facebook\.com\/messages/i.test(String(u || '')) || /messenger\.com/i.test(String(u || ''));
+  const dismissPinIfPresent = async () => {
+    try {
+      const pin = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      if (pin && pin.present) {
+        await tryDismissMessengerPinModal(page, { logPrefix: '[messages][pin]', maxTries: 2 }).catch(() => ({ ok: false }));
+        await sleep(350);
+      }
+    } catch {}
+  };
   const readMarketplaceState = async () => {
     return await page.evaluate(() => {
       const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -2095,19 +2104,25 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
           return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
         } catch { return false; }
       };
-      const nodes = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 500);
+      const nodes = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
       let menuFound = false;
       let menuActive = false;
+      let menuLabel = '';
       for (const el of nodes) {
         if (!isVisible(el)) continue;
-        const t = norm(el.innerText || el.textContent || '');
+        const rawTxt = norm(el.innerText || el.textContent || '');
+        const t = rawTxt.replace(/\s+/g, ' ').trim();
         const al = norm(el.getAttribute('aria-label') || '');
-        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
+        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
+        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
+        if (!actionable || !isVisible(actionable)) continue;
+        if (actionable.closest('[role="dialog"]')) continue;
         menuFound = true;
+        if (!menuLabel) menuLabel = (t || al || '').slice(0, 90);
         const activeBySelf =
-          String(el.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
-          String(el.getAttribute('aria-selected') || '').toLowerCase() === 'true';
-        const activeByParent = !!el.closest('[aria-current="page"], [aria-selected="true"]');
+          String(actionable.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
+          String(actionable.getAttribute('aria-selected') || '').toLowerCase() === 'true';
+        const activeByParent = !!actionable.closest('[aria-current="page"], [aria-selected="true"]');
         if (activeBySelf || activeByParent) menuActive = true;
       }
       const href = String(location.href || '');
@@ -2122,6 +2137,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
       return {
         menuFound,
         menuActive: !!(menuActive || menuActiveByUrl),
+        menuLabel,
         rows,
         hasGrid,
         anchors,
@@ -2130,6 +2146,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     }).catch(() => ({
       menuFound: false,
       menuActive: false,
+      menuLabel: '',
       rows: 0,
       hasGrid: false,
       anchors: 0,
@@ -2147,16 +2164,19 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
           return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
         } catch { return false; }
       };
-      const nodes = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 400);
+      const nodes = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
       for (const el of nodes) {
         if (!isVisible(el)) continue;
-        const t = norm(el.innerText || el.textContent || '');
+        const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
         const al = norm(el.getAttribute('aria-label') || '');
-        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
+        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
+        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
+        if (!actionable || !isVisible(actionable)) continue;
+        if (actionable.closest('[role="dialog"]')) continue;
         const activeBySelf =
-          String(el.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
-          String(el.getAttribute('aria-selected') || '').toLowerCase() === 'true';
-        const activeByParent = !!el.closest('[aria-current="page"], [aria-selected="true"]');
+          String(actionable.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
+          String(actionable.getAttribute('aria-selected') || '').toLowerCase() === 'true';
+        const activeByParent = !!actionable.closest('[aria-current="page"], [aria-selected="true"]');
         if (activeBySelf || activeByParent) return true;
       }
       return /marketplace/i.test(String(location.href || ''));
@@ -2172,14 +2192,22 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
           return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
         } catch { return false; }
       };
-      const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 400);
+      const candidates = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
       for (const el of candidates) {
         if (!isVisible(el)) continue;
-        const t = norm(el.innerText || el.textContent || '');
+        const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
         const al = norm(el.getAttribute('aria-label') || '');
-        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
-        try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-        try { el.click(); return true; } catch {}
+        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
+        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
+        if (!actionable || !isVisible(actionable)) continue;
+        if (actionable.closest('[role="dialog"]')) continue;
+        try { actionable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+        try {
+          actionable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+          actionable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          actionable.click();
+          return true;
+        } catch {}
       }
       return false;
     }).catch(() => false);
@@ -2191,8 +2219,10 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
       await page.goto(FB_MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: waitMs }).catch(() => {});
       await sleep(700);
     }
+    await dismissPinIfPresent();
     await resolveNonceIfPresent(page, { logPrefix: '[messages][nonce]', maxCycles: 2 }).catch(() => {});
     await clickContinuarComo(page, { logPrefix: '[messages][continuar]', timeout: 9000 }).catch(() => false);
+    await dismissPinIfPresent();
     let state = await readMarketplaceState();
     if (!state.menuFound) {
       return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available', state };
@@ -2201,8 +2231,10 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
       const clicked = await clickMarketplaceMenu().catch(() => false);
       if (clicked) {
         await sleep(500);
+        await dismissPinIfPresent();
         await waitMarketplaceActive(Math.min(waitMs, 7000));
       }
+      await dismissPinIfPresent();
       state = await readMarketplaceState();
     }
     if (!state.menuActive) {
