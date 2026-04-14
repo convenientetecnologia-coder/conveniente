@@ -2404,19 +2404,50 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function clickCreatePinButton() {
     try {
+      // Caminho 1: seletor direto por aria-label (mais estável quando disponível).
+      const direct =
+        (await page.$('div[role="dialog"] [aria-label*="Criar PIN"], div[role="dialog"] [aria-label*="criar pin"]')) ||
+        (await page.$('[aria-label*="Criar PIN"], [aria-label*="criar pin"]'));
+      if (direct) {
+        await direct.click({ delay: 70 }).catch(()=>{});
+        return true;
+      }
+
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
         const dlg = document.querySelector('div[role="dialog"]') || document;
-        const buttons = Array.from(dlg.querySelectorAll('button,[role="button"]')).slice(0, 220);
-        for (const b of buttons) {
-          const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
-          if (disabled) continue;
-          const t = norm(b.innerText || b.textContent || '');
-          const al = norm(b.getAttribute('aria-label') || '');
-          if (t.includes('criar pin') || al.includes('criar pin')) {
-            b.click();
+        const isVisible = (el) => {
+          try {
+            const r = el.getBoundingClientRect();
+            const st = window.getComputedStyle(el);
+            return !!r && r.width > 2 && r.height > 2 && st && st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+          } catch { return false; }
+        };
+        const disabled = (el) =>
+          (el.getAttribute('aria-disabled') === 'true') ||
+          (el.getAttribute('disabled') != null) ||
+          (String(el.getAttribute('tabindex') || '') === '-1');
+
+        // Caminho 2: pegar qualquer nó com texto "Criar PIN" e subir até o ancestral acionável.
+        const all = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],div,span,[tabindex]')).slice(0, 800);
+        for (const n of all) {
+          if (!n || !isVisible(n)) continue;
+          const t = norm(n.innerText || n.textContent || '');
+          const al = norm(n.getAttribute('aria-label') || '');
+          if (!(t.includes('criar pin') || al.includes('criar pin'))) continue;
+          const target =
+            n.closest('[aria-label*="Criar PIN"],[aria-label*="criar pin"],button,[role="button"],a[role="button"],[tabindex]') ||
+            n.parentElement ||
+            n;
+          if (!target || !isVisible(target) || disabled(target)) continue;
+          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+          try {
+            target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            target.click();
             return true;
-          }
+          } catch {}
         }
         return false;
       });
