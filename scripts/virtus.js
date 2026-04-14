@@ -50,9 +50,16 @@ async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   while (true) {
     const ok = await p.evaluate((id) => {
       try {
-        if (!(location && typeof location.pathname === 'string')) return false;
-        const path = String(location.pathname || '');
-        return path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id);
+        const path = (location && typeof location.pathname === 'string') ? String(location.pathname || '') : '';
+        const href = (location && typeof location.href === 'string') ? String(location.href || '') : '';
+        if (path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id)) return true;
+        if (href.includes('/marketplace/t/' + id) || href.includes('/messages/t/' + id) || href.includes(String(id || ''))) return true;
+        const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
+        if (!rowById) return false;
+        const selected = rowById.closest('[aria-current="page"], [aria-selected="true"], [data-visualcompletion="ignore-dynamic"]');
+        if (selected) return true;
+        const composer = document.querySelector('div[role="textbox"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+        return !!composer;
       }
       catch { return false; }
     }, chatId).catch(() => false);
@@ -1373,6 +1380,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let achou = false;
         let urlAtual = '';
+        let threadHref = '';
+        try {
+          threadHref = await found.evaluate((el) => String(el.getAttribute('href') || el.href || ''));
+        } catch {}
         const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
         for (let clickTry = 0; clickTry < 2 && !achou; clickTry++) {
           try {
@@ -1411,8 +1422,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             let attempts = 0;
             while (attempts < 6) {
-              urlAtual = await p.evaluate(() => location.pathname);
-              if (urlAtual.includes(`/marketplace/t/${chatId}`) || urlAtual.includes(`/messages/t/${chatId}`)) {
+              urlAtual = await p.evaluate(() => String(location.href || ''));
+              const inThread = await p.evaluate((id) => {
+                try {
+                  const href = String(location.href || '');
+                  if (href.includes(`/marketplace/t/${id}`) || href.includes(`/messages/t/${id}`)) return true;
+                  const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
+                  if (!rowById) return false;
+                  if (rowById.closest('[aria-current="page"], [aria-selected="true"]')) return true;
+                  const composer = document.querySelector('div[role="textbox"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+                  return !!composer;
+                } catch { return false; }
+              }, chatId).catch(() => false);
+              if (inThread) {
                 achou = true;
                 break;
               }
@@ -1438,6 +1460,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (!achou && clickTry < 1) {
             found = await p.$(anchorSel).catch(() => null);
             if (!found) break;
+          }
+        }
+        if (!achou) {
+          if (threadHref) {
+            try {
+              const absoluteHref = /^https?:\/\//i.test(String(threadHref || ''))
+                ? String(threadHref || '')
+                : new URL(String(threadHref || ''), 'https://www.facebook.com').toString();
+              await p.goto(absoluteHref, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+              await sleep(900);
+              if (await assertOnChat(p, chatId, { timeoutMs: 3500 })) {
+                achou = true;
+              }
+            } catch {}
           }
         }
         if (!achou) {
