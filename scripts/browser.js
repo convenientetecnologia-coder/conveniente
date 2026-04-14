@@ -2084,24 +2084,83 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
 async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reason = 'default' } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('invalid_page');
   const waitMs = Math.max(8000, Number(timeoutMs || 0) || 45000);
-  const isTargetUrl = (u) => /messenger\.com\/marketplace/i.test(String(u || '')) || /facebook\.com\/messages/i.test(String(u || ''));
-  const waitReady = async (budgetMs) => {
-    const ms = Math.max(3000, Number(budgetMs || 0) || waitMs);
-    const ready = await Promise.race([
-      page.waitForFunction(() => {
-        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-        const href = String(location.href || '');
-        const inMessages = /facebook\.com\/messages/.test(href) || /messenger\.com/.test(href);
-        const anchors = document.querySelectorAll('a[href*="/messages/t/"], a[href*="/marketplace/t/"]').length;
-        const rows = document.querySelectorAll('div[role="row"]').length;
-        const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
-        const headings = Array.from(document.querySelectorAll('h1, h2, [role="heading"], span, div')).slice(0, 220);
-        const hasMarketplaceHeading = headings.some((el) => norm(el.innerText || el.textContent || '') === 'marketplace');
-        return !!(inMessages && (anchors > 0 || (hasMarketplaceHeading && (rows > 0 || hasGrid))));
-      }, { timeout: ms }).catch(() => null),
-      page.waitForSelector('a[href*="/messages/t/"], a[href*="/marketplace/t/"]', { timeout: ms }).catch(() => null)
-    ]);
-    return !!ready;
+  const isTargetUrl = (u) => /facebook\.com\/messages/i.test(String(u || '')) || /messenger\.com/i.test(String(u || ''));
+  const readMarketplaceState = async () => {
+    return await page.evaluate(() => {
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      const isVisible = (el) => {
+        try {
+          const st = window.getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
+        } catch { return false; }
+      };
+      const nodes = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 500);
+      let menuFound = false;
+      let menuActive = false;
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const t = norm(el.innerText || el.textContent || '');
+        const al = norm(el.getAttribute('aria-label') || '');
+        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
+        menuFound = true;
+        const activeBySelf =
+          String(el.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
+          String(el.getAttribute('aria-selected') || '').toLowerCase() === 'true';
+        const activeByParent = !!el.closest('[aria-current="page"], [aria-selected="true"]');
+        if (activeBySelf || activeByParent) menuActive = true;
+      }
+      const href = String(location.href || '');
+      const menuActiveByUrl = /marketplace/i.test(href);
+      const rows = document.querySelectorAll('div[role="row"]').length;
+      const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
+      const anchors = document.querySelectorAll('a[href*="/messages/t/"], a[href*="/marketplace/t/"]').length;
+      const bodyText = norm(document.body ? (document.body.innerText || '') : '');
+      const emptyNoConversations =
+        bodyText.includes('nenhuma conversa') &&
+        bodyText.includes('quando voce tiver conversas');
+      return {
+        menuFound,
+        menuActive: !!(menuActive || menuActiveByUrl),
+        rows,
+        hasGrid,
+        anchors,
+        emptyNoConversations
+      };
+    }).catch(() => ({
+      menuFound: false,
+      menuActive: false,
+      rows: 0,
+      hasGrid: false,
+      anchors: 0,
+      emptyNoConversations: false
+    }));
+  };
+  const waitMarketplaceActive = async (budgetMs) => {
+    const ms = Math.max(1500, Number(budgetMs || 0) || 5000);
+    await page.waitForFunction(() => {
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      const isVisible = (el) => {
+        try {
+          const st = window.getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
+        } catch { return false; }
+      };
+      const nodes = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 400);
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const t = norm(el.innerText || el.textContent || '');
+        const al = norm(el.getAttribute('aria-label') || '');
+        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
+        const activeBySelf =
+          String(el.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
+          String(el.getAttribute('aria-selected') || '').toLowerCase() === 'true';
+        const activeByParent = !!el.closest('[aria-current="page"], [aria-selected="true"]');
+        if (activeBySelf || activeByParent) return true;
+      }
+      return /marketplace/i.test(String(location.href || ''));
+    }, { timeout: ms }).catch(() => null);
   };
   const clickMarketplaceMenu = async () => {
     return await page.evaluate(() => {
@@ -2134,11 +2193,30 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     }
     await resolveNonceIfPresent(page, { logPrefix: '[messages][nonce]', maxCycles: 2 }).catch(() => {});
     await clickContinuarComo(page, { logPrefix: '[messages][continuar]', timeout: 9000 }).catch(() => false);
-    await clickMarketplaceMenu().catch(() => false);
-    await sleep(500);
-    if (await waitReady(waitMs)) return true;
+    let state = await readMarketplaceState();
+    if (!state.menuFound) {
+      return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available', state };
+    }
+    if (!state.menuActive) {
+      const clicked = await clickMarketplaceMenu().catch(() => false);
+      if (clicked) {
+        await sleep(500);
+        await waitMarketplaceActive(Math.min(waitMs, 7000));
+      }
+      state = await readMarketplaceState();
+    }
+    if (!state.menuActive) {
+      throw new Error('marketplace_menu_not_active');
+    }
+    if (state.emptyNoConversations) {
+      return { ok: true, marketplaceAvailable: true, reason: 'marketplace_empty', state };
+    }
+    if (state.anchors > 0 || (state.hasGrid && state.rows > 0)) {
+      return { ok: true, marketplaceAvailable: true, reason: 'marketplace_ready', state };
+    }
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') logger.debug('[messages][ensure] primary failed', { reason, err: String((e && e.message) || e || '') }); } catch {}
+    throw e;
   }
   throw new Error('marketplace_messages_context_not_ready');
 }

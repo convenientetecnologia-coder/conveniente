@@ -390,10 +390,20 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   let url = '';
   try { url = page.url() || ''; } catch {}
   const browserJs = require('./browser.js');
+  const isMarketplaceUnavailableError = (err) => {
+    const msg = String((err && err.message) || err || '').toLowerCase();
+    return msg.includes('marketplace_menu_not_available');
+  };
   const isMarketplaceContextUrl = /messenger.com\/marketplace/i.test(url) || /facebook\.com\/messages/i.test(url);
   if (!isMarketplaceContextUrl) {
     if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
-      await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace' });
+      try {
+        const navState = await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace' });
+        if (navState && navState.marketplaceAvailable === false) return false;
+      } catch (err) {
+        if (isMarketplaceUnavailableError(err)) return false;
+        throw err;
+      }
     } else {
       try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
     }
@@ -407,7 +417,11 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
       await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
     }
     if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
-      await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace_final' }).catch(()=>{});
+      const finalState = await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace_final' }).catch((err) => {
+        if (isMarketplaceUnavailableError(err)) return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available' };
+        throw err;
+      });
+      if (finalState && finalState.marketplaceAvailable === false) return false;
     }
   } catch {}
   // Espera robusta por UI
@@ -421,6 +435,7 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
     page.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: timeoutMs }).catch(() => null)
   ]);
   if (!ok) throw new Error('Marketplace UI não ficou pronta a tempo');
+  return true;
 }
 
 // ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
@@ -1044,7 +1059,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!p) return [];
       try {
         if (!running || !epochOk()) return [];
-        await garantirMarketplace(p);
+        const marketReady = await garantirMarketplace(p);
+        if (!marketReady) {
+          logger.info('[VIRTUS] Marketplace ainda não disponível para esta conta (menu ausente).', { nome });
+          await sleep(5000);
+          return [];
+        }
       } catch (err) {
         logger.warn('Não está no Marketplace ou erro ao garantir Marketplace', { nome }, err);
         await sleep(5000);
@@ -1104,7 +1124,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
     if (!running || !epochOk()) return;
-    await garantirMarketplace(p);
+    const marketReady = await garantirMarketplace(p);
+    if (!marketReady) {
+      historico = {};
+      await salvaHistorico();
+      await carregaHistorico();
+      await reconcilePendingsIfAny();
+      log('[SNAPSHOT] Marketplace sem menu disponível (conta nova/sem chats de marketplace). Snapshot inicial vazio aplicado.');
+      return;
+    }
     try {
       await Promise.race([
         p.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: 8000 }),
@@ -1312,7 +1340,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        await garantirMarketplace(p);
+        const marketReady = await garantirMarketplace(p);
+        if (!marketReady) {
+          logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Removendo pending e aguardando novos sinais.', { nome, chatId });
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
 
         const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
@@ -2225,7 +2260,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!running || !epochOk()) return;
-        await garantirMarketplace(p, { timeoutMs: 25000 });
+        const marketReady = await garantirMarketplace(p, { timeoutMs: 25000 });
+        if (!marketReady) {
+          ready = true;
+          logger.info('Aba zero da Virtus pronta, mas sem menu Marketplace ainda (aguardando primeiro chat).', { nome });
+          continue;
+        }
         try {
           const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {
