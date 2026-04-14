@@ -2126,10 +2126,12 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         if (activeBySelf || activeByParent) menuActive = true;
       }
       const href = String(location.href || '');
-      const menuActiveByUrl = /marketplace/i.test(href);
+      const menuActiveByUrl = /\/messages/i.test(href) && /marketplace/i.test(href);
       const rows = document.querySelectorAll('div[role="row"]').length;
       const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
-      const anchors = document.querySelectorAll('a[href*="/messages/t/"], a[href*="/marketplace/t/"]').length;
+      const marketplaceThreadAnchors = document.querySelectorAll('a[href*="/marketplace/t/"]').length;
+      const messagesThreadAnchors = document.querySelectorAll('a[href*="/messages/t/"]').length;
+      const anchors = marketplaceThreadAnchors + messagesThreadAnchors;
       const bodyText = norm(document.body ? (document.body.innerText || '') : '');
       const emptyNoConversations =
         bodyText.includes('nenhuma conversa') &&
@@ -2141,6 +2143,8 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         rows,
         hasGrid,
         anchors,
+        marketplaceThreadAnchors,
+        messagesThreadAnchors,
         emptyNoConversations
       };
     }).catch(() => ({
@@ -2150,6 +2154,8 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
       rows: 0,
       hasGrid: false,
       anchors: 0,
+      marketplaceThreadAnchors: 0,
+      messagesThreadAnchors: 0,
       emptyNoConversations: false
     }));
   };
@@ -2192,7 +2198,9 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
           return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
         } catch { return false; }
       };
-      const candidates = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
+      const candidates = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1400);
+      const best = [];
+      const fallback = [];
       for (const el of candidates) {
         if (!isVisible(el)) continue;
         const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -2201,10 +2209,20 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
         if (!actionable || !isVisible(actionable)) continue;
         if (actionable.closest('[role="dialog"]')) continue;
+        const score =
+          ((t === 'marketplace' || al === 'marketplace') ? 4 : 0) +
+          (actionable.tagName === 'A' ? 2 : 0) +
+          ((actionable.getAttribute('href') || '').toLowerCase().includes('marketplace') ? 2 : 0) +
+          (String(actionable.getAttribute('role') || '').toLowerCase().includes('button') ? 1 : 0);
+        if (score >= 4) best.push(actionable);
+        else fallback.push(actionable);
+      }
+      for (const actionable of [...best, ...fallback]) {
         try { actionable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
         try {
           actionable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
           actionable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          actionable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
           actionable.click();
           return true;
         } catch {}
@@ -2227,15 +2245,20 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     if (!state.menuFound) {
       return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available', state };
     }
-    if (!state.menuActive) {
-      const clicked = await clickMarketplaceMenu().catch(() => false);
-      if (clicked) {
-        await sleep(500);
+    if (!state.menuActive || state.marketplaceThreadAnchors === 0) {
+      let clickedAtLeastOnce = false;
+      for (let i = 0; i < 4; i++) {
+        if (state.menuActive && state.marketplaceThreadAnchors > 0) break;
+        const clicked = await clickMarketplaceMenu().catch(() => false);
+        clickedAtLeastOnce = clickedAtLeastOnce || !!clicked;
+        await sleep(clicked ? 700 : 350);
         await dismissPinIfPresent();
-        await waitMarketplaceActive(Math.min(waitMs, 7000));
+        if (clicked) await waitMarketplaceActive(Math.min(waitMs, 5000));
+        state = await readMarketplaceState();
       }
-      await dismissPinIfPresent();
-      state = await readMarketplaceState();
+      if (!clickedAtLeastOnce && !state.menuActive) {
+        throw new Error('marketplace_menu_click_not_possible');
+      }
     }
     if (!state.menuActive) {
       throw new Error('marketplace_menu_not_active');
@@ -2243,7 +2266,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     if (state.emptyNoConversations) {
       return { ok: true, marketplaceAvailable: true, reason: 'marketplace_empty', state };
     }
-    if (state.anchors > 0 || (state.hasGrid && state.rows > 0)) {
+    if (state.marketplaceThreadAnchors > 0 || (state.menuActive && state.hasGrid && state.rows > 0 && /marketplace/.test(String(state.menuLabel || '')))) {
       return { ok: true, marketplaceAvailable: true, reason: 'marketplace_ready', state };
     }
   } catch (e) {
@@ -2559,6 +2582,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
     // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
     if (det.kind === 'create_pin' && det.hasCreateBtn) {
+      let transitionedToPinInput = false;
       try {
         pinLog({ event: 'pin_create_click_attempt', attempt });
         let createClicked = false;
@@ -2573,22 +2597,31 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           pinLog({ event: 'pin_create_clicked', attempt });
           const t0 = Date.now();
           while (Date.now() - t0 < 12_000) {
-        const detAfterCreate = await detectMessengerPinModal(page);
+            const detAfterCreate = await detectMessengerPinModal(page);
             if (detAfterCreate.present && detAfterCreate.kind === 'pin_input' && detAfterCreate.hasPinInput) {
-          det.kind = 'pin_input';
-          det.hasPinInput = true;
+              det.kind = 'pin_input';
+              det.hasPinInput = true;
+              transitionedToPinInput = true;
               try { pinLog({ event: 'pin_input_visible_after_create', attempt, waitMs: Date.now() - t0 }); } catch {}
               break;
             }
             await sleep(450);
           }
         } else {
-          // Fallback: só se realmente não conseguimos clicar em "Criar PIN".
-          const more = await clickMoreOptionsThenSkip();
-          pinLog({ event: 'pin_more_options_fallback', attempt, ok: !!(more && more.ok), error: more && more.error });
+          // Enterprise estrito: não pular criação do PIN.
+          // Se não clicou em "Criar PIN", não fecha modal por X/ESC.
+          pinLog({ event: 'pin_create_click_not_found', attempt });
+          return { ok: false, error: 'pin_create_button_not_clicked', dismissed: false };
         }
       } catch (e) {
         pinLog({ event: 'pin_create_click_error', attempt, error: (e && e.message) || String(e) });
+        return { ok: false, error: 'pin_create_exception', dismissed: false };
+      }
+
+      if (!transitionedToPinInput) {
+        // Se não evoluiu para input de PIN, não forçar fechamento.
+        pinLog({ event: 'pin_create_without_input_transition', attempt });
+        return { ok: false, error: 'pin_create_without_input', dismissed: false };
       }
     }
 
@@ -2632,6 +2665,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       // Anti-loop: no pin_input não fazemos "trusted clicks" (Fechar/Não restaurar/voltar).
       // Deixe o worker/nurse aplicar cooldown e reavaliar depois.
       return { ok: false, error: 'pin_still_present', dismissed: false, pinEntered: true };
+    }
+
+    // Em create_pin não devemos fechar modal (X/ESC), pois isso reabre loop.
+    if (det.kind === 'create_pin') {
+      pinLog({ event: 'pin_create_guard_no_close', attempt });
+      return { ok: false, error: 'pin_create_pending', dismissed: false };
     }
 
     let clickedTrusted = false;
