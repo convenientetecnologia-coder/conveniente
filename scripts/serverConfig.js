@@ -6,6 +6,7 @@ const os = require("os");
 
 const CONFIG_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.json");
 const CONFIG_VERSION = 1;
+const ALLOWED_RESERVE_PER_8GB_MB = Object.freeze([0, 256, 512, 1024, 2048, 4096, 8192, 16384]);
 
 const DEFAULTS = Object.freeze({
   version: CONFIG_VERSION,
@@ -14,7 +15,8 @@ const DEFAULTS = Object.freeze({
   capacity: {
     mode: "per_8gb",
     accountsPer8Gb: 15,
-    maxAccountsOverride: null
+    maxAccountsOverride: null,
+    reservePer8GbMB: 1024
   },
   robe: {
     windowStartMin: 360,
@@ -36,6 +38,12 @@ function toNum(v, fallback = 0) {
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
+}
+
+function normalizeReservePer8GbMB(v) {
+  const n = Math.floor(toNum(v, DEFAULTS.capacity.reservePer8GbMB));
+  if (ALLOWED_RESERVE_PER_8GB_MB.includes(n)) return n;
+  return DEFAULTS.capacity.reservePer8GbMB;
 }
 
 function ensureDirSync(dir) {
@@ -84,6 +92,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const accountsPer8Gb = clamp(Math.floor(toNum(cap.accountsPer8Gb, DEFAULTS.capacity.accountsPer8Gb)), 1, 40);
   const maxAccountsOverrideRaw = toNum(cap.maxAccountsOverride, 0);
   const maxAccountsOverride = maxAccountsOverrideRaw > 0 ? clamp(Math.floor(maxAccountsOverrideRaw), 1, 500) : null;
+  const reservePer8GbMB = normalizeReservePer8GbMB(cap.reservePer8GbMB);
 
   const windowStartMin = clamp(Math.floor(toNum(robe.windowStartMin, DEFAULTS.robe.windowStartMin)), 0, 1439);
   const windowEndMin = clamp(Math.floor(toNum(robe.windowEndMin, DEFAULTS.robe.windowEndMin)), 1, 1440);
@@ -110,6 +119,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       mode,
       accountsPer8Gb,
       maxAccountsOverride,
+      reservePer8GbMB,
       maxAccountsEffective: 0
     },
     robe: {
@@ -154,6 +164,10 @@ function validateServerConfigPayload(payload) {
       const n = toNum(cap.maxAccountsOverride, NaN);
       if (!Number.isFinite(n) || n < 1 || n > 500) errors.push("capacity.maxAccountsOverride_invalido");
     }
+    if (cap.reservePer8GbMB !== undefined) {
+      const n = Math.floor(toNum(cap.reservePer8GbMB, NaN));
+      if (!Number.isFinite(n) || !ALLOWED_RESERVE_PER_8GB_MB.includes(n)) errors.push("capacity.reservePer8GbMB_invalido");
+    }
   }
   if (robe) {
     const iFields = ["windowStartMin", "windowEndMin", "dailyHoursMin", "dailyHoursMax", "priorityBandMinHour", "priorityBandMaxHour"];
@@ -196,7 +210,8 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
     capacity: {
       mode: v.normalized.capacity.mode,
       accountsPer8Gb: v.normalized.capacity.accountsPer8Gb,
-      maxAccountsOverride: v.normalized.capacity.maxAccountsOverride
+      maxAccountsOverride: v.normalized.capacity.maxAccountsOverride,
+      reservePer8GbMB: v.normalized.capacity.reservePer8GbMB
     },
     robe: {
       windowStartMin: v.normalized.robe.windowStartMin,
