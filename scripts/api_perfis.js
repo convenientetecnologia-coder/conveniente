@@ -121,6 +121,7 @@ module.exports = (app, workerClient, fileStore) => {
       const payload = (req.body && typeof req.body === 'object')
         ? ((req.body.config && typeof req.body.config === 'object') ? req.body.config : req.body)
         : {};
+      const applyNow = !!(req.body && req.body.applyNow === true);
       const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
       if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
       const totalMemMB = serverConfig.getTotalMemMB();
@@ -132,10 +133,46 @@ module.exports = (app, workerClient, fileStore) => {
           by: operator,
           source: effective.source,
           capacityMode: effective && effective.capacity ? effective.capacity.mode : null,
-          maxAccountsEffective: effective && effective.capacity ? effective.capacity.maxAccountsEffective : null
+          maxAccountsEffective: effective && effective.capacity ? effective.capacity.maxAccountsEffective : null,
+          applyNowRequested: applyNow
         });
       } catch {}
-      return res.json({ ok: true, config: effective });
+      const finish = (result) => res.json({ ok: true, config: effective, applyNowResult: result || null });
+      if (!applyNow) return finish(null);
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable', configSaved: true, config: effective });
+      }
+      workerClient.sendWorkerCommand('robe-replan-all', {
+        reason: 'server_config_apply_now',
+        operator
+      }, { timeoutMs: 180000 })
+        .then((r) => finish(r || { ok: false, error: 'empty_replan_response' }))
+        .catch((e) => {
+          return res.json({
+            ok: false,
+            error: 'apply_now_failed',
+            details: (e && e.message) || String(e),
+            configSaved: true,
+            config: effective
+          });
+        });
+      return;
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  app.post('/api/server-config/apply-now', async (req, res) => {
+    try {
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable' });
+      }
+      const operator = String(req.headers['x-operator'] || 'dashboard').slice(0, 180);
+      const r = await workerClient.sendWorkerCommand('robe-replan-all', {
+        reason: 'manual_apply_now',
+        operator
+      }, { timeoutMs: 180000 });
+      return res.json({ ok: true, result: r || null });
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }

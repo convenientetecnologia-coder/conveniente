@@ -5859,7 +5859,9 @@ const ROBE_DAILY_PLAN_BASE_CFG = {
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
   offdayRatio: 0.25,
-  mainHoursRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
+  priorityBandMinHour: 6,
+  priorityBandMaxHour: 12,
+  priorityBandRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
   minGapMin: Math.max(10, Number(process.env.ROBE_DAILY_PLAN_MIN_GAP_MIN || 20) || 20),
   gateLogEveryMs: Math.max(60_000, Number(process.env.ROBE_DAILY_PLAN_GATE_LOG_EVERY_MS || 10 * 60_000) || 10 * 60_000),
   dailyHoursMin: 1,
@@ -5906,13 +5908,27 @@ function getRobeDailyPlanCfg(totalMemMB = 0) {
   const dMax = Math.max(dMin, Math.min(24, Number(robe.dailyHoursMax || base.dailyHoursMax) || base.dailyHoursMax));
   const wStart = Math.max(0, Math.min(1439, Number(robe.windowStartMin || base.windowStartMin) || base.windowStartMin));
   const wEnd = Math.max(wStart + 1, Math.min(1440, Number(robe.windowEndMin || base.windowEndMin) || base.windowEndMin));
-  const sig = `${wStart}-${wEnd}-${dMin}-${dMax}`;
+  const bandMinRaw = Math.max(1, Math.min(24, Number(robe.priorityBandMinHour || base.priorityBandMinHour) || base.priorityBandMinHour));
+  const bandMaxRaw = Math.max(1, Math.min(24, Number(robe.priorityBandMaxHour || base.priorityBandMaxHour) || base.priorityBandMaxHour));
+  const bandMinSorted = Math.min(bandMinRaw, bandMaxRaw);
+  const bandMaxSorted = Math.max(bandMinRaw, bandMaxRaw);
+  const bandMin = Math.max(dMin, Math.min(dMax, bandMinSorted));
+  const bandMax = Math.max(bandMin, Math.min(dMax, bandMaxSorted));
+  const bandRatioRaw = (robe && robe.priorityBandRatio !== undefined && robe.priorityBandRatio !== null)
+    ? Number(robe.priorityBandRatio)
+    : Number(base.priorityBandRatio);
+  const bandRatioBase = Number.isFinite(bandRatioRaw) ? bandRatioRaw : Number(base.priorityBandRatio);
+  const bandRatio = Math.max(0, Math.min(1, bandRatioBase));
+  const sig = `${wStart}-${wEnd}-${dMin}-${dMax}-${bandMin}-${bandMax}-${bandRatio.toFixed(4)}`;
   return {
     ...base,
     windowStartMin: wStart,
     windowEndMin: wEnd,
     dailyHoursMin: dMin,
     dailyHoursMax: dMax,
+    priorityBandMinHour: bandMin,
+    priorityBandMaxHour: bandMax,
+    priorityBandRatio: bandRatio,
     vtag: `${base.vtagBase}:${sig}`
   };
 }
@@ -6329,13 +6345,20 @@ function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '', options
       seed: seedHex
     };
   }
-  const isMainBand = rng() < cfg.mainHoursRatio;
   let dailyHours = 0;
-  if (isMainBand) {
-    dailyHours = _robeRandInt(rng, 6, 12);
+  const usePriorityBand = rng() < cfg.priorityBandRatio;
+  if (usePriorityBand) {
+    dailyHours = _robeRandInt(rng, cfg.priorityBandMinHour, cfg.priorityBandMaxHour);
   } else {
-    const lowExtreme = rng() < 0.60;
-    dailyHours = lowExtreme ? _robeRandInt(rng, 1, 6) : _robeRandInt(rng, 12, 14);
+    const complement = [];
+    for (let h = cfg.dailyHoursMin; h <= cfg.dailyHoursMax; h++) {
+      if (h < cfg.priorityBandMinHour || h > cfg.priorityBandMaxHour) complement.push(h);
+    }
+    if (complement.length > 0) {
+      dailyHours = complement[_robeRandInt(rng, 0, complement.length - 1)];
+    } else {
+      dailyHours = _robeRandInt(rng, cfg.priorityBandMinHour, cfg.priorityBandMaxHour);
+    }
   }
   if (forceDailyHours > 0) {
     dailyHours = Math.max(1, Math.round(forceDailyHours));
@@ -10968,6 +10991,56 @@ const handlers = {
       }
       return { ok: true };
     } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+  },
+
+  async ['robe-replan-all']({ reason, operator } = {}) {
+    try {
+      const perfisArr = loadPerfisJson();
+      const nomes = (Array.isArray(perfisArr) ? perfisArr : [])
+        .map((p) => String(p && p.nome || '').trim())
+        .filter(Boolean);
+      let manifestsUpdated = 0;
+      let plansRegenerated = 0;
+      let sessionsCleared = 0;
+      const nowMs = Date.now();
+      for (const nome of nomes) {
+        try { _robeDailyPlanCache.delete(nome); } catch {}
+        try { _robeDailyPlanInFlight.delete(nome); } catch {}
+        try { _robeDailyGateState.delete(nome); } catch {}
+        try {
+          await manifestStore.update(nome, (m) => {
+            m = m || {};
+            if (m.robeDailyPlanV1) delete m.robeDailyPlanV1;
+            if (m.robeBlockSessionV2) {
+              delete m.robeBlockSessionV2;
+              sessionsCleared += 1;
+            }
+            return m;
+          });
+          manifestsUpdated += 1;
+        } catch {}
+        try {
+          const p = await getOrCreateRobeDailyPlan(nome, nowMs).catch(() => null);
+          if (p) plansRegenerated += 1;
+        } catch {}
+      }
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'robe_replan_all_applied_now',
+          totalProfiles: nomes.length,
+          manifestsUpdated,
+          plansRegenerated,
+          sessionsCleared,
+          reason: String(reason || '').slice(0, 120) || null,
+          operator: String(operator || '').slice(0, 120) || null
+        });
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return { ok: true, totalProfiles: nomes.length, manifestsUpdated, plansRegenerated, sessionsCleared };
+    } catch (e) {
+      return { ok: false, error: e && e.message || String(e) };
+    }
   },
 
   async ['set-shard']({ names }) {

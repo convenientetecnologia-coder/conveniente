@@ -21,6 +21,9 @@ const DEFAULTS = Object.freeze({
     windowEndMin: 1380,
     dailyHoursMin: 1,
     dailyHoursMax: 14,
+    priorityBandMinHour: 6,
+    priorityBandMaxHour: 12,
+    priorityBandRatio: 0.6,
     postsPerHourMin: 2.2,
     postsPerHourMax: 3.4
   }
@@ -86,6 +89,15 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const windowEndMin = clamp(Math.floor(toNum(robe.windowEndMin, DEFAULTS.robe.windowEndMin)), 1, 1440);
   const dailyHoursMin = clamp(Math.floor(toNum(robe.dailyHoursMin, DEFAULTS.robe.dailyHoursMin)), 1, 24);
   const dailyHoursMax = clamp(Math.floor(toNum(robe.dailyHoursMax, DEFAULTS.robe.dailyHoursMax)), 1, 24);
+  const dailyHoursMinNorm = Math.min(dailyHoursMin, dailyHoursMax);
+  const dailyHoursMaxNorm = Math.max(dailyHoursMin, dailyHoursMax);
+  const priorityBandMinRaw = clamp(Math.floor(toNum(robe.priorityBandMinHour, DEFAULTS.robe.priorityBandMinHour)), 1, 24);
+  const priorityBandMaxRaw = clamp(Math.floor(toNum(robe.priorityBandMaxHour, DEFAULTS.robe.priorityBandMaxHour)), 1, 24);
+  const priorityBandMinSorted = Math.min(priorityBandMinRaw, priorityBandMaxRaw);
+  const priorityBandMaxSorted = Math.max(priorityBandMinRaw, priorityBandMaxRaw);
+  const priorityBandMinHour = clamp(priorityBandMinSorted, dailyHoursMinNorm, dailyHoursMaxNorm);
+  const priorityBandMaxHour = clamp(priorityBandMaxSorted, priorityBandMinHour, dailyHoursMaxNorm);
+  const priorityBandRatio = Number(clamp(toNum(robe.priorityBandRatio, DEFAULTS.robe.priorityBandRatio), 0, 1).toFixed(4));
   const postsPerHourMin = clamp(toNum(robe.postsPerHourMin, DEFAULTS.robe.postsPerHourMin), 0.1, 12.0);
   const postsPerHourMax = clamp(toNum(robe.postsPerHourMax, DEFAULTS.robe.postsPerHourMax), 0.1, 12.0);
 
@@ -103,8 +115,11 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     robe: {
       windowStartMin,
       windowEndMin,
-      dailyHoursMin: Math.min(dailyHoursMin, dailyHoursMax),
-      dailyHoursMax: Math.max(dailyHoursMin, dailyHoursMax),
+      dailyHoursMin: dailyHoursMinNorm,
+      dailyHoursMax: dailyHoursMaxNorm,
+      priorityBandMinHour,
+      priorityBandMaxHour,
+      priorityBandRatio,
       postsPerHourMin: Number(Math.min(postsPerHourMin, postsPerHourMax).toFixed(3)),
       postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3))
     }
@@ -141,14 +156,14 @@ function validateServerConfigPayload(payload) {
     }
   }
   if (robe) {
-    const iFields = ["windowStartMin", "windowEndMin", "dailyHoursMin", "dailyHoursMax"];
+    const iFields = ["windowStartMin", "windowEndMin", "dailyHoursMin", "dailyHoursMax", "priorityBandMinHour", "priorityBandMaxHour"];
     for (const f of iFields) {
       if (robe[f] !== undefined) {
         const n = toNum(robe[f], NaN);
         if (!Number.isFinite(n)) errors.push(`robe.${f}_invalido`);
       }
     }
-    const fFields = ["postsPerHourMin", "postsPerHourMax"];
+    const fFields = ["postsPerHourMin", "postsPerHourMax", "priorityBandRatio"];
     for (const f of fFields) {
       if (robe[f] !== undefined) {
         const n = toNum(robe[f], NaN);
@@ -188,6 +203,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       windowEndMin: v.normalized.robe.windowEndMin,
       dailyHoursMin: v.normalized.robe.dailyHoursMin,
       dailyHoursMax: v.normalized.robe.dailyHoursMax,
+      priorityBandMinHour: v.normalized.robe.priorityBandMinHour,
+      priorityBandMaxHour: v.normalized.robe.priorityBandMaxHour,
+      priorityBandRatio: v.normalized.robe.priorityBandRatio,
       postsPerHourMin: v.normalized.robe.postsPerHourMin,
       postsPerHourMax: v.normalized.robe.postsPerHourMax
     }
