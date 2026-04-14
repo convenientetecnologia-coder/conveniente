@@ -4607,9 +4607,9 @@ function _pruneWindow(arr, ms) {
 
 const AUTO_CFG = {
   // Governor (light/full) — configurável por env para tuning em produção:
-  // Política (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
-  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
-  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
+  // Política (2026-04-14): entrar em light quando < 1GB e sair quando >= 1.25GB.
+  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '1024', 10) || 1024),
+  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '1280', 10) || 1280),
   CPU_ENTER: 85,
   CPU_EXIT: 70,
   EMA_ALPHA_CPU: 0.30,
