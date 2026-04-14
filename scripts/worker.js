@@ -1945,7 +1945,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.messenger.com/marketplace'
+        ? 'https://www.facebook.com/messages'
         : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1961,6 +1961,13 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       throw eNav;
     }
     await sleep(900);
+    if (prefer === 'messenger') {
+      try {
+        if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+          await browserHelper.ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'worker_human_non_blank_entry' });
+        }
+      } catch {}
+    }
 
     // Destravar UI (fecha modais, etc)
     try { await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase, allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
@@ -4499,7 +4506,7 @@ async function evaluateChatsState(page) {
       let rows = 0, anchors = 0, skeletons = 0;
       if (grid) {
         rows = grid.querySelectorAll('div[role="row"]').length;
-        anchors = grid.querySelectorAll('a[href^="/marketplace/t/"]').length;
+        anchors = grid.querySelectorAll('a[href*="/marketplace/t/"], a[href*="/messages/t/"]').length;
         skeletons = grid.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
       } else {
         skeletons = document.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
@@ -4537,7 +4544,11 @@ async function tryFixPhantom(nome, page) {
 
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
-      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+        await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_phantom_nav_home' });
+      } else {
+        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
       ph.navs10m.push(now);
       ph.actions10m.push(now);
       ph.lastActionAt = now;
@@ -4563,7 +4574,11 @@ async function tryFixPhantom(nome, page) {
         const man = await manifestStore.read(nome).catch(()=>null);
         await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+        await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_phantom_new_page' }).catch(()=>{});
+      } else {
+        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      }
       try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl2.mainPage = np;
       await wirePageObservers(nome, np);
@@ -9319,7 +9334,7 @@ const handlers = {
         };
 
         // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
-        const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
+        const pMsg = pick((u) => /messenger\.com|facebook\.com\/messages/i.test(u)); // Messenger/Messages (Virtus)
         const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)); // Robe create (FB)
         const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
         const pLang = pick((u) => /facebook\.com\/settings\/language/i.test(u)); // sanity
@@ -9330,8 +9345,12 @@ const handlers = {
           // Blindagem: garanta que estamos checando o domínio correto
           try {
             const u0 = safeUrl(page);
-            if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+            if (label === 'msg' && !/messenger\.com|facebook\.com\/messages/i.test(u0)) {
+              if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+                await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 45000, reason: 'worker_check_one_msg' }).catch(()=>{});
+              } else {
+                await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              }
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -9552,7 +9571,11 @@ const handlers = {
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+            await browserHelper.ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'worker_login_remediate_msg' }).catch(()=>{});
+          } else {
+            await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          }
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -10374,7 +10397,11 @@ const handlers = {
         let pagesN = [];
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
-          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+            await browserHelper.ensureMarketplaceMessagesContext(pagesN[0], { timeoutMs: 30000, reason: 'worker_human_resume_post_preflight' }).catch(()=>{});
+          } else {
+            await pagesN[0].goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          }
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
@@ -11807,7 +11834,7 @@ async function unfreezeProfile(nome, setBy = 'admin') {
 async function detectMessengerTempBlock(page) {
   try {
     const url = page.url ? page.url() : '';
-    if (!/messenger.com/i.test(url)) return { blocked: false };
+    if (!/messenger\.com|facebook\.com\/messages/i.test(url)) return { blocked: false };
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const texts = Array.from(document.querySelectorAll('h1,h2,span,div'))
@@ -13558,7 +13585,7 @@ async function nurseTick() {
       let det = { blocked:false };
       try {
         const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
-        const isMessenger = /messenger.com/i.test(urlNow);
+        const isMessenger = /messenger\.com|facebook\.com\/messages/i.test(urlNow);
         const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const isCreateOrSellerRoute =
           /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
@@ -13747,7 +13774,7 @@ async function nurseTick() {
 
       try {
         const url = p0.url ? p0.url() : '';
-        if (/messenger\.com\/.*marketplace/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+        if (/(messenger\.com\/.*marketplace|facebook\.com\/messages)/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
           const ph = getPhantomState(nome);
           const snap = await evaluateChatsState(p0);
           if (isOkFromSnapshot(snap)) {
@@ -14137,7 +14164,13 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    try {
+      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+        await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_health_nav_home' }).catch(()=>{});
+      } else {
+        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      }
+    } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14158,7 +14191,11 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+        await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_health_new_page' }).catch(()=>{});
+      } else {
+        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      }
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);
@@ -14211,7 +14248,7 @@ async function healthTick() {
     let det = { blocked:false };
     try {
       const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
-      const isMessenger = /messenger.com/i.test(urlNow);
+      const isMessenger = /messenger\.com|facebook\.com\/messages/i.test(urlNow);
       const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
       const isCreateOrSellerRoute =
         /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);

@@ -49,7 +49,11 @@ async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
     const ok = await p.evaluate((id) => {
-      try { return (location && typeof location.pathname === 'string') ? location.pathname.includes('/marketplace/t/' + id) : false; }
+      try {
+        if (!(location && typeof location.pathname === 'string')) return false;
+        const path = String(location.pathname || '');
+        return path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id);
+      }
       catch { return false; }
     }, chatId).catch(() => false);
     if (ok) return true;
@@ -313,24 +317,33 @@ function isChatRecente(tempoLabel) {
 function extraiIdDoHref(href) {
   try {
     const s = String(href || '');
-    const pos = s.indexOf('/marketplace/t/');
-    if (pos < 0) return null;
-    const rest = s.slice(pos + '/marketplace/t/'.length);
-    const id = rest.split(/[/?#]/)[0];
-    return id && /^\d+$/.test(id) ? id : null;
+    const keys = ['/marketplace/t/', '/messages/t/'];
+    for (const key of keys) {
+      const pos = s.indexOf(key);
+      if (pos < 0) continue;
+      const rest = s.slice(pos + key.length);
+      const id = rest.split(/[/?#]/)[0];
+      if (id && /^\d+$/.test(id)) return id;
+    }
+    return null;
   } catch { return null; }
 }
 
 async function coletaChatsMarketplaceTodos(page) {
   try {
-    const items = await page.$$eval('a[href^="/marketplace/t/"]', els => {
+    const items = await page.$$eval('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', els => {
       function _extraiId(href) {
         try {
           const s = String(href || '');
-          const pos = s.indexOf('/marketplace/t/');
-          const rest = s.slice(pos + '/marketplace/t/'.length);
-          const id = rest.split(/[/?#]/)[0];
-          return id && /^\d+$/.test(id) ? id : null;
+          const keys = ['/marketplace/t/', '/messages/t/'];
+          for (const key of keys) {
+            const pos = s.indexOf(key);
+            if (pos < 0) continue;
+            const rest = s.slice(pos + key.length);
+            const id = rest.split(/[/?#]/)[0];
+            if (id && /^\d+$/.test(id)) return id;
+          }
+          return null;
         } catch { return null; }
       }
       function _extraiTempo(row) {
@@ -376,28 +389,36 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
   let url = '';
   try { url = page.url() || ''; } catch {}
-  if (!/messenger.com\/marketplace/i.test(url)) {
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
+  const browserJs = require('./browser.js');
+  const isMarketplaceContextUrl = /messenger.com\/marketplace/i.test(url) || /facebook\.com\/messages/i.test(url);
+  if (!isMarketplaceContextUrl) {
+    if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
+      await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace' });
+    } else {
+      try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
+    }
   }
   // Cura fluxos de nonce/continuar
   try {
-    const browserJs = require('./browser.js');
     if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
       await browserJs.resolveNonceIfPresent(page).catch(()=>{});
     }
     if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
       await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
     }
+    if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
+      await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace_final' }).catch(()=>{});
+    }
   } catch {}
   // Espera robusta por UI
   const ok = await Promise.race([
     page.waitForFunction(() => {
-      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+      const hasAnchor = !!document.querySelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]');
       const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
       const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
       return hasAnchor || hasGrid || hasRow;
     }, { timeout: timeoutMs }),
-    page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: timeoutMs }).catch(() => null)
+    page.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: timeoutMs }).catch(() => null)
   ]);
   if (!ok) throw new Error('Marketplace UI não ficou pronta a tempo');
 }
@@ -444,7 +465,7 @@ async function scrollChatsToTop(page, nome) {
 
       // Tentativa extra: clicar em cima no topo para garantir foco no chat mais recente
       try {
-        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
+        let firstA = grid.querySelector('a[role="link"], a[href*="/marketplace/t/"], a[href*="/messages/t/"]');
         if (firstA) {
           firstA.focus && firstA.focus();
           // Eventual scrollIntoView + toTop
@@ -1031,7 +1052,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       try {
         await Promise.race([
-          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 4000 }),
+          p.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: 4000 }),
           p.waitForSelector('div[role="row"] span', { timeout: 4000 }),
         ]);
       } catch {}
@@ -1086,7 +1107,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await garantirMarketplace(p);
     try {
       await Promise.race([
-        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
+        p.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: 8000 }),
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
@@ -1302,7 +1323,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
         await scrollChatsToTop(p, nome).catch(()=>{});
         await sleep(300);
         let found = await p.$(anchorSel);
@@ -1356,7 +1377,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             let attempts = 0;
             while (attempts < 6) {
               urlAtual = await p.evaluate(() => location.pathname);
-              if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+              if (urlAtual.includes(`/marketplace/t/${chatId}`) || urlAtual.includes(`/messages/t/${chatId}`)) {
                 achou = true;
                 break;
               }
@@ -1944,7 +1965,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
             }
             try {
-              const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
+              const browserJs = require('./browser.js');
+              let navResp = null;
+              if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
+                await browserJs.ensureMarketplaceMessagesContext(p, { timeoutMs: navTimeoutMs, reason: 'virtus_page_recycle' });
+                navMethod = 'ensure_marketplace_context';
+              } else {
+                navResp = await p.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
+              }
               postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
               navStatus = navResp && typeof navResp.status === 'function' ? Number(navResp.status()) : null;
             } catch (primaryNavErr) {
@@ -1963,9 +1991,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 15000
               );
               try {
-                await p.evaluate(() => {
-                  try { location.assign('https://www.messenger.com/marketplace'); } catch {}
-                });
+                await p.evaluate(() => { try { location.assign('https://www.facebook.com/messages'); } catch {} });
                 const waitBudgetMs = Math.max(6000, Math.floor(navTimeoutMs * 0.8));
                 try {
                   await Promise.race([
@@ -1973,7 +1999,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     p.waitForFunction(
                       () => {
                         try {
-                          return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace'));
+                          const path = location && typeof location.pathname === 'string' ? String(location.pathname || '') : '';
+                          return path.includes('/marketplace') || path.includes('/messages');
                         } catch {
                           return false;
                         }
@@ -1985,12 +2012,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 let landed = false;
                 try {
                   const u = String(p.url() || '');
-                  landed = u.includes('/marketplace');
+                  landed = /facebook\.com\/messages|messenger\.com\/marketplace/i.test(u);
                 } catch {}
                 if (!landed) {
                   try {
                     landed = !!(await p.evaluate(() => {
-                      try { return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace')); }
+                      try {
+                        const path = location && typeof location.pathname === 'string' ? String(location.pathname || '') : '';
+                        return path.includes('/marketplace') || path.includes('/messages');
+                      }
                       catch { return false; }
                     }));
                   } catch {}
@@ -2186,10 +2216,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const p = await ensurePage();
         if (!running || !epochOk()) return;
         if (!p) { await sleep(2500); continue; }
-        if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
+        if (p.url() === 'about:blank' || !/(messenger\.com\/marketplace|facebook\.com\/messages)/i.test(p.url())) {
           try {
             if (!running || !epochOk()) return;
-            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await p.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
           } catch {
             bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
           }

@@ -35,7 +35,7 @@ async function waitForMessengerNavigation(page, nome, timeoutMs = RELOAD_TIMEOUT
   while ((Date.now() - t0) < timeoutMs) {
     try {
       const url = (typeof page.url === 'function') ? (page.url() || '') : '';
-      if (/^https?:\/\/(www\.)?messenger\.com/i.test(url)) {
+      if (/^https?:\/\/(www\.)?(messenger\.com|facebook\.com\/messages)/i.test(url)) {
         logger.info('[RELOAD] navegação detectada', { nome, url });
         return true;
       }
@@ -125,7 +125,11 @@ async function processReload(nome, controllers, robeMeta) {
     if (!ok) {
       logger.warn('[RELOAD] timeout na navegação - tentando manual', { nome });
       try {
-        await newPage.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
+          await browserHelper.ensureMarketplaceMessagesContext(newPage, { timeoutMs: 30000, reason: 'reload_manual_fallback' }).catch(()=>{});
+        } else {
+          await newPage.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        }
       } catch {}
       ok = await waitForMessengerNavigation(newPage, nome, 20000);
       if (!ok) {

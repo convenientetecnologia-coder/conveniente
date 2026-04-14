@@ -13,6 +13,8 @@ const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
 
+const FB_MESSAGES_URL = 'https://www.facebook.com/messages';
+
 puppeteer.use(StealthPlugin());
 
 /**
@@ -756,12 +758,15 @@ async function patchPage(nome, page, coords) {
   const enableVirtusMessengerBlock =
     (
       typeof url === "string"
-      && /^https?:\/\/(www\.)?messenger\.com\/?/.test(url)
+      && (
+        /^https?:\/\/(www\.)?messenger\.com\/?/.test(url)
+        || /^https?:\/\/(www\.)?facebook\.com\/messages(?:[/?#]|$)/.test(url)
+      )
     ) || (
       page.target && typeof page.target === 'function' &&
       (
-        (page.target()._targetInfo && /messenger\.com/.test(page.target()._targetInfo.url || ""))
-        || (typeof page.target().url === 'function' && /messenger\.com/.test(page.target().url() || ""))
+        (page.target()._targetInfo && /(?:messenger\.com|facebook\.com\/messages)/.test(page.target()._targetInfo.url || ""))
+        || (typeof page.target().url === 'function' && /(?:messenger\.com|facebook\.com\/messages)/.test(page.target().url() || ""))
       )
     );
 
@@ -791,7 +796,7 @@ async function patchPage(nome, page, coords) {
           const type = req.resourceType();
           const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
           const isLoggedArea = () => {
-            try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
+            try { return /(?:messenger\.com\/(?:marketplace|t\/|inbox|compose)|facebook\.com\/messages(?:[/?#]|$))/i.test(page.url() || ''); }
             catch { return false; }
           };
 
@@ -2076,6 +2081,68 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
   return false;
 }
 
+async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reason = 'default' } = {}) {
+  if (!page || typeof page.url !== 'function') throw new Error('invalid_page');
+  const waitMs = Math.max(8000, Number(timeoutMs || 0) || 45000);
+  const isTargetUrl = (u) => /messenger\.com\/marketplace/i.test(String(u || '')) || /facebook\.com\/messages/i.test(String(u || ''));
+  const waitReady = async (budgetMs) => {
+    const ms = Math.max(3000, Number(budgetMs || 0) || waitMs);
+    const ready = await Promise.race([
+      page.waitForFunction(() => {
+        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+        const href = String(location.href || '');
+        const inMessages = /facebook\.com\/messages/.test(href) || /messenger\.com/.test(href);
+        const anchors = document.querySelectorAll('a[href*="/messages/t/"], a[href*="/marketplace/t/"]').length;
+        const rows = document.querySelectorAll('div[role="row"]').length;
+        const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
+        const headings = Array.from(document.querySelectorAll('h1, h2, [role="heading"], span, div')).slice(0, 220);
+        const hasMarketplaceHeading = headings.some((el) => norm(el.innerText || el.textContent || '') === 'marketplace');
+        return !!(inMessages && (anchors > 0 || (hasMarketplaceHeading && (rows > 0 || hasGrid))));
+      }, { timeout: ms }).catch(() => null),
+      page.waitForSelector('a[href*="/messages/t/"], a[href*="/marketplace/t/"]', { timeout: ms }).catch(() => null)
+    ]);
+    return !!ready;
+  };
+  const clickMarketplaceMenu = async () => {
+    return await page.evaluate(() => {
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      const isVisible = (el) => {
+        try {
+          const st = window.getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
+        } catch { return false; }
+      };
+      const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], div[role="link"]')).slice(0, 400);
+      for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        const t = norm(el.innerText || el.textContent || '');
+        const al = norm(el.getAttribute('aria-label') || '');
+        if (t !== 'marketplace' && !al.includes('marketplace')) continue;
+        try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+        try { el.click(); return true; } catch {}
+      }
+      return false;
+    }).catch(() => false);
+  };
+  try {
+    let url = '';
+    try { url = String(page.url() || ''); } catch {}
+    if (!isTargetUrl(url)) {
+      await page.goto(FB_MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: waitMs }).catch(() => {});
+      await sleep(700);
+    }
+    await resolveNonceIfPresent(page, { logPrefix: '[messages][nonce]', maxCycles: 2 }).catch(() => {});
+    await clickContinuarComo(page, { logPrefix: '[messages][continuar]', timeout: 9000 }).catch(() => false);
+    await clickMarketplaceMenu().catch(() => false);
+    await sleep(500);
+    if (await waitReady(waitMs)) return true;
+  } catch (e) {
+    try { if (process.env.BROWSER_DEBUG === '1') logger.debug('[messages][ensure] primary failed', { reason, err: String((e && e.message) || e || '') }); } catch {}
+  }
+  throw new Error('marketplace_messages_context_not_ready');
+}
+
 // Facebook checkpoint helpers
 async function clickVoltarParaFacebook(page, { logPrefix='[fb][voltar]', timeout = 15000 } = {}) {
   try {
@@ -2820,7 +2887,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
 
   // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
-  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
+  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messages/marketplace (Virtus)
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
@@ -2872,7 +2939,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.messenger.com/marketplace';
+  const msgUrl = FB_MESSAGES_URL;
 
   // Aba 0 — Facebook base
   try {
@@ -2921,14 +2988,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await sleep(900);
     try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
     await sleep(900);
-
-    // Nonce + “Continuar como...”
-    await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
-    const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
-      if (!clicked) {
-      await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce-2]' });
-      await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
-    }
+    await ensureMarketplaceMessagesContext(p2, { timeoutMs: 45000, reason: 'configure_profile' }).catch(()=>{});
 
     // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
     try {
@@ -5180,7 +5240,7 @@ async function collectFreshCookies(browser) {
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
     // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'collect_fresh_cookies' }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
@@ -5304,6 +5364,7 @@ module.exports = {
   tryDismissMessengerPinModal,
   gptRemediateFbUi,
   ensureFbUiUnblocked,
+  ensureMarketplaceMessagesContext,
   installOneTabGuard,
   installAboutBlankKiller,
   // ==== NOVOS:
