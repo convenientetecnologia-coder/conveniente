@@ -5913,7 +5913,9 @@ const ROBE_DAILY_PLAN_BASE_CFG = {
   enabled: true,
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
-  offdayRatio: 0.25,
+  // Regra operacional: 100% das contas trabalham todos os dias.
+  // Mantemos randomizacao de horarios/blocos, mas sem offday.
+  offdayRatio: 0,
   priorityBandMinHour: 6,
   priorityBandMaxHour: 12,
   priorityBandRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
@@ -6380,6 +6382,15 @@ function _isValidRobeDailyPlan(plan, date) {
   }
   return true;
 }
+function _robePlanNeedsRegenForCfg(plan) {
+  try {
+    const cfg = getRobeDailyPlanCfg();
+    // Quando offday está desabilitado (0%), qualquer plano "enabled:false"
+    // deve ser regenerado imediatamente para garantir 100% diário.
+    if (Number(cfg.offdayRatio || 0) <= 0 && plan && plan.enabled === false) return true;
+  } catch {}
+  return false;
+}
 function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '', options = null) {
   const cfg = getRobeDailyPlanCfg();
   const seedInput = `${cfg.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
@@ -6480,19 +6491,19 @@ function _applyRobeDailyHardRules(nome, dateYmd, hostId, basePlan, prevPlan, man
 async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
   const date = _robeDailyDateYmd(nowMs);
   const c = _robeDailyPlanCache.get(nome);
-  if (c && c.date === date && c.plan && _isValidRobeDailyPlan(c.plan, date)) return c.plan;
+  if (c && c.date === date && c.plan && _isValidRobeDailyPlan(c.plan, date) && !_robePlanNeedsRegenForCfg(c.plan)) return c.plan;
   const inflight = _robeDailyPlanInFlight.get(nome);
   if (inflight) {
     try { await inflight; } catch {}
     const c2 = _robeDailyPlanCache.get(nome);
-    if (c2 && c2.date === date && c2.plan && _isValidRobeDailyPlan(c2.plan, date)) return c2.plan;
+    if (c2 && c2.date === date && c2.plan && _isValidRobeDailyPlan(c2.plan, date) && !_robePlanNeedsRegenForCfg(c2.plan)) return c2.plan;
   }
   const job = (async () => {
     const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
     const man = manifestHint || await manifestStore.read(nome).catch(()=>null);
     const prevPlan = man && man.robeDailyPlanV1 ? man.robeDailyPlanV1 : null;
     let plan = prevPlan;
-    if (!_isValidRobeDailyPlan(plan, date)) {
+    if (!_isValidRobeDailyPlan(plan, date) || _robePlanNeedsRegenForCfg(plan)) {
       const basePlan = _buildRobeDailyPlanDeterministic(nome, date, hostId);
       const hard = _applyRobeDailyHardRules(nome, date, hostId, basePlan, prevPlan, man, nowMs);
       plan = hard.plan;
