@@ -1,7 +1,6 @@
 // scripts/memoryPlan.js
 
 const os = require('os');
-const serverConfig = require('./serverConfig.js');
 
 /**
  * Converte bytes em MB.
@@ -28,10 +27,9 @@ function planMemoryAndShards({ totalProfiles }) {
   const NODE_SEG_MB = 8192; // 8GB por Node
   const NODE_OVERHEAD_MB = 2048; // 2GB por Node
   const CHROME_AVG_MB = 600;
-  const runtimeCfg = (() => {
-    try { return serverConfig.readServerConfigEffective({ totalMemMB: totalMB }); } catch { return null; }
-  })();
-  const configuredGlobalCap = Math.max(1, Number(runtimeCfg && runtimeCfg.capacity && runtimeCfg.capacity.maxAccountsEffective || 0) || 1);
+  // Política fixa: 30 contas por 16GB => 15 contas por 8GB.
+  const totalGB = Math.max(1, totalMB / 1024);
+  const configuredGlobalCap = Math.max(1, Math.floor(totalGB * (15 / 8)));
 
   // 1) Nodes exatos PELO HARDWARE, independente de RAM livre
   let nodes = Math.ceil(totalMB / NODE_SEG_MB);
@@ -76,7 +74,7 @@ function planMemoryAndShards({ totalProfiles }) {
       chromeAvgMB: CHROME_AVG_MB
     },
     serverConfig: {
-      capacityMode: runtimeCfg && runtimeCfg.capacity ? runtimeCfg.capacity.mode : 'unknown',
+      capacityMode: 'fixed_per_8gb',
       maxAccountsEffective: configuredGlobalCap
     }
   };

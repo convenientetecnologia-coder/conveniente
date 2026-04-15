@@ -803,6 +803,7 @@
     }
     function modeLabel(m) {
       const x = String(m || '').toLowerCase();
+      if (x === 'fixed_per_8gb') return 'Fixo (15 contas / 8GB)';
       if (x === 'absolute') return 'Absoluto';
       if (x === 'auto_by_ram') return 'Auto por RAM';
       return 'Por 8GB';
@@ -918,24 +919,8 @@
         <h2>Configuração do Servidor</h2>
         <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
         <div class="form-row">
-          <label>Capacidade — modo</label>
-          <select id="srvCapMode">
-            <option value="per_8gb">Por 8GB de RAM</option>
-            <option value="absolute">Teto absoluto de contas</option>
-            <option value="auto_by_ram">Auto por RAM (legado)</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>Contas por 8GB</label>
-          <input type="number" id="srvAccountsPer8Gb" min="1" max="40" step="1" />
-        </div>
-        <div class="form-row">
-          <label>Teto absoluto (opcional)</label>
-          <input type="number" id="srvMaxOverride" min="1" max="500" step="1" placeholder="Ex.: 30" />
-        </div>
-        <div class="form-row">
-          <label>RAM reservada por 8GB (gate de abertura)</label>
-          <select id="srvReservePer8GbMB">${buildFixedMbOptions([0,256,512,1024,2048,4096,8192,16384])}</select>
+          <label>Capacidade de abertura</label>
+          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta apenas parâmetros do Robe.</div>
         </div>
         <div class="form-row">
           <label>Robe — janela global (início / fim)</label>
@@ -974,10 +959,6 @@
       overlay.append(box);
       document.body.append(overlay);
       const infoEl = box.querySelector('#serverCfgInfo');
-      const modeEl = box.querySelector('#srvCapMode');
-      const per8El = box.querySelector('#srvAccountsPer8Gb');
-      const absEl = box.querySelector('#srvMaxOverride');
-      const reservePer8El = box.querySelector('#srvReservePer8GbMB');
       const wsEl = box.querySelector('#srvWindowStart');
       const weEl = box.querySelector('#srvWindowEnd');
       const dminEl = box.querySelector('#srvDailyHoursMin');
@@ -990,20 +971,9 @@
       const closeBtn = box.querySelector('#srvCfgClose');
       const saveBtn = box.querySelector('#srvCfgSave');
 
-      const updateCapInputs = () => {
-        const mode = String(modeEl.value || '').toLowerCase();
-        per8El.disabled = !(mode === 'per_8gb');
-        absEl.disabled = !(mode === 'absolute');
-      };
-      modeEl.addEventListener('change', updateCapInputs);
-
       const fillFromConfig = (cfg) => {
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
-        modeEl.value = String(cap.mode || 'per_8gb');
-        per8El.value = Number(cap.accountsPer8Gb || 15);
-        absEl.value = (cap.maxAccountsOverride == null) ? '' : Number(cap.maxAccountsOverride);
-        reservePer8El.value = Number(cap.reservePer8GbMB === 0 ? 0 : (cap.reservePer8GbMB || 1024));
         wsEl.value = minToHourLabel(Number(robe.windowStartMin || 360), { end: false });
         weEl.value = minToHourLabel(Number(robe.windowEndMin || 1380), { end: true });
         dminEl.value = Number(robe.dailyHoursMin || 1);
@@ -1018,9 +988,8 @@
         prBandPctEl.value = String(prBandPctStep);
         pminEl.value = Number(robe.postsPerHourMin || 2.2);
         pmaxEl.value = Number(robe.postsPerHourMax || 3.4);
-        updateCapInputs();
         infoEl.className = 'pill info';
-        infoEl.innerHTML = `<span class="dot"></span>Modo: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
+        infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
       };
 
       (async () => {
@@ -1086,12 +1055,6 @@
             return;
           }
           const payload = {
-            capacity: {
-              mode: String(modeEl.value || 'per_8gb'),
-              accountsPer8Gb: Number(per8El.value || 15),
-              maxAccountsOverride: (String(absEl.value || '').trim() === '') ? null : Number(absEl.value),
-              reservePer8GbMB: Number(reservePer8El.value || 1024)
-            },
             robe: {
               windowStartMin: startMin,
               windowEndMin: endMin,

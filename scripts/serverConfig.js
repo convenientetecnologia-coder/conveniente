@@ -16,7 +16,7 @@ const DEFAULTS = Object.freeze({
     mode: "per_8gb",
     accountsPer8Gb: 15,
     maxAccountsOverride: null,
-    reservePer8GbMB: 1024
+    reservePer8GbMB: 512
   },
   robe: {
     windowStartMin: 360,
@@ -83,7 +83,9 @@ function calcMaxAccountsEffective({ mode, accountsPer8Gb, maxAccountsOverride, t
 
 function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "default" } = {}) {
   const r = (raw && typeof raw === "object") ? raw : {};
-  const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
+  // Capacidade de abertura/RAM é fixa por política operacional.
+  // O dashboard mantém apenas tuning de Robe.
+  const cap = { ...DEFAULTS.capacity };
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
