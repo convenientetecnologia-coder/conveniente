@@ -2791,6 +2791,25 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
+  async function forcePinTwoStageSequence(attempt = 1) {
+    try { pinLog({ event: 'pin_force_two_stage_start', attempt, pin: DEFAULT_PIN }); } catch {}
+    const enter1 = await tryEnterPin(DEFAULT_PIN, 1);
+    if (!enter1 || enter1.ok !== true) {
+      try { pinLog({ event: 'pin_force_stage1_failed', attempt, error: enter1 && enter1.error ? enter1.error : 'unknown' }); } catch {}
+      return { ok: false, error: enter1 && enter1.error ? enter1.error : 'pin_stage1_failed' };
+    }
+    await sleep(1800);
+
+    const enter2 = await tryEnterPin(DEFAULT_PIN, 2);
+    if (!enter2 || enter2.ok !== true) {
+      try { pinLog({ event: 'pin_force_stage2_failed', attempt, error: enter2 && enter2.error ? enter2.error : 'unknown' }); } catch {}
+      return { ok: false, error: enter2 && enter2.error ? enter2.error : 'pin_stage2_failed' };
+    }
+    await sleep(1800);
+    try { pinLog({ event: 'pin_force_two_stage_done', attempt }); } catch {}
+    return { ok: true, pinEntered: true };
+  }
+
   for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
@@ -2809,109 +2828,26 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       if (fixedRestore) continue;
     }
 
-    // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
-    if (det.kind === 'create_pin' && (det.hasCreateBtn || det.hasPinInput)) {
-      let transitionedToPinInput = false;
+    // Fluxo direto e linear do PIN (sem fechar/reabrir modal):
+    // clicou "Criar PIN" -> espera estabilizar -> digita 2x -> fim.
+    if (det.kind === 'create_pin' || (det.kind === 'pin_input' && det.hasPinInput)) {
       try {
-        // Alguns cenários já exibem o input sem precisar clicar de novo em "Criar PIN".
-        if (det.hasPinInput) {
-          transitionedToPinInput = true;
-          det.kind = 'pin_input';
-          try { pinLog({ event: 'pin_input_already_visible_in_create_pin', attempt }); } catch {}
-        }
-
-        pinLog({ event: 'pin_create_click_attempt', attempt });
-        let createClicked = false;
-        if (!transitionedToPinInput) {
-          for (let k = 1; k <= 3; k++) {
+        if (det.kind === 'create_pin') {
+          let createClicked = false;
+          for (let k = 1; k <= 2; k++) {
             createClicked = await clickCreatePinButton();
-            try { pinLog({ event: 'pin_create_click_try', attempt, k, ok: !!createClicked }); } catch {}
+            try { pinLog({ event: 'pin_create_click_try_linear', attempt, k, ok: !!createClicked }); } catch {}
             if (createClicked) break;
-            await sleep(650);
+            await sleep(900);
           }
+          await sleep(2200);
         }
-        await sleep(900);
-        if (createClicked || transitionedToPinInput) {
-          pinLog({ event: 'pin_create_clicked', attempt });
-          const t0 = Date.now();
-          while (Date.now() - t0 < 12_000) {
-            const detAfterCreate = await detectMessengerPinModal(page);
-            if (detAfterCreate.present && detAfterCreate.hasPinInput) {
-              det.kind = 'pin_input';
-              det.hasPinInput = true;
-              transitionedToPinInput = true;
-              try { pinLog({ event: 'pin_input_visible_after_create', attempt, waitMs: Date.now() - t0 }); } catch {}
-              break;
-            }
-            await sleep(450);
-          }
-        } else {
-          // Fallback controlado: algumas variações não expõem "Criar PIN", mas já exibem o input.
-          const detFallbackInput = await detectMessengerPinModal(page).catch(() => ({ present: false }));
-          if (detFallbackInput.present && detFallbackInput.kind === 'pin_input' && detFallbackInput.hasPinInput) {
-            det.kind = 'pin_input';
-            det.hasPinInput = true;
-            transitionedToPinInput = true;
-            try { pinLog({ event: 'pin_create_click_not_found_but_input_present', attempt }); } catch {}
-          } else {
-            // Enterprise estrito: não pular criação do PIN.
-            // Se não clicou em "Criar PIN", não fecha modal por X/ESC.
-            pinLog({ event: 'pin_create_click_not_found', attempt });
-            return { ok: false, error: 'pin_create_button_not_clicked', dismissed: false };
-          }
-        }
+        const forced = await forcePinTwoStageSequence(attempt);
+        if (forced && forced.ok === true) return { ok: true, dismissed: true, pinEntered: true };
       } catch (e) {
-        pinLog({ event: 'pin_create_click_error', attempt, error: (e && e.message) || String(e) });
-        return { ok: false, error: 'pin_create_exception', dismissed: false };
+        try { pinLog({ event: 'pin_linear_flow_exception', attempt, error: (e && e.message) || String(e) }); } catch {}
       }
-
-      if (!transitionedToPinInput) {
-        // Se não evoluiu para input de PIN, não forçar fechamento.
-        pinLog({ event: 'pin_create_without_input_transition', attempt });
-        return { ok: false, error: 'pin_create_without_input', dismissed: false };
-      }
-    }
-
-    // PIN INPUT: só digita. Não clicar em nada (anti-loop).
-    if (det.kind === 'pin_input' && det.hasPinInput) {
-      try {
-        pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
-        const enterResult = await tryEnterPin(DEFAULT_PIN, 1);
-        if (enterResult.ok) {
-          pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed, submitClicked: !!enterResult.submitClicked, clearedWaitOk: !!enterResult.cleared });
-          await sleep(1500); // Aguarda processamento
-          // Verifica se o modal sumiu após digitar o PIN
-          const detAfter = await detectMessengerPinModal(page);
-          if (!detAfter.present) {
-            pinLog({ event: 'pin_success_modal_dismissed', attempt });
-            return { ok: true, dismissed: true, pinEntered: true };
-          }
-          // Se ainda está presente, pode ser que precise confirmar digitando de novo (comum em conta nova)
-          pinLog({ event: 'pin_entered_but_modal_still_present', attempt });
-          if (detAfter.kind === 'pin_input' && detAfter.hasPinInput) {
-            pinLog({ event: 'pin_confirm_second_entry_attempt', attempt, pin: DEFAULT_PIN });
-            const enter2 = await tryEnterPin(DEFAULT_PIN, 2);
-            if (enter2.ok) {
-              pinLog({ event: 'pin_second_entry_done', attempt, confirmed: !!enter2.confirmed });
-              await sleep(1800);
-              const detAfter2 = await detectMessengerPinModal(page);
-              if (!detAfter2.present) {
-                pinLog({ event: 'pin_success_modal_dismissed_after_second', attempt });
-                return { ok: true, dismissed: true, pinEntered: true };
-              }
-            } else {
-              pinLog({ event: 'pin_second_entry_failed', attempt, error: enter2.error });
-            }
-          }
-        } else {
-          pinLog({ event: 'pin_enter_failed', attempt, error: enterResult.error });
-        }
-      } catch (e) {
-        pinLog({ event: 'pin_enter_exception', attempt, error: (e && e.message) || String(e) });
-      }
-      // Anti-loop: no pin_input não fazemos "trusted clicks" (Fechar/Não restaurar/voltar).
-      // Deixe o worker/nurse aplicar cooldown e reavaliar depois.
-      return { ok: false, error: 'pin_still_present', dismissed: false, pinEntered: true };
+      return { ok: false, error: 'pin_linear_flow_failed', dismissed: false, pinEntered: true };
     }
 
     // Em create_pin não devemos fechar modal (X/ESC), pois isso reabre loop.
