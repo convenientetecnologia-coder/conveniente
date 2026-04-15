@@ -290,17 +290,24 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
 }
 
 // Graceful shutdown — encerra worker e faz cleanup
-process.on('SIGINT', async () => {
-  logger.info('[STOP] SIGINT recebido. Encerrando...');
-  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  logger.info('[STOP] SIGTERM recebido. Encerrando...');
-  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
-  process.exit(0);
-});
+let _masterShuttingDown = false;
+async function shutdownMaster(signal = '') {
+  if (_masterShuttingDown) return;
+  _masterShuttingDown = true;
+  const sig = String(signal || 'unknown');
+  logger.info(`[STOP] ${sig} recebido. Encerrando...`);
+  try {
+    if (clusterClient && typeof clusterClient.kill === 'function') {
+      await clusterClient.kill({ graceMs: 15000, forceMs: 5000 });
+    }
+  } catch (e) {
+    try { logger.warn('[STOP] erro no shutdown do cluster', { signal: sig, error: e && e.message || e }); } catch {}
+  } finally {
+    process.exit(0);
+  }
+}
+process.on('SIGINT', () => { shutdownMaster('SIGINT'); });
+process.on('SIGTERM', () => { shutdownMaster('SIGTERM'); });
 
 // P1: política consistente de erros globais (master).
 // - Por padrão NÃO mata o processo (sem auto-restart neste ambiente).
