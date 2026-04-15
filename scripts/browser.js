@@ -2039,7 +2039,8 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
   // Enterprise: NÃO clicar "qualquer submit" aqui.
   // No Messenger, pode existir um <form id="login_form"> oculto com botão "Continuar".
-  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>").
+  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>")
+  // e, no novo seletor de perfis do facebook.com/messages, o CTA direto "Continuar".
   const t0 = Date.now();
   const maxMs = Math.max(1000, Number(timeout || 0) || 0);
   while ((Date.now() - t0) < maxMs) {
@@ -2054,7 +2055,12 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
       return true;
         } catch { return false; }
       };
-      const cands = Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 240);
+      const bodyText = norm(document.body ? (document.body.innerText || '') : '');
+      const profileChooserContext =
+        bodyText.includes('usar outro perfil') &&
+        (bodyText.includes('criar nova conta') || bodyText.includes('remover perfis deste navegador'));
+      const cands = Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 320);
+      let profileContinueFallback = null;
       for (const el of cands) {
         if (!el) continue;
         const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
@@ -2067,6 +2073,26 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
           el.click();
           return true;
         }
+        if (!profileContinueFallback && profileChooserContext) {
+          const isContinue =
+            t === 'continuar' ||
+            al === 'continuar' ||
+            t.includes('continuar') ||
+            al.includes('continuar');
+          const suspicious =
+            t.includes('continuar sem') ||
+            al.includes('continuar sem') ||
+            t.includes('continuar sem restaurar') ||
+            al.includes('continuar sem restaurar');
+          if (isContinue && !suspicious) {
+            profileContinueFallback = el;
+          }
+        }
+      }
+      if (profileContinueFallback && profileChooserContext) {
+        try { profileContinueFallback.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+        profileContinueFallback.click();
+        return true;
       }
       return false;
     }).catch(() => false);
@@ -2209,6 +2235,12 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
         if (!actionable || !isVisible(actionable)) continue;
         if (actionable.closest('[role="dialog"]')) continue;
+        const actionableText = norm(actionable.innerText || actionable.textContent || '').replace(/\s+/g, ' ').trim();
+        const actionableAria = norm(actionable.getAttribute('aria-label') || '');
+        const actionableHref = String(actionable.getAttribute('href') || '').toLowerCase();
+        const mentionsMarketplace = actionableText.includes('marketplace') || actionableAria.includes('marketplace') || actionableHref.includes('marketplace');
+        const isFacebookMenu = actionableAria.includes('menu do facebook') || actionableAria.includes('facebook menu');
+        if (!mentionsMarketplace || isFacebookMenu) continue;
         const score =
           ((t === 'marketplace' || al === 'marketplace') ? 4 : 0) +
           (actionable.tagName === 'A' ? 2 : 0) +
@@ -2325,6 +2357,29 @@ async function detectMessengerPinModal(page) {
             return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
           });
 
+      // Caso C: aviso de histórico indisponível no dispositivo.
+      const restoreUnavailableText =
+        txt.includes('nao e possivel restaurar o historico de conversas neste dispositivo') ||
+        (txt.includes('nao e possivel restaurar') && txt.includes('historico de conversas'));
+      const hasVerOpcoesBtn =
+        Array.from(document.querySelectorAll('button,[role="button"]'))
+          .some(el => {
+            const t = norm(el.innerText || el.textContent || '');
+            const al = norm(el.getAttribute('aria-label') || '');
+            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null);
+            if (disabled) return false;
+            return t.includes('ver opcoes') || t.includes('ver opções') || al.includes('ver opcoes') || al.includes('ver opções');
+          });
+      const hasCloseBtn =
+        Array.from(document.querySelectorAll('[aria-label],[role="button"],button'))
+          .some(el => {
+            const t = norm(el.innerText || el.textContent || '');
+            const al = norm(el.getAttribute('aria-label') || '');
+            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex') || '') === '-1');
+            if (disabled) return false;
+            return al.includes('fechar') || al.includes('close') || t === 'x';
+          });
+
       // Legado: alguns fluxos mostram “Criar PIN” (mantemos também)
       const createText =
         txt.includes('crie um pin') ||
@@ -2343,17 +2398,21 @@ async function detectMessengerPinModal(page) {
       const present =
         (pinText && hasPinInput) ||
         (contText && hasNaoRestaurarBtn) ||
-        (createText && hasCreateBtn);
+        (createText && hasCreateBtn) ||
+        (restoreUnavailableText && (hasVerOpcoesBtn || hasCloseBtn || hasNaoRestaurarBtn));
 
       return {
         present: !!present,
         kind: (pinText && hasPinInput) ? 'pin_input'
           : (contText && hasNaoRestaurarBtn) ? 'continue_without_restore'
           : (createText && hasCreateBtn) ? 'create_pin'
+          : (restoreUnavailableText && (hasVerOpcoesBtn || hasCloseBtn || hasNaoRestaurarBtn)) ? 'restore_history_unavailable'
           : null,
         hasPinInput,
         hasNaoRestaurarBtn,
-        hasCreateBtn
+        hasCreateBtn,
+        hasVerOpcoesBtn,
+        hasCloseBtn
       };
     });
   } catch {
@@ -2380,6 +2439,73 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       await h.click({ delay: 60 }).catch(()=>{});
       return true;
     } catch { return false; }
+  }
+
+  async function resolveRestoreHistoryUnavailableFlow() {
+    try {
+      const acted = await page.evaluate(() => {
+        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const isVisible = (el) => {
+          try {
+            const r = el.getBoundingClientRect();
+            const st = window.getComputedStyle(el);
+            return !!r && r.width > 2 && r.height > 2 && st && st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+          } catch { return false; }
+        };
+        const isDisabled = (el) =>
+          (el.getAttribute('aria-disabled') === 'true') ||
+          (el.getAttribute('disabled') != null) ||
+          (String(el.getAttribute('tabindex') || '') === '-1');
+        const clickHumanLike = (el) => {
+          if (!el || !isVisible(el) || isDisabled(el)) return false;
+          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+          try {
+            el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            el.click();
+            return true;
+          } catch { return false; }
+        };
+
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        let didSomething = false;
+        for (const d of dialogs) {
+          if (!isVisible(d)) continue;
+          const dt = norm(d.innerText || d.textContent || '');
+
+          if (dt.includes('nao e possivel restaurar o historico de conversas neste dispositivo') || (dt.includes('nao e possivel restaurar') && dt.includes('historico de conversas'))) {
+            const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
+            if (close && clickHumanLike(close)) return true;
+            const opts = Array.from(d.querySelectorAll('button,[role="button"]'));
+            for (const b of opts) {
+              const t = norm(b.innerText || b.textContent || '');
+              const al = norm(b.getAttribute('aria-label') || '');
+              if (t.includes('ver opcoes') || t.includes('ver opções') || al.includes('ver opcoes') || al.includes('ver opções')) {
+                if (clickHumanLike(b)) return true;
+              }
+            }
+          }
+
+          if (dt.includes('continuar sem restaurar') || (dt.includes('nao restaurar') && dt.includes('mensagens'))) {
+            const btns = Array.from(d.querySelectorAll('button,[role="button"]'));
+            for (const b of btns) {
+              const t = norm(b.innerText || b.textContent || '');
+              const al = norm(b.getAttribute('aria-label') || '');
+              if (t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens')) {
+                if (clickHumanLike(b)) return true;
+              }
+            }
+            const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
+            if (close && clickHumanLike(close)) didSomething = true;
+          }
+        }
+        return didSomething;
+      }).catch(() => false);
+      return !!acted;
+    } catch {
+      return false;
+    }
   }
 
   async function clickNaoRestaurarTrusted() {
@@ -2610,6 +2736,15 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       pinLog({ event: 'pin_present', attempt, kind: det.kind || null, hasPinInput: !!det.hasPinInput, hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn, hasCreateBtn: !!det.hasCreateBtn });
     } catch {}
+
+    if (det.kind === 'restore_history_unavailable' || det.kind === 'continue_without_restore') {
+      const fixedRestore = await resolveRestoreHistoryUnavailableFlow();
+      try { pinLog({ event: 'restore_unavailable_flow_attempt', attempt, fixedRestore: !!fixedRestore }); } catch {}
+      await sleep(fixedRestore ? 900 : 450);
+      const detAfterRestore = await detectMessengerPinModal(page);
+      if (!detAfterRestore.present) return { ok: true, dismissed: true, restoreHandled: true };
+      if (fixedRestore) continue;
+    }
 
     // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
     if (det.kind === 'create_pin' && det.hasCreateBtn) {
