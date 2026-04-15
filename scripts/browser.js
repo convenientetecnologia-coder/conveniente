@@ -2738,8 +2738,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
       if (!h) return { ok: false, error: 'pin_input_not_found' };
 
-      // Trava de segurança: input precisa estar visível e dentro de dialog.
-      // Mantemos proteção contra composer sem depender de texto rígido do dialog.
+      // Trava de segurança: aceitar o input oficial de PIN mesmo fora de role=dialog,
+      // pois o Facebook Messages pode renderizar o fluxo em estruturas diferentes.
       const pinInputLooksSafe = await page.evaluate((el) => {
         try {
           if (!el) return false;
@@ -2752,24 +2752,25 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             } catch { return false; }
           };
           if (!isVisible(el)) return false;
-          const dlg = el.closest('div[role="dialog"]');
-          if (!dlg) return false;
-          const dlgText = norm(dlg.innerText || dlg.textContent || '');
-          const strongSignalsInDialog =
-            dlgText.includes('pin') ||
-            dlgText.includes('restaurar') ||
-            dlgText.includes('historico') ||
-            dlgText.includes('historico de conversa');
           const aria = norm(el.getAttribute('aria-label') || '');
           const id = norm(el.getAttribute('id') || '');
-          const looksLikePinInput =
+          const isOfficialPinInput =
             aria === 'pin' ||
             aria.includes('pin') ||
-            id.includes('numeric-code-input') ||
-            String(el.getAttribute('maxlength') || '') === '6';
-          // Aceita quando é input com cara de PIN dentro de modal visível.
-          // Sinal forte de texto ajuda no diagnóstico, mas não é obrigatório.
-          return !!looksLikePinInput;
+            id.includes('numeric-code-input');
+          if (isOfficialPinInput) return true;
+
+          // Fallback: input de 6 dígitos com sinais fortes no container próximo.
+          const maxLen = String(el.getAttribute('maxlength') || '');
+          if (maxLen !== '6') return false;
+          const box = el.closest('form,section,article,div') || document.body;
+          const txt = norm(box ? (box.innerText || box.textContent || '') : '');
+          const hasPinSignals =
+            txt.includes('pin') ||
+            txt.includes('crie um pin') ||
+            txt.includes('confirm') ||
+            txt.includes('historico de conversa');
+          return hasPinSignals;
         } catch { return false; }
       }, h).catch(() => false);
       if (!pinInputLooksSafe) return { ok: false, error: 'pin_input_not_safe_context' };
@@ -2809,24 +2810,33 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
 
     // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
-    if (det.kind === 'create_pin' && det.hasCreateBtn) {
+    if (det.kind === 'create_pin' && (det.hasCreateBtn || det.hasPinInput)) {
       let transitionedToPinInput = false;
       try {
+        // Alguns cenários já exibem o input sem precisar clicar de novo em "Criar PIN".
+        if (det.hasPinInput) {
+          transitionedToPinInput = true;
+          det.kind = 'pin_input';
+          try { pinLog({ event: 'pin_input_already_visible_in_create_pin', attempt }); } catch {}
+        }
+
         pinLog({ event: 'pin_create_click_attempt', attempt });
         let createClicked = false;
-        for (let k = 1; k <= 3; k++) {
-          createClicked = await clickCreatePinButton();
-          try { pinLog({ event: 'pin_create_click_try', attempt, k, ok: !!createClicked }); } catch {}
-          if (createClicked) break;
-          await sleep(650);
+        if (!transitionedToPinInput) {
+          for (let k = 1; k <= 3; k++) {
+            createClicked = await clickCreatePinButton();
+            try { pinLog({ event: 'pin_create_click_try', attempt, k, ok: !!createClicked }); } catch {}
+            if (createClicked) break;
+            await sleep(650);
+          }
         }
         await sleep(900);
-        if (createClicked) {
+        if (createClicked || transitionedToPinInput) {
           pinLog({ event: 'pin_create_clicked', attempt });
           const t0 = Date.now();
           while (Date.now() - t0 < 12_000) {
             const detAfterCreate = await detectMessengerPinModal(page);
-            if (detAfterCreate.present && detAfterCreate.kind === 'pin_input' && detAfterCreate.hasPinInput) {
+            if (detAfterCreate.present && detAfterCreate.hasPinInput) {
               det.kind = 'pin_input';
               det.hasPinInput = true;
               transitionedToPinInput = true;
