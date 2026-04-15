@@ -4660,6 +4660,25 @@ function getOpenMinFreeMB(operator = '') {
   } catch {}
   return snap.reserveNormalMB;
 }
+
+async function waitForPostOpenHeadroom({ nome = '', operator = '', timeoutMs = 18000, sampleEveryMs = 900 } = {}) {
+  const extra = Math.max(0, Number(HEADROOM_AFTER_OPEN_MB || 0) || 0);
+  if (extra <= 0) {
+    return { ok: true, skipped: true, reason: 'headroom_disabled', freeMB: getAvailableMB(), needMB: getOpenMinFreeMB(operator) };
+  }
+  const start = Date.now();
+  const minNeed = getOpenMinFreeMB(operator) + extra;
+  let bestFree = 0;
+  while ((Date.now() - start) < Math.max(2000, Number(timeoutMs || 0) || 18000)) {
+    const freeMB = getAvailableMB();
+    if (freeMB > bestFree) bestFree = freeMB;
+    if (freeMB >= minNeed) {
+      return { ok: true, freeMB, needMB: minNeed, waitedMs: Date.now() - start };
+    }
+    await sleep(Math.max(300, Number(sampleEveryMs || 0) || 900));
+  }
+  return { ok: false, freeMB: getAvailableMB(), bestFree, needMB: minNeed, waitedMs: Date.now() - start };
+}
 const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS || '15000', 10);
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
@@ -5812,6 +5831,15 @@ async function activateOnce(nome, source = '', operator = '') {
         try { await snapshotStatusAndWrite(); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
+        // Anti-pressao: após abrir o browser, aguarda headroom mínimo para evitar rajada em cadeia.
+        try {
+          const settle = await waitForPostOpenHeadroom({ nome, operator: String(operator || '').trim() });
+          if (!settle || settle.ok !== true) {
+            throw new Error('headroom_below_min_after_open');
+          }
+        } catch (eSettle) {
+          throw eSettle;
+        }
         logger.info('[WORKER][activateOnce] concluído', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
 

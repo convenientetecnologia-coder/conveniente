@@ -48,6 +48,8 @@ const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
 const MIN_FREE_RAM_MB_STATIC = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '0', 10);
 // Ciclo de auto-tune em ms
 const CYCLE_MS = parseInt(process.env.SUP_CYCLE_MS || '1600', 10);
+// Anti-pressao global entre concessões de abertura.
+const OPEN_RAMP_COOLDOWN_MS = Math.max(0, parseInt(process.env.OPEN_RAMP_COOLDOWN_MS || '5000', 10) || 5000);
 
 function getMinFreeRamMBFor({ operator } = {}) {
   const snap = ramPolicy.snapshotPolicy();
@@ -377,7 +379,11 @@ function podeAbrirNovoSlot(perfil, opts = {}) {
     return {ok: false, reason: "cooldown", waitMs: cooldownUntil-now, perfil};
   }
   // (ANTIGO global - pode remover ou restringir para edge-cases de hard fault, mas por now deixamos sem efeito)
-  // if (state.openBlockedUntil > now) { ... }
+  if (state.openBlockedUntil > now) {
+    const waitMs = Math.max(0, state.openBlockedUntil - now);
+    pushEvent({ type: "denied", reason: "open_ramp", perfil, waitMs });
+    return { ok: false, reason: "open_ramp", waitMs };
+  }
 
   // Limitador hard por slots (cap efetivo runtime)
   if (state.slotsAbertos >= hardCap) {
@@ -423,6 +429,9 @@ function requestOpen(perfil) {
 
   state.slotsAbertos = Math.min(state.maxSlots || 1, state.slotsAbertos + 1);
   state.tempoUltAbertura = Date.now();
+  if (OPEN_RAMP_COOLDOWN_MS > 0) {
+    state.openBlockedUntil = Date.now() + OPEN_RAMP_COOLDOWN_MS;
+  }
   ativos.set(perfil, { openAt: Date.now() });
   pushEvent({type:"open_granted", perfil});
   saveState();

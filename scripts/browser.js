@@ -15,6 +15,14 @@ const gatewayProxy = require('./gatewayProxy');
 
 const FB_MESSAGES_URL = 'https://www.facebook.com/messages';
 
+// Anti-pressao no bootstrap do Messages (defaults conservadores).
+const CONFIG_MSG_BOOT_SETTLE_MS = Math.max(800, parseInt(process.env.CONFIG_MSG_BOOT_SETTLE_MS || '1800', 10) || 1800);
+const CONFIG_MSG_RELOAD_ON_BOOT = String(process.env.CONFIG_MSG_RELOAD_ON_BOOT || '0').trim() === '1';
+const CONFIG_MSG_UI_MAX_ROUNDS = Math.max(1, Math.min(5, parseInt(process.env.CONFIG_MSG_UI_MAX_ROUNDS || '2', 10) || 2));
+const ENSURE_MARKETPLACE_MAX_CLICK_TRIES = Math.max(1, Math.min(6, parseInt(process.env.ENSURE_MARKETPLACE_MAX_CLICK_TRIES || '3', 10) || 3));
+const ENSURE_MARKETPLACE_IDLE_CLICK_MS = Math.max(300, parseInt(process.env.ENSURE_MARKETPLACE_IDLE_CLICK_MS || '650', 10) || 650);
+const ENSURE_MARKETPLACE_ACTIVE_CLICK_MS = Math.max(500, parseInt(process.env.ENSURE_MARKETPLACE_ACTIVE_CLICK_MS || '1000', 10) || 1000);
+
 puppeteer.use(StealthPlugin());
 
 /**
@@ -2283,11 +2291,11 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     }
     if (!state.menuActive || state.marketplaceThreadAnchors === 0) {
       let clickedAtLeastOnce = false;
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < ENSURE_MARKETPLACE_MAX_CLICK_TRIES; i++) {
         if (state.menuActive && state.marketplaceThreadAnchors > 0) break;
         const clicked = await clickMarketplaceMenu().catch(() => false);
         clickedAtLeastOnce = clickedAtLeastOnce || !!clicked;
-        await sleep(clicked ? 700 : 350);
+        await sleep(clicked ? ENSURE_MARKETPLACE_ACTIVE_CLICK_MS : ENSURE_MARKETPLACE_IDLE_CLICK_MS);
         await dismissPinIfPresent();
         if (clicked) await waitMarketplaceActive(Math.min(waitMs, 5000));
         state = await readMarketplaceState();
@@ -3369,7 +3377,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await injectCookies(p1, cookies);
     await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
-    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: CONFIG_MSG_UI_MAX_ROUNDS }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] create ui', { nome, createUrl, ui: ui1 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: (e && e.message) || String(e) });
@@ -3382,9 +3390,13 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await patchPage(nome, p2, coords);
     await injectCookies(p2, cookies);
     await p2.goto(msgUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    await sleep(900);
-    try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-    await sleep(900);
+    await sleep(CONFIG_MSG_BOOT_SETTLE_MS);
+    // facebook.com/messages está mais pesado: reload imediato pode elevar pico na largada.
+    // Mantemos reload apenas por opt-in para diagnóstico controlado.
+    if (CONFIG_MSG_RELOAD_ON_BOOT) {
+      try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+      await sleep(Math.max(900, CONFIG_MSG_BOOT_SETTLE_MS));
+    }
     await ensureMarketplaceMessagesContext(p2, { timeoutMs: 45000, reason: 'configure_profile' }).catch(()=>{});
 
     // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
@@ -3416,7 +3428,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         throw e;
       }
 
-    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: CONFIG_MSG_UI_MAX_ROUNDS }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
