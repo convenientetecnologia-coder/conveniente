@@ -1619,7 +1619,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--disable-background-timer-throttling', // Não pausa timers de fundo
       '--disable-backgrounding-occluded-windows', // Prev. throttling CPU tabs background
       '--disable-renderer-backgrounding', // Garantir render foreground
-      '--process-per-site', // Cada site processo
       '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
       '--disk-cache-size=104857600', // 100MB de cap em disco
       '--media-cache-size=0', // Zero cache de mídia
@@ -1627,6 +1626,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--start-maximized' // Maximizada sempre
       // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
+    // Reduz explosão de subprocessos por navegador em hosts com muitas contas.
+    // Se precisar do comportamento antigo para diagnóstico, habilitar via env.
+    if (process.env.CHROME_PROCESS_PER_SITE === '1') {
+      launchArgs.push('--process-per-site');
+    }
 
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
     if (process.env.MEDIA_AUTO_UI === '1') {

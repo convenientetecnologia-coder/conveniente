@@ -5570,7 +5570,6 @@ async function activateOnce(nome, source = '', operator = '') {
     const job = (async () => {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
-        logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
@@ -5813,7 +5812,6 @@ async function activateOnce(nome, source = '', operator = '') {
         try { await snapshotStatusAndWrite(); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
-        logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         logger.info('[WORKER][activateOnce] concluído', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
 
