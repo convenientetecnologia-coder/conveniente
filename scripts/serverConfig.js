@@ -14,7 +14,7 @@ const DEFAULTS = Object.freeze({
   updatedBy: "default",
   capacity: {
     mode: "per_8gb",
-    accountsPer8Gb: 15,
+    accountsPer8Gb: 10,
     maxAccountsOverride: null,
     reservePer8GbMB: 512
   },
@@ -74,10 +74,10 @@ function getTotalMemMB() {
 
 function calcMaxAccountsEffective({ mode, accountsPer8Gb, maxAccountsOverride, totalMemMB }) {
   const totalGB = Math.max(1, toNum(totalMemMB, getTotalMemMB()) / 1024);
-  const per8 = Math.max(1, Math.floor(toNum(accountsPer8Gb, 15)));
+  const per8 = Math.max(1, Math.floor(toNum(accountsPer8Gb, 10)));
   const override = toNum(maxAccountsOverride, 0);
   if (String(mode) === "absolute" && override > 0) return Math.max(1, Math.floor(override));
-  if (String(mode) === "auto_by_ram") return Math.max(1, Math.floor(totalGB * (30 / 16)));
+  if (String(mode) === "auto_by_ram") return Math.max(1, Math.floor(totalGB * (10 / 8)));
   return Math.max(1, Math.floor(totalGB * (per8 / 8)));
 }
 

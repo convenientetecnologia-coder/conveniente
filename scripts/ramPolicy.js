@@ -2,13 +2,16 @@
 // Política única de RAM (ultra enterprise)
 //
 // Regras:
-// - Operação normal: manter livre (base fixa 2GB + reserva configurável por 8GB)
+// - Operação normal: manter livre (base fixa 2GB + reserva por porte do servidor)
+//   * Servidor de 8GB: reserva extra = 0MB
+//   * Acima disso: +1GB a cada 16GB totais de RAM
 // - Provisão (pico cookies): manter livre (HOST_BASE_MB + PROVISION_SPIKE_MB)
-//   (a reserva por 8GB é emprestável durante provisão, pois Robe/Virtus ficam controlados)
+//   (a reserva extra por porte é emprestável durante provisão, pois Robe/Virtus ficam controlados)
 
 const os = require('os');
 const FIXED_HOST_BASE_MB = 2048;
-const DEFAULT_RESERVE_PER_8GB_MB = 512;
+const RESERVE_STEP_TOTAL_MB = 16 * 1024;
+const RESERVE_STEP_MB = 1024;
 
 function mb(x) {
   const n = Number(x);
@@ -35,16 +38,19 @@ function getProvisionSpikeMB() {
   return mb(process.env.PROVISION_SPIKE_MB || 1536);
 }
 
-function getReservePer8GbMB(totalMB = 0) {
-  // Reserva fixa por 8GB: não depende mais do dashboard.
-  return DEFAULT_RESERVE_PER_8GB_MB;
+function getReserveByHostSizeMB(totalMB = 0) {
+  const total = mb(totalMB);
+  // Regra operacional: em 8GB não adiciona reserva extra.
+  if (total <= 8 * 1024) return 0;
+  // Acima disso, 1GB a cada 16GB totais (inteiro).
+  const chunks16 = Math.max(0, Math.floor(total / RESERVE_STEP_TOTAL_MB));
+  return chunks16 * RESERVE_STEP_MB;
 }
 
 function calcReserveNormalMB(totalMB) {
   const base = getHostBaseMB();
-  const nodes = calcNodesByTotalMemMB(totalMB);
-  const reservePer8 = getReservePer8GbMB(totalMB);
-  return base + (nodes * reservePer8);
+  const reserveByHost = getReserveByHostSizeMB(totalMB);
+  return base + reserveByHost;
 }
 
 function calcReserveProvisionMB(totalMB) {
@@ -58,14 +64,14 @@ function snapshotPolicy() {
   const nodes = calcNodesByTotalMemMB(totalMB);
   const base = getHostBaseMB();
   const spike = getProvisionSpikeMB();
-  const reservePer8GbMB = getReservePer8GbMB(totalMB);
+  const reserveByHostSizeMB = getReserveByHostSizeMB(totalMB);
   return {
     totalMB,
     nodes,
     hostBaseMB: base,
-    reservePer8GbMB,
+    reserveByHostSizeMB,
     provisionSpikeMB: spike,
-    reserveNormalMB: base + (nodes * reservePer8GbMB),
+    reserveNormalMB: base + reserveByHostSizeMB,
     reserveProvisionMB: base + spike
   };
 }
@@ -74,7 +80,7 @@ module.exports = {
   getTotalMemMB,
   calcNodesByTotalMemMB,
   getHostBaseMB,
-  getReservePer8GbMB,
+  getReserveByHostSizeMB,
   getProvisionSpikeMB,
   calcReserveNormalMB,
   calcReserveProvisionMB,

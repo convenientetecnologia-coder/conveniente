@@ -43,7 +43,7 @@ function killGuardActiveForPerfil(perfil) {
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
 // Quantidade reserva de RAM a manter livre (em MB).
 // Regra ultra enterprise:
-// - Operação normal: 2GB + 1GB por node
+// - Operação normal: 2GB + reserva por porte (8GB=+0MB; acima disso +1GB por 16GB totais)
 // - Durante provision (somente dono do lock): 2GB + pico de cookies (~1.5GB)
 const MIN_FREE_RAM_MB_STATIC = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '0', 10);
 // Ciclo de auto-tune em ms
@@ -66,7 +66,7 @@ function getMinFreeRamMBFor({ operator } = {}) {
     }
   } catch {}
 
-  // Operação normal: 2GB + 1GB por node
+  // Operação normal: 2GB + reserva por porte do host
   return snap.reserveNormalMB;
 }
 

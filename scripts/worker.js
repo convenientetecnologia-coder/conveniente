@@ -4644,7 +4644,7 @@ const AUTO_CFG = {
 const ramPolicy = require('./ramPolicy.js');
 
 // RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: 2GB + 1GB por node (nós = ceil(totalGB/16))
+// - Operação normal: 2GB + reserva por porte (8GB=+0MB; acima disso +1GB por 16GB totais)
 // - Durante provision (somente dono do lock): 2GB + pico cookies (~1.5GB)
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
