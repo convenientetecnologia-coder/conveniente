@@ -115,6 +115,7 @@ const VIRTUS_HEAVY_ACTION_MIN_GAP_MS = Math.max(10000, parseInt(process.env.VIRT
 const VIRTUS_PAGE_SWAP_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_SWAP_RECYCLE_ENABLED || '0').trim() === '1';
 const VIRTUS_PAGE_SWAP_WINDOW_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_WINDOW_MS || '25000', 10) || 25000);
 const VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS || '20000', 10) || 20000);
+const VIRTUS_PAGE_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_RECYCLE_ENABLED || '0').trim() === '1';
 const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
@@ -694,8 +695,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let lastKeepaliveAt = 0;
   let lastReplyAtMs = Date.now();
   let lastHeavyActionAt = 0;
+  let lastMarketplaceEnsureAt = 0;
+  let lastMarketplaceEnsureResult = false;
+  let lastMarketplaceNoMenuAt = 0;
   let repliesSinceRecycle = 0;
   const heavyActionTimes = [];
+  const MARKETPLACE_ENSURE_MIN_GAP_MS = Math.max(
+    12_000,
+    Number(process.env.VIRTUS_MARKETPLACE_ENSURE_MIN_GAP_MS || 30_000) || 30_000
+  );
+  const MARKETPLACE_MENU_ABSENT_RECHECK_MS = Math.max(
+    45_000,
+    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_RECHECK_MS || 180_000) || 180_000
+  );
 
   // trackers
   let saveChain = Promise.resolve();
@@ -790,6 +802,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (idleForMs >= VIRTUS_IDLE_DEEP_MS) return 'deep_idle';
     if (idleForMs >= VIRTUS_IDLE_COLD_MS) return 'cold_idle';
     return 'warm_idle';
+  }
+
+  async function ensureMarketplaceCalmo(p, { timeoutMs = 25000, force = false, reason = 'default' } = {}) {
+    const now = Date.now();
+    const idleSafe = !chatAtivo && (!Array.isArray(fila) || fila.length === 0) && !isVirtusLocked(nome);
+    if (!force && idleSafe) {
+      if (!lastMarketplaceEnsureResult && (now - Number(lastMarketplaceNoMenuAt || 0)) < MARKETPLACE_MENU_ABSENT_RECHECK_MS) {
+        return false;
+      }
+      if ((now - Number(lastMarketplaceEnsureAt || 0)) < MARKETPLACE_ENSURE_MIN_GAP_MS) {
+        return !!lastMarketplaceEnsureResult;
+      }
+    }
+    const ok = await garantirMarketplace(p, { timeoutMs });
+    lastMarketplaceEnsureAt = Date.now();
+    lastMarketplaceEnsureResult = !!ok;
+    if (!ok) lastMarketplaceNoMenuAt = lastMarketplaceEnsureAt;
+    if (VIRTUS_DETAILED_DEBUG) {
+      logger.info('[VIRTUS] ensureMarketplaceCalmo', {
+        nome,
+        reason,
+        ok: !!ok,
+        force: !!force,
+        idleSafe,
+        cooldownMs: MARKETPLACE_ENSURE_MIN_GAP_MS
+      });
+    }
+    return !!ok;
   }
 
   // Persistência segura no Windows
@@ -1065,7 +1105,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!p) return [];
       try {
         if (!running || !epochOk()) return [];
-        const marketReady = await garantirMarketplace(p);
+        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'coleta_chats' });
         if (!marketReady) {
           logger.info('[VIRTUS] Marketplace ainda não disponível para esta conta (menu ausente).', { nome });
           await sleep(5000);
@@ -1130,7 +1170,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
     if (!running || !epochOk()) return;
-    const marketReady = await garantirMarketplace(p);
+    const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'init_historico' });
     if (!marketReady) {
       historico = {};
       await salvaHistorico();
@@ -1346,7 +1386,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        const marketReady = await garantirMarketplace(p);
+        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'responder_chat' });
         if (!marketReady) {
           logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Removendo pending e aguardando novos sinais.', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
@@ -1956,7 +1996,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             30000
           );
         }
-        if ((hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk && idleSafe && !skipByIdlePolicy) {
+        if (VIRTUS_PAGE_RECYCLE_ENABLED && (hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk && idleSafe && !skipByIdlePolicy) {
           const heavyGuard = canRunHeavyAction(nowMs);
           if (!heavyGuard.ok) {
             __virtusAgentLog(
@@ -2300,7 +2340,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!running || !epochOk()) return;
-        const marketReady = await garantirMarketplace(p, { timeoutMs: 25000 });
+        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'runner_boot' });
         if (!marketReady) {
           ready = true;
           logger.info('Aba zero da Virtus pronta, mas sem menu Marketplace ainda (aguardando primeiro chat).', { nome });
