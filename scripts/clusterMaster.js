@@ -54,7 +54,9 @@ function createCluster() {
     remainingForChromesMB: plan.budgets.remainingForChromesMB,
     chromeAvgMB: plan.budgets.chromeAvgMB,
     totalProfiles: names.length,
-    effectiveChromesCap: 'all'
+    maxChromesPossibleGlobal: plan.maxChromesPossibleGlobal,
+    configuredMaxAccounts: plan.serverConfig && plan.serverConfig.maxAccountsEffective,
+    effectiveChromesCap: plan.maxChromesPossibleGlobal
   });
 
   const children = [];

@@ -65,6 +65,7 @@ function planMemoryAndShards({ totalProfiles }) {
     totalMB,
     cushionMB,
     usableMB,
+    maxChromesPossibleGlobal,
     nodes,
     perNode: {
       maxChromes: targetPerNode
