@@ -5819,6 +5819,20 @@ async function activateOnce(nome, source = '', operator = '') {
 
         return { ok: true };
       } catch (e) {
+        // Hardening P0: se a ativação falhou após abrir/acoplar browser,
+        // garantir cleanup para não deixar processo Chrome órfão.
+        try {
+          const ctrlFail = controllers.get(nome);
+          if (ctrlFail) {
+            try {
+              await hardCloseController(nome, ctrlFail, {
+                reason: 'activate_failed_cleanup',
+                allowKillUserDataDir: true
+              });
+            } catch {}
+            try { controllers.delete(nome); } catch {}
+          }
+        } catch {}
         try {
           const st = readJsonFile(statusPath, null) || { perfis: [] };
           let found = false;
