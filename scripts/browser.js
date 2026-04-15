@@ -2672,6 +2672,53 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
+  async function typePinDigitsOnHandle(h, digits) {
+    if (!h) return { ok: false, error: 'pin_input_not_found' };
+    try {
+      // Limpa o campo alvo sem teclado global.
+      await page.evaluate((el) => {
+        try {
+          if (!el) return;
+          el.focus();
+          const proto = el && el.constructor ? el.constructor.prototype : null;
+          const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+          if (desc && typeof desc.set === 'function') desc.set.call(el, '');
+          else el.value = '';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch {}
+      }, h).catch(()=>{});
+      await sleep(220);
+
+      for (const ch of String(digits || '').split('')) {
+        await page.evaluate((el, c) => {
+          try {
+            if (!el) return;
+            el.focus();
+            const curr = String(el.value || '');
+            const next = curr + String(c || '');
+            const proto = el && el.constructor ? el.constructor.prototype : null;
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (desc && typeof desc.set === 'function') desc.set.call(el, next);
+            else el.value = next;
+            el.dispatchEvent(new Event('keydown', { bubbles: true, key: String(c || '') }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('keyup', { bubbles: true, key: String(c || '') }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {}
+        }, h, ch).catch(()=>{});
+        await sleep(250);
+      }
+      const filledOk = await page.evaluate((el, expected) => {
+        try { return String(el && el.value || '') === String(expected || ''); } catch { return false; }
+      }, h, digits).catch(() => false);
+      if (!filledOk) return { ok: false, error: 'pin_input_fill_failed' };
+      return { ok: true, filled: true };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || 'pin_type_exception' };
+    }
+  }
+
   async function tryEnterPin(pinValue = DEFAULT_PIN, round = 1) {
     // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
     // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
@@ -2727,95 +2774,17 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }, h).catch(() => false);
       if (!pinInputLooksSafe) return { ok: false, error: 'pin_input_not_safe_context' };
 
-      // Foco + limpar sem teclado global.
+      // Foco + digitação pausada no campo alvo (sem teclado global / sem submit).
       try { await h.click({ clickCount: 1, delay: 60 }).catch(()=>{}); } catch {}
-      try {
-        await page.evaluate((el) => {
-          try {
-            if (!el) return;
-            el.focus();
-            const proto = el && el.constructor ? el.constructor.prototype : null;
-            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-            if (desc && typeof desc.set === 'function') desc.set.call(el, '');
-            else el.value = '';
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          } catch {}
-        }, h).catch(()=>{});
-      } catch {}
-      await sleep(220);
 
       // Digitar 8 8 2 5 8 4 com calma
       const digits = String(pinValue || '').trim();
       if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
-      // Preencher por JS no input-alvo (evita vazamento no composer/chat).
-      try {
-        await page.evaluate((el, val) => {
-          try {
-            const v = String(val || '');
-            try { el.focus(); } catch {}
-            const proto = el && el.constructor ? el.constructor.prototype : null;
-            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-            if (desc && typeof desc.set === 'function') desc.set.call(el, v);
-            else el.value = v;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          } catch {}
-        }, h, digits).catch(()=>{});
-      } catch {}
-      const filledOk = await page.evaluate((el, expected) => {
-        try { return String(el && el.value || '') === String(expected || ''); } catch { return false; }
-      }, h, digits).catch(() => false);
-      if (!filledOk) return { ok: false, error: 'pin_input_fill_failed' };
-
-      await sleep(420);
-      // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
-      // Submit: tentar CTA primário do dialog; se não encontrar, usa Enter como fallback.
-      let clickedSubmit = false;
-      try {
-        clickedSubmit = await page.evaluate(() => {
-          function norm(s){
-            try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
-            catch { return String(s||'').toLowerCase(); }
-          }
-          const dlg = document.querySelector('div[role="dialog"]') || document;
-          const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
-          const words = ['confirmar','confirm','continuar','continue','avancar','avançar','next','ok','done','concluir','finalizar','salvar','save'];
-          for (const b of btns) {
-            const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
-            if (disabled) continue;
-            const t = norm(b.innerText || b.value || b.textContent || '');
-            const al = norm(b.getAttribute('aria-label') || '');
-            if (!t && !al) continue;
-            if (words.some(w => t.includes(w) || al.includes(w))) { try { b.click(); return true; } catch {} }
-          }
-          return false;
-        }).catch(()=>false);
-      } catch {}
-      if (!clickedSubmit) {
-        try { await h.press('Enter').catch(()=>{}); } catch {}
-      }
-
-      // Espera determinística: modal desaparecer / input sumir (até 12s)
-      const cleared = await page.waitForFunction(() => {
-        try {
-          const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-          const txt = norm(document.body ? (document.body.innerText || '') : '');
-          const hasPinInput =
-            !!document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
-            !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-            Array.from(document.querySelectorAll('input[type="text"][maxlength="6"],input[type="tel"][maxlength="6"]'))
-              .some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
-          const pinText =
-            txt.includes('insira seu pin') ||
-            txt.includes('inserir seu pin') ||
-            (txt.includes('restaurar') && txt.includes('historico') && txt.includes('pin'));
-          return !(hasPinInput && pinText);
-        } catch { return false; }
-      }, { timeout: 12_000 }).then(()=>true).catch(()=>false);
-
-      await sleep(800);
-      return { ok: true, entered: true, submitClicked: !!clickedSubmit, cleared, confirmed: (Number(round) >= 2) };
+      const typed = await typePinDigitsOnHandle(h, digits);
+      if (!typed || typed.ok !== true) return { ok: false, error: typed && typed.error ? typed.error : 'pin_type_failed' };
+      await sleep(900);
+      // Sem submit/enter por regra: o Facebook avança sozinho para confirmação.
+      return { ok: true, entered: true, submitClicked: false, cleared: false, confirmed: (Number(round) >= 2) };
     } catch (e) {
       return { ok: false, error: (e && e.message) || 'pin_enter_exception' };
     }
