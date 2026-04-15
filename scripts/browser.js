@@ -2691,7 +2691,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
       if (!h) return { ok: false, error: 'pin_input_not_found' };
 
-      // Trava de segurança: só aceita input dentro de dialog de PIN/restauração.
+      // Trava de segurança: input precisa estar visível e dentro de dialog.
+      // Mantemos proteção contra composer sem depender de texto rígido do dialog.
       const pinInputLooksSafe = await page.evaluate((el) => {
         try {
           if (!el) return false;
@@ -2707,7 +2708,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           const dlg = el.closest('div[role="dialog"]');
           if (!dlg) return false;
           const dlgText = norm(dlg.innerText || dlg.textContent || '');
-          const strongSignals =
+          const strongSignalsInDialog =
             dlgText.includes('pin') ||
             dlgText.includes('restaurar') ||
             dlgText.includes('historico') ||
@@ -2719,7 +2720,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             aria.includes('pin') ||
             id.includes('numeric-code-input') ||
             String(el.getAttribute('maxlength') || '') === '6';
-          return !!(strongSignals && looksLikePinInput);
+          // Aceita quando é input com cara de PIN dentro de modal visível.
+          // Sinal forte de texto ajuda no diagnóstico, mas não é obrigatório.
+          return !!looksLikePinInput;
         } catch { return false; }
       }, h).catch(() => false);
       if (!pinInputLooksSafe) return { ok: false, error: 'pin_input_not_safe_context' };
@@ -2864,10 +2867,19 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             await sleep(450);
           }
         } else {
-          // Enterprise estrito: não pular criação do PIN.
-          // Se não clicou em "Criar PIN", não fecha modal por X/ESC.
-          pinLog({ event: 'pin_create_click_not_found', attempt });
-          return { ok: false, error: 'pin_create_button_not_clicked', dismissed: false };
+          // Fallback controlado: algumas variações não expõem "Criar PIN", mas já exibem o input.
+          const detFallbackInput = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+          if (detFallbackInput.present && detFallbackInput.kind === 'pin_input' && detFallbackInput.hasPinInput) {
+            det.kind = 'pin_input';
+            det.hasPinInput = true;
+            transitionedToPinInput = true;
+            try { pinLog({ event: 'pin_create_click_not_found_but_input_present', attempt }); } catch {}
+          } else {
+            // Enterprise estrito: não pular criação do PIN.
+            // Se não clicou em "Criar PIN", não fecha modal por X/ESC.
+            pinLog({ event: 'pin_create_click_not_found', attempt });
+            return { ok: false, error: 'pin_create_button_not_clicked', dismissed: false };
+          }
         }
       } catch (e) {
         pinLog({ event: 'pin_create_click_error', attempt, error: (e && e.message) || String(e) });
