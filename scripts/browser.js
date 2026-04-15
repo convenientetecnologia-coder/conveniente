@@ -2510,6 +2510,37 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function clickNaoRestaurarTrusted() {
     try {
+      const directSelectors = [
+        'div[role="dialog"] [aria-label="Não restaurar mensagens"][role="button"]',
+        'div[role="dialog"] [aria-label="Nao restaurar mensagens"][role="button"]',
+        'div[role="dialog"] [aria-label*="Não restaurar mensagens"][role="button"]',
+        'div[role="dialog"] [aria-label*="Nao restaurar mensagens"][role="button"]',
+        '[aria-label="Não restaurar mensagens"][role="button"]',
+        '[aria-label="Nao restaurar mensagens"][role="button"]'
+      ];
+      for (const sel of directSelectors) {
+        const h = await page.$(sel).catch(()=>null);
+        if (!h) continue;
+        const clicked = await page.evaluate((el) => {
+          try {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const st = window.getComputedStyle(el);
+            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex') || '') === '-1');
+            if (disabled) return false;
+            if (!r || r.width < 2 || r.height < 2) return false;
+            if (!st || st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || '1') < 0.05) return false;
+            try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+            el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            el.click();
+            return true;
+          } catch { return false; }
+        }, h).catch(() => false);
+        if (clicked) return true;
+      }
+
       // variações PT-BR / sem acento
       const xps = [
         '//div[@role="dialog"]//button[contains(.,"Não restaurar mensagens")]',
@@ -2648,15 +2679,61 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
       if (!h) return { ok: false, error: 'pin_input_not_found' };
 
-      // Foco + limpar sem "ruído"
-      try { await h.click({ clickCount: 3, delay: 60 }).catch(()=>{}); } catch {}
-      try { await page.keyboard.press('Backspace').catch(()=>{}); } catch {}
+      // Trava de segurança: só aceita input dentro de dialog de PIN/restauração.
+      const pinInputLooksSafe = await page.evaluate((el) => {
+        try {
+          if (!el) return false;
+          const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+          const isVisible = (node) => {
+            try {
+              const r = node.getBoundingClientRect();
+              const st = window.getComputedStyle(node);
+              return !!r && r.width > 2 && r.height > 2 && st && st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+            } catch { return false; }
+          };
+          if (!isVisible(el)) return false;
+          const dlg = el.closest('div[role="dialog"]');
+          if (!dlg) return false;
+          const dlgText = norm(dlg.innerText || dlg.textContent || '');
+          const strongSignals =
+            dlgText.includes('pin') ||
+            dlgText.includes('restaurar') ||
+            dlgText.includes('historico') ||
+            dlgText.includes('historico de conversa');
+          const aria = norm(el.getAttribute('aria-label') || '');
+          const id = norm(el.getAttribute('id') || '');
+          const looksLikePinInput =
+            aria === 'pin' ||
+            aria.includes('pin') ||
+            id.includes('numeric-code-input') ||
+            String(el.getAttribute('maxlength') || '') === '6';
+          return !!(strongSignals && looksLikePinInput);
+        } catch { return false; }
+      }, h).catch(() => false);
+      if (!pinInputLooksSafe) return { ok: false, error: 'pin_input_not_safe_context' };
+
+      // Foco + limpar sem teclado global.
+      try { await h.click({ clickCount: 1, delay: 60 }).catch(()=>{}); } catch {}
+      try {
+        await page.evaluate((el) => {
+          try {
+            if (!el) return;
+            el.focus();
+            const proto = el && el.constructor ? el.constructor.prototype : null;
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (desc && typeof desc.set === 'function') desc.set.call(el, '');
+            else el.value = '';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {}
+        }, h).catch(()=>{});
+      } catch {}
       await sleep(220);
 
       // Digitar 8 8 2 5 8 4 com calma
       const digits = String(pinValue || '').trim();
       if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
-      // Preencher também por JS (React-friendly) + eventos (alguns modais ignoram só teclado).
+      // Preencher por JS no input-alvo (evita vazamento no composer/chat).
       try {
         await page.evaluate((el, val) => {
           try {
@@ -2671,9 +2748,10 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           } catch {}
         }, h, digits).catch(()=>{});
       } catch {}
-      for (const ch of digits) {
-        try { await page.keyboard.type(String(ch), { delay: 240 }).catch(()=>{}); } catch {}
-      }
+      const filledOk = await page.evaluate((el, expected) => {
+        try { return String(el && el.value || '') === String(expected || ''); } catch { return false; }
+      }, h, digits).catch(() => false);
+      if (!filledOk) return { ok: false, error: 'pin_input_fill_failed' };
 
       await sleep(420);
       // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
@@ -2700,7 +2778,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         }).catch(()=>false);
       } catch {}
       if (!clickedSubmit) {
-        try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
+        try { await h.press('Enter').catch(()=>{}); } catch {}
       }
 
       // Espera determinística: modal desaparecer / input sumir (até 12s)
