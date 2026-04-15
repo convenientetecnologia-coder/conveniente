@@ -72,13 +72,20 @@ function getTotalMemMB() {
   try { return Math.round(os.totalmem() / (1024 * 1024)); } catch { return 0; }
 }
 
+function calcNominal8GbBlocks(totalMemMB) {
+  const total = Math.max(1, Math.floor(toNum(totalMemMB, getTotalMemMB())));
+  // Regra de capacidade por faixa nominal com tolerância de 1GB:
+  // evita cair 10->9 por leitura levemente menor sem inflar 9GB para 20 contas.
+  return Math.max(1, Math.floor((total + 1024) / 8192));
+}
+
 function calcMaxAccountsEffective({ mode, accountsPer8Gb, maxAccountsOverride, totalMemMB }) {
-  const totalGB = Math.max(1, toNum(totalMemMB, getTotalMemMB()) / 1024);
+  const blocks8gb = calcNominal8GbBlocks(totalMemMB);
   const per8 = Math.max(1, Math.floor(toNum(accountsPer8Gb, 10)));
   const override = toNum(maxAccountsOverride, 0);
   if (String(mode) === "absolute" && override > 0) return Math.max(1, Math.floor(override));
-  if (String(mode) === "auto_by_ram") return Math.max(1, Math.floor(totalGB * (10 / 8)));
-  return Math.max(1, Math.floor(totalGB * (per8 / 8)));
+  if (String(mode) === "auto_by_ram") return Math.max(1, blocks8gb * 10);
+  return Math.max(1, blocks8gb * per8);
 }
 
 function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "default" } = {}) {

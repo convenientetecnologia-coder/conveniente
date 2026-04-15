@@ -9,6 +9,15 @@ const os = require('os');
  */
 function mb(x) { return Math.floor(x / (1024 * 1024)); }
 
+function calcNominal8GbBlocks(totalMB) {
+  // Capacidade por faixa nominal de hardware:
+  // 8GB => 1 bloco; 16GB => 2 blocos; etc.
+  // Usa tolerância de 1GB para evitar penalizar hosts que reportam levemente
+  // abaixo do nominal, sem "promover" 9GB para 16GB.
+  const mbTotal = Math.max(1, Number(totalMB) || 0);
+  return Math.max(1, Math.floor((mbTotal + 1024) / 8192));
+}
+
 /**
  * Calcula plano automático de memória/sharding para multi-node, multinacional.
  * - NODES = ceil(RAM FÍSICA / 8GB) (NUNCA por RAM livre!)
@@ -27,9 +36,9 @@ function planMemoryAndShards({ totalProfiles }) {
   const NODE_SEG_MB = 8192; // 8GB por Node
   const NODE_OVERHEAD_MB = 2048; // 2GB por Node
   const CHROME_AVG_MB = 600;
-  // Política fixa: 10 contas por 8GB.
-  const totalGB = Math.max(1, totalMB / 1024);
-  const configuredGlobalCap = Math.max(1, Math.floor(totalGB * (10 / 8)));
+  // Política fixa por faixa nominal: 10 contas por 8GB (8=>10, 16=>20, ...).
+  const blocks8gb = calcNominal8GbBlocks(totalMB);
+  const configuredGlobalCap = Math.max(1, blocks8gb * 10);
 
   // 1) Nodes exatos PELO HARDWARE, independente de RAM livre
   let nodes = Math.ceil(totalMB / NODE_SEG_MB);
