@@ -2573,13 +2573,35 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function clickCreatePinButton() {
     try {
-      // Caminho 1: seletor direto por aria-label (mais estável quando disponível).
+      // Caminho estrito: botão explícito "Criar PIN" (evita clicar ancestrais genéricos).
       const direct =
-        (await page.$('div[role="dialog"] [aria-label*="Criar PIN"], div[role="dialog"] [aria-label*="criar pin"]')) ||
-        (await page.$('[aria-label*="Criar PIN"], [aria-label*="criar pin"]'));
+        (await page.$('div[role="dialog"] [aria-label="Criar PIN"][role="button"], div[role="dialog"] [aria-label="Criar PIN"], div[role="dialog"] button[aria-label="Criar PIN"]')) ||
+        (await page.$('[aria-label="Criar PIN"][role="button"], [aria-label="Criar PIN"], button[aria-label="Criar PIN"]')) ||
+        (await page.$('div[role="button"] span') );
       if (direct) {
-        await direct.click({ delay: 70 }).catch(()=>{});
-        return true;
+        const clickedDirect = await page.evaluate((el) => {
+          try {
+            if (!el) return false;
+            let target = el;
+            const txt = String(el.innerText || el.textContent || '').toLowerCase();
+            if (txt.includes('criar pin')) {
+              target = el.closest('button,[role="button"],a[role="button"]') || el;
+            }
+            const label = String(target.getAttribute && target.getAttribute('aria-label') || '').toLowerCase();
+            const text = String(target.innerText || target.textContent || '').toLowerCase();
+            if (!(label.includes('criar pin') || text.includes('criar pin'))) return false;
+            const r = target.getBoundingClientRect();
+            const st = window.getComputedStyle(target);
+            const disabled = (target.getAttribute('aria-disabled') === 'true') || (target.getAttribute('disabled') != null) || (String(target.getAttribute('tabindex') || '') === '-1');
+            if (disabled) return false;
+            if (!r || r.width < 2 || r.height < 2) return false;
+            if (!st || st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || '1') < 0.05) return false;
+            try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+            target.click();
+            return true;
+          } catch { return false; }
+        }, direct).catch(() => false);
+        if (clickedDirect) return true;
       }
 
       const clicked = await page.evaluate(() => {
@@ -2597,17 +2619,14 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           (el.getAttribute('disabled') != null) ||
           (String(el.getAttribute('tabindex') || '') === '-1');
 
-        // Caminho 2: pegar qualquer nó com texto "Criar PIN" e subir até o ancestral acionável.
-        const all = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],div,span,[tabindex]')).slice(0, 800);
+        // Caminho 2 (ainda estrito): só elementos claramente "button-like".
+        const all = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"]')).slice(0, 300);
         for (const n of all) {
           if (!n || !isVisible(n)) continue;
           const t = norm(n.innerText || n.textContent || '');
           const al = norm(n.getAttribute('aria-label') || '');
           if (!(t.includes('criar pin') || al.includes('criar pin'))) continue;
-          const target =
-            n.closest('[aria-label*="Criar PIN"],[aria-label*="criar pin"],button,[role="button"],a[role="button"],[tabindex]') ||
-            n.parentElement ||
-            n;
+          const target = n;
           if (!target || !isVisible(target) || disabled(target)) continue;
           try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
           try {
@@ -2690,24 +2709,10 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }, h).catch(()=>{});
       await sleep(220);
 
+      try { await h.focus().catch(()=>{}); } catch {}
       for (const ch of String(digits || '').split('')) {
-        await page.evaluate((el, c) => {
-          try {
-            if (!el) return;
-            el.focus();
-            const curr = String(el.value || '');
-            const next = curr + String(c || '');
-            const proto = el && el.constructor ? el.constructor.prototype : null;
-            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-            if (desc && typeof desc.set === 'function') desc.set.call(el, next);
-            else el.value = next;
-            el.dispatchEvent(new Event('keydown', { bubbles: true, key: String(c || '') }));
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('keyup', { bubbles: true, key: String(c || '') }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          } catch {}
-        }, h, ch).catch(()=>{});
-        await sleep(250);
+        try { await h.type(String(ch), { delay: 240 }).catch(()=>{}); } catch {}
+        await sleep(130);
       }
       const filledOk = await page.evaluate((el, expected) => {
         try { return String(el && el.value || '') === String(expected || ''); } catch { return false; }
@@ -2775,8 +2780,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }, h).catch(() => false);
       if (!pinInputLooksSafe) return { ok: false, error: 'pin_input_not_safe_context' };
 
-      // Foco + digitação pausada no campo alvo (sem teclado global / sem submit).
-      try { await h.click({ clickCount: 1, delay: 60 }).catch(()=>{}); } catch {}
+      // Digitação pausada no campo alvo (sem clicar de novo para evitar fechar modal).
+      try { await h.focus().catch(()=>{}); } catch {}
 
       // Digitar 8 8 2 5 8 4 com calma
       const digits = String(pinValue || '').trim();
@@ -2832,7 +2837,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     // clicou "Criar PIN" -> espera estabilizar -> digita 2x -> fim.
     if (det.kind === 'create_pin' || (det.kind === 'pin_input' && det.hasPinInput)) {
       try {
-        if (det.kind === 'create_pin') {
+        if (det.kind === 'create_pin' && !det.hasPinInput) {
           let createClicked = false;
           for (let k = 1; k <= 2; k++) {
             createClicked = await clickCreatePinButton();
@@ -2840,7 +2845,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             if (createClicked) break;
             await sleep(900);
           }
-          await sleep(2200);
+          await sleep(2600);
         }
         const forced = await forcePinTwoStageSequence(attempt);
         if (forced && forced.ok === true) return { ok: true, dismissed: true, pinEntered: true };
