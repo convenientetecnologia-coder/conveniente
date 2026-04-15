@@ -14,7 +14,9 @@ function calcNominal8GbBlocks(totalMB) {
   // 8GB => 1 bloco; 16GB => 2 blocos; etc.
   // Usa tolerância de 1GB para evitar penalizar hosts que reportam levemente
   // abaixo do nominal, sem "promover" 9GB para 16GB.
-  const mbTotal = Math.max(1, Number(totalMB) || 0);
+  // Regra de baseline operacional: qualquer host < 8GB é tratado como 8GB.
+  const mbTotalRaw = Math.max(1, Number(totalMB) || 0);
+  const mbTotal = Math.max(8192, mbTotalRaw);
   return Math.max(1, Math.floor((mbTotal + 1024) / 8192));
 }
 

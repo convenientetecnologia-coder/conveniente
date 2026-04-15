@@ -73,7 +73,9 @@ function getTotalMemMB() {
 }
 
 function calcNominal8GbBlocks(totalMemMB) {
-  const total = Math.max(1, Math.floor(toNum(totalMemMB, getTotalMemMB())));
+  // Baseline operacional: hosts abaixo de 8GB usam a mesma faixa de 8GB.
+  const totalRaw = Math.max(1, Math.floor(toNum(totalMemMB, getTotalMemMB())));
+  const total = Math.max(8192, totalRaw);
   // Regra de capacidade por faixa nominal com tolerância de 1GB:
   // evita cair 10->9 por leitura levemente menor sem inflar 9GB para 20 contas.
   return Math.max(1, Math.floor((total + 1024) / 8192));
