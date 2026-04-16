@@ -229,8 +229,12 @@ module.exports = (app, workerClient, fileStore) => {
       let nome = require('./utils').slugify(cidade) + '-' + Date.now();
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-      // UA com fallback
-      const preset = fileStore.pickUaPreset() || {};
+      // UAFP/UAPreset:
+      // - se vier uaPresetId no payload de stock_provision, respeita origem (consistência dispositivo)
+      // - fallback para balanceador local apenas quando ausente
+      const requestedUaPresetId = String((req.body && (req.body.uaPresetId || req.body.ua_preset_id)) || '').trim();
+      const presetFromRequest = requestedUaPresetId ? fileStore.getUaPresetById(requestedUaPresetId) : null;
+      const preset = presetFromRequest || fileStore.pickUaPreset() || {};
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (

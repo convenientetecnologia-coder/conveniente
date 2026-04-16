@@ -2335,6 +2335,7 @@ async function execStockProvision(cmd) {
       const cookies = a && a.cookies;
       const label = String(a && a.label || '').trim();
       const stockAccountId = (a && (a.stockAccountId || a.stock_account_id)) ? Number(a.stockAccountId || a.stock_account_id) : null;
+      const uaPresetIdRaw = String(a && (a.uaPresetId || a.ua_preset_id) || '').trim();
       // Credenciais podem vir do CT Stock payload (não logar).
       const login = String(a && (a.login || a.user || a.email || a.username) || '').trim();
       const password = String(a && (a.password || a.pass) || '').trim();
@@ -2423,7 +2424,7 @@ async function execStockProvision(cmd) {
             timeoutMs: Math.max(15_000, Math.min(90_000, budgetLeftMs() + 10_000)),
             // Ultra enterprise: persiste login/senha no manifest já na criação, para permitir fluxo
             // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
-            body: { cidade: city, cookies, login, password, stockAccountId }
+            body: { cidade: city, cookies, login, password, stockAccountId, uaPresetId: uaPresetIdRaw || null }
           });
           if (!r || r.ok === false) {
             const err = String((r && r.error) || 'create_profile_failed');

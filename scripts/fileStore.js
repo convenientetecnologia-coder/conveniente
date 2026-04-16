@@ -307,6 +307,18 @@ function pickUaPreset() {
   } catch { return null; }
 }
 
+function getUaPresetById(uaPresetId) {
+  try {
+    const id = String(uaPresetId || '').trim();
+    if (!id) return null;
+    const presets = readJsonSafe(presetsPath, []);
+    if (!Array.isArray(presets) || !presets.length) return null;
+    return presets.find((p) => p && String(p.id || '').trim() === id) || null;
+  } catch {
+    return null;
+  }
+}
+
 // === lock helpers (owner-safe) ===
 const _sleepBuf = new SharedArrayBuffer(4);
 const _sleepI32 = new Int32Array(_sleepBuf);
@@ -1043,7 +1055,7 @@ module.exports = {
   dadosDir, perfisPath, perfisDir, presetsPath, desiredPath, statusPath,
   readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
   patchDesired, // agora async/lock
-  loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
+  loadPerfisJson, savePerfisJson, pickUaPreset, getUaPresetById, getStatusSnapshot, isPerfilAtivo,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:

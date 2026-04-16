@@ -5490,7 +5490,11 @@ async function activateOnce(nome, source = '', operator = '') {
     // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pós-sucesso),
     // não bloquear reabertura imediata com kill_guard. Kill guard é anti-flap para falhas.
     const _source = String(source || '');
-    const _bypassKillGuard = /login_remediate_post_success/i.test(_source);
+    const _bypassKillGuard =
+      /login_remediate_post_success/i.test(_source) ||
+      // LAB/diagnóstico: permitir abrir mesmo sob kill_guard quando explicitamente em modo debug,
+      // para destravar cenários de teste sem relaxar produção.
+      (process.env.BROWSER_DEBUG === '1' && /(^agent$|^ui$|^admin$)/i.test(opTrim));
     if (killGuardActive(nome) && !_bypassKillGuard) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
@@ -14269,6 +14273,40 @@ async function isPageLikelyAlive(page, nome) {
     url = page.url ? page.url() : '';
   } catch {}
   const aboutBlankStuck = (url === 'about:blank') && ((now - st.lastDomEventAt) > HEALTH_CFG.ABOUT_BLANK_GRACE_MS);
+  const isChromeErrorUrl = /^chrome-error:\/\//i.test(String(url || ''));
+  let hasCrashSignals = false;
+  try {
+    hasCrashSignals = await Promise.race([
+      page.evaluate(() => {
+        try {
+          const txt = String((document && (document.body && (document.body.innerText || document.body.textContent))) || '')
+            .toLowerCase()
+            .slice(0, 4000);
+          if (!txt) return false;
+          if (txt.includes('aw, snap')) return true;
+          if (txt.includes('status_access_violation')) return true;
+          if (txt.includes('out of memory')) return true;
+          if (txt.includes('recarregar esta página')) return true;
+          if (txt.includes('recarregar essa página')) return true;
+          if (txt.includes('algo deu errado ao exibir esta página')) return true;
+          return false;
+        } catch { return false; }
+      }).catch(() => false),
+      new Promise((resolve) => setTimeout(() => resolve(false), 1200))
+    ]);
+  } catch {}
+  if (isChromeErrorUrl || hasCrashSignals) {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'health_page_crash_detected',
+        nome: String(nome || ''),
+        url: String(url || '').slice(0, 220),
+        source: isChromeErrorUrl ? 'chrome_error_url' : 'dom_signal'
+      });
+    } catch {}
+    return false;
+  }
   const urlIsFb = /facebook\.com|messenger\.com/i.test(url);
   const aliveBySignals = (!noDom || !noNet);
   const aliveByReady = (readyOk && urlIsFb && !aboutBlankStuck);
@@ -14282,7 +14320,12 @@ async function recoveryStep(nome, page, step) {
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
-    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
+    let ok = false;
+    try {
+      const rr = await reloadPageEnterprise(page, { nome, tag: 'worker_health_reload', timeoutMs: 20_000 }).catch(() => ({ ok: false }));
+      ok = !!(rr && rr.ok);
+    } catch {}
+    if (!ok) return false;
     st.counters.softReloads10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.reload;
     try { await issues.append(nome, 'mil_action', 'health_recover:reload'); } catch {}
@@ -14291,13 +14334,17 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
+    let ok = false;
     try {
       if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_health_nav_home' }).catch(()=>{});
+        const rr = await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_health_nav_home' }).catch(() => null);
+        ok = (rr === true) || !!(rr && rr.ok);
       } else {
-        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        ok = true;
       }
     } catch {}
+    if (!ok) return false;
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14318,10 +14365,17 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
+      let ok = false;
       if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_health_new_page' }).catch(()=>{});
+        const rr = await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_health_new_page' }).catch(()=>null);
+        ok = (rr === true) || !!(rr && rr.ok);
       } else {
-        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        ok = true;
+      }
+      if (!ok) {
+        try { await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+        return false;
       }
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
@@ -14354,7 +14408,6 @@ async function escalateToReopen(nome, reason='health_reopen') {
 async function healthTick() {
   if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
-    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
 
     if (!ctrl || !ctrl.browser) continue;

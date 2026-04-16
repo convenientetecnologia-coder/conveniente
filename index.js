@@ -9,6 +9,53 @@ const fs = require('fs');
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
 
+const SINGLETON_LOCK_PATH = path.join(__dirname, 'dados', 'runtime_index.lock');
+let _singletonFd = null;
+function _pidAlive(pid) {
+  try {
+    if (!Number.isFinite(Number(pid)) || Number(pid) <= 0) return false;
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function ensureSingleInstance() {
+  try { fs.mkdirSync(path.join(__dirname, 'dados'), { recursive: true }); } catch {}
+  const acquire = () => {
+    _singletonFd = fs.openSync(SINGLETON_LOCK_PATH, 'wx');
+    const payload = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
+    fs.writeFileSync(_singletonFd, payload, 'utf8');
+  };
+  try {
+    acquire();
+  } catch (e) {
+    const code = String(e && e.code || '');
+    if (code === 'EEXIST') {
+      let prevPid = 0;
+      try {
+        const txt = fs.readFileSync(SINGLETON_LOCK_PATH, 'utf8');
+        prevPid = Number((JSON.parse(txt) || {}).pid || 0);
+      } catch {}
+      if (_pidAlive(prevPid)) {
+        logger.error('[BOOT] Instância já em execução; abortando novo start.', { lockPath: SINGLETON_LOCK_PATH, pidAtivo: prevPid || null });
+        process.exit(1);
+      }
+      try { fs.unlinkSync(SINGLETON_LOCK_PATH); } catch {}
+      acquire();
+    } else {
+      throw e;
+    }
+  }
+  const cleanup = () => {
+    try { if (_singletonFd != null) fs.closeSync(_singletonFd); } catch {}
+    try { fs.unlinkSync(SINGLETON_LOCK_PATH); } catch {}
+  };
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+}
+
 /**
  * =========================
  * BACKUP AUTO (enterprise)
@@ -72,6 +119,7 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
 
 // Inicia backup automático (rollback rápido do conveniente)
+ensureSingleInstance();
 startAutoBackupConveniente();
 
 // ===================== CORS restrito =====================

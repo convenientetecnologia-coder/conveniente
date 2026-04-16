@@ -126,16 +126,51 @@ const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
-const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '25', 10) || 25);
-const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '60', 10) || 60);
-const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '180', 10) || 180);
-const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '450', 10) || 450);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
-const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
-const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(8000, parseInt(process.env.VIRTUS_CHAT_OPEN_DEADLINE_MS || '30000', 10) || 30000);
-const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(6000, parseInt(process.env.VIRTUS_COMPOSER_FAST_TIMEOUT_MS || '22000', 10) || 22000);
-const VIRTUS_COMPOSER_RECHECK_MS = Math.max(500, parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || '1400', 10) || 1400);
+const VIRTUS_FAST_MODE = String(process.env.VIRTUS_FAST_MODE || '0').trim() === '1';
+const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(
+  0,
+  parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || String(VIRTUS_FAST_MODE ? 0 : 25), 10) || (VIRTUS_FAST_MODE ? 0 : 25)
+);
+const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(
+  VIRTUS_TYPE_DELAY_MIN_MS,
+  parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || String(VIRTUS_FAST_MODE ? 12 : 60), 10) || (VIRTUS_FAST_MODE ? 12 : 60)
+);
+const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(
+  0,
+  parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || String(VIRTUS_FAST_MODE ? 50 : 180), 10) || (VIRTUS_FAST_MODE ? 50 : 180)
+);
+const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(
+  VIRTUS_ENTER_AFTER_TYPE_MIN_MS,
+  parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || String(VIRTUS_FAST_MODE ? 120 : 450), 10) || (VIRTUS_FAST_MODE ? 120 : 450)
+);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(
+  120,
+  parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || String(VIRTUS_FAST_MODE ? 220 : 700), 10) || (VIRTUS_FAST_MODE ? 220 : 700)
+);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(
+  VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS,
+  parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || String(VIRTUS_FAST_MODE ? 450 : 1400), 10) || (VIRTUS_FAST_MODE ? 450 : 1400)
+);
+const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(
+  120,
+  parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || String(VIRTUS_FAST_MODE ? 220 : 450), 10) || (VIRTUS_FAST_MODE ? 220 : 450)
+);
+const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(
+  8000,
+  parseInt(process.env.VIRTUS_CHAT_OPEN_DEADLINE_MS || String(VIRTUS_FAST_MODE ? 15000 : 30000), 10) || (VIRTUS_FAST_MODE ? 15000 : 30000)
+);
+const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(
+  6000,
+  parseInt(process.env.VIRTUS_COMPOSER_FAST_TIMEOUT_MS || String(VIRTUS_FAST_MODE ? 10000 : 22000), 10) || (VIRTUS_FAST_MODE ? 10000 : 22000)
+);
+const VIRTUS_COMPOSER_RECHECK_MS = Math.max(
+  250,
+  parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || String(VIRTUS_FAST_MODE ? 550 : 1400), 10) || (VIRTUS_FAST_MODE ? 550 : 1400)
+);
+const VIRTUS_SEND_CONFIRM_TIMEOUT_MS = Math.max(
+  1200,
+  parseInt(process.env.VIRTUS_SEND_CONFIRM_TIMEOUT_MS || String(VIRTUS_FAST_MODE ? 3200 : 7000), 10) || (VIRTUS_FAST_MODE ? 3200 : 7000)
+);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
 const VIRTUS_DIRECT_SEND_ON_OPEN = String(process.env.VIRTUS_DIRECT_SEND_ON_OPEN || '1').trim() !== '0';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
@@ -561,12 +596,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
             const norm = s => String(s||'').toLowerCase();
             const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
             return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
-          }, { timeout: 7000 }).then(()=>true).catch(()=>false);
+          }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(()=>true).catch(()=>false);
         } catch { return false; }
       })(),
       (async () => {
         try {
-          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
+          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }, campo)
             .then(()=>true).catch(()=>false);
         } catch { return false; }
       })()
@@ -609,7 +644,7 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
         const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
         return nodes.some((el) => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
       } catch { return false; }
-    }, { timeout: 7000 }).then(() => true).catch(() => false);
+    }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(() => true).catch(() => false);
 
     if (!sent) {
       await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
@@ -670,17 +705,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
+  const fastMode = VIRTUS_FAST_MODE && !slowMode;
   const POLL_INTERVAL_MS = Math.max(
-    15_000,
-    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 45_000 : 30_000)) || (slowMode ? 45_000 : 30_000)
+    fastMode ? 5_000 : 15_000,
+    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (fastMode ? 9_000 : (slowMode ? 45_000 : 30_000))) || (fastMode ? 9_000 : (slowMode ? 45_000 : 30_000))
   );
   const MIN_REPLY_DELAY_MS = Math.max(
-    8_000,
-    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (slowMode ? 80_000 : 60_000)) || (slowMode ? 80_000 : 60_000)
+    fastMode ? 2_000 : 8_000,
+    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (fastMode ? 4_500 : (slowMode ? 80_000 : 60_000))) || (fastMode ? 4_500 : (slowMode ? 80_000 : 60_000))
   );
   const MAX_REPLY_DELAY_MS = Math.max(
     MIN_REPLY_DELAY_MS,
-    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (slowMode ? 150_000 : 120_000)) || (slowMode ? 150_000 : 120_000)
+    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (fastMode ? 9_000 : (slowMode ? 150_000 : 120_000))) || (fastMode ? 9_000 : (slowMode ? 150_000 : 120_000))
   );
   const RETRY_REPLY_DELAY_MS = Math.max(
     2_000,
@@ -1057,10 +1093,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const txt = await p.evaluate(el => (el.innerText || el.textContent || '').trim(), alertExists);
         if (txt && CHAT_BLOCKED_PATTERNS.some(rx => rx.test(txt))) return true;
       }
-      const txts = await p.$$eval('div, span, h1, h2', els =>
-        els.slice(0, 200).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)
-      );
-      for (const t of txts) {
+      // Evita varredura pesada do DOM (Messenger é gigante e isso custava muito em VM lenta).
+      const txts = await p.$$eval(
+        'div[role="alert"], [role="alert"] span, [aria-live="polite"], [aria-live="assertive"]',
+        els => els.slice(0, 60).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)
+      ).catch(() => []);
+      for (const t of (txts || [])) {
         if (CHAT_BLOCKED_PATTERNS.some(rx => rx.test(t))) return true;
       }
     } catch {}
@@ -1263,6 +1301,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function atualizaFila() {
     let mudancaFila = false;
+    // Debug seed (opt-in): injeta chat(s) de chats_pending.json com startedAt=0 direto na fila.
+    // Uso: laboratório / teste controlado sem depender de "chat recente".
+    if (String(process.env.VIRTUS_ALLOW_PENDING_SEED || '0').trim() === '1') {
+      try {
+        const pend = await pendingList(nome);
+        const agoraSeed = agoraEpoch();
+        let changed = false;
+        for (const [chatId, rec] of Object.entries(pend || {})) {
+          if (!chatId) continue;
+          if (!rec || Number(rec.startedAt || 0) !== 0) continue;
+          const ts = respondedCache.get(chatId) || Number(historico[chatId] || 0);
+          const jaRespondido = ts && (agoraSeed - ts) < NO_REPEAT_WINDOW_SEC;
+          if (!jaRespondido && !fila.includes(chatId)) {
+            fila.push(chatId);
+            mudancaFila = true;
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_seed_enqueue',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80)
+              });
+            } catch {}
+          }
+          pend[chatId] = { ...(rec || {}), startedAt: Date.now() };
+          changed = true;
+        }
+        if (changed) {
+          await writeJsonAtomicFsync(PENDING_JSON_NAME(nome), pend);
+        }
+      } catch {}
+    }
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     let novosAti = 0;
     const agora = agoraEpoch();
@@ -1506,49 +1576,84 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const pickBestAnchorHandle = async () => {
             const handles = await p.$$(anchorSel).catch(() => []);
             if (!Array.isArray(handles) || !handles.length) return null;
-            const vp = p.viewport && typeof p.viewport === 'function'
-              ? (p.viewport() || { width: 1366, height: 768 })
-              : { width: 1366, height: 768 };
-            let best = null;
-            let bestScore = -Infinity;
-            for (const h of handles.slice(0, 80)) {
-              try {
-                const box = await h.boundingBox().catch(() => null);
-                if (!box || box.width < 4 || box.height < 4) continue;
-                const visW = Math.max(0, Math.min(box.x + box.width, Number(vp.width || 1366)) - Math.max(box.x, 0));
-                const visH = Math.max(0, Math.min(box.y + box.height, Number(vp.height || 768)) - Math.max(box.y, 0));
-                const visArea = visW * visH;
-                const domMeta = await h.evaluate((el) => {
-                  try {
+
+            // Importante: em `facebook.com/messages` há casos com âncoras duplicadas/clonadas (DOM),
+            // e várias ficam fora do viewport (x negativo). Para não clicar em "clone invisível",
+            // escolhemos o melhor candidato pelo DOM (getBoundingClientRect + estilos + elementFromPoint)
+            // e retornamos o handle pelo índice (mesma ordem do querySelectorAll / $$).
+            try {
+              const pick = await p.evaluate((selector) => {
+                try {
+                  const els = Array.from(document.querySelectorAll(selector)).slice(0, 160);
+                  const vw = Number(window.innerWidth || 1366);
+                  const vh = Number(window.innerHeight || 768);
+                  let bestIdx = -1;
+                  let bestScore = -Infinity;
+
+                  const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
+                  const normHrefPath = (h) => String(h || '').replace(/^https?:\/\/[^/]+/i, '');
+
+                  for (let i = 0; i < els.length; i++) {
+                    const el = els[i];
+                    if (!el || !el.isConnected) continue;
+                    const cs = window.getComputedStyle(el);
+                    if (!cs) continue;
+                    if (cs.display === 'none') continue;
+                    if (cs.visibility === 'hidden') continue;
+                    if (cs.pointerEvents === 'none') continue;
+                    const op = Number(cs.opacity || '1');
+                    if (!Number.isFinite(op) || op <= 0) continue;
+
                     const r = el.getBoundingClientRect();
-                    const cx = r.left + (r.width / 2);
-                    const cy = r.top + (r.height / 2);
+                    if (!r || r.width < 4 || r.height < 4) continue;
+
+                    const visW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+                    const visH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+                    const visArea = visW * visH;
+                    const inView = visArea > 0;
+
+                    const cxRaw = r.left + (r.width / 2);
+                    const cyRaw = r.top + (r.height / 2);
+                    const cx = clamp(cxRaw, 0, vw - 1);
+                    const cy = clamp(cyRaw, 0, vh - 1);
                     const top = document.elementFromPoint(cx, cy);
                     const topAnchor = top && top.closest ? top.closest('a[href]') : null;
-                    const href = String((el.getAttribute('href') || el.href || '') || '');
-                    const topHref = String((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '');
-                    const topMatches = !!topAnchor && !!href && topHref.includes(href.replace(/^https?:\/\/[^/]+/i, ''));
-                    return {
-                      topMatches,
-                      topTag: top ? String(top.tagName || '').toLowerCase() : '',
-                      topHref: String(topHref || '').slice(0, 180)
-                    };
-                  } catch {
-                    return { topMatches: false, topTag: '', topHref: '' };
+
+                    const href = normHrefPath(el.getAttribute('href') || el.href || '');
+                    const topHref = normHrefPath((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '');
+                    const topMatches = !!topAnchor && !!href && !!topHref && topHref.includes(href);
+
+                    const centerInViewport = (cxRaw >= 0 && cxRaw <= vw && cyRaw >= 0 && cyRaw <= vh);
+                    const distOutside = Math.abs(Math.min(0, r.left)) + Math.abs(Math.min(0, r.top)) + Math.max(0, r.right - vw) + Math.max(0, r.bottom - vh);
+
+                    // Score:
+                    // - dá preferência forte para candidato visível e com centro realmente clicável (topMatches)
+                    // - penaliza fora do viewport (distOutside), mas ainda escolhe o "menos ruim" se todos estiverem fora
+                    let score = 0;
+                    score += inView ? (visArea * 10) : -1e9;
+                    score += centerInViewport ? 5e6 : 0;
+                    score += topMatches ? 5e9 : 0;
+                    score -= distOutside * 1000;
+                    score -= (Math.abs(r.x) * 10 + Math.abs(r.y));
+
+                    if (score > bestScore) {
+                      bestScore = score;
+                      bestIdx = i;
+                    }
                   }
-                }).catch(() => ({ topMatches: false, topTag: '', topHref: '' }));
-                const topBonus = domMeta && domMeta.topMatches ? 500000 : 0;
-                // Prioriza âncora realmente visível e com centro clicável no topo.
-                const score = visArea > 0
-                  ? (visArea + (box.width * box.height * 0.01) + topBonus)
-                  : (-Math.abs(box.x) - Math.abs(box.y));
-                if (score > bestScore) {
-                  bestScore = score;
-                  best = h;
+
+                  return { bestIdx, count: els.length };
+                } catch {
+                  return { bestIdx: -1, count: 0 };
                 }
-              } catch {}
-            }
-            return best || handles[0] || null;
+              }, anchorSel).catch(() => null);
+
+              if (pick && Number.isFinite(pick.bestIdx) && pick.bestIdx >= 0 && pick.bestIdx < handles.length) {
+                return handles[pick.bestIdx] || handles[0] || null;
+              }
+            } catch {}
+
+            return handles[0] || null;
           };
           try {
             const anchorProbe = await p.evaluate((id) => {

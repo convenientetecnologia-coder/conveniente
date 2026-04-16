@@ -22,6 +22,11 @@ const CONFIG_MSG_UI_MAX_ROUNDS = Math.max(1, Math.min(5, parseInt(process.env.CO
 const ENSURE_MARKETPLACE_MAX_CLICK_TRIES = Math.max(1, Math.min(6, parseInt(process.env.ENSURE_MARKETPLACE_MAX_CLICK_TRIES || '3', 10) || 3));
 const ENSURE_MARKETPLACE_IDLE_CLICK_MS = Math.max(300, parseInt(process.env.ENSURE_MARKETPLACE_IDLE_CLICK_MS || '650', 10) || 650);
 const ENSURE_MARKETPLACE_ACTIVE_CLICK_MS = Math.max(500, parseInt(process.env.ENSURE_MARKETPLACE_ACTIVE_CLICK_MS || '1000', 10) || 1000);
+const PIN_MODAL_RETRY_COOLDOWN_MS = Math.max(5000, parseInt(process.env.PIN_MODAL_RETRY_COOLDOWN_MS || '30000', 10) || 30000);
+const PIN_MODAL_CREATE_PIN_COOLDOWN_MS = Math.max(30000, parseInt(process.env.PIN_MODAL_CREATE_PIN_COOLDOWN_MS || '180000', 10) || 180000);
+const PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS = Math.max(3000, parseInt(process.env.PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS || '45000', 10) || 45000);
+const PUPPETEER_PROTOCOL_TIMEOUT_MS = Math.max(60000, parseInt(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || '180000', 10) || 180000);
+const _pinModalRuntimeState = new WeakMap();
 
 puppeteer.use(StealthPlugin());
 
@@ -931,6 +936,7 @@ function cleanupUserDataLocks(userDataDir) {
       'SingletonLock',
       'SingletonCookie',
       'SingletonSocket',
+      'DevToolsActivePort',
       'SingletonSharedMemory',
       'Lock',
       'LOCK',
@@ -1609,6 +1615,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // RAM: Encerra processos do perfil e limpa locks
     try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
+    // Windows: dá um respiro curto para o sistema liberar handles/locks após taskkill.
+    try { await new Promise(r => setTimeout(r, 250)); } catch {}
 
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
@@ -1632,8 +1640,30 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--media-cache-size=0', // Zero cache de mídia
       '--window-size=1366,768', // Sempre inicializa janela visível/tamanho padrão
       '--start-maximized' // Maximizada sempre
-      // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
+      // Removido: 'no-zygote' e 'single-process' (instáveis em produção)
     ];
+    // Estabilidade enterprise em VM fraca:
+    // por padrão rodamos em modo "safe" (software) para evitar crash fatal de GPU.
+    // Override: CHROME_GPU_MODE=native para usar aceleração de GPU nativa.
+    const chromeGpuMode = String(process.env.CHROME_GPU_MODE || 'safe').trim().toLowerCase();
+    if (chromeGpuMode !== 'native') {
+      launchArgs.push(
+        '--disable-gpu',
+        '--disable-gpu-compositing',
+        '--disable-accelerated-2d-canvas',
+        '--disable-accelerated-video-decode',
+        '--use-angle=swiftshader',
+        '--enable-unsafe-swiftshader'
+      );
+    }
+    // Debug: habilita log do Chrome para diagnóstico de crash de launch.
+    if (process.env.BROWSER_DEBUG === '1') {
+      try {
+        launchArgs.push(`--log-file=${chromeLogFile}`);
+        launchArgs.push('--enable-logging=stderr');
+        launchArgs.push('--v=1');
+      } catch {}
+    }
     // Reduz explosão de subprocessos por navegador em hosts com muitas contas.
     // Se precisar do comportamento antigo para diagnóstico, habilitar via env.
     if (process.env.CHROME_PROCESS_PER_SITE === '1') {
@@ -1683,7 +1713,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           args: launchArgs,
           defaultViewport,
           dumpio: !!process.env.BROWSER_DEBUG,
-          protocolTimeout: 120000 // 120 segundos garante o Stealth/plugin
+          protocolTimeout: PUPPETEER_PROTOCOL_TIMEOUT_MS
         });
         if (process.env.BROWSER_DEBUG === '1') {
           const spawnargs = b.process && b.process ? b.process().spawnargs : null;
@@ -2437,6 +2467,15 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const path = require('path');
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
   const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
+  const now0 = Date.now();
+  let state = _pinModalRuntimeState.get(page);
+  if (!state) {
+    state = { suppressUntil: 0, createPinSuppressUntil: 0, lastCreatePinLogAt: 0 };
+    _pinModalRuntimeState.set(page, state);
+  }
+  if (now0 < Number(state.suppressUntil || 0)) {
+    return { ok: true, dismissed: false, skipped: true, reason: 'pin_retry_cooldown' };
+  }
 
   // PIN padrão do sistema (enterprise): configurável via env.
   // Default: 882584 (padrão operacional)
@@ -2694,6 +2733,16 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
+    if (det.kind === 'create_pin' && Date.now() < Number(state.createPinSuppressUntil || 0)) {
+      const nowSkip = Date.now();
+      if ((nowSkip - Number(state.lastCreatePinLogAt || 0)) >= PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS) {
+        state.lastCreatePinLogAt = nowSkip;
+        try {
+          logger.info(`${logPrefix} pin_modal skip kind=create_pin reason=create_pin_cooldown`);
+        } catch {}
+      }
+      return { ok: true, dismissed: false, skipped: true, reason: 'create_pin_cooldown' };
+    }
 
     // snapshot mínimo sempre que detecta (ajuda a comparar DOM real vs esperado)
     try {
@@ -2798,14 +2847,25 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
 
     try {
-      pinLog({ event:'pin_modal_dismiss_attempt', attempt, kind: det.kind || null, url: (()=>{try{return page.url();}catch{return ''}})(), clickedTrusted: !!clickedTrusted, clickedEval: !!clicked });
-      logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} kind=${det.kind||''} clickedTrusted=${!!clickedTrusted} clickedEval=${!!clicked}`);
+      const nowLog = Date.now();
+      const shouldLogCreatePin = det.kind !== 'create_pin' || (clickedTrusted || clicked) || ((nowLog - Number(state.lastCreatePinLogAt || 0)) >= PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS);
+      if (shouldLogCreatePin) {
+        if (det.kind === 'create_pin') state.lastCreatePinLogAt = nowLog;
+        pinLog({ event:'pin_modal_dismiss_attempt', attempt, kind: det.kind || null, url: (()=>{try{return page.url();}catch{return ''}})(), clickedTrusted: !!clickedTrusted, clickedEval: !!clicked });
+        logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} kind=${det.kind||''} clickedTrusted=${!!clickedTrusted} clickedEval=${!!clicked}`);
+      }
     } catch {}
     await sleep(700);
 
     const det2 = await detectMessengerPinModal(page);
     if (!det2.present) return { ok: true, dismissed: true };
+    if (det2.kind === 'create_pin') {
+      state.createPinSuppressUntil = Date.now() + PIN_MODAL_CREATE_PIN_COOLDOWN_MS;
+    } else {
+      state.suppressUntil = Date.now() + PIN_MODAL_RETRY_COOLDOWN_MS;
+    }
   }
+  state.suppressUntil = Date.now() + PIN_MODAL_RETRY_COOLDOWN_MS;
   return { ok: false, error: 'pin_modal_still_present' };
 }
 
