@@ -128,6 +128,8 @@ const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VI
 const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
 const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(8000, parseInt(process.env.VIRTUS_CHAT_OPEN_DEADLINE_MS || '30000', 10) || 30000);
+const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(6000, parseInt(process.env.VIRTUS_COMPOSER_FAST_TIMEOUT_MS || '22000', 10) || 22000);
+const VIRTUS_COMPOSER_RECHECK_MS = Math.max(500, parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
@@ -670,8 +672,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (slowMode ? 22_000 : 10_000)) || (slowMode ? 22_000 : 10_000)
   );
   const RETRY_REPLY_DELAY_MS = Math.max(
-    5_000,
-    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 10_000) || 10_000
+    2_000,
+    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 3_000) || 3_000
   );
   const SCROLL_TOP_INTERVAL_MS = Math.max(
     120_000,
@@ -1416,15 +1418,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'responder_chat' });
-        if (!marketReady) {
-          logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Mantendo chat na fila para retry curto.', { nome, chatId });
-          replyRetryReasonByChat.set(chatId, 'marketplace_indisponivel');
-          try { await pendingDel(nome, chatId); } catch {}
-          chatAtivo = null;
-          return;
-        }
-
         const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
           log(`[GUARD-ID] Já respondido (ID ${chatId}) <8h. Pulando envio.`);
@@ -1434,123 +1427,137 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
-        await scrollChatsToTop(p, nome).catch(()=>{});
-        await sleep(300);
-        let found = await p.$(anchorSel);
-
-        if (!found) {
-          logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
-        const openDeadlineAt = Date.now() + VIRTUS_CHAT_OPEN_DEADLINE_MS;
-        let achou = false;
+        let found = null;
+        let achou = await assertOnChat(p, chatId, { timeoutMs: 0 });
         let urlAtual = '';
-        const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
-        for (let clickTry = 0; clickTry < 2 && !achou && Date.now() < openDeadlineAt; clickTry++) {
-          try {
-            await found.evaluate((el) => {
-              try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
-            });
-          } catch {}
+        if (!achou) {
+          const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 12000, force: false, reason: 'responder_chat' });
+          if (!marketReady) {
+            logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Mantendo chat na fila para retry curto.', { nome, chatId });
+            replyRetryReasonByChat.set(chatId, 'marketplace_indisponivel');
+            try { await pendingDel(nome, chatId); } catch {}
+            chatAtivo = null;
+            return;
+          }
 
-          for (const clickMode of clickOrder) {
-            if (achou) break;
-            if (Date.now() >= openDeadlineAt) break;
+          let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
+          await scrollChatsToTop(p, nome).catch(()=>{});
+          await sleep(300);
+          found = await p.$(anchorSel);
+
+          if (!found) {
+            logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
+          const openDeadlineAt = Date.now() + VIRTUS_CHAT_OPEN_DEADLINE_MS;
+          const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
+          for (let clickTry = 0; clickTry < 2 && !achou && Date.now() < openDeadlineAt; clickTry++) {
             try {
-              if (clickMode === 'dom') {
-                await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
-              } else {
-                const box = await found.boundingBox().catch(() => null);
-                if (box && box.width > 4 && box.height > 4) {
-                  const x = box.x + (box.width / 2);
-                  const y = box.y + (box.height / 2);
-                  await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
-                  await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
+              await found.evaluate((el) => {
+                try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
+              });
+            } catch {}
+
+            for (const clickMode of clickOrder) {
+              if (achou) break;
+              if (Date.now() >= openDeadlineAt) break;
+              try {
+                if (clickMode === 'dom') {
+                  await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+                } else {
+                  const box = await found.boundingBox().catch(() => null);
+                  if (box && box.width > 4 && box.height > 4) {
+                    const x = box.x + (box.width / 2);
+                    const y = box.y + (box.height / 2);
+                    await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
+                    await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
+                  }
                 }
+              } catch {}
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'virtus_chat_open_click_attempt',
+                  nome: String(nome || ''),
+                  chatId: String(chatId || '').slice(0, 80),
+                  clickTry: Number(clickTry + 1),
+                  mode: String(clickMode || '')
+                });
+              } catch {}
+
+              await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+
+              let attempts = 0;
+              while (attempts < 6 && Date.now() < openDeadlineAt) {
+                urlAtual = await p.evaluate(() => String(location.href || ''));
+                const inThread = await p.evaluate((id) => {
+                  try {
+                    const href = String(location.href || '');
+                    if (href.includes(`/marketplace/t/${id}`) || href.includes(`/messages/t/${id}`)) return true;
+                    const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
+                    if (!rowById) return false;
+                    if (rowById.closest('[aria-current="page"], [aria-selected="true"]')) return true;
+                    return false;
+                  } catch { return false; }
+                }, chatId).catch(() => false);
+                if (inThread) {
+                  achou = true;
+                  break;
+                }
+                await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
+                attempts++;
               }
-            } catch {}
+
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'virtus_chat_open_click_result',
+                  nome: String(nome || ''),
+                  chatId: String(chatId || '').slice(0, 80),
+                  clickTry: Number(clickTry + 1),
+                  mode: String(clickMode || ''),
+                  ok: !!achou,
+                  url: String(urlAtual || '').slice(0, 180)
+                });
+              } catch {}
+            }
+
+            // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
+            if (!achou && clickTry < 1) {
+              found = await p.$(anchorSel).catch(() => null);
+              if (!found) break;
+            }
+          }
+          if (!achou && Date.now() < openDeadlineAt) {
             try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'virtus_chat_open_click_attempt',
-                nome: String(nome || ''),
-                chatId: String(chatId || '').slice(0, 80),
-                clickTry: Number(clickTry + 1),
-                mode: String(clickMode || '')
-              });
-            } catch {}
-
-            await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
-
-            let attempts = 0;
-            while (attempts < 6 && Date.now() < openDeadlineAt) {
-              urlAtual = await p.evaluate(() => String(location.href || ''));
-              const inThread = await p.evaluate((id) => {
-                try {
-                  const href = String(location.href || '');
-                  if (href.includes(`/marketplace/t/${id}`) || href.includes(`/messages/t/${id}`)) return true;
-                  const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
-                  if (!rowById) return false;
-                  if (rowById.closest('[aria-current="page"], [aria-selected="true"]')) return true;
-                  return false;
-                } catch { return false; }
+              const forcedSelect = await p.evaluate((id) => {
+                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 6);
+                if (!all.length) return false;
+                for (const a of all) {
+                  try {
+                    const row = a.closest('div[role="row"]') || a;
+                    row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                    row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                    row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    row.click();
+                  } catch {}
+                  try { a.click(); } catch {}
+                }
+                return true;
               }, chatId).catch(() => false);
-              if (inThread) {
-                achou = true;
-                break;
+              if (forcedSelect) {
+                await sleep(1100);
+                if (await assertOnChat(p, chatId, { timeoutMs: 2800 })) achou = true;
               }
-              await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
-              attempts++;
-            }
-
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'virtus_chat_open_click_result',
-                nome: String(nome || ''),
-                chatId: String(chatId || '').slice(0, 80),
-                clickTry: Number(clickTry + 1),
-                mode: String(clickMode || ''),
-                ok: !!achou,
-                url: String(urlAtual || '').slice(0, 180)
-              });
             } catch {}
           }
-
-          // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
-          if (!achou && clickTry < 1) {
-            found = await p.$(anchorSel).catch(() => null);
-            if (!found) break;
-          }
-        }
-        if (!achou && Date.now() < openDeadlineAt) {
-          try {
-            const forcedSelect = await p.evaluate((id) => {
-              const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 6);
-              if (!all.length) return false;
-              for (const a of all) {
-                try {
-                  const row = a.closest('div[role="row"]') || a;
-                  row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-                  row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                  row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                  row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                  row.click();
-                } catch {}
-                try { a.click(); } catch {}
-              }
-              return true;
-            }, chatId).catch(() => false);
-            if (forcedSelect) {
-              await sleep(1100);
-              if (await assertOnChat(p, chatId, { timeoutMs: 2800 })) achou = true;
-            }
-          } catch {}
+        } else {
+          logger.info('[VIRTUS] Chat já aberto no momento de responder. Fast-path para digitação.', { nome, chatId });
         }
         if (!achou) {
           logger.warn(`Não entrou no chat correto no prazo. Reagendando retry curto. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId, openDeadlineMs: VIRTUS_CHAT_OPEN_DEADLINE_MS });
@@ -1583,7 +1590,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        let campo = await waitForComposer(p, 10000);
+        const composerFastDeadlineAt = Date.now() + VIRTUS_COMPOSER_FAST_TIMEOUT_MS;
+        let campo = await waitForComposer(p, 3500);
         if (!campo) {
           logger.warn('Composer não encontrado. Retry por click no mesmo chat (sem goto).', { nome, chatId });
           try {
@@ -1613,7 +1621,32 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             resetFail(chatId);
             return;
           }
-          campo = await waitForComposer(p, 8000);
+          campo = await waitForComposer(p, 3000);
+        }
+
+        while (!campo && Date.now() < composerFastDeadlineAt) {
+          try {
+            if (!running || !epochOk()) break;
+            const stillOnChat = await assertOnChat(p, chatId, { timeoutMs: 700 });
+            if (!stillOnChat && found) {
+              try { await found.click({ delay: randomBetween(60, 120) }).catch(()=>{}); } catch {}
+            }
+            campo = await waitForComposer(p, VIRTUS_COMPOSER_RECHECK_MS);
+            if (campo) break;
+            if (found) {
+              try {
+                const box3 = await found.boundingBox().catch(() => null);
+                if (box3 && box3.width > 4 && box3.height > 4) {
+                  const x3 = box3.x + (box3.width / 2);
+                  const y3 = box3.y + (box3.height / 2);
+                  await p.mouse.click(x3, y3, { delay: randomBetween(50, 120) }).catch(()=>{});
+                } else {
+                  await found.click({ delay: randomBetween(50, 120) }).catch(()=>{});
+                }
+              } catch {}
+            }
+            await sleep(350);
+          } catch {}
         }
 
         if (!campo) {
