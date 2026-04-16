@@ -127,6 +127,7 @@ const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, 
 const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
 const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
+const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(8000, parseInt(process.env.VIRTUS_CHAT_OPEN_DEADLINE_MS || '30000', 10) || 30000);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
@@ -657,14 +658,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const POLL_INTERVAL_MS = Math.max(
-    45_000,
-    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 90_000 : 60_000)) || (slowMode ? 90_000 : 60_000)
+    15_000,
+    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 45_000 : 30_000)) || (slowMode ? 45_000 : 30_000)
   );
-  const MIN_REPLY_DELAY_MS = slowMode ? 80_000 : 60_000;
-  const MAX_REPLY_DELAY_MS = slowMode ? 150_000 : 120_000;
+  const MIN_REPLY_DELAY_MS = Math.max(
+    3_000,
+    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (slowMode ? 12_000 : 6_000)) || (slowMode ? 12_000 : 6_000)
+  );
+  const MAX_REPLY_DELAY_MS = Math.max(
+    MIN_REPLY_DELAY_MS,
+    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (slowMode ? 22_000 : 10_000)) || (slowMode ? 22_000 : 10_000)
+  );
   const RETRY_REPLY_DELAY_MS = Math.max(
-    8_000,
-    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 15_000) || 15_000
+    5_000,
+    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 10_000) || 10_000
   );
   const SCROLL_TOP_INTERVAL_MS = Math.max(
     120_000,
@@ -1440,10 +1447,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
+        const openDeadlineAt = Date.now() + VIRTUS_CHAT_OPEN_DEADLINE_MS;
         let achou = false;
         let urlAtual = '';
         const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
-        for (let clickTry = 0; clickTry < 2 && !achou; clickTry++) {
+        for (let clickTry = 0; clickTry < 2 && !achou && Date.now() < openDeadlineAt; clickTry++) {
           try {
             await found.evaluate((el) => {
               try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
@@ -1452,6 +1460,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           for (const clickMode of clickOrder) {
             if (achou) break;
+            if (Date.now() >= openDeadlineAt) break;
             try {
               if (clickMode === 'dom') {
                 await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
@@ -1479,7 +1488,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
 
             let attempts = 0;
-            while (attempts < 6) {
+            while (attempts < 6 && Date.now() < openDeadlineAt) {
               urlAtual = await p.evaluate(() => String(location.href || ''));
               const inThread = await p.evaluate((id) => {
                 try {
@@ -1519,7 +1528,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!found) break;
           }
         }
-        if (!achou) {
+        if (!achou && Date.now() < openDeadlineAt) {
           try {
             const forcedSelect = await p.evaluate((id) => {
               const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 6);
@@ -1544,9 +1553,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           } catch {}
         }
         if (!achou) {
-          logger.error(`Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId });
+          logger.warn(`Não entrou no chat correto no prazo. Reagendando retry curto. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId, openDeadlineMs: VIRTUS_CHAT_OPEN_DEADLINE_MS });
+          replyRetryReasonByChat.set(chatId, 'chat_open_timeout');
           try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
         }
@@ -1616,12 +1625,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try { await pendingDel(nome, chatId); } catch {}
             try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
             resetFail(chatId);
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
           } else {
+            replyRetryReasonByChat.set(chatId, 'composer_missing');
             try { await pendingDel(nome, chatId); } catch {}
+            chatAtivo = null;
+            return;
           }
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
         }
 // REVALIDAÇÃO FINAL DE TTL: aborta se alguém marcou este chat < janela
 {
