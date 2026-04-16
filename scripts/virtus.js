@@ -129,11 +129,11 @@ const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_
 const VIRTUS_FAST_MODE = String(process.env.VIRTUS_FAST_MODE || '0').trim() === '1';
 const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(
   0,
-  parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || String(VIRTUS_FAST_MODE ? 0 : 25), 10) || (VIRTUS_FAST_MODE ? 0 : 25)
+  parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || String(VIRTUS_FAST_MODE ? 0 : 12), 10) || (VIRTUS_FAST_MODE ? 0 : 12)
 );
 const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(
   VIRTUS_TYPE_DELAY_MIN_MS,
-  parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || String(VIRTUS_FAST_MODE ? 12 : 60), 10) || (VIRTUS_FAST_MODE ? 12 : 60)
+  parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || String(VIRTUS_FAST_MODE ? 6 : 30), 10) || (VIRTUS_FAST_MODE ? 6 : 30)
 );
 const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(
   0,
