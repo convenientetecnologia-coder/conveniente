@@ -1053,6 +1053,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   const COMPOSER_SELECTORS = [
+    'div[contenteditable="true"][role="textbox"][aria-label="Mensagem"][data-lexical-editor="true"]',
+    'div[contenteditable="true"][role="textbox"][aria-placeholder="Aa"][data-lexical-editor="true"]',
     'div[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"][aria-label]',
     'div[contenteditable="true"]',
@@ -1493,6 +1495,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
           log(`[GUARD-ID] Já respondido (ID ${chatId}) <8h. Pulando envio.`);
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_skip_recently_responded',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              tsPrev: Number(tsPrev || 0),
+              nowEpoch: Number(agoraEpoch() || 0),
+              noRepeatWindowSec: Number(NO_REPEAT_WINDOW_SEC || 0)
+            });
+          } catch {}
+          // #region agent log
+          fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H9',location:'virtus.js:responderChat.guardRecent',message:'skip_recently_responded',data:{nome:String(nome||''),chatId:String(chatId||''),tsPrev:Number(tsPrev||0),nowEpoch:Number(agoraEpoch()||0),windowSec:Number(NO_REPEAT_WINDOW_SEC||0)},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1535,15 +1551,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               : { width: 1366, height: 768 };
             let best = null;
             let bestScore = -Infinity;
-            for (const h of handles.slice(0, 20)) {
+            for (const h of handles.slice(0, 80)) {
               try {
                 const box = await h.boundingBox().catch(() => null);
                 if (!box || box.width < 4 || box.height < 4) continue;
                 const visW = Math.max(0, Math.min(box.x + box.width, Number(vp.width || 1366)) - Math.max(box.x, 0));
                 const visH = Math.max(0, Math.min(box.y + box.height, Number(vp.height || 768)) - Math.max(box.y, 0));
                 const visArea = visW * visH;
-                // Prioriza âncora realmente visível; fallback escolhe a mais próxima do viewport.
-                const score = visArea > 0 ? (visArea + (box.width * box.height * 0.01)) : (-Math.abs(box.x) - Math.abs(box.y));
+                const domMeta = await h.evaluate((el) => {
+                  try {
+                    const r = el.getBoundingClientRect();
+                    const cx = r.left + (r.width / 2);
+                    const cy = r.top + (r.height / 2);
+                    const top = document.elementFromPoint(cx, cy);
+                    const topAnchor = top && top.closest ? top.closest('a[href]') : null;
+                    const href = String((el.getAttribute('href') || el.href || '') || '');
+                    const topHref = String((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '');
+                    const topMatches = !!topAnchor && !!href && topHref.includes(href.replace(/^https?:\/\/[^/]+/i, ''));
+                    return {
+                      topMatches,
+                      topTag: top ? String(top.tagName || '').toLowerCase() : '',
+                      topHref: String(topHref || '').slice(0, 180)
+                    };
+                  } catch {
+                    return { topMatches: false, topTag: '', topHref: '' };
+                  }
+                }).catch(() => ({ topMatches: false, topTag: '', topHref: '' }));
+                const topBonus = domMeta && domMeta.topMatches ? 500000 : 0;
+                // Prioriza âncora realmente visível e com centro clicável no topo.
+                const score = visArea > 0
+                  ? (visArea + (box.width * box.height * 0.01) + topBonus)
+                  : (-Math.abs(box.x) - Math.abs(box.y));
                 if (score > bestScore) {
                   bestScore = score;
                   best = h;
@@ -1608,12 +1646,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const selected = await found.evaluate((el) => {
                 try {
                   const r = el.getBoundingClientRect();
+                  const cx = r.left + (r.width / 2);
+                  const cy = r.top + (r.height / 2);
+                  const top = document.elementFromPoint(cx, cy);
+                  const topAnchor = top && top.closest ? top.closest('a[href]') : null;
                   return {
                     href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
                     x: Math.round(Number(r.x || 0)),
                     y: Math.round(Number(r.y || 0)),
                     w: Math.round(Number(r.width || 0)),
-                    h: Math.round(Number(r.height || 0))
+                    h: Math.round(Number(r.height || 0)),
+                    topTag: top ? String(top.tagName || '').toLowerCase() : '',
+                    topHref: String((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '').slice(0, 180)
                   };
                 } catch {
                   return null;
@@ -1652,6 +1696,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             for (const clickMode of clickOrder) {
               if (achou) break;
               if (Date.now() >= openDeadlineAt) break;
+              // Re-pick por tentativa/método para reduzir risco de handle stale/off-screen.
+              const rePicked = await pickBestAnchorHandle().catch(() => null);
+              if (rePicked) found = rePicked;
+              try {
+                const selectedForClick = await found.evaluate((el) => {
+                  try {
+                    const r = el.getBoundingClientRect();
+                    return {
+                      href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
+                      x: Math.round(Number(r.x || 0)),
+                      y: Math.round(Number(r.y || 0)),
+                      w: Math.round(Number(r.width || 0)),
+                      h: Math.round(Number(r.height || 0))
+                    };
+                  } catch {
+                    return null;
+                  }
+                }).catch(() => null);
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'virtus_chat_anchor_selected_for_click',
+                  nome: String(nome || ''),
+                  chatId: String(chatId || '').slice(0, 80),
+                  clickTry: Number(clickTry + 1),
+                  mode: String(clickMode || ''),
+                  selected: selectedForClick || null
+                });
+                // #region agent log
+                fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H10',location:'virtus.js:responderChat.clickLoop',message:'anchor_selected_for_click',data:{nome:String(nome||''),chatId:String(chatId||''),clickTry:Number(clickTry+1),mode:String(clickMode||''),selected:selectedForClick||null},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
+              } catch {}
               try {
                 const clickPreflight = await found.evaluate((el) => {
                   try {
@@ -1690,9 +1765,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               } catch {}
               try {
                 if (clickMode === 'dom') {
-                  await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+                  const rowClicked = await found.evaluate((el) => {
+                    try {
+                      const row = el.closest('div[role="row"]') || el;
+                      row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                      row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                      row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                      row.click();
+                      return true;
+                    } catch {
+                      return false;
+                    }
+                  }).catch(() => false);
+                  if (!rowClicked) {
+                    await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+                  }
                 } else {
-                  const box = await found.boundingBox().catch(() => null);
+                  let rowHandle = null;
+                  try {
+                    rowHandle = await found.evaluateHandle((el) => el.closest('div[role="row"]') || el);
+                  } catch {}
+                  const box = rowHandle ? await rowHandle.boundingBox().catch(() => null) : await found.boundingBox().catch(() => null);
+                  try { if (rowHandle) await rowHandle.dispose(); } catch {}
                   if (box && box.width > 4 && box.height > 4) {
                     const x = box.x + (box.width / 2);
                     const y = box.y + (box.height / 2);
