@@ -725,6 +725,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let historico = {};
   let chatAtivo = null;
   const replyRetryReasonByChat = new Map();
+  const replyRetryCountByChat = new Map();
   const replyScheduleMetaByChat = new Map();
 
   const HIST_FILE = HIST_JSON_NAME(nome);
@@ -745,6 +746,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const RETRY_REPLY_DELAY_MS = Math.max(
     2_000,
     Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 3_000) || 3_000
+  );
+  const RETRY_REPLY_MAX_DELAY_MS = Math.max(
+    RETRY_REPLY_DELAY_MS,
+    Number(process.env.VIRTUS_REPLY_RETRY_MAX_DELAY_MS || 45_000) || 45_000
   );
   const SCROLL_TOP_INTERVAL_MS = Math.max(
     120_000,
@@ -1183,8 +1188,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     setFailCount(chatId, n);
     return n;
   }
+  function markReplyRetry(chatId, reason) {
+    replyRetryReasonByChat.set(chatId, reason);
+  }
+  function nextReplyRetryDelay(chatId) {
+    const prev = Number(replyRetryCountByChat.get(chatId) || 0) || 0;
+    const count = prev + 1;
+    replyRetryCountByChat.set(chatId, count);
+    const exp = Math.min(4, Math.max(0, count - 1)); // 1x,2x,4x,8x,16x
+    const base = RETRY_REPLY_DELAY_MS * Math.pow(2, exp);
+    const jitter = randomBetween(300, 1800);
+    const delay = Math.min(RETRY_REPLY_MAX_DELAY_MS, base) + jitter;
+    return { delay, count };
+  }
   function resetFail(chatId) {
     failCounts.delete(chatId);
+    replyRetryCountByChat.delete(chatId);
+    replyRetryReasonByChat.delete(chatId);
+    replyScheduleMetaByChat.delete(chatId);
   }
 
   async function coletaChatsMarketplaceRecentes() {
@@ -1405,16 +1426,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (filaChatTimer) return;
     if (!fila.length) {
       if (replyRetryReasonByChat.size > 0) replyRetryReasonByChat.clear();
+      if (replyRetryCountByChat.size > 0) replyRetryCountByChat.clear();
       if (replyScheduleMetaByChat.size > 0) replyScheduleMetaByChat.clear();
       return;
     }
 
     const next = fila[0];
     const retryReason = replyRetryReasonByChat.get(next);
-    const delay = retryReason ? RETRY_REPLY_DELAY_MS : randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
+    const retryMeta = retryReason ? nextReplyRetryDelay(next) : null;
+    const delay = retryMeta ? Number(retryMeta.delay || RETRY_REPLY_DELAY_MS) : randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
     const now = Date.now();
     const dueAt = now + delay;
-    replyScheduleMetaByChat.set(next, { scheduledAt: now, dueAt, delay, retryReason: retryReason || null });
+    replyScheduleMetaByChat.set(next, {
+      scheduledAt: now,
+      dueAt,
+      delay,
+      retryReason: retryReason || null,
+      retryCount: retryMeta ? Number(retryMeta.count || 1) : 0
+    });
     try {
       provisionAudit.append({
         ts: now,
@@ -1424,12 +1453,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         delayMs: Number(delay || 0),
         dueAt,
         retryReason: retryReason || null,
+        retryCount: retryMeta ? Number(retryMeta.count || 1) : 0,
         queueLen: Number(fila.length || 0)
       });
     } catch {}
     if (retryReason) {
       replyRetryReasonByChat.delete(next);
-      log(`[FILA] Retry chat ${next} em ${Math.round(delay/1000)}s (${retryReason})`);
+      log(`[FILA] Retry chat ${next} em ${Math.round(delay/1000)}s (${retryReason}; tentativa=${retryMeta ? retryMeta.count : 1})`);
     } else {
       log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
     }
@@ -1772,7 +1802,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           if (!found) {
             logger.warn(`Âncora do chatId ${chatId} não encontrada. Retry curto (click-only).`, { nome, chatId });
-            replyRetryReasonByChat.set(chatId, 'chat_anchor_missing');
+            markReplyRetry(chatId, 'chat_anchor_missing');
             try { await pendingDel(nome, chatId); } catch {}
             chatAtivo = null;
             return;
@@ -1987,7 +2017,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         if (!achou) {
           logger.warn(`Não entrou no chat correto no prazo. Reagendando retry curto. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId, openDeadlineMs: VIRTUS_CHAT_OPEN_DEADLINE_MS });
-          replyRetryReasonByChat.set(chatId, 'chat_open_timeout');
+          markReplyRetry(chatId, 'chat_open_timeout');
           try { await pendingDel(nome, chatId); } catch {}
           chatAtivo = null;
           return;
@@ -2012,7 +2042,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const preSendOnChat = await assertOnChat(p, chatId, { timeoutMs: 1200 });
         if (!preSendOnChat) {
           try { await pendingDel(nome, chatId); } catch {}
-          replyRetryReasonByChat.set(chatId, 'context_lost_before_send');
+          markReplyRetry(chatId, 'context_lost_before_send');
           chatAtivo = null;
           await logIssue(nome, 'mil_action', `virtus_context_abort: url divergiu antes do envio (chat ${chatId})`);
           return;
@@ -2155,7 +2185,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             chatAtivo = null;
             return;
           } else {
-            replyRetryReasonByChat.set(chatId, 'composer_missing');
+            markReplyRetry(chatId, 'composer_missing');
             try { await pendingDel(nome, chatId); } catch {}
             chatAtivo = null;
             return;

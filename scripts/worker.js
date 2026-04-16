@@ -7502,6 +7502,21 @@ async function robeTickGlobal() {
       return;
     }
   } catch {}
+  // Circuit breaker leve: em pressão CDP, poupa o Robe para priorizar estabilidade
+  // do atendimento e evitar "ações pela metade" por saturação de sessão.
+  try {
+    const cdpPressure = getCdpPressureState();
+    if (cdpPressure.active) {
+      robeTickGlobal._lastCdpPressureLogAt = robeTickGlobal._lastCdpPressureLogAt || 0;
+      const now = Date.now();
+      const last = Number(robeTickGlobal._lastCdpPressureLogAt || 0) || 0;
+      if (!last || (now - last) > 60000) {
+        robeTickGlobal._lastCdpPressureLogAt = now;
+        await milLog('mil_action', `robeTickGlobal_skip_due_cdp_pressure reason=${cdpPressure.reason || 'cdp_fatal'} msLeft=${cdpPressure.msLeft}`);
+      }
+      return;
+    }
+  } catch {}
   // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
   const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
   let lightMaxEnqueue = null;
@@ -14723,9 +14738,52 @@ process.on('message', async (msg) => {
 
 const CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS = Math.max(5000, parseInt(process.env.CONVENIENTE_CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS || '15000', 10) || 15000);
 let _lastCdpFatalRecoverySweepAt = 0;
+const CDP_PRESSURE_WINDOW_MS = Math.max(60_000, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_WINDOW_MS || String(10 * 60 * 1000), 10) || (10 * 60 * 1000));
+const CDP_PRESSURE_THRESHOLD = Math.max(1, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_THRESHOLD || '2', 10) || 2);
+const CDP_PRESSURE_HOLD_MS = Math.max(60_000, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_HOLD_MS || String(8 * 60 * 1000), 10) || (8 * 60 * 1000));
+let _cdpFatalEvents = [];
+let _cdpPressureUntil = 0;
+let _cdpPressureReason = '';
+
+function noteCdpFatalPressure({ source = '', msg = '' } = {}) {
+  try {
+    const now = Date.now();
+    _cdpFatalEvents = (_cdpFatalEvents || []).filter(ts => (now - Number(ts || 0)) <= CDP_PRESSURE_WINDOW_MS);
+    _cdpFatalEvents.push(now);
+    const count = _cdpFatalEvents.length;
+    if (count >= CDP_PRESSURE_THRESHOLD) {
+      const nextUntil = now + CDP_PRESSURE_HOLD_MS;
+      if (nextUntil > Number(_cdpPressureUntil || 0)) _cdpPressureUntil = nextUntil;
+      _cdpPressureReason = String(source || 'cdp_fatal').trim() || 'cdp_fatal';
+      try {
+        logger.warn('[FATAL][WORKER] cdp_pressure_mode_on', {
+          source: String(source || ''),
+          countWindow: count,
+          windowMs: CDP_PRESSURE_WINDOW_MS,
+          holdMs: CDP_PRESSURE_HOLD_MS,
+          pressureUntil: _cdpPressureUntil,
+          msg: String(msg || '').slice(0, 220)
+        });
+      } catch {}
+    }
+  } catch {}
+}
+
+function getCdpPressureState() {
+  const now = Date.now();
+  const until = Number(_cdpPressureUntil || 0) || 0;
+  const active = until > now;
+  return {
+    active,
+    until: until || null,
+    reason: active ? String(_cdpPressureReason || 'cdp_fatal') : null,
+    msLeft: active ? (until - now) : 0
+  };
+}
 
 async function runCdpFatalRecoverySweep({ source = '', msg = '' } = {}) {
   try {
+    noteCdpFatalPressure({ source, msg });
     const now = Date.now();
     if ((now - _lastCdpFatalRecoverySweepAt) < CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS) {
       try {
