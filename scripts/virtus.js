@@ -66,17 +66,6 @@ async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
       }, chatId).catch(() => false),
       new Promise((resolve) => setTimeout(() => resolve('__virtus_eval_timeout__'), VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS))
     ]).catch(() => false);
-    if (evalOrTimeout === '__virtus_eval_timeout__') {
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'virtus_assert_on_chat_eval_timeout',
-          chatId: String(chatId || '').slice(0, 80),
-          timeoutMs: Number(VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS || 0),
-          waitedMs: Number(Date.now() - evalStartedAt)
-        });
-      } catch {}
-    }
     const ok = (evalOrTimeout === true);
     if (ok) return true;
     if (!timeoutMs) return false;
@@ -149,45 +138,9 @@ const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(6000, parseInt(process.env.VIRT
 const VIRTUS_COMPOSER_RECHECK_MS = Math.max(500, parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
 const VIRTUS_DIRECT_SEND_ON_OPEN = String(process.env.VIRTUS_DIRECT_SEND_ON_OPEN || '1').trim() !== '0';
-const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
-const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
-  try {
-    if (!LEGACY_RUNTIME_DEBUG_ENABLED) return;
-    const now = Date.now();
-    const k = String(key || `${hypothesisId}:${location}:${message}`);
-    const last = Number(__virtusDbgState.lastByKey[k] || 0) || 0;
-    if (minIntervalMs > 0 && (now - last) < minIntervalMs) return;
-    __virtusDbgState.lastByKey[k] = now;
-    // #region agent log
-    fetch(__VIRTUS_DEBUG_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        runId: 'stage3-pre-fix',
-        hypothesisId,
-        location,
-        message,
-        data: data && typeof data === 'object' ? data : {},
-        timestamp: now
-      })
-    }).catch(() => {});
-    try {
-      if (provisionAudit && typeof provisionAudit.append === 'function') {
-        provisionAudit.append({
-          ts: now,
-          event: 'dbg_agent_runtime',
-          runId: 'stage3-pre-fix',
-          hypothesisId: String(hypothesisId || ''),
-          location: String(location || ''),
-          message: String(message || ''),
-          data: data && typeof data === 'object' ? data : {}
-        });
-      }
-    } catch {}
-    // #endregion
-  } catch {}
+  return;
 }
 
 // Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
@@ -630,19 +583,8 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
-  const t0 = Date.now();
-  const msgLen = String(msg || '').length;
   setVirtusInputLock(nome, true);
   try {
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'virtus_direct_send_path_start',
-        nome: String(nome || ''),
-        chatId: String(chatId || '').slice(0, 80),
-        msgLen: Number(msgLen || 0)
-      });
-    } catch {}
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
     const focusReady = await p.evaluate(() => {
       try {
@@ -653,32 +595,9 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
         return (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
       } catch { return false; }
     }).catch(() => false);
-    if (!focusReady) {
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'virtus_direct_send_path_result',
-          nome: String(nome || ''),
-          chatId: String(chatId || '').slice(0, 80),
-          ok: false,
-          reason: 'focus_not_ready',
-          durMs: Number(Date.now() - t0)
-        });
-      } catch {}
-      return false;
-    }
+    if (!focusReady) return false;
 
     const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'virtus_direct_send_typing_start',
-        nome: String(nome || ''),
-        chatId: String(chatId || '').slice(0, 80),
-        msgLen: Number(msgLen || 0),
-        typingDelayMs: Number(typingDelayMs || 0)
-      });
-    } catch {}
     await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
     await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
@@ -694,30 +613,8 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
 
     if (!sent) {
       await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'virtus_direct_send_path_result',
-          nome: String(nome || ''),
-          chatId: String(chatId || '').slice(0, 80),
-          ok: false,
-          reason: 'send_confirmation_timeout_direct',
-          durMs: Number(Date.now() - t0)
-        });
-      } catch {}
       return false;
     }
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'virtus_direct_send_path_result',
-        nome: String(nome || ''),
-        chatId: String(chatId || '').slice(0, 80),
-        ok: true,
-        reason: 'sent',
-        durMs: Number(Date.now() - t0)
-      });
-    } catch {}
     return true;
   } finally {
     setVirtusInputLock(nome, false);
@@ -762,7 +659,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // ========== FIM BLOCO FREEZER INSTRUÇÃO 1 ==========
 
   const log = (...args) => logger.info(args.join(' '), { nome });
-  const DEBUG_RUN_ID = `virtus_debug_${Date.now()}`;
 
   let running = true;
   let page = null;
@@ -1011,22 +907,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         setResponded(id, ts);
       }
     }
-    // #region agent log
-    __virtusAgentLog(
-      'H7',
-      'virtus.js:carregaHistorico',
-      'virtus_history_loaded',
-      {
-        nome: String(nome || ''),
-        historicoKeys: Object.keys(historico || {}).length,
-        respondedCacheSize: respondedCache.size,
-        noRepeatWindowSec: NO_REPEAT_WINDOW_SEC,
-        pollIntervalMs: POLL_INTERVAL_MS
-      },
-      `virtus.history.loaded.${String(nome || '')}`,
-      60000
-    );
-    // #endregion
   }
 
   function limpaHistoricoVelho() {
@@ -1049,22 +929,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (first !== undefined) respondedCache.delete(first);
       mudanca = true;
     }
-    // #region agent log
-    __virtusAgentLog(
-      'H7',
-      'virtus.js:limpaHistoricoVelho',
-      'virtus_history_prune',
-      {
-        nome: String(nome || ''),
-        removed,
-        historicoKeys: Object.keys(historico || {}).length,
-        respondedCacheSize: respondedCache.size,
-        changed: !!mudanca
-      },
-      `virtus.history.prune.${String(nome || '')}`,
-      60000
-    );
-    // #endregion
     return mudanca;
   }
 
@@ -1204,7 +1068,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function waitForComposer(p, timeoutMs = 10000) {
-    const waitStartedAt = Date.now();
     const start = Date.now();
     while ((Date.now() - start) < timeoutMs) {
       for (const sel of COMPOSER_SELECTORS) {
@@ -1223,15 +1086,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       await sleep(250);
     }
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'virtus_wait_composer_timeout',
-        nome: String(nome || ''),
-        timeoutMs: Number(timeoutMs || 0),
-        waitedMs: Number(Date.now() - waitStartedAt)
-      });
-    } catch {}
     return null;
   }
 
@@ -1440,27 +1294,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
       mudancaFila = true;
     }
-    // #region agent log
-    __virtusAgentLog(
-      'H8',
-      'virtus.js:atualizaFila',
-      'virtus_queue_state',
-      {
-        nome: String(nome || ''),
-        chatsNovosCount: Array.isArray(chatsNovos) ? chatsNovos.length : 0,
-        novosAti,
-        filaSize: fila.length,
-        chatAtivo: chatAtivo ? String(chatAtivo) : null,
-        pendingTimers: {
-          filaInterval: !!filaInterval,
-          filaChatTimer: !!filaChatTimer,
-          scrollInterval: !!scrollInterval
-        }
-      },
-      `virtus.queue.state.${String(nome || '')}`,
-      45000
-    );
-    // #endregion
     return mudancaFila;
   }
 
@@ -1492,9 +1325,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         queueLen: Number(fila.length || 0)
       });
     } catch {}
-    // #region agent log
-    fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H1',location:'virtus.js:scheduleNextIfIdle',message:'reply_scheduled',data:{nome:String(nome||''),chatId:String(next||''),delayMs:Number(delay||0),dueAtMs:Number(dueAt||0),retryReason:retryReason||null,queueLen:Number(fila.length||0)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (retryReason) {
       replyRetryReasonByChat.delete(next);
       log(`[FILA] Retry chat ${next} em ${Math.round(delay/1000)}s (${retryReason})`);
@@ -1507,9 +1337,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const sched = replyScheduleMetaByChat.get(next) || null;
       replyScheduleMetaByChat.delete(next);
       const timerDriftMs = (sched && Number(sched.dueAt || 0) > 0) ? (firedAt - Number(sched.dueAt || 0)) : null;
-      // #region agent log
-      fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H1',location:'virtus.js:scheduleNextIfIdle.timer',message:'reply_timer_fired',data:{nome:String(nome||''),chatId:String(next||''),firedAtMs:Number(firedAt||0),dueAtMs:sched?Number(sched.dueAt||0):null,timerDriftMs:(typeof timerDriftMs==='number'?Number(timerDriftMs):null),retryReason:sched?(sched.retryReason||null):null},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       stepLog.appendJSONL(nome, 'virtus', {
         attempt: attId,
         step: 'schedule_reply',
@@ -1544,9 +1371,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function responderChat(chatId, opts = {}) {
     const tStartMs = Date.now();
     const timerDriftMs = Number(opts && opts.timerDriftMs);
-    // #region agent log
-    fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H3',location:'virtus.js:responderChat.entry',message:'responder_chat_start',data:{nome:String(nome||''),chatId:String(chatId||''),timerDriftMs:(Number.isFinite(timerDriftMs)?Number(timerDriftMs):null)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (Number.isFinite(timerDriftMs) && timerDriftMs > 2500) {
       logger.warn('[VIRTUS] Timer drift acima do esperado antes de responder chat', {
         nome,
@@ -1648,9 +1472,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               noRepeatWindowSec: Number(NO_REPEAT_WINDOW_SEC || 0)
             });
           } catch {}
-          // #region agent log
-          fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H9',location:'virtus.js:responderChat.guardRecent',message:'skip_recently_responded',data:{nome:String(nome||''),chatId:String(chatId||''),tsPrev:Number(tsPrev||0),nowEpoch:Number(agoraEpoch()||0),windowSec:Number(NO_REPEAT_WINDOW_SEC||0)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1669,9 +1490,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               hasMessageThreads: Number(document.querySelectorAll('a[href*="/marketplace/t/"], a[href*="/messages/t/"]').length || 0)
             }));
           } catch {}
-          // #region agent log
-          fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H2',location:'virtus.js:responderChat.preClick',message:'chat_not_open_before_click_flow',data:{nome:String(nome||''),chatId:String(chatId||''),preClickCtx:preClickCtx||null},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           // Atendimento é estritamente click-only: não chamar ensureMarketplaceCalmo/goto nesse fluxo.
           try {
             provisionAudit.append({
@@ -1818,9 +1636,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (!found) {
             logger.warn(`Âncora do chatId ${chatId} não encontrada. Retry curto (click-only).`, { nome, chatId });
             replyRetryReasonByChat.set(chatId, 'chat_anchor_missing');
-            // #region agent log
-            fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H4',location:'virtus.js:responderChat.anchorMissing',message:'chat_anchor_missing_retry_short',data:{nome:String(nome||''),chatId:String(chatId||'')},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
             try { await pendingDel(nome, chatId); } catch {}
             chatAtivo = null;
             return;
@@ -1865,9 +1680,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   mode: String(clickMode || ''),
                   selected: selectedForClick || null
                 });
-                // #region agent log
-                fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H10',location:'virtus.js:responderChat.clickLoop',message:'anchor_selected_for_click',data:{nome:String(nome||''),chatId:String(chatId||''),clickTry:Number(clickTry+1),mode:String(clickMode||''),selected:selectedForClick||null},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
               } catch {}
               try {
                 const clickPreflight = await found.evaluate((el) => {
@@ -1955,21 +1767,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 const urlEval = await evalWithTimeout(p, () => String(location.href || ''), undefined, 3000);
                 if (urlEval.ok) {
                   urlAtual = String(urlEval.value || '');
-                } else {
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'virtus_click_check_eval_timeout',
-                      nome: String(nome || ''),
-                      chatId: String(chatId || '').slice(0, 80),
-                      phase: 'location_href',
-                      clickTry: Number(clickTry + 1),
-                      mode: String(clickMode || ''),
-                      attempts: Number(attempts),
-                      durMs: Number(urlEval.durMs || 0),
-                      error: String(urlEval.error || '')
-                    });
-                  } catch {}
                 }
                 const inThreadEval = await evalWithTimeout(p, (id) => {
                   try {
@@ -1982,22 +1779,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   } catch { return false; }
                 }, chatId, 3200);
                 const inThread = !!inThreadEval.ok && !!inThreadEval.value;
-                if (!inThreadEval.ok) {
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'virtus_click_check_eval_timeout',
-                      nome: String(nome || ''),
-                      chatId: String(chatId || '').slice(0, 80),
-                      phase: 'in_thread_check',
-                      clickTry: Number(clickTry + 1),
-                      mode: String(clickMode || ''),
-                      attempts: Number(attempts),
-                      durMs: Number(inThreadEval.durMs || 0),
-                      error: String(inThreadEval.error || '')
-                    });
-                  } catch {}
-                }
                 if (inThread) {
                   achou = true;
                   break;
@@ -2031,9 +1812,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     targetHref: String(currentHref || '').slice(0, 180)
                   });
                 } catch {}
-                // #region agent log
-                fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H2',location:'virtus.js:responderChat.clickResult',message:'chat_click_did_not_activate_thread',data:{nome:String(nome||''),chatId:String(chatId||''),clickTry:Number(clickTry+1),mode:String(clickMode||''),url:String(urlAtual||'').slice(0,200)},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
               }
             }
 
@@ -2073,9 +1851,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!achou) {
           logger.warn(`Não entrou no chat correto no prazo. Reagendando retry curto. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId, openDeadlineMs: VIRTUS_CHAT_OPEN_DEADLINE_MS });
           replyRetryReasonByChat.set(chatId, 'chat_open_timeout');
-          // #region agent log
-          fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H3',location:'virtus.js:responderChat.chatOpenTimeout',message:'chat_open_timeout_retry_short',data:{nome:String(nome||''),chatId:String(chatId||''),urlAtual:String(urlAtual||'').slice(0,200),openDeadlineMs:Number(VIRTUS_CHAT_OPEN_DEADLINE_MS||0)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           try { await pendingDel(nome, chatId); } catch {}
           chatAtivo = null;
           return;
@@ -2084,27 +1859,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Ativa send-guard imediatamente após confirmar navegação correta.
         // P1 hardening: use o Browser (não a Page) para evitar leak quando a page fecha/desconecta.
         acquireSendGuardBrowser(browser, chatId);
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_send_phase_enter',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80)
-          });
-        } catch {}
 
-        const blockedCheckStart = Date.now();
         const blocked = await isChatBlocked(p);
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_blocked_check_done',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80),
-            blocked: !!blocked,
-            durMs: Number(Date.now() - blockedCheckStart)
-          });
-        } catch {}
         if (blocked) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
@@ -2116,18 +1872,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         // Checagem de contexto antes de aguardar o composer
-        const preSendAssertStart = Date.now();
         const preSendOnChat = await assertOnChat(p, chatId, { timeoutMs: 1200 });
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_pre_send_assert_done',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80),
-            ok: !!preSendOnChat,
-            durMs: Number(Date.now() - preSendAssertStart)
-          });
-        } catch {}
         if (!preSendOnChat) {
           try { await pendingDel(nome, chatId); } catch {}
           replyRetryReasonByChat.set(chatId, 'context_lost_before_send');
@@ -2158,29 +1903,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (Array.isArray(msg)) msg = msg.join('\n');
           if (typeof msg !== 'string') msg = String(msg);
         }
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_msg_selected',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80),
-            msgLen: Number(String(msg || '').length)
-          });
-        } catch {}
 
         if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
 
         if (VIRTUS_DIRECT_SEND_ON_OPEN) {
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_direct_send_attempt',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80)
-            });
-          } catch {}
           stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId, mode: 'direct' });
           try {
             provisionAudit.append({
@@ -2192,15 +1920,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             });
           } catch {}
           const sentDirect = await sendMessageDirectIfFocused(p, msg, nome, chatId).catch(() => false);
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_direct_send_result',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              ok: !!sentDirect
-            });
-          } catch {}
           if (sentDirect) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId, mode: 'direct' });
             try {
@@ -2225,19 +1944,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         const composerFastDeadlineAt = Date.now() + VIRTUS_COMPOSER_FAST_TIMEOUT_MS;
-        const composerWaitStart = Date.now();
         let campo = await waitForComposer(p, 3500);
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_wait_composer_probe',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80),
-            phase: 'initial_3500',
-            found: !!campo,
-            waitedMs: Number(Date.now() - composerWaitStart)
-          });
-        } catch {}
         if (!campo) {
           logger.warn('Composer não encontrado. Retry por click no mesmo chat (sem goto).', { nome, chatId });
           try {
@@ -2267,19 +1974,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             resetFail(chatId);
             return;
           }
-          const composerRetryStart = Date.now();
           campo = await waitForComposer(p, 3000);
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_wait_composer_probe',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              phase: 'after_retry_click_3000',
-              found: !!campo,
-              waitedMs: Number(Date.now() - composerRetryStart)
-            });
-          } catch {}
         }
 
         while (!campo && Date.now() < composerFastDeadlineAt) {
@@ -2289,20 +1984,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!stillOnChat && found) {
               try { await found.click({ delay: randomBetween(60, 120) }).catch(()=>{}); } catch {}
             }
-            const composerLoopStart = Date.now();
             campo = await waitForComposer(p, VIRTUS_COMPOSER_RECHECK_MS);
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'virtus_wait_composer_probe',
-                nome: String(nome || ''),
-                chatId: String(chatId || '').slice(0, 80),
-                phase: 'loop_recheck',
-                found: !!campo,
-                waitedMs: Number(Date.now() - composerLoopStart),
-                recheckMs: Number(VIRTUS_COMPOSER_RECHECK_MS || 0)
-              });
-            } catch {}
             if (campo) break;
             if (found) {
               try {
@@ -2324,9 +2006,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const fails = incFail(chatId);
           stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'composer_missing', chatId, failCount: fails });
           logger.error(`Composer indisponível para chat ${chatId}. Tentativas: ${fails}`, { nome, chatId });
-          // #region agent log
-          fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H4',location:'virtus.js:responderChat.composerMissing',message:'composer_missing_path',data:{nome:String(nome||''),chatId:String(chatId||''),failCount:Number(fails||0)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           if (fails >= 2) {
             logger.warn(`${chatId} falhou 2x. Marcando como respondido para não travar fila.`, { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
