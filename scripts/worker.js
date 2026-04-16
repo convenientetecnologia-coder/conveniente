@@ -4441,7 +4441,7 @@ const provisionLock = require('./provisionLock.js');
 const { getAvailableMB } = utils;
 
 const HEALTH_CFG = {
-  TICK_MS: 10000,
+  TICK_MS: Math.max(10_000, parseInt(process.env.HEALTH_TICK_MS || '60000', 10) || 60000),
   DEAD_NO_EVENT_MS: 45000,
   DEAD_NO_DOM_MS: 45000,
   DEAD_NO_NET_MS: 60000,
@@ -11575,7 +11575,7 @@ async function appendIssueNurseDebounced(nome, type, message, key) {
 }
 
 const NURSE_CFG = {
-  INTERVAL_MS: 5000,
+  INTERVAL_MS: Math.max(5_000, parseInt(process.env.NURSE_TICK_MS || '30000', 10) || 30000),
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
@@ -11600,6 +11600,10 @@ const CDP_RECONNECT_CFG = {
   attempts: Math.max(1, Math.min(5, Number(process.env.CDP_RECONNECT_ATTEMPTS || 3) || 3)),
   delaysMs: [2000, 5000, 10000]
 };
+const CDP_CONNECT_PROTOCOL_TIMEOUT_MS = Math.max(
+  60000,
+  Number(process.env.PUPPETEER_CONNECT_PROTOCOL_TIMEOUT_MS || process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || 180000) || 180000
+);
 
 function _envMs(name, fallback) {
   return Math.max(0, Number(process.env[name] || fallback) || fallback);
@@ -11665,7 +11669,7 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
       const b = await puppeteer.connect({
         browserWSEndpoint: wsEndpoint,
         defaultViewport: null,
-        protocolTimeout: 60000
+        protocolTimeout: CDP_CONNECT_PROTOCOL_TIMEOUT_MS
       });
       if (b && b.isConnected && b.isConnected()) {
         const pages = await b.pages().catch(() => []);
@@ -11919,7 +11923,7 @@ async function detectMessengerTempBlock(page) {
 // =========================================================
 const AUTO_LR_CFG = {
   enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
-  tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
+  tickMs: Math.max(5_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 30000) || 30000),
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
   minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
@@ -14138,8 +14142,10 @@ async function stockProvisionResumeTick() {
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
-setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
-setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
+const STOCK_PROVISION_LOCK_WATCH_TICK_MS = Math.max(5_000, parseInt(process.env.STOCK_PROVISION_LOCK_WATCH_TICK_MS || '30000', 10) || 30000);
+const STOCK_PROVISION_RESUME_TICK_MS = Math.max(10_000, parseInt(process.env.STOCK_PROVISION_RESUME_TICK_MS || '60000', 10) || 60000);
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, STOCK_PROVISION_LOCK_WATCH_TICK_MS);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, STOCK_PROVISION_RESUME_TICK_MS);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
 setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
