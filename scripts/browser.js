@@ -2259,6 +2259,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
   const clickMarketplaceMenu = async () => {
     return await page.evaluate(() => {
       const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      const normHrefPath = (href) => String(href || '').toLowerCase().replace(/^https?:\/\/[^/]+/i, '');
       const isVisible = (el) => {
         try {
           const st = window.getComputedStyle(el);
@@ -2267,8 +2268,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         } catch { return false; }
       };
       const candidates = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1400);
-      const best = [];
-      const fallback = [];
+      const scored = [];
       for (const el of candidates) {
         if (!isVisible(el)) continue;
         const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -2279,30 +2279,109 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
         if (actionable.closest('[role="dialog"]')) continue;
         const actionableText = norm(actionable.innerText || actionable.textContent || '').replace(/\s+/g, ' ').trim();
         const actionableAria = norm(actionable.getAttribute('aria-label') || '');
-        const actionableHref = String(actionable.getAttribute('href') || '').toLowerCase();
+        const actionableHref = String(actionable.getAttribute('href') || '');
+        const actionableHrefPath = normHrefPath(actionableHref);
         const mentionsMarketplace = actionableText.includes('marketplace') || actionableAria.includes('marketplace') || actionableHref.includes('marketplace');
         const isFacebookMenu = actionableAria.includes('menu do facebook') || actionableAria.includes('facebook menu');
         if (!mentionsMarketplace || isFacebookMenu) continue;
+
+        // Hard-block do Marketplace errado (compra/venda geral), reportado em produção:
+        // /marketplace/?ref=app_tab
+        const isGeneralMarketplaceHref =
+          /^\/marketplace\/?\?ref=app_tab(?:$|&)/i.test(actionableHrefPath) ||
+          /^\/marketplace\/?(?:\?.*)?$/i.test(actionableHrefPath);
+        if (isGeneralMarketplaceHref) continue;
+
+        const container = actionable.closest('[role="listitem"], li, [data-visualcompletion], [role="row"], [role="gridcell"], div') || actionable.parentElement || actionable;
+        const containerText = norm(container ? (container.innerText || container.textContent || '') : '').replace(/\s+/g, ' ').trim();
+        const hasNewMessagesHint =
+          /(^|\s)\d+\s+novas?\s+mensagens/.test(containerText) ||
+          containerText.includes('novas mensagens') ||
+          containerText.includes('nova mensagem') ||
+          /(^|\s)\d+\s+new\s+messages?/.test(containerText) ||
+          containerText.includes('new messages');
+        const hasMessagesHint =
+          containerText.includes('mensagens') ||
+          containerText.includes('conversas') ||
+          containerText.includes('messages') ||
+          containerText.includes('conversations');
+        const hrefLooksMessagesContext =
+          /\/messages(?:\/|$|\?)/i.test(actionableHrefPath) ||
+          /messenger\.com\/marketplace/i.test(actionableHref);
+        const hrefLooksThread =
+          /\/marketplace\/t\//i.test(actionableHrefPath) ||
+          /\/messages\/t\//i.test(actionableHrefPath);
+
+        // Se houver href explícito, só aceitamos sinais de contexto de mensagens/thread.
+        if (actionableHrefPath && !hrefLooksMessagesContext && !hrefLooksThread) continue;
+
         const score =
-          ((t === 'marketplace' || al === 'marketplace') ? 4 : 0) +
-          (actionable.tagName === 'A' ? 2 : 0) +
-          ((actionable.getAttribute('href') || '').toLowerCase().includes('marketplace') ? 2 : 0) +
+          ((t === 'marketplace' || al === 'marketplace') ? 6 : 0) +
+          (hasNewMessagesHint ? 12 : 0) +
+          (hasMessagesHint ? 6 : 0) +
+          (hrefLooksMessagesContext ? 10 : 0) +
+          (hrefLooksThread ? 12 : 0) +
+          (actionable.tagName === 'A' ? 1 : 0) +
           (String(actionable.getAttribute('role') || '').toLowerCase().includes('button') ? 1 : 0);
-        if (score >= 4) best.push(actionable);
-        else fallback.push(actionable);
+        scored.push({
+          actionable,
+          score,
+          actionableHref: String(actionableHref || '').slice(0, 240),
+          actionableAria: String(actionable.getAttribute('aria-label') || '').slice(0, 240),
+          actionableText: String(actionable.innerText || actionable.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240),
+          hasNewMessagesHint,
+          hasMessagesHint,
+          hrefLooksMessagesContext,
+          hrefLooksThread
+        });
       }
-      for (const actionable of [...best, ...fallback]) {
+
+      scored.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+      for (const candidate of scored) {
+        const actionable = candidate && candidate.actionable;
+        if (!actionable) continue;
         try { actionable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
         try {
           actionable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
           actionable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
           actionable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
           actionable.click();
-          return true;
+          return {
+            clicked: true,
+            selected: {
+              score: Number(candidate.score || 0),
+              actionableHref: candidate.actionableHref || '',
+              actionableAria: candidate.actionableAria || '',
+              actionableText: candidate.actionableText || '',
+              hasNewMessagesHint: !!candidate.hasNewMessagesHint,
+              hasMessagesHint: !!candidate.hasMessagesHint,
+              hrefLooksMessagesContext: !!candidate.hrefLooksMessagesContext,
+              hrefLooksThread: !!candidate.hrefLooksThread
+            },
+            candidates: scored.slice(0, 5).map((c) => ({
+              score: Number(c.score || 0),
+              actionableHref: c.actionableHref || '',
+              actionableAria: c.actionableAria || '',
+              actionableText: c.actionableText || '',
+              hasNewMessagesHint: !!c.hasNewMessagesHint,
+              hasMessagesHint: !!c.hasMessagesHint,
+              hrefLooksMessagesContext: !!c.hrefLooksMessagesContext,
+              hrefLooksThread: !!c.hrefLooksThread
+            }))
+          };
         } catch {}
       }
-      return false;
-    }).catch(() => false);
+      return { clicked: false, selected: null, candidates: scored.slice(0, 5).map((c) => ({
+        score: Number(c.score || 0),
+        actionableHref: c.actionableHref || '',
+        actionableAria: c.actionableAria || '',
+        actionableText: c.actionableText || '',
+        hasNewMessagesHint: !!c.hasNewMessagesHint,
+        hasMessagesHint: !!c.hasMessagesHint,
+        hrefLooksMessagesContext: !!c.hrefLooksMessagesContext,
+        hrefLooksThread: !!c.hrefLooksThread
+      })) };
+    }).catch(() => ({ clicked: false, selected: null, candidates: [] }));
   };
   try {
     let url = '';
@@ -2319,12 +2398,32 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     if (!state.menuFound) {
       return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available', state };
     }
-    if (!state.menuActive || state.marketplaceThreadAnchors === 0) {
+    if (!state.menuActive || (state.marketplaceThreadAnchors + state.messagesThreadAnchors) === 0) {
       let clickedAtLeastOnce = false;
       for (let i = 0; i < ENSURE_MARKETPLACE_MAX_CLICK_TRIES; i++) {
-        if (state.menuActive && state.marketplaceThreadAnchors > 0) break;
-        const clicked = await clickMarketplaceMenu().catch(() => false);
-        clickedAtLeastOnce = clickedAtLeastOnce || !!clicked;
+        if (state.menuActive && (state.marketplaceThreadAnchors + state.messagesThreadAnchors) > 0) break;
+        const clickResult = await clickMarketplaceMenu();
+        const clicked = !!(clickResult && clickResult.clicked);
+        clickedAtLeastOnce = clickedAtLeastOnce || clicked;
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'ensure_marketplace_menu_click_attempt',
+            reason: String(reason || ''),
+            tryIdx: Number(i + 1),
+            clicked: !!clicked,
+            selected: (clickResult && clickResult.selected) ? clickResult.selected : null,
+            topCandidates: (clickResult && Array.isArray(clickResult.candidates)) ? clickResult.candidates : [],
+            preState: {
+              menuFound: !!state.menuFound,
+              menuActive: !!state.menuActive,
+              marketplaceThreadAnchors: Number(state.marketplaceThreadAnchors || 0),
+              messagesThreadAnchors: Number(state.messagesThreadAnchors || 0),
+              rows: Number(state.rows || 0),
+              hasGrid: !!state.hasGrid
+            }
+          });
+        } catch {}
         await sleep(clicked ? ENSURE_MARKETPLACE_ACTIVE_CLICK_MS : ENSURE_MARKETPLACE_IDLE_CLICK_MS);
         await dismissPinIfPresent();
         if (clicked) await waitMarketplaceActive(Math.min(waitMs, 5000));
@@ -2340,7 +2439,7 @@ async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reaso
     if (state.emptyNoConversations) {
       return { ok: true, marketplaceAvailable: true, reason: 'marketplace_empty', state };
     }
-    if (state.marketplaceThreadAnchors > 0 || (state.menuActive && state.hasGrid && state.rows > 0 && /marketplace/.test(String(state.menuLabel || '')))) {
+    if ((state.marketplaceThreadAnchors + state.messagesThreadAnchors) > 0) {
       return { ok: true, marketplaceAvailable: true, reason: 'marketplace_ready', state };
     }
   } catch (e) {
