@@ -698,6 +698,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let lastMarketplaceEnsureAt = 0;
   let lastMarketplaceEnsureResult = false;
   let lastMarketplaceNoMenuAt = 0;
+  let lastMarketplaceNoMenuLogAt = 0;
   let repliesSinceRecycle = 0;
   const heavyActionTimes = [];
   const MARKETPLACE_ENSURE_MIN_GAP_MS = Math.max(
@@ -707,6 +708,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const MARKETPLACE_MENU_ABSENT_RECHECK_MS = Math.max(
     45_000,
     Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_RECHECK_MS || 180_000) || 180_000
+  );
+  const MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS = Math.max(
+    30_000,
+    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS || 300_000) || 300_000
   );
 
   // trackers
@@ -806,13 +811,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function ensureMarketplaceCalmo(p, { timeoutMs = 25000, force = false, reason = 'default' } = {}) {
     const now = Date.now();
+    if (!force && (now - Number(lastMarketplaceEnsureAt || 0)) < MARKETPLACE_ENSURE_MIN_GAP_MS) {
+      return !!lastMarketplaceEnsureResult;
+    }
     const idleSafe = !chatAtivo && (!Array.isArray(fila) || fila.length === 0) && !isVirtusLocked(nome);
     if (!force && idleSafe) {
       if (!lastMarketplaceEnsureResult && (now - Number(lastMarketplaceNoMenuAt || 0)) < MARKETPLACE_MENU_ABSENT_RECHECK_MS) {
         return false;
-      }
-      if ((now - Number(lastMarketplaceEnsureAt || 0)) < MARKETPLACE_ENSURE_MIN_GAP_MS) {
-        return !!lastMarketplaceEnsureResult;
       }
     }
     const ok = await garantirMarketplace(p, { timeoutMs });
@@ -1107,7 +1112,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) return [];
         const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'coleta_chats' });
         if (!marketReady) {
-          logger.info('[VIRTUS] Marketplace ainda não disponível para esta conta (menu ausente).', { nome });
+          const nowLog = Date.now();
+          if (!lastMarketplaceNoMenuLogAt || (nowLog - lastMarketplaceNoMenuLogAt) >= MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS) {
+            lastMarketplaceNoMenuLogAt = nowLog;
+            logger.info('[VIRTUS] Marketplace ainda não disponível para esta conta (menu ausente).', { nome });
+          }
           await sleep(5000);
           return [];
         }
@@ -1386,7 +1395,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'responder_chat' });
+        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'responder_chat' });
         if (!marketReady) {
           logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Removendo pending e aguardando novos sinais.', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
