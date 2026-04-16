@@ -731,8 +731,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const fastMode = VIRTUS_FAST_MODE && !slowMode;
   const POLL_INTERVAL_MS = Math.max(
-    fastMode ? 5_000 : 15_000,
-    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (fastMode ? 9_000 : (slowMode ? 45_000 : 30_000))) || (fastMode ? 9_000 : (slowMode ? 45_000 : 30_000))
+    fastMode ? 5_000 : 12_000,
+    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (fastMode ? 9_000 : (slowMode ? 30_000 : 20_000))) || (fastMode ? 9_000 : (slowMode ? 30_000 : 20_000))
   );
   const MIN_REPLY_DELAY_MS = Math.max(
     fastMode ? 2_000 : 8_000,
@@ -791,8 +791,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     Number(process.env.VIRTUS_MARKETPLACE_ENSURE_MIN_GAP_MS || 30_000) || 30_000
   );
   const MARKETPLACE_MENU_ABSENT_RECHECK_MS = Math.max(
-    45_000,
-    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_RECHECK_MS || 180_000) || 180_000
+    20_000,
+    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_RECHECK_MS || 60_000) || 60_000
   );
   const MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS = Math.max(
     30_000,
@@ -901,7 +901,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     const idleSafe = !chatAtivo && (!Array.isArray(fila) || fila.length === 0) && !isVirtusLocked(nome);
     if (!force && idleSafe) {
-      if (!lastMarketplaceEnsureResult && (now - Number(lastMarketplaceNoMenuAt || 0)) < MARKETPLACE_MENU_ABSENT_RECHECK_MS) {
+      // Recheck adaptativo para evitar "cegueira" de minutos quando o menu aparece após nova mensagem.
+      const adaptiveNoMenuRecheckMs = Math.max(
+        20_000,
+        Math.min(
+          Number(MARKETPLACE_MENU_ABSENT_RECHECK_MS || 0) || 60_000,
+          Math.max(Number(POLL_INTERVAL_MS || 0) * 2, 35_000)
+        )
+      );
+      if (!lastMarketplaceEnsureResult && (now - Number(lastMarketplaceNoMenuAt || 0)) < adaptiveNoMenuRecheckMs) {
         return false;
       }
     }
