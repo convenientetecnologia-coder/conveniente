@@ -619,17 +619,21 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
 async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
   setVirtusInputLock(nome, true);
+  const directMarker = `virtus_direct_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   try {
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
-    const focusReady = await p.evaluate(() => {
+    const focusReady = await p.evaluate((marker) => {
       try {
         const ae = document.activeElement;
         if (!ae || !ae.getAttribute) return false;
         const ce = String(ae.getAttribute('contenteditable') || '').toLowerCase();
         const role = String(ae.getAttribute('role') || '').toLowerCase();
-        return (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
+        const ok = (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
+        if (!ok) return false;
+        try { ae.setAttribute('data-virtus-direct-marker', String(marker || '')); } catch {}
+        return true;
       } catch { return false; }
-    }).catch(() => false);
+    }, directMarker).catch(() => false);
     if (!focusReady) return false;
 
     const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
@@ -638,13 +642,24 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
     await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
     await p.keyboard.press('Enter');
 
-    const sent = await p.waitForFunction(() => {
-      try {
-        const norm = (s) => String(s || '').toLowerCase();
-        const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
-        return nodes.some((el) => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
-      } catch { return false; }
-    }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(() => true).catch(() => false);
+    const sent = await Promise.race([
+      p.waitForFunction(() => {
+        try {
+          const norm = (s) => String(s || '').toLowerCase();
+          const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+          return nodes.some((el) => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
+        } catch { return false; }
+      }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(() => true).catch(() => false),
+      p.waitForFunction((marker) => {
+        try {
+          const sel = `[data-virtus-direct-marker="${String(marker || '').replace(/"/g, '\\"')}"]`;
+          const el = document.querySelector(sel);
+          if (!el) return false;
+          const txt = (el.innerText || el.textContent || '').trim();
+          return txt.length === 0;
+        } catch { return false; }
+      }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }, directMarker).then(() => true).catch(() => false)
+    ]);
 
     if (!sent) {
       await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
@@ -652,6 +667,15 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
     }
     return true;
   } finally {
+    try {
+      await p.evaluate((marker) => {
+        try {
+          const sel = `[data-virtus-direct-marker="${String(marker || '').replace(/"/g, '\\"')}"]`;
+          const el = document.querySelector(sel);
+          if (el) el.removeAttribute('data-virtus-direct-marker');
+        } catch {}
+      }, directMarker).catch(() => {});
+    } catch {}
     setVirtusInputLock(nome, false);
   }
 }
