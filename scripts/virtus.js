@@ -48,20 +48,36 @@ function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b) rel
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
-    const ok = await p.evaluate((id) => {
+    const evalStartedAt = Date.now();
+    const evalOrTimeout = await Promise.race([
+      p.evaluate((id) => {
+        try {
+          const path = (location && typeof location.pathname === 'string') ? String(location.pathname || '') : '';
+          const href = (location && typeof location.href === 'string') ? String(location.href || '') : '';
+          if (path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id)) return true;
+          if (href.includes('/marketplace/t/' + id) || href.includes('/messages/t/' + id)) return true;
+          const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
+          if (!rowById) return false;
+          const selected = rowById.closest('[aria-current="page"], [aria-selected="true"]');
+          if (selected) return true;
+          return false;
+        }
+        catch { return false; }
+      }, chatId).catch(() => false),
+      new Promise((resolve) => setTimeout(() => resolve('__virtus_eval_timeout__'), VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS))
+    ]).catch(() => false);
+    if (evalOrTimeout === '__virtus_eval_timeout__') {
       try {
-        const path = (location && typeof location.pathname === 'string') ? String(location.pathname || '') : '';
-        const href = (location && typeof location.href === 'string') ? String(location.href || '') : '';
-        if (path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id)) return true;
-        if (href.includes('/marketplace/t/' + id) || href.includes('/messages/t/' + id)) return true;
-        const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
-        if (!rowById) return false;
-        const selected = rowById.closest('[aria-current="page"], [aria-selected="true"]');
-        if (selected) return true;
-        return false;
-      }
-      catch { return false; }
-    }, chatId).catch(() => false);
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'virtus_assert_on_chat_eval_timeout',
+          chatId: String(chatId || '').slice(0, 80),
+          timeoutMs: Number(VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS || 0),
+          waitedMs: Number(Date.now() - evalStartedAt)
+        });
+      } catch {}
+    }
+    const ok = (evalOrTimeout === true);
     if (ok) return true;
     if (!timeoutMs) return false;
     const elapsed = Date.now() - t0;
@@ -116,6 +132,7 @@ const VIRTUS_PAGE_SWAP_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_SWAP_REC
 const VIRTUS_PAGE_SWAP_WINDOW_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_WINDOW_MS || '25000', 10) || 25000);
 const VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS || '20000', 10) || 20000);
 const VIRTUS_PAGE_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_RECYCLE_ENABLED || '0').trim() === '1';
+const VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS = Math.max(600, parseInt(process.env.VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS || '2200', 10) || 2200);
 const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
@@ -613,8 +630,19 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
+  const t0 = Date.now();
+  const msgLen = String(msg || '').length;
   setVirtusInputLock(nome, true);
   try {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'virtus_direct_send_path_start',
+        nome: String(nome || ''),
+        chatId: String(chatId || '').slice(0, 80),
+        msgLen: Number(msgLen || 0)
+      });
+    } catch {}
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
     const focusReady = await p.evaluate(() => {
       try {
@@ -625,9 +653,32 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
         return (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
       } catch { return false; }
     }).catch(() => false);
-    if (!focusReady) return false;
+    if (!focusReady) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'virtus_direct_send_path_result',
+          nome: String(nome || ''),
+          chatId: String(chatId || '').slice(0, 80),
+          ok: false,
+          reason: 'focus_not_ready',
+          durMs: Number(Date.now() - t0)
+        });
+      } catch {}
+      return false;
+    }
 
     const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'virtus_direct_send_typing_start',
+        nome: String(nome || ''),
+        chatId: String(chatId || '').slice(0, 80),
+        msgLen: Number(msgLen || 0),
+        typingDelayMs: Number(typingDelayMs || 0)
+      });
+    } catch {}
     await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
     await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
@@ -643,8 +694,30 @@ async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
 
     if (!sent) {
       await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'virtus_direct_send_path_result',
+          nome: String(nome || ''),
+          chatId: String(chatId || '').slice(0, 80),
+          ok: false,
+          reason: 'send_confirmation_timeout_direct',
+          durMs: Number(Date.now() - t0)
+        });
+      } catch {}
       return false;
     }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'virtus_direct_send_path_result',
+        nome: String(nome || ''),
+        chatId: String(chatId || '').slice(0, 80),
+        ok: true,
+        reason: 'sent',
+        durMs: Number(Date.now() - t0)
+      });
+    } catch {}
     return true;
   } finally {
     setVirtusInputLock(nome, false);
@@ -2011,8 +2084,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Ativa send-guard imediatamente após confirmar navegação correta.
         // P1 hardening: use o Browser (não a Page) para evitar leak quando a page fecha/desconecta.
         acquireSendGuardBrowser(browser, chatId);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_send_phase_enter',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80)
+          });
+        } catch {}
 
-        if (await isChatBlocked(p)) {
+        const blockedCheckStart = Date.now();
+        const blocked = await isChatBlocked(p);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_blocked_check_done',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80),
+            blocked: !!blocked,
+            durMs: Number(Date.now() - blockedCheckStart)
+          });
+        } catch {}
+        if (blocked) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
@@ -2023,7 +2116,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         // Checagem de contexto antes de aguardar o composer
-        if (!(await assertOnChat(p, chatId, { timeoutMs: 1200 }))) {
+        const preSendAssertStart = Date.now();
+        const preSendOnChat = await assertOnChat(p, chatId, { timeoutMs: 1200 });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_pre_send_assert_done',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80),
+            ok: !!preSendOnChat,
+            durMs: Number(Date.now() - preSendAssertStart)
+          });
+        } catch {}
+        if (!preSendOnChat) {
           try { await pendingDel(nome, chatId); } catch {}
           replyRetryReasonByChat.set(chatId, 'context_lost_before_send');
           chatAtivo = null;
@@ -2053,6 +2158,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (Array.isArray(msg)) msg = msg.join('\n');
           if (typeof msg !== 'string') msg = String(msg);
         }
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_msg_selected',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80),
+            msgLen: Number(String(msg || '').length)
+          });
+        } catch {}
 
         if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
