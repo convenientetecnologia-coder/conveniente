@@ -652,6 +652,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let fila = [];
   let historico = {};
   let chatAtivo = null;
+  const replyRetryReasonByChat = new Map();
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
@@ -661,6 +662,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   );
   const MIN_REPLY_DELAY_MS = slowMode ? 80_000 : 60_000;
   const MAX_REPLY_DELAY_MS = slowMode ? 150_000 : 120_000;
+  const RETRY_REPLY_DELAY_MS = Math.max(
+    8_000,
+    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 15_000) || 15_000
+  );
   const SCROLL_TOP_INTERVAL_MS = Math.max(
     120_000,
     Number(process.env.VIRTUS_SCROLL_TOP_INTERVAL_MS || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)) || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)
@@ -1308,11 +1313,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running) return;
     if (chatAtivo) return;
     if (filaChatTimer) return;
-    if (!fila.length) return;
+    if (!fila.length) {
+      if (replyRetryReasonByChat.size > 0) replyRetryReasonByChat.clear();
+      return;
+    }
 
     const next = fila[0];
-    const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
-    log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
+    const retryReason = replyRetryReasonByChat.get(next);
+    const delay = retryReason ? RETRY_REPLY_DELAY_MS : randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
+    if (retryReason) {
+      replyRetryReasonByChat.delete(next);
+      log(`[FILA] Retry chat ${next} em ${Math.round(delay/1000)}s (${retryReason})`);
+    } else {
+      log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
+    }
     filaChatTimer = setTimeout(async () => {
       if (!running || !epochOk()) return;
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
@@ -1397,9 +1411,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'responder_chat' });
         if (!marketReady) {
-          logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Removendo pending e aguardando novos sinais.', { nome, chatId });
+          logger.info('[VIRTUS] Marketplace indisponível (menu ausente). Mantendo chat na fila para retry curto.', { nome, chatId });
+          replyRetryReasonByChat.set(chatId, 'marketplace_indisponivel');
           try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
         }
