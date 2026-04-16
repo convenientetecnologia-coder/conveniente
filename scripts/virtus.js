@@ -131,6 +131,7 @@ const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(8000, parseInt(process.env.VIRTUS_
 const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(6000, parseInt(process.env.VIRTUS_COMPOSER_FAST_TIMEOUT_MS || '22000', 10) || 22000);
 const VIRTUS_COMPOSER_RECHECK_MS = Math.max(500, parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
+const VIRTUS_DIRECT_SEND_ON_OPEN = String(process.env.VIRTUS_DIRECT_SEND_ON_OPEN || '1').trim() !== '0';
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
@@ -610,6 +611,45 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
   }
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
+
+async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
+  setVirtusInputLock(nome, true);
+  try {
+    if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
+    const focusReady = await p.evaluate(() => {
+      try {
+        const ae = document.activeElement;
+        if (!ae || !ae.getAttribute) return false;
+        const ce = String(ae.getAttribute('contenteditable') || '').toLowerCase();
+        const role = String(ae.getAttribute('role') || '').toLowerCase();
+        return (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
+      } catch { return false; }
+    }).catch(() => false);
+    if (!focusReady) return false;
+
+    const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
+    await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
+    if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
+    await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
+    await p.keyboard.press('Enter');
+
+    const sent = await p.waitForFunction(() => {
+      try {
+        const norm = (s) => String(s || '').toLowerCase();
+        const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+        return nodes.some((el) => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
+      } catch { return false; }
+    }, { timeout: 7000 }).then(() => true).catch(() => false);
+
+    if (!sent) {
+      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
+      return false;
+    }
+    return true;
+  } finally {
+    setVirtusInputLock(nome, false);
+  }
+}
 
 async function startVirtus(browser, nome, robeMeta = {}) {
   // Na primeira linha dentro de startVirtus, após argumentos:
@@ -1091,6 +1131,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function waitForComposer(p, timeoutMs = 10000) {
+    const waitStartedAt = Date.now();
     const start = Date.now();
     while ((Date.now() - start) < timeoutMs) {
       for (const sel of COMPOSER_SELECTORS) {
@@ -1109,7 +1150,35 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       await sleep(250);
     }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'virtus_wait_composer_timeout',
+        nome: String(nome || ''),
+        timeoutMs: Number(timeoutMs || 0),
+        waitedMs: Number(Date.now() - waitStartedAt)
+      });
+    } catch {}
     return null;
+  }
+
+  async function evalWithTimeout(p, fn, arg, timeoutMs = 2800) {
+    const evalStart = Date.now();
+    const exec = (typeof arg === 'undefined') ? p.evaluate(fn) : p.evaluate(fn, arg);
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`eval_timeout_${timeoutMs}`)), Math.max(500, Number(timeoutMs || 0)));
+    });
+    try {
+      const value = await Promise.race([exec, timeoutPromise]);
+      return { ok: true, value, durMs: Date.now() - evalStart, error: null };
+    } catch (err) {
+      return {
+        ok: false,
+        value: null,
+        durMs: Date.now() - evalStart,
+        error: String((err && err.message) || err || 'eval_error').slice(0, 160)
+      };
+    }
   }
 
   function incFail(chatId) {
@@ -1810,8 +1879,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
               let attempts = 0;
               while (attempts < 6 && Date.now() < openDeadlineAt) {
-                urlAtual = await p.evaluate(() => String(location.href || ''));
-                const inThread = await p.evaluate((id) => {
+                const urlEval = await evalWithTimeout(p, () => String(location.href || ''), undefined, 3000);
+                if (urlEval.ok) {
+                  urlAtual = String(urlEval.value || '');
+                } else {
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'virtus_click_check_eval_timeout',
+                      nome: String(nome || ''),
+                      chatId: String(chatId || '').slice(0, 80),
+                      phase: 'location_href',
+                      clickTry: Number(clickTry + 1),
+                      mode: String(clickMode || ''),
+                      attempts: Number(attempts),
+                      durMs: Number(urlEval.durMs || 0),
+                      error: String(urlEval.error || '')
+                    });
+                  } catch {}
+                }
+                const inThreadEval = await evalWithTimeout(p, (id) => {
                   try {
                     const href = String(location.href || '');
                     if (href.includes(`/marketplace/t/${id}`) || href.includes(`/messages/t/${id}`)) return true;
@@ -1820,7 +1907,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     if (rowById.closest('[aria-current="page"], [aria-selected="true"]')) return true;
                     return false;
                   } catch { return false; }
-                }, chatId).catch(() => false);
+                }, chatId, 3200);
+                const inThread = !!inThreadEval.ok && !!inThreadEval.value;
+                if (!inThreadEval.ok) {
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'virtus_click_check_eval_timeout',
+                      nome: String(nome || ''),
+                      chatId: String(chatId || '').slice(0, 80),
+                      phase: 'in_thread_check',
+                      clickTry: Number(clickTry + 1),
+                      mode: String(clickMode || ''),
+                      attempts: Number(attempts),
+                      durMs: Number(inThreadEval.durMs || 0),
+                      error: String(inThreadEval.error || '')
+                    });
+                  } catch {}
+                }
                 if (inThread) {
                   achou = true;
                   break;
@@ -1927,8 +2031,99 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
+        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
+        let msg = null;
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
+            msg = String(man.customVirtusMessage).trim();
+          }
+        } catch {}
+
+        // 2) Se não houver custom, cai no atendimento.json como hoje
+        if (!msg) {
+          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
+            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
+          if (Array.isArray(msg)) msg = msg.join('\n');
+          if (typeof msg !== 'string') msg = String(msg);
+        }
+
+        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+
+        if (VIRTUS_DIRECT_SEND_ON_OPEN) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_direct_send_attempt',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80)
+            });
+          } catch {}
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId, mode: 'direct' });
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_send_prepare',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              mode: 'direct'
+            });
+          } catch {}
+          const sentDirect = await sendMessageDirectIfFocused(p, msg, nome, chatId).catch(() => false);
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_direct_send_result',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              ok: !!sentDirect
+            });
+          } catch {}
+          if (sentDirect) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId, mode: 'direct' });
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_send_ok',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                mode: 'direct'
+              });
+            } catch {}
+            log(`Mensagem enviada para chat ${chatId}`);
+            try { await pendingDel(nome, chatId); } catch {}
+            const tsNowDirect = agoraEpoch();
+            historico[chatId] = tsNowDirect;
+            setResponded(chatId, tsNowDirect);
+            await salvaHistorico();
+            lastReplyAtMs = Date.now();
+            repliesSinceRecycle += 1;
+            return;
+          }
+        }
+
         const composerFastDeadlineAt = Date.now() + VIRTUS_COMPOSER_FAST_TIMEOUT_MS;
+        const composerWaitStart = Date.now();
         let campo = await waitForComposer(p, 3500);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_wait_composer_probe',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80),
+            phase: 'initial_3500',
+            found: !!campo,
+            waitedMs: Number(Date.now() - composerWaitStart)
+          });
+        } catch {}
         if (!campo) {
           logger.warn('Composer não encontrado. Retry por click no mesmo chat (sem goto).', { nome, chatId });
           try {
@@ -1958,7 +2153,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             resetFail(chatId);
             return;
           }
+          const composerRetryStart = Date.now();
           campo = await waitForComposer(p, 3000);
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_wait_composer_probe',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              phase: 'after_retry_click_3000',
+              found: !!campo,
+              waitedMs: Number(Date.now() - composerRetryStart)
+            });
+          } catch {}
         }
 
         while (!campo && Date.now() < composerFastDeadlineAt) {
@@ -1968,7 +2175,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!stillOnChat && found) {
               try { await found.click({ delay: randomBetween(60, 120) }).catch(()=>{}); } catch {}
             }
+            const composerLoopStart = Date.now();
             campo = await waitForComposer(p, VIRTUS_COMPOSER_RECHECK_MS);
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_wait_composer_probe',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                phase: 'loop_recheck',
+                found: !!campo,
+                waitedMs: Number(Date.now() - composerLoopStart),
+                recheckMs: Number(VIRTUS_COMPOSER_RECHECK_MS || 0)
+              });
+            } catch {}
             if (campo) break;
             if (found) {
               try {
@@ -2021,33 +2241,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 }
 
         resetFail(chatId);
-
-        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
-        let msg = null;
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
-            msg = String(man.customVirtusMessage).trim();
-          }
-        } catch {}
-
-        // 2) Se não houver custom, cai no atendimento.json como hoje
-        if (!msg) {
-          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-          if (Array.isArray(msg)) msg = msg.join('\n');
-          if (typeof msg !== 'string') msg = String(msg);
-        }
-
-        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
 
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
         try {
