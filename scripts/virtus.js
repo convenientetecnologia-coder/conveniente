@@ -120,10 +120,10 @@ const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
-const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '55', 10) || 55);
-const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '120', 10) || 120);
-const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '350', 10) || 350);
-const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '900', 10) || 900);
+const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '25', 10) || 25);
+const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '60', 10) || 60);
+const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '180', 10) || 180);
+const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '450', 10) || 450);
 const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
 const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
@@ -664,12 +664,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 45_000 : 30_000)) || (slowMode ? 45_000 : 30_000)
   );
   const MIN_REPLY_DELAY_MS = Math.max(
-    3_000,
-    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (slowMode ? 12_000 : 6_000)) || (slowMode ? 12_000 : 6_000)
+    8_000,
+    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (slowMode ? 80_000 : 60_000)) || (slowMode ? 80_000 : 60_000)
   );
   const MAX_REPLY_DELAY_MS = Math.max(
     MIN_REPLY_DELAY_MS,
-    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (slowMode ? 22_000 : 10_000)) || (slowMode ? 22_000 : 10_000)
+    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (slowMode ? 150_000 : 120_000)) || (slowMode ? 150_000 : 120_000)
   );
   const RETRY_REPLY_DELAY_MS = Math.max(
     2_000,

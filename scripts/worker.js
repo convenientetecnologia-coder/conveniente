@@ -7630,8 +7630,14 @@ async function robeTickGlobal() {
 
         if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
           virtusWasRunning = true;
-          try { await ctrl.virtus.stop(); } catch {}
-          ctrl.virtus = null;
+          try {
+            const stopRes = await stopVirtus(nome, { reason: 'robe_tick_pause', policy: 'preserveDesired' }).catch(()=>({ ok:false, error:'stop_failed' }));
+            if (stopRes && stopRes.deferred) {
+              virtusWasRunning = false;
+              try { await reportAction(nome, 'mil_action', 'robe_tick_pause_deferred_send_lock'); } catch {}
+              return;
+            }
+          } catch {}
         }
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
@@ -7778,9 +7784,47 @@ async function fotosGcTick() {
 setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
 
-async function stopVirtus(nome) {
+function getVirtusSendLock(ctrl) {
+  try {
+    const lk = ctrl && ctrl.browser && ctrl.browser._sendLock;
+    if (lk && lk.active === true && String(lk.owner || '') === 'virtus') {
+      return {
+        active: true,
+        chatId: lk.chatId ? String(lk.chatId) : '',
+        since: Number(lk.since || 0) || 0
+      };
+    }
+  } catch {}
+  return null;
+}
+
+async function stopVirtus(nome, opts = {}) {
 const ctrl = controllers.get(nome);
-if (!ctrl) return;
+if (!ctrl) return { ok: true, skipped: 'no_controller' };
+const reason = String(opts && opts.reason || 'unspecified').slice(0, 120);
+const force = !!(opts && opts.force === true);
+const policy = String(opts && opts.policy || '').slice(0, 80);
+const lock = getVirtusSendLock(ctrl);
+if (!force && lock) {
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].virtusStopDeferredAt = Date.now();
+    robeMeta[nome].virtusStopDeferredReason = reason || 'send_lock';
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'worker_virtus_stop_deferred_send_lock',
+      nome: String(nome || ''),
+      reason,
+      policy: policy || null,
+      chatId: lock.chatId || null,
+      lockAgeMs: lock.since > 0 ? (Date.now() - lock.since) : null
+    });
+  } catch {}
+  try { issues.append(nome, 'mil_action', `virtus_stop_deferred_send_lock reason=${reason || 'unknown'}`).catch(()=>{}); } catch {}
+  return { ok: false, deferred: true, error: 'send_lock_active' };
+}
 try {
 if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
 await ctrl.virtus.stop().catch(()=>{});
@@ -7795,6 +7839,7 @@ if (ctrl.browser) {
 }
 try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
+return { ok: true };
 }
 
 // ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
@@ -8388,6 +8433,24 @@ const handlers = {
     reopenDelayMs = getControlledReopenDelayMs(reason || 'preserve');
   }
   const ctrl = controllers.get(nome);
+  if (ctrl && preserve) {
+    const lock = getVirtusSendLock(ctrl);
+    if (lock) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'worker_deactivate_deferred_send_lock',
+          nome: String(nome || ''),
+          reason: String(reason || ''),
+          policy: 'preserveDesired',
+          chatId: lock.chatId || null,
+          lockAgeMs: lock.since > 0 ? (Date.now() - lock.since) : null
+        });
+      } catch {}
+      try { await issues.append(nome, 'mil_action', `deactivate_deferred_send_lock reason=${String(reason || 'unknown').slice(0, 80)}`); } catch {}
+      return { ok: false, deferred: true, error: 'send_lock_active' };
+    }
+  }
   if (!ctrl) {
     // Enterprise HARD: se este deactivate faz parte de um fluxo de delete, não podemos “fingir ok”
     // quando ainda existe Chrome vivo para este perfil (isso gera exatamente o navegador fantasma).
@@ -8471,11 +8534,12 @@ const handlers = {
   // antes de mexer em browser:
   try {
     if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-      await ctrl.virtus.stop();
+      const stopRes = await stopVirtus(nome, { reason: `deactivate:${String(reason || '')}`, policy: String(policy || ''), force: !!strictCloseRequired }).catch(()=>({ ok:false, error:'stop_failed' }));
+      if (stopRes && stopRes.deferred) {
+        return { ok: false, deferred: true, error: 'send_lock_active' };
+      }
     }
   } catch {}
-  ctrl.virtus = null;
-  ctrl.trabalhando = false;
   // HARD CLOSE militar
   let hc = null;
   try {
@@ -10594,8 +10658,14 @@ const handlers = {
 
             if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
               virtusWasRunning = true;
-              try { await ctrl.virtus.stop(); } catch {}
-              ctrl.virtus = null;
+              try {
+                const stopRes = await stopVirtus(nome, { reason: 'robe_play_pause', policy: 'preserveDesired' }).catch(()=>({ ok:false, error:'stop_failed' }));
+                if (stopRes && stopRes.deferred) {
+                  virtusWasRunning = false;
+                  try { await reportAction(nome, 'mil_action', 'robe_play_pause_deferred_send_lock'); } catch {}
+                  return { ok: false, error: 'send_lock_active' };
+                }
+              } catch {}
             }
 
             try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
