@@ -2044,6 +2044,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await salvaHistorico();
             lastReplyAtMs = Date.now();
             repliesSinceRecycle += 1;
+            // Fluxo direto também precisa liberar item ativo da fila.
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
             return;
           }
         }
@@ -2193,6 +2196,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       chatAtivo = null;
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
+      if (chatAtivo === chatId) chatAtivo = null;
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
