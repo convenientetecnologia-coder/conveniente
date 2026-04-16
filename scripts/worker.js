@@ -14283,6 +14283,15 @@ async function isPageLikelyAlive(page, nome) {
             .toLowerCase()
             .slice(0, 4000);
           if (!txt) return false;
+          // Estado transitório do Messenger/Facebook Messages:
+          // "Não foi possível carregar as conversas. Recarregue essa página..."
+          // Não tratar como crash fatal de Chrome; o browser.js tenta clicar em "Recarregar".
+          if (txt.includes('não foi possível carregar as conversas')) return false;
+          if (txt.includes('nao foi possivel carregar as conversas')) return false;
+          if (txt.includes('recarregue essa página para ver suas conversas')) return false;
+          if (txt.includes('recarregue essa pagina para ver suas conversas')) return false;
+          if (txt.includes('recarregue esta página para ver suas conversas')) return false;
+          if (txt.includes('recarregue esta pagina para ver suas conversas')) return false;
           if (txt.includes('aw, snap')) return true;
           if (txt.includes('status_access_violation')) return true;
           if (txt.includes('out of memory')) return true;
