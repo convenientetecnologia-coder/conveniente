@@ -1546,6 +1546,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               hrefs: Array.isArray(anchorProbe && anchorProbe.hrefs) ? anchorProbe.hrefs : []
             });
           } catch {}
+          try {
+            const anchorMetrics = await p.evaluate((id) => {
+              try {
+                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 12);
+                return all.map((a, idx) => {
+                  const r = a.getBoundingClientRect();
+                  const cs = window.getComputedStyle(a);
+                  return {
+                    idx,
+                    href: String((a.getAttribute('href') || a.href || '')).slice(0, 180),
+                    w: Math.round(Number(r.width || 0)),
+                    h: Math.round(Number(r.height || 0)),
+                    x: Math.round(Number(r.x || 0)),
+                    y: Math.round(Number(r.y || 0)),
+                    display: String(cs.display || ''),
+                    visibility: String(cs.visibility || ''),
+                    opacity: String(cs.opacity || ''),
+                    pointerEvents: String(cs.pointerEvents || ''),
+                    isConnected: !!a.isConnected
+                  };
+                });
+              } catch { return []; }
+            }, chatId).catch(() => []);
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_chat_anchor_metrics',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              anchors: Array.isArray(anchorMetrics) ? anchorMetrics : []
+            });
+          } catch {}
           found = await p.$(anchorSel);
 
           if (!found) {
@@ -1571,6 +1602,42 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             for (const clickMode of clickOrder) {
               if (achou) break;
               if (Date.now() >= openDeadlineAt) break;
+              try {
+                const clickPreflight = await found.evaluate((el) => {
+                  try {
+                    const r = el.getBoundingClientRect();
+                    const cs = window.getComputedStyle(el);
+                    const cx = r.left + (r.width / 2);
+                    const cy = r.top + (r.height / 2);
+                    const top = document.elementFromPoint(cx, cy);
+                    return {
+                      href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
+                      w: Math.round(Number(r.width || 0)),
+                      h: Math.round(Number(r.height || 0)),
+                      x: Math.round(Number(r.x || 0)),
+                      y: Math.round(Number(r.y || 0)),
+                      display: String(cs.display || ''),
+                      visibility: String(cs.visibility || ''),
+                      opacity: String(cs.opacity || ''),
+                      pointerEvents: String(cs.pointerEvents || ''),
+                      topTag: top ? String(top.tagName || '').toLowerCase() : '',
+                      topRole: top ? String(top.getAttribute && top.getAttribute('role') || '') : '',
+                      topHref: top ? String((top.getAttribute && top.getAttribute('href')) || (top.href || '') || '').slice(0, 180) : ''
+                    };
+                  } catch {
+                    return null;
+                  }
+                }).catch(() => null);
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'virtus_chat_click_preflight',
+                  nome: String(nome || ''),
+                  chatId: String(chatId || '').slice(0, 80),
+                  clickTry: Number(clickTry + 1),
+                  mode: String(clickMode || ''),
+                  preflight: clickPreflight || null
+                });
+              } catch {}
               try {
                 if (clickMode === 'dom') {
                   await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
