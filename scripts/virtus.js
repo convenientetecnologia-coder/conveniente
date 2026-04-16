@@ -1336,6 +1336,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const now = Date.now();
     const dueAt = now + delay;
     replyScheduleMetaByChat.set(next, { scheduledAt: now, dueAt, delay, retryReason: retryReason || null });
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'virtus_reply_scheduled',
+        nome: String(nome || ''),
+        chatId: String(next || '').slice(0, 80),
+        delayMs: Number(delay || 0),
+        dueAt,
+        retryReason: retryReason || null,
+        queueLen: Number(fila.length || 0)
+      });
+    } catch {}
     // #region agent log
     fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H1',location:'virtus.js:scheduleNextIfIdle',message:'reply_scheduled',data:{nome:String(nome||''),chatId:String(next||''),delayMs:Number(delay||0),dueAtMs:Number(dueAt||0),retryReason:retryReason||null,queueLen:Number(fila.length||0)},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
@@ -1515,6 +1527,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
           await scrollChatsToTop(p, nome).catch(()=>{});
           await sleep(300);
+          try {
+            const anchorProbe = await p.evaluate((id) => {
+              try {
+                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`));
+                const hrefs = all.slice(0, 8).map(a => String((a && (a.getAttribute('href') || a.href || '')) || '').slice(0, 180));
+                return { count: all.length, hrefs };
+              } catch {
+                return { count: 0, hrefs: [] };
+              }
+            }, chatId).catch(() => ({ count: 0, hrefs: [] }));
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'virtus_chat_anchor_probe',
+              nome: String(nome || ''),
+              chatId: String(chatId || '').slice(0, 80),
+              count: Number(anchorProbe && anchorProbe.count || 0),
+              hrefs: Array.isArray(anchorProbe && anchorProbe.hrefs) ? anchorProbe.hrefs : []
+            });
+          } catch {}
           found = await p.$(anchorSel);
 
           if (!found) {
@@ -1600,6 +1631,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 });
               } catch {}
               if (!achou) {
+                try {
+                  const currentHref = await found.evaluate((el) => String((el && (el.getAttribute('href') || el.href || '')) || '').slice(0, 180)).catch(() => '');
+                  provisionAudit.append({
+                    ts: Date.now(),
+                    event: 'virtus_chat_open_click_target_href',
+                    nome: String(nome || ''),
+                    chatId: String(chatId || '').slice(0, 80),
+                    clickTry: Number(clickTry + 1),
+                    mode: String(clickMode || ''),
+                    targetHref: String(currentHref || '').slice(0, 180)
+                  });
+                } catch {}
                 // #region agent log
                 fetch('http://127.0.0.1:7768/ingest/418add1d-7c90-419a-b932-824e41372681',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'450d56'},body:JSON.stringify({sessionId:'450d56',runId:DEBUG_RUN_ID,hypothesisId:'H2',location:'virtus.js:responderChat.clickResult',message:'chat_click_did_not_activate_thread',data:{nome:String(nome||''),chatId:String(chatId||''),clickTry:Number(clickTry+1),mode:String(clickMode||''),url:String(urlAtual||'').slice(0,200)},timestamp:Date.now()})}).catch(()=>{});
                 // #endregion
@@ -1796,6 +1839,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
 
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_send_prepare',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80)
+          });
+        } catch {}
         try { await campo.focus(); } catch {}
         const isFocused = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
         if (!isFocused) { try { await campo.focus(); } catch {} }
@@ -1804,6 +1855,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await sendMessageSafe(p, campo, msg, nome, chatId);
         // -----------------------------------------------------
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'virtus_send_ok',
+            nome: String(nome || ''),
+            chatId: String(chatId || '').slice(0, 80)
+          });
+        } catch {}
 
         log(`Mensagem enviada para chat ${chatId}`);
         // Ledger: remove pending ANTES de gravar responded (commit)
