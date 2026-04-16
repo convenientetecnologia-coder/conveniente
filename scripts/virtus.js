@@ -1527,6 +1527,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
           await scrollChatsToTop(p, nome).catch(()=>{});
           await sleep(300);
+          const pickBestAnchorHandle = async () => {
+            const handles = await p.$$(anchorSel).catch(() => []);
+            if (!Array.isArray(handles) || !handles.length) return null;
+            const vp = p.viewport && typeof p.viewport === 'function'
+              ? (p.viewport() || { width: 1366, height: 768 })
+              : { width: 1366, height: 768 };
+            let best = null;
+            let bestScore = -Infinity;
+            for (const h of handles.slice(0, 20)) {
+              try {
+                const box = await h.boundingBox().catch(() => null);
+                if (!box || box.width < 4 || box.height < 4) continue;
+                const visW = Math.max(0, Math.min(box.x + box.width, Number(vp.width || 1366)) - Math.max(box.x, 0));
+                const visH = Math.max(0, Math.min(box.y + box.height, Number(vp.height || 768)) - Math.max(box.y, 0));
+                const visArea = visW * visH;
+                // Prioriza âncora realmente visível; fallback escolhe a mais próxima do viewport.
+                const score = visArea > 0 ? (visArea + (box.width * box.height * 0.01)) : (-Math.abs(box.x) - Math.abs(box.y));
+                if (score > bestScore) {
+                  bestScore = score;
+                  best = h;
+                }
+              } catch {}
+            }
+            return best || handles[0] || null;
+          };
           try {
             const anchorProbe = await p.evaluate((id) => {
               try {
@@ -1577,7 +1602,32 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               anchors: Array.isArray(anchorMetrics) ? anchorMetrics : []
             });
           } catch {}
-          found = await p.$(anchorSel);
+          found = await pickBestAnchorHandle();
+          if (found) {
+            try {
+              const selected = await found.evaluate((el) => {
+                try {
+                  const r = el.getBoundingClientRect();
+                  return {
+                    href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
+                    x: Math.round(Number(r.x || 0)),
+                    y: Math.round(Number(r.y || 0)),
+                    w: Math.round(Number(r.width || 0)),
+                    h: Math.round(Number(r.height || 0))
+                  };
+                } catch {
+                  return null;
+                }
+              }).catch(() => null);
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_chat_anchor_selected',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                selected: selected || null
+              });
+            } catch {}
+          }
 
           if (!found) {
             logger.warn(`Âncora do chatId ${chatId} não encontrada. Retry curto (click-only).`, { nome, chatId });
@@ -1718,7 +1768,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
             if (!achou && clickTry < 1) {
-              found = await p.$(anchorSel).catch(() => null);
+              found = await pickBestAnchorHandle();
               if (!found) break;
             }
           }
