@@ -22,7 +22,7 @@ function calcNominal8GbBlocks(totalMB) {
 
 /**
  * Calcula plano automático de memória/sharding para multi-node, multinacional.
- * - NODES = ceil(RAM FÍSICA / 8GB) (NUNCA por RAM livre!)
+ * - NODES = ceil(RAM FÍSICA / 16GB) (NUNCA por RAM livre!)
  * - 10% colchão (min 2GB)
  * - Overhead de 2GB por Node.
  * - Limite de ~10 perfis por Node, nunca mais.
@@ -35,7 +35,7 @@ function calcNominal8GbBlocks(totalMB) {
 function planMemoryAndShards({ totalProfiles }) {
   const totalMB = mb(os.totalmem());
   const cushionMB = Math.max(Math.floor(totalMB * 0.10), 2048); // 10% colchão, min 2GB
-  const NODE_SEG_MB = 8192; // 8GB por Node
+  const NODE_SEG_MB = 16384; // 16GB por Node
   const NODE_OVERHEAD_MB = 2048; // 2GB por Node
   const CHROME_AVG_MB = 600;
   // Política fixa por faixa nominal: 10 contas por 8GB (8=>10, 16=>20, ...).
