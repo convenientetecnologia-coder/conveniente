@@ -7464,7 +7464,6 @@ async function robeTickGlobal() {
   }
 
   const perfisArr = loadPerfisJson();
-  const sessionGateByNome = new Map();
   const nomesAll = perfisArr.map(p => p.nome);
   const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
     if (isFrozenNow(nome)) return null;
@@ -7473,19 +7472,7 @@ async function robeTickGlobal() {
     }
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
-    const nowMs = Date.now();
     const manGate = await manifestStore.read(nome).catch(()=>null);
-    const dailyPlan = await getOrCreateRobeDailyPlan(nome, nowMs, manGate).catch(()=>null);
-    const dailyGate = _robeDailyPlanSummary(dailyPlan, nowMs);
-    const dailyGateOpen = !!(dailyGate && dailyGate.enabled === true && dailyGate.inWindowNow === true);
-    if (!dailyGateOpen) return null;
-    const sessionGate = await getOrCreateRobeSessionGate(nome, nowMs, dailyPlan, manGate).catch(() => ({ allowPost: true, technicalPauseMs: _robeSessionTechnicalPauseMs(), summary: null }));
-    if (sessionGate && sessionGate.summary) {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].robeSessionSummary = sessionGate.summary;
-    }
-    if (!sessionGate || sessionGate.allowPost !== true) return null;
-    sessionGateByNome.set(nome, sessionGate);
     // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
     // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
     try { await unfreezeCooldownIfWorking(nome); } catch {}
@@ -7494,8 +7481,7 @@ async function robeTickGlobal() {
     const exec = robeQueue.isActive(nome);
     const nowForGate = Date.now();
     const pauseReason = String((manGate && manGate.robePauseReason) || '').trim().toLowerCase();
-    const hasPauseReason = pauseReason.length > 0;
-    const hasHardPauseWithCooldown = hasPauseReason && (
+    const hasActiveCooldown = (
       (Number(manGate && manGate.robeCooldownUntil || 0) > nowForGate) ||
       (Number(manGate && manGate.robeCooldownRemainingMs || 0) > 0)
     );
@@ -7503,20 +7489,9 @@ async function robeTickGlobal() {
       try { await issues.append(nome, 'mil_action', 'skip_robe_enqueue_due_limit_posting_active'); } catch {}
       return null;
     }
-    // V2 maestro no caminho feliz:
-    // se houver cooldown legado sem pauseReason explícita, limpar para não travar enqueue.
-    if (cooldown > 0 && !hasHardPauseWithCooldown) {
-      try {
-        await manifestStore.update(nome, (m) => {
-          m = m || {};
-          m.robeCooldownUntil = nowForGate;
-          m.robeCooldownRemainingMs = 0;
-          return m;
-        });
-        cooldown = 0;
-      } catch {}
-    }
-    if (cooldown > 0 && hasHardPauseWithCooldown) {
+    // Modo V1 clássico: respeita apenas bloqueio hard de limit_posting ativo.
+    // Outros pauseReason não devem travar o ciclo 24/7.
+    if (cooldown > 0 && pauseReason === 'limit_posting' && hasActiveCooldown) {
       return null;
     }
     return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
@@ -7570,10 +7545,7 @@ async function robeTickGlobal() {
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
-        const gateInfo = sessionGateByNome.get(nome) || null;
-        const robePauseMs = (gateInfo && Number(gateInfo.technicalPauseMs || 0) > 0)
-          ? Number(gateInfo.technicalPauseMs || 0)
-          : ((15 + Math.floor(Math.random() * 16)) * 60 * 1000);
+        const robePauseMs = ((15 + Math.floor(Math.random() * 16)) * 60 * 1000);
 
         let res;
         try {
