@@ -1,4 +1,4 @@
-// scripts/browser.js
+﻿// scripts/browser.js
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
@@ -29,7 +29,7 @@ async function bringWindowToFront(page) {
     await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
   } catch (e) {
     const msg = (e && e.message) || String(e);
-    if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) — skip maximizar', { err: msg.slice(0, 80) });
+    if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) â€” skip maximizar', { err: msg.slice(0, 80) });
     try { await page.bringToFront(); } catch {}
   }
 }
@@ -271,7 +271,7 @@ function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
   const hc = Number(m.fp && m.fp.hardwareConcurrency || 8) || 8;
   const width = Number(vp.width || 1366) || 1366;
   const uaMajor = Number((String(m.uaString || '').match(/Chrome\/(\d+)\./) || [])[1] || 0) || 0;
-  // Coorte técnica plausível: hardware + viewport direcionam GPU provável.
+  // Coorte tÃ©cnica plausÃ­vel: hardware + viewport direcionam GPU provÃ¡vel.
   const bucket = (() => {
     if (hc <= 4 || width <= 1366) return ['intel_hd_520', 'intel_uhd_620'];
     if (hc <= 8 && width <= 1600) return ['intel_uhd_620', 'intel_uhd_630', 'amd_vega_8'];
@@ -280,7 +280,7 @@ function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
     return ['nvidia_rtx_2060', 'amd_rx_580'];
   })();
   let pool = FINGERPRINT_COHORTS.filter((c) => bucket.includes(c.id));
-  // Leve amarra com geração do navegador: majors mais novos tendem a hardware mais novo.
+  // Leve amarra com geraÃ§Ã£o do navegador: majors mais novos tendem a hardware mais novo.
   if (uaMajor >= 136) {
     const newer = pool.filter((c) => ['intel_iris_xe', 'nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'].includes(c.id));
     if (newer.length) pool = newer;
@@ -302,7 +302,7 @@ function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
   if (!profileName) return pickBySeed(candidates, seed) || FINGERPRINT_COHORTS[0];
 
   // Sticky + diversidade global: usa ledger persistente de coortes por perfil.
-  // Regra: reutiliza coorte já atribuída; se novo perfil, escolhe a menos usada.
+  // Regra: reutiliza coorte jÃ¡ atribuÃ­da; se novo perfil, escolhe a menos usada.
   const ledger = readCohortLedgerSafe();
   const profiles = (ledger.profiles && typeof ledger.profiles === 'object') ? ledger.profiles : {};
   const existing = profiles[profileName] && String(profiles[profileName].cohortId || '').trim();
@@ -385,7 +385,7 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
 }
 
 async function patchPage(nome, page, coords) {
-  // BLINDAGEM: nome obrigatório
+  // BLINDAGEM: nome obrigatÃ³rio
   if (!nome) throw new Error('manifest_incomplete: nome ausente (perfil corrompido)');
 
   let manifest = null;
@@ -393,7 +393,7 @@ async function patchPage(nome, page, coords) {
     // Tente ler do manifestStore
     manifest = await manifestStore.read(nome);
 
-    // FALLBACK: Se não tem userDataDir, tenta perfis.json
+    // FALLBACK: Se nÃ£o tem userDataDir, tenta perfis.json
     if (!manifest || !manifest.userDataDir) {
       const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
       const perfil = perfisArr.find(p => p && p.nome === nome);
@@ -404,13 +404,13 @@ async function patchPage(nome, page, coords) {
     }
   } catch (e) {}
 
-  // Hard-check — se manifest ou nome ou userDataDir estão inválidos, throw explicativo
+  // Hard-check â€” se manifest ou nome ou userDataDir estÃ£o invÃ¡lidos, throw explicativo
   if (!manifest || !manifest.nome || !manifest.userDataDir) {
-    // Opcional: log no disco ou em issues.json — aqui preferimos fail fast/clear
+    // Opcional: log no disco ou em issues.json â€” aqui preferimos fail fast/clear
     throw new Error('manifest_incomplete: Falta nome/userDataDir para ' + (nome || 'undefined') + '. Corrija manifest/perfis.json para autocura.');
   }
 
-  // --- RESTANTE INALTERADO (só troquei para usar manifest lido acima) ---
+  // --- RESTANTE INALTERADO (sÃ³ troquei para usar manifest lido acima) ---
   const ua = manifest.uaString;
   const uaCh = manifest.uaCh || {};
   const viewport = manifest.fp?.viewport || { width: 1366, height: 768 };
@@ -422,7 +422,7 @@ async function patchPage(nome, page, coords) {
 
   // --- PATCH FULL UA/UA-CH ---
   // P0 enterprise: CDP pode falhar com "Target closed" ou "Network.enable timed out" quando
-  // página/navegador está fechando (ex.: RAM, governor). Guard + catch evita unhandledRejection.
+  // pÃ¡gina/navegador estÃ¡ fechando (ex.: RAM, governor). Guard + catch evita unhandledRejection.
   try { if (ua) await page.setUserAgent(ua); } catch {}
   if (ua && uaCh && uaCh.brands) {
     try {
@@ -436,13 +436,13 @@ async function patchPage(nome, page, coords) {
     } catch (e) {
       const msg = (e && e.message) || String(e);
       const isCdpFatal = /Target closed|Network\.enable|Protocol error|timed out/i.test(msg);
-      if (isCdpFatal) logger.warn('[patchPage] CDP UA-CH falhou (target/timeout) — continuando sem UA-CH', { nome: String(nome || '').slice(0, 40), err: msg.slice(0, 120) });
+      if (isCdpFatal) logger.warn('[patchPage] CDP UA-CH falhou (target/timeout) â€” continuando sem UA-CH', { nome: String(nome || '').slice(0, 40), err: msg.slice(0, 120) });
       else if (process.env.BROWSER_DEBUG === '1') logger.warn('[patchPage] Falha ao setar UA-CH: ' + msg);
     }
   }
 
   // --- IDIOMA E REGION ---
-  // ATENÇÃO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
+  // ATENÃ‡ÃƒO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
   const patchLang = process.env.BROWSER_LANG || antiState.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
   const patchTz = process.env.BROWSER_TZ || antiState.timezone || 'America/Sao_Paulo';
   try { await page.setExtraHTTPHeaders({ 'accept-language': patchLang }); } catch {}
@@ -503,7 +503,7 @@ async function patchPage(nome, page, coords) {
     safeDefine(navigator, 'plugins', () => pluginArray);
     safeDefine(navigator, 'mimeTypes', () => ({ length: 0, item: () => null, namedItem: () => null }));
 
-    // WebGL determinístico por perfil/coorte
+    // WebGL determinÃ­stico por perfil/coorte
     const patchWebGl = (Proto) => {
       if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
       const originalGetParameter = Proto.prototype.getParameter;
@@ -573,7 +573,7 @@ async function patchPage(nome, page, coords) {
     patchWebGl(window.WebGL2RenderingContext);
     installWebglContextWrapper();
 
-    // Canvas determinístico estável (ruído mínimo por seed)
+    // Canvas determinÃ­stico estÃ¡vel (ruÃ­do mÃ­nimo por seed)
     if (window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype && window.CanvasRenderingContext2D.prototype.getImageData) {
       const originalGetImageData = window.CanvasRenderingContext2D.prototype.getImageData;
       window.CanvasRenderingContext2D.prototype.getImageData = function () {
@@ -587,7 +587,7 @@ async function patchPage(nome, page, coords) {
       };
     }
 
-    // Audio fingerprint determinístico estável (offset minúsculo)
+    // Audio fingerprint determinÃ­stico estÃ¡vel (offset minÃºsculo)
     if (window.AudioBuffer && window.AudioBuffer.prototype && window.AudioBuffer.prototype.getChannelData) {
       const originalGetChannelData = window.AudioBuffer.prototype.getChannelData;
       window.AudioBuffer.prototype.getChannelData = function () {
@@ -599,7 +599,7 @@ async function patchPage(nome, page, coords) {
       };
     }
 
-    // Fonts (sinal plausível + estável)
+    // Fonts (sinal plausÃ­vel + estÃ¡vel)
     try {
       const fonts = Array.isArray(cfg.fonts) ? cfg.fonts.map((x) => String(x || '').toLowerCase()) : [];
       if (document.fonts && typeof document.fonts.check === 'function') {
@@ -633,7 +633,7 @@ async function patchPage(nome, page, coords) {
     }
   }, fingerprintCfg);
 
-  // Aplicar também no documento corrente (não apenas em navegações futuras).
+  // Aplicar tambÃ©m no documento corrente (nÃ£o apenas em navegaÃ§Ãµes futuras).
   try {
     await page.evaluate((cfg) => {
       const safeDefine = (obj, key, getter) => {
@@ -706,7 +706,7 @@ async function patchPage(nome, page, coords) {
     }, fingerprintCfg);
   } catch {}
 
-  // --- GEOLOCALIZAÇÃO ---
+  // --- GEOLOCALIZAÃ‡ÃƒO ---
   if (coords && coords.latitude) {
     try { await page.setGeolocation(coords); } catch(e){}
   }
@@ -730,13 +730,13 @@ async function patchPage(nome, page, coords) {
     } catch {}
   });
 
-  // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
+  // --- INJEÃ‡ÃƒO DO DISMISS AUTOMÃTICO DO OVERLAY "SUSPEITAMOS..." ---
   try {
     // Exponha como function para page
     await page.exposeFunction('__dismissAutomationSuspect', () =>
       dismissAutomationSuspect(page, nome).catch(()=>false)
     );
-    // Injeta um scanner após DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
+    // Injeta um scanner apÃ³s DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
     await page.evaluateOnNewDocument(() => {
       let rodadas = 0;
       function tryDismiss(){
@@ -780,10 +780,10 @@ async function patchPage(nome, page, coords) {
   } catch {}
   // #endregion
 
-  // ==== PATCH APLICADO CONFORME INSTRUÇÃO (PATCH MILITAR) ====
+  // ==== PATCH APLICADO CONFORME INSTRUÃ‡ÃƒO (PATCH MILITAR) ====
   if (enableVirtusMessengerBlock) {
     try {
-      // EVITAR MÚLTIPLOS setRequestInterception/listeners:
+      // EVITAR MÃšLTIPLOS setRequestInterception/listeners:
       if (!page._virtusIntercepted) {
         await page.setRequestInterception(true);
         page.on('request', (req) => {
@@ -847,15 +847,15 @@ async function patchPage(nome, page, coords) {
     });
   } catch (e) {
     // #region agent log (debug)
-    // Diagnóstico do porquê caiu em probe_failed (sem HTML/sem segredos)
+    // DiagnÃ³stico do porquÃª caiu em probe_failed (sem HTML/sem segredos)
     try {
       let hrefSafe = '';
       try { hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
       const msg = (e && e.message) ? String(e.message) : String(e || '');
     } catch {}
     // #endregion
-    // Fail-safe enterprise: se o probe falhar, não podemos concluir "liberado".
-    // Mantemos como loginRequired=true para evitar ações erradas.
+    // Fail-safe enterprise: se o probe falhar, nÃ£o podemos concluir "liberado".
+    // Mantemos como loginRequired=true para evitar aÃ§Ãµes erradas.
     try {
       const hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
       const titleSafe = (page && typeof page.title === 'function') ? String(page.title() || '') : '';
@@ -891,9 +891,9 @@ function resolvePatchCoordsForProfile(profileName, manifest) {
   return utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
 }
 
-// Minimização suave
+// MinimizaÃ§Ã£o suave
 async function ensureMinimizedWindowForPage(page) {
-  // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
+  // GUARDA: A funÃ§Ã£o minimize Ã© inerte para steady-state (sÃ³ uso manual/debug)
   return;
 }
 
@@ -956,8 +956,8 @@ function extractUserDataDirFromCmd(cmd) {
 
 function listChromeProcessesWin() {
   try {
-    // Nota: usar -Filter (WMI-side) é MUITO mais rápido/estável que pipe+Where em hosts carregados.
-    // Também adiciona timeout para não travar o worker em cenário de WMI lento.
+    // Nota: usar -Filter (WMI-side) Ã© MUITO mais rÃ¡pido/estÃ¡vel que pipe+Where em hosts carregados.
+    // TambÃ©m adiciona timeout para nÃ£o travar o worker em cenÃ¡rio de WMI lento.
     const ps = `
       $names = @('chrome.exe','chromium.exe');
       $all = @();
@@ -996,7 +996,7 @@ function taskkillTreeWin(pid) {
 }
 
 function taskkillTreeWinGraceful(pid) {
-  // Sem /F: tenta fechar "normalmente" (WM_CLOSE). Pode falhar silenciosamente — caller decide se forçará.
+  // Sem /F: tenta fechar "normalmente" (WM_CLOSE). Pode falhar silenciosamente â€” caller decide se forÃ§arÃ¡.
   try {
     execFileSync('taskkill', ['/PID', String(pid), '/T'], { windowsHide: true, timeout: 8000 });
     return true;
@@ -1008,7 +1008,7 @@ function taskkillTreeWinGraceful(pid) {
 function _listProfilePidsWinOrThrow(userDataDir) {
   const expected = String(userDataDir || '').trim();
   if (!expected) return [];
-  // Retorna só PIDs (compacto) para evitar JSON gigantes e reduzir chance de falha.
+  // Retorna sÃ³ PIDs (compacto) para evitar JSON gigantes e reduzir chance de falha.
   const ps = `
     $expected = $args[0];
     if (-not $expected) { "[]" ; exit 0 }
@@ -1037,7 +1037,7 @@ function _listProfilePidsWinOrThrow(userDataDir) {
 }
 
 function listProfilePidsWin(userDataDir) {
-  // Mantém API legada (nunca lança): em falha retorna [].
+  // MantÃ©m API legada (nunca lanÃ§a): em falha retorna [].
   try {
     return _listProfilePidsWinOrThrow(userDataDir);
   } catch {
@@ -1047,7 +1047,7 @@ function listProfilePidsWin(userDataDir) {
 
 function listProfilePidsWinMeta(userDataDir) {
   // Enterprise: preservar sinal de falha real.
-  // Bug antigo: listProfilePidsWin engolia exceções e retornava [], mascarando WMI/Powershell quebrado,
+  // Bug antigo: listProfilePidsWin engolia exceÃ§Ãµes e retornava [], mascarando WMI/Powershell quebrado,
   // o que podia levar a delete de userDataDir com Chrome ainda vivo ("janela quebrada").
   try {
     const pids = _listProfilePidsWinOrThrow(userDataDir);
@@ -1059,7 +1059,7 @@ function listProfilePidsWinMeta(userDataDir) {
 
 /**
  * Mata processos do Chrome usando ESTE userDataDir (Windows).
- * Implementação real usando PowerShell + taskkill.
+ * ImplementaÃ§Ã£o real usando PowerShell + taskkill.
  */
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
@@ -1069,7 +1069,7 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
     if (!expected) return;
     const toKill = new Set();
 
-    // PASSO A: tentativa rápida (lista cmdline completa)
+    // PASSO A: tentativa rÃ¡pida (lista cmdline completa)
     try {
       const procs = listChromeProcessesWin();
       for (const pr of procs) {
@@ -1079,7 +1079,7 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
             toKill.add(pr.pid);
           }
         } else {
-          // fallback: se não achou o param, mas cmd contém o path inteiro
+          // fallback: se nÃ£o achou o param, mas cmd contÃ©m o path inteiro
           if (pr.cmd && normalizePathForCompare(pr.cmd).includes(expected)) {
             toKill.add(pr.pid);
           }
@@ -1087,7 +1087,7 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
       }
     } catch {}
 
-    // PASSO B: fallback robusto (WMI filtra por substring e retorna só PIDs)
+    // PASSO B: fallback robusto (WMI filtra por substring e retorna sÃ³ PIDs)
     if (!toKill.size) {
       try {
         const pids = listProfilePidsWin(expectedRaw);
@@ -1096,8 +1096,8 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
     }
 
     // PASSO B2 (ultra enterprise): fallback curto por slug
-    // Motivo: em alguns hosts, o CommandLine pode ser truncado/instável; a substring "\\Conveniente\\<slug>"
-    // é curta e costuma sobreviver. Isso evita falso-negativo que leva a "janela quebrada" após delete.
+    // Motivo: em alguns hosts, o CommandLine pode ser truncado/instÃ¡vel; a substring "\\Conveniente\\<slug>"
+    // Ã© curta e costuma sobreviver. Isso evita falso-negativo que leva a "janela quebrada" apÃ³s delete.
     if (!toKill.size) {
       try {
         const slug = (() => {
@@ -1121,7 +1121,7 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
       if (taskkillTreeWin(pid)) killed++;
     }
 
-    // PASSO C: validação + retry (caso ainda exista processo vivo com o userDataDir)
+    // PASSO C: validaÃ§Ã£o + retry (caso ainda exista processo vivo com o userDataDir)
     try {
       const still = listProfilePidsWin(expectedRaw);
       if (still && still.length) {
@@ -1133,14 +1133,14 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
 
     try {
       if (killed > 0) {
-        logger.warn('[BROWSER][KILL][userDataDir] Chrome órfão removido', { userDataDir, killed });
+        logger.warn('[BROWSER][KILL][userDataDir] Chrome Ã³rfÃ£o removido', { userDataDir, killed });
       }
     } catch {}
   } catch {}
 }
 
 function closeChromeProfileProcessesGraceful(userDataDir) {
-  // Fecha (sem /F) processos do Chrome ligados ao userDataDir; não garante fechamento.
+  // Fecha (sem /F) processos do Chrome ligados ao userDataDir; nÃ£o garante fechamento.
   if (process.platform !== 'win32') return { ok: false, skipped: 'non_win32' };
   try {
     const expectedRaw = String(userDataDir || '').trim();
@@ -1159,14 +1159,14 @@ function closeChromeProfileProcessesGraceful(userDataDir) {
 }
 
 function getChromeProfilePids(userDataDir) {
-  // Retorna lista de PIDs do Chrome/Chromium cujo CommandLine contém o userDataDir.
-  // Uso: validação "antes de deletar" (anti-janela zumbi).
+  // Retorna lista de PIDs do Chrome/Chromium cujo CommandLine contÃ©m o userDataDir.
+  // Uso: validaÃ§Ã£o "antes de deletar" (anti-janela zumbi).
   if (process.platform !== 'win32') return [];
   try {
     const raw = String(userDataDir || '').trim();
     const p0 = listProfilePidsWin(raw);
     if (p0 && p0.length) return p0;
-    // Fallback curto por slug (mesma lógica do kill): \\Conveniente\\<slug>
+    // Fallback curto por slug (mesma lÃ³gica do kill): \\Conveniente\\<slug>
     try {
       const s = raw.replace(/[\\\/]+$/g, '');
       const slug = s ? path.basename(s) : '';
@@ -1179,7 +1179,7 @@ function getChromeProfilePids(userDataDir) {
 }
 
 function getChromeProfilePidsMeta(userDataDir) {
-  // Versão enterprise: não perde sinal de falha (ok=false).
+  // VersÃ£o enterprise: nÃ£o perde sinal de falha (ok=false).
   if (process.platform !== 'win32') return { ok: true, pids: [] };
   try {
     const raw = String(userDataDir || '').trim();
@@ -1195,7 +1195,7 @@ function getChromeProfilePidsMeta(userDataDir) {
         return { ok: false, pids: [], error: (r1 && r1.error) ? r1.error : 'wmi_failed' };
       }
     } catch {}
-    // Se não temos slug e a primeira tentativa falhou, isso é "unknown" => ok=false
+    // Se nÃ£o temos slug e a primeira tentativa falhou, isso Ã© "unknown" => ok=false
     if (r0 && r0.ok === false) return { ok: false, pids: [], error: r0.error || 'wmi_failed' };
     return { ok: true, pids: [] };
   } catch (e) {
@@ -1242,7 +1242,7 @@ function ensureUserDataDirUnderChrome(manifest) {
   } catch {}
 }
 
-/* ===== Helpers novos: IO, preferências e janela única ===== */
+/* ===== Helpers novos: IO, preferÃªncias e janela Ãºnica ===== */
 
 async function safeCloseBrowser(browser) {
   try {
@@ -1272,9 +1272,9 @@ function writeJsonAtomic(file, obj) {
 }
 
 /**
- * Normaliza preferências do perfil para evitar restauração/segunda janela.
- * - Força: profile.exit_type="Normal", profile.exited_cleanly=true
- * - Força: session.restore_on_startup=0 (Nova guia), startup_urls=[]
+ * Normaliza preferÃªncias do perfil para evitar restauraÃ§Ã£o/segunda janela.
+ * - ForÃ§a: profile.exit_type="Normal", profile.exited_cleanly=true
+ * - ForÃ§a: session.restore_on_startup=0 (Nova guia), startup_urls=[]
  * - Em "Local State": exited_cleanly=true
  */
 function ensureChromeProfilePreferences(userDataDir) {
@@ -1300,19 +1300,19 @@ function ensureChromeProfilePreferences(userDataDir) {
     ls.exited_cleanly = true;
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
-    try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
+    try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferÃªncias: ' + ((e && e.message) || e)); } } catch {}
   }
 }
 
 // BEGIN -- PRUNING PATCH: ULTRA CONSCIENTE
 
 /**
- * Garante que apenas UMA janela permaneça aberta.
- * Mantém a mainPage; fecha quaisquer outras pages "page".
+ * Garante que apenas UMA janela permaneÃ§a aberta.
+ * MantÃ©m a mainPage; fecha quaisquer outras pages "page".
  * 
- * Ultra Consciente: NÃO fecha se robeMeta[nome]?.emExecucao ou ctrl?.skipPruneUntil > Date.now()!
+ * Ultra Consciente: NÃƒO fecha se robeMeta[nome]?.emExecucao ou ctrl?.skipPruneUntil > Date.now()!
  * 
- * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
+ * ApÃ³s prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
   // 1) Sempre fecha about:blank extras (nunca aguarda flags)
@@ -1331,7 +1331,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     }
   } catch {}
 
-  // 2) Se em Robe/config/etc, não faz prune amplo
+  // 2) Se em Robe/config/etc, nÃ£o faz prune amplo
   const isRobeActive = robeMeta && nome && robeMeta[nome] && robeMeta[nome].emExecucao === true;
   const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
   const isConfig = ctrl && ctrl.configurando === true;
@@ -1342,7 +1342,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     return;
   }
 
-  // 3) Prune amplo padrão (mais de 1 page)
+  // 3) Prune amplo padrÃ£o (mais de 1 page)
   const t0 = Date.now();
   while ((Date.now() - t0) < timeoutMs) {
     try {
@@ -1362,11 +1362,11 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 /**
  * Militar: em modo humano, manter APENAS 1 aba.
- * Não depende do pruneExtraWindows (que evita mexer em humano por segurança).
+ * NÃ£o depende do pruneExtraWindows (que evita mexer em humano por seguranÃ§a).
  *
  * - Escolhe uma aba para manter (prioridade: facebook.com, depois messenger.com, depois pages[0])
  * - Fecha todas as outras (inclui about:blank)
- * - Atualiza robeMeta[nome].numPages quando possível
+ * - Atualiza robeMeta[nome].numPages quando possÃ­vel
  */
 async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = null } = {}) {
   if (!browser) return { ok: false, error: 'no_browser' };
@@ -1420,10 +1420,10 @@ async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = 
 
 // END -- PRUNING PATCH
 
-// ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
+// ===== Hard One-Tab Guard (evento alvo criado/destruÃ­do) =====
 function installOneTabGuard(browser, nome, {
-  allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
-  maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
+  allow = () => false,              // funÃ§Ã£o externa que diz se â€œmais de 1 abaâ€ Ã© permitido
+  maxPagesWhenAllow = 2,            // mÃ¡ximo permitido quando allow() Ã© true (Robe/config)
   onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
   onPrune = null,                   // callback quando o guard fechou abas (telemetria/auditoria)
   getReason = null,                 // string|fn para explicar por que allow/limOpt foram escolhidos
@@ -1510,7 +1510,7 @@ function installOneTabGuard(browser, nome, {
 }
 
 // ====== FIND CHROME STABLE ======
-// Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
+// Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variÃ¡veis de ambiente, depois paths padrÃ£o de OS.
 function findChromeStable() {
   const envChrome = process.env.CHROME_PATH;
   if (envChrome && fs.existsSync(envChrome)) {
@@ -1543,7 +1543,7 @@ function findChromeStable() {
     );
   }
 
-  // Adiciona ao final dos candidatos o path do Chromium por variável de ambiente, se definido
+  // Adiciona ao final dos candidatos o path do Chromium por variÃ¡vel de ambiente, se definido
   if (envChromium) {
     candidates.push(envChromium);
   }
@@ -1551,7 +1551,7 @@ function findChromeStable() {
   for (const file of candidates) {
     if (file && fs.existsSync(file)) return file;
   }
-  throw new Error('Chrome/Chromium não encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
+  throw new Error('Chrome/Chromium nÃ£o encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
 }
 
 //
@@ -1585,12 +1585,12 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     ensureUserDataDirUnderChrome(manifest);
     const userDataDir = manifest.userDataDir;
 
-    // RAM: Garantir preferências, evitar restauração
+    // RAM: Garantir preferÃªncias, evitar restauraÃ§Ã£o
     ensureChromeProfilePreferences(userDataDir);
 
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
       logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
-      throw new Error('UserDataDir sem permissão de escrita: ' + userDataDir);
+      throw new Error('UserDataDir sem permissÃ£o de escrita: ' + userDataDir);
     }
 
     // RAM: Encerra processos do perfil e limpa locks
@@ -1604,26 +1604,26 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     const chromeLogFile = path.join(userDataDir, 'chrome_launch.log');
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
-    // FLAGS “OURO” ONLY!
+    // FLAGS â€œOUROâ€ ONLY!
     const launchArgs = [
-      '--no-first-run', // Não exibe onboarding
-      '--no-default-browser-check', // Não pergunta padrão
+      '--no-first-run', // NÃ£o exibe onboarding
+      '--no-default-browser-check', // NÃ£o pergunta padrÃ£o
       '--password-store=basic', // Evita prompts/chaves desktop
-      '--disable-extensions', // Zero extensão custom
+      '--disable-extensions', // Zero extensÃ£o custom
       '--lang=pt-BR', // GOAL: idioma fixo PT-BR
-      '--disable-background-timer-throttling', // Não pausa timers de fundo
+      '--disable-background-timer-throttling', // NÃ£o pausa timers de fundo
       '--disable-backgrounding-occluded-windows', // Prev. throttling CPU tabs background
       '--disable-renderer-backgrounding', // Garantir render foreground
       '--process-per-site', // Cada site processo
       '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
       '--disk-cache-size=104857600', // 100MB de cap em disco
-      '--media-cache-size=0', // Zero cache de mídia
-      '--window-size=1366,768', // Sempre inicializa janela visível/tamanho padrão
+      '--media-cache-size=0', // Zero cache de mÃ­dia
+      '--window-size=1366,768', // Sempre inicializa janela visÃ­vel/tamanho padrÃ£o
       '--start-maximized' // Maximizada sempre
       // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
 
-    // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
+    // Permite ativar auto-aceite da permissÃ£o de camera/mic real por flag do Chrome, via env
     if (process.env.MEDIA_AUTO_UI === '1') {
       launchArgs.push('--use-fake-ui-for-media-stream');
     }
@@ -1716,7 +1716,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
 
     if (!browserTry) {
-      throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
+      throw new Error('Browser nÃ£o iniciou apÃ³s 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
 
@@ -1724,7 +1724,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try {
       const conn = browser && browser._connection;
       if (conn && typeof conn.setProtocolTimeout === 'function') {
-        conn.setProtocolTimeout(60000); // 60s para operações CDP
+        conn.setProtocolTimeout(60000); // 60s para operaÃ§Ãµes CDP
       }
     } catch {}
 
@@ -1739,9 +1739,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw e;
     }
 
-    // 1.1) Inicialmente NÃO execute prune nem arme timer de prune durante abertura/configuração.
-    // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
-    // Permaneça inativo aqui.
+    // 1.1) Inicialmente NÃƒO execute prune nem arme timer de prune durante abertura/configuraÃ§Ã£o.
+    // SÃ³ rode pruning/timer apÃ³s entrar realmente em modo de produÃ§Ã£o (Virtus ON/start_work).
+    // PermaneÃ§a inativo aqui.
 
     // 2) Maximizar janela (se falhar, segue)
     try {
@@ -1757,7 +1757,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       logger.warn('[BROWSER] Falha ao maximizar (seguindo normal): ' + ((e && e.message) || e));
     }
 
-    // 2. PATCH: Configuração defaultTimeout, defaultNavigationTimeout e interceptação beforeunload para TODAS as new pages!
+    // 2. PATCH: ConfiguraÃ§Ã£o defaultTimeout, defaultNavigationTimeout e interceptaÃ§Ã£o beforeunload para TODAS as new pages!
     try {
       const setDefaults = async (p) => {
         try {
@@ -1777,8 +1777,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
               } catch {}
             }
           }
-          p.setDefaultTimeout(30000); // 30s ações padrão
-          p.setDefaultNavigationTimeout(45000); // 45s navegação
+          p.setDefaultTimeout(30000); // 30s aÃ§Ãµes padrÃ£o
+          p.setDefaultNavigationTimeout(45000); // 45s navegaÃ§Ã£o
           p.on('dialog', async (dlg) => {
             try {
               const t = dlg.type && dlg.type();
@@ -1802,7 +1802,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       });
     } catch {}
 
-    // 3) Permissões: GEO + CAMERA + MICROFONE (militar, multi-origin, dinâmico)
+    // 3) PermissÃµes: GEO + CAMERA + MICROFONE (militar, multi-origin, dinÃ¢mico)
     try {
       const context = browser.defaultBrowserContext();
       const MEDIA_ORIGINS = [
@@ -1821,7 +1821,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         await context.overridePermissions(o, ['geolocation', 'camera', 'microphone']);
       }
 
-      // Blindagem dinâmica: qualquer nova target criada/alterada (iframe/popup/flow) -> re-grant
+      // Blindagem dinÃ¢mica: qualquer nova target criada/alterada (iframe/popup/flow) -> re-grant
       function originOf(u) {
         try {
           const url = new URL(u);
@@ -1851,10 +1851,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       }
 
       if (process.env.BROWSER_DEBUG === '1') {
-        logger.debug('>> [BROWSER][STEP] Permissões de mídia concedidas para Facebook/Messenger.');
+        logger.debug('>> [BROWSER][STEP] PermissÃµes de mÃ­dia concedidas para Facebook/Messenger.');
       }
     } catch (e) {
-      logger.warn('[BROWSER][Permissões mídia] Falha ao conceder mídia: ' + ((e && e.message) || e));
+      logger.warn('[BROWSER][PermissÃµes mÃ­dia] Falha ao conceder mÃ­dia: ' + ((e && e.message) || e));
     }
 
     // 4) Espera por pelo menos 1 page pronta
@@ -1871,10 +1871,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
     if (!ready) {
       await safeCloseBrowser(browser);
-      throw new Error('Browser não inicializou/target não disponível em tempo aceitável!');
+      throw new Error('Browser nÃ£o inicializou/target nÃ£o disponÃ­vel em tempo aceitÃ¡vel!');
     }
 
-    // 5) patchPage na primeira aba — se falhar, fecha e relança
+    // 5) patchPage na primeira aba â€” se falhar, fecha e relanÃ§a
     try {
       const page = (await browser.pages())[0];
       await patchPage(manifest.nome, page, coords);
@@ -1911,7 +1911,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       } catch {}
     };
 
-    // Após toda a abertura e logo antes de return:
+    // ApÃ³s toda a abertura e logo antes de return:
     if (browser && typeof browser.process === "function") {
       browser._rootPid = null;
       try {
@@ -1994,7 +1994,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
 
     try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} detectado em ${url}`); } } catch {}
 
-    // Botão “Recarregar página”
+    // BotÃ£o â€œRecarregar pÃ¡ginaâ€
     const recarregar = await waitAny(page, [
       'button[type="submit"]',
       'button[aria-label*="Recarregar"]'
@@ -2010,7 +2010,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
       } catch {}
     }
 
-    // Tenta “Return to messenger”
+    // Tenta â€œReturn to messengerâ€
     const ok = await clickByXPath(page, [
       '//a[contains(.,"Return to messenger")]',
       '//a[contains(.,"Return") and contains(.,"messenger")]',
@@ -2022,19 +2022,19 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
       continue;
     }
 
-    // Sem botão na UI: recarrega e volta manualmente para a home do messenger
+    // Sem botÃ£o na UI: recarrega e volta manualmente para a home do messenger
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
     await sleep(800);
-    try { await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
+    try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
     await sleep(800);
   }
   return !/messenger.com\/login\/nonce/i.test(page.url() || '');
 }
 
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
-  // Enterprise: NÃO clicar "qualquer submit" aqui.
-  // No Messenger, pode existir um <form id="login_form"> oculto com botão "Continuar".
-  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>").
+  // Enterprise: NÃƒO clicar "qualquer submit" aqui.
+  // No Messenger, pode existir um <form id="login_form"> oculto com botÃ£o "Continuar".
+  // Aqui sÃ³ podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>").
   const t0 = Date.now();
   const maxMs = Math.max(1000, Number(timeout || 0) || 0);
   while ((Date.now() - t0) < maxMs) {
@@ -2096,12 +2096,12 @@ async function clickVoltarParaFacebook(page, { logPrefix='[fb][voltar]', timeout
 
 async function detectMessengerPinModal(page) {
   try {
-    // NÃO restringir por URL: em alguns fluxos o Messenger pode estar embutido/redirectado
-    // e ainda assim renderizar o modal do PIN. O detector já exige sinais fortes (texto + input/botão).
+    // NÃƒO restringir por URL: em alguns fluxos o Messenger pode estar embutido/redirectado
+    // e ainda assim renderizar o modal do PIN. O detector jÃ¡ exige sinais fortes (texto + input/botÃ£o).
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const txt = norm(document.body ? (document.body.innerText || '') : '');
-      // Caso A (mais comum): “Insira seu PIN para restaurar seu histórico de conversa”
+      // Caso A (mais comum): â€œInsira seu PIN para restaurar seu histÃ³rico de conversaâ€
       const pinText =
         txt.includes('insira seu pin') ||
         txt.includes('inserir seu pin') ||
@@ -2111,7 +2111,7 @@ async function detectMessengerPinModal(page) {
         !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
         Array.from(document.querySelectorAll('input[type="text"][maxlength="6"]')).some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
 
-      // Caso B (às vezes aparece após tentar fechar): “Continuar sem restaurar?”
+      // Caso B (Ã s vezes aparece apÃ³s tentar fechar): â€œContinuar sem restaurar?â€
       const contText =
         txt.includes('continuar sem restaurar') ||
         (txt.includes('nao restaurar') && txt.includes('mensagens'));
@@ -2125,7 +2125,7 @@ async function detectMessengerPinModal(page) {
             return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
           });
 
-      // Legado: alguns fluxos mostram “Criar PIN” (mantemos também)
+      // Legado: alguns fluxos mostram â€œCriar PINâ€ (mantemos tambÃ©m)
       const createText =
         txt.includes('crie um pin') ||
         txt.includes('criar pin') ||
@@ -2136,8 +2136,8 @@ async function detectMessengerPinModal(page) {
         Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => {
           const t = norm(el.innerText || el.textContent || '');
           const al = norm(el.getAttribute('aria-label') || '');
-          // pode vir como "Criar PIN" ou "Mais opções" (fluxo alternativo)
-          return t.includes('criar pin') || al.includes('criar pin') || t.includes('mais opcoes') || t.includes('mais opções') || al.includes('mais opcoes') || al.includes('mais opções');
+          // pode vir como "Criar PIN" ou "Mais opÃ§Ãµes" (fluxo alternativo)
+          return t.includes('criar pin') || al.includes('criar pin') || t.includes('mais opcoes') || t.includes('mais opÃ§Ãµes') || al.includes('mais opcoes') || al.includes('mais opÃ§Ãµes');
         });
 
       const present =
@@ -2167,8 +2167,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
   const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
 
-  // PIN padrão do sistema (enterprise): configurável via env.
-  // Default: 882584 (padrão operacional)
+  // PIN padrÃ£o do sistema (enterprise): configurÃ¡vel via env.
+  // Default: 882584 (padrÃ£o operacional)
   const DEFAULT_PIN = String(process.env.MESSENGER_PIN || '882584').trim() || '882584';
 
   async function clickCloseTrusted() {
@@ -2184,11 +2184,11 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function clickNaoRestaurarTrusted() {
     try {
-      // variações PT-BR / sem acento
+      // variaÃ§Ãµes PT-BR / sem acento
       const xps = [
-        '//div[@role="dialog"]//button[contains(.,"Não restaurar mensagens")]',
+        '//div[@role="dialog"]//button[contains(.,"NÃ£o restaurar mensagens")]',
         '//div[@role="dialog"]//button[contains(.,"Nao restaurar mensagens")]',
-        '//div[@role="dialog"]//div[@role="button"][contains(.,"Não restaurar mensagens")]',
+        '//div[@role="dialog"]//div[@role="button"][contains(.,"NÃ£o restaurar mensagens")]',
         '//div[@role="dialog"]//div[@role="button"][contains(.,"Nao restaurar mensagens")]',
       ];
       for (const xp of xps) {
@@ -2225,8 +2225,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function clickMoreOptionsThenSkip() {
-    // Alguns modais de “Crie um PIN…” não mostram “Criar PIN” e sim “Mais opções”.
-    // Estratégia: clicar "Mais opções" e depois "Agora não"/"Pular"/"No momento não".
+    // Alguns modais de â€œCrie um PINâ€¦â€ nÃ£o mostram â€œCriar PINâ€ e sim â€œMais opÃ§Ãµesâ€.
+    // EstratÃ©gia: clicar "Mais opÃ§Ãµes" e depois "Agora nÃ£o"/"Pular"/"No momento nÃ£o".
     try {
       const didMore = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -2238,7 +2238,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           if (disabled) continue;
           const t = norm(b.innerText || b.textContent || '');
           const al = norm(b.getAttribute('aria-label') || '');
-          if (t.includes('mais opcoes') || t.includes('mais opções') || al.includes('mais opcoes') || al.includes('mais opções')) {
+          if (t.includes('mais opcoes') || t.includes('mais opÃ§Ãµes') || al.includes('mais opcoes') || al.includes('mais opÃ§Ãµes')) {
             b.click();
             return true;
           }
@@ -2251,7 +2251,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
         const dlg = document.querySelector('div[role="dialog"]') || document;
         const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 160);
-        const words = ['agora nao', 'agora não', 'pular', 'no momento nao', 'no momento não', 'mais tarde', 'continuar sem'];
+        const words = ['agora nao', 'agora nÃ£o', 'pular', 'no momento nao', 'no momento nÃ£o', 'mais tarde', 'continuar sem'];
         for (const b of btns) {
           const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
           if (disabled) continue;
@@ -2273,8 +2273,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function tryEnterPin(pinValue = DEFAULT_PIN, round = 1) {
-    // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
-    // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
+    // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃƒO clicar em X/voltar/fechar.
+    // SÃ³ focar o input e digitar com cadÃªncia humana (digit-by-digit), depois Enter.
     try {
       const sel = [
         'input[aria-label="PIN"][maxlength="6"]',
@@ -2291,7 +2291,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
       if (!h) return { ok: false, error: 'pin_input_not_found' };
 
-      // Foco + limpar sem "ruído"
+      // Foco + limpar sem "ruÃ­do"
       try { await h.click({ clickCount: 3, delay: 60 }).catch(()=>{}); } catch {}
       try { await page.keyboard.press('Backspace').catch(()=>{}); } catch {}
       await sleep(220);
@@ -2299,7 +2299,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       // Digitar 8 8 2 5 8 4 com calma
       const digits = String(pinValue || '').trim();
       if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
-      // Preencher também por JS (React-friendly) + eventos (alguns modais ignoram só teclado).
+      // Preencher tambÃ©m por JS (React-friendly) + eventos (alguns modais ignoram sÃ³ teclado).
       try {
         await page.evaluate((el, val) => {
           try {
@@ -2319,8 +2319,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
 
       await sleep(420);
-      // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
-      // Submit: tentar CTA primário do dialog; se não encontrar, usa Enter como fallback.
+      // Preferir Enter (menos risco de clicar fora e fazer o modal â€œpiscarâ€)
+      // Submit: tentar CTA primÃ¡rio do dialog; se nÃ£o encontrar, usa Enter como fallback.
       let clickedSubmit = false;
       try {
         clickedSubmit = await page.evaluate(() => {
@@ -2330,7 +2330,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           }
           const dlg = document.querySelector('div[role="dialog"]') || document;
           const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
-          const words = ['confirmar','confirm','continuar','continue','avancar','avançar','next','ok','done','concluir','finalizar','salvar','save'];
+          const words = ['confirmar','confirm','continuar','continue','avancar','avanÃ§ar','next','ok','done','concluir','finalizar','salvar','save'];
           for (const b of btns) {
             const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
             if (disabled) continue;
@@ -2346,7 +2346,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
       }
 
-      // Espera determinística: modal desaparecer / input sumir (até 12s)
+      // Espera determinÃ­stica: modal desaparecer / input sumir (atÃ© 12s)
       const cleared = await page.waitForFunction(() => {
         try {
           const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -2375,12 +2375,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
 
-    // snapshot mínimo sempre que detecta (ajuda a comparar DOM real vs esperado)
+    // snapshot mÃ­nimo sempre que detecta (ajuda a comparar DOM real vs esperado)
     try {
       pinLog({ event: 'pin_present', attempt, kind: det.kind || null, hasPinInput: !!det.hasPinInput, hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn, hasCreateBtn: !!det.hasCreateBtn });
     } catch {}
 
-    // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
+    // Se for modal de "Criar PIN", a regra Ã©: tentar CRIAR PIN (nÃ£o pular) â€” fallbacks sÃ³ se falhar.
     if (det.kind === 'create_pin' && det.hasCreateBtn) {
       try {
         pinLog({ event: 'pin_create_click_attempt', attempt });
@@ -2406,7 +2406,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             await sleep(450);
           }
         } else {
-          // Fallback: só se realmente não conseguimos clicar em "Criar PIN".
+          // Fallback: sÃ³ se realmente nÃ£o conseguimos clicar em "Criar PIN".
           const more = await clickMoreOptionsThenSkip();
           pinLog({ event: 'pin_more_options_fallback', attempt, ok: !!(more && more.ok), error: more && more.error });
         }
@@ -2415,7 +2415,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
     }
 
-    // PIN INPUT: só digita. Não clicar em nada (anti-loop).
+    // PIN INPUT: sÃ³ digita. NÃ£o clicar em nada (anti-loop).
     if (det.kind === 'pin_input' && det.hasPinInput) {
       try {
         pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
@@ -2423,13 +2423,13 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         if (enterResult.ok) {
           pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed, submitClicked: !!enterResult.submitClicked, clearedWaitOk: !!enterResult.cleared });
           await sleep(1500); // Aguarda processamento
-          // Verifica se o modal sumiu após digitar o PIN
+          // Verifica se o modal sumiu apÃ³s digitar o PIN
           const detAfter = await detectMessengerPinModal(page);
           if (!detAfter.present) {
             pinLog({ event: 'pin_success_modal_dismissed', attempt });
             return { ok: true, dismissed: true, pinEntered: true };
           }
-          // Se ainda está presente, pode ser que precise confirmar digitando de novo (comum em conta nova)
+          // Se ainda estÃ¡ presente, pode ser que precise confirmar digitando de novo (comum em conta nova)
           pinLog({ event: 'pin_entered_but_modal_still_present', attempt });
           if (detAfter.kind === 'pin_input' && detAfter.hasPinInput) {
             pinLog({ event: 'pin_confirm_second_entry_attempt', attempt, pin: DEFAULT_PIN });
@@ -2452,7 +2452,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       } catch (e) {
         pinLog({ event: 'pin_enter_exception', attempt, error: (e && e.message) || String(e) });
       }
-      // Anti-loop: no pin_input não fazemos "trusted clicks" (Fechar/Não restaurar/voltar).
+      // Anti-loop: no pin_input nÃ£o fazemos "trusted clicks" (Fechar/NÃ£o restaurar/voltar).
       // Deixe o worker/nurse aplicar cooldown e reavaliar depois.
       return { ok: false, error: 'pin_still_present', dismissed: false, pinEntered: true };
     }
@@ -2470,13 +2470,13 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        // 1) Se aparecer o diálogo "Continuar sem restaurar?", clique "Não restaurar mensagens"
+        // 1) Se aparecer o diÃ¡logo "Continuar sem restaurar?", clique "NÃ£o restaurar mensagens"
         const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
         for (const d of dialogs) {
           const dt = norm(d.innerText || d.textContent || '');
           if (dt.includes('continuar sem restaurar') || (dt.includes('nao restaurar') && dt.includes('mensagens'))) {
             const btns = Array.from(d.querySelectorAll('button,[role="button"]'));
-            // preferir o botão clicável (tabindex=0, não aria-disabled)
+            // preferir o botÃ£o clicÃ¡vel (tabindex=0, nÃ£o aria-disabled)
             for (const b of btns) {
               const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
               if (disabled) continue;
@@ -2487,13 +2487,13 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
                 return true;
               }
             }
-            // Se não achou, tenta fechar o dialog
+            // Se nÃ£o achou, tenta fechar o dialog
             const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
             if (close && typeof close.click === 'function') { close.click(); return true; }
           }
         }
 
-        // 2) Caso do PIN (input 6 dígitos): tente clicar em "Fechar" (X) no topo (não necessariamente dentro de dialog)
+        // 2) Caso do PIN (input 6 dÃ­gitos): tente clicar em "Fechar" (X) no topo (nÃ£o necessariamente dentro de dialog)
         const pinInput =
           document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
           document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
@@ -2503,7 +2503,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           if (closeAny && typeof closeAny.click === 'function') { closeAny.click(); return true; }
         }
 
-        // 3) Fallback genérico: procurar botões "Fechar/X"
+        // 3) Fallback genÃ©rico: procurar botÃµes "Fechar/X"
         const root = document;
 
         const candidates = [
@@ -2518,7 +2518,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           if (el && typeof el.click === 'function') { el.click(); return true; }
         }
 
-        // fallback: ícone X dentro de um botão (caso Messenger esconda aria-label)
+        // fallback: Ã­cone X dentro de um botÃ£o (caso Messenger esconda aria-label)
         const buttons = Array.from(root.querySelectorAll('button,[role="button"]'));
         for (const b of buttons) {
           const label = norm(b.getAttribute('aria-label') || '');
@@ -2536,7 +2536,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       });
     } catch {}
 
-    // fallback "fora do DOM": ESC geralmente fecha o PIN e abre o confirm "Não restaurar"
+    // fallback "fora do DOM": ESC geralmente fecha o PIN e abre o confirm "NÃ£o restaurar"
     if (!clicked) {
       try { await page.keyboard.press('Escape').catch(()=>{}); } catch {}
       await sleep(250);
@@ -2570,19 +2570,19 @@ async function tryApplySelectorHints(page, selectorHints, opts = {}) {
   for (const selRaw of hints) {
     const sel = String(selRaw || '').trim();
     if (!sel) continue;
-    // guardrails básicos (evita seletor “perigoso”)
+    // guardrails bÃ¡sicos (evita seletor â€œperigosoâ€)
     if (sel.length > 220) continue;
     if (/script|iframe|object|embed/i.test(sel)) continue;
     try {
       const clicked = await page.evaluate((selector, requireDlg) => {
         const el = document.querySelector(selector);
         if (!el) return false;
-        // por padrão, exige dialog/modal para evitar cliques destrutivos fora
+        // por padrÃ£o, exige dialog/modal para evitar cliques destrutivos fora
         const inDialog = !!(el.closest && el.closest('div[role="dialog"]'));
         if (!inDialog && requireDlg === true) return false;
         const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
         if (!r || r.width < 2 || r.height < 2) return false;
-        // se não for dialog, só aceita clique em elementos "seguros" (consent/continuar/aceitar)
+        // se nÃ£o for dialog, sÃ³ aceita clique em elementos "seguros" (consent/continuar/aceitar)
         if (!inDialog) {
           const norm = (s) => {
             try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
@@ -2590,7 +2590,7 @@ async function tryApplySelectorHints(page, selectorHints, opts = {}) {
           };
           const t = norm(el.innerText || el.value || el.textContent || '');
           const al = norm(el.getAttribute ? (el.getAttribute('aria-label') || '') : '');
-          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar','comecar','começar','iniciar','prosseguir','avancar','avançar','fechar','close'];
+          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar','comecar','comeÃ§ar','iniciar','prosseguir','avancar','avanÃ§ar','fechar','close'];
           const okTxt = safeWords.some(w => t.includes(w) || al.includes(w));
           const tag = String(el.tagName || '').toLowerCase();
           const role = String(el.getAttribute ? (el.getAttribute('role') || '') : '').toLowerCase();
@@ -2663,16 +2663,16 @@ async function _detectFbConsentOrBlockingPage(page) {
 }
 
 async function _tryDismissFbConsent(page) {
-  // Somente ações “não destrutivas” (aceitar/continuar) e sem depender de seletor frágil.
+  // Somente aÃ§Ãµes â€œnÃ£o destrutivasâ€ (aceitar/continuar) e sem depender de seletor frÃ¡gil.
   try {
     const did = await page.evaluate(() => {
       const norm = (s) => {
         try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
         catch { return String(s||'').toLowerCase(); }
       };
-      // LGPD/consent costuma ser multi-step: “Começar” -> “Confirmar” -> ...
-      const okWords = ['comecar','começar','iniciar','continuar','prosseguir','avancar','avançar','concordo','aceitar','permitir','entendi','ok','confirmar','fechar','close'];
-      // 0) Se existir botão/ícone de fechar (X) com aria-label, tente primeiro.
+      // LGPD/consent costuma ser multi-step: â€œComeÃ§arâ€ -> â€œConfirmarâ€ -> ...
+      const okWords = ['comecar','comeÃ§ar','iniciar','continuar','prosseguir','avancar','avanÃ§ar','concordo','aceitar','permitir','entendi','ok','confirmar','fechar','close'];
+      // 0) Se existir botÃ£o/Ã­cone de fechar (X) com aria-label, tente primeiro.
       const closeBtn =
         document.querySelector('[aria-label="Fechar"][role="button"]') ||
         document.querySelector('[aria-label="Fechar"]') ||
@@ -2738,8 +2738,8 @@ async function _tryDismissGenericDialogDeterministic(page) {
       if (close) { try { close.click(); return true; } catch {} }
       const okWords = [
         'continuar','aceitar','ok','entendi','confirmar',
-        'comecar','começar','iniciar','prosseguir','avancar','avançar',
-        // onboarding/notificações
+        'comecar','comeÃ§ar','iniciar','prosseguir','avancar','avanÃ§ar',
+        // onboarding/notificaÃ§Ãµes
         'marcar como lido','mark as read',
         'ver tudo','see all',
         'fechar','close'
@@ -2757,22 +2757,22 @@ async function _tryDismissGenericDialogDeterministic(page) {
 }
 
 /**
- * “Olhos enterprise”: garante que a página não está presa em consent/popup/novidades.
- * - Determinístico primeiro.
- * - Se não resolver e allowGpt=true, chama GPT (selectorHints) para fechar modal.
+ * â€œOlhos enterpriseâ€: garante que a pÃ¡gina nÃ£o estÃ¡ presa em consent/popup/novidades.
+ * - DeterminÃ­stico primeiro.
+ * - Se nÃ£o resolver e allowGpt=true, chama GPT (selectorHints) para fechar modal.
  */
 async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', allowGpt = true, maxRounds = 3 } = {}) {
   const rounds = Math.max(1, Math.min(5, Number(maxRounds) || 3));
   for (let i = 1; i <= rounds; i++) {
-    // 0) Caso especial: Messenger PIN modal (não é “popup genérico” — a solução é determinística)
+    // 0) Caso especial: Messenger PIN modal (nÃ£o Ã© â€œpopup genÃ©ricoâ€ â€” a soluÃ§Ã£o Ã© determinÃ­stica)
     try {
       const pin = await detectMessengerPinModal(page).catch(()=>({ present:false }));
       if (pin && pin.present) {
         const r = await tryDismissMessengerPinModal(page, { logPrefix: `[UNBLOCK][PIN]`, maxTries: 2 }).catch(()=>null);
-        // após tentar, re-rodar loop (ou sair se já desbloqueou)
+        // apÃ³s tentar, re-rodar loop (ou sair se jÃ¡ desbloqueou)
         const pin2 = await detectMessengerPinModal(page).catch(()=>({ present:false }));
         if (!pin2 || !pin2.present) return { ok: true, blocked: false, round: i, pinDismissed: true, pinResult: r || null };
-        // se ainda está presente, deixa cair para GPT/flow genérico como fallback
+        // se ainda estÃ¡ presente, deixa cair para GPT/flow genÃ©rico como fallback
       }
     } catch {}
 
@@ -2780,11 +2780,11 @@ async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', a
     if (consent && consent.present && consent.kind === 'consent') {
       const det = await _tryDismissFbConsent(page);
       if (det && det.ok) continue;
-      // Consent às vezes é “full page” sem dialog; se falhar, chama GPT para diagnóstico/evidência.
+      // Consent Ã s vezes Ã© â€œfull pageâ€ sem dialog; se falhar, chama GPT para diagnÃ³stico/evidÃªncia.
       if (allowGpt && nome) {
         await gptRemediateFbUi(page, nome, { reason: `${reasonBase}_consent`, stage: `round_${i}` }).catch(()=>null);
         await sleep(900);
-        // Se o GPT clicou e saiu do consent (ex.: foi para checkpoint/captcha), NÃO marque como blocked: reavalia.
+        // Se o GPT clicou e saiu do consent (ex.: foi para checkpoint/captcha), NÃƒO marque como blocked: reavalia.
         const consentAfter = await _detectFbConsentOrBlockingPage(page).catch(()=>({ present:false }));
         if (!consentAfter || !consentAfter.present) continue;
         const det2 = await _tryDismissFbConsent(page);
@@ -2819,7 +2819,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const dbg = process.env.CONFIGURE_DEBUG === '1';
   if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
 
-  // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
+  // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsÃ­veis:
   // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
@@ -2831,14 +2831,14 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const p0 = pages[0];
   await bringWindowToFront(p0);
 
-  // Fechar extras pré-existentes (para não herdar lixo de tentativas anteriores)
+  // Fechar extras prÃ©-existentes (para nÃ£o herdar lixo de tentativas anteriores)
   try {
     for (const pg of (pages || []).slice(1)) {
       try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
     }
   } catch {}
 
-    // Ler manifest (fonte de verdade) + definição de coords por política do gateway.
+    // Ler manifest (fonte de verdade) + definiÃ§Ã£o de coords por polÃ­tica do gateway.
   let manifest = null;
   let coords = null;
   let robeMode = 'itens';
@@ -2847,12 +2847,12 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (manifest && manifest.robeMode) robeMode = String(manifest.robeMode);
   } catch {}
   try {
-    // Sem fallback para cidade da conta quando gateway estrito está ON.
+    // Sem fallback para cidade da conta quando gateway estrito estÃ¡ ON.
     coords = resolvePatchCoordsForProfile(nome, manifest || {});
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e || '');
     if (/gateway_geo_required:/i.test(msg)) throw e;
-    // Fora do modo estrito, mantém robustez sem travar o fluxo.
+    // Fora do modo estrito, mantÃ©m robustez sem travar o fluxo.
     try {
       const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
       const perfil = perfisArr.find(p => p && p.nome === nome);
@@ -2872,9 +2872,9 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.messenger.com/marketplace';
+  const msgUrl = 'https://www.facebook.com/messages';
 
-  // Aba 0 — Facebook base
+  // Aba 0 â€” Facebook base
   try {
     await patchPage(nome, p0, coords);
   } catch (e) {
@@ -2888,7 +2888,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 3 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] fb0 ui', { nome, ui: ui0 || null });
   } catch {}
-  // Se já caiu em login_form, não faz sentido abrir as outras abas (o worker seguirá para login+senha).
+  // Se jÃ¡ caiu em login_form, nÃ£o faz sentido abrir as outras abas (o worker seguirÃ¡ para login+senha).
   try {
     const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
     if (dbg) logger.debug('[CONFIG] fb0 lr', { nome, lr: lr0 || null, url: (p0.url ? String(p0.url()||'') : '') });
@@ -2897,7 +2897,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch {}
 
-  // Aba 1 — Create (Robe)
+  // Aba 1 â€” Create (Robe)
   let p1 = null;
   try {
     p1 = await browser.newPage();
@@ -2911,7 +2911,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: (e && e.message) || String(e) });
   }
 
-  // Aba 2 — Messenger (Virtus)
+  // Aba 2 â€” Messenger (Virtus)
   let p2 = null;
   try {
     p2 = await browser.newPage();
@@ -2922,7 +2922,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
     await sleep(900);
 
-    // Nonce + “Continuar como...”
+    // Nonce + â€œContinuar como...â€
     await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
     const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
       if (!clicked) {
@@ -2930,7 +2930,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
     }
 
-    // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
+    // Curador: modal do PIN (determinÃ­stico, sem GPT â€” GPT tende a clicar/fechar e causar loop)
     try {
       const pin1 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
         if (!pin1.ok) {
@@ -2940,8 +2940,8 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         if (!pin2.ok) {
           const still = await detectMessengerPinModal(p2);
           if (still.present) {
-            // Fallback enterprise: permitir GPT ajudar a clicar “Criar PIN”/“Continuar sem PIN”
-            // APENAS se a solução determinística falhar.
+            // Fallback enterprise: permitir GPT ajudar a clicar â€œCriar PINâ€/â€œContinuar sem PINâ€
+            // APENAS se a soluÃ§Ã£o determinÃ­stica falhar.
             try {
               await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg_pin', allowGpt: true, maxRounds: 4 }).catch(()=>null);
             } catch {}
@@ -2950,7 +2950,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
             const still2 = await detectMessengerPinModal(p2).catch(()=>({ present:false }));
             if (still2 && still2.present) throw new Error('messenger_pin_modal');
             if (!pin3 || pin3.ok !== true) {
-              // Se resolveu via UI unblock, ok; se não, o erro acima já aborta.
+              // Se resolveu via UI unblock, ok; se nÃ£o, o erro acima jÃ¡ aborta.
             }
           }
           }
@@ -2963,7 +2963,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
-    // Se ficou preso em PIN no provision, não mascarar: deixe o worker registrar/flaggear corretamente.
+    // Se ficou preso em PIN no provision, nÃ£o mascarar: deixe o worker registrar/flaggear corretamente.
     const msg = (e && e.message) ? String(e.message) : String(e);
     if (/messenger_pin_modal/i.test(msg)) throw e;
   }
@@ -2980,7 +2980,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
 // ===============
 // invocarHumano USA A LEITURA correta do manifest se precisar
-// Desabilitado por padrão: abrir interface/painel automático só pode via opt-in, frontend ou chamada manual/intencional.
+// Desabilitado por padrÃ£o: abrir interface/painel automÃ¡tico sÃ³ pode via opt-in, frontend ou chamada manual/intencional.
 async function invocarHumano(browser, nome) {
   try {
     const pages = await browser.pages();
@@ -2988,8 +2988,8 @@ async function invocarHumano(browser, nome) {
     if (!page) return;
     // Traz foco ao navegador
     await bringWindowToFront(page);
-    // Enterprise: se já está em login/checkpoint/appeal/recover, NÃO navegar.
-    // O humano precisa ver a tela problemática atual.
+    // Enterprise: se jÃ¡ estÃ¡ em login/checkpoint/appeal/recover, NÃƒO navegar.
+    // O humano precisa ver a tela problemÃ¡tica atual.
     let u0 = '';
     try { u0 = (typeof page.url === 'function') ? (page.url() || '') : ''; } catch {}
     const u = String(u0 || '').toLowerCase();
@@ -3009,7 +3009,7 @@ async function invocarHumano(browser, nome) {
       try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
       }
     }
-    // Garante focus de novo pós-navegação (opcional: repetir)
+    // Garante focus de novo pÃ³s-navegaÃ§Ã£o (opcional: repetir)
     await bringWindowToFront(page);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][invocarHumano] erro: ' + ((e && e.message) || e)); } } catch {}
@@ -3017,9 +3017,9 @@ async function invocarHumano(browser, nome) {
 }
 
 /**
- * Observadores de página para sinais de vida (health monitor).
+ * Observadores de pÃ¡gina para sinais de vida (health monitor).
  * Para ser chamado no worker, via wirePageObservers!
- * (Só inclui; worker faz uso.)
+ * (SÃ³ inclui; worker faz uso.)
  */
 async function attachHealthProbes(page, nome, onPing) {
   try {
@@ -3054,8 +3054,8 @@ async function attachHealthProbes(page, nome, onPing) {
  * Limpeza HARD de caches e magreza de perfil preservando cookies/login.
  * - Localiza userDataDir a partir do perfis.json/manifest do perfil.
  * - Encerra quaisquer processos do Chrome que estejam usando esse userDataDir.
- * - Remove diretórios pesados (Cache/Code Cache/GPUCache/Service Worker caches/Shader/Dawn/Media).
- * - NÃO remove Cookies/Local Storage nem o próprio userDataDir.
+ * - Remove diretÃ³rios pesados (Cache/Code Cache/GPUCache/Service Worker caches/Shader/Dawn/Media).
+ * - NÃƒO remove Cookies/Local Storage nem o prÃ³prio userDataDir.
  * - Retorna { ok: true, removed: N }.
  */
 async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
@@ -3068,7 +3068,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
       if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
     } catch {}
 
-    // Fallback: usar caminho padrão sob Chrome/User Data/Conveniente/NOME (mesma lógica do ensureUserDataDirUnderChrome)
+    // Fallback: usar caminho padrÃ£o sob Chrome/User Data/Conveniente/NOME (mesma lÃ³gica do ensureUserDataDirUnderChrome)
     if (!userDataDir) {
       try {
         const chromeRoot = (process.platform === 'win32')
@@ -3117,7 +3117,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
     // Remove locks residuais
     try { cleanupUserDataLocks(userDataDir); } catch {}
 
-    // 3) Remover diretórios pesados
+    // 3) Remover diretÃ³rios pesados
     const targets = [
       path.join(userDataDir, 'Default', 'Cache'),
       path.join(userDataDir, 'Default', 'Code Cache'),
@@ -3143,12 +3143,12 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
       } catch {}
     }
 
-    // Ajuste: checagem correta de existência e remoção
+    // Ajuste: checagem correta de existÃªncia e remoÃ§Ã£o
     removed = 0;
     for (const p of targets) {
       try {
         if (!fs.existsSync(p)) continue;
-        // Proteção adicional contra alvos críticos
+        // ProteÃ§Ã£o adicional contra alvos crÃ­ticos
         const pNorm = path.normalize(p);
         let isProtected = false;
         for (const prot of protectedPaths) {
@@ -3177,7 +3177,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
   }
 }
 
-// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO — ROBUSTA, TODOS OS GÊNEROS/IDIOMAS/VARIAÇÕES
+// PATCH DETECÃ‡ÃƒO DE BLOQUEIO TEMPORÃRIO â€” ROBUSTA, TODOS OS GÃŠNEROS/IDIOMAS/VARIAÃ‡Ã•ES
 async function detectMessengerTempBlock(page) {
   try {
     const v = await page.evaluate(() => {
@@ -3207,15 +3207,15 @@ async function detectMessengerTempBlock(page) {
         function textHitsLimit(t) {
           if (!t) return false;
           if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
-          if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
-          if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
-          if (/voce\s+n(?:a|ã)o\s+pode.*(publicar|criar).*(classificados|an[úu]ncios|listagens?|itens?)/.test(t)) return true;
+          if (/you\s+can(?:'|â€™)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+          if (/you(?:'|â€™)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+          if (/voce\s+n(?:a|Ã£)o\s+pode.*(publicar|criar).*(classificados|an[Ãºu]ncios|listagens?|itens?)/.test(t)) return true;
           if (/no\s+puedes\s+(publicar|crear).*(anuncios?|articulos?|publicaciones?)/.test(t)) return true;
           if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) &&
               /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
-          // [PATCH-GPT5] variantes adicionais (PT/ES) — “não é possível / no es posible ... no momento/agora”
-          if (/nao\s+e\s+possivel\s+(criar|publicar).*(classificados|an[úu]ncios|listagens?|itens?)/.test(t)) return true;
-          if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[ií]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
+          // [PATCH-GPT5] variantes adicionais (PT/ES) â€” â€œnÃ£o Ã© possÃ­vel / no es posible ... no momento/agoraâ€
+          if (/nao\s+e\s+possivel\s+(criar|publicar).*(classificados|an[Ãºu]ncios|listagens?|itens?)/.test(t)) return true;
+          if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[iÃ­]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
           return false;
         }
 
@@ -3252,7 +3252,7 @@ async function detectMessengerTempBlock(page) {
     if (v.blockedMessenger) { blocked = true; domain = 'messenger'; }
     else if (v.blockedFacebookCreate) { blocked = true; domain = 'facebook'; }
 
-    // Se não bloqueou e é FB/Messenger, tenta fallback deep
+    // Se nÃ£o bloqueou e Ã© FB/Messenger, tenta fallback deep
     if (!blocked && (v.isFacebookCtx || v.isMessengerCtx)) {
       try {
         const deep = await detectLimitOverlayDeep(page, { alsoCheckFrames: true });
@@ -3282,13 +3282,13 @@ async function detectMessengerTempBlock(page) {
 }
 
 /**
- * Dismiss automático do overlay "Suspeitamos que o comportamento da sua conta seja automatizado"
- * Tenta encontrar o overlay e clicar no botão "Ignorar" (PT/EN, normalizado, aria-label ou innerText).
+ * Dismiss automÃ¡tico do overlay "Suspeitamos que o comportamento da sua conta seja automatizado"
+ * Tenta encontrar o overlay e clicar no botÃ£o "Ignorar" (PT/EN, normalizado, aria-label ou innerText).
  * Debounce por perfil/controlado externamente.
  */
 async function dismissAutomationSuspect(page, nome) {
   try {
-    // Evita erro em ausência de page/context
+    // Evita erro em ausÃªncia de page/context
     if (!page) return false;
 
     const found = await page.evaluate(() => {
@@ -3313,7 +3313,7 @@ async function dismissAutomationSuspect(page, nome) {
       );
       if (!hasSuspect) return false;
 
-      // 2. Procura botão "Ignorar"
+      // 2. Procura botÃ£o "Ignorar"
       let btn = Array.from(document.querySelectorAll('[role="button"]'))
         .find(el =>
           norm(el.getAttribute('aria-label')||'').includes('gnorar') ||
@@ -3333,29 +3333,29 @@ async function dismissAutomationSuspect(page, nome) {
       return true;
     }
   } catch(e) {
-    // Logging, mas silencioso por padrão
+    // Logging, mas silencioso por padrÃ£o
     try { require('./issues.js').append && require('./issues.js').append(nome,'mil_action','dismiss_automation_suspect_ERROR '+(e&&e.message)); } catch{}
   }
   return false;
 }
 
-// [ADD/UPDATE] Deep pattern — multilíngue (PT/EN/ES) para bloqueio/limite de criação/posta/lista
+// [ADD/UPDATE] Deep pattern â€” multilÃ­ngue (PT/EN/ES) para bloqueio/limite de criaÃ§Ã£o/posta/lista
 function textHitsLimitNormalized(t) {
   if (!t) return false;
   t = String(t).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
   if (/voce\s+nao\s+pode\s+(criar|publicar).*(classificados|anuncios|listagens?|itens?).*(no\s+momento|agora)/.test(t)) return true;
-  if (/(ha|h[áa])\s+um\s+limite\s+tempor/.test(t) && /(itens?|vender|publicar|marketplace)/.test(t)) return true;
+  if (/(ha|h[Ã¡a])\s+um\s+limite\s+tempor/.test(t) && /(itens?|vender|publicar|marketplace)/.test(t)) return true;
   if (/limite\s+atingido/.test(t)) return true;
   if (/voce\s+esta\s+bloqueado\s+temporariamente/.test(t)) return true;
 
-  if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
-  if (/(there(?:'|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t) && /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(t)) return true;
-  if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+  if (/you\s+can(?:'|â€™)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+  if (/(there(?:'|â€™)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t) && /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(t)) return true;
+  if (/you(?:'|â€™)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
 
-  if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[ií]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
+  if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[iÃ­]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
   if (/limite\s+alcanzado/.test(t)) return true;
-  if (/(hay|existe)\s+un\s+limite\s+tempor/.test(t) && /(art[ií]culos?|publicar|vender|marketplace)/.test(t)) return true;
+  if (/(hay|existe)\s+un\s+limite\s+tempor/.test(t) && /(art[iÃ­]culos?|publicar|vender|marketplace)/.test(t)) return true;
 
   return false;
 }
@@ -3402,7 +3402,7 @@ function deepScanLimitOverlayInDocument() {
       const tt = textsOf(d, doc);
       if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
         const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
-        // LOGS DEBUG FORTE — após encontrar dialog
+        // LOGS DEBUG FORTE â€” apÃ³s encontrar dialog
         if (typeof window !== "undefined") {
           try {
             const hits = 2;
@@ -3441,7 +3441,7 @@ function deepScanLimitOverlayInDocument() {
       const ht = norm(h.innerText || h.textContent || '');
       if (textHitsLimitNormalized(ht)) {
         const snippet = (h.innerText||h.textContent||'').slice(0,200);
-        // LOGS DEBUG FORTE — após encontrar headline
+        // LOGS DEBUG FORTE â€” apÃ³s encontrar headline
         if (typeof window !== "undefined") {
           try {
             const hits = 1;
@@ -3480,7 +3480,7 @@ function deepScanLimitOverlayInDocument() {
       const tt = textsOf(el, doc);
       if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
         const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
-        // LOGS DEBUG FORTE — após encontrar qualquer candidato
+        // LOGS DEBUG FORTE â€” apÃ³s encontrar qualquer candidato
         if (typeof window !== "undefined") {
           try {
             const hits = 1;
@@ -3569,7 +3569,7 @@ async function detectLimitOverlayEverywhere(page, msWindow = 0) {
     if (deep && deep.blocked) return deep;
     if (!msWindow) break;
 
-    // LOG/PRINT em cada ciclo do loop — DEBUG DOM forense
+    // LOG/PRINT em cada ciclo do loop â€” DEBUG DOM forense
     try {
       const debugDom = await page.evaluate(() => {
         const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).map(el => ({
@@ -3599,7 +3599,7 @@ async function detectLimitOverlayEverywhere(page, msWindow = 0) {
 }
 
 // ==== Patch Killer de about:blank ====
-// Fecha qualquer aba "about:blank" que não navegue para uma URL real em até graceMs.
+// Fecha qualquer aba "about:blank" que nÃ£o navegue para uma URL real em atÃ© graceMs.
 // Ativo em qualquer contexto (human, robe, config, virtus).
 function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   if (!browser || browser._aboutBlankKillerInstalled) return;
@@ -3614,7 +3614,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
     try { return await t.page(); } catch { return null; }
   }
   function keyFor(target) {
-    // Blindado: só aceita _targetId. Sem aleatório.
+    // Blindado: sÃ³ aceita _targetId. Sem aleatÃ³rio.
     try { if (target && target._targetId) return String(target._targetId); } catch {}
     return null;
   }
@@ -3633,7 +3633,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       if (!key) return;
       try { browser._pageBirth[key] = browser._pageBirth[key] || Date.now(); } catch {}
 
-      // CANCELADORES - NÃO BUSQUE page.url()
+      // CANCELADORES - NÃƒO BUSQUE page.url()
       try {
         page.once('close', () => clearTimer(key));
       } catch {}
@@ -3664,7 +3664,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
               return;
             }
-            // Rearmável: tenta de novo depois
+            // RearmÃ¡vel: tenta de novo depois
             const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
             timers.set(key, t2);
             return;
@@ -3689,7 +3689,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   browser.on('targetchanged', async (t) => {
     try {
       const key = keyFor(t);
-      // Use t.url() apenas (ThreadSafe), não page.url()
+      // Use t.url() apenas (ThreadSafe), nÃ£o page.url()
       const u = (t && typeof t.url === 'function') ? t.url() : '';
       if (u && u !== 'about:blank') clearTimer(key);
     } catch {}
@@ -3715,10 +3715,10 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   } catch {}
 }
 
-// ==== NOVOS DETECTORES LOGIN E SUSPENSÃO ====
+// ==== NOVOS DETECTORES LOGIN E SUSPENSÃƒO ====
 
 /**
- * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
+ * Detecta se a pÃ¡gina estÃ¡ exigindo login (form Facebook/Messenger clÃ¡ssico, checkpoint, captcha).
  * Retorna { loginRequired: true/false, reason: string, domain: string }
  */
 async function detectLoginRequired(page) {
@@ -3729,7 +3729,7 @@ async function detectLoginRequired(page) {
 
     const v = await page.evaluate(() => {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
-      // 1) Formulários de login canônicos
+      // 1) FormulÃ¡rios de login canÃ´nicos
       const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
       const hasEmailInput = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
       const hasPassInput = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
@@ -3739,9 +3739,9 @@ async function detectLoginRequired(page) {
       const title0 = String(document && document.title ? document.title : '');
       // 2) Checkpoint/captcha
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
-      // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
+      // HARDEN: tambÃ©m usa body.innerText, porque Ã s vezes o texto estÃ¡ fora do recorte inicial
       const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-      // Fallback robusto: alguns layouts não expõem royal_login_form, mas exibem claramente a superfície de login.
+      // Fallback robusto: alguns layouts nÃ£o expÃµem royal_login_form, mas exibem claramente a superfÃ­cie de login.
       const hasLoginUiHints =
         bodyTxt.includes('esqueceu a senha') ||
         bodyTxt.includes('forgot password') ||
@@ -3773,8 +3773,8 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('confirme que voce e humano') && bodyTxt.includes('para usar sua conta') ||
         bodyTxt.includes('confirm that you are human') ||
         bodyTxt.includes('confirm you are human');
-      // Pre-screen: "confirme que você é humano para usar sua conta" + botão Continuar,
-      // mas ainda NÃO é o captcha (sem imagem/input/prompt).
+      // Pre-screen: "confirme que vocÃª Ã© humano para usar sua conta" + botÃ£o Continuar,
+      // mas ainda NÃƒO Ã© o captcha (sem imagem/input/prompt).
       const hasHumanConfirmPreScreen =
         hasHumanConfirmText &&
         hasContinueBtn &&
@@ -3790,7 +3790,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('checkpoint') ||
         bodyTxt.includes('verificacao de seguranca') ||
         bodyTxt.includes('security check');
-      // 3) Confirmação de identidade (ex.: selfie/vídeo) — NÃO é resolvível automaticamente, mas precisa ser “visto”.
+      // 3) ConfirmaÃ§Ã£o de identidade (ex.: selfie/vÃ­deo) â€” NÃƒO Ã© resolvÃ­vel automaticamente, mas precisa ser â€œvistoâ€.
       const hasIdentityText = h1.some(t =>
         t.includes('confirme sua identidade') ||
         t.includes('confirm your identity') ||
@@ -3800,7 +3800,7 @@ async function detectLoginRequired(page) {
         (t.includes('selfie') && t.includes('video'))
       );
 
-      // 4) 2FA / autenticação de dois fatores (NÃO automatizável)
+      // 4) 2FA / autenticaÃ§Ã£o de dois fatores (NÃƒO automatizÃ¡vel)
       const hasTwoFactorText =
         h1.some(t =>
           t.includes('autenticacao de dois fatores') ||
@@ -3821,8 +3821,8 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('codigo de autenticacao') ||
         bodyTxt.includes('codigo de login');
 
-      // 5) Recurso/Apelação submetida (“você apresentou um recurso…”)
-      // Estado: conta não utilizável, mas não é “login_form” — precisa de monitoramento.
+      // 5) Recurso/ApelaÃ§Ã£o submetida (â€œvocÃª apresentou um recursoâ€¦â€)
+      // Estado: conta nÃ£o utilizÃ¡vel, mas nÃ£o Ã© â€œlogin_formâ€ â€” precisa de monitoramento.
       const hasAppealSubmitted =
         h1.some(t => t.includes('voce apresentou um recurso')) ||
         bodyTxt.includes('voce apresentou um recurso') ||
@@ -3854,30 +3854,30 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('voce esta de volta ao facebook') ||
         bodyTxt.includes('voltar para o facebook') && bodyTxt.includes('voce');
 
-      // 5c) Bug do Facebook: "Este conteúdo não está disponível no momento"
-      // Isso NÃO é um bloqueio real da conta; basta navegar para home/marketplace depois.
+      // 5c) Bug do Facebook: "Este conteÃºdo nÃ£o estÃ¡ disponÃ­vel no momento"
+      // Isso NÃƒO Ã© um bloqueio real da conta; basta navegar para home/marketplace depois.
       const hasContentNotAvailable =
         bodyTxt.includes('este conteudo nao esta disponivel no momento') ||
-        bodyTxt.includes('este conteúdo não está disponível no momento') ||
+        bodyTxt.includes('este conteÃºdo nÃ£o estÃ¡ disponÃ­vel no momento') ||
         bodyTxt.includes("this content isn't available") ||
         bodyTxt.includes('this content is not available');
 
-      // 5d) Bug/erro do Messenger: "Esta página não está disponível"
+      // 5d) Bug/erro do Messenger: "Esta pÃ¡gina nÃ£o estÃ¡ disponÃ­vel"
       // Caso real: Messenger mostra tela de erro e o worker precisa checar FB /marketplace/create para inferir SMS cliff.
       const hasPageNotAvailable =
         bodyTxt.includes('esta pagina nao esta disponivel') ||
-        bodyTxt.includes('esta página não está disponível') ||
+        bodyTxt.includes('esta pÃ¡gina nÃ£o estÃ¡ disponÃ­vel') ||
         bodyTxt.includes("this page isn't available") ||
         bodyTxt.includes('this page is not available') ||
         bodyTxt.includes('o link que voce acessou pode estar corrompido') ||
-        bodyTxt.includes('o link que você acessou pode estar corrompido');
+        bodyTxt.includes('o link que vocÃª acessou pode estar corrompido');
 
-      // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
+      // 6) ConfirmaÃ§Ã£o de identidade em andamento (pÃ³s upload / aguardando anÃ¡lise)
       // IMPORTANT (ultra enterprise):
-      // - NÃO confundir "Recurso em análise" (appeal_submitted) com "Identidade em análise".
+      // - NÃƒO confundir "Recurso em anÃ¡lise" (appeal_submitted) com "Identidade em anÃ¡lise".
       // - A frase "normalmente, levamos cerca de uma hora para analisar" aparece em ambos os contextos,
-      //   então ela NÃO pode ser sinal suficiente sozinha.
-      // Critério: exigir sinais fortes e específicos de identidade/selfie/vídeo.
+      //   entÃ£o ela NÃƒO pode ser sinal suficiente sozinha.
+      // CritÃ©rio: exigir sinais fortes e especÃ­ficos de identidade/selfie/vÃ­deo.
       const identityStrongHints =
         bodyTxt.includes('selfie de video') ||
         bodyTxt.includes('video selfie') ||
@@ -3886,13 +3886,13 @@ async function detectLoginRequired(page) {
         (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
         (bodyTxt.includes('gravar') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
 
-      // Anti-falso-positivo crítico:
-      // Em telas de identidade o FB usa texto "pessoa real" (parece captcha), mas é IDENTIDADE (selfie/vídeo).
-      // Se há sinais fortes de identidade, NÃO classificar como captcha_persona.
+      // Anti-falso-positivo crÃ­tico:
+      // Em telas de identidade o FB usa texto "pessoa real" (parece captcha), mas Ã© IDENTIDADE (selfie/vÃ­deo).
+      // Se hÃ¡ sinais fortes de identidade, NÃƒO classificar como captcha_persona.
       const hasPersonaText = hasPersonaTextRaw && !identityStrongHints;
 
       const hasIdentitySubmitted =
-        // textos explícitos de identidade "em andamento"
+        // textos explÃ­citos de identidade "em andamento"
         (identityStrongHints && (
           bodyTxt.includes('confirmacao de identidade em andamento') ||
           (bodyTxt.includes('confirmacao de identidade') && bodyTxt.includes('em andamento')) ||
@@ -3901,7 +3901,7 @@ async function detectLoginRequired(page) {
           bodyTxt.includes('analisamos suas informacoes em ate')
         ));
 
-      // 7) Sinais de identidade no body (fallback quando o recorte de h1 não contém)
+      // 7) Sinais de identidade no body (fallback quando o recorte de h1 nÃ£o contÃ©m)
       const bodyHasIdentityHints =
         bodyTxt.includes('confirme sua identidade') ||
         bodyTxt.includes('confirm your identity') ||
@@ -3947,7 +3947,7 @@ async function detectLoginRequired(page) {
       titleNorm.includes('entre ou cadastre') ||
       titleNorm.includes('entre ou cadastrar') ||
       titleNorm.includes('entre no facebook') ||
-      titleNorm.includes('facebook – entre') ||
+      titleNorm.includes('facebook â€“ entre') ||
       titleNorm.includes('facebook - entre') ||
       titleNorm.includes('log in') ||
       titleNorm.includes('sign up');
@@ -3957,7 +3957,7 @@ async function detectLoginRequired(page) {
       /\/checkpoint\//i.test(hrefNorm) ||
       /\/recover\//i.test(hrefNorm);
 
-    // Bug conhecido do Facebook: não deve travar automação.
+    // Bug conhecido do Facebook: nÃ£o deve travar automaÃ§Ã£o.
     if (hasContentNotAvailable) {
       return {
         loginRequired: false,
@@ -3969,7 +3969,7 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Pré-captcha: "Confirme que você é humano" (antes do captcha).
+    // PrÃ©-captcha: "Confirme que vocÃª Ã© humano" (antes do captcha).
     // Regra enterprise: tratar como loginRequired e encaminhar para fluxo de clique "Continuar".
     if (hasHumanConfirmPreScreen) {
       // #region agent log (debug)
@@ -3984,9 +3984,9 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Captcha clássico (imagem+texto). Não é automatizável por padrão (o placeholder OCR fica no worker).
-    // Mantemos motivo "captcha_persona" quando o texto "pessoa" existe; mas se o captcha estiver explícito,
-    // também deixamos evidência forte para reduzir falso positivo.
+    // Captcha clÃ¡ssico (imagem+texto). NÃ£o Ã© automatizÃ¡vel por padrÃ£o (o placeholder OCR fica no worker).
+    // Mantemos motivo "captcha_persona" quando o texto "pessoa" existe; mas se o captcha estiver explÃ­cito,
+    // tambÃ©m deixamos evidÃªncia forte para reduzir falso positivo.
     if (hasCaptchaPromptText && hasCaptchaImg && hasCaptchaInput) {
       // #region agent log (debug)
       // #endregion
@@ -4000,8 +4000,8 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Bug/erro do Messenger: "Esta página não está disponível"
-    // Não é login_form/captcha; requer checagem ativa no worker (FB create -> SMS cliff?).
+    // Bug/erro do Messenger: "Esta pÃ¡gina nÃ£o estÃ¡ disponÃ­vel"
+    // NÃ£o Ã© login_form/captcha; requer checagem ativa no worker (FB create -> SMS cliff?).
     if (hasPageNotAvailable) {
       return {
         loginRequired: true,
@@ -4013,7 +4013,7 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // 2FA sempre vence (não dá para “contornar” em outra aba)
+    // 2FA sempre vence (nÃ£o dÃ¡ para â€œcontornarâ€ em outra aba)
     if (hasTwoFactorText) {
       return {
         loginRequired: true,
@@ -4026,7 +4026,7 @@ async function detectLoginRequired(page) {
     }
 
     // Checkpoint "Voltar para o Facebook" (desbloqueado / de volta):
-    // exige apenas clicar em "Voltar para o Facebook" e seguir, não é login_form.
+    // exige apenas clicar em "Voltar para o Facebook" e seguir, nÃ£o Ã© login_form.
     if (hasBackToFacebookUnlocked && !hasPasswordResetRequired && !hasHackedReview) {
       return {
         loginRequired: true,
@@ -4038,7 +4038,7 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Fluxo hacked/password reset: tratar como estado próprio (auto-remediável).
+    // Fluxo hacked/password reset: tratar como estado prÃ³prio (auto-remediÃ¡vel).
     if (hasPasswordResetRequired) {
       return {
         loginRequired: true,
@@ -4060,11 +4060,11 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Recurso submetido: não é “login_form”, mas bloqueia conta (precisa monitorar).
+    // Recurso submetido: nÃ£o Ã© â€œlogin_formâ€, mas bloqueia conta (precisa monitorar).
     if (hasAppealSubmitted) {
       // Importante (anti-falso-positivo):
-      // após concluir identidade, a página pode conter palavras genéricas como "identidade" no texto,
-      // então NÃO use "bodyHasIdentityHints" aqui. Só trate como identity_submitted se houver sinais fortes.
+      // apÃ³s concluir identidade, a pÃ¡gina pode conter palavras genÃ©ricas como "identidade" no texto,
+      // entÃ£o NÃƒO use "bodyHasIdentityHints" aqui. SÃ³ trate como identity_submitted se houver sinais fortes.
       if (hasIdentitySubmitted || hasIdentityText) {
         return {
           loginRequired: true,
@@ -4109,9 +4109,9 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Messenger é especial:
+    // Messenger Ã© especial:
     // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
-    // então não dá para exigir strongLoginPath/title como no Facebook.
+    // entÃ£o nÃ£o dÃ¡ para exigir strongLoginPath/title como no Facebook.
     if (domain === 'messenger' && hasInputs && (hasRoyal || hasLoginUiHints || looksLikeLoggedOutTitle || looksLikeLoginUrl)) {
       return {
         loginRequired: true,
@@ -4123,11 +4123,11 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Detecção mais conservadora para evitar falso positivo:
-    // - login_form só é válido se a rota for claramente de login/checkpoint
-    // - checkpoint/captcha também exige rota/sinais de checkpoint
+    // DetecÃ§Ã£o mais conservadora para evitar falso positivo:
+    // - login_form sÃ³ Ã© vÃ¡lido se a rota for claramente de login/checkpoint
+    // - checkpoint/captcha tambÃ©m exige rota/sinais de checkpoint
     // IMPORTANT: em algumas telas, o form aparece em rotas como /marketplace ou /index.php (logged-out),
-    // então não podemos depender apenas do path.
+    // entÃ£o nÃ£o podemos depender apenas do path.
     if (hasInputs && (hasRoyal || hasLoginUiHints) && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle || hasLoginUiHints)) {
       return {
         loginRequired: true,
@@ -4138,9 +4138,9 @@ async function detectLoginRequired(page) {
         evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
-    // Identidade (selfie/vídeo) deve ser reconhecida mesmo fora de /checkpoint.
+    // Identidade (selfie/vÃ­deo) deve ser reconhecida mesmo fora de /checkpoint.
     // Motivo: em alguns fluxos o FB renderiza a etapa dentro de / (home) com modal/SPA.
-    // Blindagem anti-falso-positivo: exigir hints fortes (selfie+vídeo) para considerar.
+    // Blindagem anti-falso-positivo: exigir hints fortes (selfie+vÃ­deo) para considerar.
     if (hasIdentitySubmitted || (identityStrongHints && bodyHasIdentityHints) || (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title)))) {
       return {
         loginRequired: true,
@@ -4152,7 +4152,7 @@ async function detectLoginRequired(page) {
       };
     }
     // Captcha/persona e checkpoint podem aparecer fora de /checkpoint (ex.: /index.php, m.facebook.com/error, etc).
-    // Se há texto explícito de "confirme que você é uma pessoa", trate como NÃO automatizável sempre.
+    // Se hÃ¡ texto explÃ­cito de "confirme que vocÃª Ã© uma pessoa", trate como NÃƒO automatizÃ¡vel sempre.
     if (hasPersonaText) {
       return {
         loginRequired: true,
@@ -4166,7 +4166,7 @@ async function detectLoginRequired(page) {
     if (hasCheckpointText && (strongLoginPath || /checkpoint/i.test(title))) {
       return {
         loginRequired: true,
-        // Se a tela é explicitamente “Confirme que você é uma pessoa”, separa para diagnóstico humano
+        // Se a tela Ã© explicitamente â€œConfirme que vocÃª Ã© uma pessoaâ€, separa para diagnÃ³stico humano
         reason: 'checkpoint_captcha',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
@@ -4184,8 +4184,8 @@ async function detectLoginRequired(page) {
       evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
     };
   } catch {}
-  // Fail-safe enterprise: se o probe falhar (contexto destruído/aba fechando),
-  // não podemos concluir "liberado". Mantemos como loginRequired=true para evitar ações erradas.
+  // Fail-safe enterprise: se o probe falhar (contexto destruÃ­do/aba fechando),
+  // nÃ£o podemos concluir "liberado". Mantemos como loginRequired=true para evitar aÃ§Ãµes erradas.
   return { loginRequired: true, reason: 'probe_failed' };
 }
 
@@ -4209,11 +4209,11 @@ async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
         };
         const el = pick();
         if (!el) return { ok: false, error: 'continue_not_found' };
-        // heurística “clicável”
+        // heurÃ­stica â€œclicÃ¡velâ€
         const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
         const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
         const disabled = (ariaDisabled === 'true') || (tabIndex === '-1');
-        // clicar mesmo se disabled=false; se disabled=true, retornamos info e não clicamos
+        // clicar mesmo se disabled=false; se disabled=true, retornamos info e nÃ£o clicamos
         if (disabled) return { ok: false, error: 'continue_disabled', ariaDisabled, tabIndex };
         try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
         try { el.click(); } catch {}
@@ -4224,7 +4224,7 @@ async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
         // #endregion
         return { ok: true };
       }
-      // Se está disabled, não adianta martelar; deixa caller decidir (ex.: captcha precisa texto).
+      // Se estÃ¡ disabled, nÃ£o adianta martelar; deixa caller decidir (ex.: captcha precisa texto).
       if (r && String(r.error||'').includes('disabled')) {
         // #region agent log (debug)
         // #endregion
@@ -4313,8 +4313,8 @@ async function focusCaptchaInput(page) {
 }
 
 async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
-  // Captcha: digitar somente caracteres úteis (sem espaços).
-  // Regra de robustez: aceitar alfanumérico (A-Z/0-9). Se o captcha mudar (letras+numeros),
+  // Captcha: digitar somente caracteres Ãºteis (sem espaÃ§os).
+  // Regra de robustez: aceitar alfanumÃ©rico (A-Z/0-9). Se o captcha mudar (letras+numeros),
   // o sistema continua pronto.
   const t = String(text || '').replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '').trim();
   if (!t) return { ok: false, error: 'empty_text' };
@@ -4323,22 +4323,22 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
     await focusCaptchaInput(page).catch(()=>null);
     // IMPORTANT (ultra enterprise):
     // Em retries, o Facebook pode manter o texto anterior no input.
-    // Se não limpar, o próximo OCR "concatena" e garante erro.
+    // Se nÃ£o limpar, o prÃ³ximo OCR "concatena" e garante erro.
     await page.evaluate(() => {
       try {
         const input = document.querySelector('input[type="text"]');
         if (!input) return;
-        // Select-all + clear (compatível com React-controlled inputs)
+        // Select-all + clear (compatÃ­vel com React-controlled inputs)
         try { input.focus(); } catch {}
         try { input.value = ''; } catch {}
         try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
         try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
       } catch {}
     }).catch(()=>null);
-    // Digitar com delay leve (um char por vez) para reduzir flake e permitir React atualizar estado do botão.
+    // Digitar com delay leve (um char por vez) para reduzir flake e permitir React atualizar estado do botÃ£o.
     await page.type('input[type="text"]', t, { delay: 60 }).catch(()=>null);
 
-    // Espera condição REAL: botão "Continuar" habilitar (sem sleeps artificiais).
+    // Espera condiÃ§Ã£o REAL: botÃ£o "Continuar" habilitar (sem sleeps artificiais).
     const budget = Math.max(1200, Number(maxWaitMs||0)||0);
     const enabled = await page.waitForFunction(() => {
       try {
@@ -4375,13 +4375,13 @@ async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 1
   try {
     const ok = await page.waitForFunction((p, stableMs) => {
       try {
-        // Mantém um mini-estado em window para detectar "estabilizou" (sem depender de sleeps externos)
+        // MantÃ©m um mini-estado em window para detectar "estabilizou" (sem depender de sleeps externos)
         const now = Date.now();
         const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
         if (!img) return true; // saiu do captcha
         const src = String(img.getAttribute('src') || img.src || '');
         const loaded = !!(img.complete && (img.naturalWidth || 0) > 0);
-        // Se temos um previousImgSrc, não aceitamos enquanto for a mesma imagem.
+        // Se temos um previousImgSrc, nÃ£o aceitamos enquanto for a mesma imagem.
         if (p && src && src === p) return false;
         if (!loaded) return false;
         const st = window.__ctCaptchaStable = window.__ctCaptchaStable || { lastSrc: '', lastChangeAt: 0 };
@@ -4390,7 +4390,7 @@ async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 1
           st.lastChangeAt = now;
           return false;
         }
-        // Só libera quando o src ficou estável por stableMs (reduz "atropelo" entre tentativas)
+        // SÃ³ libera quando o src ficou estÃ¡vel por stableMs (reduz "atropelo" entre tentativas)
         if (stableMs > 0) {
           return (now - Number(st.lastChangeAt || 0)) >= stableMs;
         }
@@ -4433,7 +4433,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
       return { ok: false, error: 'invalid_img_src', imgSrc };
     }
 
-    // Esperar imagem REAL estar carregada (evita OCR em imagem “meio atualizando”).
+    // Esperar imagem REAL estar carregada (evita OCR em imagem â€œmeio atualizandoâ€).
     // Se previousImgSrc foi informado, esperar virar para uma imagem diferente.
     const prev = String(previousImgSrc || '').trim();
     const imgReady = await page.waitForFunction((p) => {
@@ -4449,13 +4449,13 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
     }, { timeout: 12_000 }, prev).then(()=>true).catch(()=>false);
     if (!imgReady) return { ok: false, error: 'captcha_image_not_ready', imgSrc, hasPrev: !!prev };
 
-    // 2. Ler configuração Groq
+    // 2. Ler configuraÃ§Ã£o Groq
     const groqCfg = readGroqConfig();
     if (!groqCfg || !groqCfg.groqApiKey || !groqCfg.groqModel) {
       return { ok: false, error: 'groq_config_missing', hasKey: !!groqCfg?.groqApiKey, hasModel: !!groqCfg?.groqModel };
     }
 
-    // 3. Baixar imagem usando puppeteer (mais confiável que fetch para imagens do Facebook)
+    // 3. Baixar imagem usando puppeteer (mais confiÃ¡vel que fetch para imagens do Facebook)
     let imageBase64 = null;
     try {
       // Usa evaluate para baixar a imagem via canvas (evita CORS)
@@ -4464,7 +4464,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         try {
           // Tenta encontrar a imagem pelo src completo primeiro
           let img = document.querySelector(`img[src="${src}"]`);
-          // Se não encontrar, tenta pelo src parcial
+          // Se nÃ£o encontrar, tenta pelo src parcial
           if (!img) {
             const srcParts = src.split('/captcha/tfbimage/');
             if (srcParts.length > 1) {
@@ -4472,7 +4472,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               img = document.querySelector(`img[src*="${partial}"]`);
             }
           }
-          // Última tentativa: qualquer img com /captcha/tfbimage/
+          // Ãšltima tentativa: qualquer img com /captcha/tfbimage/
           if (!img) {
             img = document.querySelector('img[src*="/captcha/tfbimage/"]');
           }
@@ -4502,7 +4502,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         }
       }, imgSrc).catch(()=>null);
 
-      // Fallback: se canvas falhar, tenta baixar via fetch (com cookies da página)
+      // Fallback: se canvas falhar, tenta baixar via fetch (com cookies da pÃ¡gina)
       if (!imageBase64) {
         const response = await page.evaluate(async (src) => {
           try {
@@ -4548,8 +4548,8 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               content: [
                 {
                   type: 'text',
-                  // Regra enterprise: retornar somente os caracteres do captcha (sem espaços).
-                  // Se não conseguir ler com 110% certeza, retornar vazio.
+                  // Regra enterprise: retornar somente os caracteres do captcha (sem espaÃ§os).
+                  // Se nÃ£o conseguir ler com 110% certeza, retornar vazio.
                   text: 'Read this captcha and return ONLY the captcha characters (letters and/or digits). Output ONLY the characters, no spaces, no punctuation, no quotes, no extra text. If unsure, return empty.'
                 },
                 {
@@ -4581,7 +4581,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         return { ok: false, error: 'groq_empty_response' };
       }
 
-      // 5. Processar resposta: extrair apenas o texto (remove comentários, explicações, etc.)
+      // 5. Processar resposta: extrair apenas o texto (remove comentÃ¡rios, explicaÃ§Ãµes, etc.)
       // Groq pode retornar coisas como "The text is: ABC123" ou "ABC123" ou "Text: ABC123"
       // Precisamos extrair apenas os caracteres do captcha
       const rawTrim = String(rawText || '').trim();
@@ -4592,10 +4592,10 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         .replace(/^["']|["']$/g, '')
         .trim();
 
-      // Mantém apenas alfanumérico e remove espaços.
+      // MantÃ©m apenas alfanumÃ©rico e remove espaÃ§os.
       const used = String(cleanText || '').replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '').trim();
 
-      // Guardrail: captcha típico é curto; rejeita strings longas/lixo.
+      // Guardrail: captcha tÃ­pico Ã© curto; rejeita strings longas/lixo.
       if (!used || used.length < 4 || used.length > 8) {
         return { ok: false, error: 'groq_text_bad_length', meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: used.length } };
       }
@@ -4611,20 +4611,20 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
 
 
 /**
- * Assistente safe para fluxo de identidade (selfie/vídeo).
- * Clica apenas quando um botão "aparece" e está habilitado, sem depender de classes:
- * prioridade: Concluir > Carregar > Avançar > Continuar.
+ * Assistente safe para fluxo de identidade (selfie/vÃ­deo).
+ * Clica apenas quando um botÃ£o "aparece" e estÃ¡ habilitado, sem depender de classes:
+ * prioridade: Concluir > Carregar > AvanÃ§ar > Continuar.
  *
  * IMPORTANT:
- * - Não grava vídeo nem interage com câmera.
- * - Só atua quando o texto do body indica claramente o fluxo de identidade.
+ * - NÃ£o grava vÃ­deo nem interage com cÃ¢mera.
+ * - SÃ³ atua quando o texto do body indica claramente o fluxo de identidade.
  */
 async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) {
   const start = Date.now();
   const budget = Math.max(2_000, Number(maxWaitMs || 0) || 0);
   // IMPORTANT:
-  // No fluxo real, o botão "Carregar" pode demorar 20–120s para habilitar.
-  // Portanto, "tries" não pode limitar a espera; ele é apenas um mínimo de tentativas.
+  // No fluxo real, o botÃ£o "Carregar" pode demorar 20â€“120s para habilitar.
+  // Portanto, "tries" nÃ£o pode limitar a espera; ele Ã© apenas um mÃ­nimo de tentativas.
   const minTries = Math.max(1, Number(tries || 0) || 0);
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
@@ -4637,20 +4637,20 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
       return await page.evaluate(() => {
         function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
         const href = norm(String(location && location.href ? location.href : ''));
-        // Captcha/persona (aerr=1621002) é um fluxo humano; não deve receber cliques de "identidade".
+        // Captcha/persona (aerr=1621002) Ã© um fluxo humano; nÃ£o deve receber cliques de "identidade".
         if (href.includes('aerr=1621002')) return { ok: false, error: 'captcha_persona_context' };
         const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-        // Só considerar "fluxo de identidade" quando houver sinais claros do fluxo de selfie/vídeo
-        // (evita clicar em telas de checkpoint/captcha que também falam "pessoa real").
+        // SÃ³ considerar "fluxo de identidade" quando houver sinais claros do fluxo de selfie/vÃ­deo
+        // (evita clicar em telas de checkpoint/captcha que tambÃ©m falam "pessoa real").
         const hasSelfieFlowSignal =
           bodyTxt.includes('iniciar selfie') ||
           bodyTxt.includes('selfie de video') ||
-          bodyTxt.includes('selfie de vídeo') ||
+          bodyTxt.includes('selfie de vÃ­deo') ||
           bodyTxt.includes('carregamento desse video') ||
           bodyTxt.includes('carregar') ||
           bodyTxt.includes('upload') ||
           bodyTxt.includes('selfie de video finalizada') ||
-          bodyTxt.includes('selfie de vídeo finalizada');
+          bodyTxt.includes('selfie de vÃ­deo finalizada');
         const looksIdentity =
           hasSelfieFlowSignal &&
           (bodyTxt.includes('confirme sua identidade') ||
@@ -4662,16 +4662,16 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         if (!looksIdentity) return { ok: false, error: 'not_identity_context' };
 
         const scope = document.querySelector('div[role="dialog"]') || document;
-        // FB às vezes usa "role=none" para botões estilizados; então buscamos por texto também.
+        // FB Ã s vezes usa "role=none" para botÃµes estilizados; entÃ£o buscamos por texto tambÃ©m.
         const all = Array.from(scope.querySelectorAll('*')).slice(0, 1600);
 
-        // Detecção de estágio (evita clicar "Confirmar" quando o primeiro passo ainda é "Continuar/Iniciar").
+        // DetecÃ§Ã£o de estÃ¡gio (evita clicar "Confirmar" quando o primeiro passo ainda Ã© "Continuar/Iniciar").
         const hasUploadStage =
           bodyTxt.includes('carregar') ||
           bodyTxt.includes('upload') ||
           bodyTxt.includes('carregamento desse video') ||
           bodyTxt.includes('selfie de video finalizada') ||
-          bodyTxt.includes('selfie de vídeo finalizada');
+          bodyTxt.includes('selfie de vÃ­deo finalizada');
 
         const priority = hasUploadStage
           ? [
@@ -4679,14 +4679,14 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               { key: 'enviar', words: ['enviar', 'submit'] },
               { key: 'confirmar', words: ['confirmar', 'confirm'] },
               { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
-          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'avancar', words: ['avancar', 'avanÃ§ar', 'next'] },
               { key: 'continuar', words: ['continuar', 'continue'] },
             ]
           : [
-              // Estágio inicial: normalmente é Continuar/Avançar -> Iniciar selfie -> (só então) Carregar -> Confirmar/Concluir
+              // EstÃ¡gio inicial: normalmente Ã© Continuar/AvanÃ§ar -> Iniciar selfie -> (sÃ³ entÃ£o) Carregar -> Confirmar/Concluir
               { key: 'continuar', words: ['continuar', 'continue'] },
-              { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
-              { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo', 'iniciar selfie', 'começar', 'comecar', 'start'] },
+              { key: 'avancar', words: ['avancar', 'avanÃ§ar', 'next'] },
+              { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vÃ­deo', 'iniciar selfie', 'comeÃ§ar', 'comecar', 'start'] },
               { key: 'carregar', words: ['carregar', 'upload'] },
               { key: 'confirmar', words: ['confirmar', 'confirm'] },
               { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
@@ -4743,7 +4743,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             const vh = Math.max(0, window.innerHeight || 0);
             const vw = Math.max(0, window.innerWidth || 0);
             if (!vh || !vw) return true;
-            // margem pequena: botão no rodapé pode ficar "quase visível" mas ainda fora.
+            // margem pequena: botÃ£o no rodapÃ© pode ficar "quase visÃ­vel" mas ainda fora.
             const margin = 16;
             const top = r.top, left = r.left, bottom = r.bottom, right = r.right;
             return (bottom < margin) || (top > (vh - margin)) || (right < margin) || (left > (vw - margin));
@@ -4755,7 +4755,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
           try {
             if (!el) return { scrolled: false, scrollReason: '' };
             if (isOffscreen(el)) {
-              // Padrão do repo: behavior 'instant' (determinístico).
+              // PadrÃ£o do repo: behavior 'instant' (determinÃ­stico).
               try { el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); scrolled = true; scrollReason = 'offscreen_scrollIntoView'; } catch {}
             }
           } catch {}
@@ -4763,7 +4763,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         };
         const scrollNudgeDown = () => {
           try {
-            // micro-ajuste (uma rolada pequena) — útil quando o FB prende o botão no rodapé do conteúdo.
+            // micro-ajuste (uma rolada pequena) â€” Ãºtil quando o FB prende o botÃ£o no rodapÃ© do conteÃºdo.
             window.scrollBy(0, Math.max(220, (window.innerHeight || 800) * 0.25));
             return true;
           } catch { return false; }
@@ -4778,7 +4778,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             if (!p.words.some(w => t.includes(w) || al.includes(w))) continue;
             const b = pickClickableContainer(el);
             if (!b) continue;
-            // Não gerar falso positivo: só clicar se estiver habilitado E realmente clicável.
+            // NÃ£o gerar falso positivo: sÃ³ clicar se estiver habilitado E realmente clicÃ¡vel.
             if (isDisabled(b) || !isVisiblyClickable(b)) {
               const cand = {
                 ok: false,
@@ -4791,10 +4791,10 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               if (!bestDisabled) bestDisabled = cand;
               continue;
             }
-            // 1) Auto-scroll mínimo antes do hit-test (resolve o caso do botão no rodapé).
+            // 1) Auto-scroll mÃ­nimo antes do hit-test (resolve o caso do botÃ£o no rodapÃ©).
             const s1 = scrollToMakeClickable(b);
             let ht = hitTestCenter(b);
-            // 2) Se ainda falhar, faz um "nudge" curto e tenta mais uma vez (no máximo 1x).
+            // 2) Se ainda falhar, faz um "nudge" curto e tenta mais uma vez (no mÃ¡ximo 1x).
             let nudge = false;
             if (!ht || !ht.ok) {
               const why0 = ht && ht.reason ? String(ht.reason) : '';
@@ -4873,7 +4873,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
     if (elapsed >= budget && attempt >= minTries) break;
     // Polling curto: clica assim que habilitar (sem esperar "burro")
     await sleep(250);
-    // Se nem apareceu botão alvo por alguns segundos, não fica preso numa página errada.
+    // Se nem apareceu botÃ£o alvo por alguns segundos, nÃ£o fica preso numa pÃ¡gina errada.
     if (!firstSeenAt && elapsed > 8_000 && attempt >= minTries) break;
   }
   return { ok: false, error: `no_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt, lastSeen };
@@ -4881,7 +4881,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
 
 /**
  * Assistente safe para fluxo "conta restringida / pode ter sido invadida" (hacked cleanup + reset de senha).
- * Objetivo: clicar CTAs (Começar/Avançar/Continuar/Voltar) e, quando aparecer, preencher "nova senha" e clicar "Salvar alterações".
+ * Objetivo: clicar CTAs (ComeÃ§ar/AvanÃ§ar/Continuar/Voltar) e, quando aparecer, preencher "nova senha" e clicar "Salvar alteraÃ§Ãµes".
  */
 async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tries = 2 } = {}) {
   const start = Date.now();
@@ -4932,7 +4932,7 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
                 el.value = pass;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                // Alguns fluxos (FB) só habilitam o CTA no blur (equivalente a TAB).
+                // Alguns fluxos (FB) sÃ³ habilitam o CTA no blur (equivalente a TAB).
                 try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
                 try { el.blur && el.blur(); } catch {}
                 try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Tab', code: 'Tab' })); } catch {}
@@ -4961,12 +4961,12 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
         };
         const txt = (el) => norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
 
-        // Prioridade militar: salvar senha > voltar > avançar/continuar
+        // Prioridade militar: salvar senha > voltar > avanÃ§ar/continuar
         const priority = [
           { key: 'salvar_alteracoes', words: ['salvar alteracoes', 'save changes', 'salvar'] },
           { key: 'voltar_para_fb', words: ['voltar para o facebook', 'back to facebook'] },
-          { key: 'comecar', words: ['comecar', 'começar', 'start'] },
-          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'comecar', words: ['comecar', 'comeÃ§ar', 'start'] },
+          { key: 'avancar', words: ['avancar', 'avanÃ§ar', 'next'] },
           { key: 'continuar', words: ['continuar', 'continue'] },
         ];
 
@@ -4982,10 +4982,10 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
             return { ok: true, filled, clicked: p.key, text: t.slice(0, 60) };
           }
         }
-        // Se não clicou nada, mas preencheu senha, consideramos progresso (sem reload).
+        // Se nÃ£o clicou nada, mas preencheu senha, consideramos progresso (sem reload).
         if (filled > 0) return { ok: true, filled, clicked: 'filled_password_only' };
 
-        // Scroll nudge (virtualização: "Começar" pode não estar no DOM até rolar).
+        // Scroll nudge (virtualizaÃ§Ã£o: "ComeÃ§ar" pode nÃ£o estar no DOM atÃ© rolar).
         try {
           const y0 = window.scrollY || 0;
           window.scrollBy(0, Math.max(220, Math.floor((window.innerHeight || 800) * 0.85)));
@@ -5007,7 +5007,7 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
     if (r && r.ok) return { ok: true, ...r, waitedMs: Date.now() - start, attempts: attempt };
     lastErr = r && r.error ? String(r.error) : 'error';
     if (attempt >= minTries) {
-      // Se não clicou nada em alguns segundos, não martela.
+      // Se nÃ£o clicou nada em alguns segundos, nÃ£o martela.
       if ((Date.now() - start) > 8_000) break;
     }
     await sleep(650);
@@ -5070,17 +5070,17 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
   const pass = String(password || '').trim();
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
 
-  // 1) tentar “destravar” telas comuns (continuar como / modal) para cair no formulário
+  // 1) tentar â€œdestravarâ€ telas comuns (continuar como / modal) para cair no formulÃ¡rio
   await _maybeClickCloseX(page);
   await _maybeClickUseAnotherProfile(page);
 
-  // 2) preencher formulário (FB / Messenger)
+  // 2) preencher formulÃ¡rio (FB / Messenger)
   try {
     await page.waitForTimeout(600);
   } catch {}
 
   try {
-    // aguarda inputs aparecerem (evita “atropelo” de render)
+    // aguarda inputs aparecerem (evita â€œatropeloâ€ de render)
     await page.waitForSelector('input[name="email"], input#email', { timeout: 12000 }).catch(()=>{});
     await page.waitForSelector('input[name="pass"], input#pass', { timeout: 12000 }).catch(()=>{});
 
@@ -5102,7 +5102,7 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
 
   // 4) submit (enterprise): click -> Enter -> form.submit -> GPT -> click (2a)
   try {
-    // dá um respiro pra UI renderizar botões/handlers após preencher inputs
+    // dÃ¡ um respiro pra UI renderizar botÃµes/handlers apÃ³s preencher inputs
     await sleep(600);
     const clicked = await page.evaluate(() => {
       const btn =
@@ -5140,7 +5140,7 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
         try { await gptRemediateFbUi(page, nome, { reason: 'login_submit_fallback', stage: 'login_submit' }); } catch {}
         await sleep(900);
         const clicked2 = await page.evaluate(() => {
-          // inclui botões que não são submit mas funcionam como CTA
+          // inclui botÃµes que nÃ£o sÃ£o submit mas funcionam como CTA
           const norm = (s) => (s || '').toLowerCase();
           const btn =
             document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
@@ -5162,11 +5162,11 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
     return { ok: false, error: (e && e.message) || 'click_failed' };
   }
 
-  // 5) aguardar navegação estabilizar
+  // 5) aguardar navegaÃ§Ã£o estabilizar
   try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-  // “anti-atropelo”: alguns popups/redirects vêm 1-3s depois
+  // â€œanti-atropeloâ€: alguns popups/redirects vÃªm 1-3s depois
   try { await sleep(2600); } catch {}
-  // Validação “com olhos” (sem falso positivo): se ainda estiver em login_form, falha
+  // ValidaÃ§Ã£o â€œcom olhosâ€ (sem falso positivo): se ainda estiver em login_form, falha
   try {
     const lr = await detectLoginRequired(page).catch(()=>({ loginRequired:false }));
     if (lr && lr.loginRequired) return { ok: false, error: `still_login_required:${lr.reason||'login'}` };
@@ -5179,8 +5179,8 @@ async function collectFreshCookies(browser) {
     const pages = await browser.pages();
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
-    // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    // garantir que os domÃ­nios relevantes foram tocados (para preencher jar)
+    await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
@@ -5209,7 +5209,7 @@ async function detectAccountSuspended(page) {
       const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
       const tnorm = texts.map(norm);
 
-      // Multilíngue PT/EN/ES variantes para “suspensa/suspendida/suspended”
+      // MultilÃ­ngue PT/EN/ES variantes para â€œsuspensa/suspendida/suspendedâ€
       const hit = tnorm.some(t =>
         t.includes('sua conta foi suspensa') ||
         t.includes('sua conta esta suspensa') ||
@@ -5225,7 +5225,7 @@ async function detectAccountSuspended(page) {
         t.includes('tu cuenta esta suspendida')
       );
 
-      // Evidência adicional contendo prazo/efeito (opcional e robusta)
+      // EvidÃªncia adicional contendo prazo/efeito (opcional e robusta)
       const more = tnorm.some(t =>
         t.includes('nao esta visivel no facebook') ||
         t.includes('you cannot use it right now') ||
@@ -5239,7 +5239,7 @@ async function detectAccountSuspended(page) {
       );
 
       let snippet = '';
-      // Alguns bans vêm como "disabled checkpoint" sem conter "suspensa" no texto (ex.: "Desabilitamos sua conta")
+      // Alguns bans vÃªm como "disabled checkpoint" sem conter "suspensa" no texto (ex.: "Desabilitamos sua conta")
       const disabledCheckpoint =
         href.includes('disabled_checkpoint') ||
         path.includes('/checkpoint/dyi') ||
@@ -5271,7 +5271,7 @@ module.exports = {
   resolvePatchCoordsForProfile,
   injectCookies,
   ensureMinimizedWindowForPage,
-  pruneExtraWindows, // expose for worker (força prune)
+  pruneExtraWindows, // expose for worker (forÃ§a prune)
   pruneHumanToOneTab, // militar: modo humano => 1 aba
   getPageCount: async function (browser) {
     if (!browser) return 0;

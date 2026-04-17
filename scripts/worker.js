@@ -1,4 +1,4 @@
-// scripts/worker.js
+﻿// scripts/worker.js
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -28,7 +28,7 @@ const serverConfig = require('./serverConfig.js');
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
-// Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
+// Objetivo: prova irrefutÃ¡vel de que o worker carregou o cÃ³digo novo (e com quais envs).
 const WORKER_BUILD_TAG = '2026-01-27_provision_3tabs_v1';
 try {
   provisionAudit.append({
@@ -48,7 +48,7 @@ try {
 
 // ===== AUTO-OPEN BOOT RESET (sempre OFF no boot) =====
 // Regra operacional: ao iniciar o worker, "Tudo aberto" deve ficar desligado
-// para evitar auto-abertura após restart.
+// para evitar auto-abertura apÃ³s restart.
 try {
   fileStore.withDesiredFileLockUpdate((d) => {
     d = d || {};
@@ -73,10 +73,10 @@ const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
 const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
 // P0 hardening (INC-20260207-1403-01):
-// Garantia "volta a trabalhar" pós stock_provision em ambiente com shards.
-// A causa observada foi "volta parcial" quando alguns workers/shards não retomam.
-// Estratégia enterprise:
-// - Detectar transição de provision_lock (stock_provision) ativo -> inativo
+// Garantia "volta a trabalhar" pÃ³s stock_provision em ambiente com shards.
+// A causa observada foi "volta parcial" quando alguns workers/shards nÃ£o retomam.
+// EstratÃ©gia enterprise:
+// - Detectar transiÃ§Ã£o de provision_lock (stock_provision) ativo -> inativo
 // - Persistir marcador global (no disco) do fim do provisionamento
 // - Cada worker/shard executa um resume sweep para seus perfis, respeitando guardrails (flags/login/humano/config)
 const STOCK_PROVISION_LAST_END_MARKER = path.join(DATA_DIR, 'stock_provision_last_end.json');
@@ -115,7 +115,7 @@ function _tryBecomeGovSnapshotLeader() {
           return false;
         }
       } catch {
-        // se não der pra stat, tenta tomar posse
+        // se nÃ£o der pra stat, tenta tomar posse
         try { fs.unlinkSync(GOV_SNAP_LEADER_LOCK); } catch {}
       }
     }
@@ -287,9 +287,9 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
       continue;
     }
 
-    // Enterprise: se o CT responder "not_found_assigned", não podemos ficar em loop infinito
-    // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em múltiplos hosts).
-    // Regra pedida: se não há controller e desired.active==false, remover o perfil local imediatamente.
+    // Enterprise: se o CT responder "not_found_assigned", nÃ£o podemos ficar em loop infinito
+    // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em mÃºltiplos hosts).
+    // Regra pedida: se nÃ£o hÃ¡ controller e desired.active==false, remover o perfil local imediatamente.
     try {
       if (String(errStr || '').includes('not_found_assigned')) {
         const nome = profileName;
@@ -299,10 +299,10 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
           try {
             provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
           } catch {}
-          // Remoção local best-effort (mesma lógica do banflow)
+          // RemoÃ§Ã£o local best-effort (mesma lÃ³gica do banflow)
           try {
-            // CRÍTICO (cluster): NÃO usar loadPerfisJson()/savePerfisJson do worker (shard) para gravar perfis.json,
-            // senão um shard pode sobrescrever o arquivo global com um subconjunto (ou []) e "sumir tudo".
+            // CRÃTICO (cluster): NÃƒO usar loadPerfisJson()/savePerfisJson do worker (shard) para gravar perfis.json,
+            // senÃ£o um shard pode sobrescrever o arquivo global com um subconjunto (ou []) e "sumir tudo".
             let udir = '';
             try {
               const man = await manifestStore.read(nome).catch(() => null);
@@ -384,7 +384,7 @@ async function captureLoginRequiredEvidence(nome, page, lr) {
     robeMeta[nome] = robeMeta[nome] || {};
     const now = Date.now();
     const last = Number(robeMeta[nome].lastLREvidenceAt || 0) || 0;
-    // Rate limit: no máximo 1 evidência a cada 30 minutos por perfil
+    // Rate limit: no mÃ¡ximo 1 evidÃªncia a cada 30 minutos por perfil
     if (last > 0 && (now - last) < (30 * 60 * 1000)) return;
     robeMeta[nome].lastLREvidenceAt = now;
 
@@ -411,8 +411,8 @@ const _profileLockAls = new AsyncLocalStorage();
 const _profileOpLocks = new Map();
 async function lockProfileAction(nome, fn) {
   if (!nome) return fn();
-  // Reentrância enterprise: se já estamos executando uma ação bloqueada para este mesmo perfil
-  // (ex.: login_remediate -> detecta ban -> setBannedFlag), não pode deadlockar.
+  // ReentrÃ¢ncia enterprise: se jÃ¡ estamos executando uma aÃ§Ã£o bloqueada para este mesmo perfil
+  // (ex.: login_remediate -> detecta ban -> setBannedFlag), nÃ£o pode deadlockar.
   try {
     const st = _profileLockAls.getStore();
     if (st && st.nome === nome) return await fn();
@@ -479,8 +479,8 @@ function readHostIdSync() {
 
 async function fetchCredentialsFromCT({ profileName } = {}) {
   const cfg = readCtConfig();
-  // Fallback enterprise: se ct_config.json não tiver dados, usar env/notifierEndpoints
-  // (evita “funciona tudo, mas não arquiva no CT” quando só LOG_INGEST_SECRET está setado via env).
+  // Fallback enterprise: se ct_config.json nÃ£o tiver dados, usar env/notifierEndpoints
+  // (evita â€œfunciona tudo, mas nÃ£o arquiva no CTâ€ quando sÃ³ LOG_INGEST_SECRET estÃ¡ setado via env).
   let base = String(cfg && cfg.ctBaseUrl || '').trim();
   if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
   if (!base) {
@@ -630,7 +630,7 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
     if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
     if (man && man.uaPresetId) uaPresetId = String(man.uaPresetId || '').trim();
   } catch {}
-  // Fallback: overlay cache (quando ainda não persistiu no manifest)
+  // Fallback: overlay cache (quando ainda nÃ£o persistiu no manifest)
   try {
     if (!stockAccountId) {
       const cached = robeMeta[nome] && robeMeta[nome].overlayCredCache;
@@ -672,12 +672,12 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
-  // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
-  // Ela tem semântica própria (humano + monitor 1h quando submetido).
+  // Guardrail enterprise: identidade (selfie/vÃ­deo) nÃ£o deve virar "loginRequired" genÃ©rico.
+  // Ela tem semÃ¢ntica prÃ³pria (humano + monitor 1h quando submetido).
   try {
     const rr = String(reason || '').toLowerCase();
-    // Regra ultra enterprise: "probe_failed" é falha de medição, não evidência de login.
-    // Não pode persistir LR/derrubar Virtus por si só.
+    // Regra ultra enterprise: "probe_failed" Ã© falha de mediÃ§Ã£o, nÃ£o evidÃªncia de login.
+    // NÃ£o pode persistir LR/derrubar Virtus por si sÃ³.
     if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
       try {
         await issues.append(
@@ -703,8 +703,8 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
-      // Regra enterprise: estado atual manda. Se agora é login_required, limpar flags antigas que mascaram a verdade.
-      // Ex.: estava "recurso em análise", mas voltou para login_form -> precisamos remediar login.
+      // Regra enterprise: estado atual manda. Se agora Ã© login_required, limpar flags antigas que mascaram a verdade.
+      // Ex.: estava "recurso em anÃ¡lise", mas voltou para login_form -> precisamos remediar login.
       delete man.accountFlags.appealSubmitted;
       delete man.accountFlags.appealSubmittedAt;
       delete man.accountFlags.appealSource;
@@ -732,7 +732,7 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     robeMeta[nome].loginSource = source || '';
 
     // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
-    // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
+    // (evita o nurse religar Virtus automaticamente e ficar â€œbrigandoâ€ com telas de login).
     try {
       await fileStore.withDesiredFileLockUpdate((d) => {
         d = d || {}; d.perfis = d.perfis || {};
@@ -741,8 +741,8 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
       });
     } catch {}
 
-    // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
-    // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
+    // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃƒO pode ficar "Online".
+    // Isso evita telemetria falsa (trabalhando=true) e evita loops de automaÃ§Ã£o em tela de login.
     try {
       const ctrl = controllers.get(nome);
       if (ctrl) {
@@ -755,8 +755,8 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   } catch {}
 }
 
-// Quando o fluxo automático tentou (cookies + login/senha) e falhou, marca persistente.
-// Regra enterprise: NÃO re-tentar automaticamente em loop; só "Retomar trabalho" libera nova tentativa.
+// Quando o fluxo automÃ¡tico tentou (cookies + login/senha) e falhou, marca persistente.
+// Regra enterprise: NÃƒO re-tentar automaticamente em loop; sÃ³ "Retomar trabalho" libera nova tentativa.
 async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', stage = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -778,7 +778,7 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
 }
 
 // ===== Human Overlay (HUD) =====
-// Objetivo: quando entrar em modo humano, mostrar painel fixo no navegador com nome/motivo/login/senha e botões (copiar/retomar).
+// Objetivo: quando entrar em modo humano, mostrar painel fixo no navegador com nome/motivo/login/senha e botÃµes (copiar/retomar).
 const HUMAN_OVERLAY_CFG = {
   enabled: String(process.env.HUMAN_OVERLAY || '').trim() !== '0',
   maxPagesScan: 8
@@ -801,9 +801,9 @@ function _overlayReasonFromFlags(flags) {
 }
 
 // IMPORTANT (debug-mode / ultra enterprise):
-// setCaptchaCheckpointFlag NÃO deve invocar humano automaticamente.
-// Ela só registra flags persistentes (evidência do estado). A decisão de entrar em modo humano
-// deve ser do "flow" (ex.: após N tentativas) para evitar "paranoia".
+// setCaptchaCheckpointFlag NÃƒO deve invocar humano automaticamente.
+// Ela sÃ³ registra flags persistentes (evidÃªncia do estado). A decisÃ£o de entrar em modo humano
+// deve ser do "flow" (ex.: apÃ³s N tentativas) para evitar "paranoia".
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -815,7 +815,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointSource = String(source || '').slice(0, 80);
       man.accountFlags.captchaCheckpointUrl = String(url || '').slice(0, 300);
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
-      // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
+      // Blindagem: captcha/checkpoint NÃƒO pode ficar mascarado por "login/cookies falhou".
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -860,14 +860,14 @@ const CAPTCHA_FLOW_CFG = {
   maxTries: Math.max(1, Number(process.env.CAPTCHA_MAX_TRIES || 5) || 5)
 };
 // Kill-switch enterprise:
-// 1 = pausa automações de captcha/identidade/recurso_em_analise.
+// 1 = pausa automaÃ§Ãµes de captcha/identidade/recurso_em_analise.
 // login_required continua habilitado (autoLoginRemediate).
 const PAUSE_NON_LR_AUTOMATION = String(process.env.PAUSE_NON_LR_AUTOMATION || '1').trim() === '1';
 const CAPTCHA_PACING_CFG = {
   minStableMs: Math.max(200, Number(process.env.CAPTCHA_MIN_STABLE_MS || 1500) || 1500)
 };
 
-// Mutex in-process: 1 captcha flow por host (fallback quando supervisor permits não estão habilitados).
+// Mutex in-process: 1 captcha flow por host (fallback quando supervisor permits nÃ£o estÃ£o habilitados).
 let _captchaFlowRunning = false;
 let _captchaFlowRunningNome = null;
 
@@ -910,7 +910,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
-    // Se humano está no controle, não operar.
+    // Se humano estÃ¡ no controle, nÃ£o operar.
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
       return { ok: false, skipped: true, reason: 'human_control' };
@@ -923,7 +923,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
     }
 
     // Fallback enterprise: mutex interno (1 captcha por host).
-    // Importante: não depende do supervisor, então evita o "stall" quando permits estão disabled.
+    // Importante: nÃ£o depende do supervisor, entÃ£o evita o "stall" quando permits estÃ£o disabled.
     if (_captchaFlowRunning) {
       try {
         provisionAudit.append({
@@ -941,7 +941,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
     _captchaFlowRunningNome = String(nome || '');
     _locked = true;
 
-    // Governança por tipo: 1 captcha por host (mas não bloqueia identity/login).
+    // GovernanÃ§a por tipo: 1 captcha por host (mas nÃ£o bloqueia identity/login).
     let _govToken = null;
     try {
       const pr = await supervisorClient.requestPermit('captcha_flow', nome, {
@@ -976,7 +976,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
 
     try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_begin', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), maxTries: CAPTCHA_FLOW_CFG.maxTries }); } catch {}
 
-    // Estado seguro imediato (não pode ficar Virtus/Robe rodando)
+    // Estado seguro imediato (nÃ£o pode ficar Virtus/Robe rodando)
     try {
       await fileStore.withDesiredFileLockUpdate((d) => {
         d = d || {}; d.perfis = d.perfis || {};
@@ -1003,7 +1003,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_attempt', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), attempt, reason: lastReason.slice(0,120) }); } catch {}
 
       // Handoff enterprise:
-      // se saímos do captcha e entramos em outro estado (identidade/login/appeal), NÃO invocar humano pelo captcha flow.
+      // se saÃ­mos do captcha e entramos em outro estado (identidade/login/appeal), NÃƒO invocar humano pelo captcha flow.
       // Encaminhamos para o fluxo correto e encerramos o captcha flow.
       if (lastReason.includes('identity')) {
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_identity', nome: String(nome||''), flowId: id, attempt, reason: lastReason.slice(0,160) }); } catch {}
@@ -1025,7 +1025,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       }
       if (lastReason.includes('login_form')) {
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_login_form', nome: String(nome||''), flowId: id, attempt }); } catch {}
-        // Blindagem P0: nunca enfileirar remediação sem persistir flag LR.
+        // Blindagem P0: nunca enfileirar remediaÃ§Ã£o sem persistir flag LR.
         // Sem isso, o autoLoginRemediateTick ignora o perfil (depende de loginRequired=true).
         try { await setLoginRequiredFlag(nome, { reason: lr.reason || 'login_form', source: lr.domain || 'captcha_flow' }); } catch {}
         try { queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true }); } catch {}
@@ -1037,7 +1037,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
         const wait = await browserHelper.waitForContinueEnabled(pg, { timeoutMs: 20_000 }).catch(()=>({ ok:false, error:'wait_failed' }));
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_wait', nome: String(nome||''), flowId: id, attempt, ok: !!(wait && wait.ok), error: wait && wait.error ? String(wait.error).slice(0,120) : null }); } catch {}
         if (!(wait && wait.ok)) {
-          // Não invocar humano aqui: pre-screen pode ficar "cinza" por alguns segundos.
+          // NÃ£o invocar humano aqui: pre-screen pode ficar "cinza" por alguns segundos.
           // Deixa o nurse re-agendar com debounce.
           try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'pre_screen_disabled' }).catch(()=>{}); } catch {}
           return { ok: false, error: 'pre_screen_disabled', flowId: id };
@@ -1069,8 +1069,8 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
             imgSrcKnown: !!curImgSrc
           });
         } catch {}
-        // Se a causa é falta de config Groq no host, isso é auto-corrigível via handshake CT.
-        // Não devemos invocar humano nem consumir as 5 tentativas "em loop" aqui.
+        // Se a causa Ã© falta de config Groq no host, isso Ã© auto-corrigÃ­vel via handshake CT.
+        // NÃ£o devemos invocar humano nem consumir as 5 tentativas "em loop" aqui.
         if (!ocr || ocr.ok !== true) {
           const oerr = ocr && ocr.error ? String(ocr.error) : '';
           if (String(oerr).toLowerCase() === 'groq_config_missing') {
@@ -1083,7 +1083,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
         if (ocr && ocr.ok && ocr.text) {
           const fill = await browserHelper.fillCaptchaAndContinue(pg, { text: ocr.text, maxWaitMs: 12000 }).catch(()=>({ ok:false, error:'fill_failed' }));
           try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
-          // Aguarda transição REAL (imagem trocar ou sair do captcha) antes da próxima tentativa.
+          // Aguarda transiÃ§Ã£o REAL (imagem trocar ou sair do captcha) antes da prÃ³xima tentativa.
           try {
             const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000, minStableMs: CAPTCHA_PACING_CFG.minStableMs }).catch(()=>null);
             provisionAudit.append({
@@ -1098,7 +1098,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
               minStableMs: w && typeof w.minStableMs === 'number' ? w.minStableMs : CAPTCHA_PACING_CFG.minStableMs
             });
           } catch {}
-          // Usa o src final (se disponível) como base para a próxima tentativa
+          // Usa o src final (se disponÃ­vel) como base para a prÃ³xima tentativa
           try {
             const w2 = await browserHelper.detectCaptchaChallenge(pg).catch(()=>null);
             if (w2 && w2.imgSrc) lastImgSrc = String(w2.imgSrc || '');
@@ -1106,14 +1106,14 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
           } catch { lastImgSrc = curImgSrc || lastImgSrc; }
           continue;
         }
-        // Se OCR não deu texto, apenas segue para próxima tentativa (reload/reprobe já acontece pelo próprio FB / ou próximos loops).
+        // Se OCR nÃ£o deu texto, apenas segue para prÃ³xima tentativa (reload/reprobe jÃ¡ acontece pelo prÃ³prio FB / ou prÃ³ximos loops).
         lastImgSrc = curImgSrc || lastImgSrc;
         continue;
       }
     }
 
-    // Falhou após N tentativas => entrar em humano (agora sim).
-    // EXCEÇÃO: pre-screen não deve cair em humano; retorna para o nurse re-tentar.
+    // Falhou apÃ³s N tentativas => entrar em humano (agora sim).
+    // EXCEÃ‡ÃƒO: pre-screen nÃ£o deve cair em humano; retorna para o nurse re-tentar.
     if (lastReason && lastReason.includes('captcha_persona_pre_screen')) {
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_no_human', nome: String(nome||''), flowId: id }); } catch {}
       try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'pre_screen_no_human' }).catch(()=>{}); } catch {}
@@ -1149,8 +1149,8 @@ async function _buildHumanOverlayData(nome) {
     let login = man && (man.login || man.email || man.user || man.username) ? String(man.login || man.email || man.user || man.username) : '';
     let password = man && (man.password || man.pass) ? String(man.password || man.pass) : '';
 
-    // Enterprise: se manifest não tem credenciais, tenta buscar do CT (assigned->stock).
-    // Cache curto em memória para não spammar CT.
+    // Enterprise: se manifest nÃ£o tem credenciais, tenta buscar do CT (assigned->stock).
+    // Cache curto em memÃ³ria para nÃ£o spammar CT.
     try {
       if (!String(login || '').trim() || !String(password || '').trim()) {
         robeMeta[nome] = robeMeta[nome] || {};
@@ -1222,7 +1222,7 @@ async function _installOverlayOnPage(nome, page) {
     try {
       await page.exposeFunction('__ctHumanOverlayResume', async () => {
         try {
-          // Evidência enterprise (sem credenciais)
+          // EvidÃªncia enterprise (sem credenciais)
           try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_resume_clicked', nome: String(nome || '') }); } catch {}
         } catch {}
         try { await handlers['human-resume']({ nome }); } catch {}
@@ -1230,21 +1230,21 @@ async function _installOverlayOnPage(nome, page) {
         return true;
       });
     } catch (e) {
-      // Se já existe, ok. Se falhar por outro motivo, registrar para diagnóstico.
+      // Se jÃ¡ existe, ok. Se falhar por outro motivo, registrar para diagnÃ³stico.
       const msg = (e && e.message) ? String(e.message) : String(e);
       if (!/already exists|has been already registered|binding/i.test(msg)) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_expose_resume_failed', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
       }
     }
 
-    // Ações do HUD (enterprise): fechar navegador / pause robe 24h / excluir conta.
-    // Importante: o HUD roda no browser, mas as ações rodam no Node via exposeFunction (sem CORS).
+    // AÃ§Ãµes do HUD (enterprise): fechar navegador / pause robe 24h / excluir conta.
+    // Importante: o HUD roda no browser, mas as aÃ§Ãµes rodam no Node via exposeFunction (sem CORS).
     try {
       await page.exposeFunction('__ctHumanOverlayCloseBrowser', async () => {
         const startedAt = Date.now();
         try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'close_browser' }); } catch {}
         try {
-          // Política alinhada: não forçar desired.active=false (permite reabrir depois conforme desired atual).
+          // PolÃ­tica alinhada: nÃ£o forÃ§ar desired.active=false (permite reabrir depois conforme desired atual).
           // Manter preserveDesired evita efeitos colaterais agressivos; o sistema decide reabrir conforme desired/nurse.
           const r = await handlers.deactivate({ nome, reason: 'human_overlay_close', policy: 'preserveDesired' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
           try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'close_browser', ok: !!(r && r.ok), error: r && r.error ? String(r.error).slice(0, 180) : null, durationMs: Date.now() - startedAt }); } catch {}
@@ -1289,7 +1289,7 @@ async function _installOverlayOnPage(nome, page) {
         const startedAt = Date.now();
         try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'delete_account' }); } catch {}
         try {
-          // Reutiliza o endpoint canônico de delete (inclui: fechar se ativo + CT estoque excluídas + purge local).
+          // Reutiliza o endpoint canÃ´nico de delete (inclui: fechar se ativo + CT estoque excluÃ­das + purge local).
           const base = `http://127.0.0.1:${parseInt(process.env.PORT || '8088', 10) || 8088}`;
           const url = `${base}/api/perfis/${encodeURIComponent(String(nome || '').trim())}`;
           const Aborter = global.AbortController || require('node-abort-controller');
@@ -1335,11 +1335,11 @@ async function _installOverlayOnPage(nome, page) {
       });
     } catch {}
 
-    // Injeção persistente (recria em toda navegação) + injeção imediata no documento atual.
+    // InjeÃ§Ã£o persistente (recria em toda navegaÃ§Ã£o) + injeÃ§Ã£o imediata no documento atual.
     try {
       const overlayInstall = () => {
         try {
-          // Não retornar cedo: em SPAs o DOM pode ser recriado; precisamos garantir handlers/drag/dock sempre.
+          // NÃ£o retornar cedo: em SPAs o DOM pode ser recriado; precisamos garantir handlers/drag/dock sempre.
           window.__ctHumanOverlayInstalled = true;
 
           const HOST_ID = 'ct-human-overlay-host';
@@ -1390,13 +1390,13 @@ async function _installOverlayOnPage(nome, page) {
               <div class="wrap" id="wrap">
                 <div class="hdr" title="Dica: arraste esta barra para mover o painel">
                   <div>
-                    <div class="ttl">Modo Humano — Conveniente</div>
+                    <div class="ttl">Modo Humano â€” Conveniente</div>
                     <div class="hint" id="sub"></div>
-                    <div class="moveHint">Arraste o topo para mover • Use “Mover” para trocar de canto</div>
+                    <div class="moveHint">Arraste o topo para mover â€¢ Use â€œMoverâ€ para trocar de canto</div>
                   </div>
                   <div class="hdrBtns">
                     <button class="mini" id="dock" title="Mover painel (cantos)">Mover</button>
-                    <button class="mini" id="min" title="Minimizar/maximizar">—</button>
+                    <button class="mini" id="min" title="Minimizar/maximizar">â€”</button>
                     <div class="tag" id="tag">HUMANO</div>
                   </div>
                 </div>
@@ -1409,9 +1409,9 @@ async function _installOverlayOnPage(nome, page) {
                     <button id="copyLogin">Copiar login</button>
                     <button id="copyPass">Copiar senha</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
-                    <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
-                    <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
-                    <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluídas)">Excluir conta</button>
+                    <button id="robe24h" title="Pausar Robe por 24h (nÃ£o retoma automaÃ§Ã£o)">Robe 24h</button>
+                    <button id="closeBrowser" title="Fecha este navegador (nÃ£o altera desired.active)">Fechar navegador</button>
+                    <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluÃ­das)">Excluir conta</button>
                     <button class="danger" id="hide" title="Ocultar o painel">Ocultar painel</button>
                   </div>
                   <div class="hint" id="hint"></div>
@@ -1422,7 +1422,7 @@ async function _installOverlayOnPage(nome, page) {
             const $ = (id) => shadow.getElementById(id);
             const body = $('body');
 
-            // Persistência leve da posição (sem dependências)
+            // PersistÃªncia leve da posiÃ§Ã£o (sem dependÃªncias)
             const POS_KEY = 'ctHumanOverlayPosV1';
             const readPos = () => { try { return JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch { return null; } };
             const savePos = (p) => { try { localStorage.setItem(POS_KEY, JSON.stringify(p || {})); } catch {} };
@@ -1443,14 +1443,14 @@ async function _installOverlayOnPage(nome, page) {
                 host.style.top  = `${Math.max(6, Math.min(window.innerHeight - 60, y))}px`;
               } catch {}
             };
-            // Restaura posição
+            // Restaura posiÃ§Ã£o
             try {
               const p = readPos();
               if (p && p.mode === 'free' && typeof p.x === 'number' && typeof p.y === 'number') applyFree(p.x, p.y);
               else if (p && p.mode && typeof p.mode === 'string') applyDock(p.mode);
             } catch {}
 
-            // Botão Mover (dock cycle)
+            // BotÃ£o Mover (dock cycle)
             $('dock')?.addEventListener('click', () => {
               const seq = ['tr','tl','br','bl'];
               const cur = (() => { try { const p = readPos(); return (p && p.mode) ? String(p.mode) : 'tr'; } catch { return 'tr'; } })();
@@ -1543,7 +1543,7 @@ async function _installOverlayOnPage(nome, page) {
                   const r = await window.__ctHumanOverlayRobe24h();
                   try { $('hint').textContent = (r && r.ok) ? 'Robe 24h aplicado.' : ('Falha ao aplicar Robe 24h: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
                 } else {
-                  try { $('hint').textContent = 'Falha: binding Robe 24h indisponível. Aguarde resincronização.'; } catch {}
+                  try { $('hint').textContent = 'Falha: binding Robe 24h indisponÃ­vel. Aguarde resincronizaÃ§Ã£o.'; } catch {}
                 }
               } catch (e) {
                 try { $('hint').textContent = 'Falha ao aplicar Robe 24h.'; } catch {}
@@ -1559,7 +1559,7 @@ async function _installOverlayOnPage(nome, page) {
                   const r = await window.__ctHumanOverlayCloseBrowser();
                   try { $('hint').textContent = (r && r.ok) ? 'Navegador fechado.' : ('Falha ao fechar navegador: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
                 } else {
-                  try { $('hint').textContent = 'Falha: binding fechar navegador indisponível. Aguarde resincronização.'; } catch {}
+                  try { $('hint').textContent = 'Falha: binding fechar navegador indisponÃ­vel. Aguarde resincronizaÃ§Ã£o.'; } catch {}
                 }
               } catch {
                 try { $('hint').textContent = 'Falha ao fechar navegador.'; } catch {}
@@ -1568,13 +1568,13 @@ async function _installOverlayOnPage(nome, page) {
             });
             $('deleteAcc')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'delete_account_click' }); } catch {}
-              // Dupla confirmação (ultra enterprise): exige digitar EXCLUIR.
+              // Dupla confirmaÃ§Ã£o (ultra enterprise): exige digitar EXCLUIR.
               try {
-                const ok1 = confirm('Excluir conta: isso vai fechar o navegador, remover do servidor e enviar pro CT (estoque excluídas). Continuar?');
+                const ok1 = confirm('Excluir conta: isso vai fechar o navegador, remover do servidor e enviar pro CT (estoque excluÃ­das). Continuar?');
                 if (!ok1) return;
                 const typed = prompt('Digite EXCLUIR para confirmar:');
                 if (String(typed || '').trim().toUpperCase() !== 'EXCLUIR') {
-                  try { $('hint').textContent = 'Exclusão cancelada (confirmação inválida).'; } catch {}
+                  try { $('hint').textContent = 'ExclusÃ£o cancelada (confirmaÃ§Ã£o invÃ¡lida).'; } catch {}
                   return;
                 }
               } catch {}
@@ -1583,9 +1583,9 @@ async function _installOverlayOnPage(nome, page) {
               try {
                 if (typeof window.__ctHumanOverlayDeleteAccount === 'function') {
                   const r = await window.__ctHumanOverlayDeleteAccount();
-                  try { $('hint').textContent = (r && r.ok) ? 'Conta excluída com sucesso.' : ('Falha ao excluir conta: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
+                  try { $('hint').textContent = (r && r.ok) ? 'Conta excluÃ­da com sucesso.' : ('Falha ao excluir conta: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
                 } else {
-                  try { $('hint').textContent = 'Falha: binding excluir conta indisponível. Aguarde resincronização.'; } catch {}
+                  try { $('hint').textContent = 'Falha: binding excluir conta indisponÃ­vel. Aguarde resincronizaÃ§Ã£o.'; } catch {}
                 }
               } catch {
                 try { $('hint').textContent = 'Falha ao excluir conta.'; } catch {}
@@ -1601,7 +1601,7 @@ async function _installOverlayOnPage(nome, page) {
                   await window.__ctHumanOverlayResume();
                   try { $('hint').textContent = 'Retomada solicitada. Aguarde...'; } catch {}
                 } else {
-                  try { $('hint').textContent = 'Falha: binding de retomar indisponível. Aguarde resincronização.'; } catch {}
+                  try { $('hint').textContent = 'Falha: binding de retomar indisponÃ­vel. Aguarde resincronizaÃ§Ã£o.'; } catch {}
                 }
               } catch {}
               try { $('resume').disabled = false; } catch {}
@@ -1623,7 +1623,7 @@ async function _installOverlayOnPage(nome, page) {
             const shadow = h.shadowRoot;
             if (!shadow) return;
             const $ = (id) => shadow.getElementById(id);
-            const nome = [d.nome, d.label ? `— ${d.label}` : '', d.cidade ? `(${d.cidade})` : ''].filter(Boolean).join(' ');
+            const nome = [d.nome, d.label ? `â€” ${d.label}` : '', d.cidade ? `(${d.cidade})` : ''].filter(Boolean).join(' ');
             $('nome').textContent = nome;
             $('reason').textContent = String(d.reason || '');
             $('login').textContent = String(d.login || '');
@@ -1633,11 +1633,11 @@ async function _installOverlayOnPage(nome, page) {
             const f = d.flags || {};
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
-            else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
+            else if (f.twoFactor) statusTxt = '2FA requerido (excluÃ­da)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
-            else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
-            else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
-            else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
+            else if (f.identitySubmitted) statusTxt = 'Identidade em anÃ¡lise (monitor 1h)';
+            else if (f.identityRequired) statusTxt = 'ConfirmaÃ§Ã£o de identidade (selfie/vÃ­deo)';
+            else if (f.appealSubmitted) statusTxt = 'Recurso em anÃ¡lise (monitor 1h)';
             else if (f.loginRemediateFailed) statusTxt = 'Login/Cookies falhou (humano)';
             else if (f.loginRequired) statusTxt = 'Login requerido';
             else statusTxt = 'Modo humano ativo';
@@ -1656,13 +1656,13 @@ async function _installOverlayOnPage(nome, page) {
           };
 
           window.addEventListener('DOMContentLoaded', () => { try { render(); } catch {} }, { once: true });
-          // Resiliência: se SPA mexer no DOM e remover, recria.
+          // ResiliÃªncia: se SPA mexer no DOM e remover, recria.
           setInterval(() => { try { render(); } catch {} }, 5000);
         } catch {}
       };
-      // 1) Para futuras navegações
+      // 1) Para futuras navegaÃ§Ãµes
       await page.evaluateOnNewDocument(overlayInstall);
-      // 2) Para a página atual (senão o overlay só aparece após navegar/recarregar)
+      // 2) Para a pÃ¡gina atual (senÃ£o o overlay sÃ³ aparece apÃ³s navegar/recarregar)
       await page.evaluate(overlayInstall).catch(()=>{});
     } catch {}
   } catch {}
@@ -1670,8 +1670,8 @@ async function _installOverlayOnPage(nome, page) {
 
 async function syncHumanOverlay(nome) {
   try {
-    // Enterprise: permitir "force overlay" mesmo se HUMAN_OVERLAY=0 (útil para captcha/checkpoint).
-    // Isso evita ficar sem painel (login/senha/botões) quando o humano é realmente necessário.
+    // Enterprise: permitir "force overlay" mesmo se HUMAN_OVERLAY=0 (Ãºtil para captcha/checkpoint).
+    // Isso evita ficar sem painel (login/senha/botÃµes) quando o humano Ã© realmente necessÃ¡rio.
     const now0 = Date.now();
     const forceUntil = Number(robeMeta?.[nome]?.forceOverlayUntil || 0) || 0;
     const forced = (forceUntil && forceUntil > now0);
@@ -1697,7 +1697,7 @@ async function syncHumanOverlay(nome) {
         await _installOverlayOnPage(nome, pg);
       }
       await _setOverlayDataOnPage(pg, data);
-      // Diagnóstico enterprise: prova irrefutável de que o overlay foi instalado/atualizado nesta aba.
+      // DiagnÃ³stico enterprise: prova irrefutÃ¡vel de que o overlay foi instalado/atualizado nesta aba.
       try {
         const d = await pg.evaluate(() => {
           try {
@@ -1750,7 +1750,7 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
       return;
     }
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return;
-    // Evidência enterprise (sem credenciais)
+    // EvidÃªncia enterprise (sem credenciais)
     try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_installed', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
 
     // Instala nos pages atuais + sincroniza data.
@@ -1781,17 +1781,17 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
   } catch {}
 }
 
-// ===== Recurso/Apelação (monitoramento) =====
+// ===== Recurso/ApelaÃ§Ã£o (monitoramento) =====
 const APPEAL_CFG = {
   intervalMs: 60 * 60 * 1000,      // 1h
-  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial após "Retomar trabalho")
+  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial apÃ³s "Retomar trabalho")
   maxPagesScan: 8
 };
 
 // Reload enterprise (anti-loop infinito):
-// - não engole falhas silenciosamente
-// - fallback: goto(url atual) e, se necessário, goto('https://www.facebook.com/')
-// - logs explícitos para auditoria (prova 110% do que aconteceu)
+// - nÃ£o engole falhas silenciosamente
+// - fallback: goto(url atual) e, se necessÃ¡rio, goto('https://www.facebook.com/')
+// - logs explÃ­citos para auditoria (prova 110% do que aconteceu)
 function isProxyTunnelLikeError(msg) {
   const m = String(msg || '');
   return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out|proxy/i.test(m);
@@ -1819,7 +1819,7 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
   let method = '';
   let error = null;
   try { await pg.bringToFront?.().catch(()=>{}); } catch {}
-  // Desabilitar cache só durante o reload (evita “tela antiga” em SPAs)
+  // Desabilitar cache sÃ³ durante o reload (evita â€œtela antigaâ€ em SPAs)
   try { if (pg && typeof pg.setCacheEnabled === 'function') await pg.setCacheEnabled(false).catch(()=>{}); } catch {}
   try {
     await pg.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs });
@@ -1846,7 +1846,7 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
     }
   }
   if (!ok) {
-    // Fallback 2: navegação determinística (estado real do FB)
+    // Fallback 2: navegaÃ§Ã£o determinÃ­stica (estado real do FB)
     try {
       await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 70_000) });
       ok = true;
@@ -1859,8 +1859,8 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
       }
     }
   }
-  // Pós-navegação: alguns fluxos do FB abrem modal "Você está de volta ao Facebook".
-  // Se não clicar, o sistema pode "achar" login_required/appeal por texto antigo e ficar engessado.
+  // PÃ³s-navegaÃ§Ã£o: alguns fluxos do FB abrem modal "VocÃª estÃ¡ de volta ao Facebook".
+  // Se nÃ£o clicar, o sistema pode "achar" login_required/appeal por texto antigo e ficar engessado.
   try {
     const did = await (async () => {
       try {
@@ -1869,9 +1869,9 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
           const txt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
           const hit =
             txt.includes('voce esta de volta ao facebook') ||
-            txt.includes("você está de volta ao facebook") ||
+            txt.includes("vocÃª estÃ¡ de volta ao facebook") ||
             txt.includes("sua conta nao esta mais suspensa") ||
-            txt.includes("sua conta não está mais suspensa") ||
+            txt.includes("sua conta nÃ£o estÃ¡ mais suspensa") ||
             txt.includes("you're back on facebook") ||
             txt.includes('your account is no longer suspended');
           if (!hit) return { ok: true, did: false };
@@ -1928,8 +1928,8 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     let p0 = pages && pages[0];
     let u0 = '';
     try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
-    // Fluxo enterprise: NÃO criar novas abas só porque a aba 0 está em about:blank.
-    // A aba 0 é navegável e deve ser reaproveitada (senão abrimos 2+ abas no bootstrap e o sistema “desgoverna”).
+    // Fluxo enterprise: NÃƒO criar novas abas sÃ³ porque a aba 0 estÃ¡ em about:blank.
+    // A aba 0 Ã© navegÃ¡vel e deve ser reaproveitada (senÃ£o abrimos 2+ abas no bootstrap e o sistema â€œdesgovernaâ€).
     if (!p0) {
       p0 = await ctrl.browser.newPage().catch(()=>null);
       if (p0) {
@@ -1945,7 +1945,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.messenger.com/marketplace'
+        ? 'https://www.facebook.com/messages'
         : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1966,7 +1966,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     try { await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase, allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
     ctrl.mainPage = p0;
 
-    // Limpa abas about:blank órfãs para não ficar "Abas: 2" e economizar RAM
+    // Limpa abas about:blank Ã³rfÃ£s para nÃ£o ficar "Abas: 2" e economizar RAM
     try {
       const ps = await ctrl.browser.pages().catch(()=>[]);
       for (const pg of (ps || [])) {
@@ -1984,7 +1984,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 }
 
 // Anti-tela-preta (about:blank) para aberturas "open/open-all":
-// - Não invoca humano.
+// - NÃ£o invoca humano.
 // - Garante que exista uma aba navegada para que detectores consigam rodar.
 async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'open_entry' } = {}) {
   try {
@@ -1995,14 +1995,14 @@ async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reason
   }
 }
 
-// Probe enterprise pós-abertura (anti-engessamento):
+// Probe enterprise pÃ³s-abertura (anti-engessamento):
 // - garante que as flags reflitam a tela REAL (identity/appeal/captcha/login_form)
-// - não deixa "invocar humano" virar estado final por engano
+// - nÃ£o deixa "invocar humano" virar estado final por engano
 // Retorna { ok, state, reason }
 async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {}) {
   try {
-    // Ultra enterprise: em alguns boots o ctrl.mainPage pode ainda não estar setado (race).
-    // Não podemos "ficar cego" e pular o probe — isso causa o sintoma "às vezes clica Continuar, às vezes não".
+    // Ultra enterprise: em alguns boots o ctrl.mainPage pode ainda nÃ£o estar setado (race).
+    // NÃ£o podemos "ficar cego" e pular o probe â€” isso causa o sintoma "Ã s vezes clica Continuar, Ã s vezes nÃ£o".
     let pg = (ctrl && ctrl.mainPage) ? ctrl.mainPage : null;
     if (!pg) {
       try {
@@ -2035,7 +2035,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     const _src = String(source || '');
     const _isOpenAll = /open_all/i.test(_src);
 
-    // 0) Ban/Suspensão
+    // 0) Ban/SuspensÃ£o
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
       if (bd && bd.banned) {
@@ -2048,7 +2048,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     // 1) LoginRequired/Identity/Appeal/Captcha
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
+      // 1) Messenger OK â€” antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
       // Espera UI real do Messenger Marketplace (anti-atropelo).
@@ -2077,7 +2077,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         } catch {}
         if (!okMsg) {
           // Enterprise hardening:
-          // Se o Messenger não ficou pronto, pode ser porque estamos em tela de captcha/identity/checkpoint.
+          // Se o Messenger nÃ£o ficou pronto, pode ser porque estamos em tela de captcha/identity/checkpoint.
           // Antes de "engessar", re-probar loginRequired e encaminhar.
           try {
             const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
@@ -2102,17 +2102,17 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
                 } catch {}
                 return { ok: true, state: 'identity_required', reason: rr2 };
               }
-              // Outros loginRequired: não libera trabalho; devolve evidência.
+              // Outros loginRequired: nÃ£o libera trabalho; devolve evidÃªncia.
               return { ok: false, error: 'messenger_marketplace_not_ready_login_required', reason: rr2 };
             }
           } catch {}
-          // Não avança para Robe nem libera trabalho se o Messenger não ficou realmente pronto.
+          // NÃ£o avanÃ§a para Robe nem libera trabalho se o Messenger nÃ£o ficou realmente pronto.
           return { ok: false, error: 'messenger_marketplace_not_ready' };
         }
       } catch {}
 
-      // Política militar: NÃO abrir aba extra de create no bootstrap por padrão.
-      // Isso elimina navegação obsoleta de verificação em aba 1 e reduz concorrência.
+      // PolÃ­tica militar: NÃƒO abrir aba extra de create no bootstrap por padrÃ£o.
+      // Isso elimina navegaÃ§Ã£o obsoleta de verificaÃ§Ã£o em aba 1 e reduz concorrÃªncia.
       let robeProbe = null;
       const enableBootstrapRobeProbe = String(process.env.BOOTSTRAP_ROBE_PROBE_ENABLED || '0') === '1' && !_isOpenAll;
       if (enableBootstrapRobeProbe) {
@@ -2130,12 +2130,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           const p = await ctrl.browser.newPage().catch(()=>null);
           if (!p) throw new Error('robe_probe_no_newPage');
           try { await wirePageObservers(nome, p); } catch {}
-          // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda) — igual ao Robe.
+          // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda) â€” igual ao Robe.
           try {
             const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
             guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 20000);
           } catch {}
-          // PatchPage na aba 1 para consistência (coords/UA/stealth hooks)
+          // PatchPage na aba 1 para consistÃªncia (coords/UA/stealth hooks)
           try {
             const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
             await browserHelper.patchPage(nome, p, coords).catch(()=>{});
@@ -2165,7 +2165,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             }, { timeout: 20000 }, (robeMode === 'veiculos') ? 'vehicle' : 'item').catch(()=>false);
           } catch { okReady = false; }
           const readyDurMs = Date.now() - tReady0;
-          // Não fechar instantâneo: garantir que houve tempo mínimo de validação (anti-flake visual).
+          // NÃ£o fechar instantÃ¢neo: garantir que houve tempo mÃ­nimo de validaÃ§Ã£o (anti-flake visual).
           const minHoldMs = parseInt(process.env.BOOTSTRAP_ROBE_MIN_HOLD_MS || '1800', 10);
           const elapsed = Date.now() - tProbe0;
           if (minHoldMs > elapsed) {
@@ -2213,7 +2213,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         } catch {}
       }
 
-      // 2) Se o Robe probe achou bloqueio (captcha/login/identity/appeal), NÃO liberar “clear”.
+      // 2) Se o Robe probe achou bloqueio (captcha/login/identity/appeal), NÃƒO liberar â€œclearâ€.
       try {
         const lr2 = robeProbe && robeProbe.ok && robeProbe.lr ? robeProbe.lr : null;
         if (lr2 && lr2.loginRequired === true) {
@@ -2226,7 +2226,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           }
           if (rr2.includes('identity')) {
             try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            // iniciar fluxo de identidade (gate+cooldown já protegem)
+            // iniciar fluxo de identidade (gate+cooldown jÃ¡ protegem)
             setTimeout(() => {
               try {
                 const c = controllers.get(nome);
@@ -2241,7 +2241,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
             return { ok: true, state: 'appeal_submitted', reason: rr2 };
           }
-          // Captcha: NÃO invocar humano aqui. Agenda o captcha flow (governança própria + N tentativas).
+          // Captcha: NÃƒO invocar humano aqui. Agenda o captcha flow (governanÃ§a prÃ³pria + N tentativas).
           if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
             try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_captcha_flow_schedule', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
             try {
@@ -2252,15 +2252,15 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await setLoginRequiredFlag(nome, { reason: rr2 || 'captcha', source: lr2.domain || source }); } catch {}
             return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
           }
-          // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
+          // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras jÃ¡ existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
           return { ok: true, state: 'login_required', reason: rr2 };
         }
       } catch {}
 
-      // 3) Se Messenger OK (+ Robe OK quando aplicável) => agora sim “clear”.
+      // 3) Se Messenger OK (+ Robe OK quando aplicÃ¡vel) => agora sim â€œclearâ€.
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
-      // Se abriu "human-only" por flag velha e já está OK, liberar automação.
+      // Se abriu "human-only" por flag velha e jÃ¡ estÃ¡ OK, liberar automaÃ§Ã£o.
       try { await clearAppealSubmittedFlag(nome); } catch {}
       try { await clearIdentityFlags(nome); } catch {}
       try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']); } catch {}
@@ -2268,13 +2268,13 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {}; d.perfis = d.perfis || {};
           const prev = d.perfis[nome] || {};
-          // Em open_all: NÃO ligar Virtus automaticamente (mantém estado do desired/open_all_map).
+          // Em open_all: NÃƒO ligar Virtus automaticamente (mantÃ©m estado do desired/open_all_map).
           const nextVirtus = _isOpenAll ? (prev.virtus || 'off') : 'on';
           d.perfis[nome] = { ...prev, active: true, humanHold: false, virtus: nextVirtus };
           return d;
         });
       } catch {}
-      // Em open_all: NÃO disparar start_work automaticamente.
+      // Em open_all: NÃƒO disparar start_work automaticamente.
       if (!_isOpenAll) {
         setTimeout(() => {
           try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
@@ -2308,12 +2308,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
-    // Captcha (pré-screen/captcha clássico): NÃO invocar humano imediatamente.
+    // Captcha (prÃ©-screen/captcha clÃ¡ssico): NÃƒO invocar humano imediatamente.
     // Regra do lead (2026-01-31): pre-screen deve auto-clicar "Continuar"; captcha deve tentar o fluxo (3 tentativas)
     // antes de cair em humano.
     if (rr.includes('captcha_persona_pre_screen') || rr.includes('captcha_persona') || rr.includes('checkpoint_captcha')) {
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_captcha_flow_begin', nome: String(nome||''), source: String(source||''), reason: rr.slice(0, 160) }); } catch {}
-      // Estado seguro imediato (não pode ficar Virtus/Robe rodando)
+      // Estado seguro imediato (nÃ£o pode ficar Virtus/Robe rodando)
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {}; d.perfis = d.perfis || {};
@@ -2331,7 +2331,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_pre_screen_click', nome: String(nome||''), source: String(source||''), ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
       }
 
-      // Reclassificar e encaminhar para o fluxo que já tem 3 tentativas (inclui OCR no captcha).
+      // Reclassificar e encaminhar para o fluxo que jÃ¡ tem 3 tentativas (inclui OCR no captcha).
       const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
       const rr2 = String((lr2 && lr2.reason) ? lr2.reason : rr).toLowerCase();
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_captcha_flow_schedule', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
@@ -2342,12 +2342,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           runCaptchaFlow(nome, c, p, { source: `probe_captcha:${String(source||'')}`, force: true }).catch(()=>{});
         }
       } catch {}
-      // Expor estado sem engessar (humano só será invocado no final do runIdentityFlow se falhar).
+      // Expor estado sem engessar (humano sÃ³ serÃ¡ invocado no final do runIdentityFlow se falhar).
       try { await setLoginRequiredFlag(nome, { reason: rr2 || rr || 'captcha', source: lr.domain || source }); } catch {}
       return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
     }
 
-    // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
+    // login_form / outros: se for "login/cookies falhou", aqui Ã© vÃ¡lido invocar humano
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
     return { ok: true, state: 'login_required', reason: rr };
   } catch (e) {
@@ -2365,10 +2365,10 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       man.accountFlags.appealSource = String(source || '').slice(0, 80);
       man.accountFlags.appealUrl = String(url || '').slice(0, 300);
       man.accountFlags.appealTitle = String(title || '').slice(0, 200);
-      // Por padrão, não começa a monitorar imediatamente: "Retomar trabalho" arma o monitor.
+      // Por padrÃ£o, nÃ£o comeÃ§a a monitorar imediatamente: "Retomar trabalho" arma o monitor.
       if (!man.accountFlags.appealNextCheckAt) man.accountFlags.appealNextCheckAt = 0;
       man.accountFlags.appealLastReason = 'appeal_submitted';
-      // Blindagem: ao entrar em recurso em análise, limpar flags antigas que mascaram o estado real.
+      // Blindagem: ao entrar em recurso em anÃ¡lise, limpar flags antigas que mascaram o estado real.
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -2380,8 +2380,8 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       delete man.accountFlags.loginSource;
       delete man.accountFlags.lastLoginRequiredAt;
       // Mutual exclusivity (ultra enterprise):
-      // Recurso em análise NÃO é "identidade em análise". Se detectamos appeal_submitted,
-      // precisamos remover flags de identidade para o painel não ficar engessado em "identitySubmitted".
+      // Recurso em anÃ¡lise NÃƒO Ã© "identidade em anÃ¡lise". Se detectamos appeal_submitted,
+      // precisamos remover flags de identidade para o painel nÃ£o ficar engessado em "identitySubmitted".
       delete man.accountFlags.identityRequired;
       delete man.accountFlags.identityRequiredAt;
       delete man.accountFlags.identitySubmitted;
@@ -2394,7 +2394,7 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       delete man.accountFlags.identityLastReason;
       return man;
     });
-    // Evidência enterprise: provision_audit é allowlisted via fetch_logs.
+    // EvidÃªncia enterprise: provision_audit Ã© allowlisted via fetch_logs.
     try {
       provisionAudit.append({
         ts: Date.now(),
@@ -2408,7 +2408,7 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].appealSubmitted = true;
     robeMeta[nome].whyNotOpen = 'appeal_submitted';
-    // Mutual exclusivity: não deixar runtime preso em identity_* quando já é appeal_submitted.
+    // Mutual exclusivity: nÃ£o deixar runtime preso em identity_* quando jÃ¡ Ã© appeal_submitted.
     try {
       if (robeMeta[nome].whyNotOpen && String(robeMeta[nome].whyNotOpen).startsWith('identity')) delete robeMeta[nome].whyNotOpen;
     } catch {}
@@ -2418,8 +2418,8 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
     delete robeMeta[nome].loginReason;
   } catch {}
 
-  // Regra enterprise: "Recurso em análise" NÃO deve virar humano invocado automaticamente.
-  // Mantém automação OFF (Virtus OFF), mas não seta humanHold.
+  // Regra enterprise: "Recurso em anÃ¡lise" NÃƒO deve virar humano invocado automaticamente.
+  // MantÃ©m automaÃ§Ã£o OFF (Virtus OFF), mas nÃ£o seta humanHold.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
@@ -2453,7 +2453,7 @@ async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}
       man.accountFlags = man.accountFlags || {};
       if (man.accountFlags.appealSubmitted !== true) return man;
       // Ultra enterprise: armamento idempotente.
-      // Se já existe um "next check" no futuro, NÃO rearmar (isso reinicia o timer no painel e cria loop infinito).
+      // Se jÃ¡ existe um "next check" no futuro, NÃƒO rearmar (isso reinicia o timer no painel e cria loop infinito).
       existingNext = Number(man.accountFlags.appealNextCheckAt || 0) || 0;
       if (existingNext && existingNext > (now + 30_000)) {
         skipped = true;
@@ -2505,7 +2505,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
     const pages = await ctrl.browser.pages().catch(()=>[]);
     const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
     const pickFb = () => {
-      // Prioridade: checkpoint/appeal (mais provável de refletir o estado)
+      // Prioridade: checkpoint/appeal (mais provÃ¡vel de refletir o estado)
       for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {
         const u = safeUrl(pg);
         if (!/facebook\.com/i.test(u)) continue;
@@ -2530,10 +2530,10 @@ async function appealMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // Refresh enterprise (com fallback + log explícito)
+    // Refresh enterprise (com fallback + log explÃ­cito)
     await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
-    // Primeiro: suspensão/ban (UI dedicada). Isso evita classificar errado como "appeal".
+    // Primeiro: suspensÃ£o/ban (UI dedicada). Isso evita classificar errado como "appeal".
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
       if (bd && bd.banned) {
@@ -2551,7 +2551,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
       }
     } catch {}
 
-    // Detecta estado após refresh. Se estiver em "appeal_submitted", faz uma navegação determinística (home)
+    // Detecta estado apÃ³s refresh. Se estiver em "appeal_submitted", faz uma navegaÃ§Ã£o determinÃ­stica (home)
     // para evitar falso-positivo por DOM/aba antiga.
     let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
     try {
@@ -2623,7 +2623,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
 
     // Mudou para outro bloqueio (login/checkpoint/captcha etc).
     // Regra enterprise: SAIR do modo appeal_submitted assim que a tela mudar.
-    // Caso contrário, o nurse fica preso no ramo de "appealSubmitted" e o perfil entra em loop infinito de 1h.
+    // Caso contrÃ¡rio, o nurse fica preso no ramo de "appealSubmitted" e o perfil entra em loop infinito de 1h.
     try { await clearAppealSubmittedFlag(nome); } catch {}
     try {
       provisionAudit.append({
@@ -2636,13 +2636,13 @@ async function appealMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // 2FA: exclusão automática
+    // 2FA: exclusÃ£o automÃ¡tica
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
       return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
     }
 
-    // Identidade: flags próprias (não virar loginRequired genérico).
+    // Identidade: flags prÃ³prias (nÃ£o virar loginRequired genÃ©rico).
     if (rr.includes('identity_submitted')) {
       try { await setIdentitySubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, transitioned: true, reason: 'identity_submitted', action: 'monitor_identity_1h' };
@@ -2652,7 +2652,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
       return { ok: true, transitioned: true, reason: 'identity_required', action: 'human_identity' };
     }
 
-    // Padrão: loginRequired
+    // PadrÃ£o: loginRequired
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
     try { await issues.append(nome, 'mil_action', `appeal_monitor_transition_exit reason=${rr}`); } catch {}
     try {
@@ -2664,7 +2664,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // Política definida: se virar login_form, disparar pipeline de login_remediate automaticamente.
+    // PolÃ­tica definida: se virar login_form, disparar pipeline de login_remediate automaticamente.
     if (rr.includes('login_form')) {
       const op = `appeal_monitor_login_form:${String(nome || '')}:${Date.now()}`;
       if (isNonLrAutomationPaused()) {
@@ -2705,25 +2705,25 @@ async function appealMonitorCheckNow(nome, ctrl) {
   }
 }
 
-// ===== Identidade (selfie/vídeo) — monitoramento 1h =====
+// ===== Identidade (selfie/vÃ­deo) â€” monitoramento 1h =====
 const IDENTITY_CFG = {
   intervalMs: 60 * 60 * 1000,      // 1h
-  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial após "identity_submitted")
+  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial apÃ³s "identity_submitted")
   maxPagesScan: 8
 };
 
 // Identity Gate (ultra enterprise):
-// - garante que apenas 1 fluxo de identidade "avance botões" por vez (global no host)
-// - após qualquer ação (clique), NÃO aplica cooldown (apenas 1 por vez)
-// - o timer de identidadeSubmitted (1h) é independente e "corre solto"
+// - garante que apenas 1 fluxo de identidade "avance botÃµes" por vez (global no host)
+// - apÃ³s qualquer aÃ§Ã£o (clique), NÃƒO aplica cooldown (apenas 1 por vez)
+// - o timer de identidadeSubmitted (1h) Ã© independente e "corre solto"
 const IDENTITY_GATE = {
-  // Requisito operacional (ROBE MÃE 5): evitar câmera "em uso" e travamentos.
-  // Identidade deve rodar 1 por vez por host, com cooldown RANDOMIZADO 10–30min entre execuções.
-  // Semântica desejada: o timer “corre livre”. Se não houver identidade, nada acontece;
-  // quando aparecer uma, só roda se cooldown já expirou.
+  // Requisito operacional (ROBE MÃƒE 5): evitar cÃ¢mera "em uso" e travamentos.
+  // Identidade deve rodar 1 por vez por host, com cooldown RANDOMIZADO 10â€“30min entre execuÃ§Ãµes.
+  // SemÃ¢ntica desejada: o timer â€œcorre livreâ€. Se nÃ£o houver identidade, nada acontece;
+  // quando aparecer uma, sÃ³ roda se cooldown jÃ¡ expirou.
   cooldownMinMs: 0,
   cooldownMaxMs: 0,
-  // O botão "Carregar" pode levar 20–120s para habilitar; manter lease maior evita expirar durante a espera.
+  // O botÃ£o "Carregar" pode levar 20â€“120s para habilitar; manter lease maior evita expirar durante a espera.
   leaseMs: 4 * 60 * 1000 // lease curto o suficiente p/ evitar deadlock, longo o suficiente p/ completar a etapa
 };
 
@@ -2747,8 +2747,8 @@ async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
       const curLease = Number(g.leaseUntil || 0) || 0;
       const curCooldown = Number(g.cooldownUntil || 0) || 0;
       if (curLease && curLease > now) {
-        // Hardening: lease órfão após restart/crash.
-        // Se o owner for "pid:<n>" e o processo não existir mais, limpa o lease imediatamente.
+        // Hardening: lease Ã³rfÃ£o apÃ³s restart/crash.
+        // Se o owner for "pid:<n>" e o processo nÃ£o existir mais, limpa o lease imediatamente.
         try {
           const o = String(g.owner || '').trim();
           const m = /^pid:(\d+)$/.exec(o);
@@ -2759,7 +2759,7 @@ async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
               try { process.kill(pid, 0); alive = true; }
               catch (e) {
                 const code = (e && e.code) ? String(e.code) : '';
-                // ESRCH => não existe; EPERM => existe mas sem permissão (assume vivo)
+                // ESRCH => nÃ£o existe; EPERM => existe mas sem permissÃ£o (assume vivo)
                 if (code === 'ESRCH') alive = false;
               }
               if (!alive) {
@@ -2809,7 +2809,7 @@ async function _identityGateRelease({ owner = '', nome = '', didAction = false, 
       d = d || {};
       d._identityGate = d._identityGate || {};
       const g = d._identityGate;
-      // Só o dono limpa o lease (ou se lease expirou)
+      // SÃ³ o dono limpa o lease (ou se lease expirou)
       const curOwner = String(g.owner || '');
       const curLease = Number(g.leaseUntil || 0) || 0;
       const leaseExpired = (!curLease || curLease <= now);
@@ -2836,14 +2836,14 @@ async function _identityGateRelease({ owner = '', nome = '', didAction = false, 
   return { ok: true, cooldownMs, cooldownUntil };
 }
 
-// ===== Identidade (selfie/vídeo) — executor 24/7 (multi-step) =====
-// Objetivo: quando a UI cair em identidade, avançar os botões necessários
-// (Continuar/Avançar -> Iniciar selfie -> Carregar -> Confirmar/Concluir -> refresh)
-// com guardrails (gate + debounce) e telemetria auditável.
+// ===== Identidade (selfie/vÃ­deo) â€” executor 24/7 (multi-step) =====
+// Objetivo: quando a UI cair em identidade, avanÃ§ar os botÃµes necessÃ¡rios
+// (Continuar/AvanÃ§ar -> Iniciar selfie -> Carregar -> Confirmar/Concluir -> refresh)
+// com guardrails (gate + debounce) e telemetria auditÃ¡vel.
 const IDENTITY_FLOW_CFG = {
-  maxRunMs: 4 * 60 * 1000,     // budget total por execução (anti-loop)
-  maxSteps: 6,                // limite de cliques “sem cérebro”
-  stepWaitMs: 150_000,        // botão Carregar pode demorar 10–120s para habilitar
+  maxRunMs: 4 * 60 * 1000,     // budget total por execuÃ§Ã£o (anti-loop)
+  maxSteps: 6,                // limite de cliques â€œsem cÃ©rebroâ€
+  stepWaitMs: 150_000,        // botÃ£o Carregar pode demorar 10â€“120s para habilitar
   debounceMs: 15_000          // evita disparos duplos (probe + nurse + scan)
 };
 
@@ -2853,7 +2853,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
-    // Regra do lead: invocou humano => sistema NÃO trabalha.
+    // Regra do lead: invocou humano => sistema NÃƒO trabalha.
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80) }); } catch {}
       return { ok: false, skipped: true, reason: 'human_control' };
@@ -2865,8 +2865,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       return { ok: false, pausedByPolicy: true, error: 'non_lr_automation_paused' };
     }
 
-    // Roteamento: se já estamos em captcha, não consumir governança de identidade.
-    // (captcha tem governança própria e pode rodar em paralelo com identity_flow de outros perfis)
+    // Roteamento: se jÃ¡ estamos em captcha, nÃ£o consumir governanÃ§a de identidade.
+    // (captcha tem governanÃ§a prÃ³pria e pode rodar em paralelo com identity_flow de outros perfis)
     try {
       const lr0 = await browserHelper.detectLoginRequired(pg).catch(()=>null);
       const rr0 = (lr0 && lr0.loginRequired) ? String(lr0.reason || '').toLowerCase() : '';
@@ -2882,8 +2882,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
     }
 
-    // Governança (cross-process): limita identidade simultânea no host (evita explosão).
-    // Importante: NÃO trava — se não houver permit, retorna busy e o nurse/retry tenta mais tarde.
+    // GovernanÃ§a (cross-process): limita identidade simultÃ¢nea no host (evita explosÃ£o).
+    // Importante: NÃƒO trava â€” se nÃ£o houver permit, retorna busy e o nurse/retry tenta mais tarde.
     let _govPermitToken = null;
     try {
       const pr = await supervisorClient.requestPermit('identity_flow', nome, {
@@ -2913,7 +2913,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       return { ok: false, flowId: id, error: `governor_exception:${msg}` };
     }
 
-    // Debounce “consumido” só após conseguir governança (senão vira starvation).
+    // Debounce â€œconsumidoâ€ sÃ³ apÃ³s conseguir governanÃ§a (senÃ£o vira starvation).
     robeMeta[nome].identityFlowLastAt = now;
 
     const owner = `pid:${process.pid}`;
@@ -2932,7 +2932,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
           owner: g && g.owner ? String(g.owner) : null
         });
       } catch {}
-      // Se gate negou, devolve permit (não é erro; só concorrência por perfil)
+      // Se gate negou, devolve permit (nÃ£o Ã© erro; sÃ³ concorrÃªncia por perfil)
       try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'gate_denied' }).catch(()=>{}); } catch {}
       return { ok: false, denied: true, flowId: id };
     }
@@ -2954,7 +2954,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
         });
       } catch {}
 
-      // Loop multi-step: clica o que estiver disponível e habilitado, respeitando budget.
+      // Loop multi-step: clica o que estiver disponÃ­vel e habilitado, respeitando budget.
       let stepIndex = 0;
       while (true) {
         const elapsed = Date.now() - t0;
@@ -2990,7 +2990,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
           continue;
         }
 
-        // Falhas transitórias típicas (navegação/iframe): recarrega e tenta mais um step dentro do budget.
+        // Falhas transitÃ³rias tÃ­picas (navegaÃ§Ã£o/iframe): recarrega e tenta mais um step dentro do budget.
         try {
           const emsg = String((a && a.error) ? a.error : '').toLowerCase();
           if (emsg.includes('detached frame') || emsg.includes('execution context was destroyed') || emsg.includes('context was destroyed')) {
@@ -3000,11 +3000,11 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
           }
         } catch {}
 
-        // Se não clicou, não “martelar”: paramos para reclassificar/encaminhar.
+        // Se nÃ£o clicou, nÃ£o â€œmartelarâ€: paramos para reclassificar/encaminhar.
         break;
       }
 
-      // Refresh após ações (padrão do fluxo: após concluir passos, atualizar).
+      // Refresh apÃ³s aÃ§Ãµes (padrÃ£o do fluxo: apÃ³s concluir passos, atualizar).
       if (didAction) {
         await reloadPageEnterprise(pg, { nome, tag: `identity_flow_${String(source||'').slice(0, 28)}`, timeoutMs: 60_000 }).catch(()=>null);
         await sleep(900);
@@ -3022,7 +3022,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
             return d;
           });
         } catch {}
-        // Não travar aqui (activateOnce): agenda start_work.
+        // NÃ£o travar aqui (activateOnce): agenda start_work.
         setTimeout(() => { try { handlers.start_work({ nome, operator: `identity_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
         try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'clear' }); } catch {}
         return { ok: true, flowId: id, result: 'clear', didAction, actions: actionKinds };
@@ -3030,8 +3030,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
 
       const rr2 = String(lr2.reason || '').toLowerCase();
       if (rr2.includes('captcha_persona_pre_screen') || rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
-        // Encaminha para o captcha flow (governança própria + 5 tentativas por padrão).
-        // Importante: NÃO invocar humano aqui; o captcha flow é o único responsável por invocar humano após N tentativas.
+        // Encaminha para o captcha flow (governanÃ§a prÃ³pria + 5 tentativas por padrÃ£o).
+        // Importante: NÃƒO invocar humano aqui; o captcha flow Ã© o Ãºnico responsÃ¡vel por invocar humano apÃ³s N tentativas.
         return await runCaptchaFlow(nome, ctrl, pg, { source: `routed_post_identity:${String(source||'').slice(0,60)}`, force: true }).catch(()=>({ ok:false, error:'captcha_flow_failed' }));
       }
       if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
@@ -3041,7 +3041,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
         return { ok: true, flowId: id, result: 'appeal_submitted', didAction, actions: actionKinds };
       }
       if (rr2.includes('login_form')) {
-        // Blindagem P0: garantir flag persistida antes de agendar auto-remediação.
+        // Blindagem P0: garantir flag persistida antes de agendar auto-remediaÃ§Ã£o.
         await setLoginRequiredFlag(nome, { reason: lr2.reason || 'login_form', source: lr2.domain || 'identity_flow' }).catch(()=>{});
         queueAutoLoginRemediate(nome, { reason: lr2.reason || '', source: lr2.domain || '', immediate: true });
         try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'login_form' }); } catch {}
@@ -3053,7 +3053,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
         return { ok: true, flowId: id, result: 'identity_submitted', didAction, actions: actionKinds };
       }
 
-      // Fallback: mantém LR genérico atualizado (sem mascarar), mas não inventa ação.
+      // Fallback: mantÃ©m LR genÃ©rico atualizado (sem mascarar), mas nÃ£o inventa aÃ§Ã£o.
       await setLoginRequiredFlag(nome, { reason: lr2.reason || '', source: lr2.domain || '' }).catch(()=>{});
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'other_login_required', reason: rr2.slice(0,160) }); } catch {}
       return { ok: true, flowId: id, result: 'other_login_required', didAction, actions: actionKinds };
@@ -3079,8 +3079,8 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
       man.accountFlags.identityUrl = String(url || '').slice(0, 300);
       man.accountFlags.identityTitle = String(title || '').slice(0, 200);
       man.accountFlags.identityLastReason = 'identity_required';
-      // Blindagem enterprise: identidade é um estado próprio e não pode ficar mascarada por flags antigas.
-      // Se entrou em identidade, remover sinais de "login/cookies falhou" e "loginRequired" genérico.
+      // Blindagem enterprise: identidade Ã© um estado prÃ³prio e nÃ£o pode ficar mascarada por flags antigas.
+      // Se entrou em identidade, remover sinais de "login/cookies falhou" e "loginRequired" genÃ©rico.
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -3114,8 +3114,8 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
   // UA+FP telemetry (identity)
   try { await emitUaFpEventToCT(nome, { eventKind: 'identity', url, title }); } catch {}
 
-  // Regra enterprise: identidade NÃO deve virar "humano invocado" automaticamente.
-  // Mantém Virtus OFF para não postar/robe enquanto há identidade, mas deixa o navegador livre.
+  // Regra enterprise: identidade NÃƒO deve virar "humano invocado" automaticamente.
+  // MantÃ©m Virtus OFF para nÃ£o postar/robe enquanto hÃ¡ identidade, mas deixa o navegador livre.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
@@ -3146,7 +3146,7 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
       man.accountFlags.identityTitle = String(title || '').slice(0, 200);
       man.accountFlags.identityLastReason = 'identity_submitted';
       man.accountFlags.identityNextCheckAt = next;
-      // Se chegou aqui, não faz sentido manter identityRequired “acima” do estado submitted.
+      // Se chegou aqui, nÃ£o faz sentido manter identityRequired â€œacimaâ€ do estado submitted.
       delete man.accountFlags.identityRequired;
       delete man.accountFlags.identityRequiredAt;
       // Blindagem: ao entrar em identity_submitted, limpar flags antigas de login/cookies falhou e loginRequired.
@@ -3180,8 +3180,8 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
     delete robeMeta[nome].loginReason;
   } catch {}
 
-  // Regra enterprise: identity_submitted também NÃO deve virar humano invocado automaticamente.
-  // Mantém Virtus OFF e agenda monitor, mas não seta humanHold.
+  // Regra enterprise: identity_submitted tambÃ©m NÃƒO deve virar humano invocado automaticamente.
+  // MantÃ©m Virtus OFF e agenda monitor, mas nÃ£o seta humanHold.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
@@ -3251,11 +3251,11 @@ async function identityMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // Refresh enterprise (com fallback + log explícito)
+    // Refresh enterprise (com fallback + log explÃ­cito)
     await reloadPageEnterprise(pg, { nome, tag: 'identity_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
 
-    // Detecta estado após refresh. Se ainda disser "identity_submitted", valida também via navegação determinística
+    // Detecta estado apÃ³s refresh. Se ainda disser "identity_submitted", valida tambÃ©m via navegaÃ§Ã£o determinÃ­stica
     // para evitar ficar preso em DOM/aba antiga.
     let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     try {
@@ -3307,7 +3307,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
     if (rr.includes('identity_submitted') || rr.includes('identity')) {
       try { await issues.append(nome, 'mil_action', 'identity_monitor_still_pending'); } catch {}
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_still_pending', nome: String(nome||''), reason: String(lr.reason||'').slice(0, 200), nextAt: now + IDENTITY_CFG.intervalMs }); } catch {}
-      // Mantém em humano/hold
+      // MantÃ©m em humano/hold
       return { ok: true, pending: true };
     }
 
@@ -3325,7 +3325,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // 2FA: exclusão automática
+    // 2FA: exclusÃ£o automÃ¡tica
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
       return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
@@ -3338,7 +3338,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
       return { ok: true, transitioned: true, reason: 'appeal_submitted', action: 'monitor_appeal_1h' };
     }
 
-    // Padrão: loginRequired
+    // PadrÃ£o: loginRequired
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
     try { await issues.append(nome, 'mil_action', `identity_monitor_transition_exit reason=${rr}`); } catch {}
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_transition_exit', nome: String(nome||''), reason: String(lr.reason||'').slice(0,220) }); } catch {}
@@ -3384,21 +3384,21 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     let banResult = { ok: true };
     let closeOk = true;
 
-    // Evidence + auto-delete (ultra enterprise, mas sem “mágica por trás dos panos”):
-    // REGRA (ordem determinística):
+    // Evidence + auto-delete (ultra enterprise, mas sem â€œmÃ¡gica por trÃ¡s dos panosâ€):
+    // REGRA (ordem determinÃ­stica):
     // 1) DESLIGA desired imediatamente (impede reabertura)
     // 2) FECHA o navegador usando o MESMO motor do sistema (handlers.deactivate)
     // 3) EXCLUI o perfil usando o MESMO fluxo do DELETE /api/perfis/:nome (sem HTTP, para evitar deadlock)
-    // 4) ENVIA pro estoque Excluídas (CT) com evidence (ou enfileira retry)
+    // 4) ENVIA pro estoque ExcluÃ­das (CT) com evidence (ou enfileira retry)
     //
     // Guardrails:
     // - nunca deletar perfil se o navegador ainda estiver vivo (anti-janela fantasma)
-    // - não logar credenciais
-    // - best-effort (não pode travar o worker)
-    // - se a pré-condição de close falhar, NÃO deletar (marca pendente e sai)
+    // - nÃ£o logar credenciais
+    // - best-effort (nÃ£o pode travar o worker)
+    // - se a prÃ©-condiÃ§Ã£o de close falhar, NÃƒO deletar (marca pendente e sai)
     try {
       const flowId = newFlowId('ban');
-      // Captura stockAccountId logo no começo (antes de qualquer delete), para nunca “sumir” no CT.
+      // Captura stockAccountId logo no comeÃ§o (antes de qualquer delete), para nunca â€œsumirâ€ no CT.
       let stockAccountId = null;
       try {
         const m0 = await manifestStore.read(nome).catch(()=>null);
@@ -3425,7 +3425,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // UA+FP telemetry (banned/disabled)
       try { await emitUaFpEventToCT(nome, { eventKind: 'banned', url, title: String(snippet || '').slice(0, 180) }); } catch {}
 
-      // Evidência local (para retry se CT estiver fora)
+      // EvidÃªncia local (para retry se CT estiver fora)
       let evidencePath = '';
       try {
         const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `banned:${String(reason||'').slice(0,80)}` });
@@ -3447,7 +3447,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         });
       } catch {}
 
-      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
+      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automÃ¡tica
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -3462,13 +3462,13 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       try {
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
         // Usa o mesmo handler (deactivate) que a API usa para fechar navegador.
-        // policy=null => fechamento completo (sem preservar desired) e sem reabertura automática.
+        // policy=null => fechamento completo (sem preservar desired) e sem reabertura automÃ¡tica.
         const dr = await handlers.deactivate({ nome, reason: 'auto_banned', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
         if (!dr || dr.ok !== true) {
           closeOk = false;
           banResult = { ok: false, error: 'banned_close_failed' };
-          // Se não fechou, NÃO deletar (evita janela fantasma). Mas ainda assim vamos arquivar no CT.
+          // Se nÃ£o fechou, NÃƒO deletar (evita janela fantasma). Mas ainda assim vamos arquivar no CT.
           try {
             await manifestStore.update(nome, (man) => {
               man = man || {};
@@ -3482,9 +3482,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
       } catch {}
 
-      // 2.5) ANTES de deletar o perfil local: garantir que a conta foi enviada ao CT (Excluídas).
-      // Motivo enterprise: se stockAccountId estiver ausente e o perfil for deletado, o CT pode não conseguir mapear
-      // hostId+profileName => conta some (não aparece em Excluídas).
+      // 2.5) ANTES de deletar o perfil local: garantir que a conta foi enviada ao CT (ExcluÃ­das).
+      // Motivo enterprise: se stockAccountId estiver ausente e o perfil for deletado, o CT pode nÃ£o conseguir mapear
+      // hostId+profileName => conta some (nÃ£o aparece em ExcluÃ­das).
       let ctArchiveOk = false;
       let ctArchiveResp = null;
       let ctArchiveErr = '';
@@ -3515,12 +3515,12 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           });
         } catch {}
         if (!rr || rr.ok !== true) {
-          // CT fora/arq falhou: NÃO deletar se não temos stockAccountId, para não perder o vínculo por profileName.
+          // CT fora/arq falhou: NÃƒO deletar se nÃ£o temos stockAccountId, para nÃ£o perder o vÃ­nculo por profileName.
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          // NOVA REGRA (pedida): mesmo que CT não consiga mapear (ex.: not_found_assigned),
-          // nós SEMPRE removemos do servidor para evitar duplicidade em múltiplos hosts.
-          // A evidência fica no provision_audit + ct_archive_queue.
+          // NOVA REGRA (pedida): mesmo que CT nÃ£o consiga mapear (ex.: not_found_assigned),
+          // nÃ³s SEMPRE removemos do servidor para evitar duplicidade em mÃºltiplos hosts.
+          // A evidÃªncia fica no provision_audit + ct_archive_queue.
           ctArchiveProceed = true;
           ctArchiveProceedReason = ctArchiveErr || 'ct_archive_failed_predelete';
           try {
@@ -3539,7 +3539,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // 3) EXCLUI a conta do servidor usando o mesmo fluxo do DELETE /api/perfis/:nome (sem HTTP).
       // Regras:
       // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
-      // - remoção de userDataDir externo é best-effort.
+      // - remoÃ§Ã£o de userDataDir externo Ã© best-effort.
       try {
         if (!closeOk) {
           try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
@@ -3551,7 +3551,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
         // Remove userDataDir externo, perfis.json, desired e dir do perfil
         try {
-          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
+          // CRÃTICO (cluster): nÃ£o sobrescrever perfis.json global usando snapshot shard do worker.
           let udir = '';
           try {
             const man = await manifestStore.read(nome).catch(() => null);
@@ -3565,7 +3565,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             } catch {}
           }
           if (udir && fs.existsSync(udir)) {
-            // remoção best-effort e pode falhar em Windows (arquivo bloqueado).
+            // remoÃ§Ã£o best-effort e pode falhar em Windows (arquivo bloqueado).
             try { fileStore.rimrafSync(udir); } catch {}
           }
           try {
@@ -3591,7 +3591,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
       }
 
-      // 4) (compat) Se por algum motivo não conseguimos arquivar antes, tenta depois também.
+      // 4) (compat) Se por algum motivo nÃ£o conseguimos arquivar antes, tenta depois tambÃ©m.
       if (!ctArchiveOk) {
         try {
           const rr = ctArchiveResp || await archiveBanWithEvidenceToCT({
@@ -3627,7 +3627,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       man.accountFlags.bannedAt = Date.now();
       man.accountFlags.bannedReason = String(reason||'');
       man.accountFlags.bannedText = String(snippet||'').slice(0, 400);
-      // Enterprise: se chegou ao ban, não faz sentido manter "loginRemediateFailed" mascarando o estado.
+      // Enterprise: se chegou ao ban, nÃ£o faz sentido manter "loginRemediateFailed" mascarando o estado.
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -3645,17 +3645,17 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
-    // Mantém coerência no runtime store também.
+    // MantÃ©m coerÃªncia no runtime store tambÃ©m.
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
     } catch {}
-    // Sempre retorna (não propaga)
+    // Sempre retorna (nÃ£o propaga)
     return banResult;
   });
 }
 
-// 2FA (two-factor) => exclusão automática (ultra enterprise)
-// Regra do cliente: 2FA não é automatizável e não deve consumir slot do estoque.
+// 2FA (two-factor) => exclusÃ£o automÃ¡tica (ultra enterprise)
+// Regra do cliente: 2FA nÃ£o Ã© automatizÃ¡vel e nÃ£o deve consumir slot do estoque.
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
   return lockProfileAction(nome, async () => {
     try {
@@ -3665,13 +3665,13 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
     let closeOk = true;
 
     // Evidence + auto-delete:
-    // REGRA (ultra enterprise, ordem determinística):
+    // REGRA (ultra enterprise, ordem determinÃ­stica):
     // 1) fecha o navegador (graceful -> force)
     // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
-    // 3) envia pro estoque Excluídas (CT) com evidence
+    // 3) envia pro estoque ExcluÃ­das (CT) com evidence
     try {
       const flowId = newFlowId('two_factor');
-      // Captura stockAccountId cedo (antes de delete), para nunca “sumir” no CT.
+      // Captura stockAccountId cedo (antes de delete), para nunca â€œsumirâ€ no CT.
       let stockAccountId = null;
       try {
         const m0 = await manifestStore.read(nome).catch(()=>null);
@@ -3698,7 +3698,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       // UA+FP telemetry (2FA)
       try { await emitUaFpEventToCT(nome, { eventKind: 'two_factor', url, title: String(snippet || '').slice(0, 180) }); } catch {}
 
-      // Evidência local (para retry se CT estiver fora)
+      // EvidÃªncia local (para retry se CT estiver fora)
       let evidencePath = '';
       try {
         const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `two_factor:${String(reason||'').slice(0,80)}` });
@@ -3718,7 +3718,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         });
       } catch {}
 
-      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática.
+      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automÃ¡tica.
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -3730,7 +3730,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       } catch {}
 
       // ===== NOVO: fluxo oficial (close -> CT archive -> delete) =====
-      // Mantém abaixo o código legado (hard close/kill/pid), mas este fluxo dá return e não deixa rodar.
+      // MantÃ©m abaixo o cÃ³digo legado (hard close/kill/pid), mas este fluxo dÃ¡ return e nÃ£o deixa rodar.
       try {
         try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
 
@@ -3752,7 +3752,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
         }
 
-        // 3) arquiva no CT antes de deletar (garante que não some de Excluídas)
+        // 3) arquiva no CT antes de deletar (garante que nÃ£o some de ExcluÃ­das)
         let ctOk = false;
         let rr = null;
         try {
@@ -3782,14 +3782,14 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
           if (!stockAccountId) {
-            // Sem ID: bloqueia delete para não perder vínculo.
+            // Sem ID: bloqueia delete para nÃ£o perder vÃ­nculo.
             return { ok: false, error: 'ct_archive_failed_predelete' };
           }
         }
 
         // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
         if (!closeOk) {
-          // Regra: se o navegador não fechou, NÃO deletar. Mas a conta já foi arquivada no CT (Excluídas).
+          // Regra: se o navegador nÃ£o fechou, NÃƒO deletar. Mas a conta jÃ¡ foi arquivada no CT (ExcluÃ­das).
           try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
         } else {
         const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
@@ -3798,7 +3798,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           return { ok: false, error: 'two_factor_delete_blocked_still_active' };
         }
         try {
-          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
+          // CRÃTICO (cluster): nÃ£o sobrescrever perfis.json global usando snapshot shard do worker.
           let udir = '';
           try {
             const man = await manifestStore.read(nome).catch(() => null);
@@ -3834,7 +3834,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
         }
 
-        // flags/issue: mantém comportamento anterior
+        // flags/issue: mantÃ©m comportamento anterior
         try {
           await manifestStore.update(nome, (man) => {
             man = man || {};
@@ -3864,22 +3864,22 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].twoFactor = true;
         try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        // Se não fechou, sinaliza erro para o caller (mas já arquivou no CT).
+        // Se nÃ£o fechou, sinaliza erro para o caller (mas jÃ¡ arquivou no CT).
         if (!closeOk && tfResult && tfResult.ok === false) {
           tfResult = { ok: false, error: 'two_factor_close_failed_archived' };
         }
         return tfResult;
       } catch {}
 
-      // 1) FECHA o navegador (não excluir com navegador aberto)
+      // 1) FECHA o navegador (nÃ£o excluir com navegador aberto)
       try {
         try {
           provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null });
         } catch {}
         const ctrl = controllers.get(nome);
-        // Capturar userDataDir para validação hard (anti-janela zumbi)
+        // Capturar userDataDir para validaÃ§Ã£o hard (anti-janela zumbi)
         // IMPORTANT (ultra enterprise):
-        // - Mesmo com inconsistência (perfil removido do perfis.json antes do fechamento),
+        // - Mesmo com inconsistÃªncia (perfil removido do perfis.json antes do fechamento),
         //   precisamos impedir delete enquanto existir Chrome vivo.
         // - Fallback por substring: \\Conveniente\\<nome>
         let udirForCheck = '';
@@ -3902,7 +3902,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null;
           ctrl.trabalhando = false;
-          // Captura PID antes de fechar (rootPid mais confiável quando lastRootPid ainda não foi persistido)
+          // Captura PID antes de fechar (rootPid mais confiÃ¡vel quando lastRootPid ainda nÃ£o foi persistido)
           let pidBefore = 0;
           try {
             if (ctrl.browser && typeof ctrl.browser.process === 'function') {
@@ -3980,7 +3980,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         }
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
 
-        // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
+        // GARANTIA: nÃ£o deletar se ainda houver processos do Chrome usando este userDataDir.
         try {
           const t0 = Date.now();
           const deadlineMs = 30_000;
@@ -4058,7 +4058,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             }
           }
 
-          // Marca no manifest: browser fechado (pré-condição para delete/arquive).
+          // Marca no manifest: browser fechado (prÃ©-condiÃ§Ã£o para delete/arquive).
           try {
             const before = await manifestStore.read(nome).catch(()=>null);
             const prevClosedAt = before && before.accountFlags ? Number(before.accountFlags.browserClosedAt || 0) || 0 : 0;
@@ -4081,7 +4081,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
         } catch {}
 
-        // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
+        // ApÃ³s fechar: limpar PIDs persistidos para nÃ£o confundir futuras aÃ§Ãµes.
         try {
           if (robeMeta[nome]) robeMeta[nome].rootPid = null;
         } catch {}
@@ -4095,9 +4095,9 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         } catch {}
       } catch {}
 
-      // 2) EXCLUI a conta do servidor (perfil local) — best-effort
+      // 2) EXCLUI a conta do servidor (perfil local) â€” best-effort
       try {
-        // Enterprise HARD: só deletar se o manifest afirmar que o browser foi fechado
+        // Enterprise HARD: sÃ³ deletar se o manifest afirmar que o browser foi fechado
         try {
           const mPre = await manifestStore.read(nome).catch(()=>null);
           const closedAt = mPre && mPre.accountFlags ? Number(mPre.accountFlags.browserClosedAt || 0) || 0 : 0;
@@ -4127,13 +4127,13 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               });
             } catch {}
 
-            // browser já foi fechado acima
+            // browser jÃ¡ foi fechado acima
             try { controllers.delete(nome); } catch {}
             try { stopPruneLoop(nome); } catch {}
 
             // remover userDataDir externo e perfis.json
             try {
-              // Fonte primária: manifestStore (mais confiável que perfis.json)
+              // Fonte primÃ¡ria: manifestStore (mais confiÃ¡vel que perfis.json)
               let udirFromManifest = '';
               try {
                 const man = await manifestStore.read(nome).catch(()=>null);
@@ -4143,7 +4143,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               const perfil = Array.isArray(allPerfisArr) ? allPerfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
-                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
+                // Browser deve estar fechado. Mesmo assim: se sobrar Ã³rfÃ£o, forÃ§a kill aqui (Ãºltimo recurso) antes do rimraf.
                 try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
@@ -4155,7 +4155,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               } catch {}
             } catch {}
 
-            // remover desired e diretório do perfil
+            // remover desired e diretÃ³rio do perfil
             try { await fileStore.removeDesired(nome); } catch {}
             try {
               const dir = path.join(fileStore.perfisDir, nome);
@@ -4191,7 +4191,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       } catch {}
     } catch {}
 
-    // 3) ENVIA pro estoque Excluídas (CT) com evidence (último passo)
+    // 3) ENVIA pro estoque ExcluÃ­das (CT) com evidence (Ãºltimo passo)
     try {
       const rr = await archiveBanWithEvidenceToCT({
         profileName: nome,
@@ -4225,7 +4225,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       man.accountFlags.twoFactorAt = Date.now();
       man.accountFlags.twoFactorReason = String(reason||'');
       man.accountFlags.twoFactorText = String(snippet||'').slice(0, 400);
-      // 2FA exclui do fluxo, então não faz sentido manter flags que induzem auto-remediação
+      // 2FA exclui do fluxo, entÃ£o nÃ£o faz sentido manter flags que induzem auto-remediaÃ§Ã£o
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -4370,7 +4370,7 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('loginRemediateFailed')) {
       delete robeMeta[nome].loginRemediateFailed;
       delete robeMeta[nome].loginRemediateFailedReason;
-      // Durante failFast, whyNotOpen pode ser um motivo específico (two_factor, ui_blocked:..., etc).
+      // Durante failFast, whyNotOpen pode ser um motivo especÃ­fico (two_factor, ui_blocked:..., etc).
       // Ao "Retomar trabalho", sempre limpa.
       if (typeof robeMeta[nome].whyNotOpen === 'string') delete robeMeta[nome].whyNotOpen;
     }
@@ -4423,7 +4423,7 @@ async function detectFbLimitInAnyPage(ctrl) {
 }
 
 // REMOVIDO: pidusage e ps-list usam WMI/PowerShell internamente no Windows
-// Placeholders explícitos para garantir que nunca haverá uso em runtime
+// Placeholders explÃ­citos para garantir que nunca haverÃ¡ uso em runtime
 const pidusage = null;
 const psList = null;
 
@@ -4537,7 +4537,7 @@ async function tryFixPhantom(nome, page) {
 
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
-      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
       ph.navs10m.push(now);
       ph.actions10m.push(now);
       ph.lastActionAt = now;
@@ -4563,7 +4563,7 @@ async function tryFixPhantom(nome, page) {
         const man = await manifestStore.read(nome).catch(()=>null);
         await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl2.mainPage = np;
       await wirePageObservers(nome, np);
@@ -4577,7 +4577,7 @@ async function tryFixPhantom(nome, page) {
   ph.failures = (ph.failures || 0) + 1;
   await issues.append(nome, 'mil_action', `phantom_escalate:reopen failures=${ph.failures}`);
   if (killGuardActive(nome)) {
-    await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+    await issues.append(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until');
     return true;
   }
   await handlers.deactivate({ nome, reason: 'phantom_reopen', policy: 'preserveDesired' });
@@ -4606,8 +4606,8 @@ function _pruneWindow(arr, ms) {
 }
 
 const AUTO_CFG = {
-  // Governor (light/full) — configurável por env para tuning em produção:
-  // Política (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
+  // Governor (light/full) â€” configurÃ¡vel por env para tuning em produÃ§Ã£o:
+  // PolÃ­tica (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
   MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
   MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
   CPU_ENTER: 85,
@@ -4617,19 +4617,19 @@ const AUTO_CFG = {
   HOT_TICKS: 3,
   COOL_TICKS: 3,
   MIN_HOLD_MS: 45000,
-  // Em light, Robe NÃO pode parar, apenas reduzir pressão.
+  // Em light, Robe NÃƒO pode parar, apenas reduzir pressÃ£o.
   ROBE_LIGHT_MIN_SPACING_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ROBE_LIGHT_MIN_SPACING_MS || '60000', 10) || 60000),
-  // Quantos Robes no máximo enfileirar por tick em light (0 => não enfileira).
+  // Quantos Robes no mÃ¡ximo enfileirar por tick em light (0 => nÃ£o enfileira).
   ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
-  // Confirmações por tempo (evita “piscar” e evita entrar em light por flutuação).
+  // ConfirmaÃ§Ãµes por tempo (evita â€œpiscarâ€ e evita entrar em light por flutuaÃ§Ã£o).
   ENTER_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ENTER_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
   EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000))
 };
 
 const ramPolicy = require('./ramPolicy.js');
 
-// RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: 2GB + 1GB por node (nós = ceil(totalGB/16))
+// RAM mÃ­nima dinÃ¢mica (ultra enterprise):
+// - OperaÃ§Ã£o normal: 2GB + 1GB por node (nÃ³s = ceil(totalGB/16))
 // - Durante provision (somente dono do lock): 2GB + pico cookies (~1.5GB)
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
@@ -4649,10 +4649,10 @@ const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS |
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 
-// Sinal de saturação SEM WMI: event-loop lag (ms)
-// - Quando o loop trava, o sistema “se perde” (timers atrasam, navegação falha, about:blank se acumula).
-// - Este é o gatilho enterprise para backpressure antes de quebrar.
-// Defaults mais conservadores (menos sensível) — ainda configurável por env.
+// Sinal de saturaÃ§Ã£o SEM WMI: event-loop lag (ms)
+// - Quando o loop trava, o sistema â€œse perdeâ€ (timers atrasam, navegaÃ§Ã£o falha, about:blank se acumula).
+// - Este Ã© o gatilho enterprise para backpressure antes de quebrar.
+// Defaults mais conservadores (menos sensÃ­vel) â€” ainda configurÃ¡vel por env.
 const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '400', 10);
 const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '200', 10);
 const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '2000', 10);
@@ -4662,7 +4662,7 @@ const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10)
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
-  // pressureSince/recoveredSince implementam a janela de confirmação (5min).
+  // pressureSince/recoveredSince implementam a janela de confirmaÃ§Ã£o (5min).
   pressureSince: 0,
   recoveredSince: 0,
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
@@ -4699,12 +4699,12 @@ async function governorTick() {
 
     const memLow = (freeMB > 0 && freeMB < AUTO_CFG.MEM_ENTER_MB);
     const memHigh = (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB);
-    // Política (triagem 2026-01-30): modo leve/full definido por RAM.
-    // Lag continua sendo observado (telemetria), mas NÃO deve causar mudança de modo sozinho.
+    // PolÃ­tica (triagem 2026-01-30): modo leve/full definido por RAM.
+    // Lag continua sendo observado (telemetria), mas NÃƒO deve causar mudanÃ§a de modo sozinho.
     const pressureNow = memLow;
     const recoveredNow = memHigh;
 
-    // Janela de confirmação (5min) para entrar/sair.
+    // Janela de confirmaÃ§Ã£o (5min) para entrar/sair.
     if (pressureNow) {
       if (!autoMode.pressureSince) autoMode.pressureSince = now;
     } else {
@@ -4716,7 +4716,7 @@ async function governorTick() {
       autoMode.recoveredSince = 0;
     }
 
-    // Troca normal full/light baseada em janela de confirmação.
+    // Troca normal full/light baseada em janela de confirmaÃ§Ã£o.
     if (autoMode.mode === 'full') {
       if (autoMode.pressureSince && (now - autoMode.pressureSince) >= AUTO_CFG.ENTER_CONFIRM_MS && _canSwitch()) {
         autoMode.mode = 'light';
@@ -4756,7 +4756,7 @@ async function killProcessTreeByRootPid(pid) {
   try {
     if (process.platform === 'win32') {
       const { execFile } = require('child_process');
-      // Versão sem WMI: usa taskkill para matar o processo raiz e toda a árvore.
+      // VersÃ£o sem WMI: usa taskkill para matar o processo raiz e toda a Ã¡rvore.
       await new Promise((res) => {
         execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }, () => res());
       });
@@ -4767,7 +4767,7 @@ async function killProcessTreeByRootPid(pid) {
 }
 
 async function closeProcessTreeByRootPid(pid) {
-  // Tentativa "graciosa" (sem /F): fecha janela/processo se possível. Se não fechar, o caller decide forçar.
+  // Tentativa "graciosa" (sem /F): fecha janela/processo se possÃ­vel. Se nÃ£o fechar, o caller decide forÃ§ar.
   if (!pid) return;
   try {
     if (process.platform === 'win32') {
@@ -4832,7 +4832,7 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
       if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
     } catch {}
   }
-  // Fallback final determinístico (padrão do sistema)
+  // Fallback final determinÃ­stico (padrÃ£o do sistema)
   if (!userDataDir) {
     try {
       userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
@@ -4855,10 +4855,10 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
     sleep(BROWSER_CLOSE_TIMEOUT_MS).then(() => ({ ok: false, timeout: true }))
   ]);
   closeOutcome = raced || closeOutcome;
-  // Se fechou ou não, garantimos hard-kill se necessário
+  // Se fechou ou nÃ£o, garantimos hard-kill se necessÃ¡rio
   // Regra:
   // - Se timeout OU pid ainda vivo => taskkill
-  // - Se allowKillUserDataDir => também kill por userDataDir (remove órfãos)
+  // - Se allowKillUserDataDir => tambÃ©m kill por userDataDir (remove Ã³rfÃ£os)
   if (rootPid && (!closeOutcome.ok || closeOutcome.timeout || isPidAlive(rootPid))) {
     try { await killProcessTreeByRootPid(rootPid); } catch {}
   }
@@ -4917,7 +4917,7 @@ async function killStrayChromes() {
 }
 
 // ===== BUILD / VERSION TRACE (ultra enterprise) =====
-// Objetivo: provar 110% qual build está rodando no host (RM4), sem depender de git.
+// Objetivo: provar 110% qual build estÃ¡ rodando no host (RM4), sem depender de git.
 const BUILD_INFO = (() => {
   const startedAt = Date.now();
   try {
@@ -5024,7 +5024,7 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 function manifestPathOf(nome) {
   const perfisArr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
   const perfil = perfisArr.find(p => p && p.nome === nome);
-  if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
+  if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil nÃ£o encontrado: ' + nome);
   return path.join(perfil.userDataDir, 'manifest.json');
 }
 
@@ -5241,7 +5241,7 @@ __agentLog(
 );
 // #endregion
 
-// Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
+// Governor (NORMAL/SLOW) â€” roda sempre, ultra leve (sem WMI)
 setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
 
 function governorSnapshotTick() {
@@ -5294,7 +5294,7 @@ function governorSnapshotTick() {
   });
 }
 
-// Snapshot 1/min (48h = ~2880 linhas) — leve, append-only.
+// Snapshot 1/min (48h = ~2880 linhas) â€” leve, append-only.
 const GOV_SNAPSHOT_INTERVAL_MS = Math.max(10_000, parseInt(process.env.CT_GOV_SNAPSHOT_INTERVAL_MS || String(60 * 1000), 10) || (60 * 1000));
 setInterval(() => { try { governorSnapshotTick(); } catch {} }, GOV_SNAPSHOT_INTERVAL_MS);
 setTimeout(() => { try { governorSnapshotTick(); } catch {} }, 5000);
@@ -5411,11 +5411,11 @@ async function activateOnce(nome, source = '', operator = '') {
 
   opening[nome] = true;
   let _supervisorSlotGranted = false;
-  // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
-  // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
+  // Enterprise rule (2026-01): NUNCA abrir jÃ¡ em "humano invocado" sÃ³ por humanHold.
+  // humanHold Ã© apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
   const opTrim = String(operator || '').trim();
-  // Open-all pode chegar com operator=lockOwner (para bypass do provision_lock). Então:
+  // Open-all pode chegar com operator=lockOwner (para bypass do provision_lock). EntÃ£o:
   // - detecta bulk-open por operator OU por source.
   const srcTrim = String(source || '').trim();
   const _isBulkOpen =
@@ -5425,10 +5425,10 @@ async function activateOnce(nome, source = '', operator = '') {
     try { provisionAudit.append({ ts: Date.now(), event: 'open_all_activate_once_enter', nome: String(nome||''), source: String(source||''), operator: String(operator||'') }); } catch {}
   }
   // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
-  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
+  // Isso NÃƒO pode impedir o pÃ³s-probe (senÃ£o identidade/login ficam â€œparadosâ€).
   const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
   const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
-  // Regra do usuário: ao abrir (open_all/manual), limpar flags de login para revalidar estado real.
+  // Regra do usuÃ¡rio: ao abrir (open_all/manual), limpar flags de login para revalidar estado real.
   if (_isBulkOpen || _isManualOpen) {
     try {
       const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
@@ -5453,8 +5453,8 @@ async function activateOnce(nome, source = '', operator = '') {
     }
     logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${inShard(nome)} size=${SHARD_SET.size}`);
 
-    // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pós-sucesso),
-    // não bloquear reabertura imediata com kill_guard. Kill guard é anti-flap para falhas.
+    // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pÃ³s-sucesso),
+    // nÃ£o bloquear reabertura imediata com kill_guard. Kill guard Ã© anti-flap para falhas.
     const _source = String(source || '');
     const _bypassKillGuard = /login_remediate_post_success/i.test(_source);
     if (killGuardActive(nome) && !_bypassKillGuard) {
@@ -5470,8 +5470,8 @@ async function activateOnce(nome, source = '', operator = '') {
     }
 
     // Hardening: durante locks que realmente precisam "congelar abertura", bloquear novas aberturas.
-    // Importante (2026-01-30): `open_all_map` NÃO pode bloquear aberturas — ele existe justamente para abrir.
-    // Ele só deve pausar Virtus/Robe (governança) e bloquear fluxos pesados, mas não impedir abrir navegador.
+    // Importante (2026-01-30): `open_all_map` NÃƒO pode bloquear aberturas â€” ele existe justamente para abrir.
+    // Ele sÃ³ deve pausar Virtus/Robe (governanÃ§a) e bloquear fluxos pesados, mas nÃ£o impedir abrir navegador.
     try {
       const op = String(operator || '').trim();
       const cur = provisionLock.get();
@@ -5505,7 +5505,7 @@ async function activateOnce(nome, source = '', operator = '') {
           return { ok: false, error: 'maintenance_provision' };
         }
 
-        // open_all_map não bloqueia abertura (mesmo com operator diferente).
+        // open_all_map nÃ£o bloqueia abertura (mesmo com operator diferente).
         if (isOpenAll) {
           // noop
         }
@@ -5513,7 +5513,7 @@ async function activateOnce(nome, source = '', operator = '') {
     } catch {}
 
     // Se vier humanHold marcado, limpamos antes de abrir e fazemos probe real depois.
-    // Só voltará a humano invocado se o probe detectar captcha/checkpoint ou falha real de login.
+    // SÃ³ voltarÃ¡ a humano invocado se o probe detectar captcha/checkpoint ou falha real de login.
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       _humanHoldAtStart = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
@@ -5534,7 +5534,7 @@ async function activateOnce(nome, source = '', operator = '') {
       .catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
       robeMeta[nome] = robeMeta[nome] || {};
-      // NOVO: Reduzido de 30s para 5s (supervisor já controla velocidade via cooldowns)
+      // NOVO: Reduzido de 30s para 5s (supervisor jÃ¡ controla velocidade via cooldowns)
       robeMeta[nome].activationHeldUntil = Date.now() + 5000;
       await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
@@ -5559,14 +5559,14 @@ async function activateOnce(nome, source = '', operator = '') {
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
-          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
+          await reportAction(nome, 'robe_error', 'manifest incompleto na ativaÃ§Ã£o; perfil congelado 12h');
           if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
           return { ok:false, error: 'manifest_incomplete' };
         }
 
         {
           const freeMB = getAvailableMB();
-          const minFreeMB = getOpenMinFreeMB(operator); // RAM mínima dinâmica (considera provision lock)
+          const minFreeMB = getOpenMinFreeMB(operator); // RAM mÃ­nima dinÃ¢mica (considera provision lock)
           if (freeMB <= minFreeMB) {
             await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${minFreeMB}MB (gate, activeNodes=${robeQueue.activeCount()})`);
             throw new Error('ram_insuficiente_para_ativar');
@@ -5575,7 +5575,7 @@ async function activateOnce(nome, source = '', operator = '') {
 
         const browser = await browserHelper.openBrowser(manifest);
         if (!browser || typeof browser.newPage !== 'function') {
-          throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
+          throw new Error('Objeto browser nÃ£o retornado corretamente (Puppeteer falhou ao acoplar).');
         }
         try {
           const ws = (typeof browser.wsEndpoint === 'function') ? String(browser.wsEndpoint() || '') : '';
@@ -5589,7 +5589,7 @@ async function activateOnce(nome, source = '', operator = '') {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].rootPid = proc.pid;
           logger.info('[WORKER][activateOnce] rootPid setado', { nome, rootPid: proc.pid });
-          // Persistência enterprise: garante kill por PID mesmo se o controller virar órfão depois.
+          // PersistÃªncia enterprise: garante kill por PID mesmo se o controller virar Ã³rfÃ£o depois.
           try {
             await manifestStore.update(nome, (man) => {
               man = man || {};
@@ -5599,7 +5599,7 @@ async function activateOnce(nome, source = '', operator = '') {
             });
           } catch {}
         } else {
-          logger.warn('[WORKER][activateOnce] rootPid NÃO setado', {
+          logger.warn('[WORKER][activateOnce] rootPid NÃƒO setado', {
             nome,
             hasProcessFn: !!(browser.process),
             proc: !!proc,
@@ -5626,11 +5626,11 @@ async function activateOnce(nome, source = '', operator = '') {
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
-        // Regra enterprise: NÃO abrir já em humano/overlay por "humanHold".
-        // Abertura sempre começa normal; o probe decide (captcha/checkpoint => invocar humano).
+        // Regra enterprise: NÃƒO abrir jÃ¡ em humano/overlay por "humanHold".
+        // Abertura sempre comeÃ§a normal; o probe decide (captcha/checkpoint => invocar humano).
 
-        // Enterprise: se este perfil está marcado como "loginRemediateFailed",
-        // NÃO invocar humano às cegas: primeiro navegar + revalidar (pode ter virado identidade).
+        // Enterprise: se este perfil estÃ¡ marcado como "loginRemediateFailed",
+        // NÃƒO invocar humano Ã s cegas: primeiro navegar + revalidar (pode ter virado identidade).
         try {
           const flags = await readAccountFlags(nome).catch(()=>({}));
           if (flags && flags.loginRemediateFailed === true) {
@@ -5640,15 +5640,15 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await stopVirtus(nome); } catch {}
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
-              // Anti-engessamento: navegar para Facebook e validar se é login/captcha/identity/appeal de fato.
-              // Só invocar humano se for captcha/checkpoint OU login_form real.
+              // Anti-engessamento: navegar para Facebook e validar se Ã© login/captcha/identity/appeal de fato.
+              // SÃ³ invocar humano se for captcha/checkpoint OU login_form real.
               try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'open_login_failed_entry' }); } catch {}
               try {
                 const pr = await probeHumanStateOnOpen(nome, ctrl, { source: 'open_login_failed' }).catch(()=>null);
                 const st = pr && pr.state ? String(pr.state) : '';
                 if (st === 'captcha_checkpoint' || st === 'login_required') {
-                  // Regra do usuário: NUNCA invocar humano automaticamente (nem em login_failed).
-                  // Mantém Virtus OFF e deixa o operador decidir se chama invoke_human.
+                  // Regra do usuÃ¡rio: NUNCA invocar humano automaticamente (nem em login_failed).
+                  // MantÃ©m Virtus OFF e deixa o operador decidir se chama invoke_human.
                   try {
                     await fileStore.withDesiredFileLockUpdate((d) => {
                       d = d || {}; d.perfis = d.perfis || {};
@@ -5657,7 +5657,7 @@ async function activateOnce(nome, source = '', operator = '') {
                     });
                   } catch {}
                 } else {
-                  // Se virou identidade/appeal/liberou, não manter "loginRemediateFailed" como estado final.
+                  // Se virou identidade/appeal/liberou, nÃ£o manter "loginRemediateFailed" como estado final.
                   try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
                 }
               } catch {}
@@ -5665,10 +5665,10 @@ async function activateOnce(nome, source = '', operator = '') {
           }
         } catch {}
 
-        // Regra enterprise: identidade/appeal NÃO devem abrir já em "humano invocado".
-        // Quem decide humano invocado é SOMENTE captcha/checkpoint ou login falhou de verdade.
+        // Regra enterprise: identidade/appeal NÃƒO devem abrir jÃ¡ em "humano invocado".
+        // Quem decide humano invocado Ã© SOMENTE captcha/checkpoint ou login falhou de verdade.
 
-        // AppealSubmitted (recurso em análise) deve ser monitorado, não "humano invocado" na abertura.
+        // AppealSubmitted (recurso em anÃ¡lise) deve ser monitorado, nÃ£o "humano invocado" na abertura.
 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
@@ -5687,11 +5687,11 @@ async function activateOnce(nome, source = '', operator = '') {
               ctrl.mainPage = pages[0];
               try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
             }
-              // Open / Open-all / Open manual: não pode ficar em about:blank (tela preta).
-              // Garante navegação e faz probe para refletir estado real (identity/captcha/login/appeal).
-              // Pós-abertura: sempre probe (bulk/manual/unknown).
-              // Importante: NÃO navegar pra home se já estamos numa tela real (ex.: identidade),
-              // senão removemos o contexto e atrasamos/impedimos o fluxo.
+              // Open / Open-all / Open manual: nÃ£o pode ficar em about:blank (tela preta).
+              // Garante navegaÃ§Ã£o e faz probe para refletir estado real (identity/captcha/login/appeal).
+              // PÃ³s-abertura: sempre probe (bulk/manual/unknown).
+              // Importante: NÃƒO navegar pra home se jÃ¡ estamos numa tela real (ex.: identidade),
+              // senÃ£o removemos o contexto e atrasamos/impedimos o fluxo.
               if (_isBulkOpen || _isManualOpen) {
                 try {
                   const p0 = pages && pages[0];
@@ -5699,7 +5699,7 @@ async function activateOnce(nome, source = '', operator = '') {
                   try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
                   const isBlank = (!u0 || u0 === 'about:blank');
                   if (isBlank) {
-                    // Fluxo enterprise: primeiro Messenger (Virtus). Só depois validamos Facebook/Robe.
+                    // Fluxo enterprise: primeiro Messenger (Virtus). SÃ³ depois validamos Facebook/Robe.
                     await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
                   }
                 } catch {}
@@ -5747,9 +5747,9 @@ async function activateOnce(nome, source = '', operator = '') {
                   const isVirtusSwap = swapUntil > Date.now();
                   // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
                   if (c && c.humanControl === true) return 1;
-                  // Swap controlado do Virtus precisa no máximo 2 abas (nova + antiga) por poucos segundos.
+                  // Swap controlado do Virtus precisa no mÃ¡ximo 2 abas (nova + antiga) por poucos segundos.
                   if (isVirtusSwap) return 2;
-                  // CRÍTICO (provision/injetar cookies): durante configuração precisamos 3 abas estáveis:
+                  // CRÃTICO (provision/injetar cookies): durante configuraÃ§Ã£o precisamos 3 abas estÃ¡veis:
                   // 0) FB base  1) FB create (item|vehicle)  2) Messenger
                   // Se bootstrap limitar para 2, ele fecha uma aba e causa exatamente o "atropelo" (Messenger sendo puxado pro create).
                   if (c && c.configurando === true) return 3;
@@ -5799,7 +5799,7 @@ async function activateOnce(nome, source = '', operator = '') {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
         logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
-        logger.info('[WORKER][activateOnce] concluído', { nome, source });
+        logger.info('[WORKER][activateOnce] concluÃ­do', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
 
         return { ok: true };
@@ -5822,7 +5822,7 @@ async function activateOnce(nome, source = '', operator = '') {
         try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
-          // NOVO: Reduzido de 15s para 5s (supervisor já controla velocidade)
+          // NOVO: Reduzido de 15s para 5s (supervisor jÃ¡ controla velocidade)
           robeMeta[nome].activationHeldUntil = Date.now() + 5000;
           try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 5s (activateOnce)'); } catch {}
         }
@@ -6528,8 +6528,8 @@ async function isRobeWindowOpenNow(nome, nowMs = Date.now()) {
   return allow;
 }
 function savePerfisJson(arr) {
-  // CRÍTICO (cluster): nunca permitir que um worker shard sobrescreva o perfis.json global.
-  // Manter esta função apenas por compatibilidade com trechos antigos (não deve ser usada para writes shard).
+  // CRÃTICO (cluster): nunca permitir que um worker shard sobrescreva o perfis.json global.
+  // Manter esta funÃ§Ã£o apenas por compatibilidade com trechos antigos (nÃ£o deve ser usada para writes shard).
   try {
     if (SHARD_SET && SHARD_SET.size) {
       try { provisionAudit.append({ ts: Date.now(), event: 'perfis_write_blocked_worker_shard', shardSize: SHARD_SET.size }); } catch {}
@@ -6541,7 +6541,7 @@ function savePerfisJson(arr) {
 
 function pickUaPreset() {
   try {
-    // Fonte única de escolha: fileStore (usa política ponderada/curada).
+    // Fonte Ãºnica de escolha: fileStore (usa polÃ­tica ponderada/curada).
     return fileStore.pickUaPreset();
   } catch {
     return null;
@@ -6800,8 +6800,8 @@ function cleanupProfileTransientLocks(nome, source) {
 
 let ramMonitorInterval = null;
 
-// ====== ELEIÇÃO DE LÍDER DE MÉTRICAS (UM POR HOST) ======
-// Somente o líder executa o monitor pesado de RAM/CPU (WMI/pidusage).
+// ====== ELEIÃ‡ÃƒO DE LÃDER DE MÃ‰TRICAS (UM POR HOST) ======
+// Somente o lÃ­der executa o monitor pesado de RAM/CPU (WMI/pidusage).
 // Demais workers apenas aguardam e consomem os dados via robeMeta/status.json.
 const METRICS_LEADER_FILE = path.join(__dirname, '..', 'dados', 'metrics_leader.lock');
 const METRICS_LEADER_STALE_MS = 60 * 1000; // 60s
@@ -6811,7 +6811,7 @@ function ensureMetricsLeader() {
   try {
     const now = Date.now();
 
-    // Se já somos líder, apenas atualiza o heartbeat no arquivo
+    // Se jÃ¡ somos lÃ­der, apenas atualiza o heartbeat no arquivo
     if (isMetricsLeaderFlag) {
       try {
         fs.writeFileSync(
@@ -6834,7 +6834,7 @@ function ensureMetricsLeader() {
       isMetricsLeaderFlag = true;
       return true;
     } catch {
-      // Arquivo já existe — verificar se está STALE
+      // Arquivo jÃ¡ existe â€” verificar se estÃ¡ STALE
       let data = null;
       try {
         const raw = fs.readFileSync(METRICS_LEADER_FILE, 'utf8');
@@ -6844,7 +6844,7 @@ function ensureMetricsLeader() {
       }
       const ts = data && typeof data.ts === 'number' ? data.ts : 0;
       if (!ts || (now - ts) > METRICS_LEADER_STALE_MS) {
-        // Considera líder anterior como morto/stale — tenta assumir
+        // Considera lÃ­der anterior como morto/stale â€” tenta assumir
         try { fs.unlinkSync(METRICS_LEADER_FILE); } catch {}
         try {
           const fd = fs.openSync(METRICS_LEADER_FILE, 'wx');
@@ -6856,11 +6856,11 @@ function ensureMetricsLeader() {
           isMetricsLeaderFlag = true;
           return true;
         } catch {
-          // Outro processo venceu a corrida — não somos líder
+          // Outro processo venceu a corrida â€” nÃ£o somos lÃ­der
           return false;
           }
       }
-      // Arquivo recente: outro worker é o líder
+      // Arquivo recente: outro worker Ã© o lÃ­der
       return false;
         }
       } catch {
@@ -6868,7 +6868,7 @@ function ensureMetricsLeader() {
       }
     }
 
-// Helpers para coleta de memória por PID — sem WMI/PowerShell
+// Helpers para coleta de memÃ³ria por PID â€” sem WMI/PowerShell
 async function getWinTasklistMap() {
   return new Promise((resolve) => {
     execFile('tasklist', ['/FO','CSV','/NH'], { windowsHide: true, maxBuffer: 10*1024*1024 }, (err, stdout) => {
@@ -6897,7 +6897,7 @@ async function getWinTasklistMap() {
 
 async function getPosixPsMap() {
   // Linux/macOS: ps -o pid=,rss= (rss em KB)
-  // macOS usa 'ps -axo pid=,rss=' e Linux também aceita 'ps -o pid=,rss='
+  // macOS usa 'ps -axo pid=,rss=' e Linux tambÃ©m aceita 'ps -o pid=,rss='
   const args = process.platform === 'darwin'
     ? ['-axo','pid=,rss=']
     : ['-o','pid=,rss=','-A'];
@@ -6920,7 +6920,7 @@ async function getPosixPsMap() {
   });
 }
 
-// === INÍCIO: PID discovery via CDP/Tracing (sem WMI) ===
+// === INÃCIO: PID discovery via CDP/Tracing (sem WMI) ===
 const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '180000', 10); // 180s
 const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '160', 10);       // amostra curta
 const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '1', 10);
@@ -7025,7 +7025,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
           const stream = ev && ev.stream;
           if (!stream) return resolve([]);
           const data = await readIOStreamChunks(session, stream);
-          // data é um JSON com traceEvents
+          // data Ã© um JSON com traceEvents
           try {
             const obj = JSON.parse(data);
             const arr = Array.isArray(obj && obj.traceEvents) ? obj.traceEvents : [];
@@ -7039,7 +7039,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
       };
       session.on('Tracing.tracingComplete', onComplete);
     });
-    // Start Tracing com memory-infra (rápido e leve)
+    // Start Tracing com memory-infra (rÃ¡pido e leve)
     await session.send('Tracing.start', {
       categories: 'disabled-by-default-memory-infra',
       transferMode: 'ReturnAsStream',
@@ -7083,14 +7083,14 @@ async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}
       if (expired) _ramDiagCounters.staleHits = Number(_ramDiagCounters.staleHits || 0) + 1;
       return cache.pids.slice(0);
     }
-    // Caminho crítico: fora do orçamento de refresh, nunca dispara tracing pesado.
-    // Retorna rootPid como fallback leve até o próximo refresh forçado.
+    // Caminho crÃ­tico: fora do orÃ§amento de refresh, nunca dispara tracing pesado.
+    // Retorna rootPid como fallback leve atÃ© o prÃ³ximo refresh forÃ§ado.
     if (!forceRefresh) {
       const root = robeMeta[nome].rootPid || null;
       if (root && Number.isFinite(root)) return [root];
       return [];
     }
-    // Força refresh (tranquilo: curto e leve)
+    // ForÃ§a refresh (tranquilo: curto e leve)
     const _refreshStart = Date.now();
     const pids = await collectChromePidsViaTracing(ctrl.browser).catch(()=>[]);
     const _refreshMs = Date.now() - _refreshStart;
@@ -7140,7 +7140,7 @@ async function ramCpuMonitorTick() {
   let _forcedRefreshErr = 0;
   let _forcedRefreshMsTotal = 0;
   if (_ramTickBusy) {
-    // agenda próximo tick mesmo se estiver ocupada (anti overlap)
+    // agenda prÃ³ximo tick mesmo se estiver ocupada (anti overlap)
     const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '15000', 10);
     const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
     const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
@@ -7149,12 +7149,12 @@ async function ramCpuMonitorTick() {
   }
 
   _ramTickBusy = true;
-  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '15000', 10); // 15s padrão Windows
-  const NIX_INTERVAL_MS = 9000 + Math.floor(Math.random() * 2000); // ~9–11s POSIX
+  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '15000', 10); // 15s padrÃ£o Windows
+  const NIX_INTERVAL_MS = 9000 + Math.floor(Math.random() * 2000); // ~9â€“11s POSIX
   const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
   try {
-    // Se não há nenhum browser ativo neste worker, não gasta CPU
+    // Se nÃ£o hÃ¡ nenhum browser ativo neste worker, nÃ£o gasta CPU
     if (!controllers || controllers.size === 0) {
       _ramDiagLast = {
         ts: Date.now(),
@@ -7188,12 +7188,12 @@ async function ramCpuMonitorTick() {
       return;
     }
 
-    // Tira um snapshot do OS (uma chamada só por tick, leve)
+    // Tira um snapshot do OS (uma chamada sÃ³ por tick, leve)
     const pidMemMap = process.platform === 'win32'
       ? await getWinTasklistMap()
       : await getPosixPsMap();
 
-    // Refrescamos no máximo N perfis por tick (demais usam cache)
+    // Refrescamos no mÃ¡ximo N perfis por tick (demais usam cache)
     const entries = Array.from(controllers.entries());
     const refreshBudget = Math.min(PIDS_REFRESH_PER_TICK, entries.length);
     _refreshBudgetUsed = refreshBudget;
@@ -7221,7 +7221,7 @@ async function ramCpuMonitorTick() {
           continue;
         }
 
-        // Captura rootPid se ainda não existir
+        // Captura rootPid se ainda nÃ£o existir
         robeMeta[nome] = robeMeta[nome] || {};
         if (!robeMeta[nome].rootPid) {
           try {
@@ -7233,7 +7233,7 @@ async function ramCpuMonitorTick() {
         }
 
         // NOVO: soma de root + filhos (pelo CDP Tracing) + tasklist/ps
-        // Aplica fator de correção para aproximar Private Working Set (evita duplicação de memória compartilhada)
+        // Aplica fator de correÃ§Ã£o para aproximar Private Working Set (evita duplicaÃ§Ã£o de memÃ³ria compartilhada)
         const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.435'); // 0.435 = ~43.5% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
@@ -7242,16 +7242,16 @@ async function ramCpuMonitorTick() {
             const v = pidMemMap[pid];
             if (typeof v === 'number' && v >= 0) totalMB += v;
           }
-          // Aplica fator de correção para aproximar Private Working Set (Windows: Working Set inclui memória compartilhada)
+          // Aplica fator de correÃ§Ã£o para aproximar Private Working Set (Windows: Working Set inclui memÃ³ria compartilhada)
           if (process.platform === 'win32' && RAM_CORRECTION_FACTOR > 0 && RAM_CORRECTION_FACTOR <= 1) {
             totalMB = Math.round(totalMB * RAM_CORRECTION_FACTOR);
           }
         } else {
-          // fallback duro (só rootPid) se cache vazio
+          // fallback duro (sÃ³ rootPid) se cache vazio
           const root = robeMeta[nome].rootPid || null;
           if (root && Number.isFinite(root) && typeof pidMemMap[root] === 'number') {
             totalMB = pidMemMap[root];
-            // Aplica fator de correção também no fallback
+            // Aplica fator de correÃ§Ã£o tambÃ©m no fallback
             if (process.platform === 'win32' && RAM_CORRECTION_FACTOR > 0 && RAM_CORRECTION_FACTOR <= 1) {
               totalMB = Math.round(totalMB * RAM_CORRECTION_FACTOR);
             }
@@ -7260,7 +7260,7 @@ async function ramCpuMonitorTick() {
           }
         }
         robeMeta[nome].ramMB = totalMB || null;
-        // CPU por perfil permanece null (sem WMI/PowerShell). O frontend já é null-aware
+        // CPU por perfil permanece null (sem WMI/PowerShell). O frontend jÃ¡ Ã© null-aware
         robeMeta[nome].cpuPercent = null;
 
       } catch {
@@ -7339,16 +7339,16 @@ function extractUserDataDir(cmd) {
   return m ? (m[1] || m[2] || m[3]) : null;
 }
 
-// Função para obter Private Working Set no Windows (evita duplicação de memória compartilhada)
-// 110% sem WMI/PowerShell — não coleta nada (pidusage e ps-list usam WMI internamente)
+// FunÃ§Ã£o para obter Private Working Set no Windows (evita duplicaÃ§Ã£o de memÃ³ria compartilhada)
+// 110% sem WMI/PowerShell â€” nÃ£o coleta nada (pidusage e ps-list usam WMI internamente)
 async function getPidPrivateWSBytes(pids) {
-  // 110% sem WMI/PowerShell — não coleta nada
+  // 110% sem WMI/PowerShell â€” nÃ£o coleta nada
   return {};
 }
 
 setTimeout(ramCpuMonitorTick, 5000);
 
-// ====== Robe dinâmico (itens vs veiculos) ======
+// ====== Robe dinÃ¢mico (itens vs veiculos) ======
 async function getRobeModuleFor(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
@@ -7411,13 +7411,13 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
     // #endregion
-    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado pelo módulo.`);
+    await reportAction(nome, 'robe_error', `Erro tÃ©cnico no Robe: ${(e&&e.message)||e}. Cooldown padrÃ£o (15â€“30min) serÃ¡ aplicado pelo mÃ³dulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
 }
 
 async function robeTickGlobal() {
-  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
+  // Hardening: durante provisionamento, pausar Robe/automaÃ§Ã£o para evitar concorrÃªncia.
   try {
     if (provisionLock.isActive()) {
       try {
@@ -7432,7 +7432,7 @@ async function robeTickGlobal() {
       return;
     }
   } catch {}
-  // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
+  // Em light: NÃƒO pode pausar Robe por completo. Apenas reduzir pressÃ£o (throttle).
   const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
   let lightMaxEnqueue = null;
   if (isLight) {
@@ -7487,7 +7487,7 @@ async function robeTickGlobal() {
     if (!sessionGate || sessionGate.allowPost !== true) return null;
     sessionGateByNome.set(nome, sessionGate);
     // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
-    // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
+    // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pÃ³s-remediaÃ§Ã£o/pausas.
     try { await unfreezeCooldownIfWorking(nome); } catch {}
     let cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
@@ -7504,7 +7504,7 @@ async function robeTickGlobal() {
       return null;
     }
     // V2 maestro no caminho feliz:
-    // se houver cooldown legado sem pauseReason explícita, limpar para não travar enqueue.
+    // se houver cooldown legado sem pauseReason explÃ­cita, limpar para nÃ£o travar enqueue.
     if (cooldown > 0 && !hasHardPauseWithCooldown) {
       try {
         await manifestStore.update(nome, (m) => {
@@ -7588,7 +7588,7 @@ async function robeTickGlobal() {
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
-          await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
+          await reportAction(nome, 'robe_error', `Falha tÃ©cnica: ${(e&&e.message)||e}; cooldown padrÃ£o (15â€“30min) serÃ¡ aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
@@ -7699,11 +7699,11 @@ async function fotosGcTick() {
       logger.info('[FOTOS][GC] resultado', { deletedFiles: res.deletedFiles, removedIndex: res.removedIndex, resetGens: res.resetGens });
     }
   } catch (e) {
-    // index_lock_timeout é esperado quando há contenção (muitas operações simultâneas)
-    // Não é crítico, apenas indica que o GC será tentado novamente no próximo ciclo
+    // index_lock_timeout Ã© esperado quando hÃ¡ contenÃ§Ã£o (muitas operaÃ§Ãµes simultÃ¢neas)
+    // NÃ£o Ã© crÃ­tico, apenas indica que o GC serÃ¡ tentado novamente no prÃ³ximo ciclo
     const msg = (e && e.message) || String(e);
     if (msg.includes('index_lock_timeout')) {
-      // Silencioso: timeout de lock é normal em alta contenção
+      // Silencioso: timeout de lock Ã© normal em alta contenÃ§Ã£o
     } else {
       logger.warn('[FOTOS][GC] erro', { error: msg });
     }
@@ -7731,7 +7731,7 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
 }
 
-// ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
+// ===== Ultra enterprise: quiescÃªncia determinÃ­stica para operaÃ§Ãµes crÃ­ticas (inject cookies / provision) =====
 function _quiesceSnapshot({ excludeNome } = {}) {
   const snap = {
     controllers: controllers.size,
@@ -7755,7 +7755,7 @@ function _quiesceSnapshot({ excludeNome } = {}) {
       snap.busyNames.push(nome);
       snap.busyDetails.push({ nome, sendLockActive, robeEmExecucao, inConfig, inHuman, virtusOnline, trabalhando: !!c.trabalhando });
     }
-    // "pausável": virtus online e não está ocupado/humano/config
+    // "pausÃ¡vel": virtus online e nÃ£o estÃ¡ ocupado/humano/config
     if (virtusOnline && !sendLockActive && !robeEmExecucao && !inConfig && !inHuman) {
       snap.pauseableVirtusNames.push(nome);
       snap.pauseableVirtusDetails.push({ nome, virtusOnline, trabalhando: !!c.trabalhando });
@@ -7798,7 +7798,7 @@ async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, wai
     }
   }
 
-  // (2) Pausa Virtus para todos que são pausáveis
+  // (2) Pausa Virtus para todos que sÃ£o pausÃ¡veis
   const paused = [];
   const s3 = _quiesceSnapshot({ excludeNome: target });
   for (const nome of s3.pauseableVirtusNames) {
@@ -7810,7 +7810,7 @@ async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, wai
   }
   audit({ phase: 'pause_sent', pausedCount: paused.length, pausedNames: paused.map(x => x.nome).slice(0, 50) });
 
-  // (3) Espera nenhum Virtus "pausável" permanecer online
+  // (3) Espera nenhum Virtus "pausÃ¡vel" permanecer online
   if (pauseMax > 0) {
     const t1 = Date.now();
     while ((Date.now() - t1) < pauseMax) {
@@ -7872,7 +7872,7 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 
 controllers.delete(nome);
 
-// LIMPA rootPid para evitar consultas em PIDs órfãos (WMI-free+ps-tree)
+// LIMPA rootPid para evitar consultas em PIDs Ã³rfÃ£os (WMI-free+ps-tree)
 try {
   if (robeMeta[nome]) {
     robeMeta[nome].rootPid = null;
@@ -7965,9 +7965,9 @@ function resolveChromeUserDataRoot() {
 }
 
 function automationAllowed(ctrl, { operator } = {}) {
-  // Política enterprise:
-  // - Locks globais (configure/login_remediate/open_all_map/close_all) podem bloquear automação.
-  // - Stock provision NÃO deve bloquear Robe/Virtus do servidor (requisito do lead);
+  // PolÃ­tica enterprise:
+  // - Locks globais (configure/login_remediate/open_all_map/close_all) podem bloquear automaÃ§Ã£o.
+  // - Stock provision NÃƒO deve bloquear Robe/Virtus do servidor (requisito do lead);
   //   o provisionamento usa headroom/RAM + supervisor slots sem pausar o resto.
   try {
     const op = String(operator || '').trim();
@@ -7996,7 +7996,7 @@ async function start_work({ nome, operator }) {
 
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      return { ok: false, error: 'Navegador nÃ£o estÃ¡ aberto/vivo para esta conta!' };
 
     if (ctrl.humanControl || ctrl.configurando) {
       await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
@@ -8004,8 +8004,8 @@ async function start_work({ nome, operator }) {
       return { ok: false, error: 'profile_in_human_or_config' };
     }
 
-    // Guardrail enterprise: se flags persistentes indicam PIL, bloquear automação SEMPRE.
-    // Isso garante que "Recurso em análise" (appealSubmitted) e "Conta suspensa" não voltem a ficar Virtus Online após restart/open-all.
+    // Guardrail enterprise: se flags persistentes indicam PIL, bloquear automaÃ§Ã£o SEMPRE.
+    // Isso garante que "Recurso em anÃ¡lise" (appealSubmitted) e "Conta suspensa" nÃ£o voltem a ficar Virtus Online apÃ³s restart/open-all.
     try {
       const flags = await readAccountFlags(nome).catch(()=>({}));
       if (flags && flags.banned === true) {
@@ -8035,8 +8035,8 @@ async function start_work({ nome, operator }) {
       if (flags && (flags.identitySubmitted === true || flags.identityRequired === true)) {
         const kind = flags.identitySubmitted === true ? 'identity_submitted' : 'identity_required';
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind, nextAt: Number(flags.identityNextCheckAt||0)||0 }); } catch {}
-        // Ultra enterprise: se start_work foi acionado manualmente e a conta está em identidade,
-        // não “falhar seco”: agenda o fluxo de identidade imediatamente (1 por vez + cooldown).
+        // Ultra enterprise: se start_work foi acionado manualmente e a conta estÃ¡ em identidade,
+        // nÃ£o â€œfalhar secoâ€: agenda o fluxo de identidade imediatamente (1 por vez + cooldown).
         try {
           const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
           const p0 = pages && pages[0];
@@ -8074,11 +8074,11 @@ async function start_work({ nome, operator }) {
       }
     } catch {}
     if (ctrl.trabalhando && ctrl.virtus) {
-      logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
+      logger.info('[HANDLER] start_work ok (jÃ¡ trabalhando)', { nome });
       return { ok: true };
     }
-    // Idempotência enterprise: em corridas pós-reopen pode surgir trabalhando=true
-    // com virtus ainda não anexado no ctrl. Nesse caso, tenta anexar e não falha o fluxo.
+    // IdempotÃªncia enterprise: em corridas pÃ³s-reopen pode surgir trabalhando=true
+    // com virtus ainda nÃ£o anexado no ctrl. Nesse caso, tenta anexar e nÃ£o falha o fluxo.
     if (ctrl.trabalhando && !ctrl.virtus && !ctrl._virtusStarting) {
       try {
         ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
@@ -8092,7 +8092,7 @@ async function start_work({ nome, operator }) {
         logger.info('[HANDLER] start_work ok (reconciled trabalhando without virtus)', { nome });
         return { ok: true, reconciled: 'trabalhando_without_virtus' };
       } catch {
-        // Se não conseguiu anexar, volta para o fluxo normal abaixo.
+        // Se nÃ£o conseguiu anexar, volta para o fluxo normal abaixo.
         try { ctrl.trabalhando = false; } catch {}
       }
     }
@@ -8112,7 +8112,7 @@ async function start_work({ nome, operator }) {
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
 
-      // Enterprise: preflight rápido ANTES de iniciar Virtus:
+      // Enterprise: preflight rÃ¡pido ANTES de iniciar Virtus:
       // - se detectou banned/suspended/disabled -> auto arquivar+deletar (libera slot)
       // - se detectou appeal_submitted -> manter humano + armar monitor (1h)
       try {
@@ -8126,7 +8126,7 @@ async function start_work({ nome, operator }) {
             return { ok: false, error: 'banned' };
           }
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-          // 2FA => exclusão automática (não é humano, não é automação)
+          // 2FA => exclusÃ£o automÃ¡tica (nÃ£o Ã© humano, nÃ£o Ã© automaÃ§Ã£o)
           if (lr && lr.loginRequired) {
             const rr = String(lr.reason || '').toLowerCase();
             if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
@@ -8178,7 +8178,7 @@ async function start_work({ nome, operator }) {
       } catch {}
 
       // Regra operacional atual:
-      // não abrir aba extra de Marketplace no pós-cadastro.
+      // nÃ£o abrir aba extra de Marketplace no pÃ³s-cadastro.
       // Isso evita abrir/fechar aba 1 sem necessidade e reduz cutucada.
 
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
@@ -8216,7 +8216,7 @@ async function start_work({ nome, operator }) {
 const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
-    if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
+    if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatÃ³rios.' };
     if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
@@ -8227,7 +8227,7 @@ const handlers = {
 
     const cookiesArr = utils.normalizeCookies(cookies);
     if (!cookiesArr.length || !cookiesArr.find(c => c.name === 'c_user') || !cookiesArr.find(c => c.name === 'xs')) {
-      return { ok: false, error: 'Cookies inválidos ou ausentes: precisa de c_user e xs!' };
+      return { ok: false, error: 'Cookies invÃ¡lidos ou ausentes: precisa de c_user e xs!' };
     }
 
     const perfilObj = {
@@ -8248,7 +8248,7 @@ const handlers = {
     };
     try { fs.mkdirSync(perfilObj.userDataDir, { recursive: true }); } catch {}
 
-    // CRÍTICO (cluster): criar perfil deve atualizar o perfis.json GLOBAL com lock (não shard snapshot).
+    // CRÃTICO (cluster): criar perfil deve atualizar o perfis.json GLOBAL com lock (nÃ£o shard snapshot).
     try {
       fileStore.withPerfisFileLockUpdate((arr) => {
         arr = Array.isArray(arr) ? arr : [];
@@ -8300,7 +8300,7 @@ const handlers = {
   const strictCloseRequired =
     !preserve &&
     /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
-  // Resolver userDataDir cedo (para validação pós-close determinística)
+  // Resolver userDataDir cedo (para validaÃ§Ã£o pÃ³s-close determinÃ­stica)
   let udirForCheck = '';
   try {
     const man0 = await manifestStore.read(nome).catch(()=>null);
@@ -8323,7 +8323,7 @@ const handlers = {
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
-    // Enterprise HARD: se este deactivate faz parte de um fluxo de delete, não podemos “fingir ok”
+    // Enterprise HARD: se este deactivate faz parte de um fluxo de delete, nÃ£o podemos â€œfingir okâ€
     // quando ainda existe Chrome vivo para este perfil (isso gera exatamente o navegador fantasma).
     if (strictCloseRequired) {
       let udir = '';
@@ -8399,7 +8399,7 @@ const handlers = {
       issues.append(nome, 'mil_action', 'reopen_suppressed_human_hold').catch(()=>{});
     }
     await snapshotStatusAndWrite();
-    logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
+    logger.info('[HANDLER] deactivate concluÃ­do (controller ausente)', { nome });
     return { ok: true };
   }
   // antes de mexer em browser:
@@ -8421,11 +8421,11 @@ const handlers = {
     hc = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   }
 
-  // ENTERPRISE HARD: em fluxo de delete, NÃO retornar ok:true se ainda existir Chrome vivo.
-  // (Isso causa exatamente o cenário: perfil deletado + navegador aberto/bugado.)
+  // ENTERPRISE HARD: em fluxo de delete, NÃƒO retornar ok:true se ainda existir Chrome vivo.
+  // (Isso causa exatamente o cenÃ¡rio: perfil deletado + navegador aberto/bugado.)
   if (strictCloseRequired) {
     const udir = (hc && hc.userDataDir) ? String(hc.userDataDir) : String(udirForCheck || '');
-    // 1) Se hardClose deixou rootPid vivo, já é incompleto.
+    // 1) Se hardClose deixou rootPid vivo, jÃ¡ Ã© incompleto.
     const rootAliveAfter = (hc && typeof hc.rootPidAliveAfter === 'boolean') ? hc.rootPidAliveAfter : null;
 
     // 2) Check PIDs por userDataDir (sinal forte do Chrome do perfil ainda vivo)
@@ -8461,7 +8461,7 @@ const handlers = {
         }
       } catch {}
 
-      // Re-check após tentativa graciosa
+      // Re-check apÃ³s tentativa graciosa
       let chk2 = null;
       try {
         if (udir && browserHelper.getChromeProfilePidsMeta) chk2 = browserHelper.getChromeProfilePidsMeta(udir);
@@ -8513,7 +8513,7 @@ const handlers = {
       }
     }
   }
-  // cleanup pós-fechamento
+  // cleanup pÃ³s-fechamento
   try {
     const root = robeMeta[nome]?.rootPid;
     if (root) robeMeta[nome].rootPid = null;
@@ -8583,7 +8583,7 @@ const handlers = {
     }
   }
   await snapshotStatusAndWrite();
-  logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
+  logger.info('[HANDLER] deactivate concluÃ­do', { nome, reason, policy });
   return { ok: true };
   });
 },
@@ -8592,19 +8592,19 @@ const handlers = {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador nÃ£o estÃ¡ aberto/vivo para esta conta!' };
       const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
       guard[nome] = Date.now() + 10601000;
 
       const perfisArr = loadPerfisJson();
       const perfil = perfisArr.find(p => p && p.nome === nome);
-      if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
+      if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil nÃ£o encontrado!' };
       const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
+      if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest nÃ£o existe para este perfil!' };
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
-        try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
-        return { ok: false, error: 'Cookies não encontrados no manifest!' };
+        try { await issues.append(nome, 'cookie_inject_failed', 'Cookies nÃ£o encontrados no manifest!'); } catch {}
+        return { ok: false, error: 'Cookies nÃ£o encontrados no manifest!' };
       }
       ctrl.configurando = true;
 
@@ -8615,7 +8615,7 @@ const handlers = {
         try {
           if (!provisionLock.isActive()) {
             // Contrato enterprise: configure deve rodar sob provisionLock para bloquear Robe/nurse e evitar flapping.
-            // (A rota API já adquire lock; stock_provision e login_remediate também usam lock global próprio.)
+            // (A rota API jÃ¡ adquire lock; stock_provision e login_remediate tambÃ©m usam lock global prÃ³prio.)
             return { ok: false, error: 'configure_requires_provision_lock' };
           }
         } catch {
@@ -8641,8 +8641,8 @@ const handlers = {
 
       const invokeHumanForConfigure = async (reason) => {
         const why = String(reason || 'configure_failed');
-        // Regra do usuário: NUNCA invocar humano automaticamente.
-        // Mantém Virtus OFF e registra erro, mas não seta humanHold/humanControl.
+        // Regra do usuÃ¡rio: NUNCA invocar humano automaticamente.
+        // MantÃ©m Virtus OFF e registra erro, mas nÃ£o seta humanHold/humanControl.
         enteredHuman = false;
         try {
           provisionAudit.append({ ts: Date.now(), event: 'configure_human_hold', nome: String(nome || ''), operator: op || null, reason: why });
@@ -8671,7 +8671,7 @@ const handlers = {
       };
 
       try {
-        // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
+        // Ultra enterprise: antes de injetar cookies, garantir quiescÃªncia global (Virtus/Robe pausados)
         // Importante: se pausarmos Virtus de outros perfis, precisamos retomar ao final.
         {
           const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
@@ -8692,7 +8692,7 @@ const handlers = {
           } catch {}
         }
 
-        // Headroom (enterprise): se necessário, fecha o mínimo possível (preserveDesired) e o nurse reabre depois.
+        // Headroom (enterprise): se necessÃ¡rio, fecha o mÃ­nimo possÃ­vel (preserveDesired) e o nurse reabre depois.
         try {
           const snapPolicy = ramPolicy.snapshotPolicy();
           const minFreeMB = snapPolicy.reserveProvisionMB;
@@ -8728,11 +8728,11 @@ const handlers = {
           }
         } catch {}
 
-        // Sempre pausar Virtus do próprio alvo antes de reinjetar cookies
+        // Sempre pausar Virtus do prÃ³prio alvo antes de reinjetar cookies
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_stop_virtus', nome: String(nome||''), operator: op || null }); } catch {}
         try { await stopVirtus(nome); } catch {}
 
-        // Operação de configuração é crítica: mantém Virtus OFF enquanto configura
+        // OperaÃ§Ã£o de configuraÃ§Ã£o Ã© crÃ­tica: mantÃ©m Virtus OFF enquanto configura
         try {
           await fileStore.withDesiredFileLockUpdate((desired) => {
             desired.perfis = desired.perfis || {};
@@ -8745,7 +8745,7 @@ const handlers = {
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_done', nome: String(nome||''), operator: op || null }); } catch {}
 
-        // Pós-injeção: validar estado real (login_required / appeal_submitted / etc)
+        // PÃ³s-injeÃ§Ã£o: validar estado real (login_required / appeal_submitted / etc)
         let best = null;
         let bestPage = null;
         try {
@@ -8792,7 +8792,7 @@ const handlers = {
             return { ok: false, error: 'appeal_submitted' };
           }
 
-          // Fallback: tentar login/senha (mesmo padrão do login_remediate)
+          // Fallback: tentar login/senha (mesmo padrÃ£o do login_remediate)
           let login2 = null, password2 = null;
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
@@ -8831,7 +8831,7 @@ const handlers = {
             });
           } catch {}
           if (after && after.loginRequired) {
-            // Enterprise: quando o configure falha por "still_login_required", precisamos de evidência real
+            // Enterprise: quando o configure falha por "still_login_required", precisamos de evidÃªncia real
             // (HTML + screenshot) centralizada no CT, sem pedir logs manuais ao humano.
             try {
               robeMeta[nome] = robeMeta[nome] || {};
@@ -8883,9 +8883,9 @@ const handlers = {
         }
 
         // Blindagem cadastro (stock_provision):
-        // garante Robe pausado por 24h já no fim do configure.
+        // garante Robe pausado por 24h jÃ¡ no fim do configure.
         // Assim, mesmo que falhe em etapas posteriores (recycle/start_work),
-        // conta nova não posta antes da janela mínima.
+        // conta nova nÃ£o posta antes da janela mÃ­nima.
         if (isStockProvision) {
           try {
             const plus24 = 24 * 60 * 60 * 1000;
@@ -8935,18 +8935,18 @@ const handlers = {
         try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
         logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_exception', nome: String(nome||''), operator: op || null, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
-        // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
+        // Se falhou tecnicamente, entra em humano (padrÃ£o enterprise) para evitar ficar preso sem aÃ§Ã£o.
         try { await invokeHumanForConfigure((e && e.message) || String(e)); } catch {}
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
       } finally {
         ctrl.configurando = false;
         // Regra enterprise:
-        // - configure (falha) => entra em modo humano (para inspeção/resolução)
-        // - configure (sucesso) => NÃO força modo humano; restaura estado desejado e retoma automação
+        // - configure (falha) => entra em modo humano (para inspeÃ§Ã£o/resoluÃ§Ã£o)
+        // - configure (sucesso) => NÃƒO forÃ§a modo humano; restaura estado desejado e retoma automaÃ§Ã£o
         // - stock_provision ainda controla "start_work" no pipeline (dashboard.js)
         ctrl.humanControl = enteredHuman ? true : false;
         stopPruneLoop(nome);
-        // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescência.
+        // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescÃªncia.
         try {
           const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
           const resumed = [];
@@ -8977,7 +8977,7 @@ const handlers = {
             await fileStore.withDesiredFileLockUpdate((d) => {
               d.perfis = d.perfis || {};
               const cur = d.perfis[nome] || {};
-              // Mantém active como está (evita desligar por engano), mas restaura virtus ao que era antes.
+              // MantÃ©m active como estÃ¡ (evita desligar por engano), mas restaura virtus ao que era antes.
               const wantVirtus = (targetDesiredBefore && typeof targetDesiredBefore.virtus === 'string') ? targetDesiredBefore.virtus : cur.virtus;
               d.perfis[nome] = { ...cur, virtus: wantVirtus };
               return d;
@@ -9037,8 +9037,8 @@ const handlers = {
         collectCookies: Math.max(20_000, Number(opts.collectCookiesTimeoutMs || 0) || 90_000)
       };
 
-      // Governança (cross-process): impede múltiplos login_remediate em paralelo no host.
-      // Importante: NÃO trava — se não houver permit, devolve busy e o caller faz retry/backoff.
+      // GovernanÃ§a (cross-process): impede mÃºltiplos login_remediate em paralelo no host.
+      // Importante: NÃƒO trava â€” se nÃ£o houver permit, devolve busy e o caller faz retry/backoff.
       let _govPermitToken = null;
       try {
         const pr = await supervisorClient.requestPermit('login_remediate', nome, {
@@ -9059,7 +9059,7 @@ const handlers = {
             });
           } catch {}
           // P0: Se o governor negar por busy, o fluxo pode ficar "engessado" por conta do
-          // min_interval do human_reconcile. Então enfileiramos retry no autoLoginRemediateTick.
+          // min_interval do human_reconcile. EntÃ£o enfileiramos retry no autoLoginRemediateTick.
           try {
             const r = String((pr && pr.error) || '').toLowerCase();
             if (r === 'busy' || r.includes('busy') || r.includes('governor_busy')) {
@@ -9102,7 +9102,7 @@ const handlers = {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
         const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity/.test(String(why || '').toLowerCase());
-        // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
+        // Regra do usuÃ¡rio: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
@@ -9125,7 +9125,7 @@ const handlers = {
           try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: why.slice(0, 160) }); } catch {}
         }
 
-        // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
+        // UX/telemetria: expÃµe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnÃ³stico)
         try {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].whyNotOpen = why;
@@ -9151,7 +9151,7 @@ const handlers = {
         });
       } catch {}
 
-      // 0) lock global (isola e pausa automações)
+      // 0) lock global (isola e pausa automaÃ§Ãµes)
       const lk = provisionLock.tryAcquire({
         owner: op,
         ttlMs: Math.max(9 * 60 * 1000, waitBusyMs + 7 * 60 * 1000),
@@ -9167,17 +9167,17 @@ const handlers = {
         try {
           const ev = Object.assign({ ts: Date.now() }, s || {});
           steps.push(ev);
-          // Log incremental: mesmo se travar, fica evidência no provision_audit.jsonl
+          // Log incremental: mesmo se travar, fica evidÃªncia no provision_audit.jsonl
           try {
             provisionAudit.append({ ts: ev.ts, event: 'login_remediate_step', nome: String(nome || ''), operator: op, step: ev.step || null, data: ev });
           } catch {}
         } catch {}
       };
-      // Importante: `pausedVirtus` precisa estar acessível no `finally` global para garantir resume
-      // mesmo em returns antecipados (evita queda massiva de working após quiesce).
+      // Importante: `pausedVirtus` precisa estar acessÃ­vel no `finally` global para garantir resume
+      // mesmo em returns antecipados (evita queda massiva de working apÃ³s quiesce).
       let pausedVirtus = []; // [{ nome, wasWorking }]
       try {
-      // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
+      // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execuÃ§Ã£o.
       if (overrideHumanHold) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -9209,16 +9209,16 @@ const handlers = {
         return { ok: false, error: 'browser_not_connected', steps };
       }
 
-      // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
-      // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
-      // (Antes: configurando virava false logo após configureProfile e o bootstrap capava para 2 abas.)
+      // IMPORTANTE (anti-pÃ¢nico): durante TODO o login_remediate nÃ³s mantemos "configurando=true"
+      // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validaÃ§Ã£o.
+      // (Antes: configurando virava false logo apÃ³s configureProfile e o bootstrap capava para 2 abas.)
       const prevConfigurando = !!ctrl.configurando;
       ctrl.configurando = true;
 
-      // 2) Ultra enterprise: quiescência determinística antes de injetar cookies
+      // 2) Ultra enterprise: quiescÃªncia determinÃ­stica antes de injetar cookies
       // - espera envios/postagens ativos terminarem (busy)
-      // - pausa Virtus de todos os perfis "pausáveis"
-      // Se não conseguir quiescer dentro do timeout: aborta (sem falso positivo).
+      // - pausa Virtus de todos os perfis "pausÃ¡veis"
+      // Se nÃ£o conseguir quiescer dentro do timeout: aborta (sem falso positivo).
       pausedVirtus = []; // [{ nome, wasWorking }]
       try {
         const require = true;
@@ -9230,18 +9230,18 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         pushStep({ step: 'quiesce_failed', error: msg });
         try { provisionLock.release({ owner: op }); } catch {}
-        // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
+        // Fail fast: nÃ£o injeta cookies se nÃ£o conseguiu pausar/esperar busy.
         await failFastToHuman(msg);
         return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
       }
 
-      // 3) garantir headroom (fechar o mínimo necessário)
+      // 3) garantir headroom (fechar o mÃ­nimo necessÃ¡rio)
       const closedForRam = [];
       try {
         let free = getAvailableMB();
         pushStep({ step: 'headroom_check', freeMB: free, minFreeMB });
         while (free < minFreeMB && closedForRam.length < maxHardDeactivations) {
-          // pick: não-human, não-config, não-robe ativo; preferir não trabalhando, maior RAM
+          // pick: nÃ£o-human, nÃ£o-config, nÃ£o-robe ativo; preferir nÃ£o trabalhando, maior RAM
           const candidates = [];
           controllers.forEach((c, n) => {
             if (!n || String(n) === String(nome)) return;
@@ -9281,7 +9281,7 @@ const handlers = {
             await failFastToHuman('missing_cookies_in_manifest');
             return { ok: false, error: 'missing_cookies_in_manifest', steps };
           }
-          // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
+          // Blindagem: durante configureProfile (abre vÃ¡rias abas), nÃ£o deixar aboutBlankKiller matar as abas ainda em load.
           try {
             const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
             guard[nome] = Date.now() + (6 * 60 * 1000);
@@ -9292,16 +9292,16 @@ const handlers = {
         } catch (e) {
           pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
         } finally {
-          // Não desativar configurando aqui: a validação pós-injeção ainda precisa das 3 abas vivas.
+          // NÃ£o desativar configurando aqui: a validaÃ§Ã£o pÃ³s-injeÃ§Ã£o ainda precisa das 3 abas vivas.
           // O reset acontece no finally global do login_remediate (abaixo).
-          // Também não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
+          // TambÃ©m nÃ£o remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos apÃ³s configure.
         }
       } else {
-        // Modo password_first: pula injeção e vai direto para login/senha.
+        // Modo password_first: pula injeÃ§Ã£o e vai direto para login/senha.
         pushStep({ step: 'attempt1_inject_cookies_skipped', authMode, reason: 'password_first' });
       }
 
-      // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
+      // 5) validar loginRequired em TODAS as abas reais (sem â€œpuxarâ€ tudo para /marketplace)
       let lrMessenger = null;
       let lrFacebook = null;
       let uiMessenger = null;
@@ -9318,7 +9318,7 @@ const handlers = {
           return null;
         };
 
-        // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
+        // SeleÃ§Ã£o robusta por URL (evita falso positivo por ordem de abas variar)
         const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
         const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)); // Robe create (FB)
         const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
@@ -9327,16 +9327,16 @@ const handlers = {
 
         const checkOne = async (page, label) => {
           if (!page) return null;
-          // Blindagem: garanta que estamos checando o domínio correto
+          // Blindagem: garanta que estamos checando o domÃ­nio correto
           try {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
               // Regra 110% enterprise: para validar Facebook/Marketplace para Robe, usar a rota REAL create/(item|vehicle)
-              // conforme robeMode do manifest (evita fechar/prunar a aba "errada" e evita navegação do Messenger para FB).
+              // conforme robeMode do manifest (evita fechar/prunar a aba "errada" e evita navegaÃ§Ã£o do Messenger para FB).
               let robeMode = 'itens';
               try {
                 const manx = await manifestStore.read(nome).catch(()=>null);
@@ -9350,7 +9350,7 @@ const handlers = {
             }
           } catch {}
           await appendLoginRemediateEvidence({ nome, operator: op, step: `pre_check_${label}`, page, note: `before check ${label}` });
-          // “olhos”: resolve popups/consent antes de validar login
+          // â€œolhosâ€: resolve popups/consent antes de validar login
           const ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: 3 }).catch(()=>null);
           pushStep({ step: `ui_unblock_${label}`, ui });
           const lr = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:false }));
@@ -9362,7 +9362,7 @@ const handlers = {
         };
 
         // A ordem importa: primeiro Messenger (Virtus), depois Facebook create/feed.
-        // Importante: para declarar sucesso, é obrigatório ter validado Messenger + Facebook.
+        // Importante: para declarar sucesso, Ã© obrigatÃ³rio ter validado Messenger + Facebook.
         const rMsg = await checkOne(pMsg || pAny, 'msg');
         uiMessenger = rMsg && rMsg.ui;
         lrMessenger = rMsg && rMsg.lr;
@@ -9371,14 +9371,14 @@ const handlers = {
         uiFacebook = rCreate && rCreate.ui;
         lrFacebook = rCreate && rCreate.lr;
 
-        // sanity checks (não afetam decisão principal, mas deixam evidência)
+        // sanity checks (nÃ£o afetam decisÃ£o principal, mas deixam evidÃªncia)
         await checkOne(pFb || pAny, 'fb_main');
         await checkOne(pLang, 'fb_lang');
       } catch {}
       pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook, uiMessenger, uiFacebook });
 
-      // Blindagem: se não conseguimos validar os 2 lados (Messenger + Facebook), NÃO pode dar sucesso.
-      // Exceção: no modo password_first essa validação inicial pode vir incompleta por não abrir 3 abas via configureProfile.
+      // Blindagem: se nÃ£o conseguimos validar os 2 lados (Messenger + Facebook), NÃƒO pode dar sucesso.
+      // ExceÃ§Ã£o: no modo password_first essa validaÃ§Ã£o inicial pode vir incompleta por nÃ£o abrir 3 abas via configureProfile.
       if (!lrMessenger || !lrFacebook) {
         pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook, authMode });
         if (!skipAttempt1InjectCookies) {
@@ -9405,24 +9405,24 @@ const handlers = {
           if (bd && bd.banned) {
             pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
             try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
-            // IMPORTANTE (enterprise): ban/disabled NÃO é “login/cookies falhou”.
-            // Aqui a ação correta é setBannedFlag() (que fecha + remove do servidor).
-            // Não deve marcar loginRemediateFailed/loginRequired depois disso.
+            // IMPORTANTE (enterprise): ban/disabled NÃƒO Ã© â€œlogin/cookies falhouâ€.
+            // Aqui a aÃ§Ã£o correta Ã© setBannedFlag() (que fecha + remove do servidor).
+            // NÃ£o deve marcar loginRemediateFailed/loginRequired depois disso.
             return true;
           }
         } catch {}
         return false;
       };
 
-      // 6) tentativa 2: login+senha (apenas se for login_form; caso contrário invoca humano)
+      // 6) tentativa 2: login+senha (apenas se for login_form; caso contrÃ¡rio invoca humano)
       if (needsLogin) {
         const bad = (hardBlockReason(lrMessenger) || hardBlockReason(lrFacebook));
         if (bad) {
           pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
           const why = String((lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_requires_human');
 
-          // Novo fluxo (pedido do usuário): se for captcha/pre-screen, NÃO invocar humano imediatamente.
-          // Tentamos 3 vezes (sem OCR implementado aqui) e só então invoca humano.
+          // Novo fluxo (pedido do usuÃ¡rio): se for captcha/pre-screen, NÃƒO invocar humano imediatamente.
+          // Tentamos 3 vezes (sem OCR implementado aqui) e sÃ³ entÃ£o invoca humano.
           const whyNorm = String(why || '').toLowerCase();
           if (whyNorm.includes('captcha_persona_pre_screen') || whyNorm.includes('captcha_persona') || whyNorm.includes('checkpoint_captcha')) {
             pushStep({ step: 'captcha_flow_begin', reason: why });
@@ -9448,7 +9448,7 @@ const handlers = {
                   pushStep({ step: 'captcha_screen_probe', attempt, present: !!cap.present, continueDisabled: cap.continueDisabled });
                   await browserHelper.focusCaptchaInput(page).catch(()=>null);
 
-                  // === OCR placeholder (não implementar aqui) ===
+                  // === OCR placeholder (nÃ£o implementar aqui) ===
                   // const ocrText = await yourGroqOcrFunction(cap.imgSrc, { nome, operator: op, attempt });
                   // if (ocrText) await browserHelper.fillCaptchaAndContinue(page, { text: ocrText });
 
@@ -9466,7 +9466,7 @@ const handlers = {
               }
               const lrAfter = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
               if (!lrAfter || lrAfter.loginRequired !== true) {
-                // liberou — segue
+                // liberou â€” segue
               } else {
                 const still = String(lrAfter.reason || why).toLowerCase();
                 pushStep({ step: 'captcha_flow_invoke_human_after_3_tries', reason: still });
@@ -9474,7 +9474,7 @@ const handlers = {
                 return { ok: false, error: still, steps, closedForRam, pausedVirtus };
               }
             } else {
-              // sem page => fallback para humano (não dá para tentar)
+              // sem page => fallback para humano (nÃ£o dÃ¡ para tentar)
               await failFastToHuman(why);
               return { ok: false, error: why, steps, closedForRam, pausedVirtus };
             }
@@ -9515,7 +9515,7 @@ const handlers = {
           const p0 = pages && pages[0];
           if (!p0) throw new Error('no_page0');
 
-          // UX HARDCORE: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
+          // UX HARDCORE: antes de login+senha, fechar todas as abas extras (fica sÃ³ na aba 0)
           try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
 
           const man2 = await manifestStore.read(nome).catch(()=>null);
@@ -9529,7 +9529,7 @@ const handlers = {
 
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
-          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
+          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), nÃ£o no feed.
           await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
@@ -9540,7 +9540,7 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
           if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
+          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, nÃ£o adianta seguir para Messenger.
           try {
             const lrAfterFb = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
             if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
@@ -9550,9 +9550,9 @@ const handlers = {
             }
           } catch {}
 
-          // Messenger depois (se necessário)
+          // Messenger depois (se necessÃ¡rio)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -9562,7 +9562,7 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
           if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          // Se Messenger cair em estado não automatizável, também fail-fast.
+          // Se Messenger cair em estado nÃ£o automatizÃ¡vel, tambÃ©m fail-fast.
           try {
             const lrAfterMsg = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
             if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
@@ -9576,13 +9576,13 @@ const handlers = {
           await new Promise(r => setTimeout(r, 1400));
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
 
-          // Facebook: validar create/item (Robe real) — sem navegar para o feed.
+          // Facebook: validar create/item (Robe real) â€” sem navegar para o feed.
           const uiRetryUnblock = async (label, rounds = 4) => {
-            // Espera extra para evitar "unknown" por race de navegação/contexto
+            // Espera extra para evitar "unknown" por race de navegaÃ§Ã£o/contexto
             await new Promise(r => setTimeout(r, 1600));
             let ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
             if (ui && ui.ok === false && ui.kind === 'unknown') {
-              // Retry com reload: muitos "unknown" são contexto destruído durante redirect
+              // Retry com reload: muitos "unknown" sÃ£o contexto destruÃ­do durante redirect
               try { await p0.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
               await new Promise(r => setTimeout(r, 1800));
               ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
@@ -9601,11 +9601,11 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
           if (await checkAndAbortIfBanned(p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
+          // Se create item estÃ¡ bloqueado, reflita em uiFacebook para decisÃ£o abaixo
           if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
           if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
-          // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
-          // se o create/item (Robe real) já validou ok.
+          // Caso comum (conta nova): "probe_failed" no fb_main nÃ£o pode derrubar o provision
+          // se o create/item (Robe real) jÃ¡ validou ok.
           try {
             const fbReason = String((lrFacebook && lrFacebook.reason) || '');
             if (
@@ -9634,7 +9634,7 @@ const handlers = {
         !(lrFacebook && lrFacebook.loginRequired) &&
         !!uiOk;
 
-      // Hard rule: se cair em captcha/checkpoint/identity, NÃO é sucesso e deve invocar humano.
+      // Hard rule: se cair em captcha/checkpoint/identity, NÃƒO Ã© sucesso e deve invocar humano.
       const nonAutomatableReason = (lr) => {
         const r = String(lr && lr.reason || '').toLowerCase();
         if (!r) return '';
@@ -9647,7 +9647,7 @@ const handlers = {
       const na = nonAutomatableReason(lrMessenger) || nonAutomatableReason(lrFacebook);
       if (na) {
         pushStep({ step: 'non_automatable_after_login', reason: na, lrMessenger, lrFacebook });
-        // 2FA => exclusão automática (não vira humano)
+        // 2FA => exclusÃ£o automÃ¡tica (nÃ£o vira humano)
         if (String(na) === 'two_factor') {
           try { await setTwoFactorFlag(nome, { reason: 'two_factor', snippet: '' }); } catch {}
           return { ok: false, error: 'two_factor', steps, closedForRam, pausedVirtus };
@@ -9657,10 +9657,10 @@ const handlers = {
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
       }
 
-      // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
+      // Se nÃ£o Ã© loginRequired, mas a UI estÃ¡ bloqueada (consent/popup nÃ£o resolvido), NÃƒO marque sucesso.
       if (!uiOk) {
-        // Stock provision: tente mais uma rodada determinística (reload + unblock) antes de declarar "UI bloqueada (Humano)".
-        // Motivação: conta nova costuma cair em consent/dialog temporário; dá para resolver sem humano em muitos casos.
+        // Stock provision: tente mais uma rodada determinÃ­stica (reload + unblock) antes de declarar "UI bloqueada (Humano)".
+        // MotivaÃ§Ã£o: conta nova costuma cair em consent/dialog temporÃ¡rio; dÃ¡ para resolver sem humano em muitos casos.
         const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
         if (isStockProvision) {
           try {
@@ -9706,7 +9706,7 @@ const handlers = {
         }
       }
 
-      // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
+      // Se nÃ£o Ã© loginRequired, mas a UI estÃ¡ bloqueada (consent/popup nÃ£o resolvido), NÃƒO marque sucesso.
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
         pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
@@ -9731,7 +9731,7 @@ const handlers = {
               // Garantia: pelo menos 24h a partir de agora.
               m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
               m.robeCooldownRemainingMs = 0;
-              // Não sobrescrever "limit_posting" (estado mais forte), mas em conta nova queremos new_account.
+              // NÃ£o sobrescrever "limit_posting" (estado mais forte), mas em conta nova queremos new_account.
               const r = String(m.robePauseReason || '');
               if (String(r).toLowerCase() !== 'limit_posting') {
                 m.robePauseReason = 'new_account';
@@ -9786,9 +9786,9 @@ const handlers = {
         pausedVirtus
       };
 
-      // 7) restaurar estado (mínimo impacto):
+      // 7) restaurar estado (mÃ­nimo impacto):
       // - perfis que estavam trabalhando antes: retomar Virtus
-      // - perfil alvo: só retomar se ele estava trabalhando antes E a remediação deu sucesso
+      // - perfil alvo: sÃ³ retomar se ele estava trabalhando antes E a remediaÃ§Ã£o deu sucesso
       try {
         const resumed = [];
         const tryResume = (n) => {
@@ -9820,9 +9820,9 @@ const handlers = {
         try { await snapshotStatusAndWrite(); } catch {}
       } catch {}
 
-      // 8) Pós-sucesso enterprise:
+      // 8) PÃ³s-sucesso enterprise:
       // - fechar o navegador do perfil (remove aba create/item, libera RAM)
-      // - reabrir perfis fechados por RAM (mínimo impacto, gradual)
+      // - reabrir perfis fechados por RAM (mÃ­nimo impacto, gradual)
       // - reabrir e iniciar trabalho do perfil alvo (se solicitado)
       try {
         const opts2 = (options && typeof options === 'object') ? options : {};
@@ -9832,7 +9832,7 @@ const handlers = {
 
         if (success && closeAfterSuccess) {
           pushStep({ step: 'post_success_close_target_begin' });
-          // NÃO usar handlers.deactivate aqui (ele reentra em lockProfileAction e pode deadlockar).
+          // NÃƒO usar handlers.deactivate aqui (ele reentra em lockProfileAction e pode deadlockar).
           try {
             const ctrlClose = controllers.get(nome);
             if (ctrlClose && ctrlClose.browser && ctrlClose.browser.isConnected?.()) {
@@ -9850,8 +9850,8 @@ const handlers = {
         }
 
         if (success && reopenClosedForRam && Array.isArray(closedForRam) && closedForRam.length) {
-          // Já foram fechados com policy=preserveDesired; o worker agenda reopenAt.
-          // Aqui apenas “dá um empurrão” para reabrir mais cedo de forma gradual, sem reentrar em locks.
+          // JÃ¡ foram fechados com policy=preserveDesired; o worker agenda reopenAt.
+          // Aqui apenas â€œdÃ¡ um empurrÃ£oâ€ para reabrir mais cedo de forma gradual, sem reentrar em locks.
           const nudged = [];
           const now = Date.now();
           for (let i = 0; i < closedForRam.length; i++) {
@@ -9868,12 +9868,12 @@ const handlers = {
         }
 
         if (success && startAfterSuccess) {
-          // NÃO usar handlers.activate/start_work aqui (reentrância de lockProfileAction).
-          // Estratégia enterprise determinística:
+          // NÃƒO usar handlers.activate/start_work aqui (reentrÃ¢ncia de lockProfileAction).
+          // EstratÃ©gia enterprise determinÃ­stica:
           // 1) patch desired (fonte de verdade) -> active=true, virtus=on, humanHold=false
-          // 2) fechar browser temporário (já feito acima, se closeAfterSuccess)
+          // 2) fechar browser temporÃ¡rio (jÃ¡ feito acima, se closeAfterSuccess)
           // 3) tentar ativar + iniciar Virtus com retries curtos
-          //    - se falhar, NÃO travar/loop infinito: deixa nurse/desired completar.
+          //    - se falhar, NÃƒO travar/loop infinito: deixa nurse/desired completar.
           try {
             await fileStore.withDesiredFileLockUpdate((d) => {
               d.perfis = d.perfis || {};
@@ -9892,7 +9892,7 @@ const handlers = {
             if (!robeMeta[nome].reopenAt || robeMeta[nome].reopenAt > when) robeMeta[nome].reopenAt = when;
           } catch {}
 
-          // Tentativas curtas de ativação; se falhar, nurse/desired completa sem bloquear o fluxo.
+          // Tentativas curtas de ativaÃ§Ã£o; se falhar, nurse/desired completa sem bloquear o fluxo.
           pushStep({ step: 'post_success_activate_once_begin' });
           let actOk = false;
           let lastActErr = null;
@@ -9915,7 +9915,7 @@ const handlers = {
           }
           pushStep({ step: 'post_success_activate_once_done', ok: actOk, error: lastActErr });
 
-          // Só inicia Virtus se tiver controller+browser (evita "no_browser" enganoso).
+          // SÃ³ inicia Virtus se tiver controller+browser (evita "no_browser" enganoso).
           pushStep({ step: 'post_success_start_virtus_begin' });
           try {
             const ctrlNow = controllers.get(nome);
@@ -9964,13 +9964,13 @@ const handlers = {
           if (c2) c2.configurando = prevConfigurando ? true : false;
         } catch {}
         // 7) libera lock global sempre (mesmo com returns/erros)
-        // IMPORTANTE: liberar ANTES do resume para `automationAllowed()` não bloquear re-start do Virtus.
+        // IMPORTANTE: liberar ANTES do resume para `automationAllowed()` nÃ£o bloquear re-start do Virtus.
         try { provisionLock.release({ owner: op }); } catch {}
-        // Governança: libera permit sempre (anti-leak)
+        // GovernanÃ§a: libera permit sempre (anti-leak)
         try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'done' }).catch(()=>{}); } catch {}
 
-        // P0 fix (forense): sempre tentar retomar Virtus dos perfis pausados pela quiescência.
-        // Sem isso, um único auto_login_remediate pode derrubar "working" em massa (active=ok, virtusOffline).
+        // P0 fix (forense): sempre tentar retomar Virtus dos perfis pausados pela quiescÃªncia.
+        // Sem isso, um Ãºnico auto_login_remediate pode derrubar "working" em massa (active=ok, virtusOffline).
         try {
           if (Array.isArray(pausedVirtus) && pausedVirtus.length > 0) {
             const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
@@ -10027,7 +10027,7 @@ const handlers = {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
-        return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+        return { ok: false, error: 'Navegador nÃ£o estÃ¡ aberto/vivo para esta conta!' };
       }
 
       const robes = robeMeta[nome] || {};
@@ -10108,11 +10108,11 @@ const handlers = {
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
         try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
-        return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+        return { ok: false, error: 'Navegador nÃ£o estÃ¡ aberto/vivo para esta conta!' };
       }
 
-      // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
-      // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
+      // IMPORTANTE: nÃ£o usar flags antigas (appeal/identity) para decidir automaÃ§Ã£o.
+      // "Retomar trabalho" Ã© um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
@@ -10120,7 +10120,7 @@ const handlers = {
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
       try { await syncHumanOverlay(nome); } catch {}
       // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
-      // - limpa flags de login/falha e também estados de análise (appeal/identity) para não engessar.
+      // - limpa flags de login/falha e tambÃ©m estados de anÃ¡lise (appeal/identity) para nÃ£o engessar.
       try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
       try { await clearAppealSubmittedFlag(nome); } catch {}
       try { await clearIdentityFlags(nome); } catch {}
@@ -10135,7 +10135,7 @@ const handlers = {
         delete robeMeta[nome].loginReason;
         delete robeMeta[nome].appealSubmitted;
       } catch {}
-      // "Retomar" deve remover humanHold antes do preflight (preflight pode reativar humanHold se necessário).
+      // "Retomar" deve remover humanHold antes do preflight (preflight pode reativar humanHold se necessÃ¡rio).
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -10161,32 +10161,32 @@ const handlers = {
       if (pages && pages[0]) {
         try {
           // Refresh + destravar modais do FB ANTES do preflight.
-          // NÃO navegar para Messenger aqui, senão o preflight olha a aba errada e não detecta identidade/appeal.
+          // NÃƒO navegar para Messenger aqui, senÃ£o o preflight olha a aba errada e nÃ£o detecta identidade/appeal.
           await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
           await new Promise(r => setTimeout(r, 350));
           await reloadPageEnterprise(pages[0], { nome, tag: 'human_resume_refresh', timeoutMs: 60_000 }).catch(()=>null);
         } catch {}
       }
 
-      // ===== Enterprise HARDENING: diagnóstico imediato do estado real antes de "voltar a trabalhar" =====
-      // Regras (ultra enterprise - usuário mandou):
-      // - NUNCA invocar humano automaticamente. Somente via handler explícito invoke_human.
-      // - Se estiver suspensa/banida: marca (auto delete/stock) e não tenta automação.
-      // - Se estiver em captcha/identity/checkpoint/2FA: marca flags e mantém Virtus OFF.
+      // ===== Enterprise HARDENING: diagnÃ³stico imediato do estado real antes de "voltar a trabalhar" =====
+      // Regras (ultra enterprise - usuÃ¡rio mandou):
+      // - NUNCA invocar humano automaticamente. Somente via handler explÃ­cito invoke_human.
+      // - Se estiver suspensa/banida: marca (auto delete/stock) e nÃ£o tenta automaÃ§Ã£o.
+      // - Se estiver em captcha/identity/checkpoint/2FA: marca flags e mantÃ©m Virtus OFF.
       // - Se estiver em login/senha (login_form): agenda login_remediate (cookies -> login -> humano) sob provisionLock/quiesce.
-      // - Se estiver em appeal_submitted: não retoma automação; arma monitoramento (1h).
+      // - Se estiver em appeal_submitted: nÃ£o retoma automaÃ§Ã£o; arma monitoramento (1h).
       let scheduledLoginRemediate = false;
       let appealDetectedInPreflight = false;
       let preflight = { ok: true, state: 'unknown', reason: '' };
       try {
-        // Preferir uma aba do Facebook (onde aparecem identity/appeal modals), não Messenger.
+        // Preferir uma aba do Facebook (onde aparecem identity/appeal modals), nÃ£o Messenger.
         const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
         const p0 =
           (pages && pages.find(p => /facebook\.com/i.test(safeUrl(p)) )) ||
           ((pages && pages[0]) ? pages[0] : null);
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_preflight_page', nome: String(nome||''), url: String(safeUrl(p0)||''), pagesCount: Array.isArray(pages) ? pages.length : 0 }); } catch {}
         if (p0) {
-          // 0) Suspensa/banida (UI de suspensão)
+          // 0) Suspensa/banida (UI de suspensÃ£o)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
           if (bd && bd.banned) {
         preflight = { ok: true, state: 'banned', reason: String(bd.reason || 'suspended_ui') };
@@ -10213,7 +10213,7 @@ const handlers = {
             preflight = { ok: true, state: 'login_required', reason: String(lr.reason || '') };
             try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || 'human_resume' }); } catch {}
 
-            // appeal_submitted: não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
+            // appeal_submitted: nÃ£o retoma automaÃ§Ã£o; arma monitoramento (1h) e mantÃ©m Virtus OFF.
             if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
               preflight.state = 'appeal_submitted';
               try { await issues.append(nome, 'human_resume_preflight', `state=appeal_submitted reason=${String(lr.reason||'')}`); } catch {}
@@ -10227,7 +10227,7 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // identity_submitted: entra em monitor 1h (não é login/cookies falhou)
+            // identity_submitted: entra em monitor 1h (nÃ£o Ã© login/cookies falhou)
             if (rr.includes('identity_submitted')) {
               preflight.state = 'identity_submitted';
               try { await issues.append(nome, 'human_resume_preflight', `state=identity_submitted reason=${String(lr.reason||'')}`); } catch {}
@@ -10238,7 +10238,7 @@ const handlers = {
               logger.info('[HANDLER] human-resume preflight -> identity_submitted', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
-            // identity_required: estado próprio (não é falha de login)
+            // identity_required: estado prÃ³prio (nÃ£o Ã© falha de login)
             if (rr.includes('identity')) {
               preflight.state = 'identity_required';
               try { await issues.append(nome, 'human_resume_preflight', `state=identity_required reason=${String(lr.reason||'')}`); } catch {}
@@ -10250,8 +10250,8 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // Captcha/Checkpoint: temos fluxo automático (N tentativas) e só cai em humano se falhar.
-            // 2FA => exclusão automática.
+            // Captcha/Checkpoint: temos fluxo automÃ¡tico (N tentativas) e sÃ³ cai em humano se falhar.
+            // 2FA => exclusÃ£o automÃ¡tica.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const isCaptchaCheckpoint = rr.includes('captcha') || rr.includes('checkpoint');
             const needsHuman =
@@ -10265,7 +10265,7 @@ const handlers = {
               return { ok: false, error: 'two_factor', preflight };
             }
             if (isCaptchaCheckpoint) {
-              // Captcha/Checkpoint é um estado próprio: NÃO marcar como "login/cookies falhou".
+              // Captcha/Checkpoint Ã© um estado prÃ³prio: NÃƒO marcar como "login/cookies falhou".
               preflight.state = 'captcha_flow_scheduled';
               try { await issues.append(nome, 'human_resume_preflight', `state=captcha_flow_scheduled reason=${String(lr.reason||'')}`); } catch {}
               try {
@@ -10299,7 +10299,7 @@ const handlers = {
             }
 
             // login_form (ou outros loginRequired "automatable"): agenda login_remediate imediatamente.
-            // Requisito do lead: após sucesso, conta nova/retomada deve iniciar com Robe em 24h (igual conta nova).
+            // Requisito do lead: apÃ³s sucesso, conta nova/retomada deve iniciar com Robe em 24h (igual conta nova).
             try {
               const plus24 = 24 * 60 * 60 * 1000;
               const now = Date.now();
@@ -10363,18 +10363,18 @@ const handlers = {
       if (scheduledLoginRemediate) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_scheduled_login_remediate', nome: String(nome||''), reason: String(preflight && preflight.reason || '') }); } catch {}
         await snapshotStatusAndWrite();
-        // desired é setado para virtus=off acima; login_remediate vai resolver e reativar se der certo.
+        // desired Ã© setado para virtus=off acima; login_remediate vai resolver e reativar se der certo.
         logger.info('[HANDLER] human-resume ok (login_remediate scheduled)', { nome, preflight });
         return { ok: true, scheduledLoginRemediate: true, preflight };
       }
 
-      // ===== Fluxo original: se não caiu em nenhum estado "especial", retoma automação normal =====
+      // ===== Fluxo original: se nÃ£o caiu em nenhum estado "especial", retoma automaÃ§Ã£o normal =====
       // Agora que o preflight passou, navegar para o Messenger (Virtus/Robe usam essa rota).
       try {
         let pagesN = [];
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
-          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          await pagesN[0].goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
@@ -10453,7 +10453,7 @@ const handlers = {
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_worker_robe_play_handler_entry', nome: String(nome || ''), hasCtrl: !!controllers.get(nome) }); } catch {}
       // #endregion
       const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador nÃ£o estÃ¡ aberto/vivo para esta conta!' };
 
       if (isFrozenNow(nome)) {
         return { ok: false, error: 'account_frozen' }
@@ -10539,7 +10539,7 @@ const handlers = {
                   });
                 } catch {}
                 try { await setLoginRequiredFlag(nome, { reason: rr, source: ss }); } catch {}
-                // Agenda remediação automática para convergir o fluxo Robe sem depender de novo clique.
+                // Agenda remediaÃ§Ã£o automÃ¡tica para convergir o fluxo Robe sem depender de novo clique.
                 setTimeout(() => {
                   try {
                     handlers.login_remediate({
@@ -10549,7 +10549,7 @@ const handlers = {
                     }).catch(() => {});
                   } catch {}
                 }, 0);
-                try { await reportAction(nome, 'robe_login_required', `Robe detectou login_required (${rr}); remediação agendada.`); } catch {}
+                try { await reportAction(nome, 'robe_login_required', `Robe detectou login_required (${rr}); remediaÃ§Ã£o agendada.`); } catch {}
                 robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
                 try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
                 return;
@@ -10563,7 +10563,7 @@ const handlers = {
                 try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
                 return;
               }
-              await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
+              await reportAction(nome, 'robe_error', `Falha tÃ©cnica: ${(e&&e.message)||e}; cooldown padrÃ£o (15â€“30min) serÃ¡ aplicado por robe.js`);
               robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
               try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
               try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
@@ -10687,7 +10687,7 @@ const handlers = {
     return lockProfileAction(nome, async () => {
       const ctrl = controllers.get(nome);
 
-      // Se navegador não está ativo para este perfil, não há o que aplicar!
+      // Se navegador nÃ£o estÃ¡ ativo para este perfil, nÃ£o hÃ¡ o que aplicar!
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         await issues.append(nome, 'mil_action', 'apply_city_runtime_skip_not_active');
 
@@ -10817,7 +10817,7 @@ const handlers = {
         }
       })();
 
-      // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
+      // Observabilidade enterprise: flags runtime (usadas para pausa/quiescÃªncia determinÃ­stica)
       const ctrl = controllers.get(nome);
       const virtusOnline = !!(ctrl && ctrl.virtus);
       const sendLockObj = (ctrl && ctrl.browser && ctrl.browser._sendLock && typeof ctrl.browser._sendLock === 'object')
@@ -10850,7 +10850,7 @@ const handlers = {
         issuesCount,
         ramMB: (() => {
           const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
+          // Logs removidos para evitar poluiÃ§Ã£o do terminal (ramMB null Ã© normal para perfis inativos)
           return v;
         })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -10912,7 +10912,7 @@ const handlers = {
         emExecucao: !!robeMeta[nome]?.emExecucao,
         ramMB: (() => {
           const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
+          // Logs removidos para evitar poluiÃ§Ã£o do terminal (ramMB null Ã© normal para perfis inativos)
           return v;
         })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -10962,7 +10962,7 @@ const handlers = {
       serverConfig: (() => {
         try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
       })(),
-      // Diagnóstico enterprise: ajuda a provar quando o dashboard está “cego” porque não há controllers vivos.
+      // DiagnÃ³stico enterprise: ajuda a provar quando o dashboard estÃ¡ â€œcegoâ€ porque nÃ£o hÃ¡ controllers vivos.
       _debug: {
         pid: process && process.pid ? process.pid : null,
         buildTag: (typeof WORKER_BUILD_TAG === 'string' ? WORKER_BUILD_TAG : null),
@@ -11176,8 +11176,8 @@ const problem = man
   : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
-// Estoque (CT): vínculo determinístico do perfil do servidor com a conta do estoque.
-// Importante: NÃO expõe cookies/senha — só o ID (para o CT conseguir mapear mesmo quando cookie_fp ainda não foi calculado).
+// Estoque (CT): vÃ­nculo determinÃ­stico do perfil do servidor com a conta do estoque.
+// Importante: NÃƒO expÃµe cookies/senha â€” sÃ³ o ID (para o CT conseguir mapear mesmo quando cookie_fp ainda nÃ£o foi calculado).
 const stockAccountId = (() => {
   try {
     const sid = Number((man0 && (man0.stockAccountId || man0.stock_account_id)) ? (man0.stockAccountId || man0.stock_account_id) : 0) || 0;
@@ -11208,7 +11208,7 @@ perfis.push({
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
   trabalhando: !!(controllers.get(nome)?.trabalhando),
-  // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
+  // Observabilidade enterprise (p/ pausas determinÃ­sticas durante provisionamento)
   virtusOnline: !!(controllers.get(nome)?.virtus),
   sendLockActive: !!(controllers.get(nome)?.browser && controllers.get(nome).browser._sendLock && controllers.get(nome).browser._sendLock.active),
   robeEmExecucao: !!(robeMeta[nome]?.emExecucao),
@@ -11259,8 +11259,8 @@ perfis.push({
 
 // #region agent log
 try {
-  // Anomalia de massa: muitos perfis "ativos" porém não trabalhando.
-  // Critério: captura quedas relevantes também em hosts menores, sem spammar.
+  // Anomalia de massa: muitos perfis "ativos" porÃ©m nÃ£o trabalhando.
+  // CritÃ©rio: captura quedas relevantes tambÃ©m em hosts menores, sem spammar.
   if (!global.__ANOMALY_WORKING_LAST_AT) global.__ANOMALY_WORKING_LAST_AT = 0;
   if (!global.__ANOMALY_PROFILE_LAST_AT) global.__ANOMALY_PROFILE_LAST_AT = new Map();
 
@@ -11286,7 +11286,7 @@ try {
       .filter(x =>
         x.trabalhando !== true &&
         x.virtusOnline !== true &&
-        // "deveria trabalhar": desired ativo + virtus on e sem flags de bloqueio óbvias
+        // "deveria trabalhar": desired ativo + virtus on e sem flags de bloqueio Ã³bvias
         dmap[x.nome] && dmap[x.nome].active === true && String(dmap[x.nome].virtus || '') === 'on' &&
         x.loginRequired !== true &&
         x.identityRequired !== true &&
@@ -11297,7 +11297,7 @@ try {
       .slice(0, 12)
       .map(x => ({
         nome: x.nome,
-        // sem PII: não incluir label/login
+        // sem PII: nÃ£o incluir label/login
         virtusOnline: x.virtusOnline === true,
         trabalhando: x.trabalhando === true,
         loginRequired: x.loginRequired === true,
@@ -11465,12 +11465,12 @@ const statusObj = {
   ts: Date.now()
 };
 
-// LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
+// LOGS DE DIAGNÃ“STICO DA RAM â€” somente quando estiver null/undefined
 try {
-  // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
+  // Logs removidos para evitar poluiÃ§Ã£o do terminal (ramMB null Ã© normal para perfis inativos)
   // for (const ent of perfis) {
   //   if (!(typeof ent.ramMB === 'number')) {
-  //     logger.warn('[STATUS-WRITE] ramMB é null/undefined', { nome: ent.nome, ramMB: ent.ramMB, hasRobeMeta: !!robeMeta[ent.nome] });
+  //     logger.warn('[STATUS-WRITE] ramMB Ã© null/undefined', { nome: ent.nome, ramMB: ent.ramMB, hasRobeMeta: !!robeMeta[ent.nome] });
   //   }
   // }
 } catch {}
@@ -11818,13 +11818,13 @@ async function detectMessengerTempBlock(page) {
       const hasBlocked =
         texts.some(t =>
           t.includes('voce esta bloqueado temporariamente') ||
-          t.includes('você está bloqueado temporariamente') ||
+          t.includes('vocÃª estÃ¡ bloqueado temporariamente') ||
           t.includes('youre temporarily blocked') ||
-          t.includes('you’re temporarily blocked') ||
+          t.includes('youâ€™re temporarily blocked') ||
           t.includes('temporarily blocked')
         );
       const hasReloadBtn =
-        !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar página"],[aria-label*="Reload"]');
+        !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar pÃ¡gina"],[aria-label*="Reload"]');
       return { blocked: hasBlocked, hasReloadBtn };
     });
   } catch { return { blocked: false }; }
@@ -11833,7 +11833,7 @@ async function detectMessengerTempBlock(page) {
 // =========================================================
 // AUTO LOGIN-REMEDIATE (enterprise autopilot)
 // - Objetivo: ao detectar loginRequired (login_form) em qualquer perfil aberto,
-//   disparar automaticamente o fluxo robusto `login_remediate` com mínimo impacto.
+//   disparar automaticamente o fluxo robusto `login_remediate` com mÃ­nimo impacto.
 // - Guardrails:
 //   - 1 por vez por worker/host (evita storm ao "abrir todos")
 //   - backoff por perfil + limite por janela
@@ -11915,7 +11915,7 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
 async function autoLoginRemediateTick() {
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
-  // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
+  // NÃ£o competir com provisionamento/manual configure em andamento: evita alternÃ¢ncia de lock
   try {
     if (provisionLock.isActive()) {
       try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_blocked', reason: 'provision_lock' }); } catch {}
@@ -11935,8 +11935,8 @@ async function autoLoginRemediateTick() {
     }
 
     // configurando: normalmente pula (evita conflito com provision/abas),
-    // mas se o enqueue foi force=true (ex.: governor_busy) e o item já está "ready",
-    // permitimos avançar a fila (a serialização REAL é do governor/provisionLock).
+    // mas se o enqueue foi force=true (ex.: governor_busy) e o item jÃ¡ estÃ¡ "ready",
+    // permitimos avanÃ§ar a fila (a serializaÃ§Ã£o REAL Ã© do governor/provisionLock).
     if (ctrl.configurando === true) {
       let allowOverride = false;
       try {
@@ -11974,11 +11974,11 @@ async function autoLoginRemediateTick() {
     const queued = !!(st && st.queued);
     const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
 
-    // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
+    // SÃ³ tenta se o perfil estÃ¡ marcado como loginRequired (persistido) e estÃ¡ enfileirado (evento detectado).
     if (!lrFlag || !queued) {
       continue;
     }
-    // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
+    // Blindagem anti-loop: se jÃ¡ falhou (cookies+login) recentemente e foi marcado, NÃƒO tenta de novo automaticamente.
     if (lrFailed) {
       try {
         robeMeta[nome] = robeMeta[nome] || {};
@@ -12023,11 +12023,11 @@ async function autoLoginRemediateTick() {
       options: {
         // Autopilot nunca quebra "humanHold" automaticamente.
         overrideHumanHold: false,
-        // Pós-sucesso enterprise: fecha, reabre mínimos e inicia Virtus.
+        // PÃ³s-sucesso enterprise: fecha, reabre mÃ­nimos e inicia Virtus.
         closeAfterSuccess: (String(process.env.AUTO_LOGIN_REMEDIATE_CLOSE_AFTER_SUCCESS || '0').trim() === '1'),
         startAfterSuccess: true,
         reopenClosedForRam: true,
-        // Guardrails (não fechar muito)
+        // Guardrails (nÃ£o fechar muito)
         maxHardDeactivations: 2,
         // Timeouts duros
         totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
@@ -12043,7 +12043,7 @@ async function autoLoginRemediateTick() {
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
 
     if (!st.lastOk) {
-      // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
+      // Persistir estado de falha (para abrir em modo humano e impedir loops automÃ¡ticos)
       try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
       // Backoff em falha: evita loop no mesmo perfil.
       st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
@@ -12073,12 +12073,12 @@ async function autoLoginRemediateTick() {
 }
 
 let _nurseTickRunning = false;
-// Throttle: evidência enterprise de pausa durante provisionamento (evita spam a cada 5s)
+// Throttle: evidÃªncia enterprise de pausa durante provisionamento (evita spam a cada 5s)
 let _provisionPauseLastLogAt = 0;
 let _provisionPauseLastOwner = null;
 let _provisionPauseLastUntilMs = 0;
 
-// Open-all: política para não “travar o servidor” quando faltar recurso para abrir 100%.
+// Open-all: polÃ­tica para nÃ£o â€œtravar o servidorâ€ quando faltar recurso para abrir 100%.
 // Se ficar parado por RAM/supervisor por tempo suficiente, finaliza como "sucesso parcial"
 // (sem loop infinito e sem manter Virtus pausado indefinidamente).
 const OPEN_ALL_PARTIAL_CFG = {
@@ -12089,12 +12089,12 @@ const OPEN_ALL_PARTIAL_CFG = {
 };
 
 // ===== Reconciliador de estado (modo humano) =====
-// Problema real observado em produção (RM4): perfis ficam "engessados" com flags antigas
+// Problema real observado em produÃ§Ã£o (RM4): perfis ficam "engessados" com flags antigas
 // (ex.: loginRemediateFailed) mesmo quando a UI mudou para identidade/ban/login_form.
-// Este reconciliador NÃO posta nada e NÃO liga Virtus; ele só:
+// Este reconciliador NÃƒO posta nada e NÃƒO liga Virtus; ele sÃ³:
 // - detecta BAN/disabled_checkpoint e aplica setBannedFlag (auto delete)
 // - detecta identidade/appeal/login_required e atualiza flags corretas (limpando flags obsoletas)
-// - opcional: se for login_form, pode agendar login_remediate com backoff (política do cliente)
+// - opcional: se for login_form, pode agendar login_remediate com backoff (polÃ­tica do cliente)
 const HUMAN_RECONCILE_CFG = {
   enabled: String(process.env.HUMAN_RECONCILE || '1').trim() !== '0',
   minIntervalMs: parseInt(process.env.HUMAN_RECONCILE_MIN_INTERVAL_MS || '60000', 10), // 60s por perfil
@@ -12108,7 +12108,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
   try {
     if (!HUMAN_RECONCILE_CFG.enabled) return { ok: false, skipped: 'disabled' };
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'no_browser' };
-    // Em modo humano, não reconcilia nem agenda automações.
+    // Em modo humano, nÃ£o reconcilia nem agenda automaÃ§Ãµes.
     if (ctrl && ctrl.humanControl === true) return { ok: false, skipped: 'human_control' };
     robeMeta[nome] = robeMeta[nome] || {};
     const last = Number(robeMeta[nome].humanReconcileLastAt || 0) || 0;
@@ -12127,7 +12127,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     const pg = pick();
     if (!pg) return { ok: false, skipped: 'no_pages' };
 
-    // 1) Ban/Suspensão (desabilitamos sua conta, disabled_checkpoint)
+    // 1) Ban/SuspensÃ£o (desabilitamos sua conta, disabled_checkpoint)
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
       if (bd && bd.banned) {
@@ -12173,7 +12173,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     } catch {}
     if (!lr) lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
+      // Estado real mudou: browser estÃ¡ ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
       let setVirtusOn = false;
@@ -12189,7 +12189,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
         }
       } catch {}
 
-      // Se o perfil está active=true no desired e virtus estava off por conta dessas flags presas, religar.
+      // Se o perfil estÃ¡ active=true no desired e virtus estava off por conta dessas flags presas, religar.
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -12245,7 +12245,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       return { ok: true, state: 'appeal_submitted' };
     }
 
-    // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
+    // login_form: permitir liberar o sistema (polÃ­tica do cliente) com agendamento controlado
     if (rr.includes('login_form') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
       const lastSch = Number(robeMeta[nome].humanReconcileLastScheduleAt || 0) || 0;
       if (!lastSch || (now - lastSch) >= HUMAN_RECONCILE_CFG.minIntervalScheduleMs) {
@@ -12263,7 +12263,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       return { ok: true, state: 'login_form' };
     }
 
-    // Padrão: loginRequired, mas não tentar automação (captcha/checkpoint etc)
+    // PadrÃ£o: loginRequired, mas nÃ£o tentar automaÃ§Ã£o (captcha/checkpoint etc)
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || source }); } catch {}
     return { ok: true, state: 'login_required', reason: rr };
   } catch (e) {
@@ -12278,12 +12278,12 @@ async function nurseTick() {
   _nurseTickRunning = true;
   try {
     // Ultra enterprise (safety+performance):
-    // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
-    // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
+    // Se nÃ£o hÃ¡ browsers abertos, NÃƒO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
+    // Mas ainda precisamos de um sweep leve para exclusÃµes retroativas (ban/2FA) jÃ¡ marcadas em flags.
     const now0 = Date.now();
 
     // Enterprise: retry de arquivamento no CT (quando CT estava 503/offline).
-    // Isso evita “contas sumirem” (ficam assigned no CT mas perfil local já foi deletado).
+    // Isso evita â€œcontas sumiremâ€ (ficam assigned no CT mas perfil local jÃ¡ foi deletado).
     try {
       robeMeta.system = robeMeta.system || {};
       const lastQ = Number(robeMeta.system.ctArchiveQueueLastAt || 0) || 0;
@@ -12293,13 +12293,13 @@ async function nurseTick() {
         try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queue_tick', ok: !!(qr && qr.ok), processed: (qr && qr.processed !== undefined) ? qr.processed : null }); } catch {}
       }
     } catch {}
-    // Importante (P0, 2026-01-30): o nurse NÃO pode "dormir" quando há intenção de abrir.
-    // Open-all e abertura manual começam com controllers=0.
-    // Otimização permitida: só reduzir trabalho quando NÃO existe nenhum desired.active=true e _openAll não está ativo.
+    // Importante (P0, 2026-01-30): o nurse NÃƒO pode "dormir" quando hÃ¡ intenÃ§Ã£o de abrir.
+    // Open-all e abertura manual comeÃ§am com controllers=0.
+    // OtimizaÃ§Ã£o permitida: sÃ³ reduzir trabalho quando NÃƒO existe nenhum desired.active=true e _openAll nÃ£o estÃ¡ ativo.
     let desired0 = null;
     try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch { desired0 = { perfis: {} }; }
 
-    // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
+    // Autopilot "Tudo aberto": sÃ³ forÃ§a desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
     let autoOpenEnabled = false;
     try {
@@ -12351,17 +12351,17 @@ async function nurseTick() {
       try {
         robeMeta.system = robeMeta.system || {};
         const last = Number(robeMeta.system.nurseZeroControllersSweepAt || 0) || 0;
-        if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
+        if (!last || (now0 - last) > 60_000) { // no mÃ¡ximo 1x/min
           robeMeta.system.nurseZeroControllersSweepAt = now0;
           for (const nome of Object.keys((desired0 && desired0.perfis) || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
-              // Ban já marcado => tentar excluir (best-effort, idempotente)
+              // Ban jÃ¡ marcado => tentar excluir (best-effort, idempotente)
               if (flags && flags.banned === true) {
                 try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
                 continue;
               }
-              // 2FA já marcado => tentar excluir
+              // 2FA jÃ¡ marcado => tentar excluir
               if (flags && flags.twoFactor === true) {
                 try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
                 continue;
@@ -12379,17 +12379,17 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Se NÃO há intenção de abrir, pode sair cedo (economia).
+      // Se NÃƒO hÃ¡ intenÃ§Ã£o de abrir, pode sair cedo (economia).
       if (!hasOpenIntent) {
         _nurseTickRunning = false;
         return;
       }
-      // Se há intenção de abrir, continua para o fluxo completo (vai abrir).
+      // Se hÃ¡ intenÃ§Ã£o de abrir, continua para o fluxo completo (vai abrir).
     }
-    // Ultra enterprise: durante operações globais, pausar Virtus de forma controlada
-    // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
-    // Importante (2026-01-29): NÃO pausar Virtus globalmente durante stock_provision.
-    // Stock provision só pode "mexer em RAM" (deactivate_for_ram) sem parar o robô inteiro.
+    // Ultra enterprise: durante operaÃ§Ãµes globais, pausar Virtus de forma controlada
+    // (nÃ£o interromper envio em andamento; nÃ£o mexer em perfis em config/humano/robe ativo).
+    // Importante (2026-01-29): NÃƒO pausar Virtus globalmente durante stock_provision.
+    // Stock provision sÃ³ pode "mexer em RAM" (deactivate_for_ram) sem parar o robÃ´ inteiro.
     let provisionLockSnap = null;
     try {
       const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
@@ -12405,7 +12405,7 @@ async function nurseTick() {
           (!kind && owner && /^(open_all_map:|close_all:)/i.test(owner));
 
         if (!shouldPauseVirtus) {
-          // Não pausar virtus para outros locks (ex.: stock_provision).
+          // NÃ£o pausar virtus para outros locks (ex.: stock_provision).
           _provisionPauseLastOwner = null;
           _provisionPauseLastUntilMs = 0;
         } else {
@@ -12423,7 +12423,7 @@ async function nurseTick() {
           } catch { skipped.other++; }
         }
 
-        // Evidência enterprise: loga no início do lock (ou mudança de owner) e depois a cada ~30s.
+        // EvidÃªncia enterprise: loga no inÃ­cio do lock (ou mudanÃ§a de owner) e depois a cada ~30s.
         const now = Date.now();
         const shouldLog =
           (owner && owner !== _provisionPauseLastOwner) ||
@@ -12451,7 +12451,7 @@ async function nurseTick() {
         }
         }
       } else {
-        // lock acabou: reseta para o próximo provisionamento
+        // lock acabou: reseta para o prÃ³ximo provisionamento
         _provisionPauseLastOwner = null;
         _provisionPauseLastUntilMs = 0;
       }
@@ -12460,12 +12460,12 @@ async function nurseTick() {
     const now = Date.now();
     const desired = desired0 || readJsonFile(desiredPath, { perfis: {} });
 
-    // ===== OPEN-ALL (sequência) — manter lock vivo e finalizar automaticamente =====
+    // ===== OPEN-ALL (sequÃªncia) â€” manter lock vivo e finalizar automaticamente =====
     // Modelo:
     // - /api/perfis/open-all-24h cria desired._openAll.active=true e segura provision_lock (kind=open_all_map).
-    // - Enquanto existirem perfis do shard para abrir, cada worker mantém o TTL vivo (reentrante).
-    // - Quando todos os shards terminarem (ninguém mais renova), o lock expira sozinho.
-    // - Ao detectar expiração, finalizamos desired._openAll e religamos virtus para perfis que não estão em humanHold.
+    // - Enquanto existirem perfis do shard para abrir, cada worker mantÃ©m o TTL vivo (reentrante).
+    // - Quando todos os shards terminarem (ninguÃ©m mais renova), o lock expira sozinho.
+    // - Ao detectar expiraÃ§Ã£o, finalizamos desired._openAll e religamos virtus para perfis que nÃ£o estÃ£o em humanHold.
     try {
       const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
       const oaActive = !!(oa && oa.active === true);
@@ -12476,7 +12476,7 @@ async function nurseTick() {
         ? String(provisionLockSnap.lock.meta.kind)
         : '';
 
-      // Finalizar: openAll ativo, mas lock já expirou/foi removido => concluir e reativar virtus (safe).
+      // Finalizar: openAll ativo, mas lock jÃ¡ expirou/foi removido => concluir e reativar virtus (safe).
       if (oaActive && (!lkActive || !oaOwner || lkOwner !== oaOwner)) {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {}; d.perfis = d.perfis || {};
@@ -12484,7 +12484,7 @@ async function nurseTick() {
           d._openAll.active = false;
           d._openAll.doneAt = Date.now();
           d._openAll.lastError = d._openAll.lastError || null;
-          // Regra do humano: ao concluir o open-all, liberar Virtus para quem NÃO está em humanHold.
+          // Regra do humano: ao concluir o open-all, liberar Virtus para quem NÃƒO estÃ¡ em humanHold.
           for (const n of Object.keys(d.perfis || {})) {
             const cur = d.perfis[n] || {};
             if (cur && cur.active === true && cur.humanHold !== true && String(cur.virtus || '') === 'off') {
@@ -12514,7 +12514,7 @@ async function nurseTick() {
           }
         } catch {}
 
-        // Heurística enterprise (P1): se está "preso" abrindo e os pendentes só recebem negação por RAM/supervisor,
+        // HeurÃ­stica enterprise (P1): se estÃ¡ "preso" abrindo e os pendentes sÃ³ recebem negaÃ§Ã£o por RAM/supervisor,
         // finaliza como sucesso parcial para liberar o servidor (Virtus/Robe).
         try {
           if (OPEN_ALL_PARTIAL_CFG.enabled && pending > 0) {
@@ -12539,7 +12539,7 @@ async function nurseTick() {
             const ageOk = startedAt && (now - startedAt) >= OPEN_ALL_PARTIAL_CFG.minAgeMs;
             const stalledOk = stalledSince && (now - stalledSince) >= OPEN_ALL_PARTIAL_CFG.stallMs;
             if (ageOk && stalledOk && ramDeniedPending.length === pendingNames.length) {
-              // Finaliza e "desliga" desired.active para os que não abriram por limitação (evita loop infinito).
+              // Finaliza e "desliga" desired.active para os que nÃ£o abriram por limitaÃ§Ã£o (evita loop infinito).
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
                   d = d || {}; d.perfis = d.perfis || {};
@@ -12571,7 +12571,7 @@ async function nurseTick() {
                       robeMeta[nn].whyNotOpen = 'open_all_partial_ram';
                     } catch {}
                   }
-                  // Libera Virtus para quem ficou ativo e não está em humanHold.
+                  // Libera Virtus para quem ficou ativo e nÃ£o estÃ¡ em humanHold.
                   for (const n of Object.keys(d.perfis || {})) {
                     const cur = d.perfis[n] || {};
                     if (cur && cur.active === true && cur.humanHold !== true && String(cur.virtus || '') === 'off') {
@@ -12593,7 +12593,7 @@ async function nurseTick() {
                   skipped: (ramDeniedPending || []).slice(0, 60)
                 });
               } catch {}
-              // Não faça keepalive se finalizamos agora.
+              // NÃ£o faÃ§a keepalive se finalizamos agora.
               pending = 0;
               pendingNames = [];
             }
@@ -12602,16 +12602,16 @@ async function nurseTick() {
 
         if (pending > 0) {
           try {
-            // TTL pequeno e renovável => lock cai rápido quando todos terminarem.
+            // TTL pequeno e renovÃ¡vel => lock cai rÃ¡pido quando todos terminarem.
             provisionLock.tryAcquire({ owner: oaOwner, ttlMs: 120000, meta: { kind: 'open_all_keepalive', pending } });
           } catch {}
         }
       }
     } catch {}
 
-    // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
+    // ===== PRIORIDADE ENTERPRISE: Recurso em anÃ¡lise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,
-    // ele deve ser o próximo a abrir (não pode ser “pulado”).
+    // ele deve ser o prÃ³ximo a abrir (nÃ£o pode ser â€œpuladoâ€).
     let appealReadyPick = '';
     try {
       const names0 = Object.keys(desired.perfis || {});
@@ -12632,10 +12632,10 @@ async function nurseTick() {
       }
     } catch {}
 
-    // Se achamos um "Pronto!", abre ele agora e não abre outros nesta rodada.
+    // Se achamos um "Pronto!", abre ele agora e nÃ£o abre outros nesta rodada.
     if (appealReadyPick) {
       if (robeMeta[appealReadyPick]?.activationHeldUntil && robeMeta[appealReadyPick].activationHeldUntil > Date.now()) {
-        // Não deve acontecer (guard), mas não travar: segue o loop normal.
+        // NÃ£o deve acontecer (guard), mas nÃ£o travar: segue o loop normal.
       } else if (slotsInUse < MAX_OPEN_CONCURRENCY) {
         slotsInUse++;
         try {
@@ -12652,8 +12652,8 @@ async function nurseTick() {
     for (const nome of Object.keys(desired.perfis || {})) {
       const ctrlExisting = controllers.get(nome);
       if (SHARD_SET.size && !inShard(nome) && !ctrlExisting) {
-        // Debug enterprise (P0 gaps): se o perfil está desired.active=true mas não está no shard,
-        // ele fica "órfão" e nunca abre. Logar com debounce para evidência irrefutável.
+        // Debug enterprise (P0 gaps): se o perfil estÃ¡ desired.active=true mas nÃ£o estÃ¡ no shard,
+        // ele fica "Ã³rfÃ£o" e nunca abre. Logar com debounce para evidÃªncia irrefutÃ¡vel.
         try {
           const want0 = desired.perfis ? (desired.perfis[nome] || {}) : {};
           if (want0 && want0.active === true) {
@@ -12677,7 +12677,7 @@ async function nurseTick() {
       const ctrl = ctrlExisting || null;
 
       // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,
-      // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
+      // senÃ£o o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
       try {
         const flagsR = await readAccountFlags(nome).catch(()=>({}));
         const needsRecon =
@@ -12688,14 +12688,14 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Auto-exclusão enterprise: se já está marcado como banned/suspended, arquiva no CT e deleta o perfil local.
-      // Isso cobre casos pós-restart onde a flag já estava setada e não vai passar novamente pelos fluxos de detecção.
+      // Auto-exclusÃ£o enterprise: se jÃ¡ estÃ¡ marcado como banned/suspended, arquiva no CT e deleta o perfil local.
+      // Isso cobre casos pÃ³s-restart onde a flag jÃ¡ estava setada e nÃ£o vai passar novamente pelos fluxos de detecÃ§Ã£o.
       try {
         const flagsB = await readAccountFlags(nome).catch(()=>({}));
         if (flagsB && flagsB.banned === true) {
           robeMeta[nome] = robeMeta[nome] || {};
           const last = Number(robeMeta[nome].banSweepLastAt || 0) || 0;
-          if (!last || (now - last) > (2 * 60 * 1000)) { // no máximo 1 tentativa a cada 2min por perfil
+          if (!last || (now - last) > (2 * 60 * 1000)) { // no mÃ¡ximo 1 tentativa a cada 2min por perfil
             robeMeta[nome].banSweepLastAt = now;
             try {
               provisionAudit.append({
@@ -12711,7 +12711,7 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Auto-exclusão enterprise: 2FA (persistente) — cobre pós-restart.
+      // Auto-exclusÃ£o enterprise: 2FA (persistente) â€” cobre pÃ³s-restart.
       try {
         const flags2 = await readAccountFlags(nome).catch(()=>({}));
         if (flags2 && flags2.twoFactor === true) {
@@ -12726,8 +12726,8 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Compat retroativa: versões antigas marcavam 2FA como loginRequired com reason "two_factor/2fa".
-      // Se isso acontecer, convertemos para twoFactor e excluímos.
+      // Compat retroativa: versÃµes antigas marcavam 2FA como loginRequired com reason "two_factor/2fa".
+      // Se isso acontecer, convertemos para twoFactor e excluÃ­mos.
       try {
         const flags3 = await readAccountFlags(nome).catch(()=>({}));
         if (flags3 && flags3.loginRequired === true) {
@@ -12746,7 +12746,7 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Monitoramento: identidade (selfie/vídeo) submetida — checa a cada 1h, mesmo com humanHold.
+      // Monitoramento: identidade (selfie/vÃ­deo) submetida â€” checa a cada 1h, mesmo com humanHold.
       try {
         const flagsI = await readAccountFlags(nome).catch(()=>({}));
         if (flagsI && flagsI.identitySubmitted === true) {
@@ -12772,22 +12772,22 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Identidade requerida (pré-submissão):
-      // Regra do usuário: NUNCA invocar humano automaticamente. O nurse pode rodar assist, mas não seta humanControl/overlay.
+      // Identidade requerida (prÃ©-submissÃ£o):
+      // Regra do usuÃ¡rio: NUNCA invocar humano automaticamente. O nurse pode rodar assist, mas nÃ£o seta humanControl/overlay.
       try {
         const flagsIR = await readAccountFlags(nome).catch(()=>({}));
         if (flagsIR && flagsIR.identityRequired === true) {
-          // P0: Se o navegador NÃO está aberto, não podemos "assistir" identidade.
+          // P0: Se o navegador NÃƒO estÃ¡ aberto, nÃ£o podemos "assistir" identidade.
           // Regra do humano: se desired.active=true, o navegador precisa abrir mesmo em identityRequired.
           if (!ctrl && want && want.active === true) {
             try { provisionAudit.append({ ts: now, event: 'nurse_identity_required_no_ctrl_allow_open', nome: String(nome||'') }); } catch {}
-            // NÃO continue aqui: deixa cair no bloco normal de abertura (want.active && !ctrl).
+            // NÃƒO continue aqui: deixa cair no bloco normal de abertura (want.active && !ctrl).
           } else {
           try {
             if (ctrl) {
               ctrl.trabalhando = false;
               await stopVirtus(nome).catch(()=>{});
-              // Debounce do assist (não spammar cliques)
+              // Debounce do assist (nÃ£o spammar cliques)
               robeMeta[nome] = robeMeta[nome] || {};
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
               if (!last || (now - last) > 30_000) {
@@ -12807,9 +12807,9 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Captcha/Checkpoint (pré-screen ou captcha clássico):
-      // Ultra enterprise: não pode ficar "parado" na tela. Se já está marcado como captcha, o nurse agenda o captcha flow.
-      // Guardrails: 1) não roda em humanControl/humanHold; 2) debounce 30s por perfil; 3) governança do próprio flow.
+      // Captcha/Checkpoint (prÃ©-screen ou captcha clÃ¡ssico):
+      // Ultra enterprise: nÃ£o pode ficar "parado" na tela. Se jÃ¡ estÃ¡ marcado como captcha, o nurse agenda o captcha flow.
+      // Guardrails: 1) nÃ£o roda em humanControl/humanHold; 2) debounce 30s por perfil; 3) governanÃ§a do prÃ³prio flow.
       try {
         const flagsC = await readAccountFlags(nome).catch(()=>({}));
         if (flagsC && flagsC.loginRequired === true) {
@@ -12839,11 +12839,11 @@ async function nurseTick() {
               }
               continue;
             }
-            // P0: Se o navegador NÃO está aberto, não dá pra rodar captcha flow.
+            // P0: Se o navegador NÃƒO estÃ¡ aberto, nÃ£o dÃ¡ pra rodar captcha flow.
             // Regra do humano: se desired.active=true, o navegador precisa abrir mesmo em captcha/loginRequired.
             if (!ctrl && want && want.active === true) {
               try { provisionAudit.append({ ts: now, event: 'nurse_captcha_required_no_ctrl_allow_open', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
-              // NÃO continue: deixa cair no bloco normal de abertura.
+              // NÃƒO continue: deixa cair no bloco normal de abertura.
             } else {
               continue;
             }
@@ -12851,7 +12851,7 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
+      // Monitoramento: recurso/apelaÃ§Ã£o submetida (apÃ³s "Retomar trabalho")
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
         if (flags && flags.appealSubmitted === true) {
@@ -12865,17 +12865,17 @@ async function nurseTick() {
             }
           } catch {}
           // IMPORTANTE (P0): "Abrir todos" / desired.active=true deve abrir o navegador mesmo em appealSubmitted,
-          // porque conta fechada impede diagnóstico e impede o monitor de verificar o estado real.
-          // Regra: se não há controller e queremos active=true, NÃO bloqueie a abertura aqui.
-          // Mantemos o bloqueio de automação (Robe/Virtus) via continue APENAS quando o navegador já está aberto
-          // ou quando não queremos abrir.
+          // porque conta fechada impede diagnÃ³stico e impede o monitor de verificar o estado real.
+          // Regra: se nÃ£o hÃ¡ controller e queremos active=true, NÃƒO bloqueie a abertura aqui.
+          // Mantemos o bloqueio de automaÃ§Ã£o (Robe/Virtus) via continue APENAS quando o navegador jÃ¡ estÃ¡ aberto
+          // ou quando nÃ£o queremos abrir.
           if (!ctrl && want && want.active === true) {
             try { provisionAudit.append({ ts: Date.now(), event: 'appeal_submitted_allow_open_no_ctrl', nome: String(nome||''), nextAt: Number(flags.appealNextCheckAt || 0) || 0 }); } catch {}
-            // NÃO continue: deixa cair no bloco normal de abertura (activateOnce) logo abaixo.
+            // NÃƒO continue: deixa cair no bloco normal de abertura (activateOnce) logo abaixo.
           } else {
           const nextAt = Number(flags.appealNextCheckAt || 0) || 0;
           if (!nextAt || nextAt <= now) {
-            // Só monitora se o navegador está aberto; senão, o nurse seguirá a regra normal de desired.active.
+            // SÃ³ monitora se o navegador estÃ¡ aberto; senÃ£o, o nurse seguirÃ¡ a regra normal de desired.active.
             if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
               await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_check', 'appeal_monitor_check');
               await appealMonitorCheckNow(nome, ctrl).catch(()=>null);
@@ -12887,14 +12887,14 @@ async function nurseTick() {
             await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_waiting', 'appeal_monitor_waiting');
             try { provisionAudit.append({ ts: Date.now(), event: 'appeal_waiting', nome: String(nome||''), nextAt: Number(nextAt || 0) || 0 }); } catch {}
           }
-          // Enquanto estiver em appealSubmitted, NÃO rodar automação normal (Robe/Virtus).
+          // Enquanto estiver em appealSubmitted, NÃƒO rodar automaÃ§Ã£o normal (Robe/Virtus).
           continue;
           }
         }
       } catch {}
 
       if (want.humanHold === true) {
-        // Overlay deve aparecer e se manter (retry periódico com debounce).
+        // Overlay deve aparecer e se manter (retry periÃ³dico com debounce).
         try {
           if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
             robeMeta[nome] = robeMeta[nome] || {};
@@ -12956,12 +12956,12 @@ async function nurseTick() {
           if (_flags && _flags.appealSubmitted === true) {
             try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_pending_appeal', nome: String(nome||''), appealNextCheckAt: Number(_flags.appealNextCheckAt || 0) || 0 }); } catch {}
           }
-          await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
+          await reportAction(nome, 'nurse_restart', 'desired ativo porÃ©m controller ausente â€” tentando ativar');
           try {
             // Se existe um open-all ativo sob provision_lock (kind=open_all_map),
             // a abertura precisa:
             // - bypass do lock (operator = lockOwner)
-            // - entrar em "bulk-open mode" (source contém open_all_24h)
+            // - entrar em "bulk-open mode" (source contÃ©m open_all_24h)
             let r = null;
             try {
               const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
@@ -12996,7 +12996,7 @@ async function nurseTick() {
 
                 if (!swapped) {
                   robeMeta[nome] = robeMeta[nome] || {};
-                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
+                  // NOVO: Backoff fixo de 3s ao invÃ©s de escalonado (supervisor jÃ¡ controla velocidade)
                   const curBackoff = 3000;
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
@@ -13007,9 +13007,9 @@ async function nurseTick() {
                 }
               }
             } else {
-              // NOVO: Backoff fixo de 3s ao invés de 15s
+              // NOVO: Backoff fixo de 3s ao invÃ©s de 15s
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
-              // Progresso do open-all: marca avanço para evitar "stall detector" falso.
+              // Progresso do open-all: marca avanÃ§o para evitar "stall detector" falso.
               try {
                 const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
                 const oaActive = !!(oa && oa.active === true);
@@ -13060,7 +13060,7 @@ async function nurseTick() {
           retryFailed = true;
         }
         if (retryFailed) {
-          // Mesmo sem páginas, registre um snapshot leve quando a flag LR já está setada.
+          // Mesmo sem pÃ¡ginas, registre um snapshot leve quando a flag LR jÃ¡ estÃ¡ setada.
           // Isso cria o arquivo `login_required_events.jsonl` e prova "flag presa" sem depender do browser aberto.
           try {
             const flags = await readAccountFlags(nome).catch(()=>({}));
@@ -13091,7 +13091,7 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
             if (killGuardActive(nome)) {
-              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+              await appendIssueNurseDebounced(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until');
               continue;
             }
             // PATCH P1 START (anti-flap deactivate)
@@ -13118,8 +13118,8 @@ async function nurseTick() {
 
       const p0 = pages[0];
       try {
-        // Se a flag LR já está setada (persistida), capture evidência do estado atual
-        // para provar se é falso positivo (ex.: já está logado mas flag ficou presa).
+        // Se a flag LR jÃ¡ estÃ¡ setada (persistida), capture evidÃªncia do estado atual
+        // para provar se Ã© falso positivo (ex.: jÃ¡ estÃ¡ logado mas flag ficou presa).
         try {
           const flags = await readAccountFlags(nome).catch(()=>({}));
           if (flags && flags.loginRequired === true) {
@@ -13142,7 +13142,7 @@ async function nurseTick() {
           }
         } catch {}
 
-        // === Enterprise: detectar loginRequired em QUALQUER aba (não só pages[0]) ===
+        // === Enterprise: detectar loginRequired em QUALQUER aba (nÃ£o sÃ³ pages[0]) ===
         // Prioridade de motivos (mais grave primeiro)
         const reasonPriority = (r) => {
           const s = String(r || '').toLowerCase();
@@ -13162,7 +13162,7 @@ async function nurseTick() {
           for (const pg of (pages || []).slice(0, 8)) {
             let u = '';
             try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-            // só avalia FB/Messenger
+            // sÃ³ avalia FB/Messenger
             if (!/(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(String(u || ''))) continue;
             const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
             if (det && typeof det === 'object') {
@@ -13178,8 +13178,8 @@ async function nurseTick() {
               if (isMessengerTab && !det.loginRequired) hasMessengerOk = true;
 
               if (det.loginRequired) {
-                // Regra de domínio: Virtus é decidido por Messenger.
-                // "probe_failed" em create/item é sinal fraco quando Messenger está saudável.
+                // Regra de domÃ­nio: Virtus Ã© decidido por Messenger.
+                // "probe_failed" em create/item Ã© sinal fraco quando Messenger estÃ¡ saudÃ¡vel.
                 if (isCreateItemTab && reasonNow === 'probe_failed') {
                   weakCreateProbeFailed = { det, pg, url: urlNow };
                   continue;
@@ -13203,7 +13203,7 @@ async function nurseTick() {
               });
             } catch {}
           } else if (!lr && weakCreateProbeFailed && !hasMessengerTab) {
-            // Se não há Messenger disponível, mantém fallback para não ficar cego.
+            // Se nÃ£o hÃ¡ Messenger disponÃ­vel, mantÃ©m fallback para nÃ£o ficar cego.
             lr = weakCreateProbeFailed.det;
             lrPage = weakCreateProbeFailed.pg;
           }
@@ -13216,11 +13216,11 @@ async function nurseTick() {
           } catch {}
 
           // === Enterprise hardening (P0): auto-desengessar "probe_failed" quando o scan prova LR=false ===
-          // Problema observado em produção (RM3): detectLoginRequired às vezes marca `probe_failed` (pessimista),
-          // a automação pausa (virtus off), mas o próprio scan subsequente mostra LR=false em abas reais.
+          // Problema observado em produÃ§Ã£o (RM3): detectLoginRequired Ã s vezes marca `probe_failed` (pessimista),
+          // a automaÃ§Ã£o pausa (virtus off), mas o prÃ³prio scan subsequente mostra LR=false em abas reais.
           // Guardrails:
-          // - só atua se o flag persistido é loginRequired=true com reason=probe_failed
-          // - só se o scan tem pelo menos 1 página FB/Messenger válida e TODAS têm lr=false
+          // - sÃ³ atua se o flag persistido Ã© loginRequired=true com reason=probe_failed
+          // - sÃ³ se o scan tem pelo menos 1 pÃ¡gina FB/Messenger vÃ¡lida e TODAS tÃªm lr=false
           // - precisa de streak (evita flapping) + debounce (evita loop)
           try {
             const now = Date.now();
@@ -13242,13 +13242,13 @@ async function nurseTick() {
                 s.includes('messenger_pin')
               );
             };
-            // Menos rígido e mais robusto: limpar probe_failed preso quando Messenger está comprovadamente limpo
-            // e não há nenhum sinal forte de bloqueio nas abas escaneadas.
+            // Menos rÃ­gido e mais robusto: limpar probe_failed preso quando Messenger estÃ¡ comprovadamente limpo
+            // e nÃ£o hÃ¡ nenhum sinal forte de bloqueio nas abas escaneadas.
             const scanAllClear = scanHasPages && hasMessengerClear && scan.every(p => p && p.lr === false && !isHardReason(p.reason));
             if (scanAllClear) {
               const flags = await readAccountFlags(nome).catch(()=>null);
-              // Auto-heal de "virtus off" órfão:
-              // quando Messenger está comprovadamente limpo e não há bloqueadores, não deixar conta presa em off.
+              // Auto-heal de "virtus off" Ã³rfÃ£o:
+              // quando Messenger estÃ¡ comprovadamente limpo e nÃ£o hÃ¡ bloqueadores, nÃ£o deixar conta presa em off.
               try {
                 const wantNow = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
                 const desiredVirtusOff = String((wantNow && wantNow.virtus) || '').toLowerCase() === 'off';
@@ -13299,7 +13299,7 @@ async function nurseTick() {
               const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
               const reasonNorm0 = String(reason0 || '').toLowerCase();
               // Auto-clear enterprise (stale LR):
-              // além de probe_failed, também pode limpar login_form preso quando
+              // alÃ©m de probe_failed, tambÃ©m pode limpar login_form preso quando
               // o scan prova Messenger limpo + nenhuma aba com bloqueio real.
               const isClearableStaleReason =
                 !reasonNorm0 ||
@@ -13343,13 +13343,13 @@ async function nurseTick() {
                         pages: scan
                       });
                     } catch {}
-                    // Retoma trabalho sem forçar open/close (nurse faz o resto)
+                    // Retoma trabalho sem forÃ§ar open/close (nurse faz o resto)
                     setTimeout(() => { try { handlers.start_work({ nome, operator: 'lr_auto_clear_stale' }).catch(()=>{}); } catch {} }, 0);
                   }
                 }
               }
             } else {
-              // se o scan não está "limpo", zera streak (evita limpar em cenário flapping/ambíguo)
+              // se o scan nÃ£o estÃ¡ "limpo", zera streak (evita limpar em cenÃ¡rio flapping/ambÃ­guo)
               try {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].lrAutoClearStreak = 0;
@@ -13383,12 +13383,12 @@ async function nurseTick() {
               });
             }
 
-            // GPT fallback (central): envia evidência redacted para o sitechatbot classificar e registrar padrões.
+            // GPT fallback (central): envia evidÃªncia redacted para o sitechatbot classificar e registrar padrÃµes.
             // Guardrails:
-            // - só envia se LOG_INGEST_SECRET estiver configurado (segurança)
-            // - rate-limit 30min por perfil+reason (no cliente e também no servidor central)
+            // - sÃ³ envia se LOG_INGEST_SECRET estiver configurado (seguranÃ§a)
+            // - rate-limit 30min por perfil+reason (no cliente e tambÃ©m no servidor central)
             try {
-              // Evita custo se não houver chance real de envio
+              // Evita custo se nÃ£o houver chance real de envio
               const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
               const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
               if (secret) {
@@ -13396,7 +13396,7 @@ async function nurseTick() {
                 const now = Date.now();
                 const last = Number(robeMeta[nome].lastFbGptIngestAt || 0) || 0;
                 if (!last || (now - last) > (30 * 60 * 1000)) {
-                  // Para reduzir custo: envia só quando capturou evidência ou houve mudança no motivo
+                  // Para reduzir custo: envia sÃ³ quando capturou evidÃªncia ou houve mudanÃ§a no motivo
                   if (captured || changed) {
                     const html = await (lrPage || p0).content().catch(()=>null);
                     await gptFallback.ingestFbGpt({
@@ -13413,17 +13413,17 @@ async function nurseTick() {
               }
             } catch {}
 
-            // Classificação enterprise do LR (sem achismo):
+            // ClassificaÃ§Ã£o enterprise do LR (sem achismo):
             // - Identidade => marca identityRequired/Submitted e roda assist (sem humano invocado)
-            // - Captcha/Checkpoint => marca captchaCheckpoint e aqui SIM invoca humano automaticamente (ordem do usuário)
+            // - Captcha/Checkpoint => marca captchaCheckpoint e aqui SIM invoca humano automaticamente (ordem do usuÃ¡rio)
             try {
               const rr = String(curReason || '').toLowerCase();
               if (rr.includes('identity_submitted')) {
                 await setIdentitySubmittedFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
               } else if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_') || rr.includes('identity')) {
                 await setIdentityRequiredFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
-                // AÇÃO AUTOMÁTICA (ultra enterprise): se caiu em identidade, executa o fluxo multi-step
-                // com gate/cooldown + refresh + reclassificação.
+                // AÃ‡ÃƒO AUTOMÃTICA (ultra enterprise): se caiu em identidade, executa o fluxo multi-step
+                // com gate/cooldown + refresh + reclassificaÃ§Ã£o.
                 try {
                   const pg = (lrPage || p0);
                   if (pg && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
@@ -13435,7 +13435,7 @@ async function nurseTick() {
               }
             } catch {}
           } catch {}
-          // 2FA => exclusão automática (não é humano, não é automação)
+          // 2FA => exclusÃ£o automÃ¡tica (nÃ£o Ã© humano, nÃ£o Ã© automaÃ§Ã£o)
           try {
             const rr0 = String(lr && lr.reason || '').toLowerCase();
             if (rr0.includes('two_factor') || rr0.includes('2fa') || rr0.includes('two factor')) {
@@ -13445,12 +13445,12 @@ async function nurseTick() {
               return;
             }
           } catch {}
-          // Mantém também o flag genérico para rastreio, mas sem mascarar identidade/captcha:
+          // MantÃ©m tambÃ©m o flag genÃ©rico para rastreio, mas sem mascarar identidade/captcha:
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
 
           // Enterprise autopilot:
-          // - login_form => tentar auto-remediação (cookies -> login/senha) com mínimo impacto (1 por vez)
-          // - captcha/checkpoint => segurar em humanHold (não existe automação confiável)
+          // - login_form => tentar auto-remediaÃ§Ã£o (cookies -> login/senha) com mÃ­nimo impacto (1 por vez)
+          // - captcha/checkpoint => segurar em humanHold (nÃ£o existe automaÃ§Ã£o confiÃ¡vel)
           try {
             const rr = String(lr && lr.reason || '').toLowerCase();
             if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
@@ -13463,7 +13463,7 @@ async function nurseTick() {
                 });
               } catch {}
             } else if (rr.includes('login_form')) {
-              // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
+              // Blindagem anti-loop: se jÃ¡ falhou e foi marcado, nÃ£o re-tenta automaticamente.
               try {
                 const flags = await readAccountFlags(nome).catch(()=>({}));
                 if (flags && flags.loginRemediateFailed === true) {
@@ -13488,14 +13488,14 @@ async function nurseTick() {
 
       // Curador enterprise: PIN do Messenger / "Continuar sem restaurar?"
       try {
-        // Só tenta curar quando NÃO está configurando e não está com Robe executando (evita interferir no fluxo de postagem)
+        // SÃ³ tenta curar quando NÃƒO estÃ¡ configurando e nÃ£o estÃ¡ com Robe executando (evita interferir no fluxo de postagem)
         if (ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true) && ctrl.browser && typeof ctrl.browser.pages === 'function') {
           robeMeta[nome] = robeMeta[nome] || {};
           const nowp = Date.now();
           const cd = Number(robeMeta[nome].pinCooldownUntil || 0) || 0;
           if (cd && cd > nowp) {
-            // Anti-loop: se já tentamos recentemente, não mexer no modal (evita “piscar” infinito)
-            // (o login_remediate/configure também tenta em momentos próprios).
+            // Anti-loop: se jÃ¡ tentamos recentemente, nÃ£o mexer no modal (evita â€œpiscarâ€ infinito)
+            // (o login_remediate/configure tambÃ©m tenta em momentos prÃ³prios).
           } else {
           const lastScan = Number(robeMeta[nome].lastPinScanAt || 0) || 0;
           if (!lastScan || (nowp - lastScan) > 8000) {
@@ -13524,13 +13524,13 @@ async function nurseTick() {
 
             if (firstMatch) {
               try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
-              // Anti-loop: ao ver PIN_INPUT, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
+              // Anti-loop: ao ver PIN_INPUT, nÃ£o usar GPT (pode clicar em X/voltar e ficar â€œpiscandoâ€).
               await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
-              // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
+              // Cooldown pÃ³s tentativa: dÃ¡ tempo do Messenger processar e evita re-tentativa imediata.
               robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
               const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
               if (still && still.present) {
-                // PIN_INPUT: não chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
+                // PIN_INPUT: nÃ£o chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
                 await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
                 try {
                   const fsSync2 = require('fs');
@@ -13548,7 +13548,7 @@ async function nurseTick() {
                 } catch {}
               }
             } else if (!anyPresent) {
-              // se não há PIN em nenhuma aba, limpa flag (se existir)
+              // se nÃ£o hÃ¡ PIN em nenhuma aba, limpa flag (se existir)
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
             }
           }
@@ -13590,7 +13590,7 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `action_virtus_block`, `blockDetectWindow=${robeMeta[nome].blockDetectWindow.length}`, 'action_virtus_block');
           robeMeta[nome].blockHysteresisUntil = now2 + 15*60*1000;
           if (killGuardActive(nome)) {
-            await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
+            await appendIssueNurseDebounced(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until (block)', 'guard_skip_block');
             continue;
           }
           await stopVirtus(nome);
@@ -13684,7 +13684,7 @@ async function nurseTick() {
       let healthy = await pageReadyBasic(p0);
       if (!healthy) {
         if (robeMeta[nome].recoveryHysteresisUntil && robeMeta[nome].recoveryHysteresisUntil > Date.now()) {
-          await appendIssueNurseDebounced(nome, 'hysteresis_skip', 'Aguardando histerese pós-recover', 'hysteresis_skip_after_recover');
+          await appendIssueNurseDebounced(nome, 'hysteresis_skip', 'Aguardando histerese pÃ³s-recover', 'hysteresis_skip_after_recover');
           continue;
         }
 
@@ -13720,7 +13720,7 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `suspect_page_zombie`, `strike=${robeMeta[nome].zombieStrikes}`, 'suspect_page_zombie');
           if (robeMeta[nome].zombieStrikes >= 2) {
             if (killGuardActive(nome)) {
-              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until', 'guard_skip_page_zombie');
+              await appendIssueNurseDebounced(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until', 'guard_skip_page_zombie');
               continue;
             }
             // PATCH P1 START (anti-flap deactivate)
@@ -13771,14 +13771,14 @@ async function nurseTick() {
       } catch {}
 
       if (ctrl && ctrl.configurando) {
-        logger.info('[NURSE][SKIP PRUNE] Perfil em configuração, prune ignorado', { nome });
+        logger.info('[NURSE][SKIP PRUNE] Perfil em configuraÃ§Ã£o, prune ignorado', { nome });
         continue;
       }
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
       if (want.virtus === 'on' && automationAllowed(ctrl)) {
-        // Se o governor mudou de modo, reinicia o runner do Virtus para aplicar slowMode sem derrubar browser/sessão.
+        // Se o governor mudou de modo, reinicia o runner do Virtus para aplicar slowMode sem derrubar browser/sessÃ£o.
         try {
           const curMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
           const prevMode = ctrl._virtusGovernorMode || null;
@@ -13837,20 +13837,20 @@ async function nurseTick() {
 
 async function trySwapOpen(target) {
   // Ultra enterprise: nunca executar swap agressivo durante provisionamento.
-  // O provisionamento tem seu próprio fluxo de liberação mínima de RAM (dashboard hardRecoverRam)
-  // e o supervisor já bloqueia aberturas de terceiros via maintenance_provision.
+  // O provisionamento tem seu prÃ³prio fluxo de liberaÃ§Ã£o mÃ­nima de RAM (dashboard hardRecoverRam)
+  // e o supervisor jÃ¡ bloqueia aberturas de terceiros via maintenance_provision.
   try { if (provisionLock.isActive()) return false; } catch {}
 
   const aliveNames = Array.from(controllers.keys());
   if (aliveNames.length <= 1) return false;
 
   const free0 = getAvailableMB();
-  const minNeed = getOpenMinFreeMB(''); // operação normal (sem owner do lock)
+  const minNeed = getOpenMinFreeMB(''); // operaÃ§Ã£o normal (sem owner do lock)
   const deficit = Math.max(0, (Number(minNeed || 0) || 0) - (Number(free0 || 0) || 0));
-  // Se não há déficit de RAM, não fazer swap. (Evita fechar dezenas por erro de slots/transiente)
+  // Se nÃ£o hÃ¡ dÃ©ficit de RAM, nÃ£o fazer swap. (Evita fechar dezenas por erro de slots/transiente)
   if (deficit <= 0) return false;
 
-  // Cap militar: nunca fechar muitos perfis numa única tentativa.
+  // Cap militar: nunca fechar muitos perfis numa Ãºnica tentativa.
   const MAX_SWAP_KILLS = Math.max(0, parseInt(process.env.SWAP_OPEN_MAX_KILLS || '2', 10) || 2);
   let closed = 0;
   let freedEstimate = 0;
@@ -13869,7 +13869,7 @@ async function trySwapOpen(target) {
 
   for (const cand of candidates) {
     if (closed >= MAX_SWAP_KILLS) break;
-    if (freedEstimate >= (deficit + 128)) break; // margem pequena p/ evitar “apertado”
+    if (freedEstimate >= (deficit + 128)) break; // margem pequena p/ evitar â€œapertadoâ€
     if (killGuardActive(cand.n)) continue;
     await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
     logger.info('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb });
@@ -13882,7 +13882,7 @@ async function trySwapOpen(target) {
 
   if (closed <= 0) return false;
 
-  // Tenta abrir uma única vez após liberar o mínimo necessário.
+  // Tenta abrir uma Ãºnica vez apÃ³s liberar o mÃ­nimo necessÃ¡rio.
   const r = await activateOnce(target, 'nurse_swap');
   if (r && r.ok) {
     await issues.append(target, 'mil_action', `swap_open_success closed=${closed} deficit=${deficit}MB`);
@@ -13919,7 +13919,7 @@ function _readProvisionLockSnapSafe() {
 }
 
 function stockProvisionLockWatchTick() {
-  // Detecta transição active->inactive com owner stock_provision
+  // Detecta transiÃ§Ã£o active->inactive com owner stock_provision
   const snap = _readProvisionLockSnapSafe();
   const active = !!snap.active;
   const owner = snap.owner || null;
@@ -13944,7 +13944,7 @@ function stockProvisionLockWatchTick() {
   _spLastKind = kind;
   _spLastUntilMs = untilMs;
 
-  // Transição: ativo -> inativo
+  // TransiÃ§Ã£o: ativo -> inativo
   if (wasActive && !active) {
     const wasStockProvision = (wasKind === 'stock_provision') || (wasOwner && /^stock_provision:/i.test(String(wasOwner)));
     if (wasStockProvision) {
@@ -13977,7 +13977,7 @@ async function stockProvisionResumeTick() {
   const lastDone = Number(robeMeta.system.stockProvisionResumeLastTs || 0) || 0;
   if (lastDone >= Number(marker.ts || 0)) return;
 
-  // Rate limit global por worker (evita loop caso esteja falhando por alguma razão)
+  // Rate limit global por worker (evita loop caso esteja falhando por alguma razÃ£o)
   const lastTry = Number(robeMeta.system.stockProvisionResumeLastTryAt || 0) || 0;
   if (lastTry && (Date.now() - lastTry) < 10_000) return;
   robeMeta.system.stockProvisionResumeLastTryAt = Date.now();
@@ -14050,8 +14050,8 @@ async function stockProvisionResumeTick() {
     });
   } catch {}
 
-  // Se rodou e não teve erro, marca como done para este worker.
-  // Mesmo com erros: não marcar done (próximos ticks tentam novamente; guardrails impedem storm).
+  // Se rodou e nÃ£o teve erro, marca como done para este worker.
+  // Mesmo com erros: nÃ£o marcar done (prÃ³ximos ticks tentam novamente; guardrails impedem storm).
   if (errors === 0) {
     robeMeta.system.stockProvisionResumeLastTs = Number(marker.ts || 0) || Date.now();
   }
@@ -14059,7 +14059,7 @@ async function stockProvisionResumeTick() {
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
-// Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
+// Watch do provision_lock e auto-resume pÃ³s stock_provision (P0 gaps)
 setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
 setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
@@ -14068,7 +14068,7 @@ setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
 
-// Inicializa reloadManager após todos os sistemas estarem prontos
+// Inicializa reloadManager apÃ³s todos os sistemas estarem prontos
 reloadManager.startReloadManager(controllers, robeMeta);
 
 async function wirePageObservers(nome, page) {
@@ -14137,7 +14137,7 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14158,7 +14158,7 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);
@@ -14177,7 +14177,7 @@ async function escalateToReopen(nome, reason='health_reopen') {
   const ctrl = controllers.get(nome);
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
   if (killGuardActive(nome)) {
-    await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+    await issues.append(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until');
     return;
   }
   await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
@@ -14236,7 +14236,7 @@ async function healthTick() {
         }
         try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
         if (killGuardActive(nome)) {
-          await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
+          await issues.append(nome, 'guard_skip', 'AÃ§Ã£o suprimida por kill_guard_until (block)');
           continue;
         }
         await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
@@ -14313,10 +14313,10 @@ async function healthTick() {
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 
-// ====== LIMPEZA PERIÓDICA DE ABAS ABOUT:BLANK ÓRFÃS ======
-// Varre todos os navegadores ativos e fecha abas about:blank que estão órfãs
+// ====== LIMPEZA PERIÃ“DICA DE ABAS ABOUT:BLANK Ã“RFÃƒS ======
+// Varre todos os navegadores ativos e fecha abas about:blank que estÃ£o Ã³rfÃ£s
 // (criadas mas abandonadas quando Robe aborta/abandona postagem)
-// Roda a cada 3 minutos - não agressivo, apenas limpa o que ficou esquecido
+// Roda a cada 3 minutos - nÃ£o agressivo, apenas limpa o que ficou esquecido
 async function periodicAboutBlankCleanup() {
   try {
     const issues = require('./issues.js');
@@ -14326,7 +14326,7 @@ async function periodicAboutBlankCleanup() {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
-        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
+        // ProteÃ§Ãµes: nÃ£o limpa se Robe estÃ¡ ativo, configurando, ou em modo humano
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
@@ -14334,13 +14334,13 @@ async function periodicAboutBlankCleanup() {
 
         if (inRobe || sendLockActive || inConfig || inHuman) continue;
 
-        // Varre todas as páginas procurando about:blank órfãs
+        // Varre todas as pÃ¡ginas procurando about:blank Ã³rfÃ£s
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
         
-        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
+        // ProteÃ§Ã£o extra: verifica se hÃ¡ create item aberto (sÃ³ verifica uma vez)
         const hasCreateItem = pages.some(pg => {
           try {
             const u = pg.url ? pg.url() : '';
@@ -14348,24 +14348,24 @@ async function periodicAboutBlankCleanup() {
           } catch { return false; }
         });
         
-        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
+        // Se hÃ¡ create item, nÃ£o limpa (pode ser que o Robe esteja prestes a usar)
         if (hasCreateItem) continue;
 
         let closed = 0;
 
         for (const p of pages) {
           try {
-            // Nunca fecha a página principal
+            // Nunca fecha a pÃ¡gina principal
             if (p === mainPage) continue;
             if (!mainPage && p === pages[0]) continue;
 
-            // Verifica se é about:blank
+            // Verifica se Ã© about:blank
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
             if (!url || url !== 'about:blank') continue;
 
-            // Fecha a aba about:blank órfã
-            // (já verificamos que não há Robe ativo e não há create item)
+            // Fecha a aba about:blank Ã³rfÃ£
+            // (jÃ¡ verificamos que nÃ£o hÃ¡ Robe ativo e nÃ£o hÃ¡ create item)
             await p.close({ runBeforeUnload: false }).catch(() => {});
             closed++;
           } catch {}
@@ -14385,7 +14385,7 @@ async function periodicAboutBlankCleanup() {
     }
 
     if (totalClosed > 0) {
-      logger.info('[PERIODIC_CLEANUP] Fechou abas about:blank órfãs', { total: totalClosed });
+      logger.info('[PERIODIC_CLEANUP] Fechou abas about:blank Ã³rfÃ£s', { total: totalClosed });
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {
@@ -14394,9 +14394,9 @@ async function periodicAboutBlankCleanup() {
   }
 }
 
-// Roda a cada 3 minutos (180000ms) - não agressivo, apenas limpa o que ficou esquecido
+// Roda a cada 3 minutos (180000ms) - nÃ£o agressivo, apenas limpa o que ficou esquecido
 setInterval(() => { periodicAboutBlankCleanup().catch(() => {}); }, 3 * 60 * 1000);
-// Primeira execução após 30 segundos (dá tempo para sistema inicializar)
+// Primeira execuÃ§Ã£o apÃ³s 30 segundos (dÃ¡ tempo para sistema inicializar)
 setTimeout(() => { periodicAboutBlankCleanup().catch(() => {}); }, 30000);
 
 setInterval(() => {
@@ -14451,7 +14451,7 @@ async function gracefulShutdown(reason) {
         controllersSize: controllers ? controllers.size : null
       });
     } catch {}
-    // P0: após fechar browsers, limpar controllers e gravar status final (evita "ativos fantasmas" no próximo boot)
+    // P0: apÃ³s fechar browsers, limpar controllers e gravar status final (evita "ativos fantasmas" no prÃ³ximo boot)
     try {
       const before = controllers ? controllers.size : null;
       try { controllers && controllers.clear && controllers.clear(); } catch {}
@@ -14559,7 +14559,7 @@ process.on('uncaughtException', (e) => {
       try { logger.warn('[FATAL][WORKER] CDP fatal detectado (sem exit de worker)', { source: 'uncaughtException' }); } catch {}
       runCdpFatalRecoverySweep({ source: 'uncaughtException', msg }).catch(() => {});
     } else {
-      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automático). Humano deve reiniciar: node index.js'); } catch {}
+      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automÃ¡tico). Humano deve reiniciar: node index.js'); } catch {}
     }
   } catch {}
 });
@@ -14572,7 +14572,7 @@ process.on('unhandledRejection', (e) => {
       try { logger.warn('[FATAL][WORKER] CDP fatal detectado (sem exit de worker)', { source: 'unhandledRejection' }); } catch {}
       runCdpFatalRecoverySweep({ source: 'unhandledRejection', msg }).catch(() => {});
     } else {
-      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automático). Humano deve reiniciar: node index.js'); } catch {}
+      try { logger.warn('[FATAL][WORKER] processo continua (sem exit automÃ¡tico). Humano deve reiniciar: node index.js'); } catch {}
     }
   } catch {}
 });
