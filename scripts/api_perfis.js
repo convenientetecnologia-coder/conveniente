@@ -229,12 +229,8 @@ module.exports = (app, workerClient, fileStore) => {
       let nome = require('./utils').slugify(cidade) + '-' + Date.now();
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-      // UAFP/UAPreset:
-      // - se vier uaPresetId no payload de stock_provision, respeita origem (consistência dispositivo)
-      // - fallback para balanceador local apenas quando ausente
-      const requestedUaPresetId = String((req.body && (req.body.uaPresetId || req.body.ua_preset_id)) || '').trim();
-      const presetFromRequest = requestedUaPresetId ? fileStore.getUaPresetById(requestedUaPresetId) : null;
-      const preset = presetFromRequest || fileStore.pickUaPreset() || {};
+      // UA com fallback
+      const preset = fileStore.pickUaPreset() || {};
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (
@@ -409,6 +405,7 @@ module.exports = (app, workerClient, fileStore) => {
     const isTransientActivateError = (msg) => {
       const m = String(msg || '').toLowerCase();
       return (
+        m.includes('timeout') ||
         m.includes('already_opening') ||
         m.includes('gateway_proxy_required:missing_slot_assignment') ||
         m.includes('gateway_proxy_required:assigned_slot_unavailable') ||
@@ -423,25 +420,16 @@ module.exports = (app, workerClient, fileStore) => {
         m.includes('supervisor_unreachable')
       );
     };
-    const isActivateTimeoutError = (msg) => {
-      const m = String(msg || '').toLowerCase();
-      return m.includes('timeout');
-    };
     const activateRetries = [0, 1200, 2200, 3500, 5000];
-    const activateCommandTimeoutMs = Math.max(60_000, Number(process.env.ACTIVATE_COMMAND_TIMEOUT_MS || 90_000) || 90_000);
     let r = null;
     for (let attempt = 0; attempt < activateRetries.length; attempt++) {
       if (attempt > 0) await sleepMs(activateRetries[attempt]);
-      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: activateCommandTimeoutMs }).catch(e => {
+      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
         logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', attempt: attempt + 1, error: e && e.message }, e);
         return { ok: false, error: (e && e.message) ? String(e.message) : 'activate_failed' };
       });
       if (r && r.ok === true) break;
       const errNow = (r && r.error) ? String(r.error) : 'activate_failed';
-      if (isActivateTimeoutError(errNow)) {
-        logger.warn('Ativação com timeout sem retry em cascata', { nome, attempt: attempt + 1, error: errNow });
-        break;
-      }
       if (!isTransientActivateError(errNow)) break;
       logger.warn('Ativação com erro transitório; retryando', { nome, attempt: attempt + 1, error: errNow });
     }

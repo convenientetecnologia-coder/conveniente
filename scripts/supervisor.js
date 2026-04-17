@@ -15,11 +15,8 @@ const path = require("path");
 const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRUÇÃO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
-const serverConfig = require('./serverConfig.js');
-const { planMemoryAndShards } = require('./memoryPlan.js');
 
 const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
-const perfisPath = path.join(__dirname, '..', 'dados', 'perfis.json');
 
 /**
  * Checa se kill_guard_until está ativo no status para o perfil solicitado.
@@ -43,13 +40,11 @@ function killGuardActiveForPerfil(perfil) {
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
 // Quantidade reserva de RAM a manter livre (em MB).
 // Regra ultra enterprise:
-// - Operação normal: 2GB + reserva por porte (8GB=+0MB; acima disso +1GB por 16GB totais)
+// - Operação normal: 2GB + 1GB por node
 // - Durante provision (somente dono do lock): 2GB + pico de cookies (~1.5GB)
 const MIN_FREE_RAM_MB_STATIC = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '0', 10);
 // Ciclo de auto-tune em ms
 const CYCLE_MS = parseInt(process.env.SUP_CYCLE_MS || '1600', 10);
-// Anti-pressao global entre concessões de abertura.
-const OPEN_RAMP_COOLDOWN_MS = Math.max(0, parseInt(process.env.OPEN_RAMP_COOLDOWN_MS || '5000', 10) || 5000);
 
 function getMinFreeRamMBFor({ operator } = {}) {
   const snap = ramPolicy.snapshotPolicy();
@@ -66,7 +61,7 @@ function getMinFreeRamMBFor({ operator } = {}) {
     }
   } catch {}
 
-  // Operação normal: 2GB + reserva por porte do host
+  // Operação normal: 2GB + 1GB por node
   return snap.reserveNormalMB;
 }
 
@@ -273,66 +268,15 @@ function getFreeMB() {
 function canProbe() {
   const now = Date.now();
   const minFree = getMinFreeRamMBFor({});
-  const cap = getEffectiveSlotsCap().cap;
-  const atHardCap = Number.isFinite(cap) && cap > 0 && state.slotsAbertos >= cap;
   return state.maxSlots && state.slotsAbertos >= state.maxSlots &&
-    !atHardCap &&
     getFreeMB() >= (minFree + 1024) &&
     now >= state.nextProbeAt;
-}
-
-function loadTotalProfilesCount() {
-  try {
-    if (!fs.existsSync(perfisPath)) return 0;
-    const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
-    return Array.isArray(arr) ? arr.filter(Boolean).length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function getEffectiveSlotsCap() {
-  try {
-    const totalProfiles = loadTotalProfilesCount();
-    const totalMemMB = Math.round(os.totalmem() / (1024 * 1024));
-    const cfg = serverConfig.readServerConfigEffective({ totalMemMB });
-    const cfgCapRaw = Number(cfg && cfg.capacity && cfg.capacity.maxAccountsEffective);
-    const cfgCap = Number.isFinite(cfgCapRaw) && cfgCapRaw > 0 ? Math.floor(cfgCapRaw) : null;
-    const plan = planMemoryAndShards({ totalProfiles: Math.max(1, totalProfiles) });
-    const planGlobalRaw = Number(plan && plan.maxChromesPossibleGlobal);
-    const planGlobal = Number.isFinite(planGlobalRaw) && planGlobalRaw > 0 ? Math.floor(planGlobalRaw) : null;
-    const planByNodeRaw = Number(plan && plan.nodes) * Number(plan && plan.perNode && plan.perNode.maxChromes);
-    const planByNode = Number.isFinite(planByNodeRaw) && planByNodeRaw > 0 ? Math.floor(planByNodeRaw) : null;
-    const hardList = [cfgCap, planGlobal, planByNode].filter((n) => Number.isFinite(n) && n > 0);
-    const hardCap = hardList.length ? Math.min(...hardList) : Math.max(1, totalProfiles || 1);
-    const cap = Math.max(1, Math.floor(hardCap));
-    return {
-      cap,
-      totalProfiles,
-      cfgCap,
-      planGlobal,
-      planByNode,
-      capacityMode: cfg && cfg.capacity ? cfg.capacity.mode : null
-    };
-  } catch {
-    return { cap: 1, totalProfiles: 0, cfgCap: null, planGlobal: null, planByNode: null, capacityMode: null };
-  }
-}
-
-function syncStateMaxSlotsWithCap() {
-  const info = getEffectiveSlotsCap();
-  const cap = Math.max(1, Number(info && info.cap) || 1);
-  state.maxSlots = cap;
-  state.maxEver = Math.max(Number(state.maxEver || 0), cap);
-  return info;
 }
 
 /** Decide se pode abrir um novo slot agora */
 function podeAbrirNovoSlot(perfil, opts = {}) {
   const now = Date.now();
   const freeMB = getFreeMB();
-  const capInfo = syncStateMaxSlotsWithCap();
-  const hardCap = Math.max(1, Number(capInfo && capInfo.cap) || 1);
   // Hardening: durante locks que realmente precisam "congelar abertura", NÃO permitir novas aberturas.
   // Importante (2026-01-30): `open_all_map` NÃO pode bloquear aberturas — ele existe justamente para abrir.
   // Ele só deve pausar Virtus/Robe (governança) e bloquear fluxos pesados, mas não impedir abrir navegador.
@@ -379,25 +323,12 @@ function podeAbrirNovoSlot(perfil, opts = {}) {
     return {ok: false, reason: "cooldown", waitMs: cooldownUntil-now, perfil};
   }
   // (ANTIGO global - pode remover ou restringir para edge-cases de hard fault, mas por now deixamos sem efeito)
-  if (state.openBlockedUntil > now) {
-    const waitMs = Math.max(0, state.openBlockedUntil - now);
-    pushEvent({ type: "denied", reason: "open_ramp", perfil, waitMs });
-    return { ok: false, reason: "open_ramp", waitMs };
-  }
+  // if (state.openBlockedUntil > now) { ... }
 
-  // Limitador hard por slots (cap efetivo runtime)
-  if (state.slotsAbertos >= hardCap) {
-    pushEvent({
-      type: "denied",
-      reason: "slots_cap_runtime",
-      maxSlots: hardCap,
-      slotsAbertos: state.slotsAbertos,
-      perfil,
-      cfgCap: capInfo && capInfo.cfgCap,
-      planGlobal: capInfo && capInfo.planGlobal,
-      planByNode: capInfo && capInfo.planByNode
-    });
-    return { ok: false, reason: "slots", maxSlots: hardCap, hardCap: true };
+  // Limitador por slots (mantém igual)
+  if (state.maxSlots && state.slotsAbertos >= state.maxSlots) {
+    pushEvent({type:"denied", reason:"slots", maxSlots:state.maxSlots, slotsAbertos: state.slotsAbertos, perfil});
+    return {ok: false, reason: "slots", maxSlots: state.maxSlots};
   }
   return {ok: true, freeMB};
 }
@@ -413,7 +344,6 @@ function requestOpen(perfil) {
     return { ok: false, reason: "kill_guard_until", msg: "Slot bloqueado por kill_guard_until (bloqueio anti-flapback)" };
   }
   const opts = arguments && arguments.length > 1 ? arguments[1] : {};
-  syncStateMaxSlotsWithCap();
   const resp = podeAbrirNovoSlot(perfil, opts);
   // Logic for probe (como antes)
   if (!resp.ok && resp.reason === 'slots' && canProbe()) {
@@ -427,11 +357,8 @@ function requestOpen(perfil) {
   }
   if (!resp.ok) return { ...resp, ok: false };
 
-  state.slotsAbertos = Math.min(state.maxSlots || 1, state.slotsAbertos + 1);
+  state.slotsAbertos++;
   state.tempoUltAbertura = Date.now();
-  if (OPEN_RAMP_COOLDOWN_MS > 0) {
-    state.openBlockedUntil = Date.now() + OPEN_RAMP_COOLDOWN_MS;
-  }
   ativos.set(perfil, { openAt: Date.now() });
   pushEvent({type:"open_granted", perfil});
   saveState();
@@ -442,7 +369,6 @@ function requestOpen(perfil) {
 // Era POST /notifyOpened {perfil, resultado}
 // AGORA: function notifyOpened(perfil, resultado = "ok")
 function notifyOpened(perfil, resultado = "ok") {
-  const capInfo = syncStateMaxSlotsWithCap();
   let openAt = null; if (ativos.has(perfil)) { openAt = ativos.get(perfil).openAt; }
   const dur = openAt ? Date.now() - openAt : null;
   state.slotsAbertos = Math.max(0, state.slotsAbertos-1);
@@ -450,19 +376,15 @@ function notifyOpened(perfil, resultado = "ok") {
   if (state.slotHistory.length > 600) state.slotHistory.shift();
 
   if (resultado === "ok") {
+    if (!state.maxSlots || state.slotsAbertos > state.maxSlots) state.maxSlots = state.slotsAbertos;
+    if (state.maxSlots > state.maxEver) state.maxEver = state.maxSlots;
     cooldownPerAcc.delete(perfil); // Limpa cooldown ativo (robustez extra)
   } else {
     // NOVO: Reduzido de 15s para 5s (reabertura quase imediata, mas ainda controlada)
     const until = Date.now() + 5000;
     cooldownPerAcc.set(perfil, until); // SÓ aplica cooldown para este perfil
-    pushEvent({
-      type: "abrir_err",
-      perfil,
-      maxSlots: state.maxSlots,
-      cooldownUntil: until,
-      cfgCap: capInfo && capInfo.cfgCap,
-      planGlobal: capInfo && capInfo.planGlobal
-    });
+    state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
+    pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots, cooldownUntil:until});
   }
 
   // INSTRUÇÃO 2: BUGFIX DE PROBE EM notifyOpened
@@ -470,6 +392,7 @@ function notifyOpened(perfil, resultado = "ok") {
 
   if (info && info.probe) {
     if (resultado === 'ok') {
+      state.maxSlots = (state.maxSlots||0) + 1;
       pushEvent({type:"probe_succeeded", maxSlots: state.maxSlots});
     } else {
       state.openBlockedUntil = Date.now() + 20000;
@@ -494,7 +417,6 @@ function sendTelemetria(evt) {
 /** Consulta estado e eventos do supervisor */
 // Era GET /status
 function getStatus() {
-  const capInfo = syncStateMaxSlotsWithCap();
   const permits = _permitSnapshot();
   return {
     ok: true,
@@ -502,7 +424,6 @@ function getStatus() {
       slotsAbertos: state.slotsAbertos,
       maxSlots: state.maxSlots,
       maxEver: state.maxEver,
-      hardCap: capInfo,
       ramLivre: getFreeMB(),
       ramMin: getMinFreeRamMBFor({}),
       ativosSize: ativos.size,

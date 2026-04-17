@@ -1,6 +1,7 @@
 // scripts/memoryPlan.js
 
 const os = require('os');
+const serverConfig = require('./serverConfig.js');
 
 /**
  * Converte bytes em MB.
@@ -9,23 +10,12 @@ const os = require('os');
  */
 function mb(x) { return Math.floor(x / (1024 * 1024)); }
 
-function calcNominal8GbBlocks(totalMB) {
-  // Capacidade por faixa nominal de hardware:
-  // 8GB => 1 bloco; 16GB => 2 blocos; etc.
-  // Usa tolerância de 1GB para evitar penalizar hosts que reportam levemente
-  // abaixo do nominal, sem "promover" 9GB para 16GB.
-  // Regra de baseline operacional: qualquer host < 8GB é tratado como 8GB.
-  const mbTotalRaw = Math.max(1, Number(totalMB) || 0);
-  const mbTotal = Math.max(8192, mbTotalRaw);
-  return Math.max(1, Math.floor((mbTotal + 1024) / 8192));
-}
-
 /**
  * Calcula plano automático de memória/sharding para multi-node, multinacional.
- * - NODES = ceil(RAM FÍSICA / 16GB) (NUNCA por RAM livre!)
+ * - NODES = ceil(RAM FÍSICA / 8GB) (NUNCA por RAM livre!)
  * - 10% colchão (min 2GB)
  * - Overhead de 2GB por Node.
- * - Limite de ~10 perfis por Node, nunca mais.
+ * - Limite de ~15 perfis por Node, nunca mais.
  * - Nunca ENV/manual; tudo autodetect.
  *
  * @param {object} opts
@@ -35,12 +25,13 @@ function calcNominal8GbBlocks(totalMB) {
 function planMemoryAndShards({ totalProfiles }) {
   const totalMB = mb(os.totalmem());
   const cushionMB = Math.max(Math.floor(totalMB * 0.10), 2048); // 10% colchão, min 2GB
-  const NODE_SEG_MB = 16384; // 16GB por Node
+  const NODE_SEG_MB = 8192; // 8GB por Node
   const NODE_OVERHEAD_MB = 2048; // 2GB por Node
   const CHROME_AVG_MB = 600;
-  // Política fixa por faixa nominal: 10 contas por 8GB (8=>10, 16=>20, ...).
-  const blocks8gb = calcNominal8GbBlocks(totalMB);
-  const configuredGlobalCap = Math.max(1, blocks8gb * 10);
+  const runtimeCfg = (() => {
+    try { return serverConfig.readServerConfigEffective({ totalMemMB: totalMB }); } catch { return null; }
+  })();
+  const configuredGlobalCap = Math.max(1, Number(runtimeCfg && runtimeCfg.capacity && runtimeCfg.capacity.maxAccountsEffective || 0) || 1);
 
   // 1) Nodes exatos PELO HARDWARE, independente de RAM livre
   let nodes = Math.ceil(totalMB / NODE_SEG_MB);
@@ -74,7 +65,6 @@ function planMemoryAndShards({ totalProfiles }) {
     totalMB,
     cushionMB,
     usableMB,
-    maxChromesPossibleGlobal,
     nodes,
     perNode: {
       maxChromes: targetPerNode
@@ -85,7 +75,7 @@ function planMemoryAndShards({ totalProfiles }) {
       chromeAvgMB: CHROME_AVG_MB
     },
     serverConfig: {
-      capacityMode: 'fixed_per_8gb',
+      capacityMode: runtimeCfg && runtimeCfg.capacity ? runtimeCfg.capacity.mode : 'unknown',
       maxAccountsEffective: configuredGlobalCap
     }
   };

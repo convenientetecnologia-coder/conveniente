@@ -13,21 +13,6 @@ const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
 
-const FB_MESSAGES_URL = 'https://www.facebook.com/messages';
-
-// Anti-pressao no bootstrap do Messages (defaults conservadores).
-const CONFIG_MSG_BOOT_SETTLE_MS = Math.max(800, parseInt(process.env.CONFIG_MSG_BOOT_SETTLE_MS || '1800', 10) || 1800);
-const CONFIG_MSG_RELOAD_ON_BOOT = String(process.env.CONFIG_MSG_RELOAD_ON_BOOT || '0').trim() === '1';
-const CONFIG_MSG_UI_MAX_ROUNDS = Math.max(1, Math.min(5, parseInt(process.env.CONFIG_MSG_UI_MAX_ROUNDS || '2', 10) || 2));
-const ENSURE_MARKETPLACE_MAX_CLICK_TRIES = Math.max(1, Math.min(6, parseInt(process.env.ENSURE_MARKETPLACE_MAX_CLICK_TRIES || '3', 10) || 3));
-const ENSURE_MARKETPLACE_IDLE_CLICK_MS = Math.max(300, parseInt(process.env.ENSURE_MARKETPLACE_IDLE_CLICK_MS || '650', 10) || 650);
-const ENSURE_MARKETPLACE_ACTIVE_CLICK_MS = Math.max(500, parseInt(process.env.ENSURE_MARKETPLACE_ACTIVE_CLICK_MS || '1000', 10) || 1000);
-const PIN_MODAL_RETRY_COOLDOWN_MS = Math.max(5000, parseInt(process.env.PIN_MODAL_RETRY_COOLDOWN_MS || '30000', 10) || 30000);
-const PIN_MODAL_CREATE_PIN_COOLDOWN_MS = Math.max(30000, parseInt(process.env.PIN_MODAL_CREATE_PIN_COOLDOWN_MS || '180000', 10) || 180000);
-const PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS = Math.max(3000, parseInt(process.env.PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS || '45000', 10) || 45000);
-const PUPPETEER_PROTOCOL_TIMEOUT_MS = Math.max(60000, parseInt(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || '180000', 10) || 180000);
-const _pinModalRuntimeState = new WeakMap();
-
 puppeteer.use(StealthPlugin());
 
 /**
@@ -771,15 +756,12 @@ async function patchPage(nome, page, coords) {
   const enableVirtusMessengerBlock =
     (
       typeof url === "string"
-      && (
-        /^https?:\/\/(www\.)?messenger\.com\/?/.test(url)
-        || /^https?:\/\/(www\.)?facebook\.com\/messages(?:[/?#]|$)/.test(url)
-      )
+      && /^https?:\/\/(www\.)?messenger\.com\/?/.test(url)
     ) || (
       page.target && typeof page.target === 'function' &&
       (
-        (page.target()._targetInfo && /(?:messenger\.com|facebook\.com\/messages)/.test(page.target()._targetInfo.url || ""))
-        || (typeof page.target().url === 'function' && /(?:messenger\.com|facebook\.com\/messages)/.test(page.target().url() || ""))
+        (page.target()._targetInfo && /messenger\.com/.test(page.target()._targetInfo.url || ""))
+        || (typeof page.target().url === 'function' && /messenger\.com/.test(page.target().url() || ""))
       )
     );
 
@@ -809,7 +791,7 @@ async function patchPage(nome, page, coords) {
           const type = req.resourceType();
           const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
           const isLoggedArea = () => {
-            try { return /(?:messenger\.com\/(?:marketplace|t\/|inbox|compose)|facebook\.com\/messages(?:[/?#]|$))/i.test(page.url() || ''); }
+            try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
             catch { return false; }
           };
 
@@ -936,7 +918,6 @@ function cleanupUserDataLocks(userDataDir) {
       'SingletonLock',
       'SingletonCookie',
       'SingletonSocket',
-      'DevToolsActivePort',
       'SingletonSharedMemory',
       'Lock',
       'LOCK',
@@ -1615,8 +1596,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // RAM: Encerra processos do perfil e limpa locks
     try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
-    // Windows: dá um respiro curto para o sistema liberar handles/locks após taskkill.
-    try { await new Promise(r => setTimeout(r, 250)); } catch {}
 
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
@@ -1635,40 +1614,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--disable-background-timer-throttling', // Não pausa timers de fundo
       '--disable-backgrounding-occluded-windows', // Prev. throttling CPU tabs background
       '--disable-renderer-backgrounding', // Garantir render foreground
+      '--process-per-site', // Cada site processo
       '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
       '--disk-cache-size=104857600', // 100MB de cap em disco
       '--media-cache-size=0', // Zero cache de mídia
       '--window-size=1366,768', // Sempre inicializa janela visível/tamanho padrão
       '--start-maximized' // Maximizada sempre
-      // Removido: 'no-zygote' e 'single-process' (instáveis em produção)
+      // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
-    // Estabilidade enterprise em VM fraca:
-    // por padrão rodamos em modo "safe" (software) para evitar crash fatal de GPU.
-    // Override: CHROME_GPU_MODE=native para usar aceleração de GPU nativa.
-    const chromeGpuMode = String(process.env.CHROME_GPU_MODE || 'safe').trim().toLowerCase();
-    if (chromeGpuMode !== 'native') {
-      launchArgs.push(
-        '--disable-gpu',
-        '--disable-gpu-compositing',
-        '--disable-accelerated-2d-canvas',
-        '--disable-accelerated-video-decode',
-        '--use-angle=swiftshader',
-        '--enable-unsafe-swiftshader'
-      );
-    }
-    // Debug: habilita log do Chrome para diagnóstico de crash de launch.
-    if (process.env.BROWSER_DEBUG === '1') {
-      try {
-        launchArgs.push(`--log-file=${chromeLogFile}`);
-        launchArgs.push('--enable-logging=stderr');
-        launchArgs.push('--v=1');
-      } catch {}
-    }
-    // Reduz explosão de subprocessos por navegador em hosts com muitas contas.
-    // Se precisar do comportamento antigo para diagnóstico, habilitar via env.
-    if (process.env.CHROME_PROCESS_PER_SITE === '1') {
-      launchArgs.push('--process-per-site');
-    }
 
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
     if (process.env.MEDIA_AUTO_UI === '1') {
@@ -1713,7 +1666,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           args: launchArgs,
           defaultViewport,
           dumpio: !!process.env.BROWSER_DEBUG,
-          protocolTimeout: PUPPETEER_PROTOCOL_TIMEOUT_MS
+          protocolTimeout: 120000 // 120 segundos garante o Stealth/plugin
         });
         if (process.env.BROWSER_DEBUG === '1') {
           const spawnargs = b.process && b.process ? b.process().spawnargs : null;
@@ -2081,8 +2034,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
   // Enterprise: NÃO clicar "qualquer submit" aqui.
   // No Messenger, pode existir um <form id="login_form"> oculto com botão "Continuar".
-  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>")
-  // e, no novo seletor de perfis do facebook.com/messages, o CTA direto "Continuar".
+  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>").
   const t0 = Date.now();
   const maxMs = Math.max(1000, Number(timeout || 0) || 0);
   while ((Date.now() - t0) < maxMs) {
@@ -2097,12 +2049,7 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
       return true;
         } catch { return false; }
       };
-      const bodyText = norm(document.body ? (document.body.innerText || '') : '');
-      const profileChooserContext =
-        bodyText.includes('usar outro perfil') &&
-        (bodyText.includes('criar nova conta') || bodyText.includes('remover perfis deste navegador'));
-      const cands = Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 320);
-      let profileContinueFallback = null;
+      const cands = Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 240);
       for (const el of cands) {
         if (!el) continue;
         const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
@@ -2115,26 +2062,6 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
           el.click();
           return true;
         }
-        if (!profileContinueFallback && profileChooserContext) {
-          const isContinue =
-            t === 'continuar' ||
-            al === 'continuar' ||
-            t.includes('continuar') ||
-            al.includes('continuar');
-          const suspicious =
-            t.includes('continuar sem') ||
-            al.includes('continuar sem') ||
-            t.includes('continuar sem restaurar') ||
-            al.includes('continuar sem restaurar');
-          if (isContinue && !suspicious) {
-            profileContinueFallback = el;
-          }
-        }
-      }
-      if (profileContinueFallback && profileChooserContext) {
-        try { profileContinueFallback.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
-        profileContinueFallback.click();
-        return true;
       }
       return false;
     }).catch(() => false);
@@ -2147,387 +2074,6 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
   }
   try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} nenhum 'Continuar como' detectado`); } } catch {}
   return false;
-}
-
-async function ensureMarketplaceMessagesContext(page, { timeoutMs = 45000, reason = 'default' } = {}) {
-  if (!page || typeof page.url !== 'function') throw new Error('invalid_page');
-  const waitMs = Math.max(8000, Number(timeoutMs || 0) || 45000);
-  const isTargetUrl = (u) => /facebook\.com\/messages/i.test(String(u || '')) || /messenger\.com/i.test(String(u || ''));
-  const dismissPinIfPresent = async () => {
-    try {
-      const pin = await detectMessengerPinModal(page).catch(() => ({ present: false }));
-      if (pin && pin.present) {
-        await tryDismissMessengerPinModal(page, { logPrefix: '[messages][pin]', maxTries: 2 }).catch(() => ({ ok: false }));
-        await sleep(350);
-      }
-    } catch {}
-  };
-  const readMarketplaceState = async () => {
-    return await page.evaluate(() => {
-      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-      const isVisible = (el) => {
-        try {
-          const st = window.getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
-        } catch { return false; }
-      };
-      const nodes = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
-      let menuFound = false;
-      let menuActive = false;
-      let menuLabel = '';
-      for (const el of nodes) {
-        if (!isVisible(el)) continue;
-        const rawTxt = norm(el.innerText || el.textContent || '');
-        const t = rawTxt.replace(/\s+/g, ' ').trim();
-        const al = norm(el.getAttribute('aria-label') || '');
-        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
-        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
-        if (!actionable || !isVisible(actionable)) continue;
-        if (actionable.closest('[role="dialog"]')) continue;
-        menuFound = true;
-        if (!menuLabel) menuLabel = (t || al || '').slice(0, 90);
-        const activeBySelf =
-          String(actionable.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
-          String(actionable.getAttribute('aria-selected') || '').toLowerCase() === 'true';
-        const activeByParent = !!actionable.closest('[aria-current="page"], [aria-selected="true"]');
-        if (activeBySelf || activeByParent) menuActive = true;
-      }
-      const href = String(location.href || '');
-      const menuActiveByUrl = /\/messages/i.test(href) && /marketplace/i.test(href);
-      const rows = document.querySelectorAll('div[role="row"]').length;
-      const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
-      const marketplaceThreadAnchors = document.querySelectorAll('a[href*="/marketplace/t/"]').length;
-      const messagesThreadAnchors = document.querySelectorAll('a[href*="/messages/t/"]').length;
-      const anchors = marketplaceThreadAnchors + messagesThreadAnchors;
-      const bodyText = norm(document.body ? (document.body.innerText || '') : '');
-      const emptyNoConversations =
-        bodyText.includes('nenhuma conversa') &&
-        bodyText.includes('quando voce tiver conversas');
-      return {
-        menuFound,
-        menuActive: !!(menuActive || menuActiveByUrl),
-        menuLabel,
-        rows,
-        hasGrid,
-        anchors,
-        marketplaceThreadAnchors,
-        messagesThreadAnchors,
-        emptyNoConversations
-      };
-    }).catch(() => ({
-      menuFound: false,
-      menuActive: false,
-      menuLabel: '',
-      rows: 0,
-      hasGrid: false,
-      anchors: 0,
-      marketplaceThreadAnchors: 0,
-      messagesThreadAnchors: 0,
-      emptyNoConversations: false
-    }));
-  };
-  const waitMarketplaceActive = async (budgetMs) => {
-    const ms = Math.max(1500, Number(budgetMs || 0) || 5000);
-    await page.waitForFunction(() => {
-      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-      const isVisible = (el) => {
-        try {
-          const st = window.getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
-        } catch { return false; }
-      };
-      const nodes = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1200);
-      for (const el of nodes) {
-        if (!isVisible(el)) continue;
-        const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const al = norm(el.getAttribute('aria-label') || '');
-        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
-        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
-        if (!actionable || !isVisible(actionable)) continue;
-        if (actionable.closest('[role="dialog"]')) continue;
-        const activeBySelf =
-          String(actionable.getAttribute('aria-current') || '').toLowerCase() === 'page' ||
-          String(actionable.getAttribute('aria-selected') || '').toLowerCase() === 'true';
-        const activeByParent = !!actionable.closest('[aria-current="page"], [aria-selected="true"]');
-        if (activeBySelf || activeByParent) return true;
-      }
-      return /marketplace/i.test(String(location.href || ''));
-    }, { timeout: ms }).catch(() => null);
-  };
-  const tryRecoverConversationsLoadError = async (stage = 'unknown') => {
-    try {
-      const result = await page.evaluate(() => {
-        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-        const body = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-        const hasConversationLoadError =
-          body.includes('nao foi possivel carregar as conversas') ||
-          body.includes('recarregue essa pagina para ver suas conversas') ||
-          body.includes('recarregue esta pagina para ver suas conversas') ||
-          body.includes('could not load conversations');
-        if (!hasConversationLoadError) return { detected: false, clicked: false, btnText: '' };
-
-        const isVisible = (el) => {
-          try {
-            if (!el) return false;
-            const st = window.getComputedStyle(el);
-            const r = el.getBoundingClientRect();
-            return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
-          } catch { return false; }
-        };
-
-        const candidates = Array.from(document.querySelectorAll('button,[role="button"],div[role="button"],a[role="button"],a'));
-        for (const el of candidates) {
-          if (!isVisible(el)) continue;
-          const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-          const al = norm(el.getAttribute('aria-label') || '');
-          const isReload =
-            t === 'recarregar' ||
-            al === 'recarregar' ||
-            t.includes('recarregar') ||
-            al.includes('recarregar') ||
-            t.includes('reload') ||
-            al.includes('reload') ||
-            t.includes('tentar novamente') ||
-            al.includes('tentar novamente');
-          if (!isReload) continue;
-          const actionable = el.closest('button,[role="button"],div[role="button"],a[role="button"],a') || el;
-          if (!actionable || !isVisible(actionable)) continue;
-          try { actionable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-          try {
-            actionable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-            actionable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            actionable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            actionable.click();
-            return { detected: true, clicked: true, btnText: String(t || al || '').slice(0, 80) };
-          } catch {}
-        }
-        return { detected: true, clicked: false, btnText: '' };
-      }).catch(() => ({ detected: false, clicked: false, btnText: '' }));
-
-      if (result && result.detected) {
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'ensure_marketplace_conversations_reload_detected',
-            reason: String(reason || ''),
-            stage: String(stage || ''),
-            clicked: !!result.clicked,
-            btnText: String(result.btnText || '').slice(0, 120)
-          });
-        } catch {}
-      }
-
-      if (result && result.clicked) {
-        try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {}); } catch {}
-        await sleep(700);
-      }
-      return { detected: !!(result && result.detected), clicked: !!(result && result.clicked) };
-    } catch {
-      return { detected: false, clicked: false };
-    }
-  };
-  const clickMarketplaceMenu = async () => {
-    return await page.evaluate(() => {
-      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-      const normHrefPath = (href) => String(href || '').toLowerCase().replace(/^https?:\/\/[^/]+/i, '');
-      const isVisible = (el) => {
-        try {
-          const st = window.getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          return !!st && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.05 && r.width > 2 && r.height > 2;
-        } catch { return false; }
-      };
-      const candidates = Array.from(document.querySelectorAll('a, button, div, span, [role], [tabindex]')).slice(0, 1400);
-      const scored = [];
-      for (const el of candidates) {
-        if (!isVisible(el)) continue;
-        const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const al = norm(el.getAttribute('aria-label') || '');
-        if (!(t.startsWith('marketplace') || al.includes('marketplace'))) continue;
-        const actionable = el.closest('a,button,[role="button"],[role="link"],[tabindex]') || el;
-        if (!actionable || !isVisible(actionable)) continue;
-        if (actionable.closest('[role="dialog"]')) continue;
-        const actionableText = norm(actionable.innerText || actionable.textContent || '').replace(/\s+/g, ' ').trim();
-        const actionableAria = norm(actionable.getAttribute('aria-label') || '');
-        const actionableHref = String(actionable.getAttribute('href') || '');
-        const actionableHrefPath = normHrefPath(actionableHref);
-        const mentionsMarketplace = actionableText.includes('marketplace') || actionableAria.includes('marketplace') || actionableHref.includes('marketplace');
-        const isFacebookMenu = actionableAria.includes('menu do facebook') || actionableAria.includes('facebook menu');
-        if (!mentionsMarketplace || isFacebookMenu) continue;
-
-        // Hard-block do Marketplace errado (compra/venda geral), reportado em produção:
-        // /marketplace/?ref=app_tab
-        const isGeneralMarketplaceHref =
-          /^\/marketplace\/?\?ref=app_tab(?:$|&)/i.test(actionableHrefPath) ||
-          /^\/marketplace\/?(?:\?.*)?$/i.test(actionableHrefPath);
-        if (isGeneralMarketplaceHref) continue;
-
-        const container = actionable.closest('[role="listitem"], li, [data-visualcompletion], [role="row"], [role="gridcell"], div') || actionable.parentElement || actionable;
-        const containerText = norm(container ? (container.innerText || container.textContent || '') : '').replace(/\s+/g, ' ').trim();
-        const hasNewMessagesHint =
-          /(^|\s)\d+\s+novas?\s+mensagens/.test(containerText) ||
-          containerText.includes('novas mensagens') ||
-          containerText.includes('nova mensagem') ||
-          /(^|\s)\d+\s+new\s+messages?/.test(containerText) ||
-          containerText.includes('new messages');
-        const hasMessagesHint =
-          containerText.includes('mensagens') ||
-          containerText.includes('conversas') ||
-          containerText.includes('messages') ||
-          containerText.includes('conversations');
-        const hrefLooksMessagesContext =
-          /\/messages(?:\/|$|\?)/i.test(actionableHrefPath) ||
-          /messenger\.com\/marketplace/i.test(actionableHref);
-        const hrefLooksThread =
-          /\/marketplace\/t\//i.test(actionableHrefPath) ||
-          /\/messages\/t\//i.test(actionableHrefPath);
-
-        // Se houver href explícito, só aceitamos sinais de contexto de mensagens/thread.
-        if (actionableHrefPath && !hrefLooksMessagesContext && !hrefLooksThread) continue;
-
-        const score =
-          ((t === 'marketplace' || al === 'marketplace') ? 6 : 0) +
-          (hasNewMessagesHint ? 12 : 0) +
-          (hasMessagesHint ? 6 : 0) +
-          (hrefLooksMessagesContext ? 10 : 0) +
-          (hrefLooksThread ? 12 : 0) +
-          (actionable.tagName === 'A' ? 1 : 0) +
-          (String(actionable.getAttribute('role') || '').toLowerCase().includes('button') ? 1 : 0);
-        scored.push({
-          actionable,
-          score,
-          actionableHref: String(actionableHref || '').slice(0, 240),
-          actionableAria: String(actionable.getAttribute('aria-label') || '').slice(0, 240),
-          actionableText: String(actionable.innerText || actionable.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240),
-          hasNewMessagesHint,
-          hasMessagesHint,
-          hrefLooksMessagesContext,
-          hrefLooksThread
-        });
-      }
-
-      scored.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-      for (const candidate of scored) {
-        const actionable = candidate && candidate.actionable;
-        if (!actionable) continue;
-        try { actionable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-        try {
-          actionable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-          actionable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          actionable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          actionable.click();
-          return {
-            clicked: true,
-            selected: {
-              score: Number(candidate.score || 0),
-              actionableHref: candidate.actionableHref || '',
-              actionableAria: candidate.actionableAria || '',
-              actionableText: candidate.actionableText || '',
-              hasNewMessagesHint: !!candidate.hasNewMessagesHint,
-              hasMessagesHint: !!candidate.hasMessagesHint,
-              hrefLooksMessagesContext: !!candidate.hrefLooksMessagesContext,
-              hrefLooksThread: !!candidate.hrefLooksThread
-            },
-            candidates: scored.slice(0, 5).map((c) => ({
-              score: Number(c.score || 0),
-              actionableHref: c.actionableHref || '',
-              actionableAria: c.actionableAria || '',
-              actionableText: c.actionableText || '',
-              hasNewMessagesHint: !!c.hasNewMessagesHint,
-              hasMessagesHint: !!c.hasMessagesHint,
-              hrefLooksMessagesContext: !!c.hrefLooksMessagesContext,
-              hrefLooksThread: !!c.hrefLooksThread
-            }))
-          };
-        } catch {}
-      }
-      return { clicked: false, selected: null, candidates: scored.slice(0, 5).map((c) => ({
-        score: Number(c.score || 0),
-        actionableHref: c.actionableHref || '',
-        actionableAria: c.actionableAria || '',
-        actionableText: c.actionableText || '',
-        hasNewMessagesHint: !!c.hasNewMessagesHint,
-        hasMessagesHint: !!c.hasMessagesHint,
-        hrefLooksMessagesContext: !!c.hrefLooksMessagesContext,
-        hrefLooksThread: !!c.hrefLooksThread
-      })) };
-    }).catch(() => ({ clicked: false, selected: null, candidates: [] }));
-  };
-  try {
-    let url = '';
-    try { url = String(page.url() || ''); } catch {}
-    if (!isTargetUrl(url)) {
-      await page.goto(FB_MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: waitMs }).catch(() => {});
-      await sleep(700);
-    }
-    await dismissPinIfPresent();
-    await resolveNonceIfPresent(page, { logPrefix: '[messages][nonce]', maxCycles: 2 }).catch(() => {});
-    await clickContinuarComo(page, { logPrefix: '[messages][continuar]', timeout: 9000 }).catch(() => false);
-    await dismissPinIfPresent();
-    await tryRecoverConversationsLoadError('pre_state').catch(() => ({ detected: false, clicked: false }));
-    let state = await readMarketplaceState();
-    if (!state.menuFound) {
-      const rec = await tryRecoverConversationsLoadError('menu_not_found').catch(() => ({ detected: false, clicked: false }));
-      if (rec && rec.clicked) {
-        await dismissPinIfPresent();
-        state = await readMarketplaceState();
-      }
-    }
-    if (!state.menuFound) {
-      return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available', state };
-    }
-    if (!state.menuActive || (state.marketplaceThreadAnchors + state.messagesThreadAnchors) === 0) {
-      let clickedAtLeastOnce = false;
-      for (let i = 0; i < ENSURE_MARKETPLACE_MAX_CLICK_TRIES; i++) {
-        if (state.menuActive && (state.marketplaceThreadAnchors + state.messagesThreadAnchors) > 0) break;
-        await tryRecoverConversationsLoadError(`menu_loop_${i + 1}`).catch(() => ({ detected: false, clicked: false }));
-        const clickResult = await clickMarketplaceMenu();
-        const clicked = !!(clickResult && clickResult.clicked);
-        clickedAtLeastOnce = clickedAtLeastOnce || clicked;
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'ensure_marketplace_menu_click_attempt',
-            reason: String(reason || ''),
-            tryIdx: Number(i + 1),
-            clicked: !!clicked,
-            selected: (clickResult && clickResult.selected) ? clickResult.selected : null,
-            topCandidates: (clickResult && Array.isArray(clickResult.candidates)) ? clickResult.candidates : [],
-            preState: {
-              menuFound: !!state.menuFound,
-              menuActive: !!state.menuActive,
-              marketplaceThreadAnchors: Number(state.marketplaceThreadAnchors || 0),
-              messagesThreadAnchors: Number(state.messagesThreadAnchors || 0),
-              rows: Number(state.rows || 0),
-              hasGrid: !!state.hasGrid
-            }
-          });
-        } catch {}
-        await sleep(clicked ? ENSURE_MARKETPLACE_ACTIVE_CLICK_MS : ENSURE_MARKETPLACE_IDLE_CLICK_MS);
-        await dismissPinIfPresent();
-        if (clicked) await waitMarketplaceActive(Math.min(waitMs, 5000));
-        state = await readMarketplaceState();
-      }
-      if (!clickedAtLeastOnce && !state.menuActive) {
-        throw new Error('marketplace_menu_click_not_possible');
-      }
-    }
-    if (!state.menuActive) {
-      throw new Error('marketplace_menu_not_active');
-    }
-    if (state.emptyNoConversations) {
-      return { ok: true, marketplaceAvailable: true, reason: 'marketplace_empty', state };
-    }
-    if ((state.marketplaceThreadAnchors + state.messagesThreadAnchors) > 0) {
-      return { ok: true, marketplaceAvailable: true, reason: 'marketplace_ready', state };
-    }
-  } catch (e) {
-    try { if (process.env.BROWSER_DEBUG === '1') logger.debug('[messages][ensure] primary failed', { reason, err: String((e && e.message) || e || '') }); } catch {}
-    throw e;
-  }
-  throw new Error('marketplace_messages_context_not_ready');
 }
 
 // Facebook checkpoint helpers
@@ -2579,29 +2125,6 @@ async function detectMessengerPinModal(page) {
             return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
           });
 
-      // Caso C: aviso de histórico indisponível no dispositivo.
-      const restoreUnavailableText =
-        txt.includes('nao e possivel restaurar o historico de conversas neste dispositivo') ||
-        (txt.includes('nao e possivel restaurar') && txt.includes('historico de conversas'));
-      const hasVerOpcoesBtn =
-        Array.from(document.querySelectorAll('button,[role="button"]'))
-          .some(el => {
-            const t = norm(el.innerText || el.textContent || '');
-            const al = norm(el.getAttribute('aria-label') || '');
-            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null);
-            if (disabled) return false;
-            return t.includes('ver opcoes') || t.includes('ver opções') || al.includes('ver opcoes') || al.includes('ver opções');
-          });
-      const hasCloseBtn =
-        Array.from(document.querySelectorAll('[aria-label],[role="button"],button'))
-          .some(el => {
-            const t = norm(el.innerText || el.textContent || '');
-            const al = norm(el.getAttribute('aria-label') || '');
-            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex') || '') === '-1');
-            if (disabled) return false;
-            return al.includes('fechar') || al.includes('close') || t === 'x';
-          });
-
       // Legado: alguns fluxos mostram “Criar PIN” (mantemos também)
       const createText =
         txt.includes('crie um pin') ||
@@ -2620,21 +2143,17 @@ async function detectMessengerPinModal(page) {
       const present =
         (pinText && hasPinInput) ||
         (contText && hasNaoRestaurarBtn) ||
-        (createText && hasCreateBtn) ||
-        (restoreUnavailableText && (hasVerOpcoesBtn || hasCloseBtn || hasNaoRestaurarBtn));
+        (createText && hasCreateBtn);
 
       return {
         present: !!present,
         kind: (pinText && hasPinInput) ? 'pin_input'
           : (contText && hasNaoRestaurarBtn) ? 'continue_without_restore'
           : (createText && hasCreateBtn) ? 'create_pin'
-          : (restoreUnavailableText && (hasVerOpcoesBtn || hasCloseBtn || hasNaoRestaurarBtn)) ? 'restore_history_unavailable'
           : null,
         hasPinInput,
         hasNaoRestaurarBtn,
-        hasCreateBtn,
-        hasVerOpcoesBtn,
-        hasCloseBtn
+        hasCreateBtn
       };
     });
   } catch {
@@ -2647,15 +2166,6 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const path = require('path');
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
   const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
-  const now0 = Date.now();
-  let state = _pinModalRuntimeState.get(page);
-  if (!state) {
-    state = { suppressUntil: 0, createPinSuppressUntil: 0, lastCreatePinLogAt: 0 };
-    _pinModalRuntimeState.set(page, state);
-  }
-  if (now0 < Number(state.suppressUntil || 0)) {
-    return { ok: true, dismissed: false, skipped: true, reason: 'pin_retry_cooldown' };
-  }
 
   // PIN padrão do sistema (enterprise): configurável via env.
   // Default: 882584 (padrão operacional)
@@ -2672,106 +2182,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     } catch { return false; }
   }
 
-  async function resolveRestoreHistoryUnavailableFlow() {
-    try {
-      const acted = await page.evaluate(() => {
-        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-        const isVisible = (el) => {
-          try {
-            const r = el.getBoundingClientRect();
-            const st = window.getComputedStyle(el);
-            return !!r && r.width > 2 && r.height > 2 && st && st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
-          } catch { return false; }
-        };
-        const isDisabled = (el) =>
-          (el.getAttribute('aria-disabled') === 'true') ||
-          (el.getAttribute('disabled') != null) ||
-          (String(el.getAttribute('tabindex') || '') === '-1');
-        const clickHumanLike = (el) => {
-          if (!el || !isVisible(el) || isDisabled(el)) return false;
-          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-          try {
-            el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            el.click();
-            return true;
-          } catch { return false; }
-        };
-
-        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-        let didSomething = false;
-        for (const d of dialogs) {
-          if (!isVisible(d)) continue;
-          const dt = norm(d.innerText || d.textContent || '');
-
-          if (dt.includes('nao e possivel restaurar o historico de conversas neste dispositivo') || (dt.includes('nao e possivel restaurar') && dt.includes('historico de conversas'))) {
-            const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
-            if (close && clickHumanLike(close)) return true;
-            const opts = Array.from(d.querySelectorAll('button,[role="button"]'));
-            for (const b of opts) {
-              const t = norm(b.innerText || b.textContent || '');
-              const al = norm(b.getAttribute('aria-label') || '');
-              if (t.includes('ver opcoes') || t.includes('ver opções') || al.includes('ver opcoes') || al.includes('ver opções')) {
-                if (clickHumanLike(b)) return true;
-              }
-            }
-          }
-
-          if (dt.includes('continuar sem restaurar') || (dt.includes('nao restaurar') && dt.includes('mensagens'))) {
-            const btns = Array.from(d.querySelectorAll('button,[role="button"]'));
-            for (const b of btns) {
-              const t = norm(b.innerText || b.textContent || '');
-              const al = norm(b.getAttribute('aria-label') || '');
-              if (t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens')) {
-                if (clickHumanLike(b)) return true;
-              }
-            }
-            const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
-            if (close && clickHumanLike(close)) didSomething = true;
-          }
-        }
-        return didSomething;
-      }).catch(() => false);
-      return !!acted;
-    } catch {
-      return false;
-    }
-  }
-
   async function clickNaoRestaurarTrusted() {
     try {
-      const directSelectors = [
-        'div[role="dialog"] [aria-label="Não restaurar mensagens"][role="button"]',
-        'div[role="dialog"] [aria-label="Nao restaurar mensagens"][role="button"]',
-        'div[role="dialog"] [aria-label*="Não restaurar mensagens"][role="button"]',
-        'div[role="dialog"] [aria-label*="Nao restaurar mensagens"][role="button"]',
-        '[aria-label="Não restaurar mensagens"][role="button"]',
-        '[aria-label="Nao restaurar mensagens"][role="button"]'
-      ];
-      for (const sel of directSelectors) {
-        const h = await page.$(sel).catch(()=>null);
-        if (!h) continue;
-        const clicked = await page.evaluate((el) => {
-          try {
-            if (!el) return false;
-            const r = el.getBoundingClientRect();
-            const st = window.getComputedStyle(el);
-            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex') || '') === '-1');
-            if (disabled) return false;
-            if (!r || r.width < 2 || r.height < 2) return false;
-            if (!st || st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || '1') < 0.05) return false;
-            try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-            el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            el.click();
-            return true;
-          } catch { return false; }
-        }, h).catch(() => false);
-        if (clicked) return true;
-      }
-
       // variações PT-BR / sem acento
       const xps = [
         '//div[@role="dialog"]//button[contains(.,"Não restaurar mensagens")]',
@@ -2792,69 +2204,19 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function clickCreatePinButton() {
     try {
-      // Caminho estrito: botão explícito "Criar PIN" (evita clicar ancestrais genéricos).
-      const direct =
-        (await page.$('div[role="dialog"] [aria-label="Criar PIN"][role="button"], div[role="dialog"] [aria-label="Criar PIN"], div[role="dialog"] button[aria-label="Criar PIN"]')) ||
-        (await page.$('[aria-label="Criar PIN"][role="button"], [aria-label="Criar PIN"], button[aria-label="Criar PIN"]')) ||
-        (await page.$('div[role="button"] span') );
-      if (direct) {
-        const clickedDirect = await page.evaluate((el) => {
-          try {
-            if (!el) return false;
-            let target = el;
-            const txt = String(el.innerText || el.textContent || '').toLowerCase();
-            if (txt.includes('criar pin')) {
-              target = el.closest('button,[role="button"],a[role="button"]') || el;
-            }
-            const label = String(target.getAttribute && target.getAttribute('aria-label') || '').toLowerCase();
-            const text = String(target.innerText || target.textContent || '').toLowerCase();
-            if (!(label.includes('criar pin') || text.includes('criar pin'))) return false;
-            const r = target.getBoundingClientRect();
-            const st = window.getComputedStyle(target);
-            const disabled = (target.getAttribute('aria-disabled') === 'true') || (target.getAttribute('disabled') != null) || (String(target.getAttribute('tabindex') || '') === '-1');
-            if (disabled) return false;
-            if (!r || r.width < 2 || r.height < 2) return false;
-            if (!st || st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || '1') < 0.05) return false;
-            try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-            target.click();
-            return true;
-          } catch { return false; }
-        }, direct).catch(() => false);
-        if (clickedDirect) return true;
-      }
-
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
         const dlg = document.querySelector('div[role="dialog"]') || document;
-        const isVisible = (el) => {
-          try {
-            const r = el.getBoundingClientRect();
-            const st = window.getComputedStyle(el);
-            return !!r && r.width > 2 && r.height > 2 && st && st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
-          } catch { return false; }
-        };
-        const disabled = (el) =>
-          (el.getAttribute('aria-disabled') === 'true') ||
-          (el.getAttribute('disabled') != null) ||
-          (String(el.getAttribute('tabindex') || '') === '-1');
-
-        // Caminho 2 (ainda estrito): só elementos claramente "button-like".
-        const all = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"]')).slice(0, 300);
-        for (const n of all) {
-          if (!n || !isVisible(n)) continue;
-          const t = norm(n.innerText || n.textContent || '');
-          const al = norm(n.getAttribute('aria-label') || '');
-          if (!(t.includes('criar pin') || al.includes('criar pin'))) continue;
-          const target = n;
-          if (!target || !isVisible(target) || disabled(target)) continue;
-          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
-          try {
-            target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            target.click();
+        const buttons = Array.from(dlg.querySelectorAll('button,[role="button"]')).slice(0, 220);
+        for (const b of buttons) {
+          const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+          if (disabled) continue;
+          const t = norm(b.innerText || b.textContent || '');
+          const al = norm(b.getAttribute('aria-label') || '');
+          if (t.includes('criar pin') || al.includes('criar pin')) {
+            b.click();
             return true;
-          } catch {}
+          }
         }
         return false;
       });
@@ -2910,36 +2272,190 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
+  async function tryEnterPin(pinValue = DEFAULT_PIN, round = 1) {
+    // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
+    // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
+    try {
+      const sel = [
+        'input[aria-label="PIN"][maxlength="6"]',
+        'input#mw-numeric-code-input-prevent-composer-focus-steal',
+        'input[type="text"][maxlength="6"]',
+        'input[type="tel"][maxlength="6"]'
+      ];
+      let h = null;
+      for (const s of sel) {
+        try {
+          h = await page.$(s).catch(()=>null);
+          if (h) break;
+        } catch {}
+      }
+      if (!h) return { ok: false, error: 'pin_input_not_found' };
+
+      // Foco + limpar sem "ruído"
+      try { await h.click({ clickCount: 3, delay: 60 }).catch(()=>{}); } catch {}
+      try { await page.keyboard.press('Backspace').catch(()=>{}); } catch {}
+      await sleep(220);
+
+      // Digitar 8 8 2 5 8 4 com calma
+      const digits = String(pinValue || '').trim();
+      if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
+      // Preencher também por JS (React-friendly) + eventos (alguns modais ignoram só teclado).
+      try {
+        await page.evaluate((el, val) => {
+          try {
+            const v = String(val || '');
+            try { el.focus(); } catch {}
+            const proto = el && el.constructor ? el.constructor.prototype : null;
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+            else el.value = v;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {}
+        }, h, digits).catch(()=>{});
+      } catch {}
+      for (const ch of digits) {
+        try { await page.keyboard.type(String(ch), { delay: 240 }).catch(()=>{}); } catch {}
+      }
+
+      await sleep(420);
+      // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
+      // Submit: tentar CTA primário do dialog; se não encontrar, usa Enter como fallback.
+      let clickedSubmit = false;
+      try {
+        clickedSubmit = await page.evaluate(() => {
+          function norm(s){
+            try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+            catch { return String(s||'').toLowerCase(); }
+          }
+          const dlg = document.querySelector('div[role="dialog"]') || document;
+          const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
+          const words = ['confirmar','confirm','continuar','continue','avancar','avançar','next','ok','done','concluir','finalizar','salvar','save'];
+          for (const b of btns) {
+            const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+            if (disabled) continue;
+            const t = norm(b.innerText || b.value || b.textContent || '');
+            const al = norm(b.getAttribute('aria-label') || '');
+            if (!t && !al) continue;
+            if (words.some(w => t.includes(w) || al.includes(w))) { try { b.click(); return true; } catch {} }
+          }
+          return false;
+        }).catch(()=>false);
+      } catch {}
+      if (!clickedSubmit) {
+        try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
+      }
+
+      // Espera determinística: modal desaparecer / input sumir (até 12s)
+      const cleared = await page.waitForFunction(() => {
+        try {
+          const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+          const txt = norm(document.body ? (document.body.innerText || '') : '');
+          const hasPinInput =
+            !!document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+            !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+            Array.from(document.querySelectorAll('input[type="text"][maxlength="6"],input[type="tel"][maxlength="6"]'))
+              .some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
+          const pinText =
+            txt.includes('insira seu pin') ||
+            txt.includes('inserir seu pin') ||
+            (txt.includes('restaurar') && txt.includes('historico') && txt.includes('pin'));
+          return !(hasPinInput && pinText);
+        } catch { return false; }
+      }, { timeout: 12_000 }).then(()=>true).catch(()=>false);
+
+      await sleep(800);
+      return { ok: true, entered: true, submitClicked: !!clickedSubmit, cleared, confirmed: (Number(round) >= 2) };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || 'pin_enter_exception' };
+    }
+  }
+
   for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
-    if (det.kind === 'create_pin' && Date.now() < Number(state.createPinSuppressUntil || 0)) {
-      const nowSkip = Date.now();
-      if ((nowSkip - Number(state.lastCreatePinLogAt || 0)) >= PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS) {
-        state.lastCreatePinLogAt = nowSkip;
-        try {
-          logger.info(`${logPrefix} pin_modal skip kind=create_pin reason=create_pin_cooldown`);
-        } catch {}
-      }
-      return { ok: true, dismissed: false, skipped: true, reason: 'create_pin_cooldown' };
-    }
 
     // snapshot mínimo sempre que detecta (ajuda a comparar DOM real vs esperado)
     try {
       pinLog({ event: 'pin_present', attempt, kind: det.kind || null, hasPinInput: !!det.hasPinInput, hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn, hasCreateBtn: !!det.hasCreateBtn });
     } catch {}
 
-    if (det.kind === 'restore_history_unavailable' || det.kind === 'continue_without_restore') {
-      const fixedRestore = await resolveRestoreHistoryUnavailableFlow();
-      try { pinLog({ event: 'restore_unavailable_flow_attempt', attempt, fixedRestore: !!fixedRestore }); } catch {}
-      await sleep(fixedRestore ? 900 : 450);
-      const detAfterRestore = await detectMessengerPinModal(page);
-      if (!detAfterRestore.present) return { ok: true, dismissed: true, restoreHandled: true };
-      if (fixedRestore) continue;
+    // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
+    if (det.kind === 'create_pin' && det.hasCreateBtn) {
+      try {
+        pinLog({ event: 'pin_create_click_attempt', attempt });
+        let createClicked = false;
+        for (let k = 1; k <= 3; k++) {
+          createClicked = await clickCreatePinButton();
+          try { pinLog({ event: 'pin_create_click_try', attempt, k, ok: !!createClicked }); } catch {}
+          if (createClicked) break;
+          await sleep(650);
+        }
+        await sleep(900);
+        if (createClicked) {
+          pinLog({ event: 'pin_create_clicked', attempt });
+          const t0 = Date.now();
+          while (Date.now() - t0 < 12_000) {
+        const detAfterCreate = await detectMessengerPinModal(page);
+            if (detAfterCreate.present && detAfterCreate.kind === 'pin_input' && detAfterCreate.hasPinInput) {
+          det.kind = 'pin_input';
+          det.hasPinInput = true;
+              try { pinLog({ event: 'pin_input_visible_after_create', attempt, waitMs: Date.now() - t0 }); } catch {}
+              break;
+            }
+            await sleep(450);
+          }
+        } else {
+          // Fallback: só se realmente não conseguimos clicar em "Criar PIN".
+          const more = await clickMoreOptionsThenSkip();
+          pinLog({ event: 'pin_more_options_fallback', attempt, ok: !!(more && more.ok), error: more && more.error });
+        }
+      } catch (e) {
+        pinLog({ event: 'pin_create_click_error', attempt, error: (e && e.message) || String(e) });
+      }
     }
 
-    // Estratégia simplificada por decisão operacional:
-    // NÃO criar/digitar PIN automaticamente; apenas fechar no X se aparecer.
+    // PIN INPUT: só digita. Não clicar em nada (anti-loop).
+    if (det.kind === 'pin_input' && det.hasPinInput) {
+      try {
+        pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
+        const enterResult = await tryEnterPin(DEFAULT_PIN, 1);
+        if (enterResult.ok) {
+          pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed, submitClicked: !!enterResult.submitClicked, clearedWaitOk: !!enterResult.cleared });
+          await sleep(1500); // Aguarda processamento
+          // Verifica se o modal sumiu após digitar o PIN
+          const detAfter = await detectMessengerPinModal(page);
+          if (!detAfter.present) {
+            pinLog({ event: 'pin_success_modal_dismissed', attempt });
+            return { ok: true, dismissed: true, pinEntered: true };
+          }
+          // Se ainda está presente, pode ser que precise confirmar digitando de novo (comum em conta nova)
+          pinLog({ event: 'pin_entered_but_modal_still_present', attempt });
+          if (detAfter.kind === 'pin_input' && detAfter.hasPinInput) {
+            pinLog({ event: 'pin_confirm_second_entry_attempt', attempt, pin: DEFAULT_PIN });
+            const enter2 = await tryEnterPin(DEFAULT_PIN, 2);
+            if (enter2.ok) {
+              pinLog({ event: 'pin_second_entry_done', attempt, confirmed: !!enter2.confirmed });
+              await sleep(1800);
+              const detAfter2 = await detectMessengerPinModal(page);
+              if (!detAfter2.present) {
+                pinLog({ event: 'pin_success_modal_dismissed_after_second', attempt });
+                return { ok: true, dismissed: true, pinEntered: true };
+              }
+            } else {
+              pinLog({ event: 'pin_second_entry_failed', attempt, error: enter2.error });
+            }
+          }
+        } else {
+          pinLog({ event: 'pin_enter_failed', attempt, error: enterResult.error });
+        }
+      } catch (e) {
+        pinLog({ event: 'pin_enter_exception', attempt, error: (e && e.message) || String(e) });
+      }
+      // Anti-loop: no pin_input não fazemos "trusted clicks" (Fechar/Não restaurar/voltar).
+      // Deixe o worker/nurse aplicar cooldown e reavaliar depois.
+      return { ok: false, error: 'pin_still_present', dismissed: false, pinEntered: true };
+    }
 
     let clickedTrusted = false;
     try {
@@ -3027,25 +2543,14 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
 
     try {
-      const nowLog = Date.now();
-      const shouldLogCreatePin = det.kind !== 'create_pin' || (clickedTrusted || clicked) || ((nowLog - Number(state.lastCreatePinLogAt || 0)) >= PIN_MODAL_CREATE_PIN_LOG_THROTTLE_MS);
-      if (shouldLogCreatePin) {
-        if (det.kind === 'create_pin') state.lastCreatePinLogAt = nowLog;
-        pinLog({ event:'pin_modal_dismiss_attempt', attempt, kind: det.kind || null, url: (()=>{try{return page.url();}catch{return ''}})(), clickedTrusted: !!clickedTrusted, clickedEval: !!clicked });
-        logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} kind=${det.kind||''} clickedTrusted=${!!clickedTrusted} clickedEval=${!!clicked}`);
-      }
+      pinLog({ event:'pin_modal_dismiss_attempt', attempt, kind: det.kind || null, url: (()=>{try{return page.url();}catch{return ''}})(), clickedTrusted: !!clickedTrusted, clickedEval: !!clicked });
+      logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} kind=${det.kind||''} clickedTrusted=${!!clickedTrusted} clickedEval=${!!clicked}`);
     } catch {}
     await sleep(700);
 
     const det2 = await detectMessengerPinModal(page);
     if (!det2.present) return { ok: true, dismissed: true };
-    if (det2.kind === 'create_pin') {
-      state.createPinSuppressUntil = Date.now() + PIN_MODAL_CREATE_PIN_COOLDOWN_MS;
-    } else {
-      state.suppressUntil = Date.now() + PIN_MODAL_RETRY_COOLDOWN_MS;
-    }
   }
-  state.suppressUntil = Date.now() + PIN_MODAL_RETRY_COOLDOWN_MS;
   return { ok: false, error: 'pin_modal_still_present' };
 }
 
@@ -3315,7 +2820,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
 
   // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
-  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messages/marketplace (Virtus)
+  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
@@ -3367,7 +2872,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = FB_MESSAGES_URL;
+  const msgUrl = 'https://www.messenger.com/marketplace';
 
   // Aba 0 — Facebook base
   try {
@@ -3400,7 +2905,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await injectCookies(p1, cookies);
     await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
-    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: CONFIG_MSG_UI_MAX_ROUNDS }).catch(()=>null);
+    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 3 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] create ui', { nome, createUrl, ui: ui1 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: (e && e.message) || String(e) });
@@ -3413,14 +2918,17 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await patchPage(nome, p2, coords);
     await injectCookies(p2, cookies);
     await p2.goto(msgUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    await sleep(CONFIG_MSG_BOOT_SETTLE_MS);
-    // facebook.com/messages está mais pesado: reload imediato pode elevar pico na largada.
-    // Mantemos reload apenas por opt-in para diagnóstico controlado.
-    if (CONFIG_MSG_RELOAD_ON_BOOT) {
-      try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-      await sleep(Math.max(900, CONFIG_MSG_BOOT_SETTLE_MS));
+    await sleep(900);
+    try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+    await sleep(900);
+
+    // Nonce + “Continuar como...”
+    await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
+    const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
+      if (!clicked) {
+      await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce-2]' });
+      await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
     }
-    await ensureMarketplaceMessagesContext(p2, { timeoutMs: 45000, reason: 'configure_profile' }).catch(()=>{});
 
     // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
     try {
@@ -3451,7 +2959,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         throw e;
       }
 
-    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: CONFIG_MSG_UI_MAX_ROUNDS }).catch(()=>null);
+    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: 3 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
@@ -5672,7 +5180,7 @@ async function collectFreshCookies(browser) {
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
     // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'collect_fresh_cookies' }).catch(()=>{});
+    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
@@ -5796,7 +5304,6 @@ module.exports = {
   tryDismissMessengerPinModal,
   gptRemediateFbUi,
   ensureFbUiUnblocked,
-  ensureMarketplaceMessagesContext,
   installOneTabGuard,
   installAboutBlankKiller,
   // ==== NOVOS:

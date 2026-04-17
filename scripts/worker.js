@@ -1945,7 +1945,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.facebook.com/messages'
+        ? 'https://www.messenger.com/marketplace'
         : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1961,13 +1961,6 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       throw eNav;
     }
     await sleep(900);
-    if (prefer === 'messenger') {
-      try {
-        if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-          await browserHelper.ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'worker_human_non_blank_entry' });
-        }
-      } catch {}
-    }
 
     // Destravar UI (fecha modais, etc)
     try { await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase, allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
@@ -4441,7 +4434,7 @@ const provisionLock = require('./provisionLock.js');
 const { getAvailableMB } = utils;
 
 const HEALTH_CFG = {
-  TICK_MS: Math.max(10_000, parseInt(process.env.HEALTH_TICK_MS || '60000', 10) || 60000),
+  TICK_MS: 10000,
   DEAD_NO_EVENT_MS: 45000,
   DEAD_NO_DOM_MS: 45000,
   DEAD_NO_NET_MS: 60000,
@@ -4506,7 +4499,7 @@ async function evaluateChatsState(page) {
       let rows = 0, anchors = 0, skeletons = 0;
       if (grid) {
         rows = grid.querySelectorAll('div[role="row"]').length;
-        anchors = grid.querySelectorAll('a[href*="/marketplace/t/"], a[href*="/messages/t/"]').length;
+        anchors = grid.querySelectorAll('a[href^="/marketplace/t/"]').length;
         skeletons = grid.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
       } else {
         skeletons = document.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
@@ -4544,11 +4537,7 @@ async function tryFixPhantom(nome, page) {
 
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
-      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_phantom_nav_home' });
-      } else {
-        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      }
+      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
       ph.navs10m.push(now);
       ph.actions10m.push(now);
       ph.lastActionAt = now;
@@ -4574,11 +4563,7 @@ async function tryFixPhantom(nome, page) {
         const man = await manifestStore.read(nome).catch(()=>null);
         await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
       } catch {}
-      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_phantom_new_page' }).catch(()=>{});
-      } else {
-        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      }
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl2.mainPage = np;
       await wirePageObservers(nome, np);
@@ -4622,9 +4607,9 @@ function _pruneWindow(arr, ms) {
 
 const AUTO_CFG = {
   // Governor (light/full) — configurável por env para tuning em produção:
-  // Política (2026-04-14): entrar em light quando < 1GB e sair quando >= 1.25GB.
-  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '1024', 10) || 1024),
-  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '1280', 10) || 1280),
+  // Política (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
+  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
+  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
   CPU_ENTER: 85,
   CPU_EXIT: 70,
   EMA_ALPHA_CPU: 0.30,
@@ -4644,7 +4629,7 @@ const AUTO_CFG = {
 const ramPolicy = require('./ramPolicy.js');
 
 // RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: 2GB + reserva por porte (8GB=+0MB; acima disso +1GB por 16GB totais)
+// - Operação normal: 2GB + 1GB por node (nós = ceil(totalGB/16))
 // - Durante provision (somente dono do lock): 2GB + pico cookies (~1.5GB)
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
@@ -4659,25 +4644,6 @@ function getOpenMinFreeMB(operator = '') {
     }
   } catch {}
   return snap.reserveNormalMB;
-}
-
-async function waitForPostOpenHeadroom({ nome = '', operator = '', timeoutMs = 18000, sampleEveryMs = 900 } = {}) {
-  const extra = Math.max(0, Number(HEADROOM_AFTER_OPEN_MB || 0) || 0);
-  if (extra <= 0) {
-    return { ok: true, skipped: true, reason: 'headroom_disabled', freeMB: getAvailableMB(), needMB: getOpenMinFreeMB(operator) };
-  }
-  const start = Date.now();
-  const minNeed = getOpenMinFreeMB(operator) + extra;
-  let bestFree = 0;
-  while ((Date.now() - start) < Math.max(2000, Number(timeoutMs || 0) || 18000)) {
-    const freeMB = getAvailableMB();
-    if (freeMB > bestFree) bestFree = freeMB;
-    if (freeMB >= minNeed) {
-      return { ok: true, freeMB, needMB: minNeed, waitedMs: Date.now() - start };
-    }
-    await sleep(Math.max(300, Number(sampleEveryMs || 0) || 900));
-  }
-  return { ok: false, freeMB: getAvailableMB(), bestFree, needMB: minNeed, waitedMs: Date.now() - start };
 }
 const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS || '15000', 10);
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
@@ -5490,11 +5456,7 @@ async function activateOnce(nome, source = '', operator = '') {
     // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pós-sucesso),
     // não bloquear reabertura imediata com kill_guard. Kill guard é anti-flap para falhas.
     const _source = String(source || '');
-    const _bypassKillGuard =
-      /login_remediate_post_success/i.test(_source) ||
-      // LAB/diagnóstico: permitir abrir mesmo sob kill_guard quando explicitamente em modo debug,
-      // para destravar cenários de teste sem relaxar produção.
-      (process.env.BROWSER_DEBUG === '1' && /(^agent$|^ui$|^admin$)/i.test(opTrim));
+    const _bypassKillGuard = /login_remediate_post_success/i.test(_source);
     if (killGuardActive(nome) && !_bypassKillGuard) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
@@ -5593,6 +5555,7 @@ async function activateOnce(nome, source = '', operator = '') {
     const job = (async () => {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
+        logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
@@ -5835,34 +5798,12 @@ async function activateOnce(nome, source = '', operator = '') {
         try { await snapshotStatusAndWrite(); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
-        // Anti-pressao: após abrir o browser, aguarda headroom mínimo para evitar rajada em cadeia.
-        try {
-          const settle = await waitForPostOpenHeadroom({ nome, operator: String(operator || '').trim() });
-          if (!settle || settle.ok !== true) {
-            throw new Error('headroom_below_min_after_open');
-          }
-        } catch (eSettle) {
-          throw eSettle;
-        }
+        logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         logger.info('[WORKER][activateOnce] concluído', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
 
         return { ok: true };
       } catch (e) {
-        // Hardening P0: se a ativação falhou após abrir/acoplar browser,
-        // garantir cleanup para não deixar processo Chrome órfão.
-        try {
-          const ctrlFail = controllers.get(nome);
-          if (ctrlFail) {
-            try {
-              await hardCloseController(nome, ctrlFail, {
-                reason: 'activate_failed_cleanup',
-                allowKillUserDataDir: true
-              });
-            } catch {}
-            try { controllers.delete(nome); } catch {}
-          }
-        } catch {}
         try {
           const st = readJsonFile(statusPath, null) || { perfis: [] };
           let found = false;
@@ -5917,9 +5858,7 @@ const ROBE_DAILY_PLAN_BASE_CFG = {
   enabled: true,
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
-  // Regra operacional: 100% das contas trabalham todos os dias.
-  // Mantemos randomizacao de horarios/blocos, mas sem offday.
-  offdayRatio: 0,
+  offdayRatio: 0.25,
   priorityBandMinHour: 6,
   priorityBandMaxHour: 12,
   priorityBandRatio: Math.max(0, Math.min(1, Number(process.env.ROBE_DAILY_PLAN_MAIN_RATIO || 0.60) || 0.60)),
@@ -6386,15 +6325,6 @@ function _isValidRobeDailyPlan(plan, date) {
   }
   return true;
 }
-function _robePlanNeedsRegenForCfg(plan) {
-  try {
-    const cfg = getRobeDailyPlanCfg();
-    // Quando offday está desabilitado (0%), qualquer plano "enabled:false"
-    // deve ser regenerado imediatamente para garantir 100% diário.
-    if (Number(cfg.offdayRatio || 0) <= 0 && plan && plan.enabled === false) return true;
-  } catch {}
-  return false;
-}
 function _buildRobeDailyPlanDeterministic(nome, dateYmd, hostIdOpt = '', options = null) {
   const cfg = getRobeDailyPlanCfg();
   const seedInput = `${cfg.vtag}|${String(nome || '')}|${String(dateYmd || '')}|${String(hostIdOpt || '')}`;
@@ -6495,19 +6425,19 @@ function _applyRobeDailyHardRules(nome, dateYmd, hostId, basePlan, prevPlan, man
 async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint = null) {
   const date = _robeDailyDateYmd(nowMs);
   const c = _robeDailyPlanCache.get(nome);
-  if (c && c.date === date && c.plan && _isValidRobeDailyPlan(c.plan, date) && !_robePlanNeedsRegenForCfg(c.plan)) return c.plan;
+  if (c && c.date === date && c.plan && _isValidRobeDailyPlan(c.plan, date)) return c.plan;
   const inflight = _robeDailyPlanInFlight.get(nome);
   if (inflight) {
     try { await inflight; } catch {}
     const c2 = _robeDailyPlanCache.get(nome);
-    if (c2 && c2.date === date && c2.plan && _isValidRobeDailyPlan(c2.plan, date) && !_robePlanNeedsRegenForCfg(c2.plan)) return c2.plan;
+    if (c2 && c2.date === date && c2.plan && _isValidRobeDailyPlan(c2.plan, date)) return c2.plan;
   }
   const job = (async () => {
     const hostId = (readHostIdSync && typeof readHostIdSync === 'function') ? (readHostIdSync() || '') : '';
     const man = manifestHint || await manifestStore.read(nome).catch(()=>null);
     const prevPlan = man && man.robeDailyPlanV1 ? man.robeDailyPlanV1 : null;
     let plan = prevPlan;
-    if (!_isValidRobeDailyPlan(plan, date) || _robePlanNeedsRegenForCfg(plan)) {
+    if (!_isValidRobeDailyPlan(plan, date)) {
       const basePlan = _buildRobeDailyPlanDeterministic(nome, date, hostId);
       const hard = _applyRobeDailyHardRules(nome, date, hostId, basePlan, prevPlan, man, nowMs);
       plan = hard.plan;
@@ -7502,21 +7432,6 @@ async function robeTickGlobal() {
       return;
     }
   } catch {}
-  // Circuit breaker leve: em pressão CDP, poupa o Robe para priorizar estabilidade
-  // do atendimento e evitar "ações pela metade" por saturação de sessão.
-  try {
-    const cdpPressure = getCdpPressureState();
-    if (cdpPressure.active) {
-      robeTickGlobal._lastCdpPressureLogAt = robeTickGlobal._lastCdpPressureLogAt || 0;
-      const now = Date.now();
-      const last = Number(robeTickGlobal._lastCdpPressureLogAt || 0) || 0;
-      if (!last || (now - last) > 60000) {
-        robeTickGlobal._lastCdpPressureLogAt = now;
-        await milLog('mil_action', `robeTickGlobal_skip_due_cdp_pressure reason=${cdpPressure.reason || 'cdp_fatal'} msLeft=${cdpPressure.msLeft}`);
-      }
-      return;
-    }
-  } catch {}
   // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
   const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
   let lightMaxEnqueue = null;
@@ -7649,14 +7564,8 @@ async function robeTickGlobal() {
 
         if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
           virtusWasRunning = true;
-          try {
-            const stopRes = await stopVirtus(nome, { reason: 'robe_tick_pause', policy: 'preserveDesired' }).catch(()=>({ ok:false, error:'stop_failed' }));
-            if (stopRes && stopRes.deferred) {
-              virtusWasRunning = false;
-              try { await reportAction(nome, 'mil_action', 'robe_tick_pause_deferred_send_lock'); } catch {}
-              return;
-            }
-          } catch {}
+          try { await ctrl.virtus.stop(); } catch {}
+          ctrl.virtus = null;
         }
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
@@ -7803,47 +7712,9 @@ async function fotosGcTick() {
 setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
 
-function getVirtusSendLock(ctrl) {
-  try {
-    const lk = ctrl && ctrl.browser && ctrl.browser._sendLock;
-    if (lk && lk.active === true && String(lk.owner || '') === 'virtus') {
-      return {
-        active: true,
-        chatId: lk.chatId ? String(lk.chatId) : '',
-        since: Number(lk.since || 0) || 0
-      };
-    }
-  } catch {}
-  return null;
-}
-
-async function stopVirtus(nome, opts = {}) {
+async function stopVirtus(nome) {
 const ctrl = controllers.get(nome);
-if (!ctrl) return { ok: true, skipped: 'no_controller' };
-const reason = String(opts && opts.reason || 'unspecified').slice(0, 120);
-const force = !!(opts && opts.force === true);
-const policy = String(opts && opts.policy || '').slice(0, 80);
-const lock = getVirtusSendLock(ctrl);
-if (!force && lock) {
-  try {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].virtusStopDeferredAt = Date.now();
-    robeMeta[nome].virtusStopDeferredReason = reason || 'send_lock';
-  } catch {}
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'worker_virtus_stop_deferred_send_lock',
-      nome: String(nome || ''),
-      reason,
-      policy: policy || null,
-      chatId: lock.chatId || null,
-      lockAgeMs: lock.since > 0 ? (Date.now() - lock.since) : null
-    });
-  } catch {}
-  try { issues.append(nome, 'mil_action', `virtus_stop_deferred_send_lock reason=${reason || 'unknown'}`).catch(()=>{}); } catch {}
-  return { ok: false, deferred: true, error: 'send_lock_active' };
-}
+if (!ctrl) return;
 try {
 if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
 await ctrl.virtus.stop().catch(()=>{});
@@ -7858,7 +7729,6 @@ if (ctrl.browser) {
 }
 try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
-return { ok: true };
 }
 
 // ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
@@ -8452,24 +8322,6 @@ const handlers = {
     reopenDelayMs = getControlledReopenDelayMs(reason || 'preserve');
   }
   const ctrl = controllers.get(nome);
-  if (ctrl && preserve) {
-    const lock = getVirtusSendLock(ctrl);
-    if (lock) {
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'worker_deactivate_deferred_send_lock',
-          nome: String(nome || ''),
-          reason: String(reason || ''),
-          policy: 'preserveDesired',
-          chatId: lock.chatId || null,
-          lockAgeMs: lock.since > 0 ? (Date.now() - lock.since) : null
-        });
-      } catch {}
-      try { await issues.append(nome, 'mil_action', `deactivate_deferred_send_lock reason=${String(reason || 'unknown').slice(0, 80)}`); } catch {}
-      return { ok: false, deferred: true, error: 'send_lock_active' };
-    }
-  }
   if (!ctrl) {
     // Enterprise HARD: se este deactivate faz parte de um fluxo de delete, não podemos “fingir ok”
     // quando ainda existe Chrome vivo para este perfil (isso gera exatamente o navegador fantasma).
@@ -8553,12 +8405,11 @@ const handlers = {
   // antes de mexer em browser:
   try {
     if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-      const stopRes = await stopVirtus(nome, { reason: `deactivate:${String(reason || '')}`, policy: String(policy || ''), force: !!strictCloseRequired }).catch(()=>({ ok:false, error:'stop_failed' }));
-      if (stopRes && stopRes.deferred) {
-        return { ok: false, deferred: true, error: 'send_lock_active' };
-      }
+      await ctrl.virtus.stop();
     }
   } catch {}
+  ctrl.virtus = null;
+  ctrl.trabalhando = false;
   // HARD CLOSE militar
   let hc = null;
   try {
@@ -9468,7 +9319,7 @@ const handlers = {
         };
 
         // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
-        const pMsg = pick((u) => /messenger\.com|facebook\.com\/messages/i.test(u)); // Messenger/Messages (Virtus)
+        const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
         const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)); // Robe create (FB)
         const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
         const pLang = pick((u) => /facebook\.com\/settings\/language/i.test(u)); // sanity
@@ -9479,12 +9330,8 @@ const handlers = {
           // Blindagem: garanta que estamos checando o domínio correto
           try {
             const u0 = safeUrl(page);
-            if (label === 'msg' && !/messenger\.com|facebook\.com\/messages/i.test(u0)) {
-              if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-                await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 45000, reason: 'worker_check_one_msg' }).catch(()=>{});
-              } else {
-                await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-              }
+            if (label === 'msg' && !/messenger\.com/i.test(u0)) {
+              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -9705,11 +9552,7 @@ const handlers = {
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-            await browserHelper.ensureMarketplaceMessagesContext(p0, { timeoutMs: 45000, reason: 'worker_login_remediate_msg' }).catch(()=>{});
-          } else {
-            await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          }
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -10531,11 +10374,7 @@ const handlers = {
         let pagesN = [];
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
-          if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-            await browserHelper.ensureMarketplaceMessagesContext(pagesN[0], { timeoutMs: 30000, reason: 'worker_human_resume_post_preflight' }).catch(()=>{});
-          } else {
-            await pagesN[0].goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-          }
+          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
@@ -10677,14 +10516,8 @@ const handlers = {
 
             if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
               virtusWasRunning = true;
-              try {
-                const stopRes = await stopVirtus(nome, { reason: 'robe_play_pause', policy: 'preserveDesired' }).catch(()=>({ ok:false, error:'stop_failed' }));
-                if (stopRes && stopRes.deferred) {
-                  virtusWasRunning = false;
-                  try { await reportAction(nome, 'mil_action', 'robe_play_pause_deferred_send_lock'); } catch {}
-                  return { ok: false, error: 'send_lock_active' };
-                }
-              } catch {}
+              try { await ctrl.virtus.stop(); } catch {}
+              ctrl.virtus = null;
             }
 
             try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
@@ -11664,7 +11497,7 @@ async function appendIssueNurseDebounced(nome, type, message, key) {
 }
 
 const NURSE_CFG = {
-  INTERVAL_MS: Math.max(5_000, parseInt(process.env.NURSE_TICK_MS || '30000', 10) || 30000),
+  INTERVAL_MS: 5000,
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
@@ -11689,10 +11522,6 @@ const CDP_RECONNECT_CFG = {
   attempts: Math.max(1, Math.min(5, Number(process.env.CDP_RECONNECT_ATTEMPTS || 3) || 3)),
   delaysMs: [2000, 5000, 10000]
 };
-const CDP_CONNECT_PROTOCOL_TIMEOUT_MS = Math.max(
-  60000,
-  Number(process.env.PUPPETEER_CONNECT_PROTOCOL_TIMEOUT_MS || process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || 180000) || 180000
-);
 
 function _envMs(name, fallback) {
   return Math.max(0, Number(process.env[name] || fallback) || fallback);
@@ -11758,7 +11587,7 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
       const b = await puppeteer.connect({
         browserWSEndpoint: wsEndpoint,
         defaultViewport: null,
-        protocolTimeout: CDP_CONNECT_PROTOCOL_TIMEOUT_MS
+        protocolTimeout: 60000
       });
       if (b && b.isConnected && b.isConnected()) {
         const pages = await b.pages().catch(() => []);
@@ -11978,7 +11807,7 @@ async function unfreezeProfile(nome, setBy = 'admin') {
 async function detectMessengerTempBlock(page) {
   try {
     const url = page.url ? page.url() : '';
-    if (!/messenger\.com|facebook\.com\/messages/i.test(url)) return { blocked: false };
+    if (!/messenger.com/i.test(url)) return { blocked: false };
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const texts = Array.from(document.querySelectorAll('h1,h2,span,div'))
@@ -12012,7 +11841,7 @@ async function detectMessengerTempBlock(page) {
 // =========================================================
 const AUTO_LR_CFG = {
   enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
-  tickMs: Math.max(5_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 30000) || 30000),
+  tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
   minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
@@ -13729,7 +13558,7 @@ async function nurseTick() {
       let det = { blocked:false };
       try {
         const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
-        const isMessenger = /messenger\.com|facebook\.com\/messages/i.test(urlNow);
+        const isMessenger = /messenger.com/i.test(urlNow);
         const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const isCreateOrSellerRoute =
           /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
@@ -13918,7 +13747,7 @@ async function nurseTick() {
 
       try {
         const url = p0.url ? p0.url() : '';
-        if (/(messenger\.com\/.*marketplace|facebook\.com\/messages)/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+        if (/messenger\.com\/.*marketplace/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
           const ph = getPhantomState(nome);
           const snap = await evaluateChatsState(p0);
           if (isOkFromSnapshot(snap)) {
@@ -14231,10 +14060,8 @@ async function stockProvisionResumeTick() {
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
-const STOCK_PROVISION_LOCK_WATCH_TICK_MS = Math.max(5_000, parseInt(process.env.STOCK_PROVISION_LOCK_WATCH_TICK_MS || '30000', 10) || 30000);
-const STOCK_PROVISION_RESUME_TICK_MS = Math.max(10_000, parseInt(process.env.STOCK_PROVISION_RESUME_TICK_MS || '60000', 10) || 60000);
-setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, STOCK_PROVISION_LOCK_WATCH_TICK_MS);
-setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, STOCK_PROVISION_RESUME_TICK_MS);
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
 setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
@@ -14288,49 +14115,6 @@ async function isPageLikelyAlive(page, nome) {
     url = page.url ? page.url() : '';
   } catch {}
   const aboutBlankStuck = (url === 'about:blank') && ((now - st.lastDomEventAt) > HEALTH_CFG.ABOUT_BLANK_GRACE_MS);
-  const isChromeErrorUrl = /^chrome-error:\/\//i.test(String(url || ''));
-  let hasCrashSignals = false;
-  try {
-    hasCrashSignals = await Promise.race([
-      page.evaluate(() => {
-        try {
-          const txt = String((document && (document.body && (document.body.innerText || document.body.textContent))) || '')
-            .toLowerCase()
-            .slice(0, 4000);
-          if (!txt) return false;
-          // Estado transitório do Messenger/Facebook Messages:
-          // "Não foi possível carregar as conversas. Recarregue essa página..."
-          // Não tratar como crash fatal de Chrome; o browser.js tenta clicar em "Recarregar".
-          if (txt.includes('não foi possível carregar as conversas')) return false;
-          if (txt.includes('nao foi possivel carregar as conversas')) return false;
-          if (txt.includes('recarregue essa página para ver suas conversas')) return false;
-          if (txt.includes('recarregue essa pagina para ver suas conversas')) return false;
-          if (txt.includes('recarregue esta página para ver suas conversas')) return false;
-          if (txt.includes('recarregue esta pagina para ver suas conversas')) return false;
-          if (txt.includes('aw, snap')) return true;
-          if (txt.includes('status_access_violation')) return true;
-          if (txt.includes('out of memory')) return true;
-          if (txt.includes('recarregar esta página')) return true;
-          if (txt.includes('recarregar essa página')) return true;
-          if (txt.includes('algo deu errado ao exibir esta página')) return true;
-          return false;
-        } catch { return false; }
-      }).catch(() => false),
-      new Promise((resolve) => setTimeout(() => resolve(false), 1200))
-    ]);
-  } catch {}
-  if (isChromeErrorUrl || hasCrashSignals) {
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'health_page_crash_detected',
-        nome: String(nome || ''),
-        url: String(url || '').slice(0, 220),
-        source: isChromeErrorUrl ? 'chrome_error_url' : 'dom_signal'
-      });
-    } catch {}
-    return false;
-  }
   const urlIsFb = /facebook\.com|messenger\.com/i.test(url);
   const aliveBySignals = (!noDom || !noNet);
   const aliveByReady = (readyOk && urlIsFb && !aboutBlankStuck);
@@ -14344,12 +14128,7 @@ async function recoveryStep(nome, page, step) {
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
-    let ok = false;
-    try {
-      const rr = await reloadPageEnterprise(page, { nome, tag: 'worker_health_reload', timeoutMs: 20_000 }).catch(() => ({ ok: false }));
-      ok = !!(rr && rr.ok);
-    } catch {}
-    if (!ok) return false;
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
     st.counters.softReloads10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.reload;
     try { await issues.append(nome, 'mil_action', 'health_recover:reload'); } catch {}
@@ -14358,17 +14137,7 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    let ok = false;
-    try {
-      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        const rr = await browserHelper.ensureMarketplaceMessagesContext(page, { timeoutMs: 30000, reason: 'worker_health_nav_home' }).catch(() => null);
-        ok = (rr === true) || !!(rr && rr.ok);
-      } else {
-        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        ok = true;
-      }
-    } catch {}
-    if (!ok) return false;
+    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14389,18 +14158,7 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
-      let ok = false;
-      if (browserHelper && typeof browserHelper.ensureMarketplaceMessagesContext === 'function') {
-        const rr = await browserHelper.ensureMarketplaceMessagesContext(np, { timeoutMs: 30000, reason: 'worker_health_new_page' }).catch(()=>null);
-        ok = (rr === true) || !!(rr && rr.ok);
-      } else {
-        await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        ok = true;
-      }
-      if (!ok) {
-        try { await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-        return false;
-      }
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);
@@ -14432,6 +14190,7 @@ async function escalateToReopen(nome, reason='health_reopen') {
 async function healthTick() {
   if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
 
     if (!ctrl || !ctrl.browser) continue;
@@ -14452,7 +14211,7 @@ async function healthTick() {
     let det = { blocked:false };
     try {
       const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
-      const isMessenger = /messenger\.com|facebook\.com\/messages/i.test(urlNow);
+      const isMessenger = /messenger.com/i.test(urlNow);
       const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
       const isCreateOrSellerRoute =
         /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
@@ -14738,52 +14497,9 @@ process.on('message', async (msg) => {
 
 const CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS = Math.max(5000, parseInt(process.env.CONVENIENTE_CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS || '15000', 10) || 15000);
 let _lastCdpFatalRecoverySweepAt = 0;
-const CDP_PRESSURE_WINDOW_MS = Math.max(60_000, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_WINDOW_MS || String(10 * 60 * 1000), 10) || (10 * 60 * 1000));
-const CDP_PRESSURE_THRESHOLD = Math.max(1, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_THRESHOLD || '2', 10) || 2);
-const CDP_PRESSURE_HOLD_MS = Math.max(60_000, parseInt(process.env.CONVENIENTE_CDP_PRESSURE_HOLD_MS || String(8 * 60 * 1000), 10) || (8 * 60 * 1000));
-let _cdpFatalEvents = [];
-let _cdpPressureUntil = 0;
-let _cdpPressureReason = '';
-
-function noteCdpFatalPressure({ source = '', msg = '' } = {}) {
-  try {
-    const now = Date.now();
-    _cdpFatalEvents = (_cdpFatalEvents || []).filter(ts => (now - Number(ts || 0)) <= CDP_PRESSURE_WINDOW_MS);
-    _cdpFatalEvents.push(now);
-    const count = _cdpFatalEvents.length;
-    if (count >= CDP_PRESSURE_THRESHOLD) {
-      const nextUntil = now + CDP_PRESSURE_HOLD_MS;
-      if (nextUntil > Number(_cdpPressureUntil || 0)) _cdpPressureUntil = nextUntil;
-      _cdpPressureReason = String(source || 'cdp_fatal').trim() || 'cdp_fatal';
-      try {
-        logger.warn('[FATAL][WORKER] cdp_pressure_mode_on', {
-          source: String(source || ''),
-          countWindow: count,
-          windowMs: CDP_PRESSURE_WINDOW_MS,
-          holdMs: CDP_PRESSURE_HOLD_MS,
-          pressureUntil: _cdpPressureUntil,
-          msg: String(msg || '').slice(0, 220)
-        });
-      } catch {}
-    }
-  } catch {}
-}
-
-function getCdpPressureState() {
-  const now = Date.now();
-  const until = Number(_cdpPressureUntil || 0) || 0;
-  const active = until > now;
-  return {
-    active,
-    until: until || null,
-    reason: active ? String(_cdpPressureReason || 'cdp_fatal') : null,
-    msLeft: active ? (until - now) : 0
-  };
-}
 
 async function runCdpFatalRecoverySweep({ source = '', msg = '' } = {}) {
   try {
-    noteCdpFatalPressure({ source, msg });
     const now = Date.now();
     if ((now - _lastCdpFatalRecoverySweepAt) < CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS) {
       try {

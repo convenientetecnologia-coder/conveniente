@@ -2,17 +2,11 @@
 // Política única de RAM (ultra enterprise)
 //
 // Regras:
-// - Operação normal: manter livre (base fixa 2GB + reserva por porte do servidor)
-//   * Servidor de até 8GB: reserva extra = 0MB
-//   * Acima de 8GB até 16GB: reserva extra = 1GB
-//   * Acima de 16GB: soma +1GB por cada faixa adicional de 16GB
+// - Operação normal: manter livre (HOST_BASE_MB + 1GB por node)
 // - Provisão (pico cookies): manter livre (HOST_BASE_MB + PROVISION_SPIKE_MB)
-//   (a reserva extra por porte é emprestável durante provisão, pois Robe/Virtus ficam controlados)
+//   (o "1GB por node" é emprestável durante provisão, pois Robe/Virtus ficam controlados)
 
 const os = require('os');
-const FIXED_HOST_BASE_MB = 2048;
-const RESERVE_STEP_TOTAL_MB = 16 * 1024;
-const RESERVE_STEP_MB = 1024;
 
 function mb(x) {
   const n = Number(x);
@@ -23,35 +17,26 @@ function getTotalMemMB() {
   try { return mb(os.totalmem() / (1024 * 1024)); } catch { return 0; }
 }
 
-// Heurística atual do projeto: 1 node a cada 16GB (ceil)
+// Heurística atual do projeto: 1 node a cada 8GB (ceil)
 function calcNodesByTotalMemMB(totalMB) {
   const total = mb(totalMB);
   const gb = total / 1024;
-  const nodes = Math.max(1, Math.ceil(gb / 16));
+  const nodes = Math.max(1, Math.ceil(gb / 8));
   return nodes;
 }
 
 function getHostBaseMB() {
-  return FIXED_HOST_BASE_MB;
+  return mb(process.env.HOST_BASE_MB || 2048);
 }
 
 function getProvisionSpikeMB() {
   return mb(process.env.PROVISION_SPIKE_MB || 1536);
 }
 
-function getReserveByHostSizeMB(totalMB = 0) {
-  const total = mb(totalMB);
-  // Regra operacional: até 8GB não adiciona reserva extra.
-  if (total <= 8 * 1024) return 0;
-  // Acima de 8GB, aplica ao menos 1GB e cresce por faixas de 16GB.
-  const chunks16 = Math.max(1, Math.ceil(total / RESERVE_STEP_TOTAL_MB));
-  return chunks16 * RESERVE_STEP_MB;
-}
-
 function calcReserveNormalMB(totalMB) {
   const base = getHostBaseMB();
-  const reserveByHost = getReserveByHostSizeMB(totalMB);
-  return base + reserveByHost;
+  const nodes = calcNodesByTotalMemMB(totalMB);
+  return base + (nodes * 1024);
 }
 
 function calcReserveProvisionMB(totalMB) {
@@ -65,14 +50,12 @@ function snapshotPolicy() {
   const nodes = calcNodesByTotalMemMB(totalMB);
   const base = getHostBaseMB();
   const spike = getProvisionSpikeMB();
-  const reserveByHostSizeMB = getReserveByHostSizeMB(totalMB);
   return {
     totalMB,
     nodes,
     hostBaseMB: base,
-    reserveByHostSizeMB,
     provisionSpikeMB: spike,
-    reserveNormalMB: base + reserveByHostSizeMB,
+    reserveNormalMB: base + (nodes * 1024),
     reserveProvisionMB: base + spike
   };
 }
@@ -81,7 +64,6 @@ module.exports = {
   getTotalMemMB,
   calcNodesByTotalMemMB,
   getHostBaseMB,
-  getReserveByHostSizeMB,
   getProvisionSpikeMB,
   calcReserveNormalMB,
   calcReserveProvisionMB,

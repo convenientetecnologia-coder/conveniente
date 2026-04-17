@@ -54,9 +54,7 @@ function createCluster() {
     remainingForChromesMB: plan.budgets.remainingForChromesMB,
     chromeAvgMB: plan.budgets.chromeAvgMB,
     totalProfiles: names.length,
-    maxChromesPossibleGlobal: plan.maxChromesPossibleGlobal,
-    configuredMaxAccounts: plan.serverConfig && plan.serverConfig.maxAccountsEffective,
-    effectiveChromesCap: plan.maxChromesPossibleGlobal
+    effectiveChromesCap: 'all'
   });
 
   const children = [];
@@ -528,58 +526,13 @@ function createCluster() {
     }
   }
 
-  async function kill({ graceMs = 12000, forceMs = 4000 } = {}) {
+  async function kill() {
     isShuttingDown = true;
     // ============= BEGIN PATCH: close perfisWatcher before killing =============
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     // ============= END PATCH: close perfisWatcher before killing ===============
-
-    const waiters = [];
     for (const c of children) {
-      try {
-        const proc = c && c.proc;
-        if (!proc) continue;
-        const waiter = new Promise((resolve) => {
-          let done = false;
-          const finish = () => {
-            if (done) return;
-            done = true;
-            resolve(true);
-          };
-          try { proc.once('exit', finish); } catch {}
-          try { proc.once('close', finish); } catch {}
-          // Se já morreu, resolve imediatamente.
-          try {
-            if (proc.killed || proc.exitCode != null || proc.signalCode != null) finish();
-          } catch {}
-        });
-        waiters.push({ proc, waiter });
-      } catch {}
-    }
-
-    for (const w of waiters) {
-      try { w.proc.kill('SIGTERM'); } catch {}
-    }
-
-    const gracefulAll = Promise.all(waiters.map(w => w.waiter));
-    const gracefulTimedOut = await Promise.race([
-      gracefulAll.then(() => false),
-      new Promise((resolve) => setTimeout(() => resolve(true), Math.max(1000, Number(graceMs) || 12000)))
-    ]);
-
-    if (gracefulTimedOut) {
-      logger.warn('[CLUSTER] kill(): timeout aguardando SIGTERM; forçando SIGKILL nos workers vivos');
-      for (const w of waiters) {
-        try {
-          const p = w.proc;
-          const alive = !!(p && (p.exitCode == null) && (p.signalCode == null));
-          if (alive) p.kill('SIGKILL');
-        } catch {}
-      }
-      await Promise.race([
-        Promise.all(waiters.map(w => w.waiter)),
-        new Promise((resolve) => setTimeout(resolve, Math.max(1000, Number(forceMs) || 4000)))
-      ]);
+      try { c.proc.kill('SIGTERM'); } catch {}
     }
   }
 
