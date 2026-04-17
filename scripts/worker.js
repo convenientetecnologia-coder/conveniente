@@ -1945,7 +1945,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.facebook.com/messages'
+        ? 'https://www.messenger.com/marketplace'
         : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -4537,7 +4537,7 @@ async function tryFixPhantom(nome, page) {
 
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
-      await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
       ph.navs10m.push(now);
       ph.actions10m.push(now);
       ph.lastActionAt = now;
@@ -4563,7 +4563,7 @@ async function tryFixPhantom(nome, page) {
         const man = await manifestStore.read(nome).catch(()=>null);
         await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
       } catch {}
-      await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl2.mainPage = np;
       await wirePageObservers(nome, np);
@@ -9331,7 +9331,7 @@ const handlers = {
           try {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -9552,7 +9552,7 @@ const handlers = {
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -10374,7 +10374,7 @@ const handlers = {
         let pagesN = [];
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
-          await pagesN[0].goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
@@ -14137,7 +14137,7 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14158,7 +14158,7 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
-      await np.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);

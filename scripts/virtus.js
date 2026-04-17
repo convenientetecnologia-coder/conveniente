@@ -48,25 +48,10 @@ function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b) rel
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
-    const evalStartedAt = Date.now();
-    const evalOrTimeout = await Promise.race([
-      p.evaluate((id) => {
-        try {
-          const path = (location && typeof location.pathname === 'string') ? String(location.pathname || '') : '';
-          const href = (location && typeof location.href === 'string') ? String(location.href || '') : '';
-          if (path.includes('/marketplace/t/' + id) || path.includes('/messages/t/' + id)) return true;
-          if (href.includes('/marketplace/t/' + id) || href.includes('/messages/t/' + id)) return true;
-          const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
-          if (!rowById) return false;
-          const selected = rowById.closest('[aria-current="page"], [aria-selected="true"]');
-          if (selected) return true;
-          return false;
-        }
-        catch { return false; }
-      }, chatId).catch(() => false),
-      new Promise((resolve) => setTimeout(() => resolve('__virtus_eval_timeout__'), VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS))
-    ]).catch(() => false);
-    const ok = (evalOrTimeout === true);
+    const ok = await p.evaluate((id) => {
+      try { return (location && typeof location.pathname === 'string') ? location.pathname.includes('/marketplace/t/' + id) : false; }
+      catch { return false; }
+    }, chatId).catch(() => false);
     if (ok) return true;
     if (!timeoutMs) return false;
     const elapsed = Date.now() - t0;
@@ -120,62 +105,57 @@ const VIRTUS_HEAVY_ACTION_MIN_GAP_MS = Math.max(10000, parseInt(process.env.VIRT
 const VIRTUS_PAGE_SWAP_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_SWAP_RECYCLE_ENABLED || '0').trim() === '1';
 const VIRTUS_PAGE_SWAP_WINDOW_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_WINDOW_MS || '25000', 10) || 25000);
 const VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS = Math.max(8000, parseInt(process.env.VIRTUS_PAGE_SWAP_NAV_TIMEOUT_MS || '20000', 10) || 20000);
-const VIRTUS_PAGE_RECYCLE_ENABLED = String(process.env.VIRTUS_PAGE_RECYCLE_ENABLED || '0').trim() === '1';
-const VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS = Math.max(600, parseInt(process.env.VIRTUS_ASSERT_ON_CHAT_EVAL_TIMEOUT_MS || '2200', 10) || 2200);
 const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
-const VIRTUS_FAST_MODE = String(process.env.VIRTUS_FAST_MODE || '0').trim() === '1';
-const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(
-  0,
-  parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || String(VIRTUS_FAST_MODE ? 0 : 12), 10) || (VIRTUS_FAST_MODE ? 0 : 12)
-);
-const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(
-  VIRTUS_TYPE_DELAY_MIN_MS,
-  parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || String(VIRTUS_FAST_MODE ? 6 : 30), 10) || (VIRTUS_FAST_MODE ? 6 : 30)
-);
-const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(
-  0,
-  parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || String(VIRTUS_FAST_MODE ? 50 : 180), 10) || (VIRTUS_FAST_MODE ? 50 : 180)
-);
-const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(
-  VIRTUS_ENTER_AFTER_TYPE_MIN_MS,
-  parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || String(VIRTUS_FAST_MODE ? 120 : 450), 10) || (VIRTUS_FAST_MODE ? 120 : 450)
-);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(
-  120,
-  parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || String(VIRTUS_FAST_MODE ? 220 : 700), 10) || (VIRTUS_FAST_MODE ? 220 : 700)
-);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(
-  VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS,
-  parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || String(VIRTUS_FAST_MODE ? 450 : 1400), 10) || (VIRTUS_FAST_MODE ? 450 : 1400)
-);
-const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(
-  120,
-  parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || String(VIRTUS_FAST_MODE ? 220 : 450), 10) || (VIRTUS_FAST_MODE ? 220 : 450)
-);
-const VIRTUS_CHAT_OPEN_DEADLINE_MS = Math.max(
-  8000,
-  parseInt(process.env.VIRTUS_CHAT_OPEN_DEADLINE_MS || String(VIRTUS_FAST_MODE ? 15000 : 30000), 10) || (VIRTUS_FAST_MODE ? 15000 : 30000)
-);
-const VIRTUS_COMPOSER_FAST_TIMEOUT_MS = Math.max(
-  6000,
-  parseInt(process.env.VIRTUS_COMPOSER_FAST_TIMEOUT_MS || String(VIRTUS_FAST_MODE ? 10000 : 22000), 10) || (VIRTUS_FAST_MODE ? 10000 : 22000)
-);
-const VIRTUS_COMPOSER_RECHECK_MS = Math.max(
-  250,
-  parseInt(process.env.VIRTUS_COMPOSER_RECHECK_MS || String(VIRTUS_FAST_MODE ? 550 : 1400), 10) || (VIRTUS_FAST_MODE ? 550 : 1400)
-);
-const VIRTUS_SEND_CONFIRM_TIMEOUT_MS = Math.max(
-  1200,
-  parseInt(process.env.VIRTUS_SEND_CONFIRM_TIMEOUT_MS || String(VIRTUS_FAST_MODE ? 3200 : 7000), 10) || (VIRTUS_FAST_MODE ? 3200 : 7000)
-);
+const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '55', 10) || 55);
+const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '120', 10) || 120);
+const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '350', 10) || 350);
+const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '900', 10) || 900);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
+const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
 const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
-const VIRTUS_DIRECT_SEND_ON_OPEN = String(process.env.VIRTUS_DIRECT_SEND_ON_OPEN || '1').trim() !== '0';
+const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
+const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
-  return;
+  try {
+    if (!LEGACY_RUNTIME_DEBUG_ENABLED) return;
+    const now = Date.now();
+    const k = String(key || `${hypothesisId}:${location}:${message}`);
+    const last = Number(__virtusDbgState.lastByKey[k] || 0) || 0;
+    if (minIntervalMs > 0 && (now - last) < minIntervalMs) return;
+    __virtusDbgState.lastByKey[k] = now;
+    // #region agent log
+    fetch(__VIRTUS_DEBUG_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runId: 'stage3-pre-fix',
+        hypothesisId,
+        location,
+        message,
+        data: data && typeof data === 'object' ? data : {},
+        timestamp: now
+      })
+    }).catch(() => {});
+    try {
+      if (provisionAudit && typeof provisionAudit.append === 'function') {
+        provisionAudit.append({
+          ts: now,
+          event: 'dbg_agent_runtime',
+          runId: 'stage3-pre-fix',
+          hypothesisId: String(hypothesisId || ''),
+          location: String(location || ''),
+          message: String(message || ''),
+          data: data && typeof data === 'object' ? data : {}
+        });
+      }
+    } catch {}
+    // #endregion
+  } catch {}
 }
 
 // Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
@@ -333,33 +313,24 @@ function isChatRecente(tempoLabel) {
 function extraiIdDoHref(href) {
   try {
     const s = String(href || '');
-    const keys = ['/marketplace/t/', '/messages/t/'];
-    for (const key of keys) {
-      const pos = s.indexOf(key);
-      if (pos < 0) continue;
-      const rest = s.slice(pos + key.length);
-      const id = rest.split(/[/?#]/)[0];
-      if (id && /^\d+$/.test(id)) return id;
-    }
-    return null;
+    const pos = s.indexOf('/marketplace/t/');
+    if (pos < 0) return null;
+    const rest = s.slice(pos + '/marketplace/t/'.length);
+    const id = rest.split(/[/?#]/)[0];
+    return id && /^\d+$/.test(id) ? id : null;
   } catch { return null; }
 }
 
 async function coletaChatsMarketplaceTodos(page) {
   try {
-    const items = await page.$$eval('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', els => {
+    const items = await page.$$eval('a[href^="/marketplace/t/"]', els => {
       function _extraiId(href) {
         try {
           const s = String(href || '');
-          const keys = ['/marketplace/t/', '/messages/t/'];
-          for (const key of keys) {
-            const pos = s.indexOf(key);
-            if (pos < 0) continue;
-            const rest = s.slice(pos + key.length);
-            const id = rest.split(/[/?#]/)[0];
-            if (id && /^\d+$/.test(id)) return id;
-          }
-          return null;
+          const pos = s.indexOf('/marketplace/t/');
+          const rest = s.slice(pos + '/marketplace/t/'.length);
+          const id = rest.split(/[/?#]/)[0];
+          return id && /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
       function _extraiTempo(row) {
@@ -405,53 +376,30 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
   let url = '';
   try { url = page.url() || ''; } catch {}
-  const browserJs = require('./browser.js');
-  const isMarketplaceUnavailableError = (err) => {
-    const msg = String((err && err.message) || err || '').toLowerCase();
-    return msg.includes('marketplace_menu_not_available');
-  };
-  const isMarketplaceContextUrl = /messenger.com\/marketplace/i.test(url) || /facebook\.com\/messages/i.test(url);
-  if (!isMarketplaceContextUrl) {
-    if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
-      try {
-        const navState = await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace' });
-        if (navState && navState.marketplaceAvailable === false) return false;
-      } catch (err) {
-        if (isMarketplaceUnavailableError(err)) return false;
-        throw err;
-      }
-    } else {
-      try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
-    }
+  if (!/messenger.com\/marketplace/i.test(url)) {
+    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
   }
   // Cura fluxos de nonce/continuar
   try {
+    const browserJs = require('./browser.js');
     if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
       await browserJs.resolveNonceIfPresent(page).catch(()=>{});
     }
     if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
       await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
     }
-    if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
-      const finalState = await browserJs.ensureMarketplaceMessagesContext(page, { timeoutMs, reason: 'virtus_garantir_marketplace_final' }).catch((err) => {
-        if (isMarketplaceUnavailableError(err)) return { ok: true, marketplaceAvailable: false, reason: 'marketplace_menu_not_available' };
-        throw err;
-      });
-      if (finalState && finalState.marketplaceAvailable === false) return false;
-    }
   } catch {}
   // Espera robusta por UI
   const ok = await Promise.race([
     page.waitForFunction(() => {
-      const hasAnchor = !!document.querySelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]');
+      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
       const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
       const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
       return hasAnchor || hasGrid || hasRow;
     }, { timeout: timeoutMs }),
-    page.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: timeoutMs }).catch(() => null)
+    page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: timeoutMs }).catch(() => null)
   ]);
   if (!ok) throw new Error('Marketplace UI não ficou pronta a tempo');
-  return true;
 }
 
 // ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
@@ -496,7 +444,7 @@ async function scrollChatsToTop(page, nome) {
 
       // Tentativa extra: clicar em cima no topo para garantir foco no chat mais recente
       try {
-        let firstA = grid.querySelector('a[role="link"], a[href*="/marketplace/t/"], a[href*="/messages/t/"]');
+        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
         if (firstA) {
           firstA.focus && firstA.focus();
           // Eventual scrollIntoView + toTop
@@ -596,12 +544,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
             const norm = s => String(s||'').toLowerCase();
             const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
             return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
-          }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(()=>true).catch(()=>false);
+          }, { timeout: 7000 }).then(()=>true).catch(()=>false);
         } catch { return false; }
       })(),
       (async () => {
         try {
-          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }, campo)
+          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
             .then(()=>true).catch(()=>false);
         } catch { return false; }
       })()
@@ -616,69 +564,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
   }
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
-
-async function sendMessageDirectIfFocused(p, msg, nome, chatId) {
-  setVirtusInputLock(nome, true);
-  const directMarker = `virtus_direct_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-  try {
-    if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
-    const focusReady = await p.evaluate((marker) => {
-      try {
-        const ae = document.activeElement;
-        if (!ae || !ae.getAttribute) return false;
-        const ce = String(ae.getAttribute('contenteditable') || '').toLowerCase();
-        const role = String(ae.getAttribute('role') || '').toLowerCase();
-        const ok = (ce === 'true' || ce === 'plaintext-only') && role === 'textbox';
-        if (!ok) return false;
-        try { ae.setAttribute('data-virtus-direct-marker', String(marker || '')); } catch {}
-        return true;
-      } catch { return false; }
-    }, directMarker).catch(() => false);
-    if (!focusReady) return false;
-
-    const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
-    await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
-    if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) return false;
-    await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
-    await p.keyboard.press('Enter');
-
-    const sent = await Promise.race([
-      p.waitForFunction(() => {
-        try {
-          const norm = (s) => String(s || '').toLowerCase();
-          const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
-          return nodes.some((el) => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
-        } catch { return false; }
-      }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }).then(() => true).catch(() => false),
-      p.waitForFunction((marker) => {
-        try {
-          const sel = `[data-virtus-direct-marker="${String(marker || '').replace(/"/g, '\\"')}"]`;
-          const el = document.querySelector(sel);
-          if (!el) return false;
-          const txt = (el.innerText || el.textContent || '').trim();
-          return txt.length === 0;
-        } catch { return false; }
-      }, { timeout: VIRTUS_SEND_CONFIRM_TIMEOUT_MS }, directMarker).then(() => true).catch(() => false)
-    ]);
-
-    if (!sent) {
-      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout_direct');
-      return false;
-    }
-    return true;
-  } finally {
-    try {
-      await p.evaluate((marker) => {
-        try {
-          const sel = `[data-virtus-direct-marker="${String(marker || '').replace(/"/g, '\\"')}"]`;
-          const el = document.querySelector(sel);
-          if (el) el.removeAttribute('data-virtus-direct-marker');
-        } catch {}
-      }, directMarker).catch(() => {});
-    } catch {}
-    setVirtusInputLock(nome, false);
-  }
-}
 
 async function startVirtus(browser, nome, robeMeta = {}) {
   // Na primeira linha dentro de startVirtus, após argumentos:
@@ -724,33 +609,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let fila = [];
   let historico = {};
   let chatAtivo = null;
-  const replyRetryReasonByChat = new Map();
-  const replyRetryCountByChat = new Map();
-  const replyScheduleMetaByChat = new Map();
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  const fastMode = VIRTUS_FAST_MODE && !slowMode;
   const POLL_INTERVAL_MS = Math.max(
-    fastMode ? 5_000 : 12_000,
-    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (fastMode ? 9_000 : (slowMode ? 30_000 : 20_000))) || (fastMode ? 9_000 : (slowMode ? 30_000 : 20_000))
+    45_000,
+    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 90_000 : 60_000)) || (slowMode ? 90_000 : 60_000)
   );
-  const MIN_REPLY_DELAY_MS = Math.max(
-    fastMode ? 2_000 : 8_000,
-    Number(process.env.VIRTUS_MIN_REPLY_DELAY_MS || (fastMode ? 4_500 : (slowMode ? 80_000 : 60_000))) || (fastMode ? 4_500 : (slowMode ? 80_000 : 60_000))
-  );
-  const MAX_REPLY_DELAY_MS = Math.max(
-    MIN_REPLY_DELAY_MS,
-    Number(process.env.VIRTUS_MAX_REPLY_DELAY_MS || (fastMode ? 9_000 : (slowMode ? 150_000 : 120_000))) || (fastMode ? 9_000 : (slowMode ? 150_000 : 120_000))
-  );
-  const RETRY_REPLY_DELAY_MS = Math.max(
-    2_000,
-    Number(process.env.VIRTUS_REPLY_RETRY_DELAY_MS || 3_000) || 3_000
-  );
-  const RETRY_REPLY_MAX_DELAY_MS = Math.max(
-    RETRY_REPLY_DELAY_MS,
-    Number(process.env.VIRTUS_REPLY_RETRY_MAX_DELAY_MS || 45_000) || 45_000
-  );
+  const MIN_REPLY_DELAY_MS = slowMode ? 80_000 : 60_000;
+  const MAX_REPLY_DELAY_MS = slowMode ? 150_000 : 120_000;
   const SCROLL_TOP_INTERVAL_MS = Math.max(
     120_000,
     Number(process.env.VIRTUS_SCROLL_TOP_INTERVAL_MS || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)) || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)
@@ -785,24 +652,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let lastKeepaliveAt = 0;
   let lastReplyAtMs = Date.now();
   let lastHeavyActionAt = 0;
-  let lastMarketplaceEnsureAt = 0;
-  let lastMarketplaceEnsureResult = false;
-  let lastMarketplaceNoMenuAt = 0;
-  let lastMarketplaceNoMenuLogAt = 0;
   let repliesSinceRecycle = 0;
   const heavyActionTimes = [];
-  const MARKETPLACE_ENSURE_MIN_GAP_MS = Math.max(
-    12_000,
-    Number(process.env.VIRTUS_MARKETPLACE_ENSURE_MIN_GAP_MS || 30_000) || 30_000
-  );
-  const MARKETPLACE_MENU_ABSENT_RECHECK_MS = Math.max(
-    20_000,
-    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_RECHECK_MS || 60_000) || 60_000
-  );
-  const MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS = Math.max(
-    30_000,
-    Number(process.env.VIRTUS_MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS || 300_000) || 300_000
-  );
 
   // trackers
   let saveChain = Promise.resolve();
@@ -899,42 +750,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     return 'warm_idle';
   }
 
-  async function ensureMarketplaceCalmo(p, { timeoutMs = 25000, force = false, reason = 'default' } = {}) {
-    const now = Date.now();
-    if (!force && (now - Number(lastMarketplaceEnsureAt || 0)) < MARKETPLACE_ENSURE_MIN_GAP_MS) {
-      return !!lastMarketplaceEnsureResult;
-    }
-    const idleSafe = !chatAtivo && (!Array.isArray(fila) || fila.length === 0) && !isVirtusLocked(nome);
-    if (!force && idleSafe) {
-      // Recheck adaptativo para evitar "cegueira" de minutos quando o menu aparece após nova mensagem.
-      const adaptiveNoMenuRecheckMs = Math.max(
-        20_000,
-        Math.min(
-          Number(MARKETPLACE_MENU_ABSENT_RECHECK_MS || 0) || 60_000,
-          Math.max(Number(POLL_INTERVAL_MS || 0) * 2, 35_000)
-        )
-      );
-      if (!lastMarketplaceEnsureResult && (now - Number(lastMarketplaceNoMenuAt || 0)) < adaptiveNoMenuRecheckMs) {
-        return false;
-      }
-    }
-    const ok = await garantirMarketplace(p, { timeoutMs });
-    lastMarketplaceEnsureAt = Date.now();
-    lastMarketplaceEnsureResult = !!ok;
-    if (!ok) lastMarketplaceNoMenuAt = lastMarketplaceEnsureAt;
-    if (VIRTUS_DETAILED_DEBUG) {
-      logger.info('[VIRTUS] ensureMarketplaceCalmo', {
-        nome,
-        reason,
-        ok: !!ok,
-        force: !!force,
-        idleSafe,
-        cooldownMs: MARKETPLACE_ENSURE_MIN_GAP_MS
-      });
-    }
-    return !!ok;
-  }
-
   // Persistência segura no Windows
   async function salvaHistorico() {
     saveChain = saveChain.then(async () => {
@@ -980,6 +795,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         setResponded(id, ts);
       }
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H7',
+      'virtus.js:carregaHistorico',
+      'virtus_history_loaded',
+      {
+        nome: String(nome || ''),
+        historicoKeys: Object.keys(historico || {}).length,
+        respondedCacheSize: respondedCache.size,
+        noRepeatWindowSec: NO_REPEAT_WINDOW_SEC,
+        pollIntervalMs: POLL_INTERVAL_MS
+      },
+      `virtus.history.loaded.${String(nome || '')}`,
+      60000
+    );
+    // #endregion
   }
 
   function limpaHistoricoVelho() {
@@ -1002,6 +833,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (first !== undefined) respondedCache.delete(first);
       mudanca = true;
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H7',
+      'virtus.js:limpaHistoricoVelho',
+      'virtus_history_prune',
+      {
+        nome: String(nome || ''),
+        removed,
+        historicoKeys: Object.keys(historico || {}).length,
+        respondedCacheSize: respondedCache.size,
+        changed: !!mudanca
+      },
+      `virtus.history.prune.${String(nome || '')}`,
+      60000
+    );
+    // #endregion
     return mudanca;
   }
 
@@ -1103,8 +950,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   const COMPOSER_SELECTORS = [
-    'div[contenteditable="true"][role="textbox"][aria-label="Mensagem"][data-lexical-editor="true"]',
-    'div[contenteditable="true"][role="textbox"][aria-placeholder="Aa"][data-lexical-editor="true"]',
     'div[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"][aria-label]',
     'div[contenteditable="true"]',
@@ -1130,12 +975,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const txt = await p.evaluate(el => (el.innerText || el.textContent || '').trim(), alertExists);
         if (txt && CHAT_BLOCKED_PATTERNS.some(rx => rx.test(txt))) return true;
       }
-      // Evita varredura pesada do DOM (Messenger é gigante e isso custava muito em VM lenta).
-      const txts = await p.$$eval(
-        'div[role="alert"], [role="alert"] span, [aria-live="polite"], [aria-live="assertive"]',
-        els => els.slice(0, 60).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)
-      ).catch(() => []);
-      for (const t of (txts || [])) {
+      const txts = await p.$$eval('div, span, h1, h2', els =>
+        els.slice(0, 200).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)
+      );
+      for (const t of txts) {
         if (CHAT_BLOCKED_PATTERNS.some(rx => rx.test(t))) return true;
       }
     } catch {}
@@ -1164,48 +1007,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     return null;
   }
 
-  async function evalWithTimeout(p, fn, arg, timeoutMs = 2800) {
-    const evalStart = Date.now();
-    const exec = (typeof arg === 'undefined') ? p.evaluate(fn) : p.evaluate(fn, arg);
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`eval_timeout_${timeoutMs}`)), Math.max(500, Number(timeoutMs || 0)));
-    });
-    try {
-      const value = await Promise.race([exec, timeoutPromise]);
-      return { ok: true, value, durMs: Date.now() - evalStart, error: null };
-    } catch (err) {
-      return {
-        ok: false,
-        value: null,
-        durMs: Date.now() - evalStart,
-        error: String((err && err.message) || err || 'eval_error').slice(0, 160)
-      };
-    }
-  }
-
   function incFail(chatId) {
     const n = (failCounts.get(chatId) || 0) + 1;
     setFailCount(chatId, n);
     return n;
   }
-  function markReplyRetry(chatId, reason) {
-    replyRetryReasonByChat.set(chatId, reason);
-  }
-  function nextReplyRetryDelay(chatId) {
-    const prev = Number(replyRetryCountByChat.get(chatId) || 0) || 0;
-    const count = prev + 1;
-    replyRetryCountByChat.set(chatId, count);
-    const exp = Math.min(4, Math.max(0, count - 1)); // 1x,2x,4x,8x,16x
-    const base = RETRY_REPLY_DELAY_MS * Math.pow(2, exp);
-    const jitter = randomBetween(300, 1800);
-    const delay = Math.min(RETRY_REPLY_MAX_DELAY_MS, base) + jitter;
-    return { delay, count };
-  }
   function resetFail(chatId) {
     failCounts.delete(chatId);
-    replyRetryCountByChat.delete(chatId);
-    replyRetryReasonByChat.delete(chatId);
-    replyScheduleMetaByChat.delete(chatId);
   }
 
   async function coletaChatsMarketplaceRecentes() {
@@ -1215,16 +1023,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!p) return [];
       try {
         if (!running || !epochOk()) return [];
-        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: false, reason: 'coleta_chats' });
-        if (!marketReady) {
-          const nowLog = Date.now();
-          if (!lastMarketplaceNoMenuLogAt || (nowLog - lastMarketplaceNoMenuLogAt) >= MARKETPLACE_MENU_ABSENT_LOG_THROTTLE_MS) {
-            lastMarketplaceNoMenuLogAt = nowLog;
-            logger.info('[VIRTUS] Marketplace ainda não disponível para esta conta (menu ausente).', { nome });
-          }
-          await sleep(5000);
-          return [];
-        }
+        await garantirMarketplace(p);
       } catch (err) {
         logger.warn('Não está no Marketplace ou erro ao garantir Marketplace', { nome }, err);
         await sleep(5000);
@@ -1232,7 +1031,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       try {
         await Promise.race([
-          p.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: 4000 }),
+          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 4000 }),
           p.waitForSelector('div[role="row"] span', { timeout: 4000 }),
         ]);
       } catch {}
@@ -1284,18 +1083,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
     if (!running || !epochOk()) return;
-    const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'init_historico' });
-    if (!marketReady) {
-      historico = {};
-      await salvaHistorico();
-      await carregaHistorico();
-      await reconcilePendingsIfAny();
-      log('[SNAPSHOT] Marketplace sem menu disponível (conta nova/sem chats de marketplace). Snapshot inicial vazio aplicado.');
-      return;
-    }
+    await garantirMarketplace(p);
     try {
       await Promise.race([
-        p.waitForSelector('a[href*="/marketplace/t/"], a[href*="/messages/t/"]', { timeout: 8000 }),
+        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
@@ -1354,38 +1145,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function atualizaFila() {
     let mudancaFila = false;
-    // Debug seed (opt-in): injeta chat(s) de chats_pending.json com startedAt=0 direto na fila.
-    // Uso: laboratório / teste controlado sem depender de "chat recente".
-    if (String(process.env.VIRTUS_ALLOW_PENDING_SEED || '0').trim() === '1') {
-      try {
-        const pend = await pendingList(nome);
-        const agoraSeed = agoraEpoch();
-        let changed = false;
-        for (const [chatId, rec] of Object.entries(pend || {})) {
-          if (!chatId) continue;
-          if (!rec || Number(rec.startedAt || 0) !== 0) continue;
-          const ts = respondedCache.get(chatId) || Number(historico[chatId] || 0);
-          const jaRespondido = ts && (agoraSeed - ts) < NO_REPEAT_WINDOW_SEC;
-          if (!jaRespondido && !fila.includes(chatId)) {
-            fila.push(chatId);
-            mudancaFila = true;
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'virtus_seed_enqueue',
-                nome: String(nome || ''),
-                chatId: String(chatId || '').slice(0, 80)
-              });
-            } catch {}
-          }
-          pend[chatId] = { ...(rec || {}), startedAt: Date.now() };
-          changed = true;
-        }
-        if (changed) {
-          await writeJsonAtomicFsync(PENDING_JSON_NAME(nome), pend);
-        }
-      } catch {}
-    }
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     let novosAti = 0;
     const agora = agoraEpoch();
@@ -1417,6 +1176,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
       mudancaFila = true;
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H8',
+      'virtus.js:atualizaFila',
+      'virtus_queue_state',
+      {
+        nome: String(nome || ''),
+        chatsNovosCount: Array.isArray(chatsNovos) ? chatsNovos.length : 0,
+        novosAti,
+        filaSize: fila.length,
+        chatAtivo: chatAtivo ? String(chatAtivo) : null,
+        pendingTimers: {
+          filaInterval: !!filaInterval,
+          filaChatTimer: !!filaChatTimer,
+          scrollInterval: !!scrollInterval
+        }
+      },
+      `virtus.queue.state.${String(nome || '')}`,
+      45000
+    );
+    // #endregion
     return mudancaFila;
   }
 
@@ -1424,101 +1204,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running) return;
     if (chatAtivo) return;
     if (filaChatTimer) return;
-    if (!fila.length) {
-      if (replyRetryReasonByChat.size > 0) replyRetryReasonByChat.clear();
-      if (replyRetryCountByChat.size > 0) replyRetryCountByChat.clear();
-      if (replyScheduleMetaByChat.size > 0) replyScheduleMetaByChat.clear();
-      return;
-    }
+    if (!fila.length) return;
 
     const next = fila[0];
-    const retryReason = replyRetryReasonByChat.get(next);
-    const retryMeta = retryReason ? nextReplyRetryDelay(next) : null;
-    const delay = retryMeta ? Number(retryMeta.delay || RETRY_REPLY_DELAY_MS) : randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
-    const now = Date.now();
-    const dueAt = now + delay;
-    replyScheduleMetaByChat.set(next, {
-      scheduledAt: now,
-      dueAt,
-      delay,
-      retryReason: retryReason || null,
-      retryCount: retryMeta ? Number(retryMeta.count || 1) : 0
-    });
-    try {
-      provisionAudit.append({
-        ts: now,
-        event: 'virtus_reply_scheduled',
-        nome: String(nome || ''),
-        chatId: String(next || '').slice(0, 80),
-        delayMs: Number(delay || 0),
-        dueAt,
-        retryReason: retryReason || null,
-        retryCount: retryMeta ? Number(retryMeta.count || 1) : 0,
-        queueLen: Number(fila.length || 0)
-      });
-    } catch {}
-    if (retryReason) {
-      replyRetryReasonByChat.delete(next);
-      log(`[FILA] Retry chat ${next} em ${Math.round(delay/1000)}s (${retryReason}; tentativa=${retryMeta ? retryMeta.count : 1})`);
-    } else {
-      log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
-    }
+    const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
+    log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
     filaChatTimer = setTimeout(async () => {
       if (!running || !epochOk()) return;
-      const firedAt = Date.now();
-      const sched = replyScheduleMetaByChat.get(next) || null;
-      replyScheduleMetaByChat.delete(next);
-      const timerDriftMs = (sched && Number(sched.dueAt || 0) > 0) ? (firedAt - Number(sched.dueAt || 0)) : null;
-      stepLog.appendJSONL(nome, 'virtus', {
-        attempt: attId,
-        step: 'schedule_reply',
-        chatId: next,
-        in: delay,
-        scheduledAt: sched ? Number(sched.scheduledAt || 0) : null,
-        dueAt: sched ? Number(sched.dueAt || 0) : null,
-        firedAt,
-        timerDriftMs: (typeof timerDriftMs === 'number') ? Number(timerDriftMs) : null,
-        retryReason: sched ? (sched.retryReason || null) : null
-      });
-      try {
-        provisionAudit.append({
-          ts: firedAt,
-          event: 'virtus_reply_timer_fired',
-          nome: String(nome || ''),
-          chatId: String(next || '').slice(0, 80),
-          scheduledAt: sched ? Number(sched.scheduledAt || 0) : null,
-          dueAt: sched ? Number(sched.dueAt || 0) : null,
-          firedAt,
-          delayMs: sched ? Number(sched.delay || delay || 0) : Number(delay || 0),
-          timerDriftMs: (typeof timerDriftMs === 'number') ? Number(timerDriftMs) : null,
-          retryReason: sched ? (sched.retryReason || null) : null
-        });
-      } catch {}
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
       filaChatTimer = null;
-      await responderChat(next, { scheduleMeta: sched, timerDriftMs });
+      await responderChat(next);
       scheduleNextIfIdle();
     }, delay);
   }
 
-  async function responderChat(chatId, opts = {}) {
+  async function responderChat(chatId) {
     const tStartMs = Date.now();
-    const timerDriftMs = Number(opts && opts.timerDriftMs);
-    if (Number.isFinite(timerDriftMs) && timerDriftMs > 2500) {
-      logger.warn('[VIRTUS] Timer drift acima do esperado antes de responder chat', {
-        nome,
-        chatId,
-        timerDriftMs
-      });
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'virtus_reply_timer_drift_high',
-          nome: String(nome || ''),
-          chatId: String(chatId || '').slice(0, 80),
-          timerDriftMs: Number(timerDriftMs)
-        });
-      } catch {}
-    }
     if (!running || !epochOk()) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
@@ -1590,435 +1291,103 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
+        await garantirMarketplace(p);
+
         const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
           log(`[GUARD-ID] Já respondido (ID ${chatId}) <8h. Pulando envio.`);
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_skip_recently_responded',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              tsPrev: Number(tsPrev || 0),
-              nowEpoch: Number(agoraEpoch() || 0),
-              noRepeatWindowSec: Number(NO_REPEAT_WINDOW_SEC || 0)
-            });
-          } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
         }
 
-        let found = null;
-        let achou = await assertOnChat(p, chatId, { timeoutMs: 0 });
+        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        await scrollChatsToTop(p, nome).catch(()=>{});
+        await sleep(300);
+        let found = await p.$(anchorSel);
+
+        if (!found) {
+          logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        let achou = false;
         let urlAtual = '';
-        if (!achou) {
-          let preClickCtx = null;
+        const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
+        for (let clickTry = 0; clickTry < 2 && !achou; clickTry++) {
           try {
-            preClickCtx = await p.evaluate(() => ({
-              href: String(location.href || ''),
-              hasMarketplaceMenu: !!document.querySelector('a[href*="/marketplace/"]'),
-              hasMessageThreads: Number(document.querySelectorAll('a[href*="/marketplace/t/"], a[href*="/messages/t/"]').length || 0)
-            }));
-          } catch {}
-          // Atendimento é estritamente click-only: não chamar ensureMarketplaceCalmo/goto nesse fluxo.
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_chat_open_click_only_mode',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80)
+            await found.evaluate((el) => {
+              try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
             });
           } catch {}
 
-          let anchorSel = `a[href*="/marketplace/t/${chatId}"], a[href*="/messages/t/${chatId}"]`;
-          await scrollChatsToTop(p, nome).catch(()=>{});
-          await sleep(300);
-          const pickBestAnchorHandle = async () => {
-            const handles = await p.$$(anchorSel).catch(() => []);
-            if (!Array.isArray(handles) || !handles.length) return null;
-
-            // Importante: em `facebook.com/messages` há casos com âncoras duplicadas/clonadas (DOM),
-            // e várias ficam fora do viewport (x negativo). Para não clicar em "clone invisível",
-            // escolhemos o melhor candidato pelo DOM (getBoundingClientRect + estilos + elementFromPoint)
-            // e retornamos o handle pelo índice (mesma ordem do querySelectorAll / $$).
+          for (const clickMode of clickOrder) {
+            if (achou) break;
             try {
-              const pick = await p.evaluate((selector) => {
-                try {
-                  const els = Array.from(document.querySelectorAll(selector)).slice(0, 160);
-                  const vw = Number(window.innerWidth || 1366);
-                  const vh = Number(window.innerHeight || 768);
-                  let bestIdx = -1;
-                  let bestScore = -Infinity;
-
-                  const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
-                  const normHrefPath = (h) => String(h || '').replace(/^https?:\/\/[^/]+/i, '');
-
-                  for (let i = 0; i < els.length; i++) {
-                    const el = els[i];
-                    if (!el || !el.isConnected) continue;
-                    const cs = window.getComputedStyle(el);
-                    if (!cs) continue;
-                    if (cs.display === 'none') continue;
-                    if (cs.visibility === 'hidden') continue;
-                    if (cs.pointerEvents === 'none') continue;
-                    const op = Number(cs.opacity || '1');
-                    if (!Number.isFinite(op) || op <= 0) continue;
-
-                    const r = el.getBoundingClientRect();
-                    if (!r || r.width < 4 || r.height < 4) continue;
-
-                    const visW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-                    const visH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                    const visArea = visW * visH;
-                    const inView = visArea > 0;
-
-                    const cxRaw = r.left + (r.width / 2);
-                    const cyRaw = r.top + (r.height / 2);
-                    const cx = clamp(cxRaw, 0, vw - 1);
-                    const cy = clamp(cyRaw, 0, vh - 1);
-                    const top = document.elementFromPoint(cx, cy);
-                    const topAnchor = top && top.closest ? top.closest('a[href]') : null;
-
-                    const href = normHrefPath(el.getAttribute('href') || el.href || '');
-                    const topHref = normHrefPath((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '');
-                    const topMatches = !!topAnchor && !!href && !!topHref && topHref.includes(href);
-
-                    const centerInViewport = (cxRaw >= 0 && cxRaw <= vw && cyRaw >= 0 && cyRaw <= vh);
-                    const distOutside = Math.abs(Math.min(0, r.left)) + Math.abs(Math.min(0, r.top)) + Math.max(0, r.right - vw) + Math.max(0, r.bottom - vh);
-
-                    // Score:
-                    // - dá preferência forte para candidato visível e com centro realmente clicável (topMatches)
-                    // - penaliza fora do viewport (distOutside), mas ainda escolhe o "menos ruim" se todos estiverem fora
-                    let score = 0;
-                    score += inView ? (visArea * 10) : -1e9;
-                    score += centerInViewport ? 5e6 : 0;
-                    score += topMatches ? 5e9 : 0;
-                    score -= distOutside * 1000;
-                    score -= (Math.abs(r.x) * 10 + Math.abs(r.y));
-
-                    if (score > bestScore) {
-                      bestScore = score;
-                      bestIdx = i;
-                    }
-                  }
-
-                  return { bestIdx, count: els.length };
-                } catch {
-                  return { bestIdx: -1, count: 0 };
+              if (clickMode === 'dom') {
+                await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+              } else {
+                const box = await found.boundingBox().catch(() => null);
+                if (box && box.width > 4 && box.height > 4) {
+                  const x = box.x + (box.width / 2);
+                  const y = box.y + (box.height / 2);
+                  await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
+                  await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
                 }
-              }, anchorSel).catch(() => null);
-
-              if (pick && Number.isFinite(pick.bestIdx) && pick.bestIdx >= 0 && pick.bestIdx < handles.length) {
-                return handles[pick.bestIdx] || handles[0] || null;
               }
             } catch {}
-
-            return handles[0] || null;
-          };
-          try {
-            const anchorProbe = await p.evaluate((id) => {
-              try {
-                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`));
-                const hrefs = all.slice(0, 8).map(a => String((a && (a.getAttribute('href') || a.href || '')) || '').slice(0, 180));
-                return { count: all.length, hrefs };
-              } catch {
-                return { count: 0, hrefs: [] };
-              }
-            }, chatId).catch(() => ({ count: 0, hrefs: [] }));
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_chat_anchor_probe',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              count: Number(anchorProbe && anchorProbe.count || 0),
-              hrefs: Array.isArray(anchorProbe && anchorProbe.hrefs) ? anchorProbe.hrefs : []
-            });
-          } catch {}
-          try {
-            const anchorMetrics = await p.evaluate((id) => {
-              try {
-                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 12);
-                return all.map((a, idx) => {
-                  const r = a.getBoundingClientRect();
-                  const cs = window.getComputedStyle(a);
-                  return {
-                    idx,
-                    href: String((a.getAttribute('href') || a.href || '')).slice(0, 180),
-                    w: Math.round(Number(r.width || 0)),
-                    h: Math.round(Number(r.height || 0)),
-                    x: Math.round(Number(r.x || 0)),
-                    y: Math.round(Number(r.y || 0)),
-                    display: String(cs.display || ''),
-                    visibility: String(cs.visibility || ''),
-                    opacity: String(cs.opacity || ''),
-                    pointerEvents: String(cs.pointerEvents || ''),
-                    isConnected: !!a.isConnected
-                  };
-                });
-              } catch { return []; }
-            }, chatId).catch(() => []);
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_chat_anchor_metrics',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              anchors: Array.isArray(anchorMetrics) ? anchorMetrics : []
-            });
-          } catch {}
-          found = await pickBestAnchorHandle();
-          if (found) {
             try {
-              const selected = await found.evaluate((el) => {
-                try {
-                  const r = el.getBoundingClientRect();
-                  const cx = r.left + (r.width / 2);
-                  const cy = r.top + (r.height / 2);
-                  const top = document.elementFromPoint(cx, cy);
-                  const topAnchor = top && top.closest ? top.closest('a[href]') : null;
-                  return {
-                    href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
-                    x: Math.round(Number(r.x || 0)),
-                    y: Math.round(Number(r.y || 0)),
-                    w: Math.round(Number(r.width || 0)),
-                    h: Math.round(Number(r.height || 0)),
-                    topTag: top ? String(top.tagName || '').toLowerCase() : '',
-                    topHref: String((topAnchor && (topAnchor.getAttribute('href') || topAnchor.href || '')) || '').slice(0, 180)
-                  };
-                } catch {
-                  return null;
-                }
-              }).catch(() => null);
               provisionAudit.append({
                 ts: Date.now(),
-                event: 'virtus_chat_anchor_selected',
+                event: 'virtus_chat_open_click_attempt',
                 nome: String(nome || ''),
                 chatId: String(chatId || '').slice(0, 80),
-                selected: selected || null
+                clickTry: Number(clickTry + 1),
+                mode: String(clickMode || '')
+              });
+            } catch {}
+
+            await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+
+            let attempts = 0;
+            while (attempts < 6) {
+              urlAtual = await p.evaluate(() => location.pathname);
+              if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+                achou = true;
+                break;
+              }
+              await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
+              attempts++;
+            }
+
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_chat_open_click_result',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                clickTry: Number(clickTry + 1),
+                mode: String(clickMode || ''),
+                ok: !!achou,
+                url: String(urlAtual || '').slice(0, 180)
               });
             } catch {}
           }
 
-          if (!found) {
-            logger.warn(`Âncora do chatId ${chatId} não encontrada. Retry curto (click-only).`, { nome, chatId });
-            markReplyRetry(chatId, 'chat_anchor_missing');
-            try { await pendingDel(nome, chatId); } catch {}
-            chatAtivo = null;
-            return;
+          // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
+          if (!achou && clickTry < 1) {
+            found = await p.$(anchorSel).catch(() => null);
+            if (!found) break;
           }
-
-          const openDeadlineAt = Date.now() + VIRTUS_CHAT_OPEN_DEADLINE_MS;
-          const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
-          for (let clickTry = 0; clickTry < 2 && !achou && Date.now() < openDeadlineAt; clickTry++) {
-            try {
-              await found.evaluate((el) => {
-                try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
-              });
-            } catch {}
-
-            for (const clickMode of clickOrder) {
-              if (achou) break;
-              if (Date.now() >= openDeadlineAt) break;
-              // Re-pick por tentativa/método para reduzir risco de handle stale/off-screen.
-              const rePicked = await pickBestAnchorHandle().catch(() => null);
-              if (rePicked) found = rePicked;
-              try {
-                const selectedForClick = await found.evaluate((el) => {
-                  try {
-                    const r = el.getBoundingClientRect();
-                    return {
-                      href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
-                      x: Math.round(Number(r.x || 0)),
-                      y: Math.round(Number(r.y || 0)),
-                      w: Math.round(Number(r.width || 0)),
-                      h: Math.round(Number(r.height || 0))
-                    };
-                  } catch {
-                    return null;
-                  }
-                }).catch(() => null);
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'virtus_chat_anchor_selected_for_click',
-                  nome: String(nome || ''),
-                  chatId: String(chatId || '').slice(0, 80),
-                  clickTry: Number(clickTry + 1),
-                  mode: String(clickMode || ''),
-                  selected: selectedForClick || null
-                });
-              } catch {}
-              try {
-                const clickPreflight = await found.evaluate((el) => {
-                  try {
-                    const r = el.getBoundingClientRect();
-                    const cs = window.getComputedStyle(el);
-                    const cx = r.left + (r.width / 2);
-                    const cy = r.top + (r.height / 2);
-                    const top = document.elementFromPoint(cx, cy);
-                    return {
-                      href: String((el.getAttribute('href') || el.href || '')).slice(0, 180),
-                      w: Math.round(Number(r.width || 0)),
-                      h: Math.round(Number(r.height || 0)),
-                      x: Math.round(Number(r.x || 0)),
-                      y: Math.round(Number(r.y || 0)),
-                      display: String(cs.display || ''),
-                      visibility: String(cs.visibility || ''),
-                      opacity: String(cs.opacity || ''),
-                      pointerEvents: String(cs.pointerEvents || ''),
-                      topTag: top ? String(top.tagName || '').toLowerCase() : '',
-                      topRole: top ? String(top.getAttribute && top.getAttribute('role') || '') : '',
-                      topHref: top ? String((top.getAttribute && top.getAttribute('href')) || (top.href || '') || '').slice(0, 180) : ''
-                    };
-                  } catch {
-                    return null;
-                  }
-                }).catch(() => null);
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'virtus_chat_click_preflight',
-                  nome: String(nome || ''),
-                  chatId: String(chatId || '').slice(0, 80),
-                  clickTry: Number(clickTry + 1),
-                  mode: String(clickMode || ''),
-                  preflight: clickPreflight || null
-                });
-              } catch {}
-              try {
-                if (clickMode === 'dom') {
-                  const rowClicked = await found.evaluate((el) => {
-                    try {
-                      const row = el.closest('div[role="row"]') || el;
-                      row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                      row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                      row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                      row.click();
-                      return true;
-                    } catch {
-                      return false;
-                    }
-                  }).catch(() => false);
-                  if (!rowClicked) {
-                    await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
-                  }
-                } else {
-                  let rowHandle = null;
-                  try {
-                    rowHandle = await found.evaluateHandle((el) => el.closest('div[role="row"]') || el);
-                  } catch {}
-                  const box = rowHandle ? await rowHandle.boundingBox().catch(() => null) : await found.boundingBox().catch(() => null);
-                  try { if (rowHandle) await rowHandle.dispose(); } catch {}
-                  if (box && box.width > 4 && box.height > 4) {
-                    const x = box.x + (box.width / 2);
-                    const y = box.y + (box.height / 2);
-                    await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
-                    await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
-                  }
-                }
-              } catch {}
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'virtus_chat_open_click_attempt',
-                  nome: String(nome || ''),
-                  chatId: String(chatId || '').slice(0, 80),
-                  clickTry: Number(clickTry + 1),
-                  mode: String(clickMode || '')
-                });
-              } catch {}
-
-              await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
-
-              let attempts = 0;
-              while (attempts < 6 && Date.now() < openDeadlineAt) {
-                const urlEval = await evalWithTimeout(p, () => String(location.href || ''), undefined, 3000);
-                if (urlEval.ok) {
-                  urlAtual = String(urlEval.value || '');
-                }
-                const inThreadEval = await evalWithTimeout(p, (id) => {
-                  try {
-                    const href = String(location.href || '');
-                    if (href.includes(`/marketplace/t/${id}`) || href.includes(`/messages/t/${id}`)) return true;
-                    const rowById = document.querySelector(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`);
-                    if (!rowById) return false;
-                    if (rowById.closest('[aria-current="page"], [aria-selected="true"]')) return true;
-                    return false;
-                  } catch { return false; }
-                }, chatId, 3200);
-                const inThread = !!inThreadEval.ok && !!inThreadEval.value;
-                if (inThread) {
-                  achou = true;
-                  break;
-                }
-                await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
-                attempts++;
-              }
-
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'virtus_chat_open_click_result',
-                  nome: String(nome || ''),
-                  chatId: String(chatId || '').slice(0, 80),
-                  clickTry: Number(clickTry + 1),
-                  mode: String(clickMode || ''),
-                  ok: !!achou,
-                  url: String(urlAtual || '').slice(0, 180)
-                });
-              } catch {}
-              if (!achou) {
-                try {
-                  const currentHref = await found.evaluate((el) => String((el && (el.getAttribute('href') || el.href || '')) || '').slice(0, 180)).catch(() => '');
-                  provisionAudit.append({
-                    ts: Date.now(),
-                    event: 'virtus_chat_open_click_target_href',
-                    nome: String(nome || ''),
-                    chatId: String(chatId || '').slice(0, 80),
-                    clickTry: Number(clickTry + 1),
-                    mode: String(clickMode || ''),
-                    targetHref: String(currentHref || '').slice(0, 180)
-                  });
-                } catch {}
-              }
-            }
-
-            // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
-            if (!achou && clickTry < 1) {
-              found = await pickBestAnchorHandle();
-              if (!found) break;
-            }
-          }
-          if (!achou && Date.now() < openDeadlineAt) {
-            try {
-              const forcedSelect = await p.evaluate((id) => {
-                const all = Array.from(document.querySelectorAll(`a[href*="/marketplace/t/${id}"], a[href*="/messages/t/${id}"]`)).slice(0, 6);
-                if (!all.length) return false;
-                for (const a of all) {
-                  try {
-                    const row = a.closest('div[role="row"]') || a;
-                    row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-                    row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                    row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                    row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                    row.click();
-                  } catch {}
-                  try { a.click(); } catch {}
-                }
-                return true;
-              }, chatId).catch(() => false);
-              if (forcedSelect) {
-                await sleep(1100);
-                if (await assertOnChat(p, chatId, { timeoutMs: 2800 })) achou = true;
-              }
-            } catch {}
-          }
-        } else {
-          logger.info('[VIRTUS] Chat já aberto no momento de responder. Fast-path para digitação.', { nome, chatId });
         }
         if (!achou) {
-          logger.warn(`Não entrou no chat correto no prazo. Reagendando retry curto. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId, openDeadlineMs: VIRTUS_CHAT_OPEN_DEADLINE_MS });
-          markReplyRetry(chatId, 'chat_open_timeout');
+          logger.error(`Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
         }
@@ -2027,8 +1396,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // P1 hardening: use o Browser (não a Page) para evitar leak quando a page fecha/desconecta.
         acquireSendGuardBrowser(browser, chatId);
 
-        const blocked = await isChatBlocked(p);
-        if (blocked) {
+        if (await isChatBlocked(p)) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
@@ -2039,82 +1407,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         // Checagem de contexto antes de aguardar o composer
-        const preSendOnChat = await assertOnChat(p, chatId, { timeoutMs: 1200 });
-        if (!preSendOnChat) {
+        if (!(await assertOnChat(p, chatId, { timeoutMs: 1200 }))) {
           try { await pendingDel(nome, chatId); } catch {}
-          markReplyRetry(chatId, 'context_lost_before_send');
+          fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           await logIssue(nome, 'mil_action', `virtus_context_abort: url divergiu antes do envio (chat ${chatId})`);
           return;
         }
 
-        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
-        let msg = null;
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
-            msg = String(man.customVirtusMessage).trim();
-          }
-        } catch {}
-
-        // 2) Se não houver custom, cai no atendimento.json como hoje
-        if (!msg) {
-          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-          if (Array.isArray(msg)) msg = msg.join('\n');
-          if (typeof msg !== 'string') msg = String(msg);
-        }
-
-        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-
-        if (VIRTUS_DIRECT_SEND_ON_OPEN) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId, mode: 'direct' });
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'virtus_send_prepare',
-              nome: String(nome || ''),
-              chatId: String(chatId || '').slice(0, 80),
-              mode: 'direct'
-            });
-          } catch {}
-          const sentDirect = await sendMessageDirectIfFocused(p, msg, nome, chatId).catch(() => false);
-          if (sentDirect) {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId, mode: 'direct' });
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'virtus_send_ok',
-                nome: String(nome || ''),
-                chatId: String(chatId || '').slice(0, 80),
-                mode: 'direct'
-              });
-            } catch {}
-            log(`Mensagem enviada para chat ${chatId}`);
-            try { await pendingDel(nome, chatId); } catch {}
-            const tsNowDirect = agoraEpoch();
-            historico[chatId] = tsNowDirect;
-            setResponded(chatId, tsNowDirect);
-            await salvaHistorico();
-            lastReplyAtMs = Date.now();
-            repliesSinceRecycle += 1;
-            // Fluxo direto também precisa liberar item ativo da fila.
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        }
-
-        const composerFastDeadlineAt = Date.now() + VIRTUS_COMPOSER_FAST_TIMEOUT_MS;
-        let campo = await waitForComposer(p, 3500);
+        let campo = await waitForComposer(p, 10000);
         if (!campo) {
           logger.warn('Composer não encontrado. Retry por click no mesmo chat (sem goto).', { nome, chatId });
           try {
@@ -2144,32 +1445,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             resetFail(chatId);
             return;
           }
-          campo = await waitForComposer(p, 3000);
-        }
-
-        while (!campo && Date.now() < composerFastDeadlineAt) {
-          try {
-            if (!running || !epochOk()) break;
-            const stillOnChat = await assertOnChat(p, chatId, { timeoutMs: 700 });
-            if (!stillOnChat && found) {
-              try { await found.click({ delay: randomBetween(60, 120) }).catch(()=>{}); } catch {}
-            }
-            campo = await waitForComposer(p, VIRTUS_COMPOSER_RECHECK_MS);
-            if (campo) break;
-            if (found) {
-              try {
-                const box3 = await found.boundingBox().catch(() => null);
-                if (box3 && box3.width > 4 && box3.height > 4) {
-                  const x3 = box3.x + (box3.width / 2);
-                  const y3 = box3.y + (box3.height / 2);
-                  await p.mouse.click(x3, y3, { delay: randomBetween(50, 120) }).catch(()=>{});
-                } else {
-                  await found.click({ delay: randomBetween(50, 120) }).catch(()=>{});
-                }
-              } catch {}
-            }
-            await sleep(350);
-          } catch {}
+          campo = await waitForComposer(p, 8000);
         }
 
         if (!campo) {
@@ -2181,15 +1457,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try { await pendingDel(nome, chatId); } catch {}
             try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
             resetFail(chatId);
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
           } else {
-            markReplyRetry(chatId, 'composer_missing');
             try { await pendingDel(nome, chatId); } catch {}
-            chatAtivo = null;
-            return;
           }
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
         }
 // REVALIDAÇÃO FINAL DE TTL: aborta se alguém marcou este chat < janela
 {
@@ -2205,15 +1478,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         resetFail(chatId);
 
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
+        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
+        let msg = null;
         try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_send_prepare',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80)
-          });
+          const man = await manifestStore.read(nome).catch(()=>null);
+          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
+            msg = String(man.customVirtusMessage).trim();
+          }
         } catch {}
+
+        // 2) Se não houver custom, cai no atendimento.json como hoje
+        if (!msg) {
+          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
+            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
+          if (Array.isArray(msg)) msg = msg.join('\n');
+          if (typeof msg !== 'string') msg = String(msg);
+        }
+
+        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
         try { await campo.focus(); } catch {}
         const isFocused = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
         if (!isFocused) { try { await campo.focus(); } catch {} }
@@ -2222,14 +1514,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await sendMessageSafe(p, campo, msg, nome, chatId);
         // -----------------------------------------------------
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'virtus_send_ok',
-            nome: String(nome || ''),
-            chatId: String(chatId || '').slice(0, 80)
-          });
-        } catch {}
 
         log(`Mensagem enviada para chat ${chatId}`);
         // Ledger: remove pending ANTES de gravar responded (commit)
@@ -2258,7 +1542,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       chatAtivo = null;
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
-      if (chatAtivo === chatId) chatAtivo = null;
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
@@ -2577,7 +1860,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             30000
           );
         }
-        if (VIRTUS_PAGE_RECYCLE_ENABLED && (hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk && idleSafe && !skipByIdlePolicy) {
+        if ((hasAdaptivePressure || hasReplyCountTrigger) && cooldownOk && idleSafe && !skipByIdlePolicy) {
           const heavyGuard = canRunHeavyAction(nowMs);
           if (!heavyGuard.ok) {
             __virtusAgentLog(
@@ -2661,14 +1944,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
             }
             try {
-              const browserJs = require('./browser.js');
-              let navResp = null;
-              if (browserJs && typeof browserJs.ensureMarketplaceMessagesContext === 'function') {
-                await browserJs.ensureMarketplaceMessagesContext(p, { timeoutMs: navTimeoutMs, reason: 'virtus_page_recycle' });
-                navMethod = 'ensure_marketplace_context';
-              } else {
-                navResp = await p.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
-              }
+              const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
               postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
               navStatus = navResp && typeof navResp.status === 'function' ? Number(navResp.status()) : null;
             } catch (primaryNavErr) {
@@ -2687,7 +1963,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 15000
               );
               try {
-                await p.evaluate(() => { try { location.assign('https://www.facebook.com/messages'); } catch {} });
+                await p.evaluate(() => {
+                  try { location.assign('https://www.messenger.com/marketplace'); } catch {}
+                });
                 const waitBudgetMs = Math.max(6000, Math.floor(navTimeoutMs * 0.8));
                 try {
                   await Promise.race([
@@ -2695,8 +1973,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     p.waitForFunction(
                       () => {
                         try {
-                          const path = location && typeof location.pathname === 'string' ? String(location.pathname || '') : '';
-                          return path.includes('/marketplace') || path.includes('/messages');
+                          return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace'));
                         } catch {
                           return false;
                         }
@@ -2708,15 +1985,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 let landed = false;
                 try {
                   const u = String(p.url() || '');
-                  landed = /facebook\.com\/messages|messenger\.com\/marketplace/i.test(u);
+                  landed = u.includes('/marketplace');
                 } catch {}
                 if (!landed) {
                   try {
                     landed = !!(await p.evaluate(() => {
-                      try {
-                        const path = location && typeof location.pathname === 'string' ? String(location.pathname || '') : '';
-                        return path.includes('/marketplace') || path.includes('/messages');
-                      }
+                      try { return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace')); }
                       catch { return false; }
                     }));
                   } catch {}
@@ -2912,21 +2186,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const p = await ensurePage();
         if (!running || !epochOk()) return;
         if (!p) { await sleep(2500); continue; }
-        if (p.url() === 'about:blank' || !/(messenger\.com\/marketplace|facebook\.com\/messages)/i.test(p.url())) {
+        if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
           try {
             if (!running || !epochOk()) return;
-            await p.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
           } catch {
             bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
           }
         }
         if (!running || !epochOk()) return;
-        const marketReady = await ensureMarketplaceCalmo(p, { timeoutMs: 25000, force: true, reason: 'runner_boot' });
-        if (!marketReady) {
-          ready = true;
-          logger.info('Aba zero da Virtus pronta, mas sem menu Marketplace ainda (aguardando primeiro chat).', { nome });
-          continue;
-        }
+        await garantirMarketplace(p, { timeoutMs: 25000 });
         try {
           const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {

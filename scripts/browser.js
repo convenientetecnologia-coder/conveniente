@@ -2025,7 +2025,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
     // Sem botão na UI: recarrega e volta manualmente para a home do messenger
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
     await sleep(800);
-    try { await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
+    try { await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
     await sleep(800);
   }
   return !/messenger.com\/login\/nonce/i.test(page.url() || '');
@@ -2872,7 +2872,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.facebook.com/messages';
+  const msgUrl = 'https://www.messenger.com/marketplace';
 
   // Aba 0 — Facebook base
   try {
@@ -5180,7 +5180,7 @@ async function collectFreshCookies(browser) {
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
     // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
