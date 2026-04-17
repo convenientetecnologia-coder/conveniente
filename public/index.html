@@ -1299,42 +1299,12 @@
       return buildPill(`Robe: ${txt}`, cls);
     }
     function buildRobeDailyPlanPills(summary) {
-      const out = [];
-      const s = (summary && typeof summary === 'object') ? summary : null;
-      if (!s || s.featureEnabled === false) return out;
-      if (s.enabled !== true) {
-        out.push(buildPill('Robe hoje: OFF', 'warn'));
-        return out;
-      }
-      const h = Number(s.dailyHours || 0) || 0;
-      const bc = Number(s.blocksCount || 0) || 0;
-      const info = buildPill(`Robe hoje: ${h}h (${bc} bloco${bc === 1 ? '' : 's'})`, 'info');
-      try {
-        const labels = Array.isArray(s.blocks) ? s.blocks.map(b => String((b && b.label) || '').trim()).filter(Boolean) : [];
-        if (labels.length) info.title = `Blocos: ${labels.join(', ')}`;
-      } catch {}
-      out.push(info);
-      out.push(buildPill(s.inWindowNow ? 'Robe: dentro do bloco' : 'Robe: fora do bloco', s.inWindowNow ? 'good' : 'warn'));
-      if (!s.inWindowNow && s.nextWindowLabel) out.push(buildPill(`Próx: ${s.nextWindowLabel}`, 'info'));
-      return out;
+      // V1 runtime ativo: ocultar pills de plano/bloco para evitar ruído visual.
+      return [];
     }
     function buildRobeSessionPills(summary) {
-      const out = [];
-      const s = (summary && typeof summary === 'object') ? summary : null;
-      if (!s || s.featureEnabled === false || s.enabled !== true) return out;
-      const state = String(s.state || '').toLowerCase();
-      const planned = Math.max(0, Number(s.plannedPosts || 0) || 0);
-      const posted = Math.max(0, Number(s.postedPosts || 0) || 0);
-      if (planned > 0) out.push(buildPill(`Sessão: ${posted}/${planned} posts`, 'info'));
-      if (state === 'posting') {
-        const rem = Math.max(0, Number(s.remainingInAction || 0) || 0);
-        out.push(buildPill(`Sessão: postando${rem > 0 ? ` (${rem} no lote)` : ''}`, 'good'));
-      } else if (state === 'pause') {
-        out.push(buildPill(`Sessão: pausa${s.nextAtLabel ? ` até ${s.nextAtLabel}` : ''}`, 'warn'));
-      } else if (state === 'done') {
-        out.push(buildPill('Sessão: bloco concluído', 'info'));
-      }
-      return out;
+      // V1 runtime ativo: ocultar pills de sessão em lote.
+      return [];
     }
 
     function resolveAccountCreatedAtMs(p) {
