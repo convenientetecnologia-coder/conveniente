@@ -1633,7 +1633,7 @@ async function _installOverlayOnPage(nome, page) {
             const f = d.flags || {};
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
-            else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
+            else if (f.twoFactor) statusTxt = '2FA requerido (Humano)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
             else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
@@ -2636,10 +2636,10 @@ async function appealMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // 2FA: exclusão automática
+    // 2FA: manter em modo humano (sem exclusão automática)
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
-      return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
+      return { ok: false, transitioned: true, reason: 'two_factor', action: 'human_hold_two_factor' };
     }
 
     // Identidade: flags próprias (não virar loginRequired genérico).
@@ -3325,10 +3325,10 @@ async function identityMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // 2FA: exclusão automática
+    // 2FA: manter em modo humano (sem exclusão automática)
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
-      return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
+      return { ok: false, transitioned: true, reason: 'two_factor', action: 'human_hold_two_factor' };
     }
 
     // Se virar appeal_submitted, entra no monitor 1h de recurso
@@ -3654,601 +3654,84 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   });
 }
 
-// 2FA (two-factor) => exclusão automática (ultra enterprise)
-// Regra do cliente: 2FA não é automatizável e não deve consumir slot do estoque.
+// 2FA (two-factor) => manter conta no host (sem exclusão automática).
+// Regra atual: bloquear automação, entrar em modo humano e marcar flag persistente.
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
   return lockProfileAction(nome, async () => {
     try {
-    const prev = await readAccountFlags(nome);
-    const already = prev && prev.twoFactor === true;
-    let tfResult = { ok: true };
-    let closeOk = true;
-
-    // Evidence + auto-delete:
-    // REGRA (ultra enterprise, ordem determinística):
-    // 1) fecha o navegador (graceful -> force)
-    // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
-    // 3) envia pro estoque Excluídas (CT) com evidence
-    try {
+      const prev = await readAccountFlags(nome);
+      const already = prev && prev.twoFactor === true;
       const flowId = newFlowId('two_factor');
-      // Captura stockAccountId cedo (antes de delete), para nunca “sumir” no CT.
-      let stockAccountId = null;
-      try {
-        const m0 = await manifestStore.read(nome).catch(()=>null);
-        if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
-      } catch {}
 
-      // 0) Captura evidence (antes de fechar)
-      let b64 = '';
-      let evBuf = null;
-      let url = '';
-      try {
-        const ctrl = controllers.get(nome);
-        const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-        const p0 = pages && pages[0];
-        if (p0) {
-          try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
-          try {
-            const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
-            if (buf && buf.length) { evBuf = buf; b64 = Buffer.from(buf).toString('base64'); }
-          } catch {}
-        }
-      } catch {}
-
-      // UA+FP telemetry (2FA)
-      try { await emitUaFpEventToCT(nome, { eventKind: 'two_factor', url, title: String(snippet || '').slice(0, 180) }); } catch {}
-
-      // Evidência local (para retry se CT estiver fora)
-      let evidencePath = '';
-      try {
-        const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `two_factor:${String(reason||'').slice(0,80)}` });
-        if (ev && ev.ok) evidencePath = String(ev.path || '');
-      } catch {}
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'twofactorflow_begin',
-          flowId,
-          nome: String(nome||''),
-          stockAccountId: stockAccountId || null,
-          reason: String(reason||'').slice(0, 180),
-          hasEvidence: !!(b64 && b64.length),
-          evidencePath: evidencePath ? String(evidencePath).slice(0, 260) : null,
-          url: url ? String(url).slice(0, 260) : null
-        });
-      } catch {}
-
-      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática.
-      try {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {};
-          d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-          return d;
-        });
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_desired_disabled', nome: String(nome||'') }); } catch {}
-      } catch {}
-
-      // ===== NOVO: fluxo oficial (close -> CT archive -> delete) =====
-      // Mantém abaixo o código legado (hard close/kill/pid), mas este fluxo dá return e não deixa rodar.
-      try {
-        try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-
-        // 2) fecha via handler oficial
-        const dr = await handlers.deactivate({ nome, reason: 'auto_two_factor', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
-        if (!dr || dr.ok !== true) {
-          closeOk = false;
-          tfResult = { ok: false, error: 'two_factor_close_failed' };
-          try {
-            await manifestStore.update(nome, (man) => {
-              man = man || {};
-              man.accountFlags = man.accountFlags || {};
-              man.accountFlags.twoFactorPendingClose = true;
-              man.accountFlags.twoFactorPendingCloseAt = Date.now();
-              man.accountFlags.twoFactorPendingCloseReason = 'deactivate_failed';
-              return man;
-            });
-          } catch {}
-        }
-
-        // 3) arquiva no CT antes de deletar (garante que não some de Excluídas)
-        let ctOk = false;
-        let rr = null;
-        try {
-          rr = await archiveBanWithEvidenceToCT({
-            profileName: nome,
-            stockAccountId: stockAccountId || null,
-            reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
-            evidenceB64: b64,
-            evidenceUrl: url
-          });
-          ctOk = !!(rr && rr.ok);
-          if (rr && rr.stockAccountId && !stockAccountId) stockAccountId = Number(rr.stockAccountId) || stockAccountId;
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'auto_archive_two_factor_ct_predelete',
-              nome: String(nome||''),
-              flowId,
-              ok: !!(rr && rr.ok),
-              error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-              stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
-              details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
-            });
-          } catch {}
-        } catch {}
-        if (!ctOk) {
-          const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
-          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          if (!stockAccountId) {
-            // Sem ID: bloqueia delete para não perder vínculo.
-            return { ok: false, error: 'ct_archive_failed_predelete' };
-          }
-        }
-
-        // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
-        if (!closeOk) {
-          // Regra: se o navegador não fechou, NÃO deletar. Mas a conta já foi arquivada no CT (Excluídas).
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        } else {
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (isActive) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
-          return { ok: false, error: 'two_factor_delete_blocked_still_active' };
-        }
-        try {
-          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
-          let udir = '';
-          try {
-            const man = await manifestStore.read(nome).catch(() => null);
-            if (man && man.userDataDir) udir = String(man.userDataDir);
-          } catch {}
-          if (!udir) {
-            try {
-              const all = fileStore.loadPerfisJson() || [];
-              const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
-              if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
-            } catch {}
-          }
-          if (udir && fs.existsSync(udir)) {
-            try { fileStore.rimrafSync(udir); } catch {}
-          }
-          try {
-            fileStore.withPerfisFileLockUpdate(
-              (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
-              { caller: 'auto_delete_two_factor_profile', nome }
-            );
-          } catch {}
-        } catch {}
-        try { await fileStore.removeDesired(nome); } catch {}
-        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-        try {
-          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-          if (st && Array.isArray(st.perfis)) {
-            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-            fileStore.writeJsonAtomic(fileStore.statusPath, st);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
-        }
-
-        // flags/issue: mantém comportamento anterior
-        try {
-          await manifestStore.update(nome, (man) => {
-            man = man || {};
-            man.accountFlags = man.accountFlags || {};
-            man.accountFlags.twoFactor = true;
-            man.accountFlags.twoFactorAt = Date.now();
-            man.accountFlags.twoFactorReason = String(reason||'');
-            man.accountFlags.twoFactorText = String(snippet||'').slice(0, 400);
-            delete man.accountFlags.loginRemediateFailed;
-            delete man.accountFlags.loginRemediateFailedAt;
-            delete man.accountFlags.loginRemediateFailedReason;
-            delete man.accountFlags.loginRemediateFailedSource;
-            delete man.accountFlags.loginRemediateFailedStage;
-            delete man.accountFlags.loginRemediateFailedCount;
-            return man;
-          });
-        } catch {}
-        if (!already) {
-          try {
-            await issues.append(
-              nome,
-              'account_two_factor_detected',
-              `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
-            );
-          } catch {}
-        }
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].twoFactor = true;
-        try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        // Se não fechou, sinaliza erro para o caller (mas já arquivou no CT).
-        if (!closeOk && tfResult && tfResult.ok === false) {
-          tfResult = { ok: false, error: 'two_factor_close_failed_archived' };
-        }
-        return tfResult;
-      } catch {}
-
-      // 1) FECHA o navegador (não excluir com navegador aberto)
-      try {
-        try {
-          provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null });
-        } catch {}
-        const ctrl = controllers.get(nome);
-        // Capturar userDataDir para validação hard (anti-janela zumbi)
-        // IMPORTANT (ultra enterprise):
-        // - Mesmo com inconsistência (perfil removido do perfis.json antes do fechamento),
-        //   precisamos impedir delete enquanto existir Chrome vivo.
-        // - Fallback por substring: \\Conveniente\\<nome>
-        let udirForCheck = '';
-        let udirSource = '';
-        try {
-          const man0 = await manifestStore.read(nome).catch(()=>null);
-          if (man0 && man0.userDataDir) { udirForCheck = String(man0.userDataDir); udirSource = 'manifest'; }
-        } catch {}
-        if (!udirForCheck) {
-          try {
-            const perfisArr = loadPerfisJson();
-            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-            if (perfil && perfil.userDataDir) { udirForCheck = String(perfil.userDataDir); udirSource = 'perfis_json'; }
-          } catch {}
-        }
-        if (!udirForCheck) {
-          try { udirForCheck = `\\Conveniente\\${String(nome || '').trim()}`; udirSource = 'hint_substring'; } catch { udirForCheck = ''; udirSource = ''; }
-        }
-        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-          try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
-          ctrl.virtus = null;
-          ctrl.trabalhando = false;
-          // Captura PID antes de fechar (rootPid mais confiável quando lastRootPid ainda não foi persistido)
-          let pidBefore = 0;
-          try {
-            if (ctrl.browser && typeof ctrl.browser.process === 'function') {
-              const proc0 = ctrl.browser.process();
-              if (proc0 && proc0.pid) pidBefore = Number(proc0.pid) || 0;
-            }
-          } catch {}
-          let closeR = null;
-          try { closeR = await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'twofactorflow_close_controller_result',
-              flowId,
-              nome: String(nome||''),
-              stockAccountId: stockAccountId || null,
-              pidBefore: pidBefore || null,
-              closeR: closeR || null,
-              udirForCheck: udirForCheck ? String(udirForCheck).slice(0, 260) : null,
-              udirSource: udirSource || null
-            });
-          } catch {}
-          // 2FA (ultra enterprise):
-          // Mesma regra do ban: detectou 2FA => sempre GARANTIR fechamento real (sem "skip").
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            const pid =
-              (closeR && Number(closeR.rootPid || 0) || 0) ||
-              (man && Number(man.lastRootPid || 0) || 0) ||
-              (pidBefore || 0);
-            const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_force_kill_begin', nome: String(nome||''), rootPid: pid || null, udirSource: udirSource || null, udirForCheck: udir ? String(udir).slice(0,260) : null }); } catch {}
-            if (pid) {
-              await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              await sleep(700);
-            }
-            if (udir) {
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              await sleep(500);
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-            }
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_force_kill_done', nome: String(nome||''), rootPid: pid || null }); } catch {}
-          } catch {}
-        } else {
-          let man = null;
-          try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
-          const pid = man && Number(man.lastRootPid || 0) || 0;
-          const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-          try {
-            if (pid) {
-              await withTimeout('auto_two_factor_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              await sleep(900);
-            }
-          } catch {}
-          try {
-            if (udir) {
-              browserHelper.closeChromeProfileProcessesGraceful(udir);
-              await sleep(900);
-            }
-          } catch {}
-          try {
-            if (pid) {
-              await withTimeout('auto_two_factor_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
-              await sleep(800);
-            }
-          } catch {}
-          try {
-            if (udir) {
-              browserHelper.killChromeProfileProcesses(udir);
-              await sleep(600);
-              browserHelper.killChromeProfileProcesses(udir);
-            }
-          } catch {}
-        }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
-
-        // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
-        try {
-          const t0 = Date.now();
-          const deadlineMs = 30_000;
-          if (!udirForCheck) {
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_missing_userDataDir_block_delete', nome: String(nome||'') }); } catch {}
-            try {
-              await manifestStore.update(nome, (man) => {
-                man = man || {};
-                man.accountFlags = man.accountFlags || {};
-                man.accountFlags.twoFactorPendingClose = true;
-                man.accountFlags.twoFactorPendingCloseAt = Date.now();
-                man.accountFlags.twoFactorPendingCloseReason = 'missing_userDataDir';
-                return man;
-              });
-            } catch {}
-            return { ok: false, error: 'two_factor_close_missing_userDataDir' };
-          }
-          while (udirForCheck && (Date.now() - t0) < deadlineMs) {
-            const chk = (browserHelper.getChromeProfilePidsMeta
-              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
-              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
-            if (!chk || chk.ok === false) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk && chk.error ? String(chk.error).slice(0,180) : 'pid_check_failed' }); } catch {}
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.twoFactorPendingClose = true;
-                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
-                  man.accountFlags.twoFactorPendingCloseReason = 'pid_check_failed';
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'two_factor_close_unknown_pids' };
-            }
-            const pids = chk.pids || [];
-            if (!pids.length) break;
-            try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
-            await sleep(800);
-          }
-          if (udirForCheck) {
-            const chk2 = (browserHelper.getChromeProfilePidsMeta
-              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
-              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
-            if (!chk2 || chk2.ok === false) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk2 && chk2.error ? String(chk2.error).slice(0,180) : 'pid_check_failed' }); } catch {}
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.twoFactorPendingClose = true;
-                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
-                  man.accountFlags.twoFactorPendingCloseReason = 'pid_check_failed';
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'two_factor_close_unknown_pids' };
-            }
-            const still = chk2.pids || [];
-            if (still.length) {
-              try {
-                provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
-              } catch {}
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.twoFactorPendingClose = true;
-                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
-                  man.accountFlags.twoFactorPendingClosePids = still.slice(0, 24);
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'two_factor_close_incomplete' };
-            }
-          }
-
-          // Marca no manifest: browser fechado (pré-condição para delete/arquive).
-          try {
-            const before = await manifestStore.read(nome).catch(()=>null);
-            const prevClosedAt = before && before.accountFlags ? Number(before.accountFlags.browserClosedAt || 0) || 0 : 0;
-            await manifestStore.update(nome, (man) => {
-              man = man || {};
-              man.accountFlags = man.accountFlags || {};
-              man.accountFlags.browserClosedAt = Date.now();
-              man.accountFlags.browserClosedReason = 'auto_two_factor_close';
-              man.accountFlags.browserClosedUdirSource = udirSource || null;
-              man.accountFlags.browserClosedUdir = udirForCheck ? String(udirForCheck).slice(0, 260) : null;
-              delete man.accountFlags.twoFactorPendingClose;
-              delete man.accountFlags.twoFactorPendingCloseAt;
-              delete man.accountFlags.twoFactorPendingCloseReason;
-              delete man.accountFlags.twoFactorPendingClosePids;
-              return man;
-            });
-            const after = await manifestStore.read(nome).catch(()=>null);
-            const nextClosedAt = after && after.accountFlags ? Number(after.accountFlags.browserClosedAt || 0) || 0 : 0;
-            try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_browserClosedAt_set', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, prevClosedAt: prevClosedAt || null, nextClosedAt: nextClosedAt || null }); } catch {}
-          } catch {}
-        } catch {}
-
-        // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
-        try {
-          if (robeMeta[nome]) robeMeta[nome].rootPid = null;
-        } catch {}
-        try {
-          await manifestStore.update(nome, (man) => {
-            man = man || {};
-            delete man.lastRootPid;
-            delete man.lastRootPidAt;
-            return man;
-          });
-        } catch {}
-      } catch {}
-
-      // 2) EXCLUI a conta do servidor (perfil local) — best-effort
-      try {
-        // Enterprise HARD: só deletar se o manifest afirmar que o browser foi fechado
-        try {
-          const mPre = await manifestStore.read(nome).catch(()=>null);
-          const closedAt = mPre && mPre.accountFlags ? Number(mPre.accountFlags.browserClosedAt || 0) || 0 : 0;
-          if (!closedAt) {
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_browser_not_closed', nome: String(nome||'') }); } catch {}
-            try {
-              await manifestStore.update(nome, (man) => {
-                man = man || {};
-                man.accountFlags = man.accountFlags || {};
-                man.accountFlags.twoFactorPendingClose = true;
-                man.accountFlags.twoFactorPendingCloseAt = Date.now();
-                man.accountFlags.twoFactorPendingCloseReason = 'browser_not_closed';
-                return man;
-              });
-            } catch {}
-            return { ok: false, error: 'two_factor_delete_blocked_browser_not_closed' };
-          }
-        } catch {}
-        const rr = await (async () => {
-          try {
-            // desired OFF
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-                return d;
-              });
-            } catch {}
-
-            // browser já foi fechado acima
-            try { controllers.delete(nome); } catch {}
-            try { stopPruneLoop(nome); } catch {}
-
-            // remover userDataDir externo e perfis.json
-            try {
-              // Fonte primária: manifestStore (mais confiável que perfis.json)
-              let udirFromManifest = '';
-              try {
-                const man = await manifestStore.read(nome).catch(()=>null);
-                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
-              } catch {}
-              const allPerfisArr = (() => { try { return fileStore.loadPerfisJson() || []; } catch { return []; } })();
-              const perfil = Array.isArray(allPerfisArr) ? allPerfisArr.find(p => p && p.nome === nome) : null;
-              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
-              if (udir) {
-                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
-              }
-              try {
-                fileStore.withPerfisFileLockUpdate(
-                  (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
-                  { caller: 'auto_delete_two_factor_profile_strict', nome }
-                );
-              } catch {}
-            } catch {}
-
-            // remover desired e diretório do perfil
-            try { await fileStore.removeDesired(nome); } catch {}
-            try {
-              const dir = path.join(fileStore.perfisDir, nome);
-              try { fileStore.rimrafSync(dir); } catch {}
-            } catch {}
-
-            // limpeza status.json
-            try {
-              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-              if (st && Array.isArray(st.perfis)) {
-                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-                fileStore.writeJsonAtomic(fileStore.statusPath, st);
-              }
-            } catch {}
-
-            try { await snapshotStatusAndWrite(); } catch {}
-            return { ok: true };
-          } catch (e) {
-            return { ok: false, error: (e && e.message) || String(e) };
-          }
-        })();
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_delete_two_factor_profile',
-            nome: String(nome||''),
-            flowId,
-            stockAccountId: stockAccountId || null,
-            ok: !!(rr && rr.ok),
-            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
-          });
-        } catch {}
-      } catch {}
-    } catch {}
-
-    // 3) ENVIA pro estoque Excluídas (CT) com evidence (último passo)
-    try {
-      const rr = await archiveBanWithEvidenceToCT({
-        profileName: nome,
-        stockAccountId: stockAccountId || null,
-        reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
-        evidenceB64: b64,
-        evidenceUrl: url
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        man.accountFlags.twoFactor = true;
+        man.accountFlags.twoFactorAt = Date.now();
+        man.accountFlags.twoFactorReason = String(reason || '');
+        man.accountFlags.twoFactorText = String(snippet || '').slice(0, 400);
+        // 2FA não entra em auto-remediação.
+        delete man.accountFlags.loginRemediateFailed;
+        delete man.accountFlags.loginRemediateFailedAt;
+        delete man.accountFlags.loginRemediateFailedReason;
+        delete man.accountFlags.loginRemediateFailedSource;
+        delete man.accountFlags.loginRemediateFailedStage;
+        delete man.accountFlags.loginRemediateFailedCount;
+        // Limpa pendências herdadas do fluxo antigo de fechamento/exclusão.
+        delete man.accountFlags.twoFactorPendingClose;
+        delete man.accountFlags.twoFactorPendingCloseAt;
+        delete man.accountFlags.twoFactorPendingCloseReason;
+        delete man.accountFlags.twoFactorPendingClosePids;
+        return man;
       });
+
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl) {
+          await enterHumanMode(nome, ctrl, { reason: `two_factor:${String(reason || '').slice(0, 120)}` });
+        } else {
+          // Sem browser ativo agora: persistir hold para não retomar automação no próximo ciclo.
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
+        }
+      } catch {}
+
+      try { await snapshotStatusAndWrite(); } catch {}
+      try { await emitUaFpEventToCT(nome, { eventKind: 'two_factor', title: String(snippet || '').slice(0, 180) }); } catch {}
       try {
         provisionAudit.append({
           ts: Date.now(),
-          event: 'auto_archive_two_factor_ct',
-          nome: String(nome||''),
+          event: 'twofactorflow_human_hold',
           flowId,
-          ok: !!(rr && rr.ok),
-          error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-          stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
-          details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
+          nome: String(nome || ''),
+          reason: String(reason || '').slice(0, 180),
+          already: !!already
         });
       } catch {}
-      if (!rr || rr.ok !== true) {
-        const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
-        try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+
+      if (!already) {
+        try {
+          await issues.append(
+            nome,
+            'account_two_factor_detected',
+            `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
+          );
+        } catch {}
       }
-    } catch {}
 
-    await manifestStore.update(nome, (man) => {
-      man = man || {};
-      man.accountFlags = man.accountFlags || {};
-      man.accountFlags.twoFactor = true;
-      man.accountFlags.twoFactorAt = Date.now();
-      man.accountFlags.twoFactorReason = String(reason||'');
-      man.accountFlags.twoFactorText = String(snippet||'').slice(0, 400);
-      // 2FA exclui do fluxo, então não faz sentido manter flags que induzem auto-remediação
-      delete man.accountFlags.loginRemediateFailed;
-      delete man.accountFlags.loginRemediateFailedAt;
-      delete man.accountFlags.loginRemediateFailedReason;
-      delete man.accountFlags.loginRemediateFailedSource;
-      delete man.accountFlags.loginRemediateFailedStage;
-      delete man.accountFlags.loginRemediateFailedCount;
-      return man;
-    });
-
-    if (!already) {
-      try {
-        await issues.append(
-          nome,
-          'account_two_factor_detected',
-          `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
-        );
-      } catch {}
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].twoFactor = true;
+      robeMeta[nome].whyNotOpen = 'two_factor_human_hold';
+      return { ok: true, action: 'human_hold_two_factor' };
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_human_hold_error', nome: String(nome || ''), error: String(msg).slice(0, 220) }); } catch {}
+      return { ok: false, error: msg };
     }
-
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].twoFactor = true;
-    } catch {}
-    return { ok: true };
   });
 }
 
