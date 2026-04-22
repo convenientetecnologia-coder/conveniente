@@ -1673,6 +1673,18 @@ module.exports = (app, workerClient, fileStore) => {
       await manifestStore.update(nome, (m) => {
         m = m || {};
         m.cidade = String(novaCidade);
+        const extras = Array.isArray(m.cidadesExtras) ? m.cidadesExtras : [];
+        m.cidadesExtras = extras
+          .map(c => String(c || '').trim())
+          .filter(Boolean)
+          .filter((c, i, arr) => c !== String(novaCidade) && arr.findIndex(x => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i);
+        const cycle = m.postCityCycle && typeof m.postCityCycle === 'object' ? m.postCityCycle : null;
+        if (cycle) {
+          delete cycle.order;
+          delete cycle.idx;
+          cycle.updatedAt = Date.now();
+          m.postCityCycle = cycle;
+        }
         return m;
       });
 
@@ -1705,6 +1717,63 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       await issues.append(nome || 'system', 'mil_action', `admin_update_city_ERROR ${e && e.message || e}`);
       return res.json({ ok:false, error: e && e.message || String(e) });
+    }
+  });
+
+  // ====== PATCH — cidades extras de postagem (mantém cidade principal intacta) ======
+  app.patch('/api/perfis/:nome/cidades-extras', async (req, res) => {
+    const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
+    const input = req.body && Array.isArray(req.body.cidadesExtras) ? req.body.cidadesExtras : [];
+    try {
+      if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+      assertPerfilExists(fileStore, nome);
+
+      const utils = require('./utils.js');
+      const perfisArr = fileStore.loadPerfisJson();
+      const idx = perfisArr.findIndex(p => p && p.nome === nome);
+      if (idx < 0) return res.json({ ok: false, error: 'perfil inexistente' });
+      const cidadePrincipal = String(perfisArr[idx].cidade || '').trim();
+      if (!cidadePrincipal) return res.json({ ok: false, error: 'cidade_principal_ausente' });
+
+      const seen = new Set();
+      const extras = [];
+      for (const raw of input) {
+        const c = String(raw || '').trim();
+        if (!c) continue;
+        if (c === cidadePrincipal) continue;
+        const k = c.toLocaleLowerCase('pt-BR');
+        if (seen.has(k)) continue;
+        const coords = utils.getCoords(c);
+        if (!coords || !coords.latitude || !coords.longitude) {
+          return res.json({ ok: false, error: 'cidade_extra_sem_coordenadas', cidade: c });
+        }
+        seen.add(k);
+        extras.push(c);
+      }
+
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.cidadesExtras = extras.slice(0);
+        const cycle = m.postCityCycle && typeof m.postCityCycle === 'object' ? m.postCityCycle : null;
+        if (cycle) {
+          delete cycle.order;
+          delete cycle.idx;
+          cycle.updatedAt = Date.now();
+          m.postCityCycle = cycle;
+        }
+        return m;
+      });
+
+      await issues.append(
+        nome,
+        'mil_action',
+        `admin_update_extra_cities by=${op} count=${extras.length} principal="${cidadePrincipal}"`
+      );
+      return res.json({ ok: true, cidadesExtras: extras, count: extras.length });
+    } catch (e) {
+      try { await issues.append(nome || 'system', 'mil_action', `admin_update_extra_cities_ERROR ${e && e.message || e}`); } catch {}
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
 };

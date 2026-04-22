@@ -634,6 +634,11 @@
           <select id="cidadeUpdateSel"></select>
         </div>
         <div class="form-row">
+          <label>Cidades extras para postagem (opcional)</label>
+          <div id="cidadeExtrasWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">A geolocalização continua na cidade principal. As extras entram apenas no sorteio das postagens.</div>
+        </div>
+        <div class="form-row">
           <label>
             <input type="checkbox" id="customVirtusMsgCk" />
             Usar mensagem personalizada Virtus
@@ -663,18 +668,50 @@
       `;
       overlay.append(box);
 
+      let cidadesAll = [];
+      let extrasSelected = [];
+      function uniqueCities(arr) {
+        const seen = new Set();
+        const out = [];
+        for (const raw of (Array.isArray(arr) ? arr : [])) {
+          const v = String(raw || '').trim();
+          if (!v) continue;
+          const k = v.toLocaleLowerCase('pt-BR');
+          if (seen.has(k)) continue;
+          seen.add(k);
+          out.push(v);
+        }
+        return out;
+      }
+      function renderExtrasOptions() {
+        const wrap = box.querySelector('#cidadeExtrasWrap');
+        const sel = box.querySelector('#cidadeUpdateSel');
+        if (!wrap || !sel) return;
+        const principal = String(sel.value || perfil.cidade || '').trim();
+        const selectedSet = new Set(uniqueCities(extrasSelected).map(v => v.toLocaleLowerCase('pt-BR')));
+        const options = uniqueCities(cidadesAll).filter(c => c && c !== principal);
+        if (!options.length) {
+          wrap.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade extra disponível.</div>`;
+          return;
+        }
+        wrap.innerHTML = options.map(c => {
+          const checked = selectedSet.has(String(c).toLocaleLowerCase('pt-BR')) ? 'checked' : '';
+          return `<label style="display:flex; align-items:center; gap:6px; font-size:12px;"><input type="checkbox" data-extra-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
+        }).join('');
+      }
+
       // Populate select de cidades com a cidade atual selecionada
       (async () => {
         try {
           const cidades = await window.electronAPI.listarCidades();
+          cidadesAll = (cidades || []).map(c => (typeof c === 'string' ? c : (c && (c.nome || c.label || c.id) || ''))).filter(Boolean);
           const sel = box.querySelector('#cidadeUpdateSel');
           sel.innerHTML = '';
-          (cidades || []).forEach(c => {
+          cidadesAll.forEach(c => {
             const opt = document.createElement('option');
-            const v = typeof c === 'string' ? c : (c && (c.nome || c.label || c.id) || '');
-            opt.value = v;
-            opt.textContent = v;
-            if (String(v) === String(perfil.cidade || '')) opt.selected = true;
+            opt.value = c;
+            opt.textContent = c;
+            if (String(c) === String(perfil.cidade || '')) opt.selected = true;
             sel.append(opt);
           });
           // Se a cidade atual não estava na lista, adicione-a (garantia)
@@ -686,10 +723,18 @@
             extra.selected = true;
             sel.append(extra);
           }
+          sel.onchange = () => {
+            const currentChecks = Array.from(box.querySelectorAll('input[data-extra-city]:checked')).map(el => String(el.getAttribute('data-extra-city') || '').trim()).filter(Boolean);
+            extrasSelected = uniqueCities(currentChecks);
+            renderExtrasOptions();
+          };
+          renderExtrasOptions();
         } catch {
           // fallback mínimo
           const sel = box.querySelector('#cidadeUpdateSel');
           sel.innerHTML = `<option value="${perfil.cidade || ''}" selected>${perfil.cidade || '—'}</option>`;
+          cidadesAll = [String(perfil.cidade || '').trim()].filter(Boolean);
+          renderExtrasOptions();
         }
       })();
 
@@ -700,6 +745,8 @@
           if (r && r.ok === true && r.manifest) {
             box.querySelector('#customVirtusMsgCk').checked = !!r.manifest.customVirtusMessageEnabled;
             box.querySelector('#customVirtusMsg').value = r.manifest.customVirtusMessage || '';
+            extrasSelected = uniqueCities(r.manifest.cidadesExtras || []);
+            renderExtrasOptions();
             const rm = (r.manifest.robeMode || 'itens');
             const isVeiculos = (String(rm).toLowerCase() === 'veiculos');
             const modeCk = box.querySelector('#modeVeiculosCk');
@@ -715,6 +762,12 @@
         const novoLabel = box.querySelector('#labelInput').value.trim();
         const renameSlug = box.querySelector('#renameSlugCk').checked && !ativo;
         const novaCidade = (box.querySelector('#cidadeUpdateSel') && box.querySelector('#cidadeUpdateSel').value) || perfil.cidade || '';
+        const cidadesExtras = uniqueCities(
+          Array.from(box.querySelectorAll('input[data-extra-city]:checked'))
+            .map(el => String(el.getAttribute('data-extra-city') || '').trim())
+            .filter(Boolean)
+            .filter(c => c !== novaCidade)
+        );
         if (!novoLabel) { alert('Informe um nome exibido.'); return; }
 
         // 0) Troca de cidade primeiro (se alterada)
@@ -728,6 +781,18 @@
           }
         } catch (e) {
           alert('Falha ao alterar cidade: ' + (e && e.message || e));
+          return;
+        }
+
+        // 0.1) Salva cidades extras (somente para sorteio de postagem)
+        try {
+          const r = await window.electronAPI.updatePerfilCidadesExtras(perfil.nome, cidadesExtras);
+          if (!r || r.ok !== true) {
+            alert('Falha ao salvar cidades extras: ' + ((r && r.error) || 'erro desconhecido'));
+            return;
+          }
+        } catch (e) {
+          alert('Falha ao salvar cidades extras: ' + (e && e.message || e));
           return;
         }
 

@@ -877,6 +877,82 @@ function pickLocalizacaoAleatoria(cidade) {
   return lista[Math.floor(Math.random() * lista.length)];
 }
 
+function normalizeCityList(input) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(input) ? input : [])) {
+    const v = String(raw || '').trim();
+    if (!v) continue;
+    const k = v.toLocaleLowerCase('pt-BR');
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(v);
+  }
+  return out;
+}
+
+function shuffleCityOrder(list) {
+  const arr = Array.isArray(list) ? list.slice(0) : [];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
+
+function buildPostingCityPool(manifest) {
+  const principal = String(
+    (manifest && (manifest.cidade || manifest.localizacao || manifest['localização'])) || ''
+  ).trim();
+  const extras = normalizeCityList(manifest && manifest.cidadesExtras);
+  const pool = normalizeCityList([principal, ...extras.filter(c => c !== principal)]);
+  return pool.length ? pool : ['São Paulo'];
+}
+
+function isCycleCompatible(cycle, pool) {
+  if (!cycle || typeof cycle !== 'object') return false;
+  const order = normalizeCityList(cycle.order);
+  const want = normalizeCityList(pool);
+  if (!order.length || order.length !== want.length) return false;
+  const ordSet = new Set(order.map(v => v.toLocaleLowerCase('pt-BR')));
+  const wantSet = new Set(want.map(v => v.toLocaleLowerCase('pt-BR')));
+  if (ordSet.size !== wantSet.size) return false;
+  for (const k of wantSet) if (!ordSet.has(k)) return false;
+  const idx = Number(cycle.idx || 0);
+  if (!Number.isFinite(idx) || idx < 0 || idx > order.length) return false;
+  return true;
+}
+
+async function pickPostingCityForRun(nome) {
+  let chosen = 'São Paulo';
+  await manifestStore.update(nome, (m) => {
+    m = m || {};
+    const pool = buildPostingCityPool(m);
+    let cycle = isCycleCompatible(m.postCityCycle, pool)
+      ? { ...m.postCityCycle, order: normalizeCityList(m.postCityCycle.order) }
+      : { order: shuffleCityOrder(pool), idx: 0, updatedAt: Date.now() };
+    if (!Array.isArray(cycle.order) || !cycle.order.length) {
+      cycle.order = shuffleCityOrder(pool);
+      cycle.idx = 0;
+    }
+    let idx = Number(cycle.idx || 0);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= cycle.order.length) idx = 0;
+    chosen = String(cycle.order[idx] || pool[0] || 'São Paulo').trim() || 'São Paulo';
+    idx += 1;
+    if (idx >= cycle.order.length) {
+      cycle.order = shuffleCityOrder(pool);
+      idx = 0;
+    }
+    cycle.idx = idx;
+    cycle.updatedAt = Date.now();
+    m.postCityCycle = cycle;
+    return m;
+  });
+  return chosen;
+}
+
 async function humanTypeText(page, inputHandle, text, {
   minDelayMs,
   maxDelayMs,
@@ -2180,7 +2256,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await sleep(jitter(120, 220));
 
     // LOCALIZAÇÃO (preenchida imediatamente após Tipo de veículo)
-    cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    try {
+      cidadePerfil = await pickPostingCityForRun(nome);
+    } catch {}
+    if (!cidadePerfil) cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
     localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });

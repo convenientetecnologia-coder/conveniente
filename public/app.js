@@ -23,6 +23,12 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ novaCidade })
     }).then(r => r.json()),
+  updatePerfilCidadesExtras: (nome, cidadesExtras) =>
+    fetch(`/api/perfis/${encodeURIComponent(nome)}/cidades-extras`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cidadesExtras: Array.isArray(cidadesExtras) ? cidadesExtras : [] })
+    }).then(r => r.json()),
   getSysMetrics:   () => fetch('/api/sys').then(r => r.json()),
   getFotosCount:   () => fetch('/api/fotos/count').then(r => r.json()),
   getIssues:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/issues`).then(r => r.json()),
