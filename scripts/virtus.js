@@ -519,9 +519,26 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    // Digita com atraso humano por caractere para reduzir assinatura robótica
+    // Digita com atraso humano por caractere para reduzir assinatura robótica.
+    // IMPORTANT: para mensagens com múltiplas linhas, usar Shift+Enter entre linhas
+    // para evitar envio prematuro em mini mensagens.
     const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
-    await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
+    const fullMsg = String(msg || '');
+    const lines = fullMsg.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = String(lines[i] || '');
+      if (line.length > 0) {
+        await p.keyboard.type(line, { delay: typingDelayMs });
+      }
+      if (i < (lines.length - 1)) {
+        try {
+          await p.keyboard.down('Shift');
+          await p.keyboard.press('Enter');
+          await p.keyboard.up('Shift');
+        } catch {}
+        await sleep(Math.max(30, Math.floor(typingDelayMs / 2)));
+      }
+    }
 
     // Revalidar contexto antes do Enter
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
