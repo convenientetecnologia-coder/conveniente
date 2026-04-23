@@ -635,11 +635,15 @@
         </div>
         <div class="form-row">
           <label>Cidades extras para postagem (opcional)</label>
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <input type="text" id="cidadeExtrasFilterInput" placeholder="Filtrar cidades (ex.: anapolis, caruaru)" style="flex:1;" />
+            <button class="btn" type="button" id="cidadeExtrasClearFilter">Limpar pesquisa</button>
+          </div>
           <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
             <button class="btn" type="button" id="cidadeExtrasToggleAll">Selecionar todas</button>
           </div>
           <div id="cidadeExtrasWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">A geolocalização continua na cidade principal. As extras entram apenas no sorteio das postagens.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">A geolocalização continua na cidade principal. As extras entram apenas no sorteio das postagens. No filtro, você pode digitar em texto livre (espaço, vírgula ou quebra de linha).</div>
         </div>
         <div class="form-row">
           <label>
@@ -689,6 +693,33 @@
       function getVisibleExtraChecks() {
         return Array.from(box.querySelectorAll('input[data-extra-city]'));
       }
+      function normalizeSearchText(v) {
+        return String(v || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLocaleLowerCase('pt-BR')
+          .trim();
+      }
+      function parseFilterTerms(raw) {
+        const txt = String(raw || '').trim();
+        if (!txt) return [];
+        const parts = /[,;\n]/.test(txt)
+          ? txt.split(/[,;\n]+/)
+          : txt.split(/\s+/);
+        return uniqueCities(parts.map(v => normalizeSearchText(v)).filter(Boolean));
+      }
+      function getFilterTermsFromInput() {
+        const input = box.querySelector('#cidadeExtrasFilterInput');
+        return parseFilterTerms(input && input.value);
+      }
+      function filterExtraOptionsByInput(options) {
+        const terms = getFilterTermsFromInput();
+        if (!terms.length) return options.slice(0);
+        return options.filter((city) => {
+          const normCity = normalizeSearchText(city);
+          return terms.some((term) => normCity === term || normCity.includes(term));
+        });
+      }
       function updateExtrasToggleLabel() {
         const btn = box.querySelector('#cidadeExtrasToggleAll');
         if (!btn) return;
@@ -705,11 +736,20 @@
           : 'Selecionar todas';
       }
       function syncExtrasSelectedFromChecks() {
-        const currentChecks = getVisibleExtraChecks()
+        const visibleChecks = getVisibleExtraChecks();
+        const visibleCities = new Set(
+          visibleChecks
+            .map(el => String(el.getAttribute('data-extra-city') || '').trim())
+            .filter(Boolean)
+            .map(v => v.toLocaleLowerCase('pt-BR'))
+        );
+        const prev = uniqueCities(extrasSelected);
+        const kept = prev.filter(v => !visibleCities.has(String(v).toLocaleLowerCase('pt-BR')));
+        const checkedNow = visibleChecks
           .filter(el => !!el.checked)
           .map(el => String(el.getAttribute('data-extra-city') || '').trim())
           .filter(Boolean);
-        extrasSelected = uniqueCities(currentChecks);
+        extrasSelected = uniqueCities(kept.concat(checkedNow));
       }
       function renderExtrasOptions() {
         const wrap = box.querySelector('#cidadeExtrasWrap');
@@ -718,12 +758,18 @@
         const principal = String(sel.value || perfil.cidade || '').trim();
         const selectedSet = new Set(uniqueCities(extrasSelected).map(v => v.toLocaleLowerCase('pt-BR')));
         const options = uniqueCities(cidadesAll).filter(c => c && c !== principal);
+        const filteredOptions = filterExtraOptionsByInput(options);
         if (!options.length) {
           wrap.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade extra disponível.</div>`;
           updateExtrasToggleLabel();
           return;
         }
-        wrap.innerHTML = options.map(c => {
+        if (!filteredOptions.length) {
+          wrap.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade encontrada no filtro.</div>`;
+          updateExtrasToggleLabel();
+          return;
+        }
+        wrap.innerHTML = filteredOptions.map(c => {
           const checked = selectedSet.has(String(c).toLocaleLowerCase('pt-BR')) ? 'checked' : '';
           return `<label style="display:flex; align-items:center; gap:6px; font-size:12px;"><input type="checkbox" data-extra-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
         }).join('');
@@ -782,6 +828,24 @@
           checks.forEach(el => { el.checked = !allSelected; });
           syncExtrasSelectedFromChecks();
           updateExtrasToggleLabel();
+        };
+      }
+      const filterInput = box.querySelector('#cidadeExtrasFilterInput');
+      if (filterInput) {
+        filterInput.oninput = () => {
+          syncExtrasSelectedFromChecks();
+          renderExtrasOptions();
+        };
+      }
+      const clearFilterBtn = box.querySelector('#cidadeExtrasClearFilter');
+      if (clearFilterBtn) {
+        clearFilterBtn.onclick = () => {
+          const input = box.querySelector('#cidadeExtrasFilterInput');
+          if (!input) return;
+          input.value = '';
+          syncExtrasSelectedFromChecks();
+          renderExtrasOptions();
+          input.focus();
         };
       }
 
