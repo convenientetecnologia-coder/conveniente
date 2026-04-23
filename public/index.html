@@ -873,12 +873,11 @@
         const novoLabel = box.querySelector('#labelInput').value.trim();
         const renameSlug = box.querySelector('#renameSlugCk').checked && !ativo;
         const novaCidade = (box.querySelector('#cidadeUpdateSel') && box.querySelector('#cidadeUpdateSel').value) || perfil.cidade || '';
-        const cidadesExtras = uniqueCities(
-          Array.from(box.querySelectorAll('input[data-extra-city]:checked'))
-            .map(el => String(el.getAttribute('data-extra-city') || '').trim())
-            .filter(Boolean)
-            .filter(c => c !== novaCidade)
-        );
+        // Garante que o estado salvo considere todas as cidades selecionadas,
+        // inclusive as que estão ocultas por filtro no momento do clique em "Salvar".
+        syncExtrasSelectedFromChecks();
+        const cidadesExtras = uniqueCities(extrasSelected)
+          .filter(c => c !== novaCidade);
         if (!novoLabel) { alert('Informe um nome exibido.'); return; }
 
         // 0) Troca de cidade primeiro (se alterada)
