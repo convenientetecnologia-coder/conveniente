@@ -2958,15 +2958,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       method: (cond && cond.method) ? cond.method : 'unknown'
     });
 
-    // DESCRIÇÃO (antes de Localização)
-    await waitBeforeComposeAction(composePlan, 'before_description', { nome, attId });
-    const desc = await preencherDescricaoItem(page).catch(() => ({ ok: false, reason: 'exception' }));
+    // DESCRIÇÃO removida por regra operacional: publicar item sem descrição.
     stepLog.appendJSONL(nome, 'robe', {
       attempt: attId,
-      step: 'description_try',
-      ok: !!(desc && desc.ok),
-      len: (desc && typeof desc.len === 'number') ? desc.len : null,
-      reason: (desc && !desc.ok) ? String(desc.reason || 'unknown') : null
+      step: 'description_skipped',
+      reason: 'disabled_by_runtime_rule'
     });
 
     // LOCALIZAÇÃO
