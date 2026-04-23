@@ -635,6 +635,9 @@
         </div>
         <div class="form-row">
           <label>Cidades extras para postagem (opcional)</label>
+          <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+            <button class="btn" type="button" id="cidadeExtrasToggleAll">Selecionar todas</button>
+          </div>
           <div id="cidadeExtrasWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
           <div class="muted" style="margin-top:6px; font-size:12px;">A geolocalização continua na cidade principal. As extras entram apenas no sorteio das postagens.</div>
         </div>
@@ -683,6 +686,31 @@
         }
         return out;
       }
+      function getVisibleExtraChecks() {
+        return Array.from(box.querySelectorAll('input[data-extra-city]'));
+      }
+      function updateExtrasToggleLabel() {
+        const btn = box.querySelector('#cidadeExtrasToggleAll');
+        if (!btn) return;
+        const checks = getVisibleExtraChecks();
+        if (!checks.length) {
+          btn.disabled = true;
+          btn.textContent = 'Selecionar todas';
+          return;
+        }
+        btn.disabled = false;
+        const checkedCount = checks.filter(el => !!el.checked).length;
+        btn.textContent = (checkedCount === checks.length)
+          ? 'Desselecionar selecionadas'
+          : 'Selecionar todas';
+      }
+      function syncExtrasSelectedFromChecks() {
+        const currentChecks = getVisibleExtraChecks()
+          .filter(el => !!el.checked)
+          .map(el => String(el.getAttribute('data-extra-city') || '').trim())
+          .filter(Boolean);
+        extrasSelected = uniqueCities(currentChecks);
+      }
       function renderExtrasOptions() {
         const wrap = box.querySelector('#cidadeExtrasWrap');
         const sel = box.querySelector('#cidadeUpdateSel');
@@ -692,12 +720,14 @@
         const options = uniqueCities(cidadesAll).filter(c => c && c !== principal);
         if (!options.length) {
           wrap.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade extra disponível.</div>`;
+          updateExtrasToggleLabel();
           return;
         }
         wrap.innerHTML = options.map(c => {
           const checked = selectedSet.has(String(c).toLocaleLowerCase('pt-BR')) ? 'checked' : '';
           return `<label style="display:flex; align-items:center; gap:6px; font-size:12px;"><input type="checkbox" data-extra-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
         }).join('');
+        updateExtrasToggleLabel();
       }
 
       // Populate select de cidades com a cidade atual selecionada
@@ -724,8 +754,7 @@
             sel.append(extra);
           }
           sel.onchange = () => {
-            const currentChecks = Array.from(box.querySelectorAll('input[data-extra-city]:checked')).map(el => String(el.getAttribute('data-extra-city') || '').trim()).filter(Boolean);
-            extrasSelected = uniqueCities(currentChecks);
+            syncExtrasSelectedFromChecks();
             renderExtrasOptions();
           };
           renderExtrasOptions();
@@ -737,6 +766,24 @@
           renderExtrasOptions();
         }
       })();
+      box.addEventListener('change', (ev) => {
+        const target = ev && ev.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        if (!target.matches('input[data-extra-city]')) return;
+        syncExtrasSelectedFromChecks();
+        updateExtrasToggleLabel();
+      });
+      const toggleAllBtn = box.querySelector('#cidadeExtrasToggleAll');
+      if (toggleAllBtn) {
+        toggleAllBtn.onclick = () => {
+          const checks = getVisibleExtraChecks();
+          if (!checks.length) return;
+          const allSelected = checks.every(el => !!el.checked);
+          checks.forEach(el => { el.checked = !allSelected; });
+          syncExtrasSelectedFromChecks();
+          updateExtrasToggleLabel();
+        };
+      }
 
       // Carrega os campos customVirtusMessage do manifest
       (async () => {
