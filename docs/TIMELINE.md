@@ -31,6 +31,63 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-25 — [DOCS][CONV][OPS] Consolidacao oficial da frente Virtus (estabilidade, recovery, velocidade e mensagens)
+
+- **O que**:
+  - consolidado dossie unico da rodada Virtus com todas as entregas concluídas e evidencias de commit;
+  - registrado fechamento tecnico das frentes: navegacao Marketplace/Messages, recovery de conversas, anti-duplicidade/destravamento de fila, aceleracao de envio;
+  - registrado estado final de `dados/atendimento.json` com 65 links `wa.me/message` unicos.
+- **Por quê**: garantir continuidade sem perda de contexto, reduzir retrabalho e manter trilha auditavel "pronto x pendente" para os proximos ciclos.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-04-25_consolidado_virtus_estabilidade_mensagens.md`
+  - commit de fechamento do arquivo de mensagens: `e21069d`
+- **Reinícios**: nenhum (registro documental).
+- **Rollback**:
+  - remover/ajustar apenas os registros documentais se houver reclassificacao de status;
+  - sem impacto em runtime nesta entrada.
+
+#### 2026-04-20 — [DOCS][CT][OPS] Rateio legacy semanal (avulsas) — piloto semi-automático + guardrails (engajamento, dias, idempotência)
+
+- **O que**:
+  - Padronizada a rotina semanal de **auditoria pré-boleto** (engajamento `sent` por cidade primária+secundárias) + **emissão** por lote, a partir de `pedidos.sqlite` e `gruposids.json`.
+  - Guardrails aplicados no piloto:
+    - grupos **sem motorista** não geram cobrança;
+    - grupos com `sent_total=0` (0 engajamento) **não** devem gerar boleto (evita taxa sem engajamento);
+    - emissão idempotente por `cycle_key` (safe re-run sem duplicar Asaas).
+  - Incidente observado e mitigado: falha `database is locked` na emissão (SQLite) resolvida via retry/backoff + idempotência; reexecução segura completa o lote.
+- **Por quê**: manter o processo manual consistente e rastreável durante o piloto (3+ semanas), para depois automatizar sem repetir bugs/erros operacionais.
+- **Evidência**:
+  - Auditoria (pré-boleto):
+    - `C:\sitechatbot\tools\audit_rateio_semana_2026-04-06_a_2026-04-12.js`
+    - `C:\sitechatbot\tools\audit_rateio_semana_2026-04-13_a_2026-04-19.js`
+    - outputs: `C:\conveniente\docs\rateio_motoristas_*_pre_auditoria.(md|csv|json)`
+  - Emissão:
+    - `C:\sitechatbot\tools\issue_legacy_rateio_avulsas_due_2026-04-15_v1.js`
+    - `C:\sitechatbot\tools\issue_legacy_rateio_avulsas_due_2026-04-22_v1.js`
+    - outputs: `C:\conveniente\docs\boletos_legacy_lead_lote_*_apply_v1.(md|csv)`
+  - Runbook atualizado: `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Rateio legacy semanal (avulsas)”).
+- **Reinícios**: nenhum (scripts offline no host do CT; sem alteração de runtime).
+- **Rollback**:
+  - se um boleto for indevido, cancelar via CT (ação canônica **Excluir cobrança**), com evidência no relatório do lote.
+
+#### 2026-04-14 — [CONV][OPS] Virtus fase 2: navegação canônica estrita `messages -> Marketplace`
+
+- **O que**:
+  - `scripts/browser.js`: criado `ensureMarketplaceMessagesContext()` para convergir em `https://www.facebook.com/messages`, clicar menu Marketplace e validar feed em modo estrito;
+  - `scripts/virtus.js`: coleta/abertura/assert de chat atualizados para aceitar `/messages/t/` e `/marketplace/t/`;
+  - `scripts/worker.js` e `scripts/reloadManager.js`: recuperação, reload e retomada humana passaram a usar o convergidor canônico em vez de `goto` direto para `messenger.com/marketplace`.
+- **Por quê**: Facebook mudou o fluxo para `facebook.com/messages` e o runtime precisava blindagem explícita para não cair em inbox privado e não quebrar a fila da Virtus.
+- **Evidência**:
+  - `C:\conveniente\scripts\browser.js`
+  - `C:\conveniente\scripts\virtus.js`
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\scripts\reloadManager.js`
+- **Reinícios**: `conveniente` no host alvo.
+- **Rollback**:
+  - reverter `ensureMarketplaceMessagesContext()` para comportamento anterior de contingência;
+  - restaurar seletores exclusivos de `/marketplace/t/` no `virtus.js`;
+  - reiniciar `conveniente`.
+
 #### 2026-04-13 — [CONV][OPS] Hotfix pós-teste: modal de configuração com seletores fixos e erro detalhado
 
 - **O que**:
@@ -3227,3 +3284,43 @@ Adendo (ajuste operacional aprovado pelo owner):
   - auditoria técnica base: `C:\conveniente\docs\auditoria_tecnica_puppeteer_cdp_lifecycle_2026-04-09.md`
 - **Impacto operacional**:
   - nenhum restart (pré‑código).
+
+#### 2026-04-14 — [CONVENIENTE][P0][PRE-CODIGO] Auditoria Virtus: migração `messenger.com/marketplace` -> `facebook.com/messages` + menu Marketplace
+
+- **Mudança**:
+  - auditoria forense ponta a ponta do runtime Virtus (sem codar) para a mudança de fluxo de entrada do Messenger/Marketplace.
+- **Evidência**:
+  - INC canônico: `C:\conveniente\docs\inbox\done\INC-20260414-1030-01.md`
+  - dossiê técnico: `C:\conveniente\docs\checkups\checkup_2026-04-14_auditoria_virtus_migracao_messages_marketplace_pre_codigo.md`
+  - arquivos impactados mapeados: `C:\conveniente\scripts\virtus.js`, `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\browser.js`, `C:\conveniente\scripts\reloadManager.js`
+- **Impacto operacional**:
+  - nenhum restart (pré‑código).
+
+#### 2026-04-14 — [CONVENIENTE][P0][PRE-CODIGO] Auditoria Virtus aprofundada (função a função): navegação, recovery, invocar humano e retomada
+
+- **Mudança**:
+  - expansão da auditoria para nível função a função em `virtus.js`, `worker.js`, `browser.js` e `reloadManager.js` (sem codar), com mapa de call-flow completo.
+- **Evidência**:
+  - INC canônico: `C:\conveniente\docs\inbox\done\INC-20260414-1130-01.md`
+  - dossiê aprofundado: `C:\conveniente\docs\checkups\checkup_2026-04-14_auditoria_virtus_funcao_a_funcao_messages_marketplace_pre_codigo.md`
+  - principal achado: hardcodes de `messenger.com/marketplace` e acoplamento em `/marketplace/t/` no runtime atual.
+- **Impacto operacional**:
+  - nenhum restart (pré‑código).
+
+#### 2026-04-25 — [CONVENIENTE][DASHBOARD][ROBE] Cooldown curto configurável por servidor + limpeza da UI legada V2
+
+- **Mudança**:
+  - `Configuração do Servidor` foi simplificada para focar no cooldown curto do Robe (mín/máx em minutos);
+  - campos legados de janela/bloco/sessão V2 foram removidos da UI do servidor;
+  - defaults canônicos definidos em `25–50` minutos.
+- **Evidência (código/path)**:
+  - `C:\conveniente\public\index.html` (novo formulário do modal de server config)
+  - `C:\conveniente\scripts\serverConfig.js` (defaults/validação/persistência de `robe.cooldownMinMinutes` e `robe.cooldownMaxMinutes`)
+  - `C:\conveniente\scripts\worker.js` (`drawRobeCooldownMs` lendo config efetiva)
+  - `C:\conveniente\scripts\robe.js`
+  - `C:\conveniente\scripts\robeVeiculos.js`
+- **Contrato operacional preservado**:
+  - salvar configuração **não** reseta cooldowns já ativos (`robeCooldownUntil`) nas contas;
+  - apenas cooldowns novos passam a usar a nova faixa.
+- **Impacto operacional**:
+  - requer restart do `conveniente` para o runtime carregar o patch e começar a usar o cooldown configurável via dashboard.

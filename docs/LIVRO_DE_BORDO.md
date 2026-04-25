@@ -55,6 +55,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
 - **Começar por aqui**
   - Visão geral (o que é cada projeto) — **este arquivo**
   - Continuidade entre chats (handoff pronto para colar no novo chat) — `docs/INFORMACOES_CONTINUIDADE_GPT.md`
+  - Consolidado oficial Virtus (estabilidade + mensagens + evidências) — `docs/checkups/checkup_2026-04-25_consolidado_virtus_estabilidade_mensagens.md`
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
   - Dossiê pré-código (novo fluxo de leads por sorteio/cobrança) — `docs/checkups/checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
@@ -669,3 +670,16 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - em conta com input de categoria por digitação e sugestão única de `Diversos`, priorizar `ArrowDown + Enter` para seleção efetiva.
 - Governança de deploy mantida:
   - mudança em `conveniente` = commit/push + `self_update` via CT + restart manual humano com `node index.js`.
+
+## 2026-04-25 — Dashboard: cooldown do Robe configurável por servidor (25–50 default)
+
+- Implementado no `conveniente`:
+  - modal **Configuração do Servidor** simplificado para exibir apenas cooldown curto do Robe;
+  - remoção dos campos legados do V2 nessa tela para reduzir confusão operacional;
+  - novo range persistido em `server_runtime_config.json` como `robe.cooldownMinMinutes` e `robe.cooldownMaxMinutes`.
+- Runtime atualizado:
+  - `worker.js` passou a sortear cooldown por postagem a partir da config efetiva do servidor;
+  - `robe.js`/`robeVeiculos.js` mantêm fallback local em `25–50` caso não recebam valor do worker.
+- Contrato preservado:
+  - salvar config **não** reseta cooldown já ativo em conta;
+  - apenas cooldowns novos usam a nova faixa configurada.

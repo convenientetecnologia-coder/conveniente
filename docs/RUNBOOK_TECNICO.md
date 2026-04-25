@@ -38,6 +38,29 @@ Regras acopladas (não negociar):
 
 Motivo: evita desalinhamento e impede que um texto confuso vire mudança errada.
 
+Referência canônica (detalhamento do contrato + “formato de relato mínimo”): `docs/inbox/in_progress/INC-20260414-0900-01.md`.
+
+---
+
+### Navegação canônica Virtus (Messenger/Marketplace) — **CANÔNICO**
+
+Objetivo: garantir que a Virtus abra o feed correto de Marketplace após a migração para `facebook.com/messages`, sem desviar para inbox privado.
+
+Contrato operacional:
+- ponto único de convergência: `scripts/browser.js` -> `ensureMarketplaceMessagesContext(page, ...)`;
+- ordem: abrir `https://www.facebook.com/messages` -> clicar menu **Marketplace** -> validar feed por âncoras de chat;
+- compatibilidade: aceitar rotas `/messages/t/:id` e `/marketplace/t/:id` no runtime;
+- política atual: modo estrito (`facebook.com/messages -> Marketplace`) sem fallback de navegação para `messenger.com/marketplace`.
+
+Arquivos que devem usar esse contrato:
+- `scripts/virtus.js` (garantia de feed + assert/abertura de chat);
+- `scripts/worker.js` (recovery, resume e health);
+- `scripts/reloadManager.js` (troca/reload de aba).
+
+Regra de manutenção:
+- não adicionar `page.goto('https://www.messenger.com/marketplace')` direto em loops de runtime;
+- sempre chamar o helper canônico para preservar a mesma política de validação estrita.
+
 ---
 
 ### Reativação tokenized por praça + reset de baseline financeiro (CANÔNICO)
@@ -251,6 +274,64 @@ O GPT **não** consegue reiniciar os seus processos remotos.
   - fluxos de “editar leads / excluir boleto / cancelar boleto / reemitir” do pay-per-lead (removidos da UI para reduzir risco).
 - **Evidência (código UI)**:
   - `C:\sitechatbot\convenientetecnologia\public\ct.js`
+
+---
+
+##### CT — Rateio legacy semanal (avulsas) por engajamento (semi-automático) — **CANÔNICO (piloto)**
+
+Objetivo: durante o piloto manual (3+ semanas), emitir boletos **sem assinatura** para um subconjunto de grupos legacy (29 praças), cobrando por **engajamento semanal** (pedidos `sent`), com rateio por motorista e regra de inadimplência.
+
+**Fonte canônica do engajamento**:
+- `C:\sitechatbot\dados\pedidos.sqlite`
+  - tabela `pedidos`
+  - filtro: `status='sent'` e `sent_at` dentro do período.
+- Mapa de cidades secundárias → cidade primária (grupo): `C:\notificador\gruposids.json`
+
+**Regra de cálculo (canônica)**:
+- Base do grupo: `sent_total * R$ 5,00`
+- Rateio dentro do grupo por motorista via peso de dias usados:
+  - `days_used` explícito (ex.: “5 dias”), ou
+  - `entry_date=DD/MM` (dias restantes dentro do período), ou
+  - default `7/7`.
+- Cobrança por motorista: `(base_motorista * 1,30) + R$ 1,99`
+- Guardrail: **não redistribuir** engajamento de grupos sem motorista para outros grupos.
+
+**Artefatos gerados (sempre, antes de emitir)**:
+- `C:\conveniente\docs\rateio_motoristas_<PERIODO>_pre_auditoria.md` (auditoria humana)
+- `C:\conveniente\docs\rateio_motoristas_<PERIODO>_pre_auditoria.csv` (lista “motorista → cents”)
+- `C:\conveniente\docs\rateio_motoristas_<PERIODO>_pre_auditoria.json` (fonte para emissão idempotente)
+
+**Execução padrão (semi-automática)**
+1) **Auditar (pré-boleto)** no host do CT:
+   - atualizar a lista `TARGET_GROUPS` (motoristas + `days_used/entry_date`) no script da semana
+   - rodar: `cd C:\sitechatbot; node tools\audit_rateio_semana_<PERIODO>.js`
+2) **Validar manualmente** (humano):
+   - conferir amostras de contagem no grupo (primária + secundárias)
+3) **Emitir boletos** (quando aprovado):
+   - rodar: `cd C:\sitechatbot; node tools\issue_legacy_rateio_avulsas_due_<DUE>_v1.js`
+   - conferir saída: `boletos_legacy_lead_lote_<PERIODO>_apply_v1.md/.csv`
+
+**Guardrails de emissão (obrigatórios)**
+- **Não emitir** se o grupo teve `sent_total=0` no período (evita “taxa de boleto” sem engajamento).
+- Piso Asaas `R$ 5,00`: quando o cálculo do motorista ficar `< R$ 5,00`, a emissão aplica `max(R$ 5,00, valor_calculado)` por restrição operacional (e o relatório deixa explícito).
+
+**Idempotência + retry (incidente conhecido)**
+- Sintoma: `database is locked` ao escrever no SQLite (`C:\sitechatbot\dados\convenientetecnologia.sqlite`) durante a emissão.
+- Mitigação canônica:
+  - `Database(..., { timeout: 20000 })`
+  - retry com backoff para operações de escrita
+  - idempotência por `cycle_key = <BATCH_KEY>_<phoneDigits>`; se já existir invoice com `asaas_payment_id`, **não criar cobrança novamente** (safe re-run).
+
+**Evidência (scripts usados no piloto atual)**
+- Auditoria:
+  - `C:\sitechatbot\tools\audit_rateio_semana_2026-04-06_a_2026-04-12.js`
+  - `C:\sitechatbot\tools\audit_rateio_semana_2026-04-13_a_2026-04-19.js`
+- Emissão:
+  - `C:\sitechatbot\tools\issue_legacy_rateio_avulsas_due_2026-04-15_v1.js`
+  - `C:\sitechatbot\tools\issue_legacy_rateio_avulsas_due_2026-04-22_v1.js`
+
+Reinícios:
+- nenhum (scripts offline no host do CT; não exigem restart do runtime).
 
 ---
 
@@ -842,6 +923,32 @@ Escopo desta fase:
 
 ---
 
+### EXPERIMENTAL — Gateway/Proxy ISP (Bright Data) — inventário via API (pré‑código)
+
+Objetivo: operar proxies ISP com sticky por conta, controlados via CT, sem expor secrets.
+
+Provedor:
+- Bright Data ISP proxies ([Bright Data](https://brightdata.com.br)).
+
+Configuração (sem valor em docs/chat):
+- **Somente no CT (`sitechatbot`)**:
+  - `BRIGHTDATA_API_TOKEN` (token/API do provedor para listar/sincronizar proxies)
+- Regras:
+  - nunca salvar valor em arquivos versionados;
+  - nunca logar valor (nem em ACK, nem em JSON de evidência).
+
+Operação planejada:
+- CT tem botão “Sincronizar proxies” (puxa inventário e distribui aos hosts somente `proxyId/metadata`).
+
+Evidência canônica (pré‑código):
+- INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260405-0900-01.md`
+- dossiê: `C:\conveniente\docs\checkups\checkup_2026-04-05_gateway_proxy_dossie_pre_codigo.md`
+
+Regra de segurança (P0):
+- se o token for compartilhado em texto livre por engano, tratar como **exposto** e abrir INC de rotação imediata (revogar o anterior).
+
+---
+
 ## Atualizacao operacional (2026-02-23) — transicao legado/tokenized
 
 ### 1) Voltar grupos para legado (manter apenas Ipatinga tokenized)
@@ -1406,3 +1513,168 @@ Evidência operacional mínima:
 
 Rollback:
 - `git revert` dos commits da rodada Robe e novo `self_update` + restart manual do `conveniente`.
+
+---
+
+## Ambiente LAB local separado (CANÔNICO, 2026-04-07)
+
+Objetivo:
+- permitir testes de navegador/fingerprint/proxy com dados controlados sem poluir o repositório canônico.
+
+Estrutura padrão:
+- código canônico: `C:\conveniente`
+- runtime de testes: `C:\conveniente_lab`
+
+Script oficial:
+- `C:\conveniente\tools\lab_sync.ps1`
+
+Comando recomendado:
+- `powershell -ExecutionPolicy Bypass -File "C:\conveniente\tools\lab_sync.ps1" -InstallDeps`
+
+Garantias do fluxo:
+- espelha código para o LAB;
+- exclui metadados e runtime volátil no sync (`.git`, `.cursor`, `node_modules`, artefatos dinâmicos em `dados/*`);
+- preserva estado próprio do LAB para simulação.
+
+Regras de operação:
+1) alterações de código devem nascer em `C:\conveniente`;
+2) execução/validação de runtime deve ocorrer em `C:\conveniente_lab`;
+3) antes de commit, revisar `git status` e garantir zero artefato de runtime stageado.
+
+Evidência documental:
+- guia operacional: `C:\conveniente\docs\LAB_AMBIENTE_LOCAL.md`
+
+---
+
+### Stock provision — modo de autenticação por flag (CANÔNICO, 2026-04-09)
+
+Objetivo:
+- alternar com segurança entre fluxo legado por cookies e fluxo novo por login/senha, sem patch adicional.
+
+Flag canônica (`conveniente`):
+- `STOCK_PROVISION_AUTH_MODE=cookies_first|password_first`
+- default: `password_first` (quando a env var não estiver definida)
+
+Comportamento:
+- `cookies_first`:
+  - mantém o caminho legado (`configure` com injeção de cookies), sem mudança de operação.
+- `password_first`:
+  - no `stock_provision`, usa `login_remediate` com modo direto de login/senha;
+  - se falhar login (captcha/checkpoint/identity/credencial/UI bloqueada), para automação do perfil e entra em modo humano;
+  - o batch continua para as próximas contas.
+
+Rollback operacional:
+1. alterar a flag para `cookies_first`;
+2. reiniciar `conveniente` com `node index.js`.
+
+Observação importante (2026-04-09):
+- o recycle pós-cadastro (`deactivate` + `activate`) no `stock_provision` agora é fallback e vem desligado por padrão.
+- flag de fallback:
+  - `STOCK_PROVISION_RECYCLE_AFTER_CONFIGURE=1` (força comportamento legado de fecha/reabre)
+  - default: `0` (mantém browser aberto e segue para `start_work`)
+
+Evidência mínima:
+- `dados/provision_audit.jsonl` com `stock_provision_begin` (inclui `stockAuthMode`);
+- `dados/login_remediate_evidence.jsonl` para passos de login/remediação;
+- ACK do comando no CT (`sitechatbot/dados/logs/<hostId>/ack_<cmdId>.json`).
+
+---
+
+### Reconnect + stay-open no login_remediate (CANÔNICO, 2026-04-09)
+
+Objetivo:
+- evitar restart/reopen desnecessário quando o Chrome ainda está vivo;
+- reduzir ciclo "fecha/abre" após sucesso de login/remediação;
+- manter rollback simples por env + restart.
+
+Flags canônicas (`conveniente`):
+- `CDP_RECONNECT_ENABLED=1|0` (default `1`)
+- `CDP_RECONNECT_ATTEMPTS=<n>` (default `3`; sequência 2s -> 5s -> 10s)
+- `LOGIN_REMEDIATE_STAY_OPEN_AFTER_SUCCESS=1|0` (default `1`)
+- `AUTO_LOGIN_REMEDIATE_CLOSE_AFTER_SUCCESS=1|0` (default `0`)
+- `CONTROLLED_REOPEN_ENABLED=1|0` (default `1`)
+- `REOPEN_NON_RAM_MIN_MS=<ms>` (default `300000`)
+- `REOPEN_NON_RAM_MAX_MS=<ms>` (default `900000`)
+
+Comportamento:
+- no `disconnected`, tenta reconnect antes de fallback para reopen;
+- em sucesso de `login_remediate`, por padrão mantém browser aberto, fecha extras e liga Virtus;
+- quando precisa reabrir por falha não-RAM, usa janela randomizada controlada (em vez de 5s fixos).
+
+Evidência mínima:
+- `dados/provision_audit.jsonl`:
+  - `reconnect_attempt`, `reconnect_success`, `reconnect_fail`, `restart_fallback`
+  - `login_remediate_step` (`post_success_*`)
+- `dados/issues.jsonl`:
+  - `reconnect_success`
+  - `nurse_reopen_scheduled(disconnected) in Xs`
+
+Rollback operacional:
+1. desativar reconnect e voltar ao comportamento anterior:
+   - `CDP_RECONNECT_ENABLED=0`
+   - `LOGIN_REMEDIATE_STAY_OPEN_AFTER_SUCCESS=0`
+   - `AUTO_LOGIN_REMEDIATE_CLOSE_AFTER_SUCCESS=1`
+   - `CONTROLLED_REOPEN_ENABLED=0`
+2. reiniciar `conveniente` com `node index.js`.
+
+---
+
+### CT estoque — anti-reserva presa por ACK ausente (CANÔNICO, 2026-04-10)
+
+Objetivo:
+- evitar contas presas em `reserved` quando um `stock_provision` é entregue ao host e o ACK não chega.
+
+Implementação operacional (`sitechatbot`):
+- guardrail no scheduler/queue:
+  - função `expireStaleStockProvisionInflightNoAck` em `C:\sitechatbot\index.js`;
+  - timeout por env: `CT_STOCK_PROVISION_ACK_TIMEOUT_MS` (default `600000` = 10 min);
+  - quando expira:
+    - comando inflight é encerrado com `ack_timeout_stock_provision`;
+    - job `provision` correspondente vira `error`;
+    - conta vinculada sai de `reserved` para `available`.
+
+Ajustes complementares:
+- `countRunningProvisionByHost({ olderThanMs: 0 })` no scheduler (não ignora running recente);
+- `POST /api/stock/servers/release_all` executa sweep de timeout e retorna `timeoutSweep`.
+
+Evidência mínima:
+- `sitechatbot/dados/commands.log` com evento `stock_provision_inflight_timeout`;
+- `sitechatbot` jobs (`ct_fb_stock_jobs`) com `error=ack_timeout_stock_provision`;
+- conta volta de `reserved` para `available` em `ct_fb_stock_accounts`.
+
+Impacto operacional:
+- requer restart do `sitechatbot` para ativar (`node index.js`).
+
+Rollback:
+1. aumentar timeout (`CT_STOCK_PROVISION_ACK_TIMEOUT_MS`) para janela mais conservadora, se necessário;
+2. em último caso, reverter patch do `C:\sitechatbot\index.js` e reiniciar `sitechatbot`.
+
+---
+
+### Dashboard — cooldown configurável do Robe por servidor (CANÔNICO, 2026-04-25)
+
+Objetivo:
+- dar controle operacional por servidor para o cooldown curto do Robe sem editar código;
+- remover da UI de servidor os parâmetros legados do V2 que não são mais usados no fluxo atual.
+
+Como operar:
+- Dashboard `conveniente` -> **Configuração do Servidor**;
+- campos:
+  - `Robe — cooldown por postagem (mín / máx, em minutos)`;
+  - default canônico: `25` e `50`.
+
+Contrato funcional:
+- ao salvar, a configuração é persistida em `C:\conveniente\dados\server_runtime_config.json` (`robe.cooldownMinMinutes`/`robe.cooldownMaxMinutes`);
+- **não** reseta cooldowns já ativos nas contas;
+- somente cooldowns novos (gerados após a alteração) usam a nova faixa.
+
+Validação:
+- faixa aceita de `1` a `1440` minutos;
+- `máx` deve ser `>= mín`;
+- runtime normaliza/ordena caso chegue invertido.
+
+Evidência mínima:
+- `scripts/serverConfig.js` (defaults + validação + persistência);
+- `public/index.html` (modal de servidor simplificado para cooldown);
+- `scripts/worker.js` (`drawRobeCooldownMs` usando config efetiva);
+- `scripts/robe.js` e `scripts/robeVeiculos.js` (fallback local alinhado em `25–50`).
