@@ -5429,6 +5429,20 @@ function getRobeSessionV2Cfg(totalMemMB = 0) {
     vtag: `${base.vtagBase}:${sig}`
   };
 }
+function getRobeCooldownRangeCfg(totalMemMB = 0) {
+  const eff = getRuntimeServerConfig(totalMemMB);
+  const robe = eff && eff.robe ? eff.robe : {};
+  const minRaw = Math.floor(Number(robe.cooldownMinMinutes || 25) || 25);
+  const maxRaw = Math.floor(Number(robe.cooldownMaxMinutes || 50) || 50);
+  const min = Math.max(1, Math.min(1440, Math.min(minRaw, maxRaw)));
+  const max = Math.max(min, Math.min(1440, Math.max(minRaw, maxRaw)));
+  return { minMinutes: min, maxMinutes: max };
+}
+function drawRobeCooldownMs(totalMemMB = 0) {
+  const cfg = getRobeCooldownRangeCfg(totalMemMB);
+  const winnerMin = cfg.minMinutes + Math.floor(Math.random() * ((cfg.maxMinutes - cfg.minMinutes) + 1));
+  return winnerMin * 60 * 1000;
+}
 const _robeDailyPlanCache = new Map();
 const _robeDailyPlanInFlight = new Map();
 const _robeDailyGateState = new Map();
@@ -6894,7 +6908,7 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
     // #endregion
-    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (20–35min) será aplicado pelo módulo.`);
+    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão configurado no servidor será aplicado pelo módulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
 }
@@ -7028,7 +7042,7 @@ async function robeTickGlobal() {
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
-        const robePauseMs = ((20 + Math.floor(Math.random() * 16)) * 60 * 1000);
+        const robePauseMs = drawRobeCooldownMs();
 
         let res;
         try {
@@ -7043,7 +7057,7 @@ async function robeTickGlobal() {
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
-          await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (20–35min) será aplicado por robe.js`);
+          await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
@@ -9979,7 +9993,7 @@ const handlers = {
 
             let res;
             try {
-              res = await startRobeDynamic(ctrl.browser, nome, (20 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
+              res = await startRobeDynamic(ctrl.browser, nome, drawRobeCooldownMs(), workingNow);
             } catch (e) {
               if (e && e.ROBE_LOGIN_REQUIRED === true) {
                 const rr = String(e.loginReason || 'login_required');
@@ -10018,7 +10032,7 @@ const handlers = {
                 try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
                 return;
               }
-              await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (20–35min) será aplicado por robe.js`);
+              await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
               robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
               try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
               try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}

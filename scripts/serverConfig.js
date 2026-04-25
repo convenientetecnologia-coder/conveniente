@@ -25,7 +25,9 @@ const DEFAULTS = Object.freeze({
     priorityBandMaxHour: 12,
     priorityBandRatio: 0.6,
     postsPerHourMin: 2.2,
-    postsPerHourMax: 3.4
+    postsPerHourMax: 3.4,
+    cooldownMinMinutes: 25,
+    cooldownMaxMinutes: 50
   }
 });
 
@@ -100,6 +102,10 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const priorityBandRatio = Number(clamp(toNum(robe.priorityBandRatio, DEFAULTS.robe.priorityBandRatio), 0, 1).toFixed(4));
   const postsPerHourMin = clamp(toNum(robe.postsPerHourMin, DEFAULTS.robe.postsPerHourMin), 0.1, 12.0);
   const postsPerHourMax = clamp(toNum(robe.postsPerHourMax, DEFAULTS.robe.postsPerHourMax), 0.1, 12.0);
+  const cooldownMinMinutesRaw = Math.floor(toNum(robe.cooldownMinMinutes, DEFAULTS.robe.cooldownMinMinutes));
+  const cooldownMaxMinutesRaw = Math.floor(toNum(robe.cooldownMaxMinutes, DEFAULTS.robe.cooldownMaxMinutes));
+  const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
+  const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -121,7 +127,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       priorityBandMaxHour,
       priorityBandRatio,
       postsPerHourMin: Number(Math.min(postsPerHourMin, postsPerHourMax).toFixed(3)),
-      postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3))
+      postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3)),
+      cooldownMinMinutes,
+      cooldownMaxMinutes
     }
   };
 
@@ -156,7 +164,7 @@ function validateServerConfigPayload(payload) {
     }
   }
   if (robe) {
-    const iFields = ["windowStartMin", "windowEndMin", "dailyHoursMin", "dailyHoursMax", "priorityBandMinHour", "priorityBandMaxHour"];
+    const iFields = ["windowStartMin", "windowEndMin", "dailyHoursMin", "dailyHoursMax", "priorityBandMinHour", "priorityBandMaxHour", "cooldownMinMinutes", "cooldownMaxMinutes"];
     for (const f of iFields) {
       if (robe[f] !== undefined) {
         const n = toNum(robe[f], NaN);
@@ -207,7 +215,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       priorityBandMaxHour: v.normalized.robe.priorityBandMaxHour,
       priorityBandRatio: v.normalized.robe.priorityBandRatio,
       postsPerHourMin: v.normalized.robe.postsPerHourMin,
-      postsPerHourMax: v.normalized.robe.postsPerHourMax
+      postsPerHourMax: v.normalized.robe.postsPerHourMax,
+      cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
+      cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes
     }
   };
   try {

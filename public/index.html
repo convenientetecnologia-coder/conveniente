@@ -1095,35 +1095,13 @@
         <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
         <div class="form-row">
           <label>Capacidade de abertura</label>
-          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta apenas parâmetros do Robe.</div>
+          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta apenas o cooldown do Robe.</div>
         </div>
         <div class="form-row">
-          <label>Robe — janela global (início / fim)</label>
+          <label>Robe — cooldown por postagem (mín / máx, em minutos)</label>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <select id="srvWindowStart">${buildHourOptions({ end: false })}</select>
-            <select id="srvWindowEnd">${buildHourOptions({ end: true })}</select>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Robe — horas por conta (mín / máx)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <select id="srvDailyHoursMin">${buildRangeOptions(1,24)}</select>
-            <select id="srvDailyHoursMax">${buildRangeOptions(1,24)}</select>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Robe — bloco forte (hora mín / hora máx / prioridade %)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-            <select id="srvPriorityBandMin">${buildRangeOptions(1,24)}</select>
-            <select id="srvPriorityBandMax">${buildRangeOptions(1,24)}</select>
-            <select id="srvPriorityBandPct">${buildPercentStepOptions()}</select>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Robe — classificados por hora (mín / máx)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="number" id="srvPostsMin" min="0.1" max="12" step="0.1" />
-            <input type="number" id="srvPostsMax" min="0.1" max="12" step="0.1" />
+            <input type="number" id="srvCooldownMin" min="1" max="1440" step="1" />
+            <input type="number" id="srvCooldownMax" min="1" max="1440" step="1" />
           </div>
         </div>
         <div class="modal-actions">
@@ -1134,35 +1112,16 @@
       overlay.append(box);
       document.body.append(overlay);
       const infoEl = box.querySelector('#serverCfgInfo');
-      const wsEl = box.querySelector('#srvWindowStart');
-      const weEl = box.querySelector('#srvWindowEnd');
-      const dminEl = box.querySelector('#srvDailyHoursMin');
-      const dmaxEl = box.querySelector('#srvDailyHoursMax');
-      const prBandMinEl = box.querySelector('#srvPriorityBandMin');
-      const prBandMaxEl = box.querySelector('#srvPriorityBandMax');
-      const prBandPctEl = box.querySelector('#srvPriorityBandPct');
-      const pminEl = box.querySelector('#srvPostsMin');
-      const pmaxEl = box.querySelector('#srvPostsMax');
+      const cdMinEl = box.querySelector('#srvCooldownMin');
+      const cdMaxEl = box.querySelector('#srvCooldownMax');
       const closeBtn = box.querySelector('#srvCfgClose');
       const saveBtn = box.querySelector('#srvCfgSave');
 
       const fillFromConfig = (cfg) => {
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
-        wsEl.value = minToHourLabel(Number(robe.windowStartMin || 360), { end: false });
-        weEl.value = minToHourLabel(Number(robe.windowEndMin || 1380), { end: true });
-        dminEl.value = Number(robe.dailyHoursMin || 1);
-        dmaxEl.value = Number(robe.dailyHoursMax || 14);
-        prBandMinEl.value = Number(robe.priorityBandMinHour || 6);
-        prBandMaxEl.value = Number(robe.priorityBandMaxHour || 12);
-        const prBandRatioRaw = (robe.priorityBandRatio === 0 || robe.priorityBandRatio)
-          ? Number(robe.priorityBandRatio)
-          : 0.6;
-        const prBandRatio = Number.isFinite(prBandRatioRaw) ? Math.max(0, Math.min(1, prBandRatioRaw)) : 0.6;
-        const prBandPctStep = Math.max(10, Math.min(100, Math.round((prBandRatio * 100) / 10) * 10));
-        prBandPctEl.value = String(prBandPctStep);
-        pminEl.value = Number(robe.postsPerHourMin || 2.2);
-        pmaxEl.value = Number(robe.postsPerHourMax || 3.4);
+        cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
+        cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
         infoEl.className = 'pill info';
         infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
       };
@@ -1180,80 +1139,28 @@
       closeBtn.onclick = () => overlay.remove();
       saveBtn.onclick = async () => {
         try {
-          const startMin = hourLabelToMin(wsEl.value, 360);
-          const endMin = hourLabelToMin(weEl.value, 1380);
-          if (endMin <= startMin) {
+          const cooldownMin = Math.floor(Number(cdMinEl.value || 25));
+          const cooldownMax = Math.floor(Number(cdMaxEl.value || 50));
+          if (!Number.isFinite(cooldownMin) || !Number.isFinite(cooldownMax) || cooldownMin < 1 || cooldownMax < 1 || cooldownMin > 1440 || cooldownMax > 1440 || cooldownMax < cooldownMin) {
             await showSystemMessageModal({
               title: 'Configuração inválida',
-              message: 'Janela global inválida: horário final precisa ser maior que o inicial.',
-              tone: 'bad'
-            });
-            return;
-          }
-          const dailyMin = Number(dminEl.value || 1);
-          const dailyMax = Number(dmaxEl.value || 14);
-          const prBandMin = Number(prBandMinEl.value || 6);
-          const prBandMax = Number(prBandMaxEl.value || 12);
-          const prBandPctRaw = Number(prBandPctEl.value);
-          const prBandPct = Number.isFinite(prBandPctRaw) ? prBandPctRaw : 60;
-          const validPctSteps = new Set([10,20,30,40,50,60,70,80,90,100]);
-          if (dailyMax < dailyMin) {
-            await showSystemMessageModal({
-              title: 'Configuração inválida',
-              message: 'Horas por conta inválidas: o máximo precisa ser maior ou igual ao mínimo.',
-              tone: 'bad'
-            });
-            return;
-          }
-          if (prBandMax < prBandMin) {
-            await showSystemMessageModal({
-              title: 'Configuração inválida',
-              message: 'Bloco forte inválido: hora máxima precisa ser maior ou igual à hora mínima.',
-              tone: 'bad'
-            });
-            return;
-          }
-          if (prBandMin < dailyMin || prBandMax > dailyMax) {
-            await showSystemMessageModal({
-              title: 'Configuração inválida',
-              message: 'Bloco forte inválido: ele precisa estar dentro da faixa de horas por conta.',
-              tone: 'bad'
-            });
-            return;
-          }
-          if (!Number.isFinite(prBandPct) || !validPctSteps.has(prBandPct)) {
-            await showSystemMessageModal({
-              title: 'Configuração inválida',
-              message: 'Prioridade do bloco forte inválida: selecione um valor entre 10% e 100% (passo de 10).',
+              message: 'Cooldown inválido: use minutos entre 1 e 1440, com máximo maior ou igual ao mínimo.',
               tone: 'bad'
             });
             return;
           }
           const payload = {
             robe: {
-              windowStartMin: startMin,
-              windowEndMin: endMin,
-              dailyHoursMin: dailyMin,
-              dailyHoursMax: dailyMax,
-              priorityBandMinHour: prBandMin,
-              priorityBandMaxHour: prBandMax,
-              priorityBandRatio: Number((prBandPct / 100).toFixed(4)),
-              postsPerHourMin: Number(pminEl.value || 2.2),
-              postsPerHourMax: Number(pmaxEl.value || 3.4)
+              cooldownMinMinutes: cooldownMin,
+              cooldownMaxMinutes: cooldownMax
             }
           };
-          const applyNow = await showServerConfigApplyChoiceModal();
           setBtnLoading(saveBtn, true, 'Salvando...');
-          const r = await saveServerConfig(payload, { applyNow });
+          const r = await saveServerConfig(payload, { applyNow: false });
           fillFromConfig(r.config);
-          const appliedNow = !!(r && r.applyNowResult && r.applyNowResult.ok);
           await showSystemMessageModal({
             title: 'Configuração salva',
-            message: applyNow
-              ? (appliedNow
-                ? 'Configuração salva e reaplicada agora em todas as contas.'
-                : 'Configuração salva. A aplicação imediata retornou resposta parcial.')
-              : 'Configuração do servidor salva com sucesso.',
+            message: 'Configuração de cooldown salva com sucesso. Cooldowns já ativos não são alterados; apenas novos cooldowns usarão a nova faixa.',
             tone: 'good'
           });
           try { await reloadPerfis(); } catch {}

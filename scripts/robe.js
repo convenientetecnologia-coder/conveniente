@@ -2547,7 +2547,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
  * Start Robe — rápido e robusto:
  * - Fast-lane readiness (3.5s) + fallback curto.
  * - Espera curta se restar <5s de cooldown; aborta sem mexer no cooldown se faltar mais.
- * - Cooldown padrão 20–35min após sucesso ou erro; nada no abort por cooldown. NUNCA penalidade/backoff especial.
+ * - Cooldown padrão 25–50min após sucesso ou erro; nada no abort por cooldown. NUNCA penalidade/backoff especial.
  * - Pós-publicação: se detectar “painel/listagem” fecha imediatamente; senão fecha em até 3s (sem popup).
  *   Se houver popup, aceita e espera ~2.5s, depois fecha.
  * - Minimização suave apenas desta aba (após anti-detect).
@@ -2575,7 +2575,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     return Math.floor(n);
   })();
 
-  // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 20–35min.
+  // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
   const stepLogArr = [];
 
   const attId = stepLog.attemptId();
@@ -3078,7 +3078,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // PATCH MILITAR — Se houve limit_posting neste ciclo, retorna imediatamente sem aplicar cooldown curto.
     if (limitPostingHit) return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
 
-    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 20–35min. NUNCA penalidade/backoff especial.
+    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 25–50min. NUNCA penalidade/backoff especial.
     try {
       if (isMarketplaceRateLimit) {
         await manifestStore.update(nome, (m) => {
@@ -3089,7 +3089,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
       const pause = isMarketplaceRateLimit
         ? (2 + Math.floor(Math.random() * 4)) * 60 * 1000
-        : (20 + Math.floor(Math.random() * 16)) * 60 * 1000;
+        : (25 + Math.floor(Math.random() * 26)) * 60 * 1000;
       await manifestStore.update(nome, m => {
         m.robeCooldownUntil = Date.now() + pause;
         return m;
@@ -3130,11 +3130,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 20–35min. NUNCA penalidade/backoff especial.
+    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 25–50min. NUNCA penalidade/backoff especial.
     // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {
       if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
-        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((20 + Math.floor(Math.random() * 16)) * 60 * 1000);
+        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
         await manifestStore.update(nome, m => {
           m.robeCooldownUntil = Date.now() + pause;
           return m;

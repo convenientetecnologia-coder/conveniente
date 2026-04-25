@@ -2032,7 +2032,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     return Math.floor(n);
   })();
 
-  // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 20–35min.
+  // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
   const stepLogArr = [];
 
   const attId = stepLog.attemptId();
@@ -2407,9 +2407,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // PATCH MILITAR — Se houve limit_posting neste ciclo, retorna imediatamente sem aplicar cooldown curto.
     if (limitPostingHit) return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
 
-    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 20–35min.
+    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
     try {
-      const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((20 + Math.floor(Math.random() * 16)) * 60 * 1000);
+      const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
       await manifestStore.update(nome, m => {
         m.robeCooldownUntil = Date.now() + pause;
         return m;
@@ -2444,11 +2444,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 20–35min.
+    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
     // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {
       if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
-        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((20 + Math.floor(Math.random() * 16)) * 60 * 1000);
+        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
         await manifestStore.update(nome, m => {
           m.robeCooldownUntil = Date.now() + pause;
           return m;
