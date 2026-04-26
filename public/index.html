@@ -1095,7 +1095,7 @@
         <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
         <div class="form-row">
           <label>Capacidade de abertura</label>
-          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta apenas o cooldown do Robe.</div>
+          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta cooldown e política de deleção de foto do Robe.</div>
         </div>
         <div class="form-row">
           <label>Robe — cooldown por postagem (mín / máx, em minutos)</label>
@@ -1103,6 +1103,13 @@
             <input type="number" id="srvCooldownMin" min="1" max="1440" step="1" />
             <input type="number" id="srvCooldownMax" min="1" max="1440" step="1" />
           </div>
+        </div>
+        <div class="form-row">
+          <label>Robe — política de deleção de foto</label>
+          <select id="srvPhotoDeletePolicy">
+            <option value="after_all_working_posted">Postar em todas as contas trabalhando, depois apagar</option>
+            <option value="after_first_confirmed_post">Primeira postagem concluída já apaga</option>
+          </select>
         </div>
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
@@ -1114,6 +1121,7 @@
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
       const cdMaxEl = box.querySelector('#srvCooldownMax');
+      const photoPolicyEl = box.querySelector('#srvPhotoDeletePolicy');
       const closeBtn = box.querySelector('#srvCfgClose');
       const saveBtn = box.querySelector('#srvCfgSave');
 
@@ -1122,6 +1130,7 @@
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
         cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
+        photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         infoEl.className = 'pill info';
         infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
       };
@@ -1152,7 +1161,8 @@
           const payload = {
             robe: {
               cooldownMinMinutes: cooldownMin,
-              cooldownMaxMinutes: cooldownMax
+              cooldownMaxMinutes: cooldownMax,
+              photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted')
             }
           };
           setBtnLoading(saveBtn, true, 'Salvando...');
@@ -1160,7 +1170,7 @@
           fillFromConfig(r.config);
           await showSystemMessageModal({
             title: 'Configuração salva',
-            message: 'Configuração de cooldown salva com sucesso. Cooldowns já ativos não são alterados; apenas novos cooldowns usarão a nova faixa.',
+            message: 'Configuração salva com sucesso. Cooldowns já ativos não são alterados; novos cooldowns e novas deleções de foto passam a seguir a política selecionada.',
             tone: 'good'
           });
           try { await reloadPerfis(); } catch {}

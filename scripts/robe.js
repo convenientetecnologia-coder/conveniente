@@ -2552,7 +2552,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
  *   Se houver popup, aceita e espera ~2.5s, depois fecha.
  * - Minimização suave apenas desta aba (após anti-detect).
  */
-async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
+async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], photoDeletePolicy = 'after_all_working_posted') {
   let limitPostingHit = false;
   let page = null;
   let published = false;
@@ -3035,7 +3035,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try {
         if (fotoNome) {
           const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
-          await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+          await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles, photoDeletePolicy);
         }
       } catch (e) {
         stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);

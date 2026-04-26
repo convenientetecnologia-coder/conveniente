@@ -27,7 +27,8 @@ const DEFAULTS = Object.freeze({
     postsPerHourMin: 2.2,
     postsPerHourMax: 3.4,
     cooldownMinMinutes: 25,
-    cooldownMaxMinutes: 50
+    cooldownMaxMinutes: 50,
+    photoDeletePolicy: "after_all_working_posted"
   }
 });
 
@@ -106,6 +107,10 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMaxMinutesRaw = Math.floor(toNum(robe.cooldownMaxMinutes, DEFAULTS.robe.cooldownMaxMinutes));
   const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
+  const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
+  const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
+    ? "after_first_confirmed_post"
+    : "after_all_working_posted";
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -129,7 +134,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       postsPerHourMin: Number(Math.min(postsPerHourMin, postsPerHourMax).toFixed(3)),
       postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3)),
       cooldownMinMinutes,
-      cooldownMaxMinutes
+      cooldownMaxMinutes,
+      photoDeletePolicy
     }
   };
 
@@ -178,6 +184,12 @@ function validateServerConfigPayload(payload) {
         if (!Number.isFinite(n)) errors.push(`robe.${f}_invalido`);
       }
     }
+    if (robe.photoDeletePolicy !== undefined) {
+      const p = String(robe.photoDeletePolicy || "").trim().toLowerCase();
+      if (!["after_all_working_posted", "after_first_confirmed_post"].includes(p)) {
+        errors.push("robe.photoDeletePolicy_invalido");
+      }
+    }
   }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
@@ -217,7 +229,8 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       postsPerHourMin: v.normalized.robe.postsPerHourMin,
       postsPerHourMax: v.normalized.robe.postsPerHourMax,
       cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
-      cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes
+      cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
+      photoDeletePolicy: v.normalized.robe.photoDeletePolicy
     }
   };
   try {

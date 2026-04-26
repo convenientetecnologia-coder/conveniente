@@ -371,7 +371,7 @@ async function releaseReservation(nomeConta, fileName) {
  * ATENÇÃO: ESTA FUNÇÃO DEVE SER CHAMADA APÓS TODA TENTATIVA DE POSTAGEM, INDEPENDENTE DE SUCESSO OU FALHA. 
  * ELA GARANTE QUE A FOTO JAMAIS SERÁ SERVIDA DUAS VEZES PARA A MESMA CONTA.
  *
- * Marca uma foto como postada por uma conta e tenta excluir se TODAS workingNames já postaram.
+ * Marca uma foto como postada por uma conta e aplica política de deleção.
  *   Se o arquivo no disco não for a mesma “geração” registrada, zera postedBy (foto foi substituída → trata como nova).
  *   Remove o registro ao excluir a foto com sucesso.
  *   Se falhar a exclusão, marca deletePending para o GC tentar depois.
@@ -379,11 +379,15 @@ async function releaseReservation(nomeConta, fileName) {
  * @param {string} nomeConta
  * @param {string} fileName
  * @param {string[]} workingNames
+ * @param {"after_all_working_posted"|"after_first_confirmed_post"} photoDeletePolicy
  * @returns {Promise<{ok:true,deleted:boolean}|{ok:false,error:string}>}
  */
-async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) {
+async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = [], photoDeletePolicy = 'after_all_working_posted') {
   nomeConta = canonName(nomeConta);
   workingNames = canonNames(workingNames);
+  const deletePolicy = (String(photoDeletePolicy || '').trim().toLowerCase() === 'after_first_confirmed_post')
+    ? 'after_first_confirmed_post'
+    : 'after_all_working_posted';
 
   return _serialize(async () => {
     const lockFd = await acquireIndexLock();
@@ -431,10 +435,10 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
       for (const n of workingNames) rqSet.add(canonName(n));
       rec.requiredFor = Array.from(rqSet);
 
-      // [item 4]: critério de deleção depende APENAS de allRequiredPosted
       const reqSet = new Set(rec.requiredFor.map(canonName));
       const postedSet = new Set(rec.postedBy.map(canonName));
-      let allRequiredPosted = reqSet.size > 0 && Array.from(reqSet).every(x => postedSet.has(x));
+      const allRequiredPosted = reqSet.size > 0 && Array.from(reqSet).every(x => postedSet.has(x));
+      const shouldDeleteNow = (deletePolicy === 'after_first_confirmed_post') || allRequiredPosted;
 
       if (!exists) {
         delete idx[fileName];
@@ -442,7 +446,7 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
         return { ok: true, deleted: true };
       }
 
-      if (allRequiredPosted) {
+      if (shouldDeleteNow) {
         if (sameGeneration(rec, stat, abs)) {
           try {
             fs.unlinkSync(abs);

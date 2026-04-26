@@ -5443,6 +5443,15 @@ function drawRobeCooldownMs(totalMemMB = 0) {
   const winnerMin = cfg.minMinutes + Math.floor(Math.random() * ((cfg.maxMinutes - cfg.minMinutes) + 1));
   return winnerMin * 60 * 1000;
 }
+
+function getRobePhotoDeletePolicy(totalMemMB = 0) {
+  const eff = getRuntimeServerConfig(totalMemMB);
+  const robe = eff && eff.robe ? eff.robe : {};
+  const raw = String(robe.photoDeletePolicy || "after_all_working_posted").trim().toLowerCase();
+  return (raw === "after_first_confirmed_post")
+    ? "after_first_confirmed_post"
+    : "after_all_working_posted";
+}
 const _robeDailyPlanCache = new Map();
 const _robeDailyPlanInFlight = new Map();
 const _robeDailyGateState = new Map();
@@ -6863,7 +6872,7 @@ async function getRobeModuleFor(nome) {
 }
 
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
-async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
+async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
   // #endregion
@@ -6899,7 +6908,7 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_before_module_start', nome: String(nome || ''), hasStartRobe: !!(mod && typeof mod.startRobe === 'function') }); } catch {}
     // #endregion
-    const res = await mod.startRobe(browser, nome, robePauseMs, workingNow);
+    const res = await mod.startRobe(browser, nome, robePauseMs, workingNow, photoDeletePolicy);
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_return', nome: String(nome || ''), ok: !!(res && res.ok), error: (res && res.error) ? String(res.error) : null }); } catch {}
     // #endregion
@@ -7043,10 +7052,11 @@ async function robeTickGlobal() {
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
         const robePauseMs = drawRobeCooldownMs();
+        const photoDeletePolicy = getRobePhotoDeletePolicy();
 
         let res;
         try {
-          res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow);
+          res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow, photoDeletePolicy);
         } catch (e) {
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
@@ -9993,7 +10003,7 @@ const handlers = {
 
             let res;
             try {
-              res = await startRobeDynamic(ctrl.browser, nome, drawRobeCooldownMs(), workingNow);
+              res = await startRobeDynamic(ctrl.browser, nome, drawRobeCooldownMs(), workingNow, getRobePhotoDeletePolicy());
             } catch (e) {
               if (e && e.ROBE_LOGIN_REQUIRED === true) {
                 const rr = String(e.loginReason || 'login_required');
