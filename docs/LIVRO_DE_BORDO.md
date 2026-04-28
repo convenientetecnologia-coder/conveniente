@@ -57,6 +57,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Continuidade entre chats (handoff pronto para colar no novo chat) — `docs/INFORMACOES_CONTINUIDADE_GPT.md`
   - Consolidado oficial Virtus (estabilidade + mensagens + evidências) — `docs/checkups/checkup_2026-04-25_consolidado_virtus_estabilidade_mensagens.md`
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
+  - Instalação Linux Xubuntu (desktop visual) — `scripts/install_conveniente_linux.sh` + seção canônica no `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
   - Dossiê pré-código (novo fluxo de leads por sorteio/cobrança) — `docs/checkups/checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
   - Auditoria pré‑código (pós‑vencedor / Contestação V2.1: baseline real + gaps + simulação pesada P2) — `docs/checkups/checkup_2026-02-23_auditoria_pre_codigo_pos_vencedor_contestacao_v2_1.md`

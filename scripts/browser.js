@@ -1645,8 +1645,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       }
     }
 
-    // HEADFUL sempre
-    const isHeadless = process.env.OVERRIDE_HEADLESS === '1' || process.env.HEADLESS === '1';
+    // HEADFUL por política operacional canônica.
+    // Headless só pode ser habilitado em exceção explícita.
+    const headlessRequested = process.env.OVERRIDE_HEADLESS === '1' || process.env.HEADLESS === '1';
+    const headlessAllowed = String(process.env.CONVENIENTE_ALLOW_HEADLESS || '').trim() === '1';
+    if (headlessRequested && !headlessAllowed) {
+      try {
+        logger.warn('[BROWSER][POLICY] HEADLESS solicitado, mas bloqueado por política operacional (defina CONVENIENTE_ALLOW_HEADLESS=1 para exceção).');
+      } catch {}
+    }
+    const isHeadless = headlessRequested && headlessAllowed;
 
     // DEFAULT VIEWPORT: null SEMPRE
     const defaultViewport = null;

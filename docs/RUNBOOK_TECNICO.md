@@ -42,6 +42,69 @@ Referência canônica (detalhamento do contrato + “formato de relato mínimo�
 
 ---
 
+### Xubuntu 24.04 LTS (desktop) — instalação e operação visual do `conveniente` (CANÔNICO)
+
+Objetivo: preparar host Linux com 1 comando e manter operação diária com sessão gráfica ativa + navegadores visíveis.
+
+#### Escopo e regra operacional
+
+- Este fluxo é **Linux separado** do instalador Windows (`instalar_conveniente.ps1` permanece canônico para Windows).
+- Operação diária do `conveniente` em Linux é **headful/visual**:
+  - sessão gráfica ativa;
+  - navegador visível;
+  - dashboard visível;
+  - **não** operar em `headless=true` no dia a dia.
+
+#### Comando canônico de instalação (Linux)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/convenientetecnologia-coder/conveniente/main/scripts/install_conveniente_linux.sh)"
+```
+
+Script canônico:
+
+- `C:\conveniente\scripts\install_conveniente_linux.sh`
+
+O script instala e configura (idempotente):
+
+- timezone `America/Sao_Paulo`, locale `pt_BR.UTF-8`;
+- dependências base + libs de GUI/Puppeteer;
+- Node.js LTS e npm;
+- Google Chrome Stable;
+- clone/update do repo em `/opt/conveniente`;
+- `npm install`;
+- atalho de desktop para iniciar o runtime.
+
+#### Subida operacional (humano)
+
+Após instalação:
+
+```bash
+cd /opt/conveniente
+node index.js
+```
+
+#### Validação mínima pós-instalação
+
+- Painel abre localmente: `http://localhost:8088/index.html`;
+- `GET /health` retorna `ok=true`;
+- abertura de navegador ocorre de forma visível (sem headless);
+- perfil consegue abrir/retomar sem perder `userDataDir`.
+
+#### Risco conhecido / guardrail
+
+- Se ambiente for iniciado sem sessão gráfica ativa, o runtime pode não atender ao padrão operacional visual.
+- Evitar forçar envs de headless (`HEADLESS=1`, `OVERRIDE_HEADLESS=1`) no fluxo de produção visual.
+- Exceção controlada (somente laboratório): usar `CONVENIENTE_ALLOW_HEADLESS=1` junto com `HEADLESS=1`.
+
+#### Rollback
+
+- Remover host Linux da operação e manter execução em hosts Windows;
+- reverter commit(s) de trilha Linux no `conveniente` se necessário;
+- reinstalar host limpo e reaplicar o procedimento canônico.
+
+---
+
 ### Navegação canônica Virtus (Messenger/Marketplace) — **CANÔNICO**
 
 Objetivo: garantir que a Virtus abra o feed correto de Marketplace após a migração para `facebook.com/messages`, sem desviar para inbox privado.

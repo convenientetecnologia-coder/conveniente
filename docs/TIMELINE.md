@@ -31,6 +31,25 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-04-28 — [CONV][OPS][DOCS] Trilha canônica Linux (Xubuntu desktop visual) preparada para rollout
+
+- **O que**:
+  - adicionado instalador Linux dedicado e idempotente em `scripts/install_conveniente_linux.sh`;
+  - formalizada no runbook a operação Linux separada de Windows, com comando único de instalação;
+  - fixada regra operacional Linux: sessão gráfica ativa e navegadores visíveis (sem headless operacional diário);
+  - aplicado guardrail no launcher (`scripts/browser.js`) para bloquear headless acidental sem override explícito (`CONVENIENTE_ALLOW_HEADLESS=1`);
+  - gerado checkup técnico da frente Linux pré-rollout.
+- **Por quê**: permitir migração controlada para Xubuntu sem quebrar o fluxo consolidado de hosts Windows.
+- **Evidência**:
+  - `C:\conveniente\scripts\install_conveniente_linux.sh`
+  - `C:\conveniente\scripts\browser.js`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-04-28_migracao_linux_xubuntu_pre_rollout.md`
+- **Reinícios**: nenhum nesta etapa (preparação documental + script).
+- **Rollback**:
+  - reverter arquivos desta entrega (`install_conveniente_linux.sh`, seção no runbook, referências no livro/timeline/checkup);
+  - manter operação apenas em Windows até novo ciclo.
+
 #### 2026-04-25 — [DOCS][CONV][OPS] Consolidacao oficial da frente Virtus (estabilidade, recovery, velocidade e mensagens)
 
 - **O que**:
@@ -3324,3 +3343,29 @@ Adendo (ajuste operacional aprovado pelo owner):
   - apenas cooldowns novos passam a usar a nova faixa.
 - **Impacto operacional**:
   - requer restart do `conveniente` para o runtime carregar o patch e começar a usar o cooldown configurável via dashboard.
+
+#### 2026-04-25 — [CONVENIENTE][P0][PRE-CODIGO] Auditoria forense: verdade dos grupos x CT x Asaas (assinaturas + legacy boleto)
+
+- **Mudança**:
+  - abertura formal da auditoria de consistencia ponta a ponta usando a lista-verdade operacional do humano como fonte primaria.
+- **Evidencia**:
+  - triagem canonicamente registrada em `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT 2026-04-25 — grupos x CT x Asaas);
+  - dossie forense: `C:\conveniente\docs\checkups\checkup_2026-04-25_auditoria_forense_grupos_ct_asaas.md`;
+  - baseline historico de divergencia CT/Asaas referenciado dentro do dossie (`auditoria_lote_2026-04-01_ct_asaas_status.*`).
+- **Impacto operacional**:
+  - nenhum restart (fase de auditoria, sem alteracao de runtime).
+
+#### 2026-04-25 — [CONVENIENTE][P0][PRE-CODIGO] Reconciliação real de hoje (telefone como chave): grupos x CT x Asaas
+
+- **Mudança**:
+  - execução da auditoria de reconciliação com snapshot real (CT + Asaas), usando telefone como chave de verdade e permitindo multi-grupo por cadastro.
+- **Evidência**:
+  - script de auditoria somente leitura: `C:\conveniente\tools\audit_truth_ct_asaas_2026_04_25.js`;
+  - relatório final desta rodada: `C:\conveniente\docs\checkups\checkup_2026-04-25_auditoria_forense_grupos_ct_asaas_resultado.md`;
+  - snapshot bruto para conferência: `C:\conveniente\docs\auditoria_grupos_ct_asaas_2026-04-25_snapshot.json`.
+- **Resumo técnico**:
+  - lista-verdade: 236 telefones em 53 grupos;
+  - CT encontrado: 2139 telefones;
+  - divergências principais: `missing_in_ct=10`, `ct_not_in_truth=1913`, `truth_without_asaas_customer=26`, `non_legacy_truth_without_subscription=40`, `legacy_truth_with_subscription=1`.
+- **Impacto operacional**:
+  - nenhum restart (somente auditoria; sem alteração de runtime).
