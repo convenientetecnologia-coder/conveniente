@@ -11178,11 +11178,38 @@ async function registerFailure(nome, reason, classification) {
 
 async function pageReadyBasic(p0) {
   try {
-    const res = await Promise.race([
-      (async () => (await p0.evaluate(() => document.readyState)) || 'unknown')(),
-      new Promise(res => setTimeout(() => res('timeout'), NURSE_CFG.PAGE_EVAL_TIMEOUT_MS))
+    const diag = await Promise.race([
+      p0.evaluate(() => {
+        const readyState = document.readyState || 'unknown';
+        const href = String((location && location.href) || '');
+        const isMessengerMarketplace = /messenger\.com\/.*marketplace/i.test(href);
+        const hasChatAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+        const hasGrid = !!document.querySelector('div[role="grid"], div[role="rowgroup"], div[role="row"]');
+        const hasMarketplaceNav =
+          !!document.querySelector('a[href*="/marketplace"], [aria-label*="Marketplace"], [aria-label*="marketplace"]');
+        const bodyTextLen = String((document.body && document.body.innerText) || '').trim().length;
+        const nodeCount = document.querySelectorAll('a,button,input,main,section,article,nav,aside,div,span').length;
+        const hasMarketplaceSignals = hasChatAnchor || hasGrid || hasMarketplaceNav;
+        const likelyWhiteScreen = !hasMarketplaceSignals && nodeCount < 40 && bodyTextLen < 16;
+        return {
+          readyState,
+          isMessengerMarketplace,
+          hasMarketplaceSignals,
+          likelyWhiteScreen
+        };
+      }),
+      new Promise(res => setTimeout(() => res({ readyState: 'timeout', isMessengerMarketplace: false, hasMarketplaceSignals: false, likelyWhiteScreen: false }), NURSE_CFG.PAGE_EVAL_TIMEOUT_MS))
     ]);
-    return (res === 'interactive' || res === 'complete');
+
+    const ready = (diag.readyState === 'interactive' || diag.readyState === 'complete');
+    if (!ready) return false;
+
+    // Hardening P0: Messenger/Marketplace com "DOM pronto" mas sem sinais mínimos
+    // geralmente corresponde à aba branca/degradada.
+    if (diag.isMessengerMarketplace && !diag.hasMarketplaceSignals && diag.likelyWhiteScreen) {
+      return false;
+    }
+    return true;
   } catch { return false; }
 }
 

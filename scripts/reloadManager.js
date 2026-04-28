@@ -175,7 +175,7 @@ function schedulePeriodic(controllers) {
     const now = Date.now();
     for (const [nome, ctrl] of controllers.entries()) {
       if (!ctrl || !isBrowserConnected(ctrl)) continue;
-      // FIX militar: se não existe entry, registra agora e não agenda ainda
+      // Se não existe histórico de sucesso, inicia relógio e aguarda próximo ciclo.
       const last = lastReloadTimes.get(nome);
       if (!last) {
         lastReloadTimes.set(nome, now);
@@ -183,7 +183,11 @@ function schedulePeriodic(controllers) {
       }
       if (now - last >= RELOAD_INTERVAL_MS) {
         scheduleReload(nome);
-        lastReloadTimes.set(nome, now); // marca o ciclo
+        // IMPORTANTE:
+        // não atualize lastReloadTimes aqui.
+        // Esse relógio representa "último reload concluído com sucesso";
+        // se atualizarmos no agendamento, o processReload cairá em grace window
+        // e ficará em loop de "agendado -> skip", sem executar a troca de aba.
       }
     }
   } catch {}
