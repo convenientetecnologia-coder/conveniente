@@ -80,76 +80,44 @@ async function processReload(nome, controllers, robeMeta) {
       return safeSkipReason(nome, 'janela de grace não cumprida');
     }
 
-    // Preparação de páginas
+    // Preparação de página principal
     const browser = ctrl.browser;
     let pages = await browser.pages().catch(() => []);
     if (!Array.isArray(pages) || pages.length === 0) return safeSkipReason(nome, 'sem páginas');
     const mainPage = ctrl.mainPage || pages[0];
     if (!mainPage) return safeSkipReason(nome, 'mainPage ausente');
 
-    logger.info('[RELOAD] iniciando troca de aba', { nome });
+    logger.info('[RELOAD] iniciando reload seguro (in-place)', { nome });
 
-    // Abre nova aba e faz patch completo
-    const man = await manifestStore.read(nome).catch(() => null);
-    const coords = utils.getCoords((man && man.cidade) || '');
-    const newPage = await browser.newPage();
+    // Hotfix P0: evita troca destrutiva de aba (newPage + close old), que estava
+    // causando corrida com pruner/virtus e desconexão de browser em massa.
+    let ok = false;
     try {
-      await browserHelper.patchPage(nome, newPage, coords);
-    } catch (e) {
-      logger.warn('[RELOAD] patchPage falhou (seguindo mesmo assim)', { nome, err: (e && e.message) || String(e) });
-    }
-
-    // about:blank (já é blank por padrão; goto opcional)
-    try {
-      await newPage.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+      await mainPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     } catch {}
+    ok = await waitForMessengerNavigation(mainPage, nome, 15000);
 
-    logger.info('[RELOAD] nova aba aberta', { nome });
-
-    // Fecha aba antiga (tolerante a erro)
-    try {
-      await mainPage.close({ runBeforeUnload: false }).catch(() => {});
-      logger.info('[RELOAD] aba antiga fechada', { nome });
-    } catch (e) {
-      logger.warn('[RELOAD] falha ao fechar aba antiga (seguindo)', { nome, err: (e && e.message) || String(e) });
-    }
-
-    // Atualiza referência mainPage (opcional)
-    try {
-      ctrl.mainPage = newPage;
-    } catch {}
-
-    // Aguarda Virtus detectar e navegar ao Messenger
-    logger.info('[RELOAD] aguardando navegação do virtus', { nome });
-    let ok = await waitForMessengerNavigation(newPage, nome, RELOAD_TIMEOUT_MS);
     if (!ok) {
-      logger.warn('[RELOAD] timeout na navegação - tentando manual', { nome });
+      logger.warn('[RELOAD] timeout no reload - tentando goto manual', { nome });
       try {
-        await newPage.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        await mainPage.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       } catch {}
-      ok = await waitForMessengerNavigation(newPage, nome, 20000);
-      if (!ok) {
-        // erro crítico — fecha o navegador; sistema reabre automaticamente
-        logger.error('[RELOAD] erro durante troca de aba — navegador será fechado', { nome });
-        try { await browser.close().catch(()=>{}); } catch {}
-        return;
-      } else {
-        logger.info('[RELOAD] navegação manual concluída', { nome });
-      }
+      ok = await waitForMessengerNavigation(mainPage, nome, 20000);
     }
+
+    if (!ok) {
+      logger.warn('[RELOAD] reload não confirmou navegação (sem fechar browser)', { nome });
+      return;
+    }
+
+    try { ctrl.mainPage = mainPage; } catch {}
 
     lastReloadTimes.set(nome, Date.now());
-    logger.info('[RELOAD] troca de aba concluída com sucesso', { nome });
+    logger.info('[RELOAD] reload seguro concluído com sucesso', { nome });
 
   } catch (e) {
     logger.error('[RELOAD] erro durante troca de aba', { nome, error: (e && e.message) || String(e) }, e);
-    try {
-      const ctrl = controllers.get(nome);
-      if (ctrl && ctrl.browser) {
-        logger.warn('[RELOAD] navegador fechado devido a erro', { nome });
-        await ctrl.browser.close().catch(()=>{});
-      }
-    } catch {}
+    // Hotfix P0: em erro de reload não derrubar navegador inteiro.
   } finally {
     reloadInProgress.delete(nome);
   }
