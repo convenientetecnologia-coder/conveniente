@@ -5338,7 +5338,8 @@ function loadPerfisJson() {
   } catch { return []; }
 }
 const ROBE_DAILY_PLAN_BASE_CFG = {
-  enabled: true,
+  // Runtime atual (V1): gate de janela diária desativado.
+  enabled: false,
   windowStartMin: 6 * 60,
   windowEndMin: 23 * 60,
   offdayRatio: 0.25,
@@ -5352,7 +5353,8 @@ const ROBE_DAILY_PLAN_BASE_CFG = {
   vtagBase: 'robe_daily_plan_v2'
 };
 const ROBE_SESSION_V2_BASE_CFG = {
-  enabled: true,
+  // Runtime atual (V1): sessão em lote V2 desativada.
+  enabled: false,
   minPostsPerHour: 2.2,
   maxPostsPerHour: 3.4,
   jitterMin: 0.85,
@@ -5979,7 +5981,8 @@ async function getOrCreateRobeDailyPlan(nome, nowMs = Date.now(), manifestHint =
 }
 function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
   const nowMin = _robeDailyNowMin(nowMs);
-  if (!plan) return { featureEnabled: true, enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
+  const featureEnabled = !!(getRobeDailyPlanCfg().enabled === true);
+  if (!plan) return { featureEnabled, enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
   const blocks = Array.isArray(plan.blocks) ? plan.blocks : [];
   const inWindowNow = !!(plan.enabled && blocks.some((b) => nowMin >= Number(b.startMin || 0) && nowMin < Number(b.endMin || 0)));
   let nextWindowStartMin = null;
@@ -5990,7 +5993,7 @@ function _robeDailyPlanSummary(plan, nowMs = Date.now()) {
     }
   }
   return {
-    featureEnabled: true,
+    featureEnabled,
     date: String(plan.date || ''),
     enabled: !!plan.enabled,
     dailyHours: Number(plan.dailyHours || 0) || 0,
@@ -10284,7 +10287,7 @@ const handlers = {
           const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
           return _robeDailyPlanSummary(plan, Date.now());
         } catch {
-          return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
+          return { featureEnabled: false, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
         }
       })();
       const robeSessionSummary = await (async () => {
@@ -10668,7 +10671,7 @@ const robeDailyPlanSummary = await (async () => {
     const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
     return _robeDailyPlanSummary(plan, Date.now());
   } catch {
-    return { featureEnabled: true, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
+    return { featureEnabled: false, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
   }
 })();
 const robeSessionSummary = await (async () => {

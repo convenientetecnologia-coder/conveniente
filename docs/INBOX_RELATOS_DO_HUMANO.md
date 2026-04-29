@@ -2019,3 +2019,51 @@ diretriz:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P1 | Auditar e implementar ponta a ponta `Configuração do Servidor` para remover campos legados V2 da UI e introduzir cooldown configurável (default 25–50min) sem resetar cooldowns ativos no save | done | `public/index.html`, `scripts/serverConfig.js`, `scripts/worker.js`, `scripts/robe.js`, `scripts/robeVeiculos.js` |
+
+---
+
+## RAW_INPUT — 2026-04-25 (Triagem inbox: auditoria forense grupos x CT x Asaas, com lista-verdade)
+
+```text
+pedido do humano:
+- montar auditoria forense ponta a ponta (sem corrigir nada ainda), cruzando 3 fontes:
+  1) motoristas realmente presentes nos grupos (lista-verdade fornecida manualmente);
+  2) CT (ativos / testes / encerrados);
+  3) Asaas (assinaturas para grupos de assinatura + boletos para grupos legacy).
+- produzir documento .md ultra organizado para revisão humana;
+- tratar grupos legacy como exceção correta para ausência de assinatura (cobrança por boleto semanal);
+- identificar:
+  - motorista no grupo e fora do CT;
+  - motorista no CT e fora do grupo;
+  - cobrança/assinatura no Asaas sem motorista no grupo;
+  - motorista no grupo sem cobertura financeira correta (assinatura ou boleto legacy);
+  - grupos sem motoristas e cadastros possivelmente indevidos.
+```
+
+### TRIAGE — 2026-04-25 (Forense de consistência: grupos, CT e Asaas)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Consolidar lista-verdade de grupos/motoristas enviada pelo humano (fonte de verdade operacional) | done | `docs/checkups/checkup_2026-04-25_auditoria_forense_grupos_ct_asaas.md` |
+| 2 | P0 | Cruzar lista-verdade com CT (ativos/testes/encerrados) para detectar faltantes/excedentes e duplicidades | done | `docs/checkups/checkup_2026-04-25_auditoria_forense_grupos_ct_asaas_resultado.md` |
+| 3 | P0 | Cruzar lista-verdade + classificação de grupo (assinatura vs legacy boleto) com status financeiro do Asaas | done | `docs/checkups/checkup_2026-04-25_auditoria_forense_grupos_ct_asaas_resultado.md` |
+| 4 | P1 | Mapear grupos sem motoristas na verdade operacional e validar se há cadastro/financeiro indevido em CT/Asaas | done | `docs/checkups/checkup_2026-04-25_auditoria_forense_grupos_ct_asaas_resultado.md` |
+| 5 | P1 | Registrar lacunas de evidência (hostId/cmdId/log keys/recorte temporal) e plano objetivo de coleta via CT | done | `docs/checkups/checkup_2026-04-25_auditoria_forense_grupos_ct_asaas.md` |
+
+---
+
+## RAW_INPUT — 2026-04-29 (Robe V1 bloqueado por “fora da janela diária”)
+
+```text
+pedido do humano:
+- em servidor com várias contas, ao dar play manual no robe (e possivelmente no automático), algumas contas mostram pill "Robe: fora da janela diária";
+- o runtime atual esperado é Robe V1 (todas as contas podem postar todos os dias);
+- cooldown curto já está configurável no config do servidor (ex.: 1 a 3 horas) e deveria ser o único bloqueio de próxima postagem;
+- comportamento esperado: se cooldown zerou, a conta deve poder postar; não pode ficar bloqueada por janela diária.
+```
+
+### TRIAGE — 2026-04-29 (Robe V1: remover bloqueio de janela diária residual)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Investigar e corrigir gate residual de `robeDailyPlan/robeSessionV2` que marca “fora da janela diária” e impede postagem no modo V1 | done | `scripts/worker.js`, `public/index.html` |
