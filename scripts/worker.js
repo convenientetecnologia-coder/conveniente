@@ -9589,6 +9589,36 @@ const handlers = {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
+        // Hardening: quando não há browser vivo, tente auto-reconciliação segura para evitar conta "presa".
+        let desiredActive = false;
+        try {
+          const desiredSnap = fileStore.loadDesiredJson();
+          desiredActive = !!(desiredSnap && desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].active === true);
+        } catch {}
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].numPages = 0;
+          delete robeMeta[nome].whyNotOpen;
+        } catch {}
+        if (desiredActive) {
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d = d || {};
+              d.perfis = d.perfis || {};
+              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false };
+              return d;
+            });
+          } catch {}
+          try {
+            const op = `human_resume_reconcile_no_browser:${String(nome||'')}:${Date.now()}`;
+            setTimeout(() => {
+              try { handlers.activate({ nome, operator: op }).catch(()=>{}); } catch {}
+            }, 0);
+            try { await snapshotStatusAndWrite(); } catch {}
+            try { await issues.append(nome, 'human_resume_reconcile', 'no_browser_activate_scheduled'); } catch {}
+            return { ok: true, reconciled: 'no_browser_activate_scheduled' };
+          } catch {}
+        }
         try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
@@ -10301,6 +10331,7 @@ const handlers = {
 
       // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
       const ctrl = controllers.get(nome);
+      const isActive = !!ctrl;
       const virtusOnline = !!(ctrl && ctrl.virtus);
       const sendLockObj = (ctrl && ctrl.browser && ctrl.browser._sendLock && typeof ctrl.browser._sendLock === 'object')
         ? ctrl.browser._sendLock
@@ -10317,8 +10348,8 @@ const handlers = {
         label: p.label || null,
         cidade: p.cidade,
         uaPresetId: p.uaPresetId,
-        active: controllers.has(nome),
-        trabalhando: !!(controllers.get(nome)?.trabalhando),
+        active: isActive,
+        trabalhando: !!(ctrl?.trabalhando),
         virtusOnline,
         sendLockActive,
         sendLockOwner,
@@ -10326,8 +10357,8 @@ const handlers = {
         sendLockSince,
         sendLockAgeMs,
         robeEmExecucao,
-        configurando: !!(controllers.get(nome)?.configurando),
-        humanControl: !!(controllers.get(nome)?.humanControl),
+        configurando: !!(ctrl?.configurando),
+        humanControl: !!(ctrl?.humanControl),
         humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
         issuesCount,
         ramMB: (() => {
@@ -10336,7 +10367,10 @@ const handlers = {
           return v;
         })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-        numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+        // Evita pill "Abas: N" stale quando o perfil já não tem controller/browser ativo.
+        numPages: isActive
+          ? (typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null)
+          : 0,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,

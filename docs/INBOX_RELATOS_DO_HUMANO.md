@@ -2067,3 +2067,47 @@ pedido do humano:
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Investigar e corrigir gate residual de `robeDailyPlan/robeSessionV2` que marca “fora da janela diária” e impede postagem no modo V1 | done | `scripts/worker.js`, `public/index.html` |
+
+---
+
+## RAW_INPUT — 2026-04-29 (Ngrok caro + Virtus com contagem incorreta de motoristas em Bauru)
+
+```text
+pedido do humano:
+- registrar dossie completo sobre custo ngrok (requests/endpoint-hours/transfer), sem sair corrigindo tudo de uma vez;
+- investigar tudo que pode estar agressivo (incluindo chat CT, SSE, polling e rotinas periodicas);
+- atuar faseado, com risco controlado, uma mudanca por vez;
+- reportar problema funcional: no Virtus, Bauru mostra motoristas=0;
+- evidencia operacional humana: existe motorista em "Testes em andamento" para Bauru (Miguel de Brito - Bauru).
+```
+
+### TRIAGE — 2026-04-29 (Ngrok + Virtus Bauru)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Consolidar auditoria forense de custo ngrok (requests, SSE, polling, chat, rotinas periodicas) e priorizar mitigacoes faseadas | in_progress | `docs/checkups/checkup_2026-04-29_auditoria_ngrok_custos_e_virtus_motoristas.md` |
+| 2 | P0 | Validar divergencia de contagem no Virtus: Bauru com motorista em teste nao refletido no agregador por grupo | in_progress | `docs/checkups/checkup_2026-04-29_auditoria_ngrok_custos_e_virtus_motoristas.md`, `C:/sitechatbot/index.js`, `C:/sitechatbot/convenientetecnologia/lib/ctStore.js` |
+| 3 | P1 | Preparar plano de correcao cirurgica e rollback para contagem de motoristas sem quebrar regras de negocio | pending | `docs/checkups/checkup_2026-04-29_auditoria_ngrok_custos_e_virtus_motoristas.md` |
+
+---
+
+## RAW_INPUT — 2026-04-29 (Conta presa com Virtus Offline + Abas 2/3; acao humana nao destrava)
+
+```text
+pedido do humano:
+- problema intermitente no dashboard: conta fica "Virtus Offline" com pill "Abas: 2" ou "Abas: 3";
+- no navegador, nem sempre essas abas extras de fato estao visiveis (ou estao, mas o estado segue preso);
+- em parte dos casos, "invocar humano" + "retomar trabalho" nao destrava;
+- ate fechar/reabrir navegador pode voltar com o mesmo bug;
+- em alguns cenarios, so reiniciar servidor resolve;
+- exemplo reportado: [003] (Juan) Conta Numero 15, cidade Uberlandia, Virtus Offline, Abas=2, cooldown alto.
+- diretriz: auditoria ponta a ponta sem codar ainda.
+```
+
+### TRIAGE — 2026-04-29 (Virtus Offline preso + Abas inconsistentes)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Mapear origem real dos campos de card (`Virtus Online/Offline`, `Abas:N`) e verificar risco de estado stale por fallback de `/api/status` | done | `C:/conveniente/public/index.html`, `C:/conveniente/scripts/api_status.js`, `C:/conveniente/scripts/worker.js`, `C:/conveniente/scripts/browser.js` |
+| 2 | P0 | Auditar guardas/locks que bloqueiam `activate`, `invoke_human`, `human-resume` (`provision_lock`, `kill_guard`, captcha governor/mutex) | done | `C:/conveniente/scripts/worker.js`, `C:/conveniente/scripts/provisionLock.js`, `C:/conveniente/scripts/api_perfis.js` |
+| 3 | P1 | Construir matriz de diagnostico operacional (sintoma -> flag/lock -> endpoint -> acao segura) para reduzir falso "estado preso" | in_progress | `docs/checkups/checkup_2026-04-29_virtus_offline_abas_presas.md` |
