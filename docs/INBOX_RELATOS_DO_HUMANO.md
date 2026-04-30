@@ -2111,3 +2111,29 @@ pedido do humano:
 | 1 | P0 | Mapear origem real dos campos de card (`Virtus Online/Offline`, `Abas:N`) e verificar risco de estado stale por fallback de `/api/status` | done | `C:/conveniente/public/index.html`, `C:/conveniente/scripts/api_status.js`, `C:/conveniente/scripts/worker.js`, `C:/conveniente/scripts/browser.js` |
 | 2 | P0 | Auditar guardas/locks que bloqueiam `activate`, `invoke_human`, `human-resume` (`provision_lock`, `kill_guard`, captcha governor/mutex) | done | `C:/conveniente/scripts/worker.js`, `C:/conveniente/scripts/provisionLock.js`, `C:/conveniente/scripts/api_perfis.js` |
 | 3 | P1 | Construir matriz de diagnostico operacional (sintoma -> flag/lock -> endpoint -> acao segura) para reduzir falso "estado preso" | in_progress | `docs/checkups/checkup_2026-04-29_virtus_offline_abas_presas.md` |
+
+---
+
+## RAW_INPUT — 2026-04-30 (Cidades extras globais por servidor + sem concorrencia com cidades da conta)
+
+```text
+pedido do humano:
+- manter o comportamento atual: conta tem cidade principal e pode ter cidades extras por conta;
+- adicionar tambem no "Config do Servidor" um bloco de cidades extras globais (selecionaveis);
+- regra de negocio desejada: cada conta deve trabalhar com a uniao de:
+  (a) cidade principal da conta,
+  (b) cidades extras da conta,
+  (c) cidades extras globais do servidor;
+- sem duplicidade: se uma cidade ja e principal da conta, nao pode duplicar no sorteio;
+- sem concorrencia/colisao entre config global e config por conta;
+- manter o ciclo randomizado existente (usar o conjunto total, percorrer, depois reembaralhar);
+- diretriz: auditoria ponta a ponta antes de codar.
+```
+
+### TRIAGE — 2026-04-30 (Cidades globais no config do servidor)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Mapear fluxo atual de cidades no Robe (principal + extras da conta + ciclo randomizado) em itens e veiculos | done | `C:/conveniente/scripts/robe.js`, `C:/conveniente/scripts/robeVeiculos.js`, `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/public/index.html` |
+| 2 | P0 | Auditar config de servidor atual e pontos de extensao seguros para cidades extras globais | done | `C:/conveniente/scripts/serverConfig.js`, `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/public/index.html`, `C:/conveniente/scripts/worker.js` |
+| 3 | P1 | Definir desenho atomico sem duplicidade e sem regressao (payload, validacao, merge e rollout) antes de patch | done | `docs/checkups/checkup_2026-04-30_auditoria_cidades_globais_servidor.md` |

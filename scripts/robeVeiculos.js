@@ -10,6 +10,7 @@ const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const gatewayProxy = require('./gatewayProxy.js');
+const serverConfig = require('./serverConfig.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -907,7 +908,15 @@ function buildPostingCityPool(manifest) {
     (manifest && (manifest.cidade || manifest.localizacao || manifest['localização'])) || ''
   ).trim();
   const extras = normalizeCityList(manifest && manifest.cidadesExtras);
-  const pool = normalizeCityList([principal, ...extras.filter(c => c !== principal)]);
+  const globalExtras = (() => {
+    try {
+      const cfg = serverConfig.readServerConfigEffective();
+      return normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
+    } catch {
+      return [];
+    }
+  })();
+  const pool = normalizeCityList([principal, ...extras.filter(c => c !== principal), ...globalExtras]);
   return pool.length ? pool : ['São Paulo'];
 }
 

@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const utils = require("./utils.js");
 
 const CONFIG_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.json");
 const CONFIG_VERSION = 1;
@@ -28,7 +29,8 @@ const DEFAULTS = Object.freeze({
     postsPerHourMax: 3.4,
     cooldownMinMinutes: 25,
     cooldownMaxMinutes: 50,
-    photoDeletePolicy: "after_all_working_posted"
+    photoDeletePolicy: "after_all_working_posted",
+    cidadesExtrasGlobais: []
   }
 });
 
@@ -39,6 +41,29 @@ function toNum(v, fallback = 0) {
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
+}
+
+function cityNormKey(v) {
+  return String(v || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR")
+    .trim();
+}
+
+function normalizeCityList(input, { max = 200 } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(input) ? input : [])) {
+    const v = String(raw || "").trim();
+    if (!v) continue;
+    const k = cityNormKey(v);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(v);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 function ensureDirSync(dir) {
@@ -107,6 +132,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMaxMinutesRaw = Math.floor(toNum(robe.cooldownMaxMinutes, DEFAULTS.robe.cooldownMaxMinutes));
   const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
+  const cidadesExtrasGlobais = normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 });
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
     ? "after_first_confirmed_post"
@@ -135,7 +161,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3)),
       cooldownMinMinutes,
       cooldownMaxMinutes,
-      photoDeletePolicy
+      photoDeletePolicy,
+      cidadesExtrasGlobais
     }
   };
 
@@ -190,6 +217,21 @@ function validateServerConfigPayload(payload) {
         errors.push("robe.photoDeletePolicy_invalido");
       }
     }
+    if (robe.cidadesExtrasGlobais !== undefined) {
+      if (!Array.isArray(robe.cidadesExtrasGlobais)) {
+        errors.push("robe.cidadesExtrasGlobais_invalido");
+      } else {
+        const normalized = normalizeCityList(robe.cidadesExtrasGlobais, { max: 201 });
+        if (normalized.length > 200) errors.push("robe.cidadesExtrasGlobais_limite_excedido");
+        for (const c of normalized) {
+          const coords = utils.getCoords(c);
+          if (!coords || !coords.latitude || !coords.longitude) {
+            errors.push(`robe.cidadesExtrasGlobais_sem_coordenadas:${c}`);
+            break;
+          }
+        }
+      }
+    }
   }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
@@ -230,7 +272,8 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       postsPerHourMax: v.normalized.robe.postsPerHourMax,
       cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
       cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
-      photoDeletePolicy: v.normalized.robe.photoDeletePolicy
+      photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
+      cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     }
   };
   try {

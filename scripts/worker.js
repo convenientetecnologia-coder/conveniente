@@ -10518,6 +10518,7 @@ const handlers = {
       let manifestsUpdated = 0;
       let plansRegenerated = 0;
       let sessionsCleared = 0;
+      let cityCyclesCleared = 0;
       const nowMs = Date.now();
       for (const nome of nomes) {
         try { _robeDailyPlanCache.delete(nome); } catch {}
@@ -10530,6 +10531,14 @@ const handlers = {
             if (m.robeBlockSessionV2) {
               delete m.robeBlockSessionV2;
               sessionsCleared += 1;
+            }
+            if (m.postCityCycle && typeof m.postCityCycle === 'object') {
+              if (m.postCityCycle.order !== undefined || m.postCityCycle.idx !== undefined) {
+                cityCyclesCleared += 1;
+              }
+              delete m.postCityCycle.order;
+              delete m.postCityCycle.idx;
+              m.postCityCycle.updatedAt = Date.now();
             }
             return m;
           });
@@ -10548,12 +10557,13 @@ const handlers = {
           manifestsUpdated,
           plansRegenerated,
           sessionsCleared,
+          cityCyclesCleared,
           reason: String(reason || '').slice(0, 120) || null,
           operator: String(operator || '').slice(0, 120) || null
         });
       } catch {}
       try { await snapshotStatusAndWrite(); } catch {}
-      return { ok: true, totalProfiles: nomes.length, manifestsUpdated, plansRegenerated, sessionsCleared };
+      return { ok: true, totalProfiles: nomes.length, manifestsUpdated, plansRegenerated, sessionsCleared, cityCyclesCleared };
     } catch (e) {
       return { ok: false, error: e && e.message || String(e) };
     }

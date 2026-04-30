@@ -1111,6 +1111,18 @@
             <option value="after_first_confirmed_post">Primeira postagem concluída já apaga</option>
           </select>
         </div>
+        <div class="form-row">
+          <label>Cidades extras globais (servidor)</label>
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <input type="text" id="srvGlobalCitiesFilter" placeholder="Filtrar cidades (ex.: anapolis, caruaru)" style="flex:1;" />
+            <button class="btn" type="button" id="srvGlobalCitiesClearFilter">Limpar pesquisa</button>
+          </div>
+          <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+            <button class="btn" type="button" id="srvGlobalCitiesToggleAll">Selecionar todas</button>
+          </div>
+          <div id="srvGlobalCitiesWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Aplicadas para todas as contas do servidor. O pool final de postagem por conta fica: cidade principal + extras da conta + extras globais (sem duplicidade).</div>
+        </div>
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
           <button class="btn primary" id="srvCfgSave">Salvar</button>
@@ -1122,8 +1134,112 @@
       const cdMinEl = box.querySelector('#srvCooldownMin');
       const cdMaxEl = box.querySelector('#srvCooldownMax');
       const photoPolicyEl = box.querySelector('#srvPhotoDeletePolicy');
+      const globalCitiesFilterEl = box.querySelector('#srvGlobalCitiesFilter');
+      const globalCitiesWrapEl = box.querySelector('#srvGlobalCitiesWrap');
+      const globalCitiesToggleAllEl = box.querySelector('#srvGlobalCitiesToggleAll');
+      const globalCitiesClearFilterEl = box.querySelector('#srvGlobalCitiesClearFilter');
       const closeBtn = box.querySelector('#srvCfgClose');
       const saveBtn = box.querySelector('#srvCfgSave');
+      let globalCitiesAll = [];
+      let globalCitiesSelected = [];
+
+      function uniqueCities(arr) {
+        const seen = new Set();
+        const out = [];
+        for (const raw of (Array.isArray(arr) ? arr : [])) {
+          const v = String(raw || '').trim();
+          if (!v) continue;
+          const k = v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
+          if (seen.has(k)) continue;
+          seen.add(k);
+          out.push(v);
+        }
+        return out;
+      }
+      function parseSearchTerms(raw) {
+        const txt = String(raw || '').trim();
+        if (!txt) return [];
+        const parts = /[,;\n]/.test(txt) ? txt.split(/[,;\n]+/) : txt.split(/\s+/);
+        return uniqueCities(parts.map(v => String(v || '').trim()).filter(Boolean)).map(v =>
+          v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR')
+        );
+      }
+      function getVisibleGlobalCityChecks() {
+        return Array.from(box.querySelectorAll('input[data-srv-global-city]'));
+      }
+      function updateGlobalToggleLabel() {
+        if (!globalCitiesToggleAllEl) return;
+        const checks = getVisibleGlobalCityChecks();
+        if (!checks.length) {
+          globalCitiesToggleAllEl.disabled = true;
+          globalCitiesToggleAllEl.textContent = 'Selecionar todas';
+          return;
+        }
+        globalCitiesToggleAllEl.disabled = false;
+        const checkedCount = checks.filter(el => !!el.checked).length;
+        globalCitiesToggleAllEl.textContent = (checkedCount === checks.length)
+          ? 'Desselecionar selecionadas'
+          : 'Selecionar todas';
+      }
+      function syncGlobalSelectedFromChecks() {
+        const checks = getVisibleGlobalCityChecks();
+        const visibleSet = new Set(
+          checks
+            .map(el => String(el.getAttribute('data-srv-global-city') || '').trim())
+            .filter(Boolean)
+            .map(v => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR'))
+        );
+        const prevKept = uniqueCities(globalCitiesSelected).filter((v) => {
+          const k = v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
+          return !visibleSet.has(k);
+        });
+        const checkedNow = checks
+          .filter(el => !!el.checked)
+          .map(el => String(el.getAttribute('data-srv-global-city') || '').trim())
+          .filter(Boolean);
+        globalCitiesSelected = uniqueCities(prevKept.concat(checkedNow));
+      }
+      function renderGlobalCities() {
+        if (!globalCitiesWrapEl) return;
+        const selectedSet = new Set(
+          uniqueCities(globalCitiesSelected).map(v => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR'))
+        );
+        const terms = parseSearchTerms(globalCitiesFilterEl && globalCitiesFilterEl.value);
+        const options = uniqueCities([...(Array.isArray(globalCitiesAll) ? globalCitiesAll : []), ...globalCitiesSelected]);
+        const filtered = !terms.length ? options : options.filter((city) => {
+          const k = String(city || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
+          return terms.some(t => k === t || k.includes(t));
+        });
+        if (!options.length) {
+          globalCitiesWrapEl.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade disponível.</div>`;
+          updateGlobalToggleLabel();
+          return;
+        }
+        if (!filtered.length) {
+          globalCitiesWrapEl.innerHTML = `<div class="muted" style="grid-column:1/-1;">Nenhuma cidade encontrada no filtro.</div>`;
+          updateGlobalToggleLabel();
+          return;
+        }
+        globalCitiesWrapEl.innerHTML = filtered.map((c) => {
+          const k = String(c || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
+          const checked = selectedSet.has(k) ? 'checked' : '';
+          return `<label style="display:flex; align-items:center; gap:6px; font-size:12px;"><input type="checkbox" data-srv-global-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
+        }).join('');
+        updateGlobalToggleLabel();
+      }
+      async function loadCitiesCatalog() {
+        try {
+          const r = await fetch('/api/cidades').then(x => x.json()).catch(() => null);
+          if (r && r.ok === true && Array.isArray(r.cidades)) {
+            globalCitiesAll = uniqueCities(r.cidades);
+          } else {
+            globalCitiesAll = uniqueCities(globalCitiesAll);
+          }
+        } catch {
+          globalCitiesAll = uniqueCities(globalCitiesAll);
+        }
+        renderGlobalCities();
+      }
 
       const fillFromConfig = (cfg) => {
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
@@ -1131,8 +1247,10 @@
         cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
         cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
+        globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         infoEl.className = 'pill info';
         infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')}`;
+        renderGlobalCities();
       };
 
       (async () => {
@@ -1146,6 +1264,38 @@
       })();
 
       closeBtn.onclick = () => overlay.remove();
+      box.addEventListener('change', (ev) => {
+        const target = ev && ev.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        if (!target.matches('input[data-srv-global-city]')) return;
+        syncGlobalSelectedFromChecks();
+        updateGlobalToggleLabel();
+      });
+      if (globalCitiesToggleAllEl) {
+        globalCitiesToggleAllEl.onclick = () => {
+          const checks = getVisibleGlobalCityChecks();
+          if (!checks.length) return;
+          const allChecked = checks.every(el => !!el.checked);
+          checks.forEach(el => { el.checked = !allChecked; });
+          syncGlobalSelectedFromChecks();
+          updateGlobalToggleLabel();
+        };
+      }
+      if (globalCitiesFilterEl) {
+        globalCitiesFilterEl.oninput = () => {
+          syncGlobalSelectedFromChecks();
+          renderGlobalCities();
+        };
+      }
+      if (globalCitiesClearFilterEl) {
+        globalCitiesClearFilterEl.onclick = () => {
+          if (!globalCitiesFilterEl) return;
+          globalCitiesFilterEl.value = '';
+          syncGlobalSelectedFromChecks();
+          renderGlobalCities();
+          globalCitiesFilterEl.focus();
+        };
+      }
       saveBtn.onclick = async () => {
         try {
           const cooldownMin = Math.floor(Number(cdMinEl.value || 25));
@@ -1162,7 +1312,11 @@
             robe: {
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
-              photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted')
+              photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted'),
+              cidadesExtrasGlobais: (() => {
+                syncGlobalSelectedFromChecks();
+                return uniqueCities(globalCitiesSelected);
+              })()
             }
           };
           setBtnLoading(saveBtn, true, 'Salvando...');
@@ -1185,6 +1339,7 @@
           setBtnLoading(saveBtn, false);
         }
       };
+      loadCitiesCatalog().catch(() => {});
     }
 
     function buildPill(text, cls='info'){ const span=document.createElement('span'); span.className='pill '+cls; span.innerHTML=`<span class="dot"></span>${text}`; return span; }
