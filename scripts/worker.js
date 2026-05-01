@@ -24,7 +24,6 @@ const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
-const { archiveExcludedAccount } = require('./excludedArchive.js');
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -90,70 +89,6 @@ function safeFilePart(s) {
     .slice(0, 60) || 'x';
 }
 
-async function archiveExcludedFromRuntime({
-  nome,
-  cidadeHint,
-  loginHint,
-  passwordHint,
-  cookiesHint,
-  source
-} = {}) {
-  try {
-    let perfil = null;
-    let man = null;
-    try {
-      const all = fileStore.loadPerfisJson() || [];
-      perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
-    } catch {}
-    try { man = await manifestStore.read(nome).catch(() => null); } catch {}
-    const cidade = String(
-      cidadeHint ||
-      (perfil && perfil.cidade) ||
-      (man && (man.cidade || man.localizacao || man['localização'])) ||
-      ''
-    ).trim();
-    const login = String(
-      loginHint ||
-      (man && (man.login || man.email || man.username)) ||
-      (perfil && (perfil.login || perfil.email || perfil.username)) ||
-      ''
-    ).trim();
-    const password = String(
-      passwordHint ||
-      (man && (man.password || man.senha)) ||
-      (perfil && (perfil.password || perfil.senha)) ||
-      ''
-    );
-    const cookies = cookiesHint || (man && man.cookies) || (perfil && perfil.cookies) || [];
-    const archived = await archiveExcludedAccount({ nome, cidade, login, password, cookies });
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'excluded_account_archived',
-        nome: String(nome || ''),
-        source: String(source || ''),
-        ok: !!(archived && archived.ok),
-        filePath: (archived && archived.filePath) ? String(archived.filePath).slice(0, 260) : null,
-        error: (archived && !archived.ok) ? String(archived.error || 'archive_failed').slice(0, 180) : null
-      });
-    } catch {}
-    return archived;
-  } catch (e) {
-    const err = (e && e.message) ? String(e.message) : String(e);
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'excluded_account_archived',
-        nome: String(nome || ''),
-        source: String(source || ''),
-        ok: false,
-        filePath: null,
-        error: err.slice(0, 180)
-      });
-    } catch {}
-    return { ok: false, error: err };
-  }
-}
 function appendJsonl(fp, obj) {
   try {
     ensureDirSync(path.dirname(fp));
@@ -365,7 +300,6 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
           try {
             provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
           } catch {}
-          try { await archiveExcludedFromRuntime({ nome, source: 'ct_archive_not_found_delete_local' }); } catch {}
           // Remoção local best-effort (mesma lógica do banflow)
           try {
             // CRÍTICO (cluster): NÃO usar loadPerfisJson()/savePerfisJson do worker (shard) para gravar perfis.json,
@@ -3616,7 +3550,6 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
           return { ok: false, error: 'banned_delete_blocked_still_active' };
         }
-        try { await archiveExcludedFromRuntime({ nome, source: 'auto_delete_banned_profile' }); } catch {}
         // Remove userDataDir externo, perfis.json, desired e dir do perfil
         try {
           // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
