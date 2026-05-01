@@ -35,8 +35,34 @@ const manifestStore = require('./manifestStore.js');
 const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
 const serverConfig = require('./serverConfig.js');
+const { archiveExcludedAccount, writeExcludedAccountLocal } = require('./excludedArchive.js');
 
 module.exports = (app, workerClient, fileStore) => {
+  app.post('/api/excluded/archive_secret', async (req, res) => {
+    try {
+      const cfg = (() => { try { return require('./ctConfig.js').readCtConfig(); } catch { return null; } })();
+      const expected = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
+      const provided = String(req.headers['x-log-secret'] || '').trim();
+      if (!expected || !provided || provided !== expected) {
+        return res.status(403).json({ ok: false, error: 'forbidden_invalid_secret' });
+      }
+      const body = (req.body && typeof req.body === 'object') ? req.body : {};
+      const nome = String(body.nome || '').trim();
+      if (!nome) return res.json({ ok: false, error: 'nome_ausente' });
+      const wr = writeExcludedAccountLocal({
+        nome,
+        cidade: String(body.cidade || '').trim(),
+        login: String(body.login || '').trim(),
+        password: String(body.password || ''),
+        cookies: body.cookies || []
+      });
+      if (!wr || wr.ok !== true) return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'write_failed' });
+      return res.json({ ok: true, filePath: wr.filePath || null });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ===== Maintenance: provision lock =====
   // GET status do lock (para diagnosticar maintenance_provision)
   app.get('/api/maintenance/provision-lock', (req, res) => {
@@ -1113,11 +1139,48 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de delete perfil sem nome', { nome });
         return res.json({ ok: false, error: 'nome ausente' });
       }
+      const collectExcludedSnapshot = async () => {
+        let perfil = null;
+        let man = null;
+        try {
+          const all = fileStore.loadPerfisJson() || [];
+          perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
+        } catch {}
+        try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
+        const cidade = String(
+          (perfil && perfil.cidade) ||
+          (man && (man.cidade || man.localizacao || man['localização'])) ||
+          ''
+        ).trim();
+        const login = String(
+          (man && (man.login || man.email || man.username)) ||
+          (perfil && (perfil.login || perfil.email || perfil.username)) ||
+          ''
+        ).trim();
+        const password = String(
+          (man && (man.password || man.senha)) ||
+          (perfil && (perfil.password || perfil.senha)) ||
+          ''
+        );
+        const cookies = (man && man.cookies) || (perfil && perfil.cookies) || [];
+        return { cidade, login, password, cookies };
+      };
+      let excludedArchive = { ok: false, skipped: true };
       // Enterprise: DELETE precisa ser IDEMPOTENTE.
       // Se o perfil não existir localmente, isso já é "sucesso" — evita re-tries infinitos do CT (delete_perfis).
       // Mesmo assim, escrevemos tombstone para impedir ressuscitar via recovery/rebuild de userDataDir.
       try { assertPerfilExists(fileStore, nome); } catch (e) {
         logger.warn('Tentativa de delete perfil inexistente (idempotente)', { nome, error: e && e.message });
+        try {
+          const snap = await collectExcludedSnapshot();
+          excludedArchive = await archiveExcludedAccount({
+            nome,
+            cidade: snap.cidade,
+            login: snap.login,
+            password: snap.password,
+            cookies: snap.cookies
+          });
+        } catch {}
         // IMPORTANTE (ops): mesmo sem registro em perfis.json, ainda podemos ter sobras a limpar:
         // - desired.perfis[nome]
         // - dados/perfis/<nome>
@@ -1152,8 +1215,18 @@ module.exports = (app, workerClient, fileStore) => {
             }
           } catch {}
         } catch {}
-        return res.json({ ok: true, alreadyDeleted: true, nome, cleanup });
+        return res.json({ ok: true, alreadyDeleted: true, nome, cleanup, excludedArchive });
       }
+      try {
+        const snap = await collectExcludedSnapshot();
+        excludedArchive = await archiveExcludedAccount({
+          nome,
+          cidade: snap.cidade,
+          login: snap.login,
+          password: snap.password,
+          cookies: snap.cookies
+        });
+      } catch {}
       // Tombstone cedo (anti-ressurreição no boot/recovery)
       try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'manual_delete', by: String(op||'').slice(0, 120), stage: 'begin' }); } catch {}
       // Enterprise: delete deve ser robusto — se estiver ativo, fecha automaticamente (hard close) antes de excluir.
@@ -1360,7 +1433,7 @@ module.exports = (app, workerClient, fileStore) => {
           ctError: ct && ct.error ? String(ct.error).slice(0, 180) : null
         });
       } catch {}
-      res.json({ ok: true, ct, warning: (ct && ct.ok !== true) ? 'ct_pending_or_failed' : null });
+      res.json({ ok: true, ct, excludedArchive, warning: (ct && ct.ok !== true) ? 'ct_pending_or_failed' : null });
     } catch (e) {
       logger.error('Erro fatal na rota delete perfil', { rota: '/api/perfis/:nome', nome: req.params && req.params.nome, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

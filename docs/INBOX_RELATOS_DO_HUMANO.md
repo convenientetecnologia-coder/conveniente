@@ -2137,3 +2137,31 @@ pedido do humano:
 | 1 | P0 | Mapear fluxo atual de cidades no Robe (principal + extras da conta + ciclo randomizado) em itens e veiculos | done | `C:/conveniente/scripts/robe.js`, `C:/conveniente/scripts/robeVeiculos.js`, `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/public/index.html` |
 | 2 | P0 | Auditar config de servidor atual e pontos de extensao seguros para cidades extras globais | done | `C:/conveniente/scripts/serverConfig.js`, `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/public/index.html`, `C:/conveniente/scripts/worker.js` |
 | 3 | P1 | Definir desenho atomico sem duplicidade e sem regressao (payload, validacao, merge e rollout) antes de patch | done | `docs/checkups/checkup_2026-04-30_auditoria_cidades_globais_servidor.md` |
+
+---
+
+## RAW_INPUT — 2026-05-01 (Arquivar contas excluídas em C:/excluidas por data e cidade)
+
+```text
+pedido do humano:
+- sempre que uma conta for excluída do servidor (independente do motivo), arquivar em C:/excluidas;
+- estrutura de pasta:
+  C:/excluidas/<DD.MM.AAAA>/<cidade-da-conta>/;
+- cidade deve considerar a cidade principal cadastrada da conta (não usar cidades extras);
+- dentro da pasta da cidade, criar arquivo .txt por conta (nome do arquivo = nome da conta);
+- conteúdo do txt (simples e limpo):
+  login
+
+  senha
+
+  cookies
+- com espaço vazio entre blocos para leitura fácil.
+```
+
+### TRIAGE — 2026-05-01 (Arquivo local de excluídas)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Implementar helper canônico para arquivar conta excluída em C:/excluidas por data/cidade | in_progress | `C:/conveniente/scripts/excludedArchive.js` |
+| 2 | P0 | Integrar arquivamento no delete manual da API e nos deletes automáticos do worker | in_progress | `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/scripts/worker.js` |
+| 3 | P1 | Validar formato do TXT e tolerância a erros sem bloquear fluxo de exclusão | pending | `C:/conveniente/scripts/excludedArchive.js` |
