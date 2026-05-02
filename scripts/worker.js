@@ -6319,11 +6319,28 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inVirtusSwap = !!(browser && browser._virtusSwapUntil && Number(browser._virtusSwapUntil[nome] || 0) > Date.now());
 
     if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
-      for (const p of pages) {
+      const stablePages = Array.isArray(pages) ? pages : [];
+      // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
+      const keepPage = (() => {
         try {
-          if (mainPage && p === mainPage) continue;
-          if (!mainPage && pages[0] && p === pages[0]) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
+          if (mainPage && stablePages.includes(mainPage)) return mainPage;
+          const nonBlank = stablePages.find((pg) => {
+            try {
+              const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
+              return !!u && u !== 'about:blank';
+            } catch {
+              return false;
+            }
+          });
+          return nonBlank || stablePages[0] || null;
+        } catch {
+          return stablePages[0] || null;
+        }
+      })();
+      for (const p of stablePages) {
+        try {
+          if (keepPage && p === keepPage) continue;
+          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
             closed++;
@@ -6334,9 +6351,25 @@ async function closeExtraPages(browser, mainPage, nome) {
 
     if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
       const again = await browser.pages();
-      for (const p of again) {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && again[0] && p === again[0]) continue;
+      const stableAgain = Array.isArray(again) ? again : [];
+      const keepPage = (() => {
+        try {
+          if (mainPage && stableAgain.includes(mainPage)) return mainPage;
+          const nonBlank = stableAgain.find((pg) => {
+            try {
+              const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
+              return !!u && u !== 'about:blank';
+            } catch {
+              return false;
+            }
+          });
+          return nonBlank || stableAgain[0] || null;
+        } catch {
+          return stableAgain[0] || null;
+        }
+      })();
+      for (const p of stableAgain) {
+        if (keepPage && p === keepPage) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
         closed++;
       }
