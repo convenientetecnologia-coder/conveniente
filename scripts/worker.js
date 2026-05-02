@@ -1409,6 +1409,7 @@ async function _installOverlayOnPage(nome, page) {
                   <div class="btns">
                     <button id="copyLogin">Copiar login</button>
                     <button id="copyPass">Copiar senha</button>
+                    <button id="toggleScroll" title="Ativar/desativar rolagem automática nesta aba">Ativar scroll</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
                     <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
                     <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
@@ -1422,6 +1423,105 @@ async function _installOverlayOnPage(nome, page) {
 
             const $ = (id) => shadow.getElementById(id);
             const body = $('body');
+            const scrollState = (() => {
+              try {
+                window.__ctHumanOverlayScrollState = window.__ctHumanOverlayScrollState || {
+                  enabled: false,
+                  timer: null,
+                  stuckTicks: 0,
+                  lastTop: -1
+                };
+                return window.__ctHumanOverlayScrollState;
+              } catch {
+                return { enabled: false, timer: null, stuckTicks: 0, lastTop: -1 };
+              }
+            })();
+            const resolveScrollTarget = () => {
+              try {
+                const primary = [document.scrollingElement, document.documentElement, document.body]
+                  .find((el) => el && (Number(el.scrollHeight || 0) - Number(el.clientHeight || 0) > 20));
+                if (primary) return primary;
+                let best = null;
+                let bestDelta = 0;
+                const nodes = document.querySelectorAll('main, div, section');
+                for (const el of nodes) {
+                  if (!el || !el.getBoundingClientRect) continue;
+                  const st = window.getComputedStyle(el);
+                  const oy = String(st && st.overflowY || '').toLowerCase();
+                  if (oy !== 'auto' && oy !== 'scroll') continue;
+                  const delta = Number(el.scrollHeight || 0) - Number(el.clientHeight || 0);
+                  if (delta > bestDelta) { bestDelta = delta; best = el; }
+                }
+                return best || document.scrollingElement || document.documentElement || document.body;
+              } catch {
+                return document.scrollingElement || document.documentElement || document.body;
+              }
+            };
+            const setScrollButtonState = () => {
+              try {
+                const b = $('toggleScroll');
+                if (!b) return;
+                if (scrollState.enabled) {
+                  b.textContent = 'Desativar scroll';
+                  b.classList.add('primary');
+                } else {
+                  b.textContent = 'Ativar scroll';
+                  b.classList.remove('primary');
+                }
+              } catch {}
+            };
+            const stopOverlayAutoScroll = (reason) => {
+              try {
+                if (scrollState.timer) clearInterval(scrollState.timer);
+              } catch {}
+              scrollState.timer = null;
+              scrollState.enabled = false;
+              scrollState.stuckTicks = 0;
+              scrollState.lastTop = -1;
+              setScrollButtonState();
+              try { if (reason) window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'scroll_off', reason: String(reason || '').slice(0, 60) }); } catch {}
+            };
+            const startOverlayAutoScroll = () => {
+              if (scrollState.enabled) return;
+              scrollState.enabled = true;
+              scrollState.stuckTicks = 0;
+              scrollState.lastTop = -1;
+              setScrollButtonState();
+              scrollState.timer = setInterval(() => {
+                try {
+                  const target = resolveScrollTarget();
+                  if (!target) return;
+                  const before = Number(target.scrollTop || 0);
+                  if (typeof target.scrollBy === 'function') target.scrollBy(0, 380);
+                  else target.scrollTop = before + 380;
+                  const after = Number(target.scrollTop || 0);
+                  if (after === before) {
+                    scrollState.stuckTicks += 1;
+                    if (scrollState.stuckTicks >= 18) {
+                      stopOverlayAutoScroll('stuck');
+                      try { $('hint').textContent = 'Scroll parado: fim da lista ou página sem rolagem.'; } catch {}
+                    }
+                  } else {
+                    scrollState.stuckTicks = 0;
+                  }
+                  scrollState.lastTop = after;
+                } catch {}
+              }, 900);
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'scroll_on' }); } catch {}
+            };
+            const toggleOverlayAutoScroll = () => {
+              if (scrollState.enabled) {
+                stopOverlayAutoScroll('manual_toggle');
+                try { $('hint').textContent = 'Scroll automático desativado.'; } catch {}
+              } else {
+                startOverlayAutoScroll();
+                try { $('hint').textContent = 'Scroll automático ativado.'; } catch {}
+              }
+            };
+            try {
+              window.addEventListener('beforeunload', () => { try { stopOverlayAutoScroll('beforeunload'); } catch {} });
+            } catch {}
+            setScrollButtonState();
 
             // Persistência leve da posição (sem dependências)
             const POS_KEY = 'ctHumanOverlayPosV1';
@@ -1531,7 +1631,12 @@ async function _installOverlayOnPage(nome, page) {
               const ok = await copyText(d.password || '');
               try { $('hint').textContent = ok ? 'Senha copiada.' : 'Falha ao copiar senha.'; } catch {}
             });
+            $('toggleScroll')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'scroll_toggle_click' }); } catch {}
+              toggleOverlayAutoScroll();
+            });
             $('hide')?.addEventListener('click', () => {
+              try { stopOverlayAutoScroll('hide'); } catch {}
               try { host.style.display = 'none'; } catch {}
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'hide' }); } catch {}
             });
@@ -1553,6 +1658,7 @@ async function _installOverlayOnPage(nome, page) {
             });
             $('closeBrowser')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'close_browser_click' }); } catch {}
+              try { stopOverlayAutoScroll('close_browser'); } catch {}
               try { $('hint').textContent = 'Fechando navegador...'; } catch {}
               try { $('closeBrowser').disabled = true; } catch {}
               try {
@@ -1569,6 +1675,7 @@ async function _installOverlayOnPage(nome, page) {
             });
             $('deleteAcc')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'delete_account_click' }); } catch {}
+              try { stopOverlayAutoScroll('delete_account'); } catch {}
               // Dupla confirmação (ultra enterprise): exige digitar EXCLUIR.
               try {
                 const ok1 = confirm('Excluir conta: isso vai fechar o navegador, remover do servidor e enviar pro CT (estoque excluídas). Continuar?');
@@ -1595,6 +1702,7 @@ async function _installOverlayOnPage(nome, page) {
             });
             $('resume')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'resume_click' }); } catch {}
+              try { stopOverlayAutoScroll('resume'); } catch {}
               try { $('hint').textContent = 'Retomando...'; } catch {}
               try { $('resume').disabled = true; } catch {}
               try {
@@ -1630,6 +1738,7 @@ async function _installOverlayOnPage(nome, page) {
             $('login').textContent = String(d.login || '');
             $('pass').textContent = String(d.password || '');
             $('sub').textContent = `Atualizado: ${nowIso()}`;
+            setScrollButtonState();
 
             const f = d.flags || {};
             let statusTxt = '';
