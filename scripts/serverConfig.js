@@ -30,6 +30,20 @@ const DEFAULTS = Object.freeze({
     cooldownMinMinutes: 25,
     cooldownMaxMinutes: 50,
     workMode: "v1",
+    v2Tuning: {
+      alpha: 0.10,
+      beta: 1.0,
+      minBoost: 0.35,
+      maxBoost: 3.0,
+      noDriversFactor: 0.06,
+      lowDriversMinFactor: 0.22,
+      lowDriversGamma: 0.70,
+      antiStreakPenalty: 0.35,
+      statsWindowDays: 3,
+      prefetchRatio: 0.10,
+      prefetchMin: 5,
+      prefetchMax: 20
+    },
     photoDeletePolicy: "after_all_working_posted",
     cidadesExtrasGlobais: []
   }
@@ -106,6 +120,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const r = (raw && typeof raw === "object") ? raw : {};
   const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
+  const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
   if (!["auto_by_ram", "per_8gb", "absolute"].includes(mode)) mode = DEFAULTS.capacity.mode;
@@ -135,6 +150,20 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
   const workModeRaw = String(robe.workMode || DEFAULTS.robe.workMode).trim().toLowerCase();
   const workMode = (workModeRaw === "v2_auto") ? "v2_auto" : "v1";
+  const v2Alpha = Number(clamp(toNum(v2.alpha, DEFAULTS.robe.v2Tuning.alpha), 0, 0.6).toFixed(4));
+  const v2Beta = Number(clamp(toNum(v2.beta, DEFAULTS.robe.v2Tuning.beta), 0.05, 6.0).toFixed(4));
+  const v2MinBoost = Number(clamp(toNum(v2.minBoost, DEFAULTS.robe.v2Tuning.minBoost), 0.01, 2.0).toFixed(4));
+  const v2MaxBoost = Number(clamp(toNum(v2.maxBoost, DEFAULTS.robe.v2Tuning.maxBoost), 1.0, 20.0).toFixed(4));
+  const v2NoDriversFactor = Number(clamp(toNum(v2.noDriversFactor, DEFAULTS.robe.v2Tuning.noDriversFactor), 0, 1).toFixed(4));
+  const v2LowDriversMinFactor = Number(clamp(toNum(v2.lowDriversMinFactor, DEFAULTS.robe.v2Tuning.lowDriversMinFactor), 0, 1).toFixed(4));
+  const v2LowDriversGamma = Number(clamp(toNum(v2.lowDriversGamma, DEFAULTS.robe.v2Tuning.lowDriversGamma), 0.05, 6.0).toFixed(4));
+  const v2AntiStreakPenalty = Number(clamp(toNum(v2.antiStreakPenalty, DEFAULTS.robe.v2Tuning.antiStreakPenalty), 0.01, 1).toFixed(4));
+  const v2StatsWindowDays = clamp(Math.floor(toNum(v2.statsWindowDays, DEFAULTS.robe.v2Tuning.statsWindowDays)), 1, 10);
+  const v2PrefetchRatio = Number(clamp(toNum(v2.prefetchRatio, DEFAULTS.robe.v2Tuning.prefetchRatio), 0.01, 0.8).toFixed(4));
+  const v2PrefetchMinRaw = clamp(Math.floor(toNum(v2.prefetchMin, DEFAULTS.robe.v2Tuning.prefetchMin)), 1, 200);
+  const v2PrefetchMaxRaw = clamp(Math.floor(toNum(v2.prefetchMax, DEFAULTS.robe.v2Tuning.prefetchMax)), 1, 500);
+  const v2PrefetchMin = Math.min(v2PrefetchMinRaw, v2PrefetchMaxRaw);
+  const v2PrefetchMax = Math.max(v2PrefetchMinRaw, v2PrefetchMaxRaw);
   const cidadesExtrasGlobais = normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 });
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
@@ -165,6 +194,20 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       cooldownMinMinutes,
       cooldownMaxMinutes,
       workMode,
+      v2Tuning: {
+        alpha: v2Alpha,
+        beta: v2Beta,
+        minBoost: Math.min(v2MinBoost, v2MaxBoost),
+        maxBoost: Math.max(v2MinBoost, v2MaxBoost),
+        noDriversFactor: v2NoDriversFactor,
+        lowDriversMinFactor: v2LowDriversMinFactor,
+        lowDriversGamma: v2LowDriversGamma,
+        antiStreakPenalty: v2AntiStreakPenalty,
+        statsWindowDays: v2StatsWindowDays,
+        prefetchRatio: v2PrefetchRatio,
+        prefetchMin: v2PrefetchMin,
+        prefetchMax: v2PrefetchMax
+      },
       photoDeletePolicy,
       cidadesExtrasGlobais
     }
@@ -242,6 +285,27 @@ function validateServerConfigPayload(payload) {
         }
       }
     }
+    if (robe.v2Tuning !== undefined) {
+      if (robe.v2Tuning === null || typeof robe.v2Tuning !== "object" || Array.isArray(robe.v2Tuning)) {
+        errors.push("robe.v2Tuning_invalido");
+      } else {
+        const t = robe.v2Tuning;
+        const numFields = ["alpha","beta","minBoost","maxBoost","noDriversFactor","lowDriversMinFactor","lowDriversGamma","antiStreakPenalty","prefetchRatio"];
+        for (const f of numFields) {
+          if (t[f] !== undefined) {
+            const n = toNum(t[f], NaN);
+            if (!Number.isFinite(n)) errors.push(`robe.v2Tuning.${f}_invalido`);
+          }
+        }
+        const intFields = ["statsWindowDays","prefetchMin","prefetchMax"];
+        for (const f of intFields) {
+          if (t[f] !== undefined) {
+            const n = toNum(t[f], NaN);
+            if (!Number.isFinite(n)) errors.push(`robe.v2Tuning.${f}_invalido`);
+          }
+        }
+      }
+    }
   }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
@@ -283,6 +347,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
       cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
       workMode: v.normalized.robe.workMode,
+      v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     }

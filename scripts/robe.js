@@ -568,10 +568,11 @@ function calcRobeV2PlanTargetN(cfg) {
   return { targetN, totalProfiles, avgCooldownMin };
 }
 
-function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
+function computeRobeV2Counts({ cities, statsByCity, targetN, tuning } = {}) {
   const cityList = Array.isArray(cities) ? cities.map((c) => String(c || '').trim()).filter(Boolean) : [];
   const n = Math.max(1, Number(targetN || 0) || 1);
   if (!cityList.length) return { ok: false, error: 'no_cities' };
+  const t = (tuning && typeof tuning === 'object') ? tuning : {};
   const refs = [];
   const pops = [];
   const rows = cityList.map((city) => {
@@ -596,13 +597,17 @@ function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
   // - insight é mais importante;
   // - habitantes conta, mas com força reduzida (alpha pequeno);
   // - casos de insight nulo/zero NÃO podem premiar cidade sem motoristas.
-  const alpha = 0.10;
-  const beta = 1.0;
-  const minBoost = 0.35;
-  const maxBoost = 3.0;
-  const noDriversFactor = 0.06;          // penalidade forte: sem motoristas => quase não recebe slots
-  const lowDriversMinFactor = 0.22;      // piso para "tem motoristas, mas poucos" (penaliza sem zerar)
-  const lowDriversGamma = 0.70;          // quão rápido penaliza cidades com poucos motoristas
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const alpha = Number.isFinite(Number(t.alpha)) ? clamp(Number(t.alpha), 0, 0.6) : 0.10;
+  const beta = Number.isFinite(Number(t.beta)) ? clamp(Number(t.beta), 0.05, 6.0) : 1.0;
+  const minBoost = Number.isFinite(Number(t.minBoost)) ? clamp(Number(t.minBoost), 0.01, 2.0) : 0.35;
+  const maxBoost = Number.isFinite(Number(t.maxBoost)) ? clamp(Number(t.maxBoost), 1.0, 20.0) : 3.0;
+  const noDriversFactor = Number.isFinite(Number(t.noDriversFactor)) ? clamp(Number(t.noDriversFactor), 0, 1) : 0.06;          // penalidade forte: sem motoristas => quase não recebe slots
+  const lowDriversMinFactor = Number.isFinite(Number(t.lowDriversMinFactor)) ? clamp(Number(t.lowDriversMinFactor), 0, 1) : 0.22; // piso para "tem motoristas, mas poucos" (penaliza sem zerar)
+  const lowDriversGamma = Number.isFinite(Number(t.lowDriversGamma)) ? clamp(Number(t.lowDriversGamma), 0.05, 6.0) : 0.70;       // quão rápido penaliza cidades com poucos motoristas
+  const minBoostNorm = Math.min(minBoost, maxBoost);
+  const maxBoostNorm = Math.max(minBoost, maxBoost);
+  const antiStreakPenalty = Number.isFinite(Number(t.antiStreakPenalty)) ? clamp(Number(t.antiStreakPenalty), 0.01, 1) : 0.35;
 
   // Referência de motoristas: mediana das cidades com motoristas > 0 (robusto a outliers).
   const driversRef = (() => {
@@ -621,7 +626,7 @@ function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
     const hasDrivers = motoristas > 0;
 
     const capBoostByDrivers = hasDrivers
-      ? Math.min(maxBoost, 1 + Math.log1p(motoristas)) // motoristas baixos não podem "bater o teto 3x" com tanta facilidade
+      ? Math.min(maxBoostNorm, 1 + Math.log1p(motoristas)) // motoristas baixos não podem "bater o teto 3x" com tanta facilidade
       : 1;
 
     // Boost por insight:
@@ -631,7 +636,7 @@ function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
     let boost = 1;
     if (hasInsight && insVal > 0) {
       const raw = Math.pow(refInsight / insVal, beta);
-      boost = Math.max(minBoost, Math.min(capBoostByDrivers, raw));
+      boost = Math.max(minBoostNorm, Math.min(capBoostByDrivers, raw));
     } else if (hasInsight && insVal <= 0 && hasDrivers) {
       // Guardrail: insight=0 com 1 único motorista tende a "explodir" alocação (fica boost alto demais).
       // Nesses casos, trate como neutro (boost=1) e deixe habitantes+supply resolverem.
@@ -680,11 +685,11 @@ function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
       weight: Number(r._weight.toFixed(6)),
       count: r._count
     })),
-    params: { alpha, beta, minBoost, maxBoost, refInsight, popFallback, noDriversFactor, lowDriversMinFactor, lowDriversGamma, driversRef }
+    params: { alpha, beta, minBoost: minBoostNorm, maxBoost: maxBoostNorm, antiStreakPenalty, refInsight, popFallback, noDriversFactor, lowDriversMinFactor, lowDriversGamma, driversRef }
   };
 }
 
-function buildRobeV2ShuffledQueue(countsByCity) {
+function buildRobeV2ShuffledQueue(countsByCity, { antiStreakPenalty = 0.35 } = {}) {
   const rem = {};
   const queue = [];
   let total = 0;
@@ -701,7 +706,7 @@ function buildRobeV2ShuffledQueue(countsByCity) {
     let sum = 0;
     const weighted = candidates.map((city) => {
       const base = rem[city];
-      const penalty = (city === prev && candidates.length > 1) ? 0.35 : 1;
+      const penalty = (city === prev && candidates.length > 1) ? Math.max(0.01, Math.min(1, Number(antiStreakPenalty) || 0.35)) : 1;
       const w = Math.max(0.0001, base * penalty);
       sum += w;
       return { city, w };
@@ -723,7 +728,7 @@ function buildRobeV2ShuffledQueue(countsByCity) {
   return queue;
 }
 
-async function fetchRobeV2CityStatsFromCT(cities) {
+async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
   const ct = resolveCtSecretConfig();
   if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
   const hostId = readHostIdSafe();
@@ -734,7 +739,7 @@ async function fetchRobeV2CityStatsFromCT(cities) {
     const resp = await fetch(`${ct.base}/api/robe/v2/city_stats_secret`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Log-Secret': ct.secret },
-      body: JSON.stringify({ hostId, windowDays: 3, cities }),
+      body: JSON.stringify({ hostId, windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))), cities }),
       signal: ac.signal
     });
     clearTimeout(timeout);
@@ -751,24 +756,29 @@ async function fetchRobeV2CityStatsFromCT(cities) {
 async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const tuning = (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : {};
   const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
   if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
   const plan = calcRobeV2PlanTargetN(cfg);
-  const stats = await fetchRobeV2CityStatsFromCT(cities);
+  const stats = await fetchRobeV2CityStatsFromCT(cities, { windowDays: tuning.statsWindowDays || 3 });
   if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
   const missingCities = Array.isArray(stats.missingCities) ? stats.missingCities : [];
   if (missingCities.length >= cities.length) {
     return { ok: false, error: 'stats_all_cities_missing' };
   }
-  const calc = computeRobeV2Counts({ cities, statsByCity: stats.statsByCity, targetN: plan.targetN });
+  const calc = computeRobeV2Counts({ cities, statsByCity: stats.statsByCity, targetN: plan.targetN, tuning });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
-  const queue = buildRobeV2ShuffledQueue(calc.countsByCity);
+  const queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
   if (!queue.length) return { ok: false, error: 'empty_queue_generated' };
   const now = Date.now();
+  const pr = Number(tuning.prefetchRatio);
+  const prefetchRatio = Number.isFinite(pr) ? Math.max(0.01, Math.min(0.8, pr)) : 0.10;
+  const prefetchMin = Math.max(1, Math.min(200, Math.floor(Number(tuning.prefetchMin || 5) || 5)));
+  const prefetchMax = Math.max(prefetchMin, Math.min(500, Math.floor(Number(tuning.prefetchMax || 20) || 20)));
   return {
     ok: true,
     queue,
-    prefetchThreshold: Math.max(5, Math.min(20, Math.floor(Math.max(1, queue.length) * 0.1) || 20)),
+    prefetchThreshold: Math.max(prefetchMin, Math.min(prefetchMax, Math.floor(Math.max(1, queue.length) * prefetchRatio) || prefetchMax)),
     meta: {
       reason,
       requestId: stats.requestId || null,
@@ -778,7 +788,8 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
         workMode: String(robeCfg.workMode || 'v1'),
         cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
         cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
-        cities: cities.map((c) => cityNormKey(c))
+        cities: cities.map((c) => cityNormKey(c)),
+        v2Tuning: tuning || null
       }),
       totalProfiles: plan.totalProfiles,
       avgCooldownMin: Number(plan.avgCooldownMin.toFixed(3)),

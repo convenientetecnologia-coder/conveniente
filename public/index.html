@@ -2949,10 +2949,12 @@
             <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
               <b>Distribuição do último bloco</b>
               <div style="display:flex; gap:8px; align-items:center;">
+                <button class="btn btn-cinza" id="robePostingsTune">Configurar</button>
                 <button class="btn btn-cinza" id="robePostingsRecalc">Recalcular</button>
                 <button class="btn" id="robePostingsRefresh">Atualizar</button>
               </div>
             </div>
+            <div id="robePostingsParams" class="muted" style="font-size:12px; margin-bottom:8px;">—</div>
             <div id="robePostingsCounts" class="muted" style="font-size:12px;">—</div>
           </div>
           <div style="border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
@@ -2978,11 +2980,13 @@
       const pillTotal = box.querySelector('#robePostingsPillTotal');
       const pillRemain = box.querySelector('#robePostingsPillRemain');
       const pillQueue = box.querySelector('#robePostingsPillQueue');
+      const paramsEl = box.querySelector('#robePostingsParams');
       const countsEl = box.querySelector('#robePostingsCounts');
       const queueEl = box.querySelector('#robePostingsQueue');
       const queueMetaEl = box.querySelector('#robePostingsQueueMeta');
       const btnMore = box.querySelector('#robePostingsLoadMore');
       const btnRefresh = box.querySelector('#robePostingsRefresh');
+      const btnTune = box.querySelector('#robePostingsTune');
       const btnRecalc = box.querySelector('#robePostingsRecalc');
       const btnClose = box.querySelector('#robePostingsClose');
 
@@ -2994,9 +2998,26 @@
       function renderCounts(lastBlock) {
         if (!lastBlock) {
           countsEl.innerHTML = `<div class="muted">Nenhum bloco V2 gerado ainda. (Robe V2 precisa rodar/gerar a fila.)</div>`;
+          paramsEl.textContent = 'Parâmetros: —';
           return;
         }
         const rows = Array.isArray(lastBlock.rows) ? lastBlock.rows : [];
+        const p = (lastBlock && lastBlock.params && typeof lastBlock.params === 'object') ? lastBlock.params : null;
+        if (!p) {
+          paramsEl.textContent = 'Parâmetros: —';
+        } else {
+          const parts = [
+            `alpha=${fmtFloat(p.alpha, 4)}`,
+            `beta=${fmtFloat(p.beta, 4)}`,
+            `minBoost=${fmtFloat(p.minBoost, 4)}`,
+            `maxBoost=${fmtFloat(p.maxBoost, 4)}`,
+            `noDriversFactor=${fmtFloat(p.noDriversFactor, 4)}`,
+            `lowDriversMinFactor=${fmtFloat(p.lowDriversMinFactor, 4)}`,
+            `lowDriversGamma=${fmtFloat(p.lowDriversGamma, 4)}`,
+            `antiStreakPenalty=${fmtFloat(p.antiStreakPenalty, 4)}`
+          ];
+          paramsEl.textContent = `Parâmetros (último bloco): ${parts.join(' | ')}`;
+        }
         if (!rows.length) {
           countsEl.innerHTML = `<div class="muted">Sem detalhes do último bloco (rows vazias).</div>`;
           return;
@@ -3071,6 +3092,102 @@
 
       btnMore.onclick = () => loadPage({ reset: false });
       btnRefresh.onclick = () => loadPage({ reset: true });
+      btnTune.onclick = async () => {
+        // Modal secundário: tuning Robe V2
+        const parseNum = (s) => {
+          const v = String(s == null ? '' : s).trim().replace(',', '.');
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        const parseIntSafe = (s) => {
+          const n = parseNum(s);
+          return n == null ? null : Math.floor(n);
+        };
+        const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+        try {
+          const cfgResp = await getServerConfig();
+          const cfg = cfgResp && cfgResp.config ? cfgResp.config : {};
+          const v2 = (cfg.robe && cfg.robe.v2Tuning && typeof cfg.robe.v2Tuning === 'object') ? cfg.robe.v2Tuning : {};
+          const overlay2 = document.createElement('div'); overlay2.className = 'modal-ov';
+          const box2 = document.createElement('div'); box2.className = 'modal-box'; box2.style.maxWidth = '860px';
+          box2.innerHTML = `
+            <h2>Configurar postagens (Robe V2)</h2>
+            <div class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Configura os pesos do cálculo Habitantes x Insight (avançado). Ao salvar, a fila V2 é recalculada.</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+              <label class="pill info">alpha (habitantes) <input id="v2_alpha" style="width:100%;" value="${escapeHtml(String((v2 && v2.alpha) != null ? v2.alpha : 0.10))}"></label>
+              <label class="pill info">beta (insight) <input id="v2_beta" style="width:100%;" value="${escapeHtml(String((v2 && v2.beta) != null ? v2.beta : 1.0))}"></label>
+              <label class="pill info">minBoost <input id="v2_minBoost" style="width:100%;" value="${escapeHtml(String((v2 && v2.minBoost) != null ? v2.minBoost : 0.35))}"></label>
+              <label class="pill info">maxBoost <input id="v2_maxBoost" style="width:100%;" value="${escapeHtml(String((v2 && v2.maxBoost) != null ? v2.maxBoost : 3.0))}"></label>
+              <label class="pill info">noDriversFactor (0 motoristas) <input id="v2_noDriversFactor" style="width:100%;" value="${escapeHtml(String((v2 && v2.noDriversFactor) != null ? v2.noDriversFactor : 0.06))}"></label>
+              <label class="pill info">lowDriversMinFactor (poucos motoristas) <input id="v2_lowDriversMinFactor" style="width:100%;" value="${escapeHtml(String((v2 && v2.lowDriversMinFactor) != null ? v2.lowDriversMinFactor : 0.22))}"></label>
+              <label class="pill info">lowDriversGamma <input id="v2_lowDriversGamma" style="width:100%;" value="${escapeHtml(String((v2 && v2.lowDriversGamma) != null ? v2.lowDriversGamma : 0.70))}"></label>
+              <label class="pill info">antiStreakPenalty (repetição) <input id="v2_antiStreakPenalty" style="width:100%;" value="${escapeHtml(String((v2 && v2.antiStreakPenalty) != null ? v2.antiStreakPenalty : 0.35))}"></label>
+              <label class="pill info">statsWindowDays (CT) <input id="v2_statsWindowDays" style="width:100%;" value="${escapeHtml(String((v2 && v2.statsWindowDays) != null ? v2.statsWindowDays : 3))}"></label>
+              <label class="pill info">prefetchRatio (0-1) <input id="v2_prefetchRatio" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchRatio) != null ? v2.prefetchRatio : 0.10))}"></label>
+              <label class="pill info">prefetchMin <input id="v2_prefetchMin" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchMin) != null ? v2.prefetchMin : 5))}"></label>
+              <label class="pill info">prefetchMax <input id="v2_prefetchMax" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchMax) != null ? v2.prefetchMax : 20))}"></label>
+            </div>
+            <div class="modal-actions">
+              <button class="btn" id="v2TuneCancel">Cancelar</button>
+              <button class="btn primary" id="v2TuneSave">Salvar e recalcular</button>
+            </div>
+          `;
+          overlay2.append(box2);
+          document.body.append(overlay2);
+
+          const close2 = () => { try { overlay2.remove(); } catch {} };
+          box2.querySelector('#v2TuneCancel').onclick = close2;
+          overlay2.onclick = (ev) => { if (ev.target === overlay2) close2(); };
+
+          box2.querySelector('#v2TuneSave').onclick = async () => {
+            const read = (id) => (box2.querySelector(id) && box2.querySelector(id).value) || '';
+            const alpha = parseNum(read('#v2_alpha'));
+            const beta = parseNum(read('#v2_beta'));
+            const minBoost = parseNum(read('#v2_minBoost'));
+            const maxBoost = parseNum(read('#v2_maxBoost'));
+            const noDriversFactor = parseNum(read('#v2_noDriversFactor'));
+            const lowDriversMinFactor = parseNum(read('#v2_lowDriversMinFactor'));
+            const lowDriversGamma = parseNum(read('#v2_lowDriversGamma'));
+            const antiStreakPenalty = parseNum(read('#v2_antiStreakPenalty'));
+            const statsWindowDays = parseIntSafe(read('#v2_statsWindowDays'));
+            const prefetchRatio = parseNum(read('#v2_prefetchRatio'));
+            const prefetchMin = parseIntSafe(read('#v2_prefetchMin'));
+            const prefetchMax = parseIntSafe(read('#v2_prefetchMax'));
+
+            const next = {
+              alpha: alpha == null ? 0.10 : clamp(alpha, 0, 0.6),
+              beta: beta == null ? 1.0 : clamp(beta, 0.05, 6.0),
+              minBoost: minBoost == null ? 0.35 : clamp(minBoost, 0.01, 2.0),
+              maxBoost: maxBoost == null ? 3.0 : clamp(maxBoost, 1.0, 20.0),
+              noDriversFactor: noDriversFactor == null ? 0.06 : clamp(noDriversFactor, 0, 1),
+              lowDriversMinFactor: lowDriversMinFactor == null ? 0.22 : clamp(lowDriversMinFactor, 0, 1),
+              lowDriversGamma: lowDriversGamma == null ? 0.70 : clamp(lowDriversGamma, 0.05, 6.0),
+              antiStreakPenalty: antiStreakPenalty == null ? 0.35 : clamp(antiStreakPenalty, 0.01, 1),
+              statsWindowDays: statsWindowDays == null ? 3 : clamp(statsWindowDays, 1, 10),
+              prefetchRatio: prefetchRatio == null ? 0.10 : clamp(prefetchRatio, 0.01, 0.8),
+              prefetchMin: prefetchMin == null ? 5 : clamp(prefetchMin, 1, 200),
+              prefetchMax: prefetchMax == null ? 20 : clamp(prefetchMax, 1, 500)
+            };
+            const idleTxt = box2.querySelector('#v2TuneSave').textContent;
+            box2.querySelector('#v2TuneSave').disabled = true;
+            box2.querySelector('#v2TuneSave').style.opacity = '0.7';
+            box2.querySelector('#v2TuneSave').textContent = 'Salvando...';
+            try {
+              await saveServerConfig({ robe: { v2Tuning: next } }, { applyNow: false });
+              close2();
+              await loadPage({ reset: true });
+            } catch (e) {
+              alert('Falha ao salvar tuning: ' + (e && e.message || e));
+            } finally {
+              box2.querySelector('#v2TuneSave').disabled = false;
+              box2.querySelector('#v2TuneSave').style.opacity = '';
+              box2.querySelector('#v2TuneSave').textContent = idleTxt;
+            }
+          };
+        } catch (e) {
+          alert('Falha ao abrir configuração: ' + (e && e.message || e));
+        }
+      };
       btnRecalc.onclick = async () => {
         if (loading) return;
         const idleTxt = btnRecalc.textContent;
