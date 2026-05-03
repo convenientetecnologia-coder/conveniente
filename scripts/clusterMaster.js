@@ -349,6 +349,24 @@ function createCluster() {
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
     const nome = payload && payload.nome;
+    // Comandos globais (não dependem de perfil atribuído).
+    // Em modo cluster, comandos sem "nome" caem no roteamento por perfil e geram profile_not_assigned.
+    if (!nome) {
+      if (type === 'robe-v2-warmup') {
+        // Determinístico: apenas o node 1 gera o bloco/fila global (há lock em disco; evita duplicação).
+        return sendTo(0, type, payload, opts);
+      }
+      if (type === 'robe-replan-all') {
+        // Broadcast: cada node pode limpar caches/planos; retorno agregado.
+        const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
+        const allOk = results.every(r => r && r.ok !== false);
+        if (allOk) {
+          const pick = results.find(r => r && r.ok === true) || { ok: true };
+          return pick;
+        }
+        return { ok: false, error: 'partial_fail', results };
+      }
+    }
     if (type === 'get-status' && !nome) {
       const allPerfis = fileStore.loadPerfisJson() || [];
       const baseMap = new Map();
