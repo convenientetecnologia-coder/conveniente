@@ -3120,6 +3120,20 @@
           const cfgResp = await getServerConfig();
           const cfg = cfgResp && cfgResp.config ? cfgResp.config : {};
           const v2 = (cfg.robe && cfg.robe.v2Tuning && typeof cfg.robe.v2Tuning === 'object') ? cfg.robe.v2Tuning : {};
+          const factory = {
+            alpha: 0.10,
+            beta: 1.0,
+            minBoost: 0.35,
+            maxBoost: 3.0,
+            noDriversFactor: 0.06,
+            lowDriversMinFactor: 0.22,
+            lowDriversGamma: 0.70,
+            antiStreakPenalty: 0.35,
+            statsWindowDays: 3,
+            prefetchRatio: 0.10,
+            prefetchMin: 5,
+            prefetchMax: 20
+          };
           const overlay2 = document.createElement('div'); overlay2.className = 'modal-ov';
           const box2 = document.createElement('div'); box2.className = 'modal-box'; box2.style.maxWidth = '860px';
           box2.innerHTML = `
@@ -3158,6 +3172,7 @@
             </details>
             <div class="modal-actions">
               <button class="btn" id="v2TuneCancel">Cancelar</button>
+              <button class="btn btn-cinza" id="v2TuneFactory">Restaurar padrão (fábrica)</button>
               <button class="btn primary" id="v2TuneSave">Salvar e recalcular</button>
             </div>
           `;
@@ -3167,6 +3182,42 @@
           const close2 = () => { try { overlay2.remove(); } catch {} };
           box2.querySelector('#v2TuneCancel').onclick = close2;
           overlay2.onclick = (ev) => { if (ev.target === overlay2) close2(); };
+
+          box2.querySelector('#v2TuneFactory').onclick = async () => {
+            if (!confirm('Restaurar os parâmetros padrão de fábrica e recalcular a fila agora?')) return;
+            const setVal = (id, v) => { try { const el = box2.querySelector(id); if (el) el.value = String(v); } catch {} };
+            setVal('#v2_alpha', factory.alpha);
+            setVal('#v2_beta', factory.beta);
+            setVal('#v2_minBoost', factory.minBoost);
+            setVal('#v2_maxBoost', factory.maxBoost);
+            setVal('#v2_noDriversFactor', factory.noDriversFactor);
+            setVal('#v2_lowDriversMinFactor', factory.lowDriversMinFactor);
+            setVal('#v2_lowDriversGamma', factory.lowDriversGamma);
+            setVal('#v2_antiStreakPenalty', factory.antiStreakPenalty);
+            setVal('#v2_statsWindowDays', factory.statsWindowDays);
+            setVal('#v2_prefetchRatio', factory.prefetchRatio);
+            setVal('#v2_prefetchMin', factory.prefetchMin);
+            setVal('#v2_prefetchMax', factory.prefetchMax);
+
+            const btn = box2.querySelector('#v2TuneFactory');
+            const idleTxt = btn.textContent;
+            const btnSave = box2.querySelector('#v2TuneSave');
+            const btnCancel = box2.querySelector('#v2TuneCancel');
+            btn.disabled = true; btn.style.opacity = '0.7'; btn.textContent = 'Restaurando...';
+            btnSave.disabled = true; btnSave.style.opacity = '0.7';
+            btnCancel.disabled = true; btnCancel.style.opacity = '0.7';
+            try {
+              await saveServerConfig({ robe: { v2Tuning: factory } }, { applyNow: false });
+              close2();
+              await loadPage({ reset: true });
+            } catch (e) {
+              alert('Falha ao restaurar padrão: ' + (e && e.message || e));
+            } finally {
+              btn.disabled = false; btn.style.opacity = ''; btn.textContent = idleTxt;
+              btnSave.disabled = false; btnSave.style.opacity = '';
+              btnCancel.disabled = false; btnCancel.style.opacity = '';
+            }
+          };
 
           box2.querySelector('#v2TuneSave').onclick = async () => {
             const read = (id) => (box2.querySelector(id) && box2.querySelector(id).value) || '';
