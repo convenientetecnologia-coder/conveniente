@@ -10337,6 +10337,22 @@ const handlers = {
     return { ok: true };
   },
 
+  async ['robe-v2-warmup']({ reason, force }) {
+    try {
+      logger.info('[HANDLER] robe-v2-warmup chamada', { force: !!force, reason: reason ? String(reason).slice(0, 120) : null });
+      const robeMod = require('./robe.js');
+      if (!robeMod || typeof robeMod.robeV2WarmupNow !== 'function') {
+        return { ok: false, error: 'robe_v2_warmup_unavailable' };
+      }
+      const r = await robeMod.robeV2WarmupNow({ reason: reason || 'worker_cmd', force: !!force });
+      logger.info('[HANDLER] robe-v2-warmup fim', { ok: !!(r && r.ok), error: r && r.error });
+      return r;
+    } catch (e) {
+      logger.error('[HANDLER] robe-v2-warmup erro', { error: e && e.message }, e);
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  },
+
   // ====== HANDLER apply-city - aplica coordenadas da nova cidade em runtime ======
   async ['apply-city']({ nome }) {
     return lockProfileAction(nome, async () => {

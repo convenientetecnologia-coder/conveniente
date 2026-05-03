@@ -2948,7 +2948,10 @@
           <div style="border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
             <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
               <b>Distribuição do último bloco</b>
-              <button class="btn" id="robePostingsRefresh">Atualizar</button>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <button class="btn btn-cinza" id="robePostingsRecalc">Recalcular</button>
+                <button class="btn" id="robePostingsRefresh">Atualizar</button>
+              </div>
             </div>
             <div id="robePostingsCounts" class="muted" style="font-size:12px;">—</div>
           </div>
@@ -2980,6 +2983,7 @@
       const queueMetaEl = box.querySelector('#robePostingsQueueMeta');
       const btnMore = box.querySelector('#robePostingsLoadMore');
       const btnRefresh = box.querySelector('#robePostingsRefresh');
+      const btnRecalc = box.querySelector('#robePostingsRecalc');
       const btnClose = box.querySelector('#robePostingsClose');
 
       let pageOffset = 0;
@@ -3026,8 +3030,16 @@
             queueEl.innerHTML = '';
           }
           const data = await fetchRobeV2PostingsState({ offset: pageOffset, limit: pageLimit });
-          infoEl.className = 'pill info';
-          infoEl.innerHTML = `<span class="dot"></span>OK | ts=${new Date(Number(data.ts||Date.now())).toLocaleString('pt-BR')}`;
+          const tsLabel = new Date(Number(data.ts||Date.now())).toLocaleString('pt-BR');
+          const lastErr = data && data.meta && data.meta.lastError ? String(data.meta.lastError) : '';
+          const lastErrAt = data && data.meta && data.meta.lastErrorAt ? Number(data.meta.lastErrorAt) : 0;
+          if (lastErr) {
+            infoEl.className = 'pill bad';
+            infoEl.innerHTML = `<span class="dot"></span>ERRO | ${lastErr} ${lastErrAt ? ('| ' + new Date(lastErrAt).toLocaleString('pt-BR')) : ''} | ts=${tsLabel}`;
+          } else {
+            infoEl.className = 'pill info';
+            infoEl.innerHTML = `<span class="dot"></span>OK | ts=${tsLabel}`;
+          }
 
           pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${String(data.workMode || 'v1')}</b>`;
           queueTotal = Number(data.queueTotal || 0) || 0;
@@ -3059,6 +3071,30 @@
 
       btnMore.onclick = () => loadPage({ reset: false });
       btnRefresh.onclick = () => loadPage({ reset: true });
+      btnRecalc.onclick = async () => {
+        if (loading) return;
+        const idleTxt = btnRecalc.textContent;
+        const prevMore = btnMore.disabled;
+        const prevRefresh = btnRefresh.disabled;
+        btnRecalc.disabled = true; btnRecalc.style.opacity = '0.7'; btnRecalc.textContent = 'Recalculando...';
+        btnMore.disabled = true;
+        btnRefresh.disabled = true;
+        try {
+          const r = await fetch('/api/robes/v2/recalc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_robe_postings_recalc' },
+            body: JSON.stringify({})
+          }).then(x => x.json()).catch(()=>null);
+          if (!r || r.ok !== true) throw new Error((r && (r.error || r.message)) ? (r.error || r.message) : 'recalc_failed');
+          await loadPage({ reset: true });
+        } catch (e) {
+          alert('Falha ao recalcular: ' + (e && e.message || e));
+        } finally {
+          btnRecalc.disabled = false; btnRecalc.style.opacity = ''; btnRecalc.textContent = idleTxt;
+          btnMore.disabled = prevMore;
+          btnRefresh.disabled = prevRefresh;
+        }
+      };
       btnClose.onclick = () => { try { overlay.remove(); } catch {} };
       overlay.onclick = (ev) => { if (ev.target === overlay) { try { overlay.remove(); } catch {} } };
 

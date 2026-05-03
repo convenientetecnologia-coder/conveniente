@@ -132,6 +132,9 @@ module.exports = (app, workerClient, fileStore) => {
         workMode,
         hasStateFile: !!st,
         statePath: fp,
+        regenPending: !!(st && st.regenPending),
+        failures: (st && st.failures) ? st.failures : null,
+        meta: (st && st.meta && typeof st.meta === 'object') ? st.meta : null,
         queueTotal: queue.length,
         queuePage: { offset, limit, returned: slice.length },
         queue: slice,
@@ -144,6 +147,23 @@ module.exports = (app, workerClient, fileStore) => {
           remaining: remainingInLastBlock
         } : null
       });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // Robe V2: forçar recálculo do plano/fila (dashboard local)
+  app.post('/api/robes/v2/recalc', async (req, res) => {
+    try {
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable' });
+      }
+      const operator = String(req.headers['x-operator'] || 'dashboard').slice(0, 180);
+      const r = await workerClient.sendWorkerCommand('robe-v2-warmup', {
+        reason: `dashboard_recalc:${operator}`,
+        force: true
+      }, { timeoutMs: 60000 });
+      return res.json({ ok: true, result: r || null });
     } catch (e) {
       return res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
     }

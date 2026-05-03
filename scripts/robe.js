@@ -756,6 +756,10 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const plan = calcRobeV2PlanTargetN(cfg);
   const stats = await fetchRobeV2CityStatsFromCT(cities);
   if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
+  const missingCities = Array.isArray(stats.missingCities) ? stats.missingCities : [];
+  if (missingCities.length >= cities.length) {
+    return { ok: false, error: 'stats_all_cities_missing' };
+  }
   const calc = computeRobeV2Counts({ cities, statsByCity: stats.statsByCity, targetN: plan.targetN });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
   const queue = buildRobeV2ShuffledQueue(calc.countsByCity);
@@ -932,6 +936,43 @@ async function pickPostingCityForRunV2() {
     scheduleRobeV2Regeneration({ reason: queueAfter <= threshold ? 'prefetch_low_queue' : 'plan_expired', wait: false }).catch(() => {});
   }
   return chosen;
+}
+
+async function robeV2WarmupNow({ reason = 'manual', force = false } = {}) {
+  try {
+    if (force) {
+      await withRobeV2QueueLock((state) => {
+        state.queue = [];
+        state.planValidUntil = 0;
+        state.planGeneratedAt = 0;
+        state.regenPending = false;
+        state.regenInFlightId = null;
+        state.failures = { count: 0, lastAt: 0, backoffUntil: 0 };
+        state.meta = {
+          ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
+          forcedResetAt: Date.now(),
+          forcedResetReason: String(reason || 'manual').slice(0, 120)
+        };
+        return state;
+      });
+    }
+    const r = await scheduleRobeV2Regeneration({ reason: String(reason || 'manual'), wait: true });
+    const st = readRobeV2QueueState();
+    return {
+      ok: true,
+      regenResult: r || null,
+      state: {
+        queueTotal: Array.isArray(st.queue) ? st.queue.length : 0,
+        consumedTotal: Math.max(0, Number(st.consumedTotal || 0) || 0),
+        regenPending: !!st.regenPending,
+        lastRegenAt: Number(st.lastRegenAt || 0) || 0,
+        failures: st.failures || null,
+        lastBlock: st.lastBlock || null
+      }
+    };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 }
 
 // Busca robusta por input com rótulo visível
@@ -3702,5 +3743,6 @@ function robeQueueFilter(nome) {
 
 module.exports = {
   startRobe,
-  robeQueueFilter
+  robeQueueFilter,
+  robeV2WarmupNow
 };

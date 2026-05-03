@@ -137,7 +137,23 @@ module.exports = (app, workerClient, fileStore) => {
           applyNowRequested: applyNow
         });
       } catch {}
-      const finish = (result) => res.json({ ok: true, config: effective, applyNowResult: result || null });
+      const tryWarmupV2 = async () => {
+        try {
+          if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return null;
+          if (!effective || !effective.robe || effective.robe.workMode !== 'v2_auto') return null;
+          return await workerClient.sendWorkerCommand('robe-v2-warmup', {
+            reason: 'server_config_saved',
+            force: true
+          }, { timeoutMs: 20000 });
+        } catch (e) {
+          return { ok: false, error: 'robe_v2_warmup_failed', details: (e && e.message) || String(e) };
+        }
+      };
+
+      const finish = async (result) => {
+        const robeV2WarmupResult = await tryWarmupV2();
+        return res.json({ ok: true, config: effective, applyNowResult: result || null, robeV2WarmupResult: robeV2WarmupResult || null });
+      };
       if (!applyNow) return finish(null);
       if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
         return res.json({ ok: false, error: 'worker_client_unavailable', configSaved: true, config: effective });
