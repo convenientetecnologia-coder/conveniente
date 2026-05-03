@@ -605,6 +605,8 @@ function computeRobeV2Counts({ cities, statsByCity, targetN, tuning } = {}) {
   const noDriversFactor = Number.isFinite(Number(t.noDriversFactor)) ? clamp(Number(t.noDriversFactor), 0, 1) : 0.06;          // penalidade forte: sem motoristas => quase não recebe slots
   const lowDriversMinFactor = Number.isFinite(Number(t.lowDriversMinFactor)) ? clamp(Number(t.lowDriversMinFactor), 0, 1) : 0.22; // piso para "tem motoristas, mas poucos" (penaliza sem zerar)
   const lowDriversGamma = Number.isFinite(Number(t.lowDriversGamma)) ? clamp(Number(t.lowDriversGamma), 0.05, 6.0) : 0.70;       // quão rápido penaliza cidades com poucos motoristas
+  const driverBonusGamma = Number.isFinite(Number(t.driverBonusGamma)) ? clamp(Number(t.driverBonusGamma), 0, 2.0) : 0.25;
+  const driverBonusCap = Number.isFinite(Number(t.driverBonusCap)) ? clamp(Number(t.driverBonusCap), 1.0, 3.0) : 1.25;
   const minBoostNorm = Math.min(minBoost, maxBoost);
   const maxBoostNorm = Math.max(minBoost, maxBoost);
   const antiStreakPenalty = Number.isFinite(Number(t.antiStreakPenalty)) ? clamp(Number(t.antiStreakPenalty), 0.01, 1) : 0.35;
@@ -655,7 +657,18 @@ function computeRobeV2Counts({ cities, statsByCity, targetN, tuning } = {}) {
       supplyFactor = Math.max(lowDriversMinFactor, Math.min(1, raw));
     }
 
-    r._weight = Math.max(0.0001, Math.pow(Math.max(1, pop), alpha) * boost * supplyFactor);
+    // Bônus por motoristas (opcional):
+    // - só dá bônus quando está acima do "normal" (driversRef)
+    // - cap para não esmagar insight/habitantes
+    let driverBonus = 1;
+    if (hasDrivers && driverBonusGamma > 0 && driverBonusCap > 1) {
+      const ratio = motoristas / Math.max(1, driversRef);
+      if (ratio > 1) {
+        driverBonus = Math.min(driverBonusCap, Math.max(1, Math.pow(ratio, driverBonusGamma)));
+      }
+    }
+
+    r._weight = Math.max(0.0001, Math.pow(Math.max(1, pop), alpha) * boost * supplyFactor * driverBonus);
   }
   const weightSum = rows.reduce((acc, r) => acc + r._weight, 0);
   if (!(weightSum > 0)) return { ok: false, error: 'weights_invalid' };
@@ -685,7 +698,7 @@ function computeRobeV2Counts({ cities, statsByCity, targetN, tuning } = {}) {
       weight: Number(r._weight.toFixed(6)),
       count: r._count
     })),
-    params: { alpha, beta, minBoost: minBoostNorm, maxBoost: maxBoostNorm, antiStreakPenalty, refInsight, popFallback, noDriversFactor, lowDriversMinFactor, lowDriversGamma, driversRef }
+    params: { alpha, beta, minBoost: minBoostNorm, maxBoost: maxBoostNorm, driverBonusGamma, driverBonusCap, antiStreakPenalty, refInsight, popFallback, noDriversFactor, lowDriversMinFactor, lowDriversGamma, driversRef }
   };
 }
 

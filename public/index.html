@@ -3026,6 +3026,8 @@
             `noDriversFactor=${fmtFloat(p.noDriversFactor, 4)}`,
             `lowDriversMinFactor=${fmtFloat(p.lowDriversMinFactor, 4)}`,
             `lowDriversGamma=${fmtFloat(p.lowDriversGamma, 4)}`,
+            `driverBonusGamma=${fmtFloat(p.driverBonusGamma, 4)}`,
+            `driverBonusCap=${fmtFloat(p.driverBonusCap, 4)}`,
             `antiStreakPenalty=${fmtFloat(p.antiStreakPenalty, 4)}`
           ];
           paramsEl.textContent = `Parâmetros (último bloco): ${parts.join(' | ')}`;
@@ -3128,6 +3130,8 @@
             noDriversFactor: 0.06,
             lowDriversMinFactor: 0.22,
             lowDriversGamma: 0.70,
+            driverBonusGamma: 0.25,
+            driverBonusCap: 1.25,
             antiStreakPenalty: 0.35,
             statsWindowDays: 3,
             prefetchRatio: 0.10,
@@ -3147,6 +3151,8 @@
               <label class="pill info">noDriversFactor (0 motoristas) <input id="v2_noDriversFactor" style="width:100%;" value="${escapeHtml(String((v2 && v2.noDriversFactor) != null ? v2.noDriversFactor : 0.06))}"></label>
               <label class="pill info">lowDriversMinFactor (poucos motoristas) <input id="v2_lowDriversMinFactor" style="width:100%;" value="${escapeHtml(String((v2 && v2.lowDriversMinFactor) != null ? v2.lowDriversMinFactor : 0.22))}"></label>
               <label class="pill info">lowDriversGamma <input id="v2_lowDriversGamma" style="width:100%;" value="${escapeHtml(String((v2 && v2.lowDriversGamma) != null ? v2.lowDriversGamma : 0.70))}"></label>
+              <label class="pill info">driverBonusGamma (bônus p/ mais motoristas) <input id="v2_driverBonusGamma" style="width:100%;" value="${escapeHtml(String((v2 && v2.driverBonusGamma) != null ? v2.driverBonusGamma : 0.25))}"></label>
+              <label class="pill info">driverBonusCap (teto do bônus) <input id="v2_driverBonusCap" style="width:100%;" value="${escapeHtml(String((v2 && v2.driverBonusCap) != null ? v2.driverBonusCap : 1.25))}"></label>
               <label class="pill info">antiStreakPenalty (repetição) <input id="v2_antiStreakPenalty" style="width:100%;" value="${escapeHtml(String((v2 && v2.antiStreakPenalty) != null ? v2.antiStreakPenalty : 0.35))}"></label>
               <label class="pill info">statsWindowDays (CT) <input id="v2_statsWindowDays" style="width:100%;" value="${escapeHtml(String((v2 && v2.statsWindowDays) != null ? v2.statsWindowDays : 3))}"></label>
               <label class="pill info">prefetchRatio (0-1) <input id="v2_prefetchRatio" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchRatio) != null ? v2.prefetchRatio : 0.10))}"></label>
@@ -3164,6 +3170,7 @@
                   <div><b>noDriversFactor</b>: penalidade quando <b>motoristas=0</b>. ↓noDriversFactor ⇒ quase não recebe slots; ↑noDriversFactor ⇒ mesmo sem motoristas ainda recebe mais (use com cuidado).</div>
                   <div><b>lowDriversMinFactor</b>: piso para cidades com poucos motoristas (mas >0). ↑ ⇒ menos penalidade; ↓ ⇒ penaliza mais.</div>
                   <div><b>lowDriversGamma</b>: curva da penalidade por “poucos motoristas”. ↑gamma ⇒ penaliza mais forte quando tem pouco; ↓gamma ⇒ transição mais suave.</div>
+                  <div><b>driverBonusGamma / driverBonusCap</b>: bônus para cidades com <b>mais motoristas</b> que a mediana. ↑gamma ⇒ favorece mais quem tem mais motoristas; ↓gamma ⇒ reduz esse efeito. ↑cap ⇒ permite bônus maior; ↓cap ⇒ limita.</div>
                   <div><b>antiStreakPenalty</b>: evita repetir a mesma cidade em sequência na fila. ↓ ⇒ repete menos (fila mais alternada); ↑ ⇒ fila pode ter mais repetições quando uma cidade tem muitos slots.</div>
                   <div><b>statsWindowDays</b>: janela de cálculo no CT (chamados/insight). ↑dias ⇒ mais “estável” (menos ruído); ↓dias ⇒ mais “tempo real” (mais variação).</div>
                   <div><b>prefetchRatio / prefetchMin / prefetchMax</b>: quando gerar próximo bloco antes de zerar a fila. ↑ ⇒ gera mais cedo; ↓ ⇒ gera mais tarde. (Não muda o peso; só o momento do reabastecimento.)</div>
@@ -3193,6 +3200,8 @@
             setVal('#v2_noDriversFactor', factory.noDriversFactor);
             setVal('#v2_lowDriversMinFactor', factory.lowDriversMinFactor);
             setVal('#v2_lowDriversGamma', factory.lowDriversGamma);
+            setVal('#v2_driverBonusGamma', factory.driverBonusGamma);
+            setVal('#v2_driverBonusCap', factory.driverBonusCap);
             setVal('#v2_antiStreakPenalty', factory.antiStreakPenalty);
             setVal('#v2_statsWindowDays', factory.statsWindowDays);
             setVal('#v2_prefetchRatio', factory.prefetchRatio);
@@ -3228,6 +3237,8 @@
             const noDriversFactor = parseNum(read('#v2_noDriversFactor'));
             const lowDriversMinFactor = parseNum(read('#v2_lowDriversMinFactor'));
             const lowDriversGamma = parseNum(read('#v2_lowDriversGamma'));
+            const driverBonusGamma = parseNum(read('#v2_driverBonusGamma'));
+            const driverBonusCap = parseNum(read('#v2_driverBonusCap'));
             const antiStreakPenalty = parseNum(read('#v2_antiStreakPenalty'));
             const statsWindowDays = parseIntSafe(read('#v2_statsWindowDays'));
             const prefetchRatio = parseNum(read('#v2_prefetchRatio'));
@@ -3242,6 +3253,8 @@
               noDriversFactor: noDriversFactor == null ? 0.06 : clamp(noDriversFactor, 0, 1),
               lowDriversMinFactor: lowDriversMinFactor == null ? 0.22 : clamp(lowDriversMinFactor, 0, 1),
               lowDriversGamma: lowDriversGamma == null ? 0.70 : clamp(lowDriversGamma, 0.05, 6.0),
+              driverBonusGamma: driverBonusGamma == null ? 0.25 : clamp(driverBonusGamma, 0, 2.0),
+              driverBonusCap: driverBonusCap == null ? 1.25 : clamp(driverBonusCap, 1.0, 3.0),
               antiStreakPenalty: antiStreakPenalty == null ? 0.35 : clamp(antiStreakPenalty, 0.01, 1),
               statsWindowDays: statsWindowDays == null ? 3 : clamp(statsWindowDays, 1, 10),
               prefetchRatio: prefetchRatio == null ? 0.10 : clamp(prefetchRatio, 0.01, 0.8),

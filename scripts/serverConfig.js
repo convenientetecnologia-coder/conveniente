@@ -38,6 +38,8 @@ const DEFAULTS = Object.freeze({
       noDriversFactor: 0.06,
       lowDriversMinFactor: 0.22,
       lowDriversGamma: 0.70,
+      driverBonusGamma: 0.25,
+      driverBonusCap: 1.25,
       antiStreakPenalty: 0.35,
       statsWindowDays: 3,
       prefetchRatio: 0.10,
@@ -157,6 +159,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const v2NoDriversFactor = Number(clamp(toNum(v2.noDriversFactor, DEFAULTS.robe.v2Tuning.noDriversFactor), 0, 1).toFixed(4));
   const v2LowDriversMinFactor = Number(clamp(toNum(v2.lowDriversMinFactor, DEFAULTS.robe.v2Tuning.lowDriversMinFactor), 0, 1).toFixed(4));
   const v2LowDriversGamma = Number(clamp(toNum(v2.lowDriversGamma, DEFAULTS.robe.v2Tuning.lowDriversGamma), 0.05, 6.0).toFixed(4));
+  const v2DriverBonusGamma = Number(clamp(toNum(v2.driverBonusGamma, DEFAULTS.robe.v2Tuning.driverBonusGamma), 0, 2.0).toFixed(4));
+  const v2DriverBonusCap = Number(clamp(toNum(v2.driverBonusCap, DEFAULTS.robe.v2Tuning.driverBonusCap), 1.0, 3.0).toFixed(4));
   const v2AntiStreakPenalty = Number(clamp(toNum(v2.antiStreakPenalty, DEFAULTS.robe.v2Tuning.antiStreakPenalty), 0.01, 1).toFixed(4));
   const v2StatsWindowDays = clamp(Math.floor(toNum(v2.statsWindowDays, DEFAULTS.robe.v2Tuning.statsWindowDays)), 1, 10);
   const v2PrefetchRatio = Number(clamp(toNum(v2.prefetchRatio, DEFAULTS.robe.v2Tuning.prefetchRatio), 0.01, 0.8).toFixed(4));
@@ -202,6 +206,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
         noDriversFactor: v2NoDriversFactor,
         lowDriversMinFactor: v2LowDriversMinFactor,
         lowDriversGamma: v2LowDriversGamma,
+        driverBonusGamma: v2DriverBonusGamma,
+        driverBonusCap: v2DriverBonusCap,
         antiStreakPenalty: v2AntiStreakPenalty,
         statsWindowDays: v2StatsWindowDays,
         prefetchRatio: v2PrefetchRatio,
@@ -290,7 +296,7 @@ function validateServerConfigPayload(payload) {
         errors.push("robe.v2Tuning_invalido");
       } else {
         const t = robe.v2Tuning;
-        const numFields = ["alpha","beta","minBoost","maxBoost","noDriversFactor","lowDriversMinFactor","lowDriversGamma","antiStreakPenalty","prefetchRatio"];
+        const numFields = ["alpha","beta","minBoost","maxBoost","noDriversFactor","lowDriversMinFactor","lowDriversGamma","driverBonusGamma","driverBonusCap","antiStreakPenalty","prefetchRatio"];
         for (const f of numFields) {
           if (t[f] !== undefined) {
             const n = toNum(t[f], NaN);
