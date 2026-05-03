@@ -3139,6 +3139,23 @@
               <label class="pill info">prefetchMin <input id="v2_prefetchMin" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchMin) != null ? v2.prefetchMin : 5))}"></label>
               <label class="pill info">prefetchMax <input id="v2_prefetchMax" style="width:100%;" value="${escapeHtml(String((v2 && v2.prefetchMax) != null ? v2.prefetchMax : 20))}"></label>
             </div>
+            <details style="margin-top:10px; border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
+              <summary style="cursor:pointer;"><b>Guia rápido (o que cada parâmetro faz)</b></summary>
+              <div class="muted" style="font-size:12px; margin-top:8px; line-height:1.45;">
+                <div style="margin-bottom:8px;"><b>Regra geral:</b> aumentos/diminuições são sutis; depois de salvar, use <b>Recalcular</b> e compare a distribuição do último bloco.</div>
+                <div style="display:grid; grid-template-columns: 1fr; gap:6px;">
+                  <div><b>alpha (habitantes)</b>: aumenta o peso de “tamanho da cidade”. ↑alpha ⇒ cidades grandes ganham mais slots; ↓alpha ⇒ insight domina mais e a diferença por habitantes diminui.</div>
+                  <div><b>beta (insight)</b>: aumenta a agressividade do “insight baixo recebe mais”. ↑beta ⇒ quem tem insight menor puxa mais slots; ↓beta ⇒ distribuição fica mais uniforme (menos sensível ao insight).</div>
+                  <div><b>minBoost / maxBoost</b>: limites do multiplicador de insight. ↑maxBoost ⇒ pode concentrar mais em quem está “ruim”; ↓maxBoost ⇒ evita explosões. ↑minBoost ⇒ não deixa ninguém ficar “seco” por insight alto.</div>
+                  <div><b>noDriversFactor</b>: penalidade quando <b>motoristas=0</b>. ↓noDriversFactor ⇒ quase não recebe slots; ↑noDriversFactor ⇒ mesmo sem motoristas ainda recebe mais (use com cuidado).</div>
+                  <div><b>lowDriversMinFactor</b>: piso para cidades com poucos motoristas (mas >0). ↑ ⇒ menos penalidade; ↓ ⇒ penaliza mais.</div>
+                  <div><b>lowDriversGamma</b>: curva da penalidade por “poucos motoristas”. ↑gamma ⇒ penaliza mais forte quando tem pouco; ↓gamma ⇒ transição mais suave.</div>
+                  <div><b>antiStreakPenalty</b>: evita repetir a mesma cidade em sequência na fila. ↓ ⇒ repete menos (fila mais alternada); ↑ ⇒ fila pode ter mais repetições quando uma cidade tem muitos slots.</div>
+                  <div><b>statsWindowDays</b>: janela de cálculo no CT (chamados/insight). ↑dias ⇒ mais “estável” (menos ruído); ↓dias ⇒ mais “tempo real” (mais variação).</div>
+                  <div><b>prefetchRatio / prefetchMin / prefetchMax</b>: quando gerar próximo bloco antes de zerar a fila. ↑ ⇒ gera mais cedo; ↓ ⇒ gera mais tarde. (Não muda o peso; só o momento do reabastecimento.)</div>
+                </div>
+              </div>
+            </details>
             <div class="modal-actions">
               <button class="btn" id="v2TuneCancel">Cancelar</button>
               <button class="btn primary" id="v2TuneSave">Salvar e recalcular</button>
