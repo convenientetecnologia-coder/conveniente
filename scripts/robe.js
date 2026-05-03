@@ -762,11 +762,25 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const plan = calcRobeV2PlanTargetN(cfg);
   const stats = await fetchRobeV2CityStatsFromCT(cities, { windowDays: tuning.statsWindowDays || 3 });
   if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
-  const missingCities = Array.isArray(stats.missingCities) ? stats.missingCities : [];
-  if (missingCities.length >= cities.length) {
-    return { ok: false, error: 'stats_all_cities_missing' };
+  // IMPORTANTE: missingCities no CT significa "sem grupo/motoristas", não "cidade inválida".
+  // Fail-closed apenas quando NÃO há sinal nenhum para nenhuma cidade (evita fallback igualitário burro).
+  const statsByCity = (stats && stats.statsByCity && typeof stats.statsByCity === 'object') ? stats.statsByCity : {};
+  let keyed = 0;
+  let signal = 0;
+  for (const city of cities) {
+    const rec = statsByCity && statsByCity[city] ? statsByCity[city] : null;
+    if (rec) keyed += 1;
+    const hab = rec ? Number(rec.habitantes) : NaN;
+    const mot = rec ? Number(rec.motoristas) : NaN;
+    const ins = rec ? ((rec.insightPercent == null) ? null : Number(rec.insightPercent)) : null;
+    const hasPop = Number.isFinite(hab) && hab > 0;
+    const hasDrivers = Number.isFinite(mot) && mot > 0;
+    const hasInsight = (ins != null) && Number.isFinite(ins) && ins > 0;
+    if (hasPop || hasDrivers || hasInsight) signal += 1;
   }
-  const calc = computeRobeV2Counts({ cities, statsByCity: stats.statsByCity, targetN: plan.targetN, tuning });
+  if (keyed === 0) return { ok: false, error: 'stats_missing_keys_all' };
+  if (signal === 0) return { ok: false, error: 'stats_no_signal_all' };
+  const calc = computeRobeV2Counts({ cities, statsByCity: statsByCity, targetN: plan.targetN, tuning });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
   const queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
   if (!queue.length) return { ok: false, error: 'empty_queue_generated' };
