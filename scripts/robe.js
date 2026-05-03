@@ -12,10 +12,19 @@ const logger = require('./logger.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
+const { readCtConfig } = require('./ctConfig.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
+
+const DADOS_DIR = path.join(__dirname, '..', 'dados');
+const PERFIS_JSON_PATH = path.join(DADOS_DIR, 'perfis.json');
+const HOSTID_PATH = path.join(DADOS_DIR, 'hostid');
+const ROBE_V2_QUEUE_PATH = path.join(DADOS_DIR, 'robe_v2_queue.json');
+const ROBE_V2_QUEUE_LOCK_PATH = ROBE_V2_QUEUE_PATH + '.lock';
+const ROBE_V2_REGEN_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+let robeV2RegenPromise = null;
 
 // Sentinela para overlays/modais tardios do Facebook (Marketplace Create)
 // Injeta MutationObserver e variáveis globais para sinalizar o popup
@@ -429,6 +438,500 @@ function writeJsonAtomic(file, dataObj) {
     }
     return true;
   } catch { return false; }
+}
+
+function cityNormKey(v) {
+  return String(v || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('pt-BR')
+    .trim();
+}
+
+function readHostIdSafe() {
+  try {
+    if (!fs.existsSync(HOSTID_PATH)) return '';
+    return String(fs.readFileSync(HOSTID_PATH, 'utf8') || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function loadTotalProfilesCount() {
+  try {
+    const arr = readJsonSafe(PERFIS_JSON_PATH, []);
+    if (!Array.isArray(arr)) return 0;
+    return arr.filter((p) => p && String(p.nome || '').trim()).length;
+  } catch {
+    return 0;
+  }
+}
+
+function resolveCtSecretConfig() {
+  const cfg = readCtConfig();
+  let base = String((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  let secret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
+  if (!base || !secret) return { ok: false, error: 'ct_config_missing' };
+  base = base.replace(/\/+$/, '');
+  return { ok: true, base, secret };
+}
+
+function defaultRobeV2QueueState() {
+  return {
+    version: 1,
+    updatedAt: 0,
+    planGeneratedAt: 0,
+    planValidUntil: 0,
+    planTargetN: 0,
+    queue: [],
+    consumedTotal: 0,
+    lastBlock: null,
+    lastBlockStartAtConsumedTotal: 0,
+    lastBlockQueueLen: 0,
+    prefetchThreshold: 20,
+    regenPending: false,
+    regenInFlightId: null,
+    lastRegenAt: 0,
+    failures: { count: 0, lastAt: 0, backoffUntil: 0 },
+    meta: null
+  };
+}
+
+function readRobeV2QueueState() {
+  const d = defaultRobeV2QueueState();
+  const raw = readJsonSafe(ROBE_V2_QUEUE_PATH, d);
+  if (!raw || typeof raw !== 'object') return d;
+  const q = Array.isArray(raw.queue) ? raw.queue.map((x) => String(x || '').trim()).filter(Boolean) : [];
+  const f = (raw.failures && typeof raw.failures === 'object') ? raw.failures : {};
+  return {
+    ...d,
+    ...raw,
+    queue: q,
+    consumedTotal: Math.max(0, Number(raw.consumedTotal || 0) || 0),
+    lastBlock: (raw.lastBlock && typeof raw.lastBlock === 'object') ? raw.lastBlock : null,
+    lastBlockStartAtConsumedTotal: Math.max(0, Number(raw.lastBlockStartAtConsumedTotal || 0) || 0),
+    lastBlockQueueLen: Math.max(0, Number(raw.lastBlockQueueLen || 0) || 0),
+    failures: {
+      count: Math.max(0, Number(f.count || 0) || 0),
+      lastAt: Math.max(0, Number(f.lastAt || 0) || 0),
+      backoffUntil: Math.max(0, Number(f.backoffUntil || 0) || 0)
+    }
+  };
+}
+
+async function acquireRobeV2FileLock({ retries = 140, delayMs = 35, staleMs = 2 * 60 * 1000 } = {}) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const fd = fs.openSync(ROBE_V2_QUEUE_LOCK_PATH, 'wx');
+      try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }), 'utf8'); } catch {}
+      return () => {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(ROBE_V2_QUEUE_LOCK_PATH); } catch {}
+      };
+    } catch (e) {
+      const code = String(e && e.code || '');
+      if (code !== 'EEXIST') throw e;
+      try {
+        const st = fs.statSync(ROBE_V2_QUEUE_LOCK_PATH);
+        if ((Date.now() - Number(st.mtimeMs || 0)) > staleMs) {
+          try { fs.unlinkSync(ROBE_V2_QUEUE_LOCK_PATH); } catch {}
+        }
+      } catch {}
+      await sleep(delayMs + Math.floor(Math.random() * 20));
+    }
+  }
+  throw new Error('robe_v2_lock_timeout');
+}
+
+async function withRobeV2QueueLock(mutator) {
+  const release = await acquireRobeV2FileLock();
+  try {
+    const current = readRobeV2QueueState();
+    const next = await mutator(current);
+    const finalState = next && typeof next === 'object' ? next : current;
+    finalState.updatedAt = Date.now();
+    if (!writeJsonAtomic(ROBE_V2_QUEUE_PATH, finalState)) throw new Error('robe_v2_state_persist_failed');
+    return finalState;
+  } finally {
+    try { release(); } catch {}
+  }
+}
+
+function calcRobeV2PlanTargetN(cfg) {
+  const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const cMin = Math.max(1, Number(robeCfg.cooldownMinMinutes || 25) || 25);
+  const cMax = Math.max(cMin, Number(robeCfg.cooldownMaxMinutes || 50) || 50);
+  const avgCooldownMin = Math.max(1, (cMin + cMax) / 2);
+  const totalProfiles = Math.max(0, loadTotalProfilesCount());
+  const perAccount = 1440 / avgCooldownMin;
+  const targetN = Math.max(1, Math.ceil(perAccount * totalProfiles));
+  return { targetN, totalProfiles, avgCooldownMin };
+}
+
+function computeRobeV2Counts({ cities, statsByCity, targetN } = {}) {
+  const cityList = Array.isArray(cities) ? cities.map((c) => String(c || '').trim()).filter(Boolean) : [];
+  const n = Math.max(1, Number(targetN || 0) || 1);
+  if (!cityList.length) return { ok: false, error: 'no_cities' };
+  const refs = [];
+  const pops = [];
+  const rows = cityList.map((city) => {
+    const rec = statsByCity && statsByCity[city] ? statsByCity[city] : {};
+    const pop = Number(rec && rec.habitantes);
+    const ins = Number(rec && rec.insightPercent);
+    if (Number.isFinite(pop) && pop > 0) pops.push(pop);
+    if (Number.isFinite(ins) && ins > 0) refs.push(ins);
+    return {
+      city,
+      habitantes: Number.isFinite(pop) && pop > 0 ? pop : null,
+      insightPercent: Number.isFinite(ins) && ins > 0 ? ins : null,
+      motoristas: Number(rec && rec.motoristas || 0) || 0,
+      chamados3d: Number(rec && rec.chamados3d || 0) || 0
+    };
+  });
+  const sortedRefs = refs.slice(0).sort((a, b) => a - b);
+  const sortedPops = pops.slice(0).sort((a, b) => a - b);
+  const refInsight = sortedRefs.length ? sortedRefs[Math.floor(sortedRefs.length / 2)] : 1;
+  const popFallback = sortedPops.length ? sortedPops[Math.floor(sortedPops.length / 2)] : 1;
+  // Ajuste de justiça (enterprise):
+  // - insight é mais importante;
+  // - habitantes conta, mas com força reduzida (alpha pequeno);
+  // - casos de insight nulo/zero NÃO podem premiar cidade sem motoristas.
+  const alpha = 0.10;
+  const beta = 1.0;
+  const minBoost = 0.35;
+  const maxBoost = 3.0;
+  const noDriversFactor = 0.06;          // penalidade forte: sem motoristas => quase não recebe slots
+  const lowDriversMinFactor = 0.22;      // piso para "tem motoristas, mas poucos" (penaliza sem zerar)
+  const lowDriversGamma = 0.70;          // quão rápido penaliza cidades com poucos motoristas
+
+  // Referência de motoristas: mediana das cidades com motoristas > 0 (robusto a outliers).
+  const driversRef = (() => {
+    const arr = rows
+      .map(r => Number(r && r.motoristas || 0) || 0)
+      .filter(x => Number.isFinite(x) && x > 0)
+      .sort((a, b) => a - b);
+    if (!arr.length) return 1;
+    return Math.max(1, arr[Math.floor(arr.length / 2)] || 1);
+  })();
+  for (const r of rows) {
+    const pop = Number.isFinite(r.habitantes) && r.habitantes > 0 ? r.habitantes : popFallback;
+    const insVal = Number(r.insightPercent);
+    const hasInsight = Number.isFinite(insVal);
+    const motoristas = Number(r.motoristas || 0) || 0;
+    const hasDrivers = motoristas > 0;
+
+    const capBoostByDrivers = hasDrivers
+      ? Math.min(maxBoost, 1 + Math.log1p(motoristas)) // motoristas baixos não podem "bater o teto 3x" com tanta facilidade
+      : 1;
+
+    // Boost por insight:
+    // - insight > 0 => inverso normal com clamp
+    // - insight == 0 => trata como "muito baixo" (boost=maxBoost) sem dividir por zero
+    // - insight nulo => neutro (boost=1) para não "inventar" boost por falta de dado
+    let boost = 1;
+    if (hasInsight && insVal > 0) {
+      const raw = Math.pow(refInsight / insVal, beta);
+      boost = Math.max(minBoost, Math.min(capBoostByDrivers, raw));
+    } else if (hasInsight && insVal <= 0 && hasDrivers) {
+      // Guardrail: insight=0 com 1 único motorista tende a "explodir" alocação (fica boost alto demais).
+      // Nesses casos, trate como neutro (boost=1) e deixe habitantes+supply resolverem.
+      boost = (motoristas <= 1) ? 1 : capBoostByDrivers;
+    }
+
+    // Penalidade por baixo supply (enterprise):
+    // - sem motoristas => penalidade forte
+    // - com motoristas => só penaliza quando está abaixo do "normal" (driversRef); nunca dá bônus > 1 (evita dobrar o efeito do insight).
+    let supplyFactor = 1;
+    if (!hasDrivers) {
+      supplyFactor = noDriversFactor;
+    } else {
+      const ratio = motoristas / Math.max(1, driversRef);
+      const raw = Math.pow(Math.max(0.0001, ratio), lowDriversGamma);
+      supplyFactor = Math.max(lowDriversMinFactor, Math.min(1, raw));
+    }
+
+    r._weight = Math.max(0.0001, Math.pow(Math.max(1, pop), alpha) * boost * supplyFactor);
+  }
+  const weightSum = rows.reduce((acc, r) => acc + r._weight, 0);
+  if (!(weightSum > 0)) return { ok: false, error: 'weights_invalid' };
+  let assigned = 0;
+  for (const r of rows) {
+    const raw = n * (r._weight / weightSum);
+    r._raw = raw;
+    r._count = Math.floor(raw);
+    r._rest = raw - r._count;
+    assigned += r._count;
+  }
+  let missing = n - assigned;
+  rows.sort((a, b) => b._rest - a._rest);
+  for (let i = 0; i < rows.length && missing > 0; i++, missing--) rows[i]._count += 1;
+  rows.sort((a, b) => String(a.city).localeCompare(String(b.city), 'pt-BR'));
+  const countsByCity = {};
+  for (const r of rows) countsByCity[r.city] = Math.max(0, Number(r._count || 0) || 0);
+  return {
+    ok: true,
+    countsByCity,
+    rows: rows.map((r) => ({
+      city: r.city,
+      habitantes: r.habitantes,
+      insightPercent: r.insightPercent,
+      motoristas: r.motoristas,
+      chamados3d: r.chamados3d,
+      weight: Number(r._weight.toFixed(6)),
+      count: r._count
+    })),
+    params: { alpha, beta, minBoost, maxBoost, refInsight, popFallback, noDriversFactor, lowDriversMinFactor, lowDriversGamma, driversRef }
+  };
+}
+
+function buildRobeV2ShuffledQueue(countsByCity) {
+  const rem = {};
+  const queue = [];
+  let total = 0;
+  for (const [city, cnt] of Object.entries(countsByCity || {})) {
+    const c = Math.max(0, Number(cnt || 0) || 0);
+    if (!c) continue;
+    rem[city] = c;
+    total += c;
+  }
+  let prev = '';
+  while (total > 0) {
+    const candidates = Object.keys(rem).filter((c) => rem[c] > 0);
+    if (!candidates.length) break;
+    let sum = 0;
+    const weighted = candidates.map((city) => {
+      const base = rem[city];
+      const penalty = (city === prev && candidates.length > 1) ? 0.35 : 1;
+      const w = Math.max(0.0001, base * penalty);
+      sum += w;
+      return { city, w };
+    });
+    let pick = Math.random() * sum;
+    let chosen = weighted[weighted.length - 1].city;
+    for (const row of weighted) {
+      pick -= row.w;
+      if (pick <= 0) {
+        chosen = row.city;
+        break;
+      }
+    }
+    queue.push(chosen);
+    rem[chosen] -= 1;
+    total -= 1;
+    prev = chosen;
+  }
+  return queue;
+}
+
+async function fetchRobeV2CityStatsFromCT(cities) {
+  const ct = resolveCtSecretConfig();
+  if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
+  const hostId = readHostIdSafe();
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const timeout = setTimeout(() => { try { ac.abort(); } catch {} }, 10000);
+    const resp = await fetch(`${ct.base}/api/robe/v2/city_stats_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': ct.secret },
+      body: JSON.stringify({ hostId, windowDays: 3, cities }),
+      signal: ac.signal
+    });
+    clearTimeout(timeout);
+    const j = await resp.json().catch(() => null);
+    if (!j || j.ok !== true) {
+      return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
+    }
+    return { ok: true, statsByCity: j.statsByCity || {}, requestId: j.requestId || null, missingCities: Array.isArray(j.missingCities) ? j.missingCities : [] };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
+  const cfg = serverConfig.readServerConfigEffective();
+  const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
+  if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
+  const plan = calcRobeV2PlanTargetN(cfg);
+  const stats = await fetchRobeV2CityStatsFromCT(cities);
+  if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
+  const calc = computeRobeV2Counts({ cities, statsByCity: stats.statsByCity, targetN: plan.targetN });
+  if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
+  const queue = buildRobeV2ShuffledQueue(calc.countsByCity);
+  if (!queue.length) return { ok: false, error: 'empty_queue_generated' };
+  const now = Date.now();
+  return {
+    ok: true,
+    queue,
+    prefetchThreshold: Math.max(5, Math.min(20, Math.floor(Math.max(1, queue.length) * 0.1) || 20)),
+    meta: {
+      reason,
+      requestId: stats.requestId || null,
+      generatedAt: now,
+      citiesCount: cities.length,
+      configSig: JSON.stringify({
+        workMode: String(robeCfg.workMode || 'v1'),
+        cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
+        cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
+        cities: cities.map((c) => cityNormKey(c))
+      }),
+      totalProfiles: plan.totalProfiles,
+      avgCooldownMin: Number(plan.avgCooldownMin.toFixed(3)),
+      targetN: plan.targetN,
+      missingCities: stats.missingCities || [],
+      params: calc.params || null,
+      rows: calc.rows
+    },
+    planGeneratedAt: now,
+    planValidUntil: now + ROBE_V2_REGEN_COOLDOWN_MS,
+    planTargetN: plan.targetN
+  };
+}
+
+async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false } = {}) {
+  if (!robeV2RegenPromise) {
+    robeV2RegenPromise = (async () => {
+      let generationId = null;
+      try {
+        await withRobeV2QueueLock((state) => {
+          const now = Date.now();
+          const backoffUntil = Number(state.failures && state.failures.backoffUntil || 0) || 0;
+          if (backoffUntil > now) return state;
+          if (state.regenPending === true) return state;
+          generationId = `${process.pid}:${now}:${Math.random().toString(16).slice(2, 8)}`;
+          state.regenPending = true;
+          state.regenInFlightId = generationId;
+          return state;
+        });
+        if (!generationId) return { ok: true, skipped: true, reason: 'regen_already_pending_or_backoff' };
+        const block = await generateRobeV2QueueBlock({ reason });
+        await withRobeV2QueueLock((state) => {
+          const same = String(state.regenInFlightId || '') === String(generationId || '');
+          state.regenPending = false;
+          state.regenInFlightId = null;
+          if (!same) return state;
+          if (!block.ok) {
+            const failCount = Math.max(1, Number(state.failures && state.failures.count || 0) + 1);
+            const backoff = Math.min(30 * 60 * 1000, Math.max(30 * 1000, (2 ** Math.min(8, failCount)) * 1000));
+            state.failures = { count: failCount, lastAt: Date.now(), backoffUntil: Date.now() + backoff };
+            state.meta = {
+              ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
+              lastError: String(block.error || 'regen_failed'),
+              lastErrorAt: Date.now()
+            };
+            return state;
+          }
+          const oldLen = Array.isArray(state.queue) ? state.queue.length : 0;
+          const consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0);
+          state.queue = (Array.isArray(state.queue) ? state.queue : []).concat(block.queue);
+          state.prefetchThreshold = Number(block.prefetchThreshold || state.prefetchThreshold || 20) || 20;
+          state.planGeneratedAt = Number(block.planGeneratedAt || Date.now()) || Date.now();
+          state.planValidUntil = Number(block.planValidUntil || (Date.now() + ROBE_V2_REGEN_COOLDOWN_MS)) || (Date.now() + ROBE_V2_REGEN_COOLDOWN_MS);
+          state.planTargetN = Number(block.planTargetN || 0) || 0;
+          state.lastRegenAt = Date.now();
+          state.failures = { count: 0, lastAt: 0, backoffUntil: 0 };
+          state.meta = block.meta || null;
+
+          // Observabilidade: "último bloco" (mesmo se foi prefetch com itens antigos ainda na frente).
+          state.lastBlock = {
+            generatedAt: Number(block.meta && block.meta.generatedAt || state.planGeneratedAt || Date.now()) || Date.now(),
+            targetN: Number(block.meta && block.meta.targetN || state.planTargetN || 0) || 0,
+            citiesCount: Number(block.meta && block.meta.citiesCount || 0) || null,
+            reason: String(block.meta && block.meta.reason || reason || '').slice(0, 120) || null,
+            requestId: (block.meta && block.meta.requestId) ? String(block.meta.requestId) : null,
+            params: (block.meta && block.meta.params) ? block.meta.params : null,
+            rows: Array.isArray(block.meta && block.meta.rows) ? block.meta.rows : null
+          };
+          state.lastBlockQueueLen = Array.isArray(block.queue) ? block.queue.length : 0;
+          state.lastBlockStartAtConsumedTotal = consumedTotal + oldLen; // quando o primeiro item do novo bloco será consumido
+          return state;
+        });
+        return { ok: true };
+      } catch (e) {
+        try {
+          await withRobeV2QueueLock((state) => {
+            state.regenPending = false;
+            state.regenInFlightId = null;
+            const failCount = Math.max(1, Number(state.failures && state.failures.count || 0) + 1);
+            const backoff = Math.min(30 * 60 * 1000, Math.max(30 * 1000, (2 ** Math.min(8, failCount)) * 1000));
+            state.failures = { count: failCount, lastAt: Date.now(), backoffUntil: Date.now() + backoff };
+            state.meta = {
+              ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
+              lastError: String((e && e.message) || e || 'regen_exception'),
+              lastErrorAt: Date.now()
+            };
+            return state;
+          });
+        } catch {}
+        return { ok: false, error: (e && e.message) || String(e) };
+      } finally {
+        robeV2RegenPromise = null;
+      }
+    })();
+  }
+  if (wait) return robeV2RegenPromise;
+  robeV2RegenPromise.catch(() => {});
+  return { ok: true, queued: true };
+}
+
+async function pickPostingCityForRunV2() {
+  const cfg = serverConfig.readServerConfigEffective();
+  const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const cfgCities = normalizeCityList(robeCfg.cidadesExtrasGlobais);
+  const expectedSig = JSON.stringify({
+    workMode: String(robeCfg.workMode || 'v1'),
+    cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
+    cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
+    cities: cfgCities.map((c) => cityNormKey(c))
+  });
+  let chosen = '';
+  let queueAfter = 0;
+  let threshold = 20;
+  let expiredPlan = false;
+  await withRobeV2QueueLock((state) => {
+    const stateSig = String(state && state.meta && state.meta.configSig || '');
+    if (stateSig && stateSig !== expectedSig) {
+      state.queue = [];
+      state.planValidUntil = 0;
+      state.planGeneratedAt = 0;
+      state.meta = {
+        ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
+        configMismatchDetectedAt: Date.now(),
+        configMismatch: true
+      };
+    }
+    const q = Array.isArray(state.queue) ? state.queue : [];
+    if (q.length > 0) {
+      chosen = String(q.shift() || '').trim();
+      if (chosen) state.consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0) + 1;
+    }
+    state.queue = q;
+    queueAfter = q.length;
+    threshold = Math.max(1, Number(state.prefetchThreshold || 20) || 20);
+    expiredPlan = Number(state.planValidUntil || 0) > 0 && Number(state.planValidUntil || 0) <= Date.now();
+    return state;
+  });
+  if (!chosen) {
+    await scheduleRobeV2Regeneration({ reason: 'empty_queue_blocking', wait: true });
+    await withRobeV2QueueLock((state) => {
+      const q = Array.isArray(state.queue) ? state.queue : [];
+      if (q.length > 0) {
+        chosen = String(q.shift() || '').trim();
+        if (chosen) state.consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0) + 1;
+      }
+      state.queue = q;
+      queueAfter = q.length;
+      threshold = Math.max(1, Number(state.prefetchThreshold || 20) || 20);
+      expiredPlan = Number(state.planValidUntil || 0) > 0 && Number(state.planValidUntil || 0) <= Date.now();
+      return state;
+    });
+  }
+  if (!chosen) throw new Error('robe_v2_queue_empty');
+  if (queueAfter <= threshold || expiredPlan) {
+    scheduleRobeV2Regeneration({ reason: queueAfter <= threshold ? 'prefetch_low_queue' : 'plan_expired', wait: false }).catch(() => {});
+  }
+  return chosen;
 }
 
 // Busca robusta por input com rótulo visível
@@ -977,6 +1480,16 @@ function isCycleCompatible(cycle, pool) {
 }
 
 async function pickPostingCityForRun(nome) {
+  let workMode = 'v1';
+  try {
+    const cfg = serverConfig.readServerConfigEffective();
+    workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
+  } catch {}
+  if (workMode === 'v2_auto') {
+    const city = await pickPostingCityForRunV2();
+    if (!city) throw new Error('robe_v2_city_unavailable');
+    return city;
+  }
   let chosen = 'São Paulo';
   await manifestStore.update(nome, (m) => {
     m = m || {};
@@ -2975,9 +3488,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     });
 
     // LOCALIZAÇÃO
+    let robeWorkMode = 'v1';
+    try {
+      const cfgNow = serverConfig.readServerConfigEffective();
+      robeWorkMode = String(cfgNow && cfgNow.robe && cfgNow.robe.workMode || 'v1').trim().toLowerCase();
+    } catch {}
     try {
       cidadePerfil = await pickPostingCityForRun(nome);
     } catch {}
+    if (!cidadePerfil && robeWorkMode === 'v2_auto') {
+      throw new Error('robe_v2_city_unavailable');
+    }
     if (!cidadePerfil) cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });

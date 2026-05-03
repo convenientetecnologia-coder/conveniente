@@ -282,7 +282,7 @@
     <button class="btn btn-verde" id="resumeAllBtn">Retomar Tudo</button>
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
     <button class="btn btn-branco" id="robeReleaseAllBtn">Liberar Robe</button>
-    <button class="btn btn-cinza" id="unfreezeAllBtn">Descongelar</button>
+    <button class="btn btn-cinza" id="robePostingsBtn">Postagens</button>
 
     <!-- >>> BUSCA: imediatamente antes dos filtros <<< -->
     <div class="search-group">
@@ -314,7 +314,7 @@
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn','serverConfigBtn'];
+      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','robePostingsBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn','serverConfigBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -1105,6 +1105,14 @@
           </div>
         </div>
         <div class="form-row">
+          <label>Robe — tipo de trabalho</label>
+          <select id="srvRobeWorkMode">
+            <option value="v1">Robe V1</option>
+            <option value="v2_auto">Robe V2 automatizado</option>
+          </select>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras da conta + extras globais. Robe V2 automatizado usa apenas as cidades globais do servidor com distribuição por Habitantes x Insight.</div>
+        </div>
+        <div class="form-row">
           <label>Robe — política de deleção de foto</label>
           <select id="srvPhotoDeletePolicy">
             <option value="after_all_working_posted">Postar em todas as contas trabalhando, depois apagar</option>
@@ -1121,7 +1129,7 @@
             <button class="btn" type="button" id="srvGlobalCitiesToggleAll">Selecionar todas</button>
           </div>
           <div id="srvGlobalCitiesWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Aplicadas para todas as contas do servidor. O pool final de postagem por conta fica: cidade principal + extras da conta + extras globais (sem duplicidade).</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Aplicadas para todas as contas do servidor. No Robe V1 entram no pool com cidade principal e extras da conta; no Robe V2 automatizado são a única fonte de cidades para postagem.</div>
         </div>
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
@@ -1133,6 +1141,7 @@
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
       const cdMaxEl = box.querySelector('#srvCooldownMax');
+      const workModeEl = box.querySelector('#srvRobeWorkMode');
       const photoPolicyEl = box.querySelector('#srvPhotoDeletePolicy');
       const globalCitiesFilterEl = box.querySelector('#srvGlobalCitiesFilter');
       const globalCitiesWrapEl = box.querySelector('#srvGlobalCitiesWrap');
@@ -1246,6 +1255,7 @@
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
         cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
+        workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         infoEl.className = 'pill info';
@@ -1312,6 +1322,7 @@
             robe: {
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
+              workMode: String((workModeEl && workModeEl.value) || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1',
               photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted'),
               cidadesExtrasGlobais: (() => {
                 syncGlobalSelectedFromChecks();
@@ -2904,25 +2915,162 @@
       }
     })();
 
-    // Toolbar: botão "Descongelar todos"
-    (function bindUnfreezeAllBtn(){
-      const btn = document.getElementById('unfreezeAllBtn');
+    function fmtInt(n) {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return '—';
+      return Math.round(x).toLocaleString('pt-BR');
+    }
+    function fmtFloat(n, digits=2) {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return '—';
+      return x.toLocaleString('pt-BR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    }
+
+    async function fetchRobeV2PostingsState({ offset = 0, limit = 800 } = {}) {
+      const r = await fetch(`/api/robes/v2/postings_state?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`).then(x => x.json()).catch(()=>null);
+      if (!r || r.ok !== true) throw new Error((r && (r.error || r.message)) ? (r.error || r.message) : 'fetch_failed');
+      return r;
+    }
+
+    function showRobePostingsModal() {
+      const overlay = document.createElement('div'); overlay.className = 'modal-ov';
+      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth = '980px';
+      box.innerHTML = `
+        <h2>Postagens (Robe V2)</h2>
+        <div id="robePostingsInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando...</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+          <div class="pill info" id="robePostingsPillMode"><span class="dot"></span>Modo: —</div>
+          <div class="pill info" id="robePostingsPillTotal"><span class="dot"></span>Total (último bloco): —</div>
+          <div class="pill info" id="robePostingsPillRemain"><span class="dot"></span>Restantes (último bloco): —</div>
+          <div class="pill info" id="robePostingsPillQueue"><span class="dot"></span>Fila atual: —</div>
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr; gap:10px;">
+          <div style="border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+              <b>Distribuição do último bloco</b>
+              <button class="btn" id="robePostingsRefresh">Atualizar</button>
+            </div>
+            <div id="robePostingsCounts" class="muted" style="font-size:12px;">—</div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+              <b>Sequência da fila (próximas postagens)</b>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <span class="muted" id="robePostingsQueueMeta" style="font-size:12px;">—</span>
+                <button class="btn" id="robePostingsLoadMore">Carregar mais</button>
+              </div>
+            </div>
+            <div id="robePostingsQueue" style="max-height:320px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:8px; background:#09111f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; line-height:1.45;"></div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="robePostingsClose">Fechar</button>
+        </div>
+      `;
+      overlay.append(box);
+      document.body.append(overlay);
+
+      const infoEl = box.querySelector('#robePostingsInfo');
+      const pillMode = box.querySelector('#robePostingsPillMode');
+      const pillTotal = box.querySelector('#robePostingsPillTotal');
+      const pillRemain = box.querySelector('#robePostingsPillRemain');
+      const pillQueue = box.querySelector('#robePostingsPillQueue');
+      const countsEl = box.querySelector('#robePostingsCounts');
+      const queueEl = box.querySelector('#robePostingsQueue');
+      const queueMetaEl = box.querySelector('#robePostingsQueueMeta');
+      const btnMore = box.querySelector('#robePostingsLoadMore');
+      const btnRefresh = box.querySelector('#robePostingsRefresh');
+      const btnClose = box.querySelector('#robePostingsClose');
+
+      let pageOffset = 0;
+      const pageLimit = 800;
+      let queueTotal = 0;
+      let loading = false;
+
+      function renderCounts(lastBlock) {
+        if (!lastBlock) {
+          countsEl.innerHTML = `<div class="muted">Nenhum bloco V2 gerado ainda. (Robe V2 precisa rodar/gerar a fila.)</div>`;
+          return;
+        }
+        const rows = Array.isArray(lastBlock.rows) ? lastBlock.rows : [];
+        if (!rows.length) {
+          countsEl.innerHTML = `<div class="muted">Sem detalhes do último bloco (rows vazias).</div>`;
+          return;
+        }
+        const sorted = rows.slice(0).sort((a, b) => (Number(b.count||0)||0) - (Number(a.count||0)||0));
+        const lines = sorted.map(r => {
+          const city = String(r.city || '').trim() || '—';
+          const count = fmtInt(r.count);
+          return `<div><b>${city}</b>: ${count}</div>`;
+        }).join('');
+        countsEl.innerHTML = lines;
+      }
+
+      function appendQueue(items, baseIndex) {
+        const frag = document.createDocumentFragment();
+        for (let i = 0; i < items.length; i++) {
+          const idx = baseIndex + i + 1;
+          const div = document.createElement('div');
+          div.textContent = `${String(idx).padStart(5,' ')}. ${String(items[i] || '').trim()}`;
+          frag.appendChild(div);
+        }
+        queueEl.appendChild(frag);
+      }
+
+      async function loadPage({ reset = false } = {}) {
+        if (loading) return;
+        loading = true;
+        try {
+          if (reset) {
+            pageOffset = 0;
+            queueEl.innerHTML = '';
+          }
+          const data = await fetchRobeV2PostingsState({ offset: pageOffset, limit: pageLimit });
+          infoEl.className = 'pill info';
+          infoEl.innerHTML = `<span class="dot"></span>OK | ts=${new Date(Number(data.ts||Date.now())).toLocaleString('pt-BR')}`;
+
+          pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${String(data.workMode || 'v1')}</b>`;
+          queueTotal = Number(data.queueTotal || 0) || 0;
+          pillQueue.innerHTML = `<span class="dot"></span>Fila atual: <b>${fmtInt(queueTotal)}</b>`;
+
+          const lb = data.lastBlock || null;
+          if (!lb) {
+            pillTotal.innerHTML = `<span class="dot"></span>Total (último bloco): —`;
+            pillRemain.innerHTML = `<span class="dot"></span>Restantes (último bloco): —`;
+          } else {
+            pillTotal.innerHTML = `<span class="dot"></span>Total (último bloco): <b>${fmtInt(lb.queueLen || lb.targetN || 0)}</b>`;
+            pillRemain.innerHTML = `<span class="dot"></span>Restantes (último bloco): <b>${fmtInt(lb.remaining || 0)}</b> (consumidas: ${fmtInt(lb.consumed || 0)})`;
+          }
+          renderCounts(lb);
+
+          const items = Array.isArray(data.queue) ? data.queue : [];
+          appendQueue(items, pageOffset);
+          pageOffset += items.length;
+          queueMetaEl.textContent = `Mostrando ${fmtInt(pageOffset)} de ${fmtInt(queueTotal)} (página=${fmtInt(items.length)})`;
+          btnMore.disabled = pageOffset >= queueTotal;
+          btnMore.textContent = btnMore.disabled ? 'Fim da fila' : 'Carregar mais';
+        } catch (e) {
+          infoEl.className = 'pill bad';
+          infoEl.innerHTML = `<span class="dot"></span>Falha: ${String(e && e.message || e)}`;
+        } finally {
+          loading = false;
+        }
+      }
+
+      btnMore.onclick = () => loadPage({ reset: false });
+      btnRefresh.onclick = () => loadPage({ reset: true });
+      btnClose.onclick = () => { try { overlay.remove(); } catch {} };
+      overlay.onclick = (ev) => { if (ev.target === overlay) { try { overlay.remove(); } catch {} } };
+
+      loadPage({ reset: true }).catch(()=>{});
+    }
+
+    // Toolbar: botão "Postagens"
+    (function bindRobePostingsBtn(){
+      const btn = document.getElementById('robePostingsBtn');
       if (!btn) return;
       btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        if (!confirm('Descongelar todos os perfis agora?')) return;
-        btn.disabled = true; btn.textContent = 'Descongelando...';
-        try {
-          const r = await fetch('/api/perfis/unfreeze-all', { method: 'POST' }).then(r=>r.json());
-          if (!r || !r.ok) alert('Falha ao descongelar todos: ' + ((r && r.error) || ''));
-          await new Promise(r=>setTimeout(r, 600));
-          reloadPerfis();
-        } catch (e) {
-          alert('Erro ao descongelar todos: ' + (e && e.message || e));
-        } finally {
-          btn.disabled = false;
-          btn.textContent = 'Descongelar';
-        }
+        try { showRobePostingsModal(); } catch (e) { alert('Falha ao abrir modal: ' + (e && e.message || e)); }
       };
     })();
 

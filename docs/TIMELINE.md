@@ -31,6 +31,38 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-05-03 — [CT][OPS] Virtus/Grupos: adicionada coluna “Chamados 3 dias” (janela usada no insight)
+
+- **O que**:
+  - tabela “Todos os grupos” no Virtus ganhou coluna **Chamados 3 dias** (janela `recent3d`) entre “ontem” e “mês”.
+- **Por quê**: evitar leitura enganosa (o insight já usa janela 3d; antes a UI só mostrava hoje/ontem/mês).
+- **Evidência**:
+  - `C:\sitechatbot\public\virtus.js` (coluna + sort key `chamados_janela`).
+  - cálculo da janela/insight: `C:\sitechatbot\index.js` endpoint `GET /api/dashboard/virtus`.
+- **Reinícios**: nenhum (mudança de asset estático; pode precisar **hard refresh** no browser: `Ctrl+F5`).
+- **Rollback**: reverter a mudança no `public/virtus.js` e atualizar o CT (sem mudança de dados).
+
+#### 2026-05-03 — [CT][OPS] Virtus/Grupos: coluna “Habitantes” (editável) + remoção de colunas “Contas” e “Cidades”
+
+- **O que**:
+  - removidas do grid “Todos os grupos” as colunas **Contas (A/LR/LE/B)** e **Cidades** (ocupavam espaço e confundiam leitura humana);
+  - adicionada coluna **Habitantes** (cidade primária / `matrizCity`) com **edição inline** (clique → digita → Enter/blur salva);
+  - criado storage canônico com seed IBGE 2025 + override local:
+    - seed versionado: `C:\sitechatbot\tools\seed_city_population_ibge_6579_2025.json`
+    - override local (host): `C:\sitechatbot\dados\city_population.json` (ignorado pelo git).
+- **Por quê**: permitir leitura/decisão humana por escala do grupo e evitar conflito de update quando o operador ajustar os valores.
+- **Regra de digitação (humano)**:
+  - o campo aplica **máscara enquanto digita** (ex.: `1111` vira `1.111`);
+  - o número significa **exatamente o valor digitado** (unidades → milhões), com suporte opcional a `k`/`mil` (ex.: `587k` = `587.000`).
+- **Evidência**:
+  - UI: `C:\sitechatbot\public\virtus.js` (coluna Habitantes + edição inline; colunas removidas).
+  - Backend: `C:\sitechatbot\index.js`:
+    - `GET /api/dashboard/virtus` (inclui `habitantes` por grupo)
+    - `POST /api/dashboard/city_population` (salva override).
+  - Seed builder: `C:\sitechatbot\tools\build_city_population_seed_ibge.js` (IBGE agregados 6579/9324, período 2025).
+- **Reinícios**: `sitechatbot` (CT) no host alvo.
+- **Rollback**: reverter mudanças em `public/virtus.js` e `index.js`; apagar `dados/city_population.json` se quiser voltar ao seed puro.
+
 #### 2026-04-28 — [CONV][OPS][DOCS] Trilha canônica Linux (Xubuntu desktop visual) preparada para rollout
 
 - **O que**:
@@ -3369,3 +3401,41 @@ Adendo (ajuste operacional aprovado pelo owner):
   - divergências principais: `missing_in_ct=10`, `ct_not_in_truth=1913`, `truth_without_asaas_customer=26`, `non_legacy_truth_without_subscription=40`, `legacy_truth_with_subscription=1`.
 - **Impacto operacional**:
   - nenhum restart (somente auditoria; sem alteração de runtime).
+
+#### 2026-05-03 — [CONVENIENTE][ROBE][PRE-CODIGO] Desenho completo: “Robe V2 automatizado” (Habitantes × Insight) + fila global atômica + CT endpoint secret
+
+- **Mudança**:
+  - fechado o desenho ponta a ponta (sem codar): seletor V1/V2 no servidor, endpoint CT “secret” para stats por cidade, cálculo do plano diário \(N\), fórmula de distribuição com guardrails (insight 0/null) e fila persistente/atômica com prefetch + anti‑storm.
+- **Evidência**:
+  - checkup/dossiê: `C:\conveniente\docs\checkups\checkup_2026-05-03_robe_v2_automatizado_desenho_pre_codigo.md`
+- **Impacto operacional**:
+  - nenhum restart (pré‑código).
+
+#### 2026-05-03 — [CONVENIENTE+CT][ROBE] Implementação Robe V2 automatizado: workMode, endpoint secret de stats e fila persistente com prefetch
+
+- **Mudança**:
+  - implementado no CT o endpoint `POST /api/robe/v2/city_stats_secret` (auth por `X-Log-Secret`) retornando `habitantes + insightPercent + motoristas + chamados3d` por cidade;
+  - implementado no `conveniente` o seletor de modo `robe.workMode` (`v1`/`v2_auto`) no config de servidor (backend + dashboard);
+  - implementado no runtime do Robe (`scripts/robe.js`) o modo V2 com fila persistente (`dados/robe_v2_queue.json`), lock de arquivo, geração por `Habitantes x Insight`, consumo atômico, prefetch quando fila baixa e anti‑storm com backoff.
+- **Evidência (código/path)**:
+  - `C:\sitechatbot\index.js` (`buildRobeV2CityStats` + `POST /api/robe/v2/city_stats_secret`)
+  - `C:\conveniente\scripts\serverConfig.js` (`robe.workMode` default/validação/persistência)
+  - `C:\conveniente\public\index.html` (campo “Robe — tipo de trabalho”)
+  - `C:\conveniente\scripts\robe.js` (seleção V1/V2 + fila global persistente do V2)
+- **Impacto operacional**:
+  - requer restart de `sitechatbot` (novo endpoint secret) e de `conveniente` (novo runtime/config do Robe V2).
+
+#### 2026-05-03 — [CONVENIENTE][DASHBOARD][ROBE] Botão “Postagens”: modal com distribuição do último bloco + sequência da fila V2 (paginada)
+
+- **Mudança**:
+  - removido do dashboard o botão “Descongelar” (não usado) e adicionado “Postagens”;
+  - “Postagens” abre modal mostrando:
+    - totais por cidade do **último bloco** gerado no Robe V2 (ex.: `Curitiba (PR): 131`, etc.);
+    - contador de consumidas/restantes do último bloco (compatível com prefetch);
+    - lista paginada da **sequência atual da fila** (rolável, “Carregar mais”).
+- **Evidência (código/path)**:
+  - UI: `C:\conveniente\public\index.html` (`#robePostingsBtn` + modal)
+  - API: `C:\conveniente\scripts\api_robes.js` (`GET /api/robes/v2/postings_state`)
+  - Runtime V2 state: `C:\conveniente\scripts\robe.js` (campos `lastBlock*` + `consumedTotal` em `dados/robe_v2_queue.json`)
+- **Impacto operacional**:
+  - requer restart do `conveniente` para habilitar o novo endpoint e expor o botão/JS novo.

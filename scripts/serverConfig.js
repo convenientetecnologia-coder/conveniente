@@ -29,6 +29,7 @@ const DEFAULTS = Object.freeze({
     postsPerHourMax: 3.4,
     cooldownMinMinutes: 25,
     cooldownMaxMinutes: 50,
+    workMode: "v1",
     photoDeletePolicy: "after_all_working_posted",
     cidadesExtrasGlobais: []
   }
@@ -132,6 +133,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMaxMinutesRaw = Math.floor(toNum(robe.cooldownMaxMinutes, DEFAULTS.robe.cooldownMaxMinutes));
   const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
+  const workModeRaw = String(robe.workMode || DEFAULTS.robe.workMode).trim().toLowerCase();
+  const workMode = (workModeRaw === "v2_auto") ? "v2_auto" : "v1";
   const cidadesExtrasGlobais = normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 });
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
@@ -161,6 +164,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       postsPerHourMax: Number(Math.max(postsPerHourMin, postsPerHourMax).toFixed(3)),
       cooldownMinMinutes,
       cooldownMaxMinutes,
+      workMode,
       photoDeletePolicy,
       cidadesExtrasGlobais
     }
@@ -215,6 +219,12 @@ function validateServerConfigPayload(payload) {
       const p = String(robe.photoDeletePolicy || "").trim().toLowerCase();
       if (!["after_all_working_posted", "after_first_confirmed_post"].includes(p)) {
         errors.push("robe.photoDeletePolicy_invalido");
+      }
+    }
+    if (robe.workMode !== undefined) {
+      const wm = String(robe.workMode || "").trim().toLowerCase();
+      if (!["v1", "v2_auto"].includes(wm)) {
+        errors.push("robe.workMode_invalido");
       }
     }
     if (robe.cidadesExtrasGlobais !== undefined) {
@@ -272,6 +282,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       postsPerHourMax: v.normalized.robe.postsPerHourMax,
       cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
       cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
+      workMode: v.normalized.robe.workMode,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     }

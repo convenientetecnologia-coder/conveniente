@@ -3,6 +3,13 @@ module.exports = (app, workerClient, fileStore) => {
   const manifestStore = require('./manifestStore.js');
   const logger = require('./logger.js');
   const issues = require('./issues.js');
+  const fs = require('fs');
+  const path = require('path');
+  const serverConfig = require('./serverConfig.js');
+
+  function readJsonSafe(fp, fallback) {
+    try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { return fallback; }
+  }
 
   // Robe 24h (TODOS os perfis) — pausa por 24h cada um
   app.post('/api/robes/pause-24h-all', async (req, res) => {
@@ -96,6 +103,49 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro em /api/robes/release-all', {}, e);
       res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // ===== Robe V2: estado de postagens (último bloco + fila atual) =====
+  // UI: dashboard local (public/index.html)
+  app.get('/api/robes/v2/postings_state', (req, res) => {
+    try {
+      const cfg = serverConfig.readServerConfigEffective();
+      const workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1');
+      const DADOS_DIR = path.join(__dirname, '..', 'dados');
+      const fp = path.join(DADOS_DIR, 'robe_v2_queue.json');
+      const st = readJsonSafe(fp, null);
+      const queue = (st && Array.isArray(st.queue)) ? st.queue.map(x => String(x || '').trim()).filter(Boolean) : [];
+      const offset = Math.max(0, Math.floor(Number(req.query?.offset || 0) || 0));
+      const limit = Math.max(50, Math.min(5000, Math.floor(Number(req.query?.limit || 800) || 800)));
+      const slice = queue.slice(offset, offset + limit);
+      const consumedTotal = st ? (Math.max(0, Number(st.consumedTotal || 0) || 0)) : 0;
+      const lastBlockStartAt = st ? (Math.max(0, Number(st.lastBlockStartAtConsumedTotal || 0) || 0)) : 0;
+      const lastBlockLen = st ? (Math.max(0, Number(st.lastBlockQueueLen || 0) || 0)) : 0;
+      const lastBlock = (st && st.lastBlock && typeof st.lastBlock === 'object') ? st.lastBlock : null;
+      const consumedInLastBlock = Math.max(0, Math.min(lastBlockLen, consumedTotal - lastBlockStartAt));
+      const remainingInLastBlock = Math.max(0, lastBlockLen - consumedInLastBlock);
+
+      return res.json({
+        ok: true,
+        ts: Date.now(),
+        workMode,
+        hasStateFile: !!st,
+        statePath: fp,
+        queueTotal: queue.length,
+        queuePage: { offset, limit, returned: slice.length },
+        queue: slice,
+        consumedTotal,
+        lastBlock: lastBlock ? {
+          ...lastBlock,
+          queueLen: lastBlockLen,
+          startAtConsumedTotal: lastBlockStartAt,
+          consumed: consumedInLastBlock,
+          remaining: remainingInLastBlock
+        } : null
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
 };
