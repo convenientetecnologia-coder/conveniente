@@ -325,6 +325,18 @@
       });
     }
 
+    // Escape global (enterprise): usado em múltiplos modais.
+    // Importante: não depender de helpers locais (evita "escapeHtml is not defined").
+    function escapeHtml(s) {
+      const str = String((s == null) ? '' : s);
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // Util: tempo restante
     function tempoRestante(seg) {
       if (seg <= 0) return 'Pronto!';
@@ -3203,6 +3215,11 @@
             body: JSON.stringify({})
           }).then(x => x.json()).catch(()=>null);
           if (!r || r.ok !== true) throw new Error((r && (r.error || r.message)) ? (r.error || r.message) : 'recalc_failed');
+          const rr = r && r.result ? r.result : null;
+          if (rr && rr.ok === false) {
+            const err = rr.error ? String(rr.error) : 'worker_recalc_failed';
+            throw new Error(err);
+          }
           await loadPage({ reset: true });
         } catch (e) {
           alert('Falha ao recalcular: ' + (e && e.message || e));

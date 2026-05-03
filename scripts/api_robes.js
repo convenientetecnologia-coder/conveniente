@@ -163,6 +163,9 @@ module.exports = (app, workerClient, fileStore) => {
         reason: `dashboard_recalc:${operator}`,
         force: true
       }, { timeoutMs: 60000 });
+      if (!r || r.ok !== true) {
+        return res.json({ ok: false, error: (r && r.error) ? String(r.error) : 'robe_v2_recalc_failed', result: r || null });
+      }
       return res.json({ ok: true, result: r || null });
     } catch (e) {
       return res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
