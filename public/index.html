@@ -2955,6 +2955,7 @@
           <div class="pill info" id="robePostingsPillTotal"><span class="dot"></span>Total (último bloco): —</div>
           <div class="pill info" id="robePostingsPillRemain"><span class="dot"></span>Restantes (último bloco): —</div>
           <div class="pill info" id="robePostingsPillQueue"><span class="dot"></span>Fila atual: —</div>
+          <div class="pill info" id="robePostingsPillConsumed"><span class="dot"></span>Consumidas (total): —</div>
         </div>
         <div style="display:grid; grid-template-columns: 1fr; gap:10px;">
           <div style="border:1px solid var(--border); border-radius:10px; padding:10px; background:#0a1322;">
@@ -2992,6 +2993,7 @@
       const pillTotal = box.querySelector('#robePostingsPillTotal');
       const pillRemain = box.querySelector('#robePostingsPillRemain');
       const pillQueue = box.querySelector('#robePostingsPillQueue');
+      const pillConsumed = box.querySelector('#robePostingsPillConsumed');
       const paramsEl = box.querySelector('#robePostingsParams');
       const countsEl = box.querySelector('#robePostingsCounts');
       const queueEl = box.querySelector('#robePostingsQueue');
@@ -3078,7 +3080,8 @@
 
           pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${String(data.workMode || 'v1')}</b>`;
           queueTotal = Number(data.queueTotal || 0) || 0;
-          pillQueue.innerHTML = `<span class="dot"></span>Fila atual: <b>${fmtInt(queueTotal)}</b>`;
+          const consumedTotal = Math.max(0, Number(data.consumedTotal || 0) || 0);
+          pillConsumed.innerHTML = `<span class="dot"></span>Consumidas (total): <b>${fmtInt(consumedTotal)}</b>`;
 
           const lb = data.lastBlock || null;
           if (!lb) {
@@ -3091,9 +3094,15 @@
           renderCounts(lb);
 
           const items = Array.isArray(data.queue) ? data.queue : [];
+          const head = items.length ? String(items[0] || '').trim() : '';
+          pillQueue.innerHTML = `<span class="dot"></span>Fila atual: <b>${fmtInt(queueTotal)}</b>${head ? (` <span class="muted" style="margin-left:6px;">(topo: ${escapeHtml(head)})</span>`) : ''}`;
           appendQueue(items, pageOffset);
           pageOffset += items.length;
-          queueMetaEl.textContent = `Mostrando ${fmtInt(pageOffset)} de ${fmtInt(queueTotal)} (página=${fmtInt(items.length)})`;
+          const qp = (data && data.queuePage && typeof data.queuePage === 'object') ? data.queuePage : {};
+          const off = Math.max(0, Math.floor(Number(qp.offset != null ? qp.offset : (pageOffset - items.length)) || 0));
+          const lim = Math.max(1, Math.floor(Number(qp.limit != null ? qp.limit : pageLimit) || pageLimit));
+          const ret = Math.max(0, Math.floor(Number(qp.returned != null ? qp.returned : items.length) || items.length));
+          queueMetaEl.textContent = `Mostrando ${fmtInt(pageOffset)} de ${fmtInt(queueTotal)} (offset=${fmtInt(off)}, limit=${fmtInt(lim)}, retornados=${fmtInt(ret)})`;
           btnMore.disabled = pageOffset >= queueTotal;
           btnMore.textContent = btnMore.disabled ? 'Fim da fila' : 'Carregar mais';
         } catch (e) {
