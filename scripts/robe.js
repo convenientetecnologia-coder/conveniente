@@ -925,7 +925,10 @@ async function pickPostingCityForRunV2() {
     workMode: String(robeCfg.workMode || 'v1'),
     cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
     cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
-    cities: cfgCities.map((c) => cityNormKey(c))
+    cities: cfgCities.map((c) => cityNormKey(c)),
+    // IMPORTANTÍSSIMO: precisa espelhar exatamente o que foi salvo em meta.configSig,
+    // senão cada consumo detecta "configMismatch", zera a fila e força regeneração.
+    v2Tuning: (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : null
   });
   let chosen = '';
   let queueAfter = 0;
