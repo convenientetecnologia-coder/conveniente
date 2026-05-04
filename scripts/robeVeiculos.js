@@ -935,6 +935,21 @@ function isCycleCompatible(cycle, pool) {
 }
 
 async function pickPostingCityForRun(nome) {
+  let workMode = 'v1';
+  try {
+    const cfg = serverConfig.readServerConfigEffective();
+    workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
+  } catch {}
+  if (workMode === 'v2_auto') {
+    // Em V2, a cidade vem da fila global do servidor (não do ciclo por conta).
+    const robeMod = require('./robe.js');
+    if (!robeMod || typeof robeMod.pickPostingCityForRunV2 !== 'function') {
+      throw new Error('robe_v2_picker_unavailable');
+    }
+    const city = await robeMod.pickPostingCityForRunV2();
+    if (!city) throw new Error('robe_v2_city_unavailable');
+    return city;
+  }
   let chosen = 'São Paulo';
   await manifestStore.update(nome, (m) => {
     m = m || {};

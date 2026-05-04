@@ -3782,5 +3782,7 @@ function robeQueueFilter(nome) {
 module.exports = {
   startRobe,
   robeQueueFilter,
-  robeV2WarmupNow
+  robeV2WarmupNow,
+  // Exportado para permitir que Robe de veículos consuma a fila V2 também.
+  pickPostingCityForRunV2
 };
