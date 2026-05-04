@@ -180,9 +180,22 @@
     }
     .icon-btn.mini .icon{ width:12px; height:12px }
 
-    /* Modal base */
-    .modal-ov{ position: fixed; inset:0; background: rgba(0,0,0,.46); display:flex; align-items:center; justify-content:center; z-index:9999; }
-    .modal-box{ background:#0f1625; color:var(--text); border:1px solid var(--border); border-radius:12px; max-width:560px; width:92%; padding:18px 18px 16px; box-shadow:0 16px 50px rgba(0,0,0,.45); }
+    /* Modal base — overlay e caixa roláveis (telas baixas / zoom / muito conteúdo) */
+    .modal-ov{
+      position: fixed; inset:0; background: rgba(0,0,0,.46); z-index:9999;
+      display:flex; align-items:flex-start; justify-content:center;
+      overflow-y: auto; overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      padding: 20px 16px 28px;
+      box-sizing: border-box;
+    }
+    .modal-box{
+      background:#0f1625; color:var(--text); border:1px solid var(--border); border-radius:12px;
+      max-width:560px; width:92%; max-height: min(92vh, calc(100vh - 40px));
+      padding:18px 18px 16px; box-shadow:0 16px 50px rgba(0,0,0,.45);
+      overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+      box-sizing: border-box; flex-shrink: 0;
+    }
     .modal-box h2{ margin:6px 0 14px; font-size:18px }
     .form-row{ margin-bottom:12px }
     label{ display:block; margin-bottom:6px; color:#cdd9f0; font-weight:600; font-size:13px }
