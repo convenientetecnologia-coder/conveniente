@@ -2,11 +2,12 @@
 // Política única de RAM (ultra enterprise)
 //
 // Regras:
-// - Operação normal: manter livre (HOST_BASE_MB + 1GB por node)
-// - Provisão (pico cookies): manter livre (HOST_BASE_MB + PROVISION_SPIKE_MB)
-//   (o "1GB por node" é emprestável durante provisão, pois Robe/Virtus ficam controlados)
+// - Operação normal: manter livre (hostBaseMb + reservePer8GbMb × nós), nós = ceil(GB/8)
+// - Provisão (pico cookies): manter livre (hostBaseMb + provisionSpikeMb)
+//   Valores default e limites: server_runtime_config.json → memory (dashboard Config Servidor).
 
 const os = require('os');
+const serverConfig = require('./serverConfig.js');
 
 function mb(x) {
   const n = Number(x);
@@ -25,18 +26,40 @@ function calcNodesByTotalMemMB(totalMB) {
   return nodes;
 }
 
+function getConfigMemory() {
+  try {
+    const cfg = serverConfig.readServerConfigEffective();
+    if (cfg && cfg.memory && typeof cfg.memory === 'object') return cfg.memory;
+  } catch {}
+  return null;
+}
+
 function getHostBaseMB() {
+  const m = getConfigMemory();
+  const v = m && m.hostBaseMb;
+  if (Number.isFinite(Number(v)) && Number(v) > 0) return mb(Number(v));
   return mb(process.env.HOST_BASE_MB || 2048);
 }
 
+function getReservePer8GbMB() {
+  const m = getConfigMemory();
+  const v = m && m.reservePer8GbMb;
+  if (Number.isFinite(Number(v)) && Number(v) >= 0) return mb(Number(v));
+  return 1024;
+}
+
 function getProvisionSpikeMB() {
+  const m = getConfigMemory();
+  const v = m && m.provisionSpikeMb;
+  if (Number.isFinite(Number(v)) && Number(v) > 0) return mb(Number(v));
   return mb(process.env.PROVISION_SPIKE_MB || 1536);
 }
 
 function calcReserveNormalMB(totalMB) {
   const base = getHostBaseMB();
   const nodes = calcNodesByTotalMemMB(totalMB);
-  return base + (nodes * 1024);
+  const per = getReservePer8GbMB();
+  return base + (nodes * per);
 }
 
 function calcReserveProvisionMB(totalMB) {
@@ -50,12 +73,14 @@ function snapshotPolicy() {
   const nodes = calcNodesByTotalMemMB(totalMB);
   const base = getHostBaseMB();
   const spike = getProvisionSpikeMB();
+  const per = getReservePer8GbMB();
   return {
     totalMB,
     nodes,
     hostBaseMB: base,
     provisionSpikeMB: spike,
-    reserveNormalMB: base + (nodes * 1024),
+    reservePer8GbMB: per,
+    reserveNormalMB: base + (nodes * per),
     reserveProvisionMB: base + spike
   };
 }

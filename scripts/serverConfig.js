@@ -17,6 +17,15 @@ const DEFAULTS = Object.freeze({
     accountsPer8Gb: 15,
     maxAccountsOverride: null
   },
+  // Política de RAM (governor + reserva mínima livre para abrir navegador).
+  // Valores em MB. Lidas em runtime a cada tick — salvar no dashboard já vale sem restart.
+  memory: {
+    governorEnterMb: 2048,
+    governorExitMb: 2048,
+    hostBaseMb: 2048,
+    reservePer8GbMb: 1024,
+    provisionSpikeMb: 1536
+  },
   robe: {
     windowStartMin: 360,
     windowEndMin: 1380,
@@ -121,6 +130,7 @@ function calcMaxAccountsEffective({ mode, accountsPer8Gb, maxAccountsOverride, t
 function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "default" } = {}) {
   const r = (raw && typeof raw === "object") ? raw : {};
   const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
+  const memRaw = (r.memory && typeof r.memory === "object") ? r.memory : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
@@ -174,6 +184,13 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     ? "after_first_confirmed_post"
     : "after_all_working_posted";
 
+  let governorEnterMb = clamp(Math.floor(toNum(memRaw.governorEnterMb, DEFAULTS.memory.governorEnterMb)), 256, 32768);
+  let governorExitMb = clamp(Math.floor(toNum(memRaw.governorExitMb, DEFAULTS.memory.governorExitMb)), 256, 32768);
+  if (governorExitMb < governorEnterMb) governorExitMb = governorEnterMb;
+  const hostBaseMb = clamp(Math.floor(toNum(memRaw.hostBaseMb, DEFAULTS.memory.hostBaseMb)), 256, 16384);
+  const reservePer8GbMb = clamp(Math.floor(toNum(memRaw.reservePer8GbMb, DEFAULTS.memory.reservePer8GbMb)), 0, 8192);
+  const provisionSpikeMb = clamp(Math.floor(toNum(memRaw.provisionSpikeMb, DEFAULTS.memory.provisionSpikeMb)), 256, 8192);
+
   const normalized = {
     version: CONFIG_VERSION,
     updatedAt: Math.max(0, Math.floor(toNum(r.updatedAt, 0))),
@@ -184,6 +201,13 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       accountsPer8Gb,
       maxAccountsOverride,
       maxAccountsEffective: 0
+    },
+    memory: {
+      governorEnterMb,
+      governorExitMb,
+      hostBaseMb,
+      reservePer8GbMb,
+      provisionSpikeMb
     },
     robe: {
       windowStartMin,
@@ -232,7 +256,8 @@ function validateServerConfigPayload(payload) {
   const p = (payload && typeof payload === "object") ? payload : {};
   const cap = (p.capacity && typeof p.capacity === "object") ? p.capacity : null;
   const robe = (p.robe && typeof p.robe === "object") ? p.robe : null;
-  if (!cap && !robe) return { ok: false, error: "payload_sem_campos_reconhecidos" };
+  const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
+  if (!cap && !robe && !mem) return { ok: false, error: "payload_sem_campos_reconhecidos" };
 
   const errors = [];
   if (cap) {
@@ -313,13 +338,23 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (mem) {
+    const intFields = ["governorEnterMb", "governorExitMb", "hostBaseMb", "reservePer8GbMb", "provisionSpikeMb"];
+    for (const f of intFields) {
+      if (mem[f] !== undefined) {
+        const n = toNum(mem[f], NaN);
+        if (!Number.isFinite(n)) errors.push(`memory.${f}_invalido`);
+      }
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
     ...DEFAULTS,
     ...(readServerConfigRaw() || {}),
     capacity: { ...DEFAULTS.capacity, ...((readServerConfigRaw() || {}).capacity || {}), ...(cap || {}) },
-    robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) }
+    robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) },
+    memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
@@ -339,6 +374,13 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       mode: v.normalized.capacity.mode,
       accountsPer8Gb: v.normalized.capacity.accountsPer8Gb,
       maxAccountsOverride: v.normalized.capacity.maxAccountsOverride
+    },
+    memory: {
+      governorEnterMb: v.normalized.memory.governorEnterMb,
+      governorExitMb: v.normalized.memory.governorExitMb,
+      hostBaseMb: v.normalized.memory.hostBaseMb,
+      reservePer8GbMb: v.normalized.memory.reservePer8GbMb,
+      provisionSpikeMb: v.normalized.memory.provisionSpikeMb
     },
     robe: {
       windowStartMin: v.normalized.robe.windowStartMin,

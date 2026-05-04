@@ -4199,8 +4199,8 @@ function _pruneWindow(arr, ms) {
 }
 
 const AUTO_CFG = {
-  // Governor (light/full) — configurável por env para tuning em produção:
-  // Política (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
+  // Governor (light/full) — limiares de RAM livre (MB): preferência pelo server_runtime_config.memory
+  // (read a cada tick em governorTick). Env abaixo = fallback se config indisponível.
   MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
   MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
   CPU_ENTER: 85,
@@ -4222,8 +4222,8 @@ const AUTO_CFG = {
 const ramPolicy = require('./ramPolicy.js');
 
 // RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: 2GB + 1GB por node (nós = ceil(totalGB/16))
-// - Durante provision (somente dono do lock): 2GB + pico cookies (~1.5GB)
+// - Operação normal: hostBaseMb + (reservePer8GbMb × nós), nós = ceil(totalGB/8) — ver ramPolicy.js + server_runtime_config.memory
+// - Durante provision (somente dono do lock): hostBaseMb + provisionSpikeMb
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
   if (Number.isFinite(staticOverride) && staticOverride > 0) return staticOverride;
@@ -4290,8 +4290,20 @@ async function governorTick() {
     autoMode.eventLoopLagMaxMs = lag.maxMs;
     autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
-    const memLow = (freeMB > 0 && freeMB < AUTO_CFG.MEM_ENTER_MB);
-    const memHigh = (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB);
+    let memEnterMb = AUTO_CFG.MEM_ENTER_MB;
+    let memExitMb = AUTO_CFG.MEM_EXIT_MB;
+    try {
+      const cfg = serverConfig.readServerConfigEffective();
+      const m = cfg && cfg.memory;
+      if (m) {
+        memEnterMb = Math.max(256, Math.floor(Number(m.governorEnterMb) || memEnterMb));
+        memExitMb = Math.max(256, Math.floor(Number(m.governorExitMb) || memEnterMb));
+        if (memExitMb < memEnterMb) memExitMb = memEnterMb;
+      }
+    } catch {}
+
+    const memLow = (freeMB > 0 && freeMB < memEnterMb);
+    const memHigh = (freeMB > 0 && freeMB >= memExitMb);
     // Política (triagem 2026-01-30): modo leve/full definido por RAM.
     // Lag continua sendo observado (telemetria), mas NÃO deve causar mudança de modo sozinho.
     const pressureNow = memLow;
