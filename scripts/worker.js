@@ -24,6 +24,8 @@ const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
+const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
+const actionFingerprint = require('./orchestrator/actionFingerprint.js');
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -45,6 +47,11 @@ try {
     logIngestSecretConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.logIngestSecret); } catch { return false; } })()
   });
 } catch {}
+orchAudit('worker_boot_orchestrator_audit_ready', {
+  buildTag: WORKER_BUILD_TAG,
+  auditPath: orchestratorAudit.AUDIT_PATH,
+  auditEnabled: orchestratorAudit.enabled()
+});
 
 // ===== AUTO-OPEN BOOT RESET (sempre OFF no boot) =====
 // Regra operacional: ao iniciar o worker, "Tudo aberto" deve ficar desligado
@@ -93,6 +100,41 @@ function appendJsonl(fp, obj) {
   try {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
+  } catch {}
+}
+
+function orchAudit(event, data = {}) {
+  try { orchestratorAudit.append(event, data); } catch {}
+}
+
+function orchActorBegin(actor, data = {}) {
+  try { return orchestratorAudit.begin(actor, data); } catch { return { end() {} }; }
+}
+
+function orchActionRequested(profileId, actionKind, data = {}) {
+  try {
+    const key = actionFingerprint.actionKey({
+      profileId,
+      actionKind,
+      reason: data.reason || data.error || '',
+      source: data.source || data.operator || ''
+    });
+    orchestratorAudit.append('critical_action_requested', {
+      profileId: String(profileId || ''),
+      actionKind: String(actionKind || ''),
+      actionKey: key,
+      ...data
+    });
+  } catch {}
+}
+
+function orchActionDone(profileId, actionKind, result = {}) {
+  try {
+    orchestratorAudit.append('critical_action_done', {
+      profileId: String(profileId || ''),
+      actionKind: String(actionKind || ''),
+      ...result
+    });
   } catch {}
 }
 
@@ -836,6 +878,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
+  orchActionRequested(nome, 'ENTER_HUMAN_MODE', { reason });
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d = d || {}; d.perfis = d.perfis || {};
@@ -854,6 +897,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
+  orchActionDone(nome, 'ENTER_HUMAN_MODE', { ok: true, reason });
 }
 
 // ===== Captcha flow (OCR + retries) =====
@@ -906,6 +950,8 @@ async function enforcePausedNonLrState(nome, { kind = '', source = '' } = {}) {
 async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const startedAt = Date.now();
   const id = String(flowId || newFlowId('captcha'));
+  const __orchAudit = orchActorBegin('runCaptchaFlow', { profileId: nome, source, flowId: id, force: !!force });
+  orchActionRequested(nome, 'RUN_CAPTCHA_FLOW', { source, flowId: id, force: !!force });
   let _locked = false;
   let lastImgSrc = '';
   try {
@@ -1134,6 +1180,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       _captchaFlowRunning = false;
       _captchaFlowRunningNome = null;
     }
+    __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - startedAt });
   }
 }
 
@@ -2960,6 +3007,8 @@ const IDENTITY_FLOW_CFG = {
 async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const now = Date.now();
   const id = String(flowId || newFlowId('identity'));
+  const __orchAudit = orchActorBegin('runIdentityFlow', { profileId: nome, source, flowId: id, force: !!force });
+  orchActionRequested(nome, 'RUN_IDENTITY_FLOW', { source, flowId: id, force: !!force });
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
@@ -3175,6 +3224,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, flowId: id, error: msg };
+  } finally {
+    __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - now });
   }
 }
 
@@ -5109,18 +5160,29 @@ function isFrozenNow(nome) {
 const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
-  if (opening[nome]) return { ok: false, error: 'already_opening' };
+  const __orchAudit = orchActorBegin('activateOnce', { profileId: nome, source, operator });
+  orchActionRequested(nome, 'OPEN_BROWSER', { source, operator });
+  if (opening[nome]) {
+    orchActionDone(nome, 'OPEN_BROWSER', { ok: false, error: 'already_opening', source, operator });
+    __orchAudit.end({ profileId: nome, skipped: true, error: 'already_opening' });
+    return { ok: false, error: 'already_opening' };
+  }
 
   if (controllers.has(nome)) {
+    orchActionDone(nome, 'OPEN_BROWSER', { ok: true, already: true, source, operator });
+    __orchAudit.end({ profileId: nome, already: true });
     return { ok: true, already: true };
   }
 
   const inflight = activationLocks.get(nome);
   if (inflight) {
     try { await inflight.catch(() => {}); } catch {}
-    return controllers.has(nome)
+    const r = controllers.has(nome)
       ? { ok: true, already: true }
       : { ok: false, error: 'activation_in_progress' };
+    orchActionDone(nome, 'OPEN_BROWSER', { ...r, source, operator });
+    __orchAudit.end({ profileId: nome, ...r });
+    return r;
   }
 
   opening[nome] = true;
@@ -5551,6 +5613,8 @@ async function activateOnce(nome, source = '', operator = '') {
     activationLocks.set(nome, job);
     return await job;
   } finally {
+    orchActionDone(nome, 'OPEN_BROWSER', { ok: controllers.has(nome), source, operator });
+    __orchAudit.end({ profileId: nome, hasController: controllers.has(nome) });
     delete opening[nome];
   }
 }
@@ -7190,6 +7254,10 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
 }
 
 async function robeTickGlobal() {
+  const __orchAudit = orchActorBegin('robeTickGlobal', {
+    controllers: controllers.size,
+    autoMode: autoMode && autoMode.mode
+  });
   // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
   try {
     if (provisionLock.isActive()) {
@@ -7202,6 +7270,7 @@ async function robeTickGlobal() {
           await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
         }
       } catch {}
+      __orchAudit.end({ skipped: true, reason: 'provision_lock' });
       return;
     }
   } catch {}
@@ -7221,6 +7290,7 @@ async function robeTickGlobal() {
           autoMode.light._lastRobeSkipLogAt = now;
           await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} policy=max0`);
         }
+        __orchAudit.end({ skipped: true, reason: 'slowmode_max0' });
         return;
       }
       if (nextAt && now < nextAt) {
@@ -7230,6 +7300,7 @@ async function robeTickGlobal() {
           autoMode.light._lastRobeSkipLogAt = now;
           await milLog('mil_action', `robeTickGlobal_throttle_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} nextAt=${nextAt}`);
         }
+        __orchAudit.end({ skipped: true, reason: 'slowmode_throttle', nextAt });
         return;
       }
       autoMode.light.nextRobeEnqueueAt = now + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
@@ -7277,8 +7348,10 @@ async function robeTickGlobal() {
     if (!ctrl || !ctrl.browser) continue;
 
     logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
+    orchActionRequested(nome, 'ROBE_POST_QUEUE', { source: 'robeTickGlobal' });
 
     robeQueue.enqueue(nome, async () => {
+      const __robeRunAudit = orchActorBegin('robeQueueRun', { profileId: nome });
 
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -7378,6 +7451,8 @@ async function robeTickGlobal() {
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
+        orchActionDone(nome, 'ROBE_POST_QUEUE', { ok: true, source: 'robeTickGlobal' });
+        __robeRunAudit.end({ profileId: nome });
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
@@ -7433,6 +7508,7 @@ async function robeTickGlobal() {
     if (!robeQueue.inQueue(n)) delete m.emFila;
     if (!robeQueue.isActive(n)) delete m.emExecucao;
   }
+  __orchAudit.end({ readyCount: prontos.length, enqueuedCount: enqCount });
 }
 
 setInterval(robeTickGlobal, 7000);
@@ -7459,8 +7535,14 @@ setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
 
 async function stopVirtus(nome) {
+orchActionRequested(nome, 'STOP_VIRTUS', {});
+const __orchAudit = orchActorBegin('stopVirtus', { profileId: nome });
 const ctrl = controllers.get(nome);
-if (!ctrl) return;
+if (!ctrl) {
+orchActionDone(nome, 'STOP_VIRTUS', { ok: true, skipped: true, reason: 'no_controller' });
+__orchAudit.end({ profileId: nome, skipped: true, reason: 'no_controller' });
+return;
+}
 try {
 if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
 await ctrl.virtus.stop().catch(()=>{});
@@ -7475,6 +7557,8 @@ if (ctrl.browser) {
 }
 try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
+orchActionDone(nome, 'STOP_VIRTUS', { ok: true });
+__orchAudit.end({ profileId: nome, ok: true });
 }
 
 // ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
@@ -7582,6 +7666,11 @@ function attachBrowserLifecycle(nome, browser) {
 browser.once('disconnected', async () => {
 try {
 logger.info('[WORKER][BROWSER] disconnected', { nome });
+orchAudit('runtime_signal_observed', {
+  profileId: String(nome || ''),
+  signalKind: 'browser_disconnected',
+  source: 'attachBrowserLifecycle.disconnected'
+});
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 const ctrl = controllers.get(nome);
@@ -7737,6 +7826,7 @@ function automationAllowed(ctrl, { operator } = {}) {
 }
 
 async function start_work({ nome, operator }) {
+  orchActionRequested(nome, 'START_WORK', { operator });
   return lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
@@ -8024,6 +8114,7 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
+  orchActionRequested(nome, 'CLOSE_BROWSER', { reason, policy });
   return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   try {
@@ -8074,6 +8165,7 @@ const handlers = {
         });
       } catch {}
       await snapshotStatusAndWrite();
+      orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, skipped: true, quarantine: true, reason, policy });
       return { ok: true, skipped: true, quarantine: true, certainty };
     }
     try {
@@ -8165,6 +8257,7 @@ const handlers = {
             });
           } catch {}
           await snapshotStatusAndWrite();
+          orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'controller_missing_chrome_alive', reason, policy });
           return { ok: false, error: 'controller_missing_chrome_alive' };
         }
       } else {
@@ -8176,6 +8269,7 @@ const handlers = {
           });
         } catch {}
         await snapshotStatusAndWrite();
+        orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'controller_missing_no_userDataDir', reason, policy });
         return { ok: false, error: 'controller_missing_no_userDataDir' };
       }
     }
@@ -8198,6 +8292,7 @@ const handlers = {
     }
     await snapshotStatusAndWrite();
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
+    orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, skipped: true, reason: 'controller_absent', closeReason: reason, policy });
     return { ok: true };
   }
   // antes de mexer em browser:
@@ -8307,6 +8402,7 @@ const handlers = {
           });
         } catch {}
         await snapshotStatusAndWrite();
+        orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'chrome_alive_after_deactivate', reason, policy });
         return { ok: false, error: 'chrome_alive_after_deactivate' };
       }
     }
@@ -8382,6 +8478,7 @@ const handlers = {
   }
   await snapshotStatusAndWrite();
   logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
+  orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, reason, policy, preserve });
   return { ok: true };
   });
 },
@@ -8815,6 +8912,7 @@ const handlers = {
     return lockProfileAction(nome, async () => {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
+      orchActionRequested(nome, 'LOGIN_REMEDIATE', { operator: op, overrideHumanHold: !!(options && options.overrideHumanHold) });
       const opts = (options && typeof options === 'object') ? options : {};
       const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
       const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
@@ -9766,6 +9864,7 @@ const handlers = {
         try { provisionLock.release({ owner: op }); } catch {}
         // Governança: libera permit sempre (anti-leak)
         try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'done' }).catch(()=>{}); } catch {}
+        orchActionDone(nome, 'LOGIN_REMEDIATE', { ok: null, operator: op, durationMs: Date.now() - startedAt });
 
         // P0 fix (forense): sempre tentar retomar Virtus dos perfis pausados pela quiescência.
         // Sem isso, um único auto_login_remediate pode derrubar "working" em massa (active=ok, virtusOffline).
@@ -9819,12 +9918,14 @@ const handlers = {
   start_work,
 
   async invoke_human({ nome }) {
+    orchActionRequested(nome, 'INVOKE_HUMAN', {});
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
+        orchActionDone(nome, 'INVOKE_HUMAN', { ok: false, error: 'browser_not_connected' });
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
 
@@ -9893,11 +9994,13 @@ const handlers = {
       await snapshotStatusAndWrite();
 
       logger.info('[HANDLER] invoke_human ok', { nome });
+      orchActionDone(nome, 'INVOKE_HUMAN', { ok: true });
       return { ok: true };
     });
   },
 
   async ['human-resume']({ nome }) {
+    orchActionRequested(nome, 'HUMAN_RESUME', {});
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
@@ -10270,6 +10373,7 @@ const handlers = {
         });
       } catch {}
 
+      orchActionDone(nome, 'HUMAN_RESUME', { ok: true, appealDetectedInPreflight: !!appealDetectedInPreflight });
       return { ok:true };
     });
   },
@@ -12167,6 +12271,11 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
+  const __orchAudit = orchActorBegin('nurseTick', {
+    controllers: controllers.size,
+    autoMode: autoMode && autoMode.mode,
+    provisionLockActive: (() => { try { return !!provisionLock.isActive(); } catch { return null; } })()
+  });
   try {
     // Ultra enterprise (safety+performance):
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
@@ -13728,6 +13837,7 @@ async function nurseTick() {
       }
     }
   } finally {
+    __orchAudit.end({ controllers: controllers.size });
     _nurseTickRunning = false;
   }
 }
@@ -14085,7 +14195,11 @@ async function escalateToReopen(nome, reason='health_reopen') {
 }
 
 async function healthTick() {
-  if (controllers.size === 0) { return; }
+  if (controllers.size === 0) {
+    orchAudit('runtime_actor_tick_skip', { actor: 'healthTick', reason: 'no_controllers' });
+    return;
+  }
+  const __orchAudit = orchActorBegin('healthTick', { controllers: controllers.size });
   for (const [nome, ctrl] of controllers) {
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
@@ -14207,6 +14321,7 @@ async function healthTick() {
       }
     }
   }
+  __orchAudit.end({ controllers: controllers.size });
 }
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
