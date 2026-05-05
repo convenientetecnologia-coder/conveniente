@@ -27,6 +27,7 @@ const serverConfig = require('./serverConfig.js');
 const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
 const actionFingerprint = require('./orchestrator/actionFingerprint.js');
 const actionGate = require('./orchestrator/actionGate.js');
+const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -5045,6 +5046,8 @@ await issues.append(nome, type, msg);
 const controllers = new Map();
 
 const robeMeta = {};
+const autoLoginRemediateQueue = createAutoLoginRemediateQueue({ robeMeta, provisionAudit, issues, env: process.env });
+const AUTO_LR_CFG = autoLoginRemediateQueue.cfg;
 
 const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __agentDebugState = { lastByKey: Object.create(null) };
@@ -12063,114 +12066,15 @@ async function detectMessengerTempBlock(page) {
 //   - backoff por perfil + limite por janela
 //   - NUNCA tenta para captcha/checkpoint/identity (vira humanHold)
 // =========================================================
-const AUTO_LR_CFG = {
-  enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
-  tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
-  immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
-  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
-  maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
-  backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
-  totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
-  stageTimeoutMs: {
-    activate: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_ACTIVATE_MS || 90_000) || 90_000),
-    injectCookies: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_INJECT_MS || 240_000) || 240_000),
-    loginFb: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_FB_MS || 120_000) || 120_000),
-    loginMsg: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_MSG_MS || 120_000) || 120_000),
-    collectCookies: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_COLLECT_MS || 90_000) || 90_000),
-  }
-};
-
 let _autoLoginRemediateRunning = false;
 let _autoLoginRemediateRunningNome = null;
 
-function _pruneWindow(arr, winMs) {
-  const now = Date.now();
-  const a = Array.isArray(arr) ? arr : [];
-  return a.filter(ts => ts && (now - ts) <= winMs);
-}
-
 function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
-  try {
-    if (!AUTO_LR_CFG.enabled) return false;
-    if (!nome) return false;
-    robeMeta[nome] = robeMeta[nome] || {};
-    const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
-    const now = Date.now();
-
-    st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
-    if ((st.attempts24h || []).length >= AUTO_LR_CFG.maxAttemptsPerProfile24h) {
-      st.queued = false;
-      st.nextAt = Math.max(st.nextAt || 0, now + (3 * 60 * 60 * 1000));
-      try { issues.append(nome, 'mil_action', `auto_login_remediate_suppressed: max_attempts_24h=${AUTO_LR_CFG.maxAttemptsPerProfile24h}`).catch(()=>{}); } catch {}
-      return false;
-    }
-
-    const last = Number(st.lastStartAt || 0) || 0;
-    const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
-    const when = Math.max(
-      now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
-      earliest,
-      force ? 0 : (Number(st.nextAt || 0) || 0)
-    );
-    const prevQueued = !!st.queued;
-    const prevNextAt = Number(st.nextAt || 0) || 0;
-    const sameSignal = (
-      String(st.reason || '') === String(reason || '').slice(0, 80) &&
-      String(st.source || '') === String(source || '').slice(0, 80)
-    );
-    if (prevQueued && sameSignal && prevNextAt && prevNextAt <= when && !force) {
-      st.dedupeCount = (Number(st.dedupeCount || 0) || 0) + 1;
-      try {
-        provisionAudit.append({
-          ts: now,
-          event: 'auto_login_remediate_enqueue_deduped',
-          nome: String(nome || ''),
-          reason: String(reason || '').slice(0, 120),
-          source: String(source || '').slice(0, 80),
-          nextAt: prevNextAt,
-          dedupeCount: st.dedupeCount
-        });
-      } catch {}
-      return true;
-    }
-    st.queued = true;
-    st.nextAt = when;
-    st.reason = String(reason || '').slice(0, 80);
-    st.source = String(source || '').slice(0, 80);
-    st.force = !!force;
-    st.enqueuedAt = now;
-    try {
-      provisionAudit.append({
-        ts: now,
-        event: 'auto_login_remediate_queued',
-        nome: String(nome || ''),
-        reason: String(reason || '').slice(0, 120),
-        source: String(source || '').slice(0, 80),
-        nextAt: when,
-        immediate: !!immediate,
-        force: !!force
-      });
-    } catch {}
-    return true;
-  } catch {
-    return false;
-  }
+  return autoLoginRemediateQueue.queue(nome, { reason, source, immediate, force });
 }
 
 function isAutoLoginRemediateDeferredByGate(resp) {
-  try {
-    if (!resp || typeof resp !== 'object') return false;
-    if (resp.deduped !== true) return false;
-    const reason = String(resp.gateReason || '').toLowerCase();
-    return (
-      reason.includes('conflict_group_active') ||
-      reason.includes('same_action_active') ||
-      reason.includes('same_kind_active') ||
-      reason.includes('recent_duplicate')
-    );
-  } catch {
-    return false;
-  }
+  return autoLoginRemediateQueue.isDeferredByGate(resp);
 }
 
 async function autoLoginRemediateTick() {
@@ -12270,7 +12174,7 @@ async function autoLoginRemediateTick() {
   st.queued = false;
   st.inFlight = true;
   st.lastStartAt = Date.now();
-  st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
+  st.attempts24h = autoLoginRemediateQueue.pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
   st.attempts24h.push(st.lastStartAt);
 
   const operator = `auto_login_remediate:${nome}:${st.lastStartAt}`;
@@ -12301,33 +12205,7 @@ async function autoLoginRemediateTick() {
     });
 
     if (isAutoLoginRemediateDeferredByGate(resp)) {
-      const retryMs = Math.max(15_000, Math.min(10 * 60_000, Number(resp && resp.gateRetryAfterMs || 0) || 45_000));
-      const retryAt = Date.now() + retryMs;
-      try {
-        if (Array.isArray(st.attempts24h) && st.attempts24h[st.attempts24h.length - 1] === st.lastStartAt) st.attempts24h.pop();
-      } catch {}
-      st.queued = true;
-      st.inFlight = false;
-      st.nextAt = retryAt;
-      st.lastDoneAt = Date.now();
-      st.lastOk = false;
-      st.lastError = resp && resp.error ? String(resp.error).slice(0, 160) : 'orchestrator_gate_deferred';
-      st.deferredByGateAt = Date.now();
-      st.deferredByGateReason = resp && resp.gateReason ? String(resp.gateReason).slice(0, 80) : '';
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'auto_login_remediate_gate_deferred',
-          nome,
-          operator,
-          retryAt,
-          retryMs,
-          gateReason: resp && resp.gateReason ? String(resp.gateReason).slice(0, 120) : '',
-          gateConflictAction: resp && resp.gateConflictAction ? String(resp.gateConflictAction).slice(0, 80) : '',
-          gateConflictGroup: resp && resp.gateConflictGroup ? String(resp.gateConflictGroup).slice(0, 80) : ''
-        });
-      } catch {}
-      try { await issues.append(nome, 'mil_action', `auto_login_remediate_deferred_by_gate retryMs=${retryMs} reason=${st.deferredByGateReason||''}`); } catch {}
+      await autoLoginRemediateQueue.deferByGate({ nome, st, resp, operator });
       return;
     }
 
