@@ -27,6 +27,7 @@ const serverConfig = require('./serverConfig.js');
 const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
 const orchestratorRuntime = require('./orchestrator/runtime.js');
 const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
+const governorPolicy = require('./orchestrator/governorPolicy.js');
 const {
   audit: orchAudit,
   actorBegin: orchActorBegin,
@@ -4421,26 +4422,7 @@ function _pruneWindow(arr, ms) {
   return arr.filter(ts => (now - ts) < ms);
 }
 
-const AUTO_CFG = {
-  // Governor (light/full) — limiares de RAM livre (MB): preferência pelo server_runtime_config.memory
-  // (read a cada tick em governorTick). Env abaixo = fallback se config indisponível.
-  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
-  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
-  CPU_ENTER: 85,
-  CPU_EXIT: 70,
-  EMA_ALPHA_CPU: 0.30,
-  EMA_ALPHA_MEM: 0.20,
-  HOT_TICKS: 3,
-  COOL_TICKS: 3,
-  MIN_HOLD_MS: 45000,
-  // Em light, Robe NÃO pode parar, apenas reduzir pressão.
-  ROBE_LIGHT_MIN_SPACING_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ROBE_LIGHT_MIN_SPACING_MS || '60000', 10) || 60000),
-  // Quantos Robes no máximo enfileirar por tick em light (0 => não enfileira).
-  ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
-  // Confirmações por tempo (evita “piscar” e evita entrar em light por flutuação).
-  ENTER_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ENTER_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
-  EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000))
-};
+const AUTO_CFG = governorPolicy.buildConfig(process.env);
 
 const ramPolicy = require('./ramPolicy.js');
 
@@ -4469,11 +4451,7 @@ const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 // - Quando o loop trava, o sistema “se perde” (timers atrasam, navegação falha, about:blank se acumula).
 // - Este é o gatilho enterprise para backpressure antes de quebrar.
 // Defaults mais conservadores (menos sensível) — ainda configurável por env.
-const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '400', 10);
-const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '200', 10);
-const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '2000', 10);
-const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '900', 10);
-const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10);
+const GOVERNOR_TICK_MS = AUTO_CFG.GOVERNOR_TICK_MS;
 
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
@@ -4483,9 +4461,6 @@ const autoMode = {
   recoveredSince: 0,
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
-
-function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
-function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
 
 // Event loop delay monitor (ultra leve; sem WMI)
 const _loopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -4509,56 +4484,25 @@ async function governorTick() {
 
     const freeMB = getAvailableMB();
     const lag = readLoopLagMs();
-    autoMode.eventLoopLagMs = lag.meanMs;
-    autoMode.eventLoopLagMaxMs = lag.maxMs;
-    autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
-
-    let memEnterMb = AUTO_CFG.MEM_ENTER_MB;
-    let memExitMb = AUTO_CFG.MEM_EXIT_MB;
+    let serverMemory = null;
     try {
       const cfg = serverConfig.readServerConfigEffective();
-      const m = cfg && cfg.memory;
-      if (m) {
-        memEnterMb = Math.max(256, Math.floor(Number(m.governorEnterMb) || memEnterMb));
-        memExitMb = Math.max(256, Math.floor(Number(m.governorExitMb) || memEnterMb));
-        if (memExitMb < memEnterMb) memExitMb = memEnterMb;
-      }
+      serverMemory = cfg && cfg.memory ? cfg.memory : null;
     } catch {}
-
-    const memLow = (freeMB > 0 && freeMB < memEnterMb);
-    const memHigh = (freeMB > 0 && freeMB >= memExitMb);
-    // Política (triagem 2026-01-30): modo leve/full definido por RAM.
-    // Lag continua sendo observado (telemetria), mas NÃO deve causar mudança de modo sozinho.
-    const pressureNow = memLow;
-    const recoveredNow = memHigh;
-
-    // Janela de confirmação (5min) para entrar/sair.
-    if (pressureNow) {
-      if (!autoMode.pressureSince) autoMode.pressureSince = now;
-    } else {
-      autoMode.pressureSince = 0;
-    }
-    if (recoveredNow) {
-      if (!autoMode.recoveredSince) autoMode.recoveredSince = now;
-    } else {
-      autoMode.recoveredSince = 0;
-    }
-
-    // Troca normal full/light baseada em janela de confirmação.
-    if (autoMode.mode === 'full') {
-      if (autoMode.pressureSince && (now - autoMode.pressureSince) >= AUTO_CFG.ENTER_CONFIRM_MS && _canSwitch()) {
-        autoMode.mode = 'light';
-        autoMode.since = now;
-        autoMode.reason = 'mem_low';
-        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
-      }
-    } else {
-      if (autoMode.recoveredSince && (now - autoMode.recoveredSince) >= AUTO_CFG.EXIT_CONFIRM_MS && _canSwitch()) {
-        autoMode.mode = 'full';
-        autoMode.since = now;
-        autoMode.reason = 'recovered';
+    const decision = governorPolicy.evaluateGovernorMode({ state: autoMode, cfg: AUTO_CFG, now, freeMB, lag, serverMemory });
+    Object.assign(autoMode, decision.next || {});
+    if (decision.transition) {
+      autoMode.mode = decision.transition.mode;
+      autoMode.since = now;
+      autoMode.reason = decision.transition.reason;
+      if (decision.transition.resetWindows) {
         autoMode.pressureSince = 0;
         autoMode.recoveredSince = 0;
+      }
+      const ev = String(decision.transition.logEvent || '');
+      if (ev === 'enter_slow') {
+        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+      } else if (ev === 'exit_slow') {
         try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
       }
     }
