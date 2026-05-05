@@ -28,6 +28,7 @@ const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
 const orchestratorRuntime = require('./orchestrator/runtime.js');
 const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
 const governorPolicy = require('./orchestrator/governorPolicy.js');
+const closeCertaintyPolicy = require('./orchestrator/closeCertaintyPolicy.js');
 const {
   audit: orchAudit,
   actorBegin: orchActorBegin,
@@ -4158,15 +4159,7 @@ const HEALTH_CFG = {
   ESCALATE_TO_REOPEN_AFTER: 2,
   ABOUT_BLANK_GRACE_MS: 7000
 };
-const CLOSE_CERTAINTY_CFG = {
-  WINDOW_MS: Math.max(20_000, parseInt(process.env.CLOSE_CERTAINTY_WINDOW_MS || '120000', 10) || 120000),
-  MIN_HITS: Math.max(1, parseInt(process.env.CLOSE_CERTAINTY_MIN_HITS || '3', 10) || 3),
-  MIN_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_MIN_SPAN_MS || '25000', 10) || 25000),
-  PENDING_HOLD_MS: Math.max(5_000, parseInt(process.env.CLOSE_CERTAINTY_PENDING_HOLD_MS || '45000', 10) || 45000),
-  PRESSURE_EXTRA_HITS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_HITS || '1', 10) || 1),
-  PRESSURE_EXTRA_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_SPAN_MS || '20000', 10) || 20000)
-};
-const CLOSE_CERTAINTY_REASONS = new Set(['health_no_progress', 'virtus_block', 'nurse_zombie', 'phantom_reopen']);
+const CLOSE_CERTAINTY_CFG = closeCertaintyPolicy.buildConfig(process.env);
 
 const PHANTOM_CFG = {
   INITIAL_GRACE_MS: 9000,
@@ -4318,104 +4311,33 @@ function getHealth(nome) {
   return healthState.get(nome);
 }
 function normalizeCloseGuardReason(reason) {
-  return String(reason || '').trim().toLowerCase();
+  return closeCertaintyPolicy.normalizeReason(reason);
 }
 function isCloseGuardReason(reason) {
-  return CLOSE_CERTAINTY_REASONS.has(normalizeCloseGuardReason(reason));
+  return closeCertaintyPolicy.isGuardReason(reason, CLOSE_CERTAINTY_CFG);
 }
 function isGlobalPressureNow() {
-  try {
-    const mode = String((autoMode && autoMode.mode) || '').toLowerCase();
-    if (mode === 'light') return true;
-    const lagMean = Number((autoMode && autoMode.eventLoopLagMs) || 0) || 0;
-    const lagMax = Number((autoMode && autoMode.eventLoopLagMaxMs) || 0) || 0;
-    if (lagMean >= 900 || lagMax >= 1800) return true;
-  } catch {}
-  return false;
+  return closeCertaintyPolicy.isPressureNow(autoMode);
 }
 function clearCloseCertainty(nome, source = 'ok_signal') {
   try {
     if (!robeMeta[nome] || !robeMeta[nome].closeCertainty) return;
     const prev = robeMeta[nome].closeCertainty || {};
-    robeMeta[nome].closeCertainty = {
-      reason: '',
-      firstAt: 0,
-      lastAt: 0,
-      hits: 0,
-      lastSignal: '',
-      lastPressure: false,
-      lastDecisionAt: Date.now(),
-      lastAllow: null,
-      lastScore: 0,
-      lastRequiredHits: 0,
-      lastRequiredSpanMs: 0,
-      lastResetAt: Date.now(),
-      lastResetSource: String(source || 'unknown'),
-      prevReason: String(prev.reason || ''),
-      prevHits: Number(prev.hits || 0) || 0
-    };
+    robeMeta[nome].closeCertainty = closeCertaintyPolicy.resetState(prev, { source, now: Date.now() });
   } catch {}
 }
 function evaluateCloseCertainty(nome, reason, signal = '') {
-  const key = normalizeCloseGuardReason(reason);
-  const now = Date.now();
-  const guarded = isCloseGuardReason(key);
-  if (!guarded) {
-    return {
-      guarded: false,
-      allow: true,
-      reason: key,
-      hits: 0,
-      spanMs: 0,
-      requiredHits: 0,
-      requiredSpanMs: 0,
-      pressure: false,
-      score: 1
-    };
-  }
   robeMeta[nome] = robeMeta[nome] || {};
-  const state = robeMeta[nome].closeCertainty || {
-    reason: '',
-    firstAt: 0,
-    lastAt: 0,
-    hits: 0
-  };
-  const outOfWindow = state.lastAt > 0 && (now - state.lastAt) > CLOSE_CERTAINTY_CFG.WINDOW_MS;
-  if (state.reason !== key || outOfWindow || !state.firstAt) {
-    state.reason = key;
-    state.firstAt = now;
-    state.lastAt = now;
-    state.hits = 0;
-  }
-  state.hits = (Number(state.hits || 0) || 0) + 1;
-  state.lastAt = now;
-  state.lastSignal = String(signal || '');
-  const pressure = isGlobalPressureNow();
-  const requiredHits = CLOSE_CERTAINTY_CFG.MIN_HITS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_HITS : 0);
-  const requiredSpanMs = CLOSE_CERTAINTY_CFG.MIN_SPAN_MS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_SPAN_MS : 0);
-  const spanMs = Math.max(0, now - (Number(state.firstAt || now) || now));
-  const allow = state.hits >= requiredHits && spanMs >= requiredSpanMs;
-  const scoreByHits = Math.min(1, state.hits / Math.max(1, requiredHits));
-  const scoreBySpan = Math.min(1, spanMs / Math.max(1, requiredSpanMs));
-  const score = Math.round(((scoreByHits * 0.6) + (scoreBySpan * 0.4)) * 1000) / 1000;
-  state.lastPressure = pressure;
-  state.lastDecisionAt = now;
-  state.lastAllow = allow;
-  state.lastScore = score;
-  state.lastRequiredHits = requiredHits;
-  state.lastRequiredSpanMs = requiredSpanMs;
-  robeMeta[nome].closeCertainty = state;
-  return {
-    guarded: true,
-    allow,
-    reason: key,
-    hits: state.hits,
-    spanMs,
-    requiredHits,
-    requiredSpanMs,
-    pressure,
-    score
-  };
+  const evaluated = closeCertaintyPolicy.evaluate({
+    previousState: robeMeta[nome].closeCertainty,
+    reason,
+    signal,
+    pressure: isGlobalPressureNow(),
+    cfg: CLOSE_CERTAINTY_CFG,
+    now: Date.now()
+  });
+  if (evaluated && evaluated.state) robeMeta[nome].closeCertainty = evaluated.state;
+  return evaluated && evaluated.result ? evaluated.result : { guarded: false, allow: true, reason: normalizeCloseGuardReason(reason), score: 1 };
 }
 function _pruneWindow(arr, ms) {
   const now = Date.now();
