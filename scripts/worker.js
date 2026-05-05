@@ -165,7 +165,10 @@ function orchGateDeniedResult(ticket, { ok = true, error = 'orchestrator_duplica
     skipped: true,
     deduped: true,
     error,
-    gateReason: ticket && ticket.deniedReason ? String(ticket.deniedReason) : 'denied'
+    gateReason: ticket && ticket.deniedReason ? String(ticket.deniedReason) : 'denied',
+    gateGroup: ticket && ticket.group ? String(ticket.group) : '',
+    gateConflictAction: ticket && ticket.conflictActive && ticket.conflictActive.actionKind ? String(ticket.conflictActive.actionKind) : '',
+    gateConflictGroup: ticket && ticket.conflictActive && ticket.conflictActive.group ? String(ticket.conflictActive.group) : ''
   };
 }
 
@@ -995,6 +998,13 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
   const id = String(flowId || newFlowId('captcha'));
   const __orchAudit = orchActorBegin('runCaptchaFlow', { profileId: nome, source, flowId: id, force: !!force });
   orchActionRequested(nome, 'RUN_CAPTCHA_FLOW', { source, flowId: id, force: !!force });
+  const __orchGate = orchGateBegin(nome, 'RUN_CAPTCHA_FLOW', { source, reason: flowId || '', ttlMs: 420000, dedupeMs: force ? 0 : 45000, priority: 75 });
+  if (__orchGate && __orchGate.allow === false) {
+    const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'captcha_flow_deduped' });
+    orchActionDone(nome, 'RUN_CAPTCHA_FLOW', { ...r, source, flowId: id });
+    __orchAudit.end({ profileId: nome, flowId: id, ...r });
+    return r;
+  }
   let _locked = false;
   let lastImgSrc = '';
   try {
@@ -1223,6 +1233,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       _captchaFlowRunning = false;
       _captchaFlowRunningNome = null;
     }
+    orchGateEnd(__orchGate, { ok: true });
     __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - startedAt });
   }
 }
@@ -3052,6 +3063,13 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   const id = String(flowId || newFlowId('identity'));
   const __orchAudit = orchActorBegin('runIdentityFlow', { profileId: nome, source, flowId: id, force: !!force });
   orchActionRequested(nome, 'RUN_IDENTITY_FLOW', { source, flowId: id, force: !!force });
+  const __orchGate = orchGateBegin(nome, 'RUN_IDENTITY_FLOW', { source, reason: flowId || '', ttlMs: 420000, dedupeMs: force ? 0 : 45000, priority: 75 });
+  if (__orchGate && __orchGate.allow === false) {
+    const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'identity_flow_deduped' });
+    orchActionDone(nome, 'RUN_IDENTITY_FLOW', { ...r, source, flowId: id });
+    __orchAudit.end({ profileId: nome, flowId: id, ...r });
+    return r;
+  }
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
@@ -3268,6 +3286,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, flowId: id, error: msg };
   } finally {
+    orchGateEnd(__orchGate, { ok: true });
     __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - now });
   }
 }
@@ -9069,10 +9088,19 @@ const handlers = {
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
   async login_remediate({ nome, operator, options } = {}) {
-    return lockProfileAction(nome, async () => {
-      const startedAt = Date.now();
-      const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
-      orchActionRequested(nome, 'LOGIN_REMEDIATE', { operator: op, overrideHumanHold: !!(options && options.overrideHumanHold) });
+    const startedAtOuter = Date.now();
+    const opOuter = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAtOuter}`;
+    orchActionRequested(nome, 'LOGIN_REMEDIATE', { operator: opOuter, overrideHumanHold: !!(options && options.overrideHumanHold) });
+    const __orchGate = orchGateBegin(nome, 'LOGIN_REMEDIATE', { source: opOuter, ttlMs: 900000, dedupeMs: 60000, priority: 80 });
+    if (__orchGate && __orchGate.allow === false) {
+      const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'login_remediate_deduped' });
+      orchActionDone(nome, 'LOGIN_REMEDIATE', { ...r, operator: opOuter });
+      return r;
+    }
+    try {
+      const __loginRemediateResult = await lockProfileAction(nome, async () => {
+      const startedAt = startedAtOuter;
+      const op = opOuter;
       const opts = (options && typeof options === 'object') ? options : {};
       const preserveVirtusOnFailure = !!(opts.preserveVirtusOnFailure === true);
       const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
@@ -10073,7 +10101,11 @@ const handlers = {
           }
         } catch {}
       }
-    });
+      });
+      return __loginRemediateResult;
+    } finally {
+      orchGateEnd(__orchGate, { ok: true });
+    }
   },
 
   start_work,
