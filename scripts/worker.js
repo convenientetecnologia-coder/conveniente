@@ -29,6 +29,7 @@ const orchestratorRuntime = require('./orchestrator/runtime.js');
 const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
 const governorPolicy = require('./orchestrator/governorPolicy.js');
 const closeCertaintyPolicy = require('./orchestrator/closeCertaintyPolicy.js');
+const recoveryPolicy = require('./orchestrator/recoveryPolicy.js');
 const {
   audit: orchAudit,
   actorBegin: orchActorBegin,
@@ -11494,17 +11495,7 @@ const NURSE_SLOT_BACKOFF_MS = Math.max(5000, parseInt(process.env.NURSE_SLOT_BAC
 const NURSE_RAM_BACKOFF_MS = Math.max(3000, parseInt(process.env.NURSE_RAM_BACKOFF_MS || '10000', 10) || 10000);
 const DISCONNECTED_KILL_GUARD_MS = Math.max(5000, parseInt(process.env.DISCONNECTED_KILL_GUARD_MS || '15000', 10) || 15000);
 
-const ULTRA_RECOVERY = {
-  MAX_RELOADS: 2,
-  RELOAD_TIMEOUT_MS: 10000,
-  RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: Math.max(5000, parseInt(process.env.REOPEN_DELAY_SHORT_MS || '60000', 10) || 60000),
-  REOPEN_DELAY_RAMCPU_MS: 60000,
-  FAIL_WINDOW_MS: 3*60*60*1000,
-  FAIL_FREEZE_AFTER: 5,
-  FAIL_FREEZE_MS: 2*60*60*1000,
-  REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000
-};
+const ULTRA_RECOVERY = recoveryPolicy.buildConfig(process.env);
 
 const CDP_RECONNECT_CFG = {
   enabled: String(process.env.CDP_RECONNECT_ENABLED || '1').trim() !== '0',
@@ -11512,19 +11503,8 @@ const CDP_RECONNECT_CFG = {
   delaysMs: [2000, 5000, 10000]
 };
 
-function _envMs(name, fallback) {
-  return Math.max(0, Number(process.env[name] || fallback) || fallback);
-}
-
 function getControlledReopenDelayMs(reason = '') {
-  const r = String(reason || '').toLowerCase();
-  const controlled = String(process.env.CONTROLLED_REOPEN_ENABLED || '1').trim() !== '0';
-  if (!controlled) return ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-  if (r === 'ramkill' || r === 'cpukill') return ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random() * 120000);
-  if (r === 'virtus_block') return ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
-  const minMs = _envMs('REOPEN_NON_RAM_MIN_MS', 5 * 60 * 1000);
-  const maxMs = Math.max(minMs, _envMs('REOPEN_NON_RAM_MAX_MS', 15 * 60 * 1000));
-  return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  return recoveryPolicy.getControlledReopenDelayMs(reason, { cfg: ULTRA_RECOVERY, env: process.env });
 }
 
 function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
@@ -11642,46 +11622,21 @@ async function ensureFrozenShutdown(nome, origin = 'frozen') {
   try { await snapshotStatusAndWrite(); } catch {}
 }
 
-const INTERNAL_REASONS = new Set(['ramKill','cpuKill','manifest_missing','manifest_incomplete','panic','open_headroom']);
-const EXTERNAL_REASONS = new Set(['disconnected','no_pages','zombie','network','fb_dom','messenger_temp_block','blocked']);
-
-function classifyReason(reason, fallback) {
-  if (INTERNAL_REASONS.has(reason)) return 'internal';
-  if (EXTERNAL_REASONS.has(reason)) return 'external';
-  return fallback || 'unknown';
-}
-
 function getFailureCounts(nome) {
-  const now = Date.now();
-  const rec = profileFailures.get(nome);
-  if (!rec) return { internal: 0, external: 0, unknown: 0 };
-  const pruned = {
-    internal: (rec.internal||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
-    external: (rec.external||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
-    unknown: (rec.unknown||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS)
-  };
-  profileFailures.set(nome, pruned);
-  return { internal: pruned.internal.length, external: pruned.external.length, unknown: pruned.unknown.length };
+  return recoveryPolicy.countFailures(profileFailures, nome, { cfg: ULTRA_RECOVERY });
 }
 
 const profileFailures = new Map();
 async function registerFailure(nome, reason, classification) {
-  const now = Date.now();
-  const cls = classification || classifyReason(reason, 'unknown');
-  const rec = profileFailures.get(nome) || { internal: [], external: [], unknown: [] };
-  rec.internal = (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
-  rec.external = (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
-  rec.unknown  = (rec.unknown ||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
-  if (cls === 'internal') rec.internal.push(now);
-  else if (cls === 'external') rec.external.push(now);
-  else rec.unknown.push(now);
-  profileFailures.set(nome, rec);
-  const counts = getFailureCounts(nome);
+  const result = recoveryPolicy.recordFailure(profileFailures, nome, reason, {
+    classification,
+    cfg: ULTRA_RECOVERY
+  });
+  const { classification: cls, counts, freeze } = result;
   try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
 
-  const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
-  if (ALLOWED_FREEZE_REASONS.has(reason)) {
-    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system');
+  if (freeze && freeze.enabled) {
+    await freezeProfileFor(nome, freeze.ms, freeze.reason, freeze.setBy);
     await ensureFrozenShutdown(nome, reason || 'frozen');
   }
 }
@@ -13567,7 +13522,7 @@ async function nurseTick() {
           }
           await stopVirtus(nome);
           if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
-            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+            robeMeta[nome].reopenAt = now2 + getControlledReopenDelayMs('virtus_block');
             robeMeta[nome].closingReason = 'virtus_block';
           }
           await registerFailure(nome, 'messenger_temp_block', 'external');
@@ -14206,9 +14161,8 @@ async function healthTick() {
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         try { await stopVirtus(nome); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
-        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
         if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
-          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+          robeMeta[nome].reopenAt = Date.now() + getControlledReopenDelayMs('virtus_block');
           robeMeta[nome].closingReason = 'virtus_block';
         }
         try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
