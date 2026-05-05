@@ -26,6 +26,7 @@ const { readCtConfig } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
 const actionFingerprint = require('./orchestrator/actionFingerprint.js');
+const actionGate = require('./orchestrator/actionGate.js');
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -136,6 +137,36 @@ function orchActionDone(profileId, actionKind, result = {}) {
       ...result
     });
   } catch {}
+}
+
+function orchGateBegin(profileId, actionKind, data = {}) {
+  try {
+    return actionGate.beginAction({
+      profileId,
+      actionKind,
+      reason: data.reason || data.error || '',
+      source: data.source || data.operator || '',
+      ttlMs: data.ttlMs,
+      dedupeMs: data.dedupeMs,
+      priority: data.priority
+    });
+  } catch {
+    return { allow: true, noop: true, profileId: String(profileId || ''), actionKind: String(actionKind || '') };
+  }
+}
+
+function orchGateEnd(ticket, result = {}) {
+  try { actionGate.endAction(ticket, result); } catch {}
+}
+
+function orchGateDeniedResult(ticket, { ok = true, error = 'orchestrator_duplicate_action' } = {}) {
+  return {
+    ok,
+    skipped: true,
+    deduped: true,
+    error,
+    gateReason: ticket && ticket.deniedReason ? String(ticket.deniedReason) : 'denied'
+  };
 }
 
 function _readJsonSafe(fp, fallback = null) {
@@ -5162,14 +5193,23 @@ const activationLocks = new Map();
 async function activateOnce(nome, source = '', operator = '') {
   const __orchAudit = orchActorBegin('activateOnce', { profileId: nome, source, operator });
   orchActionRequested(nome, 'OPEN_BROWSER', { source, operator });
+  const __orchGate = orchGateBegin(nome, 'OPEN_BROWSER', { source, operator, ttlMs: 180000, dedupeMs: 12000 });
+  if (__orchGate && __orchGate.allow === false) {
+    const r = orchGateDeniedResult(__orchGate, { ok: true });
+    orchActionDone(nome, 'OPEN_BROWSER', { ...r, source, operator });
+    __orchAudit.end({ profileId: nome, ...r });
+    return r;
+  }
   if (opening[nome]) {
     orchActionDone(nome, 'OPEN_BROWSER', { ok: false, error: 'already_opening', source, operator });
+    orchGateEnd(__orchGate, { ok: false, error: 'already_opening' });
     __orchAudit.end({ profileId: nome, skipped: true, error: 'already_opening' });
     return { ok: false, error: 'already_opening' };
   }
 
   if (controllers.has(nome)) {
     orchActionDone(nome, 'OPEN_BROWSER', { ok: true, already: true, source, operator });
+    orchGateEnd(__orchGate, { ok: true, already: true });
     __orchAudit.end({ profileId: nome, already: true });
     return { ok: true, already: true };
   }
@@ -5181,6 +5221,7 @@ async function activateOnce(nome, source = '', operator = '') {
       ? { ok: true, already: true }
       : { ok: false, error: 'activation_in_progress' };
     orchActionDone(nome, 'OPEN_BROWSER', { ...r, source, operator });
+    orchGateEnd(__orchGate, r);
     __orchAudit.end({ profileId: nome, ...r });
     return r;
   }
@@ -5614,6 +5655,7 @@ async function activateOnce(nome, source = '', operator = '') {
     return await job;
   } finally {
     orchActionDone(nome, 'OPEN_BROWSER', { ok: controllers.has(nome), source, operator });
+    orchGateEnd(__orchGate, { ok: controllers.has(nome) });
     __orchAudit.end({ profileId: nome, hasController: controllers.has(nome) });
     delete opening[nome];
   }
@@ -7349,6 +7391,11 @@ async function robeTickGlobal() {
 
     logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
     orchActionRequested(nome, 'ROBE_POST_QUEUE', { source: 'robeTickGlobal' });
+    const __robeGate = orchGateBegin(nome, 'ROBE_POST_QUEUE', { source: 'robeTickGlobal', ttlMs: 1800000, dedupeMs: 30000 });
+    if (__robeGate && __robeGate.allow === false) {
+      orchActionDone(nome, 'ROBE_POST_QUEUE', { ...orchGateDeniedResult(__robeGate, { ok: true }), source: 'robeTickGlobal' });
+      continue;
+    }
 
     robeQueue.enqueue(nome, async () => {
       const __robeRunAudit = orchActorBegin('robeQueueRun', { profileId: nome });
@@ -7452,6 +7499,7 @@ async function robeTickGlobal() {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
         orchActionDone(nome, 'ROBE_POST_QUEUE', { ok: true, source: 'robeTickGlobal' });
+        orchGateEnd(__robeGate, { ok: true });
         __robeRunAudit.end({ profileId: nome });
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
@@ -7827,7 +7875,13 @@ function automationAllowed(ctrl, { operator } = {}) {
 
 async function start_work({ nome, operator }) {
   orchActionRequested(nome, 'START_WORK', { operator });
-  return lockProfileAction(nome, async () => {
+  const __orchGate = orchGateBegin(nome, 'START_WORK', { operator, ttlMs: 120000, dedupeMs: 15000 });
+  if (__orchGate && __orchGate.allow === false) {
+    const r = orchGateDeniedResult(__orchGate, { ok: true });
+    orchActionDone(nome, 'START_WORK', { ...r, operator });
+    return r;
+  }
+  const __startWorkResult = await lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
     const ctrl = controllers.get(nome);
@@ -8047,6 +8101,9 @@ async function start_work({ nome, operator }) {
       ctrl._virtusStarting = false;
     }
   });
+  orchGateEnd(__orchGate, __startWorkResult);
+  orchActionDone(nome, 'START_WORK', { ok: !!(__startWorkResult && __startWorkResult.ok), error: __startWorkResult && __startWorkResult.error ? String(__startWorkResult.error).slice(0, 160) : null, operator });
+  return __startWorkResult;
 }
 
 const handlers = {
@@ -8115,7 +8172,14 @@ const handlers = {
 
   async deactivate({ nome, reason, policy }) {
   orchActionRequested(nome, 'CLOSE_BROWSER', { reason, policy });
-  return lockProfileAction(nome, async () => {
+  const __strictGateClose = /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
+  const __orchGate = orchGateBegin(nome, 'CLOSE_BROWSER', { reason, policy, ttlMs: 180000, dedupeMs: __strictGateClose ? 0 : 12000, priority: 50 });
+  if (__orchGate && __orchGate.allow === false) {
+    const r = orchGateDeniedResult(__orchGate, { ok: true });
+    orchActionDone(nome, 'CLOSE_BROWSER', { ...r, reason, policy });
+    return r;
+  }
+  const __deactivateResult = await lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   try {
     provisionAudit.append({
@@ -8481,6 +8545,8 @@ const handlers = {
   orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, reason, policy, preserve });
   return { ok: true };
   });
+  orchGateEnd(__orchGate, __deactivateResult);
+  return __deactivateResult;
 },
 
   async configure({ nome, operator } = {}) {
@@ -9919,7 +9985,13 @@ const handlers = {
 
   async invoke_human({ nome }) {
     orchActionRequested(nome, 'INVOKE_HUMAN', {});
-    return lockProfileAction(nome, async () => {
+    const __orchGate = orchGateBegin(nome, 'INVOKE_HUMAN', { ttlMs: 300000, dedupeMs: 20000, priority: 90 });
+    if (__orchGate && __orchGate.allow === false) {
+      const r = orchGateDeniedResult(__orchGate, { ok: true });
+      orchActionDone(nome, 'INVOKE_HUMAN', r);
+      return r;
+    }
+    const __invokeHumanResult = await lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
       const ctrl = controllers.get(nome);
@@ -9997,11 +10069,19 @@ const handlers = {
       orchActionDone(nome, 'INVOKE_HUMAN', { ok: true });
       return { ok: true };
     });
+    orchGateEnd(__orchGate, __invokeHumanResult);
+    return __invokeHumanResult;
   },
 
   async ['human-resume']({ nome }) {
     orchActionRequested(nome, 'HUMAN_RESUME', {});
-    return lockProfileAction(nome, async () => {
+    const __orchGate = orchGateBegin(nome, 'HUMAN_RESUME', { ttlMs: 300000, dedupeMs: 20000, priority: 85 });
+    if (__orchGate && __orchGate.allow === false) {
+      const r = orchGateDeniedResult(__orchGate, { ok: true });
+      orchActionDone(nome, 'HUMAN_RESUME', r);
+      return r;
+    }
+    const __humanResumeResult = await lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
@@ -10376,6 +10456,8 @@ const handlers = {
       orchActionDone(nome, 'HUMAN_RESUME', { ok: true, appealDetectedInPreflight: !!appealDetectedInPreflight });
       return { ok:true };
     });
+    orchGateEnd(__orchGate, __humanResumeResult);
+    return __humanResumeResult;
   },
 
   async ['robe-play']({ nome }) {
@@ -11422,6 +11504,9 @@ const statusObj = {
   sys,
   serverConfig: (() => {
     try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
+  })(),
+  orchestrator: (() => {
+    try { return { actionGate: actionGate.snapshot() }; } catch { return null; }
   })(),
   build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null),
   ts: Date.now()
