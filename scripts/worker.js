@@ -25,9 +25,17 @@ const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
-const actionFingerprint = require('./orchestrator/actionFingerprint.js');
-const actionGate = require('./orchestrator/actionGate.js');
+const orchestratorRuntime = require('./orchestrator/runtime.js');
 const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
+const {
+  audit: orchAudit,
+  actorBegin: orchActorBegin,
+  actionRequested: orchActionRequested,
+  actionDone: orchActionDone,
+  gateBegin: orchGateBegin,
+  gateEnd: orchGateEnd,
+  gateDeniedResult: orchGateDeniedResult
+} = orchestratorRuntime;
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -103,91 +111,6 @@ function appendJsonl(fp, obj) {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
   } catch {}
-}
-
-function orchAudit(event, data = {}) {
-  try { orchestratorAudit.append(event, data); } catch {}
-}
-
-function orchActorBegin(actor, data = {}) {
-  try { return orchestratorAudit.begin(actor, data); } catch { return { end() {} }; }
-}
-
-function orchActionRequested(profileId, actionKind, data = {}) {
-  try {
-    const key = actionFingerprint.actionKey({
-      profileId,
-      actionKind,
-      reason: data.reason || data.error || '',
-      source: data.source || data.operator || ''
-    });
-    orchestratorAudit.append('critical_action_requested', {
-      profileId: String(profileId || ''),
-      actionKind: String(actionKind || ''),
-      actionKey: key,
-      ...data
-    });
-  } catch {}
-}
-
-function orchActionDone(profileId, actionKind, result = {}) {
-  try {
-    orchestratorAudit.append('critical_action_done', {
-      profileId: String(profileId || ''),
-      actionKind: String(actionKind || ''),
-      ...result
-    });
-  } catch {}
-}
-
-function orchGateBegin(profileId, actionKind, data = {}) {
-  try {
-    return actionGate.beginAction({
-      profileId,
-      actionKind,
-      reason: data.reason || data.error || '',
-      source: data.source || data.operator || '',
-      ttlMs: data.ttlMs,
-      dedupeMs: data.dedupeMs,
-      priority: data.priority
-    });
-  } catch {
-    return { allow: true, noop: true, profileId: String(profileId || ''), actionKind: String(actionKind || '') };
-  }
-}
-
-function orchGateEnd(ticket, result = {}) {
-  try { actionGate.endAction(ticket, result); } catch {}
-}
-
-function orchGateRetryAfterMs(ticket, fallbackMs = 30_000) {
-  try {
-    const now = Date.now();
-    const candidates = [];
-    const conflictExpiresAt = Number(ticket && ticket.conflictActive && ticket.conflictActive.expiresAt || 0) || 0;
-    if (conflictExpiresAt > now) candidates.push(conflictExpiresAt - now);
-    const recentExpiresAt = Number(ticket && ticket.recent && ticket.recent.expiresAt || 0) || 0;
-    if (recentExpiresAt > now) candidates.push(recentExpiresAt - now);
-    if (Number(ticket && ticket.ttlMs || 0) > 0) candidates.push(Math.min(Number(ticket.ttlMs || 0), fallbackMs));
-    const ms = candidates.length ? Math.max(...candidates) : fallbackMs;
-    return Math.max(5_000, Math.min(10 * 60_000, Number(ms || fallbackMs) || fallbackMs));
-  } catch {
-    return fallbackMs;
-  }
-}
-
-function orchGateDeniedResult(ticket, { ok = true, error = 'orchestrator_duplicate_action' } = {}) {
-  return {
-    ok,
-    skipped: true,
-    deduped: true,
-    error,
-    gateReason: ticket && ticket.deniedReason ? String(ticket.deniedReason) : 'denied',
-    gateGroup: ticket && ticket.group ? String(ticket.group) : '',
-    gateConflictAction: ticket && ticket.conflictActive && ticket.conflictActive.actionKind ? String(ticket.conflictActive.actionKind) : '',
-    gateConflictGroup: ticket && ticket.conflictActive && ticket.conflictActive.group ? String(ticket.conflictActive.group) : '',
-    gateRetryAfterMs: orchGateRetryAfterMs(ticket)
-  };
 }
 
 function _readJsonSafe(fp, fallback = null) {
@@ -11653,7 +11576,7 @@ const statusObj = {
     try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
   })(),
   orchestrator: (() => {
-    try { return { actionGate: actionGate.snapshot() }; } catch { return null; }
+    try { return { actionGate: orchestratorRuntime.gateSnapshot() }; } catch { return null; }
   })(),
   build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null),
   ts: Date.now()
