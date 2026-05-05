@@ -745,7 +745,7 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
   }
 }
 
-async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+async function setLoginRequiredFlag(nome, { reason = '', source = '', preserveVirtus = false } = {}) {
   // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
   try {
@@ -805,25 +805,37 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     robeMeta[nome].loginReason = reason || '';
     robeMeta[nome].loginSource = source || '';
 
-    // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
-    // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
-    try {
-      await fileStore.withDesiredFileLockUpdate((d) => {
-        d = d || {}; d.perfis = d.perfis || {};
-        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
-        return d;
-      });
-    } catch {}
+    if (preserveVirtus !== true) {
+      // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
+      // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+          return d;
+        });
+      } catch {}
 
-    // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
-    // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
-    try {
-      const ctrl = controllers.get(nome);
-      if (ctrl) {
-        ctrl.trabalhando = false;
-        try { await stopVirtus(nome); } catch {}
-      }
-    } catch {}
+      // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
+      // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl) {
+          ctrl.trabalhando = false;
+          try { await stopVirtus(nome); } catch {}
+        }
+      } catch {}
+    } else {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'login_required_preserve_virtus',
+          nome: String(nome || ''),
+          reason: String(reason || '').slice(0, 160),
+          source: String(source || '').slice(0, 80)
+        });
+      } catch {}
+    }
 
     try { await snapshotStatusAndWrite(); } catch {}
   } catch {}
@@ -4078,6 +4090,66 @@ function isLimitPostingRes(res) {
   return !!(res && (res.limitPosting === true || res.error === 'limit_posting' || res.HALT === true));
 }
 
+function getRobeLoginRequiredReason(input) {
+  try {
+    const msg = String((input && (input.error || input.message)) || input || '');
+    const explicit = String((input && input.loginReason) || '').trim();
+    if (explicit) return explicit.slice(0, 160);
+    const m = msg.match(/ROBE_LOGIN_REQUIRED:([^\s]+)/i);
+    if (m && m[1]) return String(m[1]).slice(0, 160);
+    if (/ROBE_LOGIN_REQUIRED/i.test(msg)) return 'login_required';
+  } catch {}
+  return '';
+}
+
+function isRobeLoginRequiredRes(input) {
+  try {
+    if (input && input.ROBE_LOGIN_REQUIRED === true) return true;
+    return !!getRobeLoginRequiredReason(input);
+  } catch {
+    return false;
+  }
+}
+
+async function handleRobeLoginRequired(nome, ctrl, input, { stage = 'robe' } = {}) {
+  const reason = getRobeLoginRequiredReason(input) || 'login_required';
+  try {
+    await issues.append(nome, 'mil_action', `robe_login_required_auto_remediate reason=${reason} stage=${stage}`);
+  } catch {}
+  try {
+    await setLoginRequiredFlag(nome, { reason, source: 'robe', preserveVirtus: true });
+  } catch {}
+  let queued = false;
+  try {
+    queued = queueAutoLoginRemediate(nome, {
+      reason,
+      source: `robe:${String(stage || '').slice(0, 40)}`,
+      immediate: true,
+      force: true
+    });
+  } catch {}
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].robeLoginRequiredAt = Date.now();
+    robeMeta[nome].robeLoginRequiredReason = reason;
+    robeMeta[nome].pauseReason = 'robe_login_required_auto_remediate';
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'robe_login_required_auto_remediate',
+      nome: String(nome || ''),
+      reason,
+      stage: String(stage || ''),
+      queued: !!queued,
+      hasController: !!ctrl,
+      virtusOnline: !!(ctrl && ctrl.virtus),
+      working: !!(ctrl && ctrl.trabalhando)
+    });
+  } catch {}
+  return { ok: false, robeLoginRequired: true, autoLoginQueued: !!queued, reason };
+}
+
 async function detectFbLimitInAnyPage(ctrl) {
   try {
     if (!ctrl || !ctrl.browser || typeof ctrl.browser.pages !== 'function') return false;
@@ -7290,6 +7362,15 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
     // #endregion
+    if (e && e.ROBE_LOGIN_REQUIRED === true) {
+      return {
+        ok: false,
+        error: String(e && e.message || e),
+        ROBE_LOGIN_REQUIRED: true,
+        loginReason: String(e.loginReason || '').slice(0, 160),
+        loginSource: String(e.loginSource || 'facebook').slice(0, 80)
+      };
+    }
     await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão configurado no servidor será aplicado pelo módulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
@@ -7445,6 +7526,12 @@ async function robeTickGlobal() {
         try {
           res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow, photoDeletePolicy);
         } catch (e) {
+          if (isRobeLoginRequiredRes(e)) {
+            await handleRobeLoginRequired(nome, ctrl, e, { stage: 'startRobeDynamic_throw' });
+            robeUpdateMeta(nome, { estado: 'login_required_auto_remediate', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            return;
+          }
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
@@ -7457,6 +7544,13 @@ async function robeTickGlobal() {
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+          return;
+        }
+
+        if (isRobeLoginRequiredRes(res)) {
+          await handleRobeLoginRequired(nome, ctrl, res, { stage: 'startRobeDynamic_result' });
+          robeUpdateMeta(nome, { estado: 'login_required_auto_remediate', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
@@ -8980,6 +9074,7 @@ const handlers = {
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       orchActionRequested(nome, 'LOGIN_REMEDIATE', { operator: op, overrideHumanHold: !!(options && options.overrideHumanHold) });
       const opts = (options && typeof options === 'object') ? options : {};
+      const preserveVirtusOnFailure = !!(opts.preserveVirtusOnFailure === true);
       const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
       const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
       const skipAttempt1InjectCookies = (
@@ -9058,7 +9153,7 @@ const handlers = {
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
         try {
-          await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
+          await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure });
         } catch {}
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
@@ -9614,7 +9709,7 @@ const handlers = {
           try { await setTwoFactorFlag(nome, { reason: 'two_factor', snippet: '' }); } catch {}
           return { ok: false, error: 'two_factor', steps, closedForRam, pausedVirtus };
         }
-        try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
         await failFastToHuman(na);
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
       }
@@ -9672,7 +9767,7 @@ const handlers = {
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
         pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
-        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
         await failFastToHuman(`ui_blocked:${kind}`);
         return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
       }
@@ -9734,7 +9829,7 @@ const handlers = {
         try { await snapshotStatusAndWrite(); } catch {}
       } else {
         pushStep({ step: 'login_remediate_failed', lrMessenger, lrFacebook });
-        try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
         await failFastToHuman('login_remediate_failed');
       }
 
@@ -12113,7 +12208,9 @@ async function autoLoginRemediateTick() {
         totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
         stageTimeoutMs: AUTO_LR_CFG.stageTimeoutMs,
         // Espera um pouco mais se estiver ocupado (robe/postagem/enviando)
-        waitBusyMs: 120_000
+        waitBusyMs: 120_000,
+        // Se o gatilho veio do Robe e o Messenger/Virtus estava vivo, falha de login no FB não deve derrubar o atendimento.
+        preserveVirtusOnFailure: /^robe:/i.test(String(st.source || ''))
       }
     });
 
