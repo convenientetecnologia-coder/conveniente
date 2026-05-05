@@ -4043,6 +4043,15 @@ const HEALTH_CFG = {
   ESCALATE_TO_REOPEN_AFTER: 2,
   ABOUT_BLANK_GRACE_MS: 7000
 };
+const CLOSE_CERTAINTY_CFG = {
+  WINDOW_MS: Math.max(20_000, parseInt(process.env.CLOSE_CERTAINTY_WINDOW_MS || '120000', 10) || 120000),
+  MIN_HITS: Math.max(1, parseInt(process.env.CLOSE_CERTAINTY_MIN_HITS || '3', 10) || 3),
+  MIN_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_MIN_SPAN_MS || '25000', 10) || 25000),
+  PENDING_HOLD_MS: Math.max(5_000, parseInt(process.env.CLOSE_CERTAINTY_PENDING_HOLD_MS || '45000', 10) || 45000),
+  PRESSURE_EXTRA_HITS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_HITS || '1', 10) || 1),
+  PRESSURE_EXTRA_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_SPAN_MS || '20000', 10) || 20000)
+};
+const CLOSE_CERTAINTY_REASONS = new Set(['health_no_progress', 'virtus_block', 'nurse_zombie', 'phantom_reopen']);
 
 const PHANTOM_CFG = {
   INITIAL_GRACE_MS: 9000,
@@ -4173,8 +4182,8 @@ async function tryFixPhantom(nome, page) {
     await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
     return true;
   }
-  await handlers.deactivate({ nome, reason: 'phantom_reopen', policy: 'preserveDesired' });
-  setKillGuard(nome);
+  const dres = await handlers.deactivate({ nome, reason: 'phantom_reopen', policy: 'preserveDesired' });
+  if (!(dres && dres.skipped)) setKillGuard(nome);
   ph.lastActionAt = now;
   return true;
 }
@@ -4192,6 +4201,106 @@ function getHealth(nome) {
     });
   }
   return healthState.get(nome);
+}
+function normalizeCloseGuardReason(reason) {
+  return String(reason || '').trim().toLowerCase();
+}
+function isCloseGuardReason(reason) {
+  return CLOSE_CERTAINTY_REASONS.has(normalizeCloseGuardReason(reason));
+}
+function isGlobalPressureNow() {
+  try {
+    const mode = String((autoMode && autoMode.mode) || '').toLowerCase();
+    if (mode === 'light') return true;
+    const lagMean = Number((autoMode && autoMode.eventLoopLagMs) || 0) || 0;
+    const lagMax = Number((autoMode && autoMode.eventLoopLagMaxMs) || 0) || 0;
+    if (lagMean >= 900 || lagMax >= 1800) return true;
+  } catch {}
+  return false;
+}
+function clearCloseCertainty(nome, source = 'ok_signal') {
+  try {
+    if (!robeMeta[nome] || !robeMeta[nome].closeCertainty) return;
+    const prev = robeMeta[nome].closeCertainty || {};
+    robeMeta[nome].closeCertainty = {
+      reason: '',
+      firstAt: 0,
+      lastAt: 0,
+      hits: 0,
+      lastSignal: '',
+      lastPressure: false,
+      lastDecisionAt: Date.now(),
+      lastAllow: null,
+      lastScore: 0,
+      lastRequiredHits: 0,
+      lastRequiredSpanMs: 0,
+      lastResetAt: Date.now(),
+      lastResetSource: String(source || 'unknown'),
+      prevReason: String(prev.reason || ''),
+      prevHits: Number(prev.hits || 0) || 0
+    };
+  } catch {}
+}
+function evaluateCloseCertainty(nome, reason, signal = '') {
+  const key = normalizeCloseGuardReason(reason);
+  const now = Date.now();
+  const guarded = isCloseGuardReason(key);
+  if (!guarded) {
+    return {
+      guarded: false,
+      allow: true,
+      reason: key,
+      hits: 0,
+      spanMs: 0,
+      requiredHits: 0,
+      requiredSpanMs: 0,
+      pressure: false,
+      score: 1
+    };
+  }
+  robeMeta[nome] = robeMeta[nome] || {};
+  const state = robeMeta[nome].closeCertainty || {
+    reason: '',
+    firstAt: 0,
+    lastAt: 0,
+    hits: 0
+  };
+  const outOfWindow = state.lastAt > 0 && (now - state.lastAt) > CLOSE_CERTAINTY_CFG.WINDOW_MS;
+  if (state.reason !== key || outOfWindow || !state.firstAt) {
+    state.reason = key;
+    state.firstAt = now;
+    state.lastAt = now;
+    state.hits = 0;
+  }
+  state.hits = (Number(state.hits || 0) || 0) + 1;
+  state.lastAt = now;
+  state.lastSignal = String(signal || '');
+  const pressure = isGlobalPressureNow();
+  const requiredHits = CLOSE_CERTAINTY_CFG.MIN_HITS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_HITS : 0);
+  const requiredSpanMs = CLOSE_CERTAINTY_CFG.MIN_SPAN_MS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_SPAN_MS : 0);
+  const spanMs = Math.max(0, now - (Number(state.firstAt || now) || now));
+  const allow = state.hits >= requiredHits && spanMs >= requiredSpanMs;
+  const scoreByHits = Math.min(1, state.hits / Math.max(1, requiredHits));
+  const scoreBySpan = Math.min(1, spanMs / Math.max(1, requiredSpanMs));
+  const score = Math.round(((scoreByHits * 0.6) + (scoreBySpan * 0.4)) * 1000) / 1000;
+  state.lastPressure = pressure;
+  state.lastDecisionAt = now;
+  state.lastAllow = allow;
+  state.lastScore = score;
+  state.lastRequiredHits = requiredHits;
+  state.lastRequiredSpanMs = requiredSpanMs;
+  robeMeta[nome].closeCertainty = state;
+  return {
+    guarded: true,
+    allow,
+    reason: key,
+    hits: state.hits,
+    spanMs,
+    requiredHits,
+    requiredSpanMs,
+    pressure,
+    score
+  };
 }
 function _pruneWindow(arr, ms) {
   const now = Date.now();
@@ -5095,7 +5204,7 @@ async function activateOnce(nome, source = '', operator = '') {
 
         if (shouldBlockOpen && !provisionLock.ownerMatchesOperator(cur.lock, op)) {
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+          robeMeta[nome].activationHeldUntil = Date.now() + SUPERVISOR_OTHER_HOLD_MS;
           await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
           try {
             provisionAudit.append({
@@ -5139,9 +5248,10 @@ async function activateOnce(nome, source = '', operator = '') {
       .catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
       robeMeta[nome] = robeMeta[nome] || {};
-      // NOVO: Reduzido de 30s para 5s (supervisor já controla velocidade via cooldowns)
-      robeMeta[nome].activationHeldUntil = Date.now() + 5000;
-      await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
+      const denyReason = String((slotResp && slotResp.reason) || 'unknown').toLowerCase();
+      const holdMs = (denyReason === 'slots') ? SUPERVISOR_SLOT_HOLD_MS : SUPERVISOR_OTHER_HOLD_MS;
+      robeMeta[nome].activationHeldUntil = Date.now() + holdMs;
+      await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'} holdMs=${holdMs}`);
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
     }
     _supervisorSlotGranted = true;
@@ -5427,9 +5537,8 @@ async function activateOnce(nome, source = '', operator = '') {
         try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
-          // NOVO: Reduzido de 15s para 5s (supervisor já controla velocidade)
-          robeMeta[nome].activationHeldUntil = Date.now() + 5000;
-          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 5s (activateOnce)'); } catch {}
+          robeMeta[nome].activationHeldUntil = Date.now() + ACTIVATE_RAM_HOLD_MS;
+          try { await reportAction(nome, 'mil_action', `activation_hold_due_ram ${Math.round(ACTIVATE_RAM_HOLD_MS / 1000)}s (activateOnce)`); } catch {}
         }
         logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message || e }, e);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
@@ -7567,7 +7676,7 @@ try {
       robeMeta[nome].reopenAt = now + reopenDelayMs;
       robeMeta[nome].closingReason = 'disconnected';
       issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected) in ${Math.round(reopenDelayMs / 1000)}s`).catch(()=>{});
-      setKillGuard(nome, 5000);
+      setKillGuard(nome, DISCONNECTED_KILL_GUARD_MS);
     } else {
       issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
     }
@@ -7937,6 +8046,58 @@ const handlers = {
   const strictCloseRequired =
     !preserve &&
     /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
+  if (preserve && isCloseGuardReason(reason || '')) {
+    const certainty = evaluateCloseCertainty(nome, reason || 'unknown', 'deactivate_preserve');
+    if (!certainty.allow) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].activationHeldUntil = Date.now() + CLOSE_CERTAINTY_CFG.PENDING_HOLD_MS;
+      try {
+        await issues.append(
+          nome,
+          'mil_action',
+          `close_quarantine_pending reason=${certainty.reason} score=${certainty.score} hits=${certainty.hits}/${certainty.requiredHits} spanMs=${certainty.spanMs}/${certainty.requiredSpanMs} pressure=${certainty.pressure ? 1 : 0} holdMs=${CLOSE_CERTAINTY_CFG.PENDING_HOLD_MS}`
+        );
+      } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'close_quarantine_pending',
+          nome: String(nome || ''),
+          reason: String(certainty.reason || ''),
+          score: Number(certainty.score || 0),
+          hits: Number(certainty.hits || 0),
+          requiredHits: Number(certainty.requiredHits || 0),
+          spanMs: Number(certainty.spanMs || 0),
+          requiredSpanMs: Number(certainty.requiredSpanMs || 0),
+          pressure: !!certainty.pressure,
+          holdMs: CLOSE_CERTAINTY_CFG.PENDING_HOLD_MS
+        });
+      } catch {}
+      await snapshotStatusAndWrite();
+      return { ok: true, skipped: true, quarantine: true, certainty };
+    }
+    try {
+      await issues.append(
+        nome,
+        'mil_action',
+        `close_quarantine_pass reason=${certainty.reason} score=${certainty.score} hits=${certainty.hits}/${certainty.requiredHits} spanMs=${certainty.spanMs}/${certainty.requiredSpanMs} pressure=${certainty.pressure ? 1 : 0}`
+      );
+    } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'close_quarantine_pass',
+        nome: String(nome || ''),
+        reason: String(certainty.reason || ''),
+        score: Number(certainty.score || 0),
+        hits: Number(certainty.hits || 0),
+        requiredHits: Number(certainty.requiredHits || 0),
+        spanMs: Number(certainty.spanMs || 0),
+        requiredSpanMs: Number(certainty.requiredSpanMs || 0),
+        pressure: !!certainty.pressure
+      });
+    } catch {}
+  }
   // Resolver userDataDir cedo (para validação pós-close determinística)
   let udirForCheck = '';
   try {
@@ -11201,12 +11362,18 @@ const NURSE_CFG = {
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
+const SUPERVISOR_SLOT_HOLD_MS = Math.max(5000, parseInt(process.env.SUPERVISOR_SLOT_HOLD_MS || '30000', 10) || 30000);
+const SUPERVISOR_OTHER_HOLD_MS = Math.max(5000, parseInt(process.env.SUPERVISOR_OTHER_HOLD_MS || '12000', 10) || 12000);
+const ACTIVATE_RAM_HOLD_MS = Math.max(5000, parseInt(process.env.ACTIVATE_RAM_HOLD_MS || '15000', 10) || 15000);
+const NURSE_SLOT_BACKOFF_MS = Math.max(5000, parseInt(process.env.NURSE_SLOT_BACKOFF_MS || '30000', 10) || 30000);
+const NURSE_RAM_BACKOFF_MS = Math.max(3000, parseInt(process.env.NURSE_RAM_BACKOFF_MS || '10000', 10) || 10000);
+const DISCONNECTED_KILL_GUARD_MS = Math.max(5000, parseInt(process.env.DISCONNECTED_KILL_GUARD_MS || '15000', 10) || 15000);
 
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
   RELOAD_TIMEOUT_MS: 10000,
   RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: 5000, // NOVO: Reduzido de 60s para 5s (reabertura quase imediata, supervisor controla velocidade)
+  REOPEN_DELAY_SHORT_MS: Math.max(5000, parseInt(process.env.REOPEN_DELAY_SHORT_MS || '60000', 10) || 60000),
   REOPEN_DELAY_RAMCPU_MS: 60000,
   FAIL_WINDOW_MS: 3*60*60*1000,
   FAIL_FREEZE_AFTER: 5,
@@ -12713,15 +12880,14 @@ async function nurseTick() {
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
               } catch {}
-              if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
+              if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
 
                 const swapped = await trySwapOpen(nome);
 
                 if (!swapped) {
                   robeMeta[nome] = robeMeta[nome] || {};
-                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
-                  const curBackoff = 3000;
+                  const curBackoff = NURSE_RAM_BACKOFF_MS;
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
                   await issues.append(nome, 'mil_action', `open_backoff set to ${Math.floor(curBackoff/1000)}s (fixed)`);
@@ -12729,10 +12895,17 @@ async function nurseTick() {
                 } else {
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
+              } else if (/supervisor_denied:slots/.test(err)) {
+                // Slot negado sob pressão não significa RAM insuficiente.
+                // Evita fechar navegador saudável por "swap" quando o gargalo é concorrência.
+                robeMeta[nome] = robeMeta[nome] || {};
+                const curBackoff = NURSE_SLOT_BACKOFF_MS;
+                robeMeta[nome].openBackoffMs = curBackoff;
+                robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
+                await issues.append(nome, 'mil_action', `open_denied_slots_backoff ${Math.floor(curBackoff/1000)}s`);
               }
             } else {
-              // NOVO: Backoff fixo de 3s ao invés de 15s
-              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
+              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = NURSE_RAM_BACKOFF_MS;
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.
               try {
                 const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
@@ -12829,8 +13002,8 @@ async function nurseTick() {
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
             await registerFailure(nome, 'no_pages', 'external');
-            await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-            setKillGuard(nome);
+            const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+            if (!(dres && dres.skipped)) setKillGuard(nome);
             robeMeta[nome].noPagesStrikes = 0;
             continue;
           }
@@ -13323,8 +13496,8 @@ async function nurseTick() {
             robeMeta[nome].closingReason = 'virtus_block';
           }
           await registerFailure(nome, 'messenger_temp_block', 'external');
-          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
-          setKillGuard(nome);
+          const dres = await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+          if (!(dres && dres.skipped)) setKillGuard(nome);
           await snapshotStatusAndWrite();
           continue;
         } else {
@@ -13458,8 +13631,8 @@ async function nurseTick() {
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
             try { registerFailure(nome, 'zombie', 'external'); } catch {}
-            await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-            setKillGuard(nome);
+            const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+            if (!(dres && dres.skipped)) setKillGuard(nome);
             robeMeta[nome].zombieStrikes = 0;
             continue;
           }
@@ -13904,8 +14077,8 @@ async function escalateToReopen(nome, reason='health_reopen') {
     await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
     return;
   }
-  await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
-  setKillGuard(nome);
+  const dres = await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
+  if (!(dres && dres.skipped)) setKillGuard(nome);
   const st = getHealth(nome);
   st.stage = 'reopen';
   st.nextTryAt = Date.now() + 60000;
@@ -13963,8 +14136,8 @@ async function healthTick() {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
           continue;
         }
-        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
-        setKillGuard(nome);
+        const dres = await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+        if (!(dres && dres.skipped)) setKillGuard(nome);
         await snapshotStatusAndWrite();
         continue;
       }
@@ -14005,6 +14178,7 @@ async function healthTick() {
       st.lastOkAt = now;
       st.stage = 'ok';
       st.counters.cyclesWithoutLife = 0;
+      clearCloseCertainty(nome, 'page_alive');
       continue;
     }
     const noEventsFor = Math.max(now - st.lastDomEventAt, now - st.lastNetEventAt);
@@ -14257,7 +14431,7 @@ async function runCdpFatalRecoverySweep({ source = '', msg = '' } = {}) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
           robeMeta[nome].closingReason = 'cdp_fatal_soft_recover';
-          setKillGuard(nome, 5000);
+          setKillGuard(nome, DISCONNECTED_KILL_GUARD_MS);
           recovered++;
         }
       } catch {}
