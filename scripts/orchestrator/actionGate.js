@@ -145,6 +145,11 @@ function beginAction({ profileId, actionKind, reason = "", source = "", ttlMs, d
       startedAt: conflictActive.startedAt,
       expiresAt: conflictActive.expiresAt
     } : null,
+    recent: recent ? {
+      endedAt: recent.endedAt,
+      expiresAt: recent.expiresAt,
+      result: recent.result || null
+    } : null,
     token,
     priority: prio,
     ttlMs: ttl,

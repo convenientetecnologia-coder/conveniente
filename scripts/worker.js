@@ -159,6 +159,22 @@ function orchGateEnd(ticket, result = {}) {
   try { actionGate.endAction(ticket, result); } catch {}
 }
 
+function orchGateRetryAfterMs(ticket, fallbackMs = 30_000) {
+  try {
+    const now = Date.now();
+    const candidates = [];
+    const conflictExpiresAt = Number(ticket && ticket.conflictActive && ticket.conflictActive.expiresAt || 0) || 0;
+    if (conflictExpiresAt > now) candidates.push(conflictExpiresAt - now);
+    const recentExpiresAt = Number(ticket && ticket.recent && ticket.recent.expiresAt || 0) || 0;
+    if (recentExpiresAt > now) candidates.push(recentExpiresAt - now);
+    if (Number(ticket && ticket.ttlMs || 0) > 0) candidates.push(Math.min(Number(ticket.ttlMs || 0), fallbackMs));
+    const ms = candidates.length ? Math.max(...candidates) : fallbackMs;
+    return Math.max(5_000, Math.min(10 * 60_000, Number(ms || fallbackMs) || fallbackMs));
+  } catch {
+    return fallbackMs;
+  }
+}
+
 function orchGateDeniedResult(ticket, { ok = true, error = 'orchestrator_duplicate_action' } = {}) {
   return {
     ok,
@@ -168,7 +184,8 @@ function orchGateDeniedResult(ticket, { ok = true, error = 'orchestrator_duplica
     gateReason: ticket && ticket.deniedReason ? String(ticket.deniedReason) : 'denied',
     gateGroup: ticket && ticket.group ? String(ticket.group) : '',
     gateConflictAction: ticket && ticket.conflictActive && ticket.conflictActive.actionKind ? String(ticket.conflictActive.actionKind) : '',
-    gateConflictGroup: ticket && ticket.conflictActive && ticket.conflictActive.group ? String(ticket.conflictActive.group) : ''
+    gateConflictGroup: ticket && ticket.conflictActive && ticket.conflictActive.group ? String(ticket.conflictActive.group) : '',
+    gateRetryAfterMs: orchGateRetryAfterMs(ticket)
   };
 }
 
@@ -12095,6 +12112,27 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
       earliest,
       force ? 0 : (Number(st.nextAt || 0) || 0)
     );
+    const prevQueued = !!st.queued;
+    const prevNextAt = Number(st.nextAt || 0) || 0;
+    const sameSignal = (
+      String(st.reason || '') === String(reason || '').slice(0, 80) &&
+      String(st.source || '') === String(source || '').slice(0, 80)
+    );
+    if (prevQueued && sameSignal && prevNextAt && prevNextAt <= when && !force) {
+      st.dedupeCount = (Number(st.dedupeCount || 0) || 0) + 1;
+      try {
+        provisionAudit.append({
+          ts: now,
+          event: 'auto_login_remediate_enqueue_deduped',
+          nome: String(nome || ''),
+          reason: String(reason || '').slice(0, 120),
+          source: String(source || '').slice(0, 80),
+          nextAt: prevNextAt,
+          dedupeCount: st.dedupeCount
+        });
+      } catch {}
+      return true;
+    }
     st.queued = true;
     st.nextAt = when;
     st.reason = String(reason || '').slice(0, 80);
@@ -12114,6 +12152,22 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
       });
     } catch {}
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function isAutoLoginRemediateDeferredByGate(resp) {
+  try {
+    if (!resp || typeof resp !== 'object') return false;
+    if (resp.deduped !== true) return false;
+    const reason = String(resp.gateReason || '').toLowerCase();
+    return (
+      reason.includes('conflict_group_active') ||
+      reason.includes('same_action_active') ||
+      reason.includes('same_kind_active') ||
+      reason.includes('recent_duplicate')
+    );
   } catch {
     return false;
   }
@@ -12245,6 +12299,37 @@ async function autoLoginRemediateTick() {
         preserveVirtusOnFailure: /^robe:/i.test(String(st.source || ''))
       }
     });
+
+    if (isAutoLoginRemediateDeferredByGate(resp)) {
+      const retryMs = Math.max(15_000, Math.min(10 * 60_000, Number(resp && resp.gateRetryAfterMs || 0) || 45_000));
+      const retryAt = Date.now() + retryMs;
+      try {
+        if (Array.isArray(st.attempts24h) && st.attempts24h[st.attempts24h.length - 1] === st.lastStartAt) st.attempts24h.pop();
+      } catch {}
+      st.queued = true;
+      st.inFlight = false;
+      st.nextAt = retryAt;
+      st.lastDoneAt = Date.now();
+      st.lastOk = false;
+      st.lastError = resp && resp.error ? String(resp.error).slice(0, 160) : 'orchestrator_gate_deferred';
+      st.deferredByGateAt = Date.now();
+      st.deferredByGateReason = resp && resp.gateReason ? String(resp.gateReason).slice(0, 80) : '';
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'auto_login_remediate_gate_deferred',
+          nome,
+          operator,
+          retryAt,
+          retryMs,
+          gateReason: resp && resp.gateReason ? String(resp.gateReason).slice(0, 120) : '',
+          gateConflictAction: resp && resp.gateConflictAction ? String(resp.gateConflictAction).slice(0, 80) : '',
+          gateConflictGroup: resp && resp.gateConflictGroup ? String(resp.gateConflictGroup).slice(0, 80) : ''
+        });
+      } catch {}
+      try { await issues.append(nome, 'mil_action', `auto_login_remediate_deferred_by_gate retryMs=${retryMs} reason=${st.deferredByGateReason||''}`); } catch {}
+      return;
+    }
 
     st.lastDoneAt = Date.now();
     st.lastOk = !!(resp && resp.ok);
