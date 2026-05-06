@@ -24,23 +24,6 @@ const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
-const orchestratorAudit = require('./orchestrator/orchestratorAudit.js');
-const orchestratorRuntime = require('./orchestrator/runtime.js');
-const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemediateQueue.js');
-const governorPolicy = require('./orchestrator/governorPolicy.js');
-const closeCertaintyPolicy = require('./orchestrator/closeCertaintyPolicy.js');
-const recoveryPolicy = require('./orchestrator/recoveryPolicy.js');
-const actionRunner = require('./orchestrator/actionRunner.js');
-const { createBrowserLifecycle } = require('./orchestrator/browserLifecycle.js');
-const {
-  audit: orchAudit,
-  actorBegin: orchActorBegin,
-  actionRequested: orchActionRequested,
-  actionDone: orchActionDone,
-  gateBegin: orchGateBegin,
-  gateEnd: orchGateEnd,
-  gateDeniedResult: orchGateDeniedResult
-} = orchestratorRuntime;
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -62,11 +45,6 @@ try {
     logIngestSecretConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.logIngestSecret); } catch { return false; } })()
   });
 } catch {}
-orchAudit('worker_boot_orchestrator_audit_ready', {
-  buildTag: WORKER_BUILD_TAG,
-  auditPath: orchestratorAudit.AUDIT_PATH,
-  auditEnabled: orchestratorAudit.enabled()
-});
 
 // ===== AUTO-OPEN BOOT RESET (sempre OFF no boot) =====
 // Regra operacional: ao iniciar o worker, "Tudo aberto" deve ficar desligado
@@ -694,7 +672,7 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
   }
 }
 
-async function setLoginRequiredFlag(nome, { reason = '', source = '', preserveVirtus = false } = {}) {
+async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
   try {
@@ -754,37 +732,25 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '', preserveVi
     robeMeta[nome].loginReason = reason || '';
     robeMeta[nome].loginSource = source || '';
 
-    if (preserveVirtus !== true) {
-      // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
-      // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
-      try {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {}; d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
-          return d;
-        });
-      } catch {}
+    // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
+    // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
+    try {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {}; d.perfis = d.perfis || {};
+        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+        return d;
+      });
+    } catch {}
 
-      // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
-      // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
-      try {
-        const ctrl = controllers.get(nome);
-        if (ctrl) {
-          ctrl.trabalhando = false;
-          try { await stopVirtus(nome); } catch {}
-        }
-      } catch {}
-    } else {
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'login_required_preserve_virtus',
-          nome: String(nome || ''),
-          reason: String(reason || '').slice(0, 160),
-          source: String(source || '').slice(0, 80)
-        });
-      } catch {}
-    }
+    // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
+    // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
+    try {
+      const ctrl = controllers.get(nome);
+      if (ctrl) {
+        ctrl.trabalhando = false;
+        try { await stopVirtus(nome); } catch {}
+      }
+    } catch {}
 
     try { await snapshotStatusAndWrite(); } catch {}
   } catch {}
@@ -870,7 +836,6 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
-  orchActionRequested(nome, 'ENTER_HUMAN_MODE', { reason });
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d = d || {}; d.perfis = d.perfis || {};
@@ -889,7 +854,6 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
-  orchActionDone(nome, 'ENTER_HUMAN_MODE', { ok: true, reason });
 }
 
 // ===== Captcha flow (OCR + retries) =====
@@ -942,15 +906,6 @@ async function enforcePausedNonLrState(nome, { kind = '', source = '' } = {}) {
 async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const startedAt = Date.now();
   const id = String(flowId || newFlowId('captcha'));
-  const __orchAudit = orchActorBegin('runCaptchaFlow', { profileId: nome, source, flowId: id, force: !!force });
-  orchActionRequested(nome, 'RUN_CAPTCHA_FLOW', { source, flowId: id, force: !!force });
-  const __orchGate = orchGateBegin(nome, 'RUN_CAPTCHA_FLOW', { source, reason: flowId || '', ttlMs: 420000, dedupeMs: force ? 0 : 45000, priority: 75 });
-  if (__orchGate && __orchGate.allow === false) {
-    const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'captcha_flow_deduped' });
-    orchActionDone(nome, 'RUN_CAPTCHA_FLOW', { ...r, source, flowId: id });
-    __orchAudit.end({ profileId: nome, flowId: id, ...r });
-    return r;
-  }
   let _locked = false;
   let lastImgSrc = '';
   try {
@@ -1179,8 +1134,6 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       _captchaFlowRunning = false;
       _captchaFlowRunningNome = null;
     }
-    orchGateEnd(__orchGate, { ok: true });
-    __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - startedAt });
   }
 }
 
@@ -3007,15 +2960,6 @@ const IDENTITY_FLOW_CFG = {
 async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const now = Date.now();
   const id = String(flowId || newFlowId('identity'));
-  const __orchAudit = orchActorBegin('runIdentityFlow', { profileId: nome, source, flowId: id, force: !!force });
-  orchActionRequested(nome, 'RUN_IDENTITY_FLOW', { source, flowId: id, force: !!force });
-  const __orchGate = orchGateBegin(nome, 'RUN_IDENTITY_FLOW', { source, reason: flowId || '', ttlMs: 420000, dedupeMs: force ? 0 : 45000, priority: 75 });
-  if (__orchGate && __orchGate.allow === false) {
-    const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'identity_flow_deduped' });
-    orchActionDone(nome, 'RUN_IDENTITY_FLOW', { ...r, source, flowId: id });
-    __orchAudit.end({ profileId: nome, flowId: id, ...r });
-    return r;
-  }
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
@@ -3231,9 +3175,6 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, flowId: id, error: msg };
-  } finally {
-    orchGateEnd(__orchGate, { ok: true });
-    __orchAudit.end({ profileId: nome, flowId: id, durationMs: Date.now() - now });
   }
 }
 
@@ -4055,66 +3996,6 @@ function isLimitPostingRes(res) {
   return !!(res && (res.limitPosting === true || res.error === 'limit_posting' || res.HALT === true));
 }
 
-function getRobeLoginRequiredReason(input) {
-  try {
-    const msg = String((input && (input.error || input.message)) || input || '');
-    const explicit = String((input && input.loginReason) || '').trim();
-    if (explicit) return explicit.slice(0, 160);
-    const m = msg.match(/ROBE_LOGIN_REQUIRED:([^\s]+)/i);
-    if (m && m[1]) return String(m[1]).slice(0, 160);
-    if (/ROBE_LOGIN_REQUIRED/i.test(msg)) return 'login_required';
-  } catch {}
-  return '';
-}
-
-function isRobeLoginRequiredRes(input) {
-  try {
-    if (input && input.ROBE_LOGIN_REQUIRED === true) return true;
-    return !!getRobeLoginRequiredReason(input);
-  } catch {
-    return false;
-  }
-}
-
-async function handleRobeLoginRequired(nome, ctrl, input, { stage = 'robe' } = {}) {
-  const reason = getRobeLoginRequiredReason(input) || 'login_required';
-  try {
-    await issues.append(nome, 'mil_action', `robe_login_required_auto_remediate reason=${reason} stage=${stage}`);
-  } catch {}
-  try {
-    await setLoginRequiredFlag(nome, { reason, source: 'robe', preserveVirtus: true });
-  } catch {}
-  let queued = false;
-  try {
-    queued = queueAutoLoginRemediate(nome, {
-      reason,
-      source: `robe:${String(stage || '').slice(0, 40)}`,
-      immediate: true,
-      force: true
-    });
-  } catch {}
-  try {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].robeLoginRequiredAt = Date.now();
-    robeMeta[nome].robeLoginRequiredReason = reason;
-    robeMeta[nome].pauseReason = 'robe_login_required_auto_remediate';
-  } catch {}
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'robe_login_required_auto_remediate',
-      nome: String(nome || ''),
-      reason,
-      stage: String(stage || ''),
-      queued: !!queued,
-      hasController: !!ctrl,
-      virtusOnline: !!(ctrl && ctrl.virtus),
-      working: !!(ctrl && ctrl.trabalhando)
-    });
-  } catch {}
-  return { ok: false, robeLoginRequired: true, autoLoginQueued: !!queued, reason };
-}
-
 async function detectFbLimitInAnyPage(ctrl) {
   try {
     if (!ctrl || !ctrl.browser || typeof ctrl.browser.pages !== 'function') return false;
@@ -4162,7 +4043,15 @@ const HEALTH_CFG = {
   ESCALATE_TO_REOPEN_AFTER: 2,
   ABOUT_BLANK_GRACE_MS: 7000
 };
-const CLOSE_CERTAINTY_CFG = closeCertaintyPolicy.buildConfig(process.env);
+const CLOSE_CERTAINTY_CFG = {
+  WINDOW_MS: Math.max(20_000, parseInt(process.env.CLOSE_CERTAINTY_WINDOW_MS || '120000', 10) || 120000),
+  MIN_HITS: Math.max(1, parseInt(process.env.CLOSE_CERTAINTY_MIN_HITS || '3', 10) || 3),
+  MIN_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_MIN_SPAN_MS || '25000', 10) || 25000),
+  PENDING_HOLD_MS: Math.max(5_000, parseInt(process.env.CLOSE_CERTAINTY_PENDING_HOLD_MS || '45000', 10) || 45000),
+  PRESSURE_EXTRA_HITS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_HITS || '1', 10) || 1),
+  PRESSURE_EXTRA_SPAN_MS: Math.max(0, parseInt(process.env.CLOSE_CERTAINTY_PRESSURE_EXTRA_SPAN_MS || '20000', 10) || 20000)
+};
+const CLOSE_CERTAINTY_REASONS = new Set(['health_no_progress', 'virtus_block', 'nurse_zombie', 'phantom_reopen']);
 
 const PHANTOM_CFG = {
   INITIAL_GRACE_MS: 9000,
@@ -4314,40 +4203,130 @@ function getHealth(nome) {
   return healthState.get(nome);
 }
 function normalizeCloseGuardReason(reason) {
-  return closeCertaintyPolicy.normalizeReason(reason);
+  return String(reason || '').trim().toLowerCase();
 }
 function isCloseGuardReason(reason) {
-  return closeCertaintyPolicy.isGuardReason(reason, CLOSE_CERTAINTY_CFG);
+  return CLOSE_CERTAINTY_REASONS.has(normalizeCloseGuardReason(reason));
 }
 function isGlobalPressureNow() {
-  return closeCertaintyPolicy.isPressureNow(autoMode);
+  try {
+    const mode = String((autoMode && autoMode.mode) || '').toLowerCase();
+    if (mode === 'light') return true;
+    const lagMean = Number((autoMode && autoMode.eventLoopLagMs) || 0) || 0;
+    const lagMax = Number((autoMode && autoMode.eventLoopLagMaxMs) || 0) || 0;
+    if (lagMean >= 900 || lagMax >= 1800) return true;
+  } catch {}
+  return false;
 }
 function clearCloseCertainty(nome, source = 'ok_signal') {
   try {
     if (!robeMeta[nome] || !robeMeta[nome].closeCertainty) return;
     const prev = robeMeta[nome].closeCertainty || {};
-    robeMeta[nome].closeCertainty = closeCertaintyPolicy.resetState(prev, { source, now: Date.now() });
+    robeMeta[nome].closeCertainty = {
+      reason: '',
+      firstAt: 0,
+      lastAt: 0,
+      hits: 0,
+      lastSignal: '',
+      lastPressure: false,
+      lastDecisionAt: Date.now(),
+      lastAllow: null,
+      lastScore: 0,
+      lastRequiredHits: 0,
+      lastRequiredSpanMs: 0,
+      lastResetAt: Date.now(),
+      lastResetSource: String(source || 'unknown'),
+      prevReason: String(prev.reason || ''),
+      prevHits: Number(prev.hits || 0) || 0
+    };
   } catch {}
 }
 function evaluateCloseCertainty(nome, reason, signal = '') {
+  const key = normalizeCloseGuardReason(reason);
+  const now = Date.now();
+  const guarded = isCloseGuardReason(key);
+  if (!guarded) {
+    return {
+      guarded: false,
+      allow: true,
+      reason: key,
+      hits: 0,
+      spanMs: 0,
+      requiredHits: 0,
+      requiredSpanMs: 0,
+      pressure: false,
+      score: 1
+    };
+  }
   robeMeta[nome] = robeMeta[nome] || {};
-  const evaluated = closeCertaintyPolicy.evaluate({
-    previousState: robeMeta[nome].closeCertainty,
-    reason,
-    signal,
-    pressure: isGlobalPressureNow(),
-    cfg: CLOSE_CERTAINTY_CFG,
-    now: Date.now()
-  });
-  if (evaluated && evaluated.state) robeMeta[nome].closeCertainty = evaluated.state;
-  return evaluated && evaluated.result ? evaluated.result : { guarded: false, allow: true, reason: normalizeCloseGuardReason(reason), score: 1 };
+  const state = robeMeta[nome].closeCertainty || {
+    reason: '',
+    firstAt: 0,
+    lastAt: 0,
+    hits: 0
+  };
+  const outOfWindow = state.lastAt > 0 && (now - state.lastAt) > CLOSE_CERTAINTY_CFG.WINDOW_MS;
+  if (state.reason !== key || outOfWindow || !state.firstAt) {
+    state.reason = key;
+    state.firstAt = now;
+    state.lastAt = now;
+    state.hits = 0;
+  }
+  state.hits = (Number(state.hits || 0) || 0) + 1;
+  state.lastAt = now;
+  state.lastSignal = String(signal || '');
+  const pressure = isGlobalPressureNow();
+  const requiredHits = CLOSE_CERTAINTY_CFG.MIN_HITS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_HITS : 0);
+  const requiredSpanMs = CLOSE_CERTAINTY_CFG.MIN_SPAN_MS + (pressure ? CLOSE_CERTAINTY_CFG.PRESSURE_EXTRA_SPAN_MS : 0);
+  const spanMs = Math.max(0, now - (Number(state.firstAt || now) || now));
+  const allow = state.hits >= requiredHits && spanMs >= requiredSpanMs;
+  const scoreByHits = Math.min(1, state.hits / Math.max(1, requiredHits));
+  const scoreBySpan = Math.min(1, spanMs / Math.max(1, requiredSpanMs));
+  const score = Math.round(((scoreByHits * 0.6) + (scoreBySpan * 0.4)) * 1000) / 1000;
+  state.lastPressure = pressure;
+  state.lastDecisionAt = now;
+  state.lastAllow = allow;
+  state.lastScore = score;
+  state.lastRequiredHits = requiredHits;
+  state.lastRequiredSpanMs = requiredSpanMs;
+  robeMeta[nome].closeCertainty = state;
+  return {
+    guarded: true,
+    allow,
+    reason: key,
+    hits: state.hits,
+    spanMs,
+    requiredHits,
+    requiredSpanMs,
+    pressure,
+    score
+  };
 }
 function _pruneWindow(arr, ms) {
   const now = Date.now();
   return arr.filter(ts => (now - ts) < ms);
 }
 
-const AUTO_CFG = governorPolicy.buildConfig(process.env);
+const AUTO_CFG = {
+  // Governor (light/full) — limiares de RAM livre (MB): preferência pelo server_runtime_config.memory
+  // (read a cada tick em governorTick). Env abaixo = fallback se config indisponível.
+  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
+  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
+  CPU_ENTER: 85,
+  CPU_EXIT: 70,
+  EMA_ALPHA_CPU: 0.30,
+  EMA_ALPHA_MEM: 0.20,
+  HOT_TICKS: 3,
+  COOL_TICKS: 3,
+  MIN_HOLD_MS: 45000,
+  // Em light, Robe NÃO pode parar, apenas reduzir pressão.
+  ROBE_LIGHT_MIN_SPACING_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ROBE_LIGHT_MIN_SPACING_MS || '60000', 10) || 60000),
+  // Quantos Robes no máximo enfileirar por tick em light (0 => não enfileira).
+  ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
+  // Confirmações por tempo (evita “piscar” e evita entrar em light por flutuação).
+  ENTER_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ENTER_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
+  EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000))
+};
 
 const ramPolicy = require('./ramPolicy.js');
 
@@ -4376,7 +4355,11 @@ const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 // - Quando o loop trava, o sistema “se perde” (timers atrasam, navegação falha, about:blank se acumula).
 // - Este é o gatilho enterprise para backpressure antes de quebrar.
 // Defaults mais conservadores (menos sensível) — ainda configurável por env.
-const GOVERNOR_TICK_MS = AUTO_CFG.GOVERNOR_TICK_MS;
+const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '400', 10);
+const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '200', 10);
+const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '2000', 10);
+const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '900', 10);
+const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10);
 
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
@@ -4386,6 +4369,9 @@ const autoMode = {
   recoveredSince: 0,
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
+
+function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
+function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
 
 // Event loop delay monitor (ultra leve; sem WMI)
 const _loopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -4409,25 +4395,56 @@ async function governorTick() {
 
     const freeMB = getAvailableMB();
     const lag = readLoopLagMs();
-    let serverMemory = null;
+    autoMode.eventLoopLagMs = lag.meanMs;
+    autoMode.eventLoopLagMaxMs = lag.maxMs;
+    autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
+
+    let memEnterMb = AUTO_CFG.MEM_ENTER_MB;
+    let memExitMb = AUTO_CFG.MEM_EXIT_MB;
     try {
       const cfg = serverConfig.readServerConfigEffective();
-      serverMemory = cfg && cfg.memory ? cfg.memory : null;
+      const m = cfg && cfg.memory;
+      if (m) {
+        memEnterMb = Math.max(256, Math.floor(Number(m.governorEnterMb) || memEnterMb));
+        memExitMb = Math.max(256, Math.floor(Number(m.governorExitMb) || memEnterMb));
+        if (memExitMb < memEnterMb) memExitMb = memEnterMb;
+      }
     } catch {}
-    const decision = governorPolicy.evaluateGovernorMode({ state: autoMode, cfg: AUTO_CFG, now, freeMB, lag, serverMemory });
-    Object.assign(autoMode, decision.next || {});
-    if (decision.transition) {
-      autoMode.mode = decision.transition.mode;
-      autoMode.since = now;
-      autoMode.reason = decision.transition.reason;
-      if (decision.transition.resetWindows) {
+
+    const memLow = (freeMB > 0 && freeMB < memEnterMb);
+    const memHigh = (freeMB > 0 && freeMB >= memExitMb);
+    // Política (triagem 2026-01-30): modo leve/full definido por RAM.
+    // Lag continua sendo observado (telemetria), mas NÃO deve causar mudança de modo sozinho.
+    const pressureNow = memLow;
+    const recoveredNow = memHigh;
+
+    // Janela de confirmação (5min) para entrar/sair.
+    if (pressureNow) {
+      if (!autoMode.pressureSince) autoMode.pressureSince = now;
+    } else {
+      autoMode.pressureSince = 0;
+    }
+    if (recoveredNow) {
+      if (!autoMode.recoveredSince) autoMode.recoveredSince = now;
+    } else {
+      autoMode.recoveredSince = 0;
+    }
+
+    // Troca normal full/light baseada em janela de confirmação.
+    if (autoMode.mode === 'full') {
+      if (autoMode.pressureSince && (now - autoMode.pressureSince) >= AUTO_CFG.ENTER_CONFIRM_MS && _canSwitch()) {
+        autoMode.mode = 'light';
+        autoMode.since = now;
+        autoMode.reason = 'mem_low';
+        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+      }
+    } else {
+      if (autoMode.recoveredSince && (now - autoMode.recoveredSince) >= AUTO_CFG.EXIT_CONFIRM_MS && _canSwitch()) {
+        autoMode.mode = 'full';
+        autoMode.since = now;
+        autoMode.reason = 'recovered';
         autoMode.pressureSince = 0;
         autoMode.recoveredSince = 0;
-      }
-      const ev = String(decision.transition.logEvent || '');
-      if (ev === 'enter_slow') {
-        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
-      } else if (ev === 'exit_slow') {
         try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
       }
     }
@@ -4494,11 +4511,118 @@ function isPidAlive(pid) {
   }
 }
 
-let browserLifecycleRuntime = null;
-
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
-  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
-  return browserLifecycleRuntime.hardCloseController(nome, ctrl, { reason, allowKillUserDataDir });
+  const t0 = Date.now();
+  const flowId = newFlowId('hard_close');
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'worker_hard_close_begin',
+      nome: String(nome || ''),
+      reason: String(reason || ''),
+      flowId,
+      freeMB: getAvailableMB(),
+      allowKillUserDataDir: !!allowKillUserDataDir
+    });
+  } catch {}
+  let rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
+  try {
+    if (!rootPid && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
+      const proc = ctrl.browser.process();
+      if (proc && proc.pid) rootPid = proc.pid;
+    }
+  } catch {}
+  let userDataDir = null;
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && man.userDataDir) userDataDir = String(man.userDataDir);
+  } catch {}
+  // ENTERPRISE: fallback para perfis.json (manifest pode estar incompleto em casos de restart/erro).
+  // Sem userDataDir, o kill por userDataDir vira falso-negativo e deixa Chrome vivo.
+  if (!userDataDir) {
+    try {
+      const perfisArr = loadPerfisJson();
+      const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+      if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
+    } catch {}
+  }
+  // Fallback final determinístico (padrão do sistema)
+  if (!userDataDir) {
+    try {
+      userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
+    } catch {}
+  }
+  let closeOutcome = { ok: false, timeout: false, err: null };
+  const rootPidAliveBefore = rootPid ? isPidAlive(rootPid) : null;
+  const closePromise = (async () => {
+    try {
+      if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
+        await ctrl.browser.close().catch(()=>{});
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, err: e };
+    }
+  })();
+  const raced = await Promise.race([
+    closePromise,
+    sleep(BROWSER_CLOSE_TIMEOUT_MS).then(() => ({ ok: false, timeout: true }))
+  ]);
+  closeOutcome = raced || closeOutcome;
+  // Se fechou ou não, garantimos hard-kill se necessário
+  // Regra:
+  // - Se timeout OU pid ainda vivo => taskkill
+  // - Se allowKillUserDataDir => também kill por userDataDir (remove órfãos)
+  if (rootPid && (!closeOutcome.ok || closeOutcome.timeout || isPidAlive(rootPid))) {
+    try { await killProcessTreeByRootPid(rootPid); } catch {}
+  }
+  if (allowKillUserDataDir && userDataDir) {
+    try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
+  }
+  const rootPidAliveAfter = rootPid ? isPidAlive(rootPid) : null;
+  let udirPidsAfter = null;
+  let udirPidsMetaOk = null;
+  let udirPidsMetaErr = null;
+  try {
+    if (userDataDir && browserHelper.getChromeProfilePidsMeta) {
+      const chk = browserHelper.getChromeProfilePidsMeta(userDataDir);
+      udirPidsMetaOk = chk ? !!chk.ok : null;
+      udirPidsMetaErr = chk && chk.error ? String(chk.error).slice(0, 180) : null;
+      udirPidsAfter = (chk && chk.pids) ? chk.pids.slice(0, 24) : [];
+    }
+  } catch {}
+  const durMs = Date.now() - t0;
+  try {
+    await issues.append(
+      nome,
+      'mil_action',
+      `deactivate_hard reason=${reason} closeOk=${!!closeOutcome.ok} timeout=${!!closeOutcome.timeout} durMs=${durMs} rootPid=${rootPid || 0} userDataDir="${userDataDir || ''}"`
+    );
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'worker_hard_close_done',
+      nome: String(nome || ''),
+      reason: String(reason || ''),
+      flowId,
+      freeMB: getAvailableMB(),
+      durMs,
+      rootPid: rootPid || null,
+      userDataDir: userDataDir || null,
+      closeOutcome: {
+        ok: !!closeOutcome.ok,
+        timeout: !!closeOutcome.timeout,
+        err: closeOutcome && closeOutcome.err ? String(closeOutcome.err && closeOutcome.err.message || closeOutcome.err).slice(0, 180) : null
+      },
+      rootPidAliveBefore,
+      rootPidAliveAfter,
+      udirPidsMetaOk,
+      udirPidsMetaErr,
+      udirPidsAfter
+    });
+  } catch {}
+  return { ok: true, flowId, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null, closeOutcome, rootPidAliveBefore, rootPidAliveAfter, udirPidsMetaOk, udirPidsMetaErr, udirPidsAfter };
 }
 
 async function killStrayChromes() {
@@ -4731,8 +4855,6 @@ await issues.append(nome, type, msg);
 const controllers = new Map();
 
 const robeMeta = {};
-const autoLoginRemediateQueue = createAutoLoginRemediateQueue({ robeMeta, provisionAudit, issues, env: process.env });
-const AUTO_LR_CFG = autoLoginRemediateQueue.cfg;
 
 const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __agentDebugState = { lastByKey: Object.create(null) };
@@ -4987,53 +5109,22 @@ function isFrozenNow(nome) {
 const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
-  let activateOpeningLease = null;
-  return actionRunner.runAction({
-    profileId: nome,
-    actionKind: 'OPEN_BROWSER',
-    actor: 'activateOnce',
-    actorData: { profileId: nome, source, operator },
-    requestData: { source, operator },
-    gateData: { source, operator, ttlMs: 180000, dedupeMs: 12000 },
-    onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: true }), source, operator }),
-    donePayload: (result) => ({ ...(result || {}), source, operator }),
-    gateEndPayload: (result) => ({
-      ok: !!(result && result.ok),
-      already: !!(result && result.already),
-      error: result && result.error ? String(result.error) : undefined
-    }),
-    actorEndPayload: (result) => ({
-      profileId: nome,
-      hasController: controllers.has(nome),
-      ok: !!(result && result.ok),
-      already: !!(result && result.already),
-      error: result && result.error ? String(result.error) : undefined
-    }),
-    onFinally: () => {
-      if (activateOpeningLease != null && opening[nome] === activateOpeningLease) {
-        delete opening[nome];
-      }
-    },
-    run: async () => {
-      if (opening[nome]) {
-        return { ok: false, error: 'already_opening' };
-      }
+  if (opening[nome]) return { ok: false, error: 'already_opening' };
 
-      if (controllers.has(nome)) {
-        return { ok: true, already: true };
-      }
+  if (controllers.has(nome)) {
+    return { ok: true, already: true };
+  }
 
-      const inflight = activationLocks.get(nome);
-      if (inflight) {
-        try { await inflight.catch(() => {}); } catch {}
-        return controllers.has(nome)
-          ? { ok: true, already: true }
-          : { ok: false, error: 'activation_in_progress' };
-      }
+  const inflight = activationLocks.get(nome);
+  if (inflight) {
+    try { await inflight.catch(() => {}); } catch {}
+    return controllers.has(nome)
+      ? { ok: true, already: true }
+      : { ok: false, error: 'activation_in_progress' };
+  }
 
-      activateOpeningLease = `${Date.now().toString(36)}:${Math.random().toString(16).slice(2)}`;
-      opening[nome] = activateOpeningLease;
-      let _supervisorSlotGranted = false;
+  opening[nome] = true;
+  let _supervisorSlotGranted = false;
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
@@ -5068,6 +5159,7 @@ async function activateOnce(nome, source = '', operator = '') {
       }
     } catch {}
   }
+  try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
       logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=false size=${SHARD_SET.size}`);
@@ -5458,8 +5550,9 @@ async function activateOnce(nome, source = '', operator = '') {
 
     activationLocks.set(nome, job);
     return await job;
-    }
-  });
+  } finally {
+    delete opening[nome];
+  }
 }
 
 function sendReply(msgId, data) {
@@ -7091,25 +7184,12 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
     // #endregion
-    if (e && e.ROBE_LOGIN_REQUIRED === true) {
-      return {
-        ok: false,
-        error: String(e && e.message || e),
-        ROBE_LOGIN_REQUIRED: true,
-        loginReason: String(e.loginReason || '').slice(0, 160),
-        loginSource: String(e.loginSource || 'facebook').slice(0, 80)
-      };
-    }
     await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão configurado no servidor será aplicado pelo módulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
 }
 
 async function robeTickGlobal() {
-  const __orchAudit = orchActorBegin('robeTickGlobal', {
-    controllers: controllers.size,
-    autoMode: autoMode && autoMode.mode
-  });
   // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
   try {
     if (provisionLock.isActive()) {
@@ -7122,7 +7202,6 @@ async function robeTickGlobal() {
           await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
         }
       } catch {}
-      __orchAudit.end({ skipped: true, reason: 'provision_lock' });
       return;
     }
   } catch {}
@@ -7142,7 +7221,6 @@ async function robeTickGlobal() {
           autoMode.light._lastRobeSkipLogAt = now;
           await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} policy=max0`);
         }
-        __orchAudit.end({ skipped: true, reason: 'slowmode_max0' });
         return;
       }
       if (nextAt && now < nextAt) {
@@ -7152,7 +7230,6 @@ async function robeTickGlobal() {
           autoMode.light._lastRobeSkipLogAt = now;
           await milLog('mil_action', `robeTickGlobal_throttle_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} nextAt=${nextAt}`);
         }
-        __orchAudit.end({ skipped: true, reason: 'slowmode_throttle', nextAt });
         return;
       }
       autoMode.light.nextRobeEnqueueAt = now + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
@@ -7200,15 +7277,8 @@ async function robeTickGlobal() {
     if (!ctrl || !ctrl.browser) continue;
 
     logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
-    orchActionRequested(nome, 'ROBE_POST_QUEUE', { source: 'robeTickGlobal' });
-    const __robeGate = orchGateBegin(nome, 'ROBE_POST_QUEUE', { source: 'robeTickGlobal', ttlMs: 1800000, dedupeMs: 30000 });
-    if (__robeGate && __robeGate.allow === false) {
-      orchActionDone(nome, 'ROBE_POST_QUEUE', { ...orchGateDeniedResult(__robeGate, { ok: true }), source: 'robeTickGlobal' });
-      continue;
-    }
 
     robeQueue.enqueue(nome, async () => {
-      const __robeRunAudit = orchActorBegin('robeQueueRun', { profileId: nome });
 
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -7255,12 +7325,6 @@ async function robeTickGlobal() {
         try {
           res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow, photoDeletePolicy);
         } catch (e) {
-          if (isRobeLoginRequiredRes(e)) {
-            await handleRobeLoginRequired(nome, ctrl, e, { stage: 'startRobeDynamic_throw' });
-            robeUpdateMeta(nome, { estado: 'login_required_auto_remediate', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
-            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-            return;
-          }
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
@@ -7273,13 +7337,6 @@ async function robeTickGlobal() {
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
-          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-          return;
-        }
-
-        if (isRobeLoginRequiredRes(res)) {
-          await handleRobeLoginRequired(nome, ctrl, res, { stage: 'startRobeDynamic_result' });
-          robeUpdateMeta(nome, { estado: 'login_required_auto_remediate', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
@@ -7321,9 +7378,6 @@ async function robeTickGlobal() {
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
-        orchActionDone(nome, 'ROBE_POST_QUEUE', { ok: true, source: 'robeTickGlobal' });
-        orchGateEnd(__robeGate, { ok: true });
-        __robeRunAudit.end({ profileId: nome });
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
@@ -7379,7 +7433,6 @@ async function robeTickGlobal() {
     if (!robeQueue.inQueue(n)) delete m.emFila;
     if (!robeQueue.isActive(n)) delete m.emExecucao;
   }
-  __orchAudit.end({ readyCount: prontos.length, enqueuedCount: enqCount });
 }
 
 setInterval(robeTickGlobal, 7000);
@@ -7406,14 +7459,8 @@ setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
 
 async function stopVirtus(nome) {
-orchActionRequested(nome, 'STOP_VIRTUS', {});
-const __orchAudit = orchActorBegin('stopVirtus', { profileId: nome });
 const ctrl = controllers.get(nome);
-if (!ctrl) {
-orchActionDone(nome, 'STOP_VIRTUS', { ok: true, skipped: true, reason: 'no_controller' });
-__orchAudit.end({ profileId: nome, skipped: true, reason: 'no_controller' });
-return;
-}
+if (!ctrl) return;
 try {
 if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
 await ctrl.virtus.stop().catch(()=>{});
@@ -7428,8 +7475,6 @@ if (ctrl.browser) {
 }
 try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
-orchActionDone(nome, 'STOP_VIRTUS', { ok: true });
-__orchAudit.end({ profileId: nome, ok: true });
 }
 
 // ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
@@ -7534,8 +7579,124 @@ async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, wai
 }
 
 function attachBrowserLifecycle(nome, browser) {
-  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
-  return browserLifecycleRuntime.attachBrowserLifecycle(nome, browser);
+browser.once('disconnected', async () => {
+try {
+logger.info('[WORKER][BROWSER] disconnected', { nome });
+try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+
+const ctrl = controllers.get(nome);
+if (ctrl && ctrl.browser === browser) {
+  try {
+    const rc = await tryReconnectAfterDisconnected(nome, ctrl);
+    if (rc && rc.ok) {
+      try { issues.append(nome, 'mil_action', `reconnect_success attempt=${Number(rc.attempt || 0)}`).catch(()=>{}); } catch {}
+      return;
+    }
+    try { issues.append(nome, 'mil_action', `restart_fallback reason=${String((rc && rc.reason) || 'unknown')}`).catch(()=>{}); } catch {}
+  } catch {}
+}
+if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
+try {
+  provisionAudit.append({
+    ts: Date.now(),
+    event: 'browser_disconnected',
+    nome: String(nome || ''),
+    working: !!(ctrl && ctrl.trabalhando),
+    humanControl: !!(ctrl && ctrl.humanControl),
+    configurando: !!(ctrl && ctrl.configurando),
+    emExecucao: !!(robeMeta[nome] && robeMeta[nome].emExecucao),
+    freeMB: getAvailableMB()
+  });
+} catch {}
+try {
+  if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+    await ctrl.virtus.stop().catch(()=>{});
+  }
+} catch {}
+
+try { freezeCooldownIfNotWorking(nome); } catch {}
+
+controllers.delete(nome);
+
+// LIMPA rootPid para evitar consultas em PIDs órfãos (WMI-free+ps-tree)
+try {
+  if (robeMeta[nome]) {
+    robeMeta[nome].rootPid = null;
+  }
+} catch {}
+
+try { healthState.delete(nome); } catch {}
+try { profileFailures.delete(nome); } catch {}
+try {
+  if (robeMeta[nome]) {
+    delete robeMeta[nome].emExecucao;
+    delete robeMeta[nome].emFila;
+    delete robeMeta[nome].cpuHistory;
+    delete robeMeta[nome].ramHist;
+    delete robeMeta[nome].reloadAttemptsWindow;
+    delete robeMeta[nome].blockDetectWindow;
+  }
+} catch {}
+
+try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
+
+stopPruneLoop(nome);
+cleanupProfileTransientLocks(nome, 'disconnected');
+// #region agent log
+__agentLog(
+  'H3',
+  'worker.js:attachBrowserLifecycle.disconnected',
+  'cleanup_after_disconnected',
+  {
+    nome: String(nome || ''),
+    hasController: controllers.has(nome),
+    hasRobeMeta: !!robeMeta[nome],
+    hasActivationLock: activationLocks.has(nome),
+    hasPruner: _pruners.has(nome),
+    hasProfileOpLock: _profileOpLocks.has(nome),
+    hasOpening: !!(opening && opening[nome]),
+    rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
+  },
+  `cleanup.disconnected.${String(nome || '')}`,
+  15000
+);
+// #endregion
+
+try { registerFailure(nome, 'disconnected', 'external'); } catch {}
+try {
+  const d = readJsonFile(desiredPath, { perfis: {} });
+  const isDesiredActive = d.perfis?.[nome]?.active === true;
+  const isHold = d.perfis?.[nome]?.humanHold === true;
+  robeMeta[nome] = robeMeta[nome] || {};
+  const now = Date.now();
+
+  if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
+    if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
+      const reopenDelayMs = getControlledReopenDelayMs('disconnected');
+      robeMeta[nome].reopenAt = now + reopenDelayMs;
+      robeMeta[nome].closingReason = 'disconnected';
+      issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected) in ${Math.round(reopenDelayMs / 1000)}s`).catch(()=>{});
+      setKillGuard(nome, DISCONNECTED_KILL_GUARD_MS);
+    } else {
+      issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
+    }
+  } else {
+    robeMeta[nome].reopenAt = null;
+    issues.append(nome, 'mil_action', isFrozenNow(nome) ? 
+      'reopen_suppressed_frozen' : (isHold ? 'reopen_suppressed_human_hold' : 'reopen_suppressed_desired_off')).catch(()=>{});
+  }
+} catch {}
+
+try { await snapshotStatusAndWrite(); } catch {}
+} catch (e) {
+  try { logger.warn('[WORKER][BROWSER] disconnect handler err', { error: e && e.message || e }); } catch {}
+}
+try {
+  browser.removeAllListeners && browser.removeAllListeners('targetcreated');
+  browser.removeAllListeners && browser.removeAllListeners('targetchanged');
+  browser.removeAllListeners && browser.removeAllListeners('targetdestroyed');
+} catch {}
+});
 }
 
 function resolveChromeUserDataRoot() {
@@ -7576,20 +7737,7 @@ function automationAllowed(ctrl, { operator } = {}) {
 }
 
 async function start_work({ nome, operator }) {
-  return actionRunner.runAction({
-    profileId: nome,
-    actionKind: 'START_WORK',
-    requestData: { operator },
-    gateData: { operator, ttlMs: 120000, dedupeMs: 15000 },
-    lock: (fn) => lockProfileAction(nome, fn),
-    onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: true }), operator }),
-    donePayload: (result) => ({
-      ok: !!(result && result.ok),
-      error: result && result.error ? String(result.error).slice(0, 160) : null,
-      operator
-    }),
-    gateEndPayload: (result) => result || { ok: false, error: 'start_work_empty_result' },
-    run: async () => {
+  return lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
     const ctrl = controllers.get(nome);
@@ -7808,7 +7956,6 @@ async function start_work({ nome, operator }) {
     } finally {
       ctrl._virtusStarting = false;
     }
-    }
   });
 }
 
@@ -7877,15 +8024,7 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
-  orchActionRequested(nome, 'CLOSE_BROWSER', { reason, policy });
-  const __strictGateClose = /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
-  const __orchGate = orchGateBegin(nome, 'CLOSE_BROWSER', { reason, policy, ttlMs: 180000, dedupeMs: __strictGateClose ? 0 : 12000, priority: 50 });
-  if (__orchGate && __orchGate.allow === false) {
-    const r = orchGateDeniedResult(__orchGate, { ok: true });
-    orchActionDone(nome, 'CLOSE_BROWSER', { ...r, reason, policy });
-    return r;
-  }
-  const __deactivateResult = await lockProfileAction(nome, async () => {
+  return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   try {
     provisionAudit.append({
@@ -7935,7 +8074,6 @@ const handlers = {
         });
       } catch {}
       await snapshotStatusAndWrite();
-      orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, skipped: true, quarantine: true, reason, policy });
       return { ok: true, skipped: true, quarantine: true, certainty };
     }
     try {
@@ -8027,7 +8165,6 @@ const handlers = {
             });
           } catch {}
           await snapshotStatusAndWrite();
-          orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'controller_missing_chrome_alive', reason, policy });
           return { ok: false, error: 'controller_missing_chrome_alive' };
         }
       } else {
@@ -8039,7 +8176,6 @@ const handlers = {
           });
         } catch {}
         await snapshotStatusAndWrite();
-        orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'controller_missing_no_userDataDir', reason, policy });
         return { ok: false, error: 'controller_missing_no_userDataDir' };
       }
     }
@@ -8062,7 +8198,6 @@ const handlers = {
     }
     await snapshotStatusAndWrite();
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
-    orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, skipped: true, reason: 'controller_absent', closeReason: reason, policy });
     return { ok: true };
   }
   // antes de mexer em browser:
@@ -8172,7 +8307,6 @@ const handlers = {
           });
         } catch {}
         await snapshotStatusAndWrite();
-        orchActionDone(nome, 'CLOSE_BROWSER', { ok: false, error: 'chrome_alive_after_deactivate', reason, policy });
         return { ok: false, error: 'chrome_alive_after_deactivate' };
       }
     }
@@ -8248,11 +8382,8 @@ const handlers = {
   }
   await snapshotStatusAndWrite();
   logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
-  orchActionDone(nome, 'CLOSE_BROWSER', { ok: true, reason, policy, preserve });
   return { ok: true };
   });
-  orchGateEnd(__orchGate, __deactivateResult);
-  return __deactivateResult;
 },
 
   async configure({ nome, operator } = {}) {
@@ -8681,27 +8812,10 @@ const handlers = {
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
   async login_remediate({ nome, operator, options } = {}) {
-    const startedAtOuter = Date.now();
-    const opOuter = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAtOuter}`;
-    return actionRunner.runAction({
-      profileId: nome,
-      actionKind: 'LOGIN_REMEDIATE',
-      requestData: { operator: opOuter, overrideHumanHold: !!(options && options.overrideHumanHold) },
-      gateData: { source: opOuter, ttlMs: 900000, dedupeMs: 60000, priority: 80 },
-      lock: (fn) => lockProfileAction(nome, fn),
-      onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: false, error: 'login_remediate_deduped' }), operator: opOuter }),
-      donePayload: (result) => ({
-        ok: result && Object.prototype.hasOwnProperty.call(result, 'ok') ? result.ok : false,
-        operator: opOuter,
-        durationMs: result && result.durationMs ? result.durationMs : (Date.now() - startedAtOuter),
-        error: result && result.error ? String(result.error).slice(0, 180) : null
-      }),
-      gateEndPayload: (result) => result || { ok: false, error: 'login_remediate_empty_result' },
-      run: async () => {
-      const startedAt = startedAtOuter;
-      const op = opOuter;
+    return lockProfileAction(nome, async () => {
+      const startedAt = Date.now();
+      const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
-      const preserveVirtusOnFailure = !!(opts.preserveVirtusOnFailure === true);
       const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
       const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
       const skipAttempt1InjectCookies = (
@@ -8780,7 +8894,7 @@ const handlers = {
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
         try {
-          await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure });
+          await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
@@ -9336,7 +9450,7 @@ const handlers = {
           try { await setTwoFactorFlag(nome, { reason: 'two_factor', snippet: '' }); } catch {}
           return { ok: false, error: 'two_factor', steps, closedForRam, pausedVirtus };
         }
-        try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
         await failFastToHuman(na);
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
       }
@@ -9394,7 +9508,7 @@ const handlers = {
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
         pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
-        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
         await failFastToHuman(`ui_blocked:${kind}`);
         return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
       }
@@ -9456,7 +9570,7 @@ const handlers = {
         try { await snapshotStatusAndWrite(); } catch {}
       } else {
         pushStep({ step: 'login_remediate_failed', lrMessenger, lrFacebook });
-        try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate', preserveVirtus: preserveVirtusOnFailure }); } catch {}
+        try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
         await failFastToHuman('login_remediate_failed');
       }
 
@@ -9699,27 +9813,18 @@ const handlers = {
           }
         } catch {}
       }
-      }
     });
   },
 
   start_work,
 
   async invoke_human({ nome }) {
-    orchActionRequested(nome, 'INVOKE_HUMAN', {});
-    const __orchGate = orchGateBegin(nome, 'INVOKE_HUMAN', { ttlMs: 300000, dedupeMs: 20000, priority: 90 });
-    if (__orchGate && __orchGate.allow === false) {
-      const r = orchGateDeniedResult(__orchGate, { ok: true });
-      orchActionDone(nome, 'INVOKE_HUMAN', r);
-      return r;
-    }
-    const __invokeHumanResult = await lockProfileAction(nome, async () => {
+    return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
-        orchActionDone(nome, 'INVOKE_HUMAN', { ok: false, error: 'browser_not_connected' });
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
 
@@ -9788,22 +9893,12 @@ const handlers = {
       await snapshotStatusAndWrite();
 
       logger.info('[HANDLER] invoke_human ok', { nome });
-      orchActionDone(nome, 'INVOKE_HUMAN', { ok: true });
       return { ok: true };
     });
-    orchGateEnd(__orchGate, __invokeHumanResult);
-    return __invokeHumanResult;
   },
 
   async ['human-resume']({ nome }) {
-    orchActionRequested(nome, 'HUMAN_RESUME', {});
-    const __orchGate = orchGateBegin(nome, 'HUMAN_RESUME', { ttlMs: 300000, dedupeMs: 20000, priority: 85 });
-    if (__orchGate && __orchGate.allow === false) {
-      const r = orchGateDeniedResult(__orchGate, { ok: true });
-      orchActionDone(nome, 'HUMAN_RESUME', r);
-      return r;
-    }
-    const __humanResumeResult = await lockProfileAction(nome, async () => {
+    return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
@@ -10175,11 +10270,8 @@ const handlers = {
         });
       } catch {}
 
-      orchActionDone(nome, 'HUMAN_RESUME', { ok: true, appealDetectedInPreflight: !!appealDetectedInPreflight });
       return { ok:true };
     });
-    orchGateEnd(__orchGate, __humanResumeResult);
-    return __humanResumeResult;
   },
 
   async ['robe-play']({ nome }) {
@@ -11227,9 +11319,6 @@ const statusObj = {
   serverConfig: (() => {
     try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
   })(),
-  orchestrator: (() => {
-    try { return { actionGate: orchestratorRuntime.gateSnapshot() }; } catch { return null; }
-  })(),
   build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null),
   ts: Date.now()
 };
@@ -11280,7 +11369,17 @@ const NURSE_SLOT_BACKOFF_MS = Math.max(5000, parseInt(process.env.NURSE_SLOT_BAC
 const NURSE_RAM_BACKOFF_MS = Math.max(3000, parseInt(process.env.NURSE_RAM_BACKOFF_MS || '10000', 10) || 10000);
 const DISCONNECTED_KILL_GUARD_MS = Math.max(5000, parseInt(process.env.DISCONNECTED_KILL_GUARD_MS || '15000', 10) || 15000);
 
-const ULTRA_RECOVERY = recoveryPolicy.buildConfig(process.env);
+const ULTRA_RECOVERY = {
+  MAX_RELOADS: 2,
+  RELOAD_TIMEOUT_MS: 10000,
+  RELOAD_POST_WAIT_MS: 250,
+  REOPEN_DELAY_SHORT_MS: Math.max(5000, parseInt(process.env.REOPEN_DELAY_SHORT_MS || '60000', 10) || 60000),
+  REOPEN_DELAY_RAMCPU_MS: 60000,
+  FAIL_WINDOW_MS: 3*60*60*1000,
+  FAIL_FREEZE_AFTER: 5,
+  FAIL_FREEZE_MS: 2*60*60*1000,
+  REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000
+};
 
 const CDP_RECONNECT_CFG = {
   enabled: String(process.env.CDP_RECONNECT_ENABLED || '1').trim() !== '0',
@@ -11288,47 +11387,20 @@ const CDP_RECONNECT_CFG = {
   delaysMs: [2000, 5000, 10000]
 };
 
-function getControlledReopenDelayMs(reason = '') {
-  return recoveryPolicy.getControlledReopenDelayMs(reason, { cfg: ULTRA_RECOVERY, env: process.env });
+function _envMs(name, fallback) {
+  return Math.max(0, Number(process.env[name] || fallback) || fallback);
 }
 
-browserLifecycleRuntime = createBrowserLifecycle({
-  puppeteer,
-  logger,
-  orchAudit,
-  issues,
-  provisionAudit,
-  robeQueue,
-  controllers,
-  robeMeta,
-  healthState,
-  getProfileFailures: () => profileFailures,
-  stopPruneLoop,
-  cleanupProfileTransientLocks,
-  reportAction,
-  snapshotStatusAndWrite,
-  getAvailableMB,
-  registerFailure,
-  isFrozenNow,
-  readJsonFile,
-  desiredPath,
-  getControlledReopenDelayMs,
-  setKillGuard,
-  disconnectedKillGuardMs: DISCONNECTED_KILL_GUARD_MS,
-  isPidAlive,
-  killProcessTreeByRootPid,
-  browserHelper,
-  manifestStore,
-  loadPerfisJson,
-  resolveChromeUserDataRoot,
-  wirePageObservers,
-  maybeStartPruneLoop,
-  sleep,
-  newFlowId,
-  freezeCooldownIfNotWorking,
-  cdpReconnectCfg: CDP_RECONNECT_CFG,
-  browserCloseTimeoutMs: BROWSER_CLOSE_TIMEOUT_MS
-});
+function getControlledReopenDelayMs(reason = '') {
+  const r = String(reason || '').toLowerCase();
+  const controlled = String(process.env.CONTROLLED_REOPEN_ENABLED || '1').trim() !== '0';
+  if (!controlled) return ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+  if (r === 'ramkill' || r === 'cpukill') return ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random() * 120000);
+  if (r === 'virtus_block') return ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+  const minMs = _envMs('REOPEN_NON_RAM_MIN_MS', 5 * 60 * 1000);
+  const maxMs = Math.max(minMs, _envMs('REOPEN_NON_RAM_MAX_MS', 15 * 60 * 1000));
+  return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+}
 
 function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
   const hasExplicit = (
@@ -11347,8 +11419,85 @@ function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
 }
 
 async function tryReconnectAfterDisconnected(nome, prevCtrl) {
-  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
-  return browserLifecycleRuntime.tryReconnectAfterDisconnected(nome, prevCtrl);
+  const startedAt = Date.now();
+  const flowId = newFlowId('reconnect');
+  if (!CDP_RECONNECT_CFG.enabled) return { ok: false, reason: 'disabled', flowId };
+  const wsEndpoint = (
+    (robeMeta[nome] && typeof robeMeta[nome].wsEndpoint === 'string' && robeMeta[nome].wsEndpoint) ||
+    (prevCtrl && prevCtrl.browser && typeof prevCtrl.browser.wsEndpoint === 'function' ? String(prevCtrl.browser.wsEndpoint() || '') : '')
+  );
+  if (!wsEndpoint) return { ok: false, reason: 'missing_ws_endpoint', flowId };
+
+  const rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
+  if (rootPid && !isPidAlive(rootPid)) {
+    return { ok: false, reason: 'root_pid_not_alive', flowId, rootPid };
+  }
+
+  for (let attempt = 1; attempt <= CDP_RECONNECT_CFG.attempts; attempt++) {
+    const delayMs = CDP_RECONNECT_CFG.delaysMs[Math.min(CDP_RECONNECT_CFG.delaysMs.length - 1, Math.max(0, attempt - 1))];
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'reconnect_attempt',
+        nome: String(nome || ''),
+        flowId,
+        attempt,
+        wsPresent: true,
+        rootPid: rootPid || null,
+        pidAlive: rootPid ? isPidAlive(rootPid) : null
+      });
+    } catch {}
+    try {
+      const b = await puppeteer.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: null,
+        protocolTimeout: 60000
+      });
+      if (b && b.isConnected && b.isConnected()) {
+        const pages = await b.pages().catch(() => []);
+        const current = controllers.get(nome);
+        const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
+        controllers.set(nome, nextCtrl);
+        try { attachBrowserLifecycle(nome, b); } catch {}
+        try {
+          if (pages && pages[0]) {
+            nextCtrl.mainPage = pages[0];
+            await wirePageObservers(nome, nextCtrl.mainPage).catch(() => {});
+            maybeStartPruneLoop(nome, nextCtrl.browser, nextCtrl.mainPage);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'reconnect_success',
+            nome: String(nome || ''),
+            flowId,
+            attempt,
+            pagesCount: Array.isArray(pages) ? pages.length : null,
+            durationMs: Date.now() - startedAt
+          });
+        } catch {}
+        return { ok: true, flowId, attempt, pagesCount: Array.isArray(pages) ? pages.length : null };
+      }
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'reconnect_fail',
+          nome: String(nome || ''),
+          flowId,
+          attempt,
+          error: msg.slice(0, 200),
+          rootPid: rootPid || null,
+          pidAliveAfter: rootPid ? isPidAlive(rootPid) : null
+        });
+      } catch {}
+    }
+    if (attempt < CDP_RECONNECT_CFG.attempts) await sleep(delayMs);
+  }
+  return { ok: false, reason: 'exhausted', flowId, durationMs: Date.now() - startedAt };
 }
 
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
@@ -11368,21 +11517,46 @@ async function ensureFrozenShutdown(nome, origin = 'frozen') {
   try { await snapshotStatusAndWrite(); } catch {}
 }
 
+const INTERNAL_REASONS = new Set(['ramKill','cpuKill','manifest_missing','manifest_incomplete','panic','open_headroom']);
+const EXTERNAL_REASONS = new Set(['disconnected','no_pages','zombie','network','fb_dom','messenger_temp_block','blocked']);
+
+function classifyReason(reason, fallback) {
+  if (INTERNAL_REASONS.has(reason)) return 'internal';
+  if (EXTERNAL_REASONS.has(reason)) return 'external';
+  return fallback || 'unknown';
+}
+
 function getFailureCounts(nome) {
-  return recoveryPolicy.countFailures(profileFailures, nome, { cfg: ULTRA_RECOVERY });
+  const now = Date.now();
+  const rec = profileFailures.get(nome);
+  if (!rec) return { internal: 0, external: 0, unknown: 0 };
+  const pruned = {
+    internal: (rec.internal||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    external: (rec.external||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    unknown: (rec.unknown||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS)
+  };
+  profileFailures.set(nome, pruned);
+  return { internal: pruned.internal.length, external: pruned.external.length, unknown: pruned.unknown.length };
 }
 
 const profileFailures = new Map();
 async function registerFailure(nome, reason, classification) {
-  const result = recoveryPolicy.recordFailure(profileFailures, nome, reason, {
-    classification,
-    cfg: ULTRA_RECOVERY
-  });
-  const { classification: cls, counts, freeze } = result;
+  const now = Date.now();
+  const cls = classification || classifyReason(reason, 'unknown');
+  const rec = profileFailures.get(nome) || { internal: [], external: [], unknown: [] };
+  rec.internal = (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  rec.external = (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  rec.unknown  = (rec.unknown ||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  if (cls === 'internal') rec.internal.push(now);
+  else if (cls === 'external') rec.external.push(now);
+  else rec.unknown.push(now);
+  profileFailures.set(nome, rec);
+  const counts = getFailureCounts(nome);
   try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
 
-  if (freeze && freeze.enabled) {
-    await freezeProfileFor(nome, freeze.ms, freeze.reason, freeze.setBy);
+  const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
+  if (ALLOWED_FREEZE_REASONS.has(reason)) {
+    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system');
     await ensureFrozenShutdown(nome, reason || 'frozen');
   }
 }
@@ -11556,15 +11730,77 @@ async function detectMessengerTempBlock(page) {
 //   - backoff por perfil + limite por janela
 //   - NUNCA tenta para captcha/checkpoint/identity (vira humanHold)
 // =========================================================
+const AUTO_LR_CFG = {
+  enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
+  tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
+  immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
+  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
+  maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
+  backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
+  totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
+  stageTimeoutMs: {
+    activate: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_ACTIVATE_MS || 90_000) || 90_000),
+    injectCookies: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_INJECT_MS || 240_000) || 240_000),
+    loginFb: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_FB_MS || 120_000) || 120_000),
+    loginMsg: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_MSG_MS || 120_000) || 120_000),
+    collectCookies: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_COLLECT_MS || 90_000) || 90_000),
+  }
+};
+
 let _autoLoginRemediateRunning = false;
 let _autoLoginRemediateRunningNome = null;
 
-function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
-  return autoLoginRemediateQueue.queue(nome, { reason, source, immediate, force });
+function _pruneWindow(arr, winMs) {
+  const now = Date.now();
+  const a = Array.isArray(arr) ? arr : [];
+  return a.filter(ts => ts && (now - ts) <= winMs);
 }
 
-function isAutoLoginRemediateDeferredByGate(resp) {
-  return autoLoginRemediateQueue.isDeferredByGate(resp);
+function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
+  try {
+    if (!AUTO_LR_CFG.enabled) return false;
+    if (!nome) return false;
+    robeMeta[nome] = robeMeta[nome] || {};
+    const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
+    const now = Date.now();
+
+    st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
+    if ((st.attempts24h || []).length >= AUTO_LR_CFG.maxAttemptsPerProfile24h) {
+      st.queued = false;
+      st.nextAt = Math.max(st.nextAt || 0, now + (3 * 60 * 60 * 1000));
+      try { issues.append(nome, 'mil_action', `auto_login_remediate_suppressed: max_attempts_24h=${AUTO_LR_CFG.maxAttemptsPerProfile24h}`).catch(()=>{}); } catch {}
+      return false;
+    }
+
+    const last = Number(st.lastStartAt || 0) || 0;
+    const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
+    const when = Math.max(
+      now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
+      earliest,
+      force ? 0 : (Number(st.nextAt || 0) || 0)
+    );
+    st.queued = true;
+    st.nextAt = when;
+    st.reason = String(reason || '').slice(0, 80);
+    st.source = String(source || '').slice(0, 80);
+    st.force = !!force;
+    st.enqueuedAt = now;
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'auto_login_remediate_queued',
+        nome: String(nome || ''),
+        reason: String(reason || '').slice(0, 120),
+        source: String(source || '').slice(0, 80),
+        nextAt: when,
+        immediate: !!immediate,
+        force: !!force
+      });
+    } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function autoLoginRemediateTick() {
@@ -11664,7 +11900,7 @@ async function autoLoginRemediateTick() {
   st.queued = false;
   st.inFlight = true;
   st.lastStartAt = Date.now();
-  st.attempts24h = autoLoginRemediateQueue.pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
+  st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
   st.attempts24h.push(st.lastStartAt);
 
   const operator = `auto_login_remediate:${nome}:${st.lastStartAt}`;
@@ -11688,16 +11924,9 @@ async function autoLoginRemediateTick() {
         totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
         stageTimeoutMs: AUTO_LR_CFG.stageTimeoutMs,
         // Espera um pouco mais se estiver ocupado (robe/postagem/enviando)
-        waitBusyMs: 120_000,
-        // Se o gatilho veio do Robe e o Messenger/Virtus estava vivo, falha de login no FB não deve derrubar o atendimento.
-        preserveVirtusOnFailure: /^robe:/i.test(String(st.source || ''))
+        waitBusyMs: 120_000
       }
     });
-
-    if (isAutoLoginRemediateDeferredByGate(resp)) {
-      await autoLoginRemediateQueue.deferByGate({ nome, st, resp, operator });
-      return;
-    }
 
     st.lastDoneAt = Date.now();
     st.lastOk = !!(resp && resp.ok);
@@ -11938,11 +12167,6 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
-  const __orchAudit = orchActorBegin('nurseTick', {
-    controllers: controllers.size,
-    autoMode: autoMode && autoMode.mode,
-    provisionLockActive: (() => { try { return !!provisionLock.isActive(); } catch { return null; } })()
-  });
   try {
     // Ultra enterprise (safety+performance):
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
@@ -13268,7 +13492,7 @@ async function nurseTick() {
           }
           await stopVirtus(nome);
           if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
-            robeMeta[nome].reopenAt = now2 + getControlledReopenDelayMs('virtus_block');
+            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
             robeMeta[nome].closingReason = 'virtus_block';
           }
           await registerFailure(nome, 'messenger_temp_block', 'external');
@@ -13504,7 +13728,6 @@ async function nurseTick() {
       }
     }
   } finally {
-    __orchAudit.end({ controllers: controllers.size });
     _nurseTickRunning = false;
   }
 }
@@ -13862,11 +14085,7 @@ async function escalateToReopen(nome, reason='health_reopen') {
 }
 
 async function healthTick() {
-  if (controllers.size === 0) {
-    orchAudit('runtime_actor_tick_skip', { actor: 'healthTick', reason: 'no_controllers' });
-    return;
-  }
-  const __orchAudit = orchActorBegin('healthTick', { controllers: controllers.size });
+  if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
@@ -13907,8 +14126,9 @@ async function healthTick() {
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         try { await stopVirtus(nome); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
+        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
         if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
-          robeMeta[nome].reopenAt = Date.now() + getControlledReopenDelayMs('virtus_block');
+          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
           robeMeta[nome].closingReason = 'virtus_block';
         }
         try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
@@ -13987,7 +14207,6 @@ async function healthTick() {
       }
     }
   }
-  __orchAudit.end({ controllers: controllers.size });
 }
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
