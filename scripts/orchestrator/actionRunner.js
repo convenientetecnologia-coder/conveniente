@@ -38,10 +38,11 @@ async function runAction({
   orchestratorRuntime.actionRequested(profileId, actionKind, requestData);
 
   const ticket = orchestratorRuntime.gateBegin(profileId, actionKind, gateData);
+  const gateAllowed = !(ticket && ticket.allow === false);
   let result = null;
   let thrown = null;
 
-  if (ticket && ticket.allow === false) {
+  if (!gateAllowed) {
     result = onGateDenied
       ? await onGateDenied(ticket)
       : orchestratorRuntime.gateDeniedResult(ticket, { ok: false });
@@ -62,8 +63,10 @@ async function runAction({
   } catch {}
 
   try {
-    const gateDataOut = typeof gateEndPayload === "function" ? gateEndPayload(safeResult, ticket) : safeResult;
-    orchestratorRuntime.gateEnd(ticket, gateDataOut || safeResult);
+    if (gateAllowed) {
+      const gateDataOut = typeof gateEndPayload === "function" ? gateEndPayload(safeResult, ticket) : safeResult;
+      orchestratorRuntime.gateEnd(ticket, gateDataOut || safeResult);
+    }
   } catch {}
 
   try {

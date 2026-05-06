@@ -4987,6 +4987,7 @@ function isFrozenNow(nome) {
 const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
+  let activateOpeningLease = null;
   return actionRunner.runAction({
     profileId: nome,
     actionKind: 'OPEN_BROWSER',
@@ -5009,7 +5010,9 @@ async function activateOnce(nome, source = '', operator = '') {
       error: result && result.error ? String(result.error) : undefined
     }),
     onFinally: () => {
-      delete opening[nome];
+      if (activateOpeningLease != null && opening[nome] === activateOpeningLease) {
+        delete opening[nome];
+      }
     },
     run: async () => {
       if (opening[nome]) {
@@ -5028,7 +5031,8 @@ async function activateOnce(nome, source = '', operator = '') {
           : { ok: false, error: 'activation_in_progress' };
       }
 
-      opening[nome] = true;
+      activateOpeningLease = `${Date.now().toString(36)}:${Math.random().toString(16).slice(2)}`;
+      opening[nome] = activateOpeningLease;
       let _supervisorSlotGranted = false;
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
