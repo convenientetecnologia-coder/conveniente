@@ -30,6 +30,8 @@ const { createAutoLoginRemediateQueue } = require('./orchestrator/autoLoginRemed
 const governorPolicy = require('./orchestrator/governorPolicy.js');
 const closeCertaintyPolicy = require('./orchestrator/closeCertaintyPolicy.js');
 const recoveryPolicy = require('./orchestrator/recoveryPolicy.js');
+const actionRunner = require('./orchestrator/actionRunner.js');
+const { createBrowserLifecycle } = require('./orchestrator/browserLifecycle.js');
 const {
   audit: orchAudit,
   actorBegin: orchActorBegin,
@@ -4492,118 +4494,11 @@ function isPidAlive(pid) {
   }
 }
 
+let browserLifecycleRuntime = null;
+
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
-  const t0 = Date.now();
-  const flowId = newFlowId('hard_close');
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'worker_hard_close_begin',
-      nome: String(nome || ''),
-      reason: String(reason || ''),
-      flowId,
-      freeMB: getAvailableMB(),
-      allowKillUserDataDir: !!allowKillUserDataDir
-    });
-  } catch {}
-  let rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
-  try {
-    if (!rootPid && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
-      const proc = ctrl.browser.process();
-      if (proc && proc.pid) rootPid = proc.pid;
-    }
-  } catch {}
-  let userDataDir = null;
-  try {
-    const man = await manifestStore.read(nome).catch(()=>null);
-    if (man && man.userDataDir) userDataDir = String(man.userDataDir);
-  } catch {}
-  // ENTERPRISE: fallback para perfis.json (manifest pode estar incompleto em casos de restart/erro).
-  // Sem userDataDir, o kill por userDataDir vira falso-negativo e deixa Chrome vivo.
-  if (!userDataDir) {
-    try {
-      const perfisArr = loadPerfisJson();
-      const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-      if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
-    } catch {}
-  }
-  // Fallback final determinístico (padrão do sistema)
-  if (!userDataDir) {
-    try {
-      userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
-    } catch {}
-  }
-  let closeOutcome = { ok: false, timeout: false, err: null };
-  const rootPidAliveBefore = rootPid ? isPidAlive(rootPid) : null;
-  const closePromise = (async () => {
-    try {
-      if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
-        await ctrl.browser.close().catch(()=>{});
-      }
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, err: e };
-    }
-  })();
-  const raced = await Promise.race([
-    closePromise,
-    sleep(BROWSER_CLOSE_TIMEOUT_MS).then(() => ({ ok: false, timeout: true }))
-  ]);
-  closeOutcome = raced || closeOutcome;
-  // Se fechou ou não, garantimos hard-kill se necessário
-  // Regra:
-  // - Se timeout OU pid ainda vivo => taskkill
-  // - Se allowKillUserDataDir => também kill por userDataDir (remove órfãos)
-  if (rootPid && (!closeOutcome.ok || closeOutcome.timeout || isPidAlive(rootPid))) {
-    try { await killProcessTreeByRootPid(rootPid); } catch {}
-  }
-  if (allowKillUserDataDir && userDataDir) {
-    try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
-  }
-  const rootPidAliveAfter = rootPid ? isPidAlive(rootPid) : null;
-  let udirPidsAfter = null;
-  let udirPidsMetaOk = null;
-  let udirPidsMetaErr = null;
-  try {
-    if (userDataDir && browserHelper.getChromeProfilePidsMeta) {
-      const chk = browserHelper.getChromeProfilePidsMeta(userDataDir);
-      udirPidsMetaOk = chk ? !!chk.ok : null;
-      udirPidsMetaErr = chk && chk.error ? String(chk.error).slice(0, 180) : null;
-      udirPidsAfter = (chk && chk.pids) ? chk.pids.slice(0, 24) : [];
-    }
-  } catch {}
-  const durMs = Date.now() - t0;
-  try {
-    await issues.append(
-      nome,
-      'mil_action',
-      `deactivate_hard reason=${reason} closeOk=${!!closeOutcome.ok} timeout=${!!closeOutcome.timeout} durMs=${durMs} rootPid=${rootPid || 0} userDataDir="${userDataDir || ''}"`
-    );
-  } catch {}
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'worker_hard_close_done',
-      nome: String(nome || ''),
-      reason: String(reason || ''),
-      flowId,
-      freeMB: getAvailableMB(),
-      durMs,
-      rootPid: rootPid || null,
-      userDataDir: userDataDir || null,
-      closeOutcome: {
-        ok: !!closeOutcome.ok,
-        timeout: !!closeOutcome.timeout,
-        err: closeOutcome && closeOutcome.err ? String(closeOutcome.err && closeOutcome.err.message || closeOutcome.err).slice(0, 180) : null
-      },
-      rootPidAliveBefore,
-      rootPidAliveAfter,
-      udirPidsMetaOk,
-      udirPidsMetaErr,
-      udirPidsAfter
-    });
-  } catch {}
-  return { ok: true, flowId, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null, closeOutcome, rootPidAliveBefore, rootPidAliveAfter, udirPidsMetaOk, udirPidsMetaErr, udirPidsAfter };
+  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
+  return browserLifecycleRuntime.hardCloseController(nome, ctrl, { reason, allowKillUserDataDir });
 }
 
 async function killStrayChromes() {
@@ -5092,43 +4987,49 @@ function isFrozenNow(nome) {
 const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
-  const __orchAudit = orchActorBegin('activateOnce', { profileId: nome, source, operator });
-  orchActionRequested(nome, 'OPEN_BROWSER', { source, operator });
-  const __orchGate = orchGateBegin(nome, 'OPEN_BROWSER', { source, operator, ttlMs: 180000, dedupeMs: 12000 });
-  if (__orchGate && __orchGate.allow === false) {
-    const r = orchGateDeniedResult(__orchGate, { ok: true });
-    orchActionDone(nome, 'OPEN_BROWSER', { ...r, source, operator });
-    __orchAudit.end({ profileId: nome, ...r });
-    return r;
-  }
-  if (opening[nome]) {
-    orchActionDone(nome, 'OPEN_BROWSER', { ok: false, error: 'already_opening', source, operator });
-    orchGateEnd(__orchGate, { ok: false, error: 'already_opening' });
-    __orchAudit.end({ profileId: nome, skipped: true, error: 'already_opening' });
-    return { ok: false, error: 'already_opening' };
-  }
+  return actionRunner.runAction({
+    profileId: nome,
+    actionKind: 'OPEN_BROWSER',
+    actor: 'activateOnce',
+    actorData: { profileId: nome, source, operator },
+    requestData: { source, operator },
+    gateData: { source, operator, ttlMs: 180000, dedupeMs: 12000 },
+    onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: true }), source, operator }),
+    donePayload: (result) => ({ ...(result || {}), source, operator }),
+    gateEndPayload: (result) => ({
+      ok: !!(result && result.ok),
+      already: !!(result && result.already),
+      error: result && result.error ? String(result.error) : undefined
+    }),
+    actorEndPayload: (result) => ({
+      profileId: nome,
+      hasController: controllers.has(nome),
+      ok: !!(result && result.ok),
+      already: !!(result && result.already),
+      error: result && result.error ? String(result.error) : undefined
+    }),
+    onFinally: () => {
+      delete opening[nome];
+    },
+    run: async () => {
+      if (opening[nome]) {
+        return { ok: false, error: 'already_opening' };
+      }
 
-  if (controllers.has(nome)) {
-    orchActionDone(nome, 'OPEN_BROWSER', { ok: true, already: true, source, operator });
-    orchGateEnd(__orchGate, { ok: true, already: true });
-    __orchAudit.end({ profileId: nome, already: true });
-    return { ok: true, already: true };
-  }
+      if (controllers.has(nome)) {
+        return { ok: true, already: true };
+      }
 
-  const inflight = activationLocks.get(nome);
-  if (inflight) {
-    try { await inflight.catch(() => {}); } catch {}
-    const r = controllers.has(nome)
-      ? { ok: true, already: true }
-      : { ok: false, error: 'activation_in_progress' };
-    orchActionDone(nome, 'OPEN_BROWSER', { ...r, source, operator });
-    orchGateEnd(__orchGate, r);
-    __orchAudit.end({ profileId: nome, ...r });
-    return r;
-  }
+      const inflight = activationLocks.get(nome);
+      if (inflight) {
+        try { await inflight.catch(() => {}); } catch {}
+        return controllers.has(nome)
+          ? { ok: true, already: true }
+          : { ok: false, error: 'activation_in_progress' };
+      }
 
-  opening[nome] = true;
-  let _supervisorSlotGranted = false;
+      opening[nome] = true;
+      let _supervisorSlotGranted = false;
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
@@ -5163,7 +5064,6 @@ async function activateOnce(nome, source = '', operator = '') {
       }
     } catch {}
   }
-  try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
       logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=false size=${SHARD_SET.size}`);
@@ -5554,12 +5454,8 @@ async function activateOnce(nome, source = '', operator = '') {
 
     activationLocks.set(nome, job);
     return await job;
-  } finally {
-    orchActionDone(nome, 'OPEN_BROWSER', { ok: controllers.has(nome), source, operator });
-    orchGateEnd(__orchGate, { ok: controllers.has(nome) });
-    __orchAudit.end({ profileId: nome, hasController: controllers.has(nome) });
-    delete opening[nome];
-  }
+    }
+  });
 }
 
 function sendReply(msgId, data) {
@@ -7634,129 +7530,8 @@ async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, wai
 }
 
 function attachBrowserLifecycle(nome, browser) {
-browser.once('disconnected', async () => {
-try {
-logger.info('[WORKER][BROWSER] disconnected', { nome });
-orchAudit('runtime_signal_observed', {
-  profileId: String(nome || ''),
-  signalKind: 'browser_disconnected',
-  source: 'attachBrowserLifecycle.disconnected'
-});
-try { robeQueue.skip && robeQueue.skip(nome); } catch {}
-
-const ctrl = controllers.get(nome);
-if (ctrl && ctrl.browser === browser) {
-  try {
-    const rc = await tryReconnectAfterDisconnected(nome, ctrl);
-    if (rc && rc.ok) {
-      try { issues.append(nome, 'mil_action', `reconnect_success attempt=${Number(rc.attempt || 0)}`).catch(()=>{}); } catch {}
-      return;
-    }
-    try { issues.append(nome, 'mil_action', `restart_fallback reason=${String((rc && rc.reason) || 'unknown')}`).catch(()=>{}); } catch {}
-  } catch {}
-}
-if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
-try {
-  provisionAudit.append({
-    ts: Date.now(),
-    event: 'browser_disconnected',
-    nome: String(nome || ''),
-    working: !!(ctrl && ctrl.trabalhando),
-    humanControl: !!(ctrl && ctrl.humanControl),
-    configurando: !!(ctrl && ctrl.configurando),
-    emExecucao: !!(robeMeta[nome] && robeMeta[nome].emExecucao),
-    freeMB: getAvailableMB()
-  });
-} catch {}
-try {
-  if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-    await ctrl.virtus.stop().catch(()=>{});
-  }
-} catch {}
-
-try { freezeCooldownIfNotWorking(nome); } catch {}
-
-controllers.delete(nome);
-
-// LIMPA rootPid para evitar consultas em PIDs órfãos (WMI-free+ps-tree)
-try {
-  if (robeMeta[nome]) {
-    robeMeta[nome].rootPid = null;
-  }
-} catch {}
-
-try { healthState.delete(nome); } catch {}
-try { profileFailures.delete(nome); } catch {}
-try {
-  if (robeMeta[nome]) {
-    delete robeMeta[nome].emExecucao;
-    delete robeMeta[nome].emFila;
-    delete robeMeta[nome].cpuHistory;
-    delete robeMeta[nome].ramHist;
-    delete robeMeta[nome].reloadAttemptsWindow;
-    delete robeMeta[nome].blockDetectWindow;
-  }
-} catch {}
-
-try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
-
-stopPruneLoop(nome);
-cleanupProfileTransientLocks(nome, 'disconnected');
-// #region agent log
-__agentLog(
-  'H3',
-  'worker.js:attachBrowserLifecycle.disconnected',
-  'cleanup_after_disconnected',
-  {
-    nome: String(nome || ''),
-    hasController: controllers.has(nome),
-    hasRobeMeta: !!robeMeta[nome],
-    hasActivationLock: activationLocks.has(nome),
-    hasPruner: _pruners.has(nome),
-    hasProfileOpLock: _profileOpLocks.has(nome),
-    hasOpening: !!(opening && opening[nome]),
-    rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
-  },
-  `cleanup.disconnected.${String(nome || '')}`,
-  15000
-);
-// #endregion
-
-try { registerFailure(nome, 'disconnected', 'external'); } catch {}
-try {
-  const d = readJsonFile(desiredPath, { perfis: {} });
-  const isDesiredActive = d.perfis?.[nome]?.active === true;
-  const isHold = d.perfis?.[nome]?.humanHold === true;
-  robeMeta[nome] = robeMeta[nome] || {};
-  const now = Date.now();
-
-  if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
-    if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
-      const reopenDelayMs = getControlledReopenDelayMs('disconnected');
-      robeMeta[nome].reopenAt = now + reopenDelayMs;
-      robeMeta[nome].closingReason = 'disconnected';
-      issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected) in ${Math.round(reopenDelayMs / 1000)}s`).catch(()=>{});
-      setKillGuard(nome, DISCONNECTED_KILL_GUARD_MS);
-    } else {
-      issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
-    }
-  } else {
-    robeMeta[nome].reopenAt = null;
-    issues.append(nome, 'mil_action', isFrozenNow(nome) ? 
-      'reopen_suppressed_frozen' : (isHold ? 'reopen_suppressed_human_hold' : 'reopen_suppressed_desired_off')).catch(()=>{});
-  }
-} catch {}
-
-try { await snapshotStatusAndWrite(); } catch {}
-} catch (e) {
-  try { logger.warn('[WORKER][BROWSER] disconnect handler err', { error: e && e.message || e }); } catch {}
-}
-try {
-  browser.removeAllListeners && browser.removeAllListeners('targetcreated');
-  browser.removeAllListeners && browser.removeAllListeners('targetchanged');
-  browser.removeAllListeners && browser.removeAllListeners('targetdestroyed');
-} catch {}
-});
+  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
+  return browserLifecycleRuntime.attachBrowserLifecycle(nome, browser);
 }
 
 function resolveChromeUserDataRoot() {
@@ -7797,14 +7572,20 @@ function automationAllowed(ctrl, { operator } = {}) {
 }
 
 async function start_work({ nome, operator }) {
-  orchActionRequested(nome, 'START_WORK', { operator });
-  const __orchGate = orchGateBegin(nome, 'START_WORK', { operator, ttlMs: 120000, dedupeMs: 15000 });
-  if (__orchGate && __orchGate.allow === false) {
-    const r = orchGateDeniedResult(__orchGate, { ok: true });
-    orchActionDone(nome, 'START_WORK', { ...r, operator });
-    return r;
-  }
-  const __startWorkResult = await lockProfileAction(nome, async () => {
+  return actionRunner.runAction({
+    profileId: nome,
+    actionKind: 'START_WORK',
+    requestData: { operator },
+    gateData: { operator, ttlMs: 120000, dedupeMs: 15000 },
+    lock: (fn) => lockProfileAction(nome, fn),
+    onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: true }), operator }),
+    donePayload: (result) => ({
+      ok: !!(result && result.ok),
+      error: result && result.error ? String(result.error).slice(0, 160) : null,
+      operator
+    }),
+    gateEndPayload: (result) => result || { ok: false, error: 'start_work_empty_result' },
+    run: async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
     const ctrl = controllers.get(nome);
@@ -8023,10 +7804,8 @@ async function start_work({ nome, operator }) {
     } finally {
       ctrl._virtusStarting = false;
     }
+    }
   });
-  orchGateEnd(__orchGate, __startWorkResult);
-  orchActionDone(nome, 'START_WORK', { ok: !!(__startWorkResult && __startWorkResult.ok), error: __startWorkResult && __startWorkResult.error ? String(__startWorkResult.error).slice(0, 160) : null, operator });
-  return __startWorkResult;
 }
 
 const handlers = {
@@ -8900,15 +8679,21 @@ const handlers = {
   async login_remediate({ nome, operator, options } = {}) {
     const startedAtOuter = Date.now();
     const opOuter = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAtOuter}`;
-    orchActionRequested(nome, 'LOGIN_REMEDIATE', { operator: opOuter, overrideHumanHold: !!(options && options.overrideHumanHold) });
-    const __orchGate = orchGateBegin(nome, 'LOGIN_REMEDIATE', { source: opOuter, ttlMs: 900000, dedupeMs: 60000, priority: 80 });
-    if (__orchGate && __orchGate.allow === false) {
-      const r = orchGateDeniedResult(__orchGate, { ok: false, error: 'login_remediate_deduped' });
-      orchActionDone(nome, 'LOGIN_REMEDIATE', { ...r, operator: opOuter });
-      return r;
-    }
-    try {
-      const __loginRemediateResult = await lockProfileAction(nome, async () => {
+    return actionRunner.runAction({
+      profileId: nome,
+      actionKind: 'LOGIN_REMEDIATE',
+      requestData: { operator: opOuter, overrideHumanHold: !!(options && options.overrideHumanHold) },
+      gateData: { source: opOuter, ttlMs: 900000, dedupeMs: 60000, priority: 80 },
+      lock: (fn) => lockProfileAction(nome, fn),
+      onGateDenied: (ticket) => ({ ...orchGateDeniedResult(ticket, { ok: false, error: 'login_remediate_deduped' }), operator: opOuter }),
+      donePayload: (result) => ({
+        ok: result && Object.prototype.hasOwnProperty.call(result, 'ok') ? result.ok : false,
+        operator: opOuter,
+        durationMs: result && result.durationMs ? result.durationMs : (Date.now() - startedAtOuter),
+        error: result && result.error ? String(result.error).slice(0, 180) : null
+      }),
+      gateEndPayload: (result) => result || { ok: false, error: 'login_remediate_empty_result' },
+      run: async () => {
       const startedAt = startedAtOuter;
       const op = opOuter;
       const opts = (options && typeof options === 'object') ? options : {};
@@ -9863,7 +9648,6 @@ const handlers = {
         try { provisionLock.release({ owner: op }); } catch {}
         // Governança: libera permit sempre (anti-leak)
         try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'done' }).catch(()=>{}); } catch {}
-        orchActionDone(nome, 'LOGIN_REMEDIATE', { ok: null, operator: op, durationMs: Date.now() - startedAt });
 
         // P0 fix (forense): sempre tentar retomar Virtus dos perfis pausados pela quiescência.
         // Sem isso, um único auto_login_remediate pode derrubar "working" em massa (active=ok, virtusOffline).
@@ -9911,11 +9695,8 @@ const handlers = {
           }
         } catch {}
       }
-      });
-      return __loginRemediateResult;
-    } finally {
-      orchGateEnd(__orchGate, { ok: true });
-    }
+      }
+    });
   },
 
   start_work,
@@ -11507,6 +11288,44 @@ function getControlledReopenDelayMs(reason = '') {
   return recoveryPolicy.getControlledReopenDelayMs(reason, { cfg: ULTRA_RECOVERY, env: process.env });
 }
 
+browserLifecycleRuntime = createBrowserLifecycle({
+  puppeteer,
+  logger,
+  orchAudit,
+  issues,
+  provisionAudit,
+  robeQueue,
+  controllers,
+  robeMeta,
+  healthState,
+  getProfileFailures: () => profileFailures,
+  stopPruneLoop,
+  cleanupProfileTransientLocks,
+  reportAction,
+  snapshotStatusAndWrite,
+  getAvailableMB,
+  registerFailure,
+  isFrozenNow,
+  readJsonFile,
+  desiredPath,
+  getControlledReopenDelayMs,
+  setKillGuard,
+  disconnectedKillGuardMs: DISCONNECTED_KILL_GUARD_MS,
+  isPidAlive,
+  killProcessTreeByRootPid,
+  browserHelper,
+  manifestStore,
+  loadPerfisJson,
+  resolveChromeUserDataRoot,
+  wirePageObservers,
+  maybeStartPruneLoop,
+  sleep,
+  newFlowId,
+  freezeCooldownIfNotWorking,
+  cdpReconnectCfg: CDP_RECONNECT_CFG,
+  browserCloseTimeoutMs: BROWSER_CLOSE_TIMEOUT_MS
+});
+
 function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
   const hasExplicit = (
     Object.prototype.hasOwnProperty.call(opts, 'closeAfterSuccess') ||
@@ -11524,85 +11343,8 @@ function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
 }
 
 async function tryReconnectAfterDisconnected(nome, prevCtrl) {
-  const startedAt = Date.now();
-  const flowId = newFlowId('reconnect');
-  if (!CDP_RECONNECT_CFG.enabled) return { ok: false, reason: 'disabled', flowId };
-  const wsEndpoint = (
-    (robeMeta[nome] && typeof robeMeta[nome].wsEndpoint === 'string' && robeMeta[nome].wsEndpoint) ||
-    (prevCtrl && prevCtrl.browser && typeof prevCtrl.browser.wsEndpoint === 'function' ? String(prevCtrl.browser.wsEndpoint() || '') : '')
-  );
-  if (!wsEndpoint) return { ok: false, reason: 'missing_ws_endpoint', flowId };
-
-  const rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
-  if (rootPid && !isPidAlive(rootPid)) {
-    return { ok: false, reason: 'root_pid_not_alive', flowId, rootPid };
-  }
-
-  for (let attempt = 1; attempt <= CDP_RECONNECT_CFG.attempts; attempt++) {
-    const delayMs = CDP_RECONNECT_CFG.delaysMs[Math.min(CDP_RECONNECT_CFG.delaysMs.length - 1, Math.max(0, attempt - 1))];
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'reconnect_attempt',
-        nome: String(nome || ''),
-        flowId,
-        attempt,
-        wsPresent: true,
-        rootPid: rootPid || null,
-        pidAlive: rootPid ? isPidAlive(rootPid) : null
-      });
-    } catch {}
-    try {
-      const b = await puppeteer.connect({
-        browserWSEndpoint: wsEndpoint,
-        defaultViewport: null,
-        protocolTimeout: 60000
-      });
-      if (b && b.isConnected && b.isConnected()) {
-        const pages = await b.pages().catch(() => []);
-        const current = controllers.get(nome);
-        const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
-        controllers.set(nome, nextCtrl);
-        try { attachBrowserLifecycle(nome, b); } catch {}
-        try {
-          if (pages && pages[0]) {
-            nextCtrl.mainPage = pages[0];
-            await wirePageObservers(nome, nextCtrl.mainPage).catch(() => {});
-            maybeStartPruneLoop(nome, nextCtrl.browser, nextCtrl.mainPage);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'reconnect_success',
-            nome: String(nome || ''),
-            flowId,
-            attempt,
-            pagesCount: Array.isArray(pages) ? pages.length : null,
-            durationMs: Date.now() - startedAt
-          });
-        } catch {}
-        return { ok: true, flowId, attempt, pagesCount: Array.isArray(pages) ? pages.length : null };
-      }
-    } catch (e) {
-      const msg = (e && e.message) ? String(e.message) : String(e);
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'reconnect_fail',
-          nome: String(nome || ''),
-          flowId,
-          attempt,
-          error: msg.slice(0, 200),
-          rootPid: rootPid || null,
-          pidAliveAfter: rootPid ? isPidAlive(rootPid) : null
-        });
-      } catch {}
-    }
-    if (attempt < CDP_RECONNECT_CFG.attempts) await sleep(delayMs);
-  }
-  return { ok: false, reason: 'exhausted', flowId, durationMs: Date.now() - startedAt };
+  if (!browserLifecycleRuntime) throw new Error('browser_lifecycle_runtime_not_ready');
+  return browserLifecycleRuntime.tryReconnectAfterDisconnected(nome, prevCtrl);
 }
 
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
