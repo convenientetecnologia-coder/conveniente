@@ -16,7 +16,8 @@ const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqC
 const gatewayProxy = require('./gatewayProxy');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
-const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
+const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
+const FULL_REPORT_INTERVAL_MS = parseInt(process.env.DASHBOARD_FULL_REPORT_INTERVAL_MS || '21600000', 10); // 6h padrão
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const ACK_PENDING_PATH = path.join(__dirname, '..', 'dados', 'acks_pending.json');
@@ -32,6 +33,7 @@ let pending = false;
 let lastWarnAt = 0;
 let lastTickDoneAt = 0;
 let gatewayRecycleQueueInFlight = false;
+let lastFullReportAt = 0;
 
 // ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
 let hostIdCache = null;
@@ -3905,6 +3907,12 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
       else if (c.type === 'set_groq_config')  { ackDetails = await execSetGroqConfig(c); }
       else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { ackDetails = await execGatewaySetProxies(c); }
+      else if (c.type === 'force_full_report') {
+        // Força próximo tick a enviar payload completo imediatamente.
+        lastFullReportAt = 0;
+        pending = true;
+        ackDetails = { ok: true, forced: true };
+      }
       else if (c.type === 'rotate_logs')      { ackDetails = await execRotateLogs(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
@@ -3957,6 +3965,34 @@ async function tick(reason = 'interval') {
   inFlight = true;
   pending = false;
   try {
+    const nowTick = Date.now();
+    const shouldSendFullReport =
+      String(reason || '').toLowerCase() === 'boot' ||
+      !lastFullReportAt ||
+      (nowTick - Number(lastFullReportAt || 0)) >= FULL_REPORT_INTERVAL_MS;
+
+    // Modo poll-only: mantém entrega de comandos rápida sem enviar status pesado.
+    if (!shouldSendFullReport) {
+      const hostId = await getOrCreateHostId();
+      hostIdCache = hostId;
+      try { await flushPendingAcks({ limit: 40 }); } catch {}
+      const pollPayload = {
+        pollOnly: true,
+        hostname: (os && os.hostname) ? os.hostname() : '',
+        hostId,
+        sentAt: now()
+      };
+      const pollResp = await tryAllEndpoints(pollPayload);
+      if (pollResp && Array.isArray(pollResp.commands) && pollResp.commands.length) {
+        await applyCommands(pollResp.commands);
+      }
+      // Retry contínuo de perfis pendentes de recycle de gateway.
+      const queueTickBatch = Math.max(1, Math.min(20, Number(process.env.GATEWAY_RECYCLE_QUEUE_TICK_BATCH || 3) || 3));
+      try { await processGatewayRecycleQueue({ maxProfiles: queueTickBatch }); } catch {}
+      try { await flushPendingAcks({ limit: 40 }); } catch {}
+      return;
+    }
+
     // Rotação automática dos JSONL críticos para evitar crescimento infinito em disco.
     // Retenção por idade (default 48h), sem depender de comando manual.
     try { maybeAutoRotateCriticalJsonl(); } catch {}
@@ -4020,7 +4056,7 @@ async function tick(reason = 'interval') {
       const bytes = Buffer.byteLength(raw, 'utf8');
       payload._telemetry = {
         payloadBytes: bytes,
-        intervalMs: INTERVAL_MS,
+        intervalMs: FULL_REPORT_INTERVAL_MS,
         perfisCount: Array.isArray(status && status.perfis) ? status.perfis.length : 0
       };
     } catch {}
@@ -4034,6 +4070,7 @@ async function tick(reason = 'interval') {
     try { await processGatewayRecycleQueue({ maxProfiles: queueTickBatch }); } catch {}
     // Nova drenagem após executar comandos (captura ACKs recém-encolados por falha transitória).
     try { await flushPendingAcks({ limit: 40 }); } catch {}
+    lastFullReportAt = Date.now();
     if (process.env.DASHBOARD_DEBUG === '1') {
       logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
     }
@@ -4044,7 +4081,7 @@ async function tick(reason = 'interval') {
   } finally {
     inFlight = false;
     lastTickDoneAt = Date.now();
-    // Se alguém marcou pending durante a execução, roda imediatamente (sem esperar INTERVAL_MS).
+    // Se alguém marcou pending durante a execução, roda imediatamente (sem esperar POLL_INTERVAL_MS).
     if (pending) {
       pending = false;
       try { setImmediate(() => { tick('pending').catch(() => {}); }); } catch {}
@@ -4054,7 +4091,7 @@ async function tick(reason = 'interval') {
     // Isso evita concorrência e garante que não existe "cancelamento" de envio por overlap.
     if (timer !== null) {
       try { if (timer) clearTimeout(timer); } catch {}
-      try { timer = setTimeout(() => { tick('interval').catch(() => {}); }, INTERVAL_MS); } catch {}
+      try { timer = setTimeout(() => { tick('interval').catch(() => {}); }, POLL_INTERVAL_MS); } catch {}
     }
   }
 }
