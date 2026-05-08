@@ -36,6 +36,7 @@ let gatewayRecycleQueueInFlight = false;
 // ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
 let hostIdCache = null;
 // ===== ALTERAÇÃO FIM =====================================
+let lastJsonlAutoRotateAt = 0;
 
 // ===== Guardrail: close_all durante provision =====
 // Regras:
@@ -3007,6 +3008,65 @@ function pruneOldLogs(dir, { prefix = '', keep = 20 } = {}) {
     return { ok:false, error: (e && e.message) || String(e) };
   }
 }
+function pruneLogsByAgeHours(dir, { prefix = '', maxAgeHours = 48 } = {}) {
+  try {
+    const hours = Math.max(1, Math.min(24 * 30, Number(maxAgeHours || 0) || 48));
+    const cutoff = Date.now() - (hours * 60 * 60 * 1000);
+    if (!fsSync.existsSync(dir)) return { ok:true, deleted: 0 };
+    const items = fsSync.readdirSync(dir).map(name => ({ name, full: path.join(dir, name) }));
+    const filtered = items.filter(x => {
+      if (!x || !x.name) return false;
+      if (prefix && !String(x.name).startsWith(prefix)) return false;
+      return String(x.name).toLowerCase().endsWith('.log');
+    });
+    let deleted = 0;
+    for (const f of filtered) {
+      try {
+        const st = fsSync.statSync(f.full);
+        const m = Number(st && st.mtimeMs || 0) || 0;
+        if (m > 0 && m < cutoff) {
+          fsSync.rmSync(f.full, { force: true });
+          deleted++;
+        }
+      } catch {}
+    }
+    return { ok:true, deleted };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e) };
+  }
+}
+function maybeAutoRotateCriticalJsonl() {
+  try {
+    const enabled = String(process.env.JSONL_AUTO_ROTATE_ENABLED || '1').trim() !== '0';
+    if (!enabled) return { ok:true, skipped: true, reason: 'disabled' };
+    const intervalMin = Math.max(5, Math.min(24 * 60, Number(process.env.JSONL_AUTO_ROTATE_INTERVAL_MIN || 60) || 60));
+    const maxAgeHours = Math.max(6, Math.min(24 * 30, Number(process.env.JSONL_AUTO_ROTATE_MAX_AGE_HOURS || 48) || 48));
+    const now = Date.now();
+    if (lastJsonlAutoRotateAt && (now - lastJsonlAutoRotateAt) < (intervalMin * 60 * 1000)) {
+      return { ok:true, skipped: true, reason: 'interval' };
+    }
+    lastJsonlAutoRotateAt = now;
+
+    const allow = logsAllowlist();
+    const dir = path.join(__dirname, '..', 'dados', 'logs');
+    safeMkdirp(dir);
+    const keys = ['provision_audit', 'login_required_events', 'messenger_pin'];
+    const rotated = [];
+    for (const key of keys) {
+      const fp = allow[key];
+      if (!fp) continue;
+      const rr = rotateFileBestEffort(fp, { destDir: dir, baseName: `${key}` });
+      // not_found/empty são esperados quando arquivo ainda não existe ou sem dados
+      if (rr && rr.ok) rotated.push({ key, ok: true, bytes: Number(rr.bytes || 0) || 0 });
+      else rotated.push({ key, ok: false, error: rr && rr.error ? String(rr.error) : 'rotate_failed' });
+      try { pruneLogsByAgeHours(dir, { prefix: `${key}.`, maxAgeHours }); } catch {}
+      try { pruneOldLogs(dir, { prefix: `${key}.`, keep: 96 }); } catch {}
+    }
+    return { ok:true, intervalMin, maxAgeHours, rotated };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e) };
+  }
+}
 async function postLogsToNotifier({ requestId, items }) {
   const base = notifierBaseFromEndpoints();
   if (!base) throw new Error('notifier_base_unavailable');
@@ -3897,6 +3957,9 @@ async function tick(reason = 'interval') {
   inFlight = true;
   pending = false;
   try {
+    // Rotação automática dos JSONL críticos para evitar crescimento infinito em disco.
+    // Retenção por idade (default 48h), sem depender de comando manual.
+    try { maybeAutoRotateCriticalJsonl(); } catch {}
     // Tentativa de drenar ACKs pendentes antes do ciclo normal.
     try { await flushPendingAcks({ limit: 40 }); } catch {}
     // ===== ALTERAÇÃO: obter [status, hostId] e atualizar hostIdCache =====
@@ -3952,6 +4015,15 @@ async function tick(reason = 'interval') {
         _dashboard: quick
       }
     };
+    try {
+      const raw = JSON.stringify(payload);
+      const bytes = Buffer.byteLength(raw, 'utf8');
+      payload._telemetry = {
+        payloadBytes: bytes,
+        intervalMs: INTERVAL_MS,
+        perfisCount: Array.isArray(status && status.perfis) ? status.perfis.length : 0
+      };
+    } catch {}
 
     const resp = await tryAllEndpoints(payload);
     if (resp && Array.isArray(resp.commands) && resp.commands.length) {
