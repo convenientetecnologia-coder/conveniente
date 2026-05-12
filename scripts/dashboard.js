@@ -3326,6 +3326,23 @@ async function execSetGroqConfig(cmd) {
   return { ok: true };
 }
 
+async function execReseedHostId(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const newHostId = String(payload.newHostId || '').trim();
+  if (!newHostId) return { ok: false, error: 'missing_newHostId' };
+  try {
+    ensureDirSync(path.dirname(HOSTID_PATH));
+    fsSync.writeFileSync(HOSTID_PATH, newHostId, 'utf8');
+    hostIdCache = newHostId;
+    // Forca refresh completo imediato para o CT consolidar o novo hostId rapido.
+    lastFullReportAt = 0;
+    pending = true;
+    return { ok: true, newHostId };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 async function listActiveGatewayProfiles() {
   const st = await httpJson('/api/status', { timeoutMs: 45_000, retries: 1 });
   const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
@@ -3906,6 +3923,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'health_bundle')    { await execHealthBundle(c); }
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
       else if (c.type === 'set_groq_config')  { ackDetails = await execSetGroqConfig(c); }
+      else if (c.type === 'reseed_host_id')   { ackDetails = await execReseedHostId(c); }
       else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { ackDetails = await execGatewaySetProxies(c); }
       else if (c.type === 'force_full_report') {
         // Força próximo tick a enviar payload completo imediatamente.
