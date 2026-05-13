@@ -1428,14 +1428,149 @@ async function _installOverlayOnPage(nome, page) {
                 window.__ctHumanOverlayScrollState = window.__ctHumanOverlayScrollState || {
                   enabled: false,
                   timer: null,
+                  tick: 0,
                   stuckTicks: 0,
-                  lastTop: -1
+                  lastTop: -1,
+                  oldestAgeDays: null,
+                  parsedDates: 0
                 };
                 return window.__ctHumanOverlayScrollState;
               } catch {
-                return { enabled: false, timer: null, stuckTicks: 0, lastTop: -1 };
+                return { enabled: false, timer: null, tick: 0, stuckTicks: 0, lastTop: -1, oldestAgeDays: null, parsedDates: 0 };
               }
             })();
+            const SCROLL_STOP_AGE_DAYS = 46; // 46+ dias encontrado => cobertura de 45 dias garantida.
+            const normalizeTxt = (s) => {
+              try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); } catch { return String(s || '').toLowerCase(); }
+            };
+            const monthFromToken = (raw) => {
+              const t = normalizeTxt(raw).replace(/\.$/, '');
+              const m = {
+                'janeiro':1,'jan':1,'january':1,
+                'fevereiro':2,'fev':2,'february':2,'feb':2,
+                'marco':3,'mar':3,'march':3,
+                'abril':4,'abr':4,'april':4,'apr':4,
+                'maio':5,'may':5,
+                'junho':6,'jun':6,'june':6,
+                'julho':7,'jul':7,'july':7,
+                'agosto':8,'ago':8,'august':8,'aug':8,
+                'setembro':9,'set':9,'sept':9,'september':9,
+                'outubro':10,'out':10,'october':10,'oct':10,
+                'novembro':11,'nov':11,'november':11,
+                'dezembro':12,'dez':12,'december':12,'dec':12
+              };
+              return Number(m[t] || 0) || 0;
+            };
+            const toAgeDays = (y, m, d) => {
+              const yy = Number(y || 0), mm = Number(m || 0), dd = Number(d || 0);
+              if (!yy || mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+              const dt = new Date(yy, mm - 1, dd);
+              if (!(dt instanceof Date) || Number.isNaN(dt.getTime())) return null;
+              if (dt.getFullYear() !== yy || dt.getMonth() !== (mm - 1) || dt.getDate() !== dd) return null;
+              const now = new Date();
+              const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              const dt0 = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+              const age = Math.floor((today0.getTime() - dt0.getTime()) / 86400000);
+              return age >= 0 ? age : null;
+            };
+            const inferYearAndAge = (month, day, yearMaybe) => {
+              const now = new Date();
+              const m = Number(month || 0), d = Number(day || 0);
+              if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+              if (yearMaybe && Number(yearMaybe) > 1900) return toAgeDays(Number(yearMaybe), m, d);
+              let y = now.getFullYear();
+              let age = toAgeDays(y, m, d);
+              if (age === null) return null;
+              // Se a data "cai no futuro" no ano atual (ex.: hoje jan e item dez), assume ano anterior.
+              if (age < 0) {
+                y -= 1;
+                age = toAgeDays(y, m, d);
+              } else {
+                const candidate = new Date(y, m - 1, d);
+                if (candidate.getTime() > (Date.now() + 36 * 60 * 60 * 1000)) {
+                  y -= 1;
+                  age = toAgeDays(y, m, d);
+                }
+              }
+              return age;
+            };
+            const extractAgesFromAnnouncementText = (inputText) => {
+              const text = normalizeTxt(inputText);
+              const out = [];
+              if (!text) return out;
+              const anchors = /(anunciad[oa]|listed|posted)/.test(text);
+              if (!anchors) return out;
+
+              const rel = /(?:anunciad[oa][^.\n]{0,48}|listed[^.\n]{0,48}|posted[^.\n]{0,48})(?:ha|h)\s*(\d{1,3})\s*(dia|dias|day|days|semana|semanas|week|weeks|mes|meses|month|months)\b/g;
+              for (const m of text.matchAll(rel)) {
+                const n = Number(m[1] || 0) || 0;
+                const unit = String(m[2] || '');
+                if (!n) continue;
+                if (/semana|week/.test(unit)) out.push(n * 7);
+                else if (/mes|month/.test(unit)) out.push(n * 30);
+                else out.push(n);
+              }
+
+              const relSimple = /(?:anunciad[oa][^.\n]{0,48}|listed[^.\n]{0,48}|posted[^.\n]{0,48})(hoje|today|ontem|yesterday)\b/g;
+              for (const m of text.matchAll(relSimple)) {
+                const t = String(m[1] || '');
+                if (/ontem|yesterday/.test(t)) out.push(1);
+                else out.push(0);
+              }
+
+              const ddmm = /(?:anunciad[oa][^.\n]{0,64}|listed[^.\n]{0,64}|posted[^.\n]{0,64})(\d{1,2})\s*[/.-]\s*(\d{1,2})(?:\s*[/.-]\s*(\d{2,4}))?/g;
+              for (const m of text.matchAll(ddmm)) {
+                const d = Number(m[1] || 0) || 0;
+                const mo = Number(m[2] || 0) || 0;
+                let y = Number(m[3] || 0) || 0;
+                if (y > 0 && y < 100) y += 2000;
+                const age = inferYearAndAge(mo, d, y || null);
+                if (age !== null) out.push(age);
+              }
+
+              const dMon = /(?:anunciad[oa][^.\n]{0,64}|listed[^.\n]{0,64}|posted[^.\n]{0,64})(\d{1,2})\s*(?:de\s*)?([a-z]{3,12})(?:\s*(?:de)?\s*(\d{2,4}))?/g;
+              for (const m of text.matchAll(dMon)) {
+                const d = Number(m[1] || 0) || 0;
+                const mo = monthFromToken(m[2] || '');
+                let y = Number(m[3] || 0) || 0;
+                if (y > 0 && y < 100) y += 2000;
+                const age = inferYearAndAge(mo, d, y || null);
+                if (age !== null) out.push(age);
+              }
+
+              const monD = /(?:anunciad[oa][^.\n]{0,64}|listed[^.\n]{0,64}|posted[^.\n]{0,64})([a-z]{3,12})\s*(\d{1,2})(?:\s*,?\s*(\d{2,4}))?/g;
+              for (const m of text.matchAll(monD)) {
+                const mo = monthFromToken(m[1] || '');
+                const d = Number(m[2] || 0) || 0;
+                let y = Number(m[3] || 0) || 0;
+                if (y > 0 && y < 100) y += 2000;
+                const age = inferYearAndAge(mo, d, y || null);
+                if (age !== null) out.push(age);
+              }
+
+              return out.filter((n) => Number.isFinite(n) && n >= 0 && n <= 5000);
+            };
+            const scanVisibleAnnouncementAges = () => {
+              try {
+                const nodes = document.querySelectorAll('span, article, [role="article"], div[role="button"], a[role="button"], a[href*="/marketplace"]');
+                const ages = [];
+                let sampled = 0;
+                for (const el of nodes) {
+                  if (!el || sampled >= 260) break;
+                  let txt = '';
+                  try { txt = String(el.innerText || el.textContent || ''); } catch {}
+                  if (!txt || txt.length < 12) continue;
+                  const n = normalizeTxt(txt);
+                  if (!/(anunciad[oa]|listed|posted)/.test(n)) continue;
+                  sampled += 1;
+                  const found = extractAgesFromAnnouncementText(n);
+                  if (found && found.length) ages.push(...found);
+                }
+                return ages;
+              } catch {
+                return [];
+              }
+            };
             const resolveScrollTarget = () => {
               try {
                 const primary = [document.scrollingElement, document.documentElement, document.body]
@@ -1476,6 +1611,7 @@ async function _installOverlayOnPage(nome, page) {
               } catch {}
               scrollState.timer = null;
               scrollState.enabled = false;
+              scrollState.tick = 0;
               scrollState.stuckTicks = 0;
               scrollState.lastTop = -1;
               setScrollButtonState();
@@ -1484,11 +1620,15 @@ async function _installOverlayOnPage(nome, page) {
             const startOverlayAutoScroll = () => {
               if (scrollState.enabled) return;
               scrollState.enabled = true;
+              scrollState.tick = 0;
               scrollState.stuckTicks = 0;
               scrollState.lastTop = -1;
+              scrollState.oldestAgeDays = null;
+              scrollState.parsedDates = 0;
               setScrollButtonState();
               scrollState.timer = setInterval(() => {
                 try {
+                  scrollState.tick += 1;
                   const target = resolveScrollTarget();
                   if (!target) return;
                   const before = Number(target.scrollTop || 0);
@@ -1505,6 +1645,42 @@ async function _installOverlayOnPage(nome, page) {
                     scrollState.stuckTicks = 0;
                   }
                   scrollState.lastTop = after;
+                  // Verificação semântica de data (não só "fim de scroll"):
+                  // encontrou anúncio 46+ dias => para automaticamente.
+                  if ((scrollState.tick % 2) === 0) {
+                    const ages = scanVisibleAnnouncementAges();
+                    if (Array.isArray(ages) && ages.length) {
+                      scrollState.parsedDates += ages.length;
+                      let oldest = null;
+                      for (const a of ages) {
+                        if (!Number.isFinite(a)) continue;
+                        if (oldest === null || a > oldest) oldest = a;
+                      }
+                      if (oldest !== null) {
+                        scrollState.oldestAgeDays = (scrollState.oldestAgeDays === null)
+                          ? oldest
+                          : Math.max(Number(scrollState.oldestAgeDays || 0), oldest);
+                        try {
+                          $('hint').textContent = `Scroll ativo: mais antigo visto ${Number(scrollState.oldestAgeDays || 0)}d (alvo: ${SCROLL_STOP_AGE_DAYS}+d).`;
+                        } catch {}
+                        if (Number(scrollState.oldestAgeDays || 0) >= SCROLL_STOP_AGE_DAYS) {
+                          stopOverlayAutoScroll('age_threshold_reached');
+                          try {
+                            $('hint').textContent = `Scroll concluído: encontrado anúncio com ${Number(scrollState.oldestAgeDays || 0)} dias (>= ${SCROLL_STOP_AGE_DAYS}).`;
+                          } catch {}
+                          try {
+                            window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({
+                              event: 'scroll_age_threshold_hit',
+                              oldestAgeDays: Number(scrollState.oldestAgeDays || 0),
+                              thresholdDays: SCROLL_STOP_AGE_DAYS,
+                              parsedDates: Number(scrollState.parsedDates || 0)
+                            });
+                          } catch {}
+                          return;
+                        }
+                      }
+                    }
+                  }
                 } catch {}
               }, 900);
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'scroll_on' }); } catch {}
