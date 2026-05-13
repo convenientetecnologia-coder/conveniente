@@ -92,6 +92,26 @@ STATUS: patch aplicado no workspace; validar no host CT com restart `node index.
 
 ---
 
+## RAW_INPUT — 2026-05-13 (CT estoque: reserva volta p/ disponível — ROBE MÃE 2/3)
+
+```text
+Relato (humano, P0): ao clicar “Liberar” no Estoque (servidores), o CT zera cooldown e o servidor fica “pronto”; em seguida o CT reserva uma conta, o cooldown volta a contar, mas a conta sai de “reservada” e volta para “disponível” (sem cadastrar). Afetando: “ROBE MÃE 2 A” e “ROBE MÃE 3 D”.
+
+Evidência técnica (CT local):
+- hostIds: ROBE MÃE 2 = bcf01e8d-82da-4d5d-aed0-d60305d4696d; ROBE MÃE 3 = 5d7c3309-8581-4a50-a421-e6cbb52d8070 (ver `docs/HOST_REGISTRY.md`).
+- `C:\sitechatbot\dados\commands.log`: múltiplos ACKs de `stock_provision` com erro `provision_lock_busy ...` e `busy_timeout ...` (além de `already_opening` / `timeout` em alguns casos).
+- `C:\sitechatbot\dados\convenientetecnologia.sqlite` (ct_fb_stock_jobs): jobs `provision` em `error` com `profileName=null` e `error=provision_lock_busy ...` / `busy_timeout ...` → isso ativa o caminho do CT que libera a conta de volta para `available`.
+
+Regra/causa raiz:
+- quando o host devolve ACK de falha SEM `profileName`, o CT solta a reserva (para evitar duplicar perfil) e a conta volta para “disponível”.
+- no conveniente, `provision_lock` é um lock global com TTL para evitar concorrência; se estiver ocupado por `human_reconcile_login_form`/`auto_login_remediate`/etc, o `stock_provision` pode falhar com `provision_lock_busy`.
+
+Próximo passo operacional (sem coleta manual de logs):
+- garantir que `conveniente` esteja atualizado e reiniciado nos hosts RM2/RM3 (para reduzir “unknown_command:*” e limpar locks pós-crash via pid); depois observar se `stock_provision` deixa de voltar com `provision_lock_busy`.
+```
+
+---
+
 ## RAW_INPUT — 2026-04-07 (elevar anti-detect para nível enterprise, por fases)
 
 ```text
