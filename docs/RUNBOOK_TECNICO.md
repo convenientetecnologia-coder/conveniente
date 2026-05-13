@@ -1712,6 +1712,24 @@ Rollback:
 1. aumentar timeout (`CT_STOCK_PROVISION_ACK_TIMEOUT_MS`) para janela mais conservadora, se necessário;
 2. em último caso, reverter patch do `C:\sitechatbot\index.js` e reiniciar `sitechatbot`.
 
+### CT estoque — scheduler automático (`stockSchedulerTick`) vs “online” na UI (CANÔNICO, 2026-05-13)
+
+Problema histórico:
+- o menu **Servidores** podia mostrar host online/vagas, mas o cadastro automático do estoque não enfileirava `stock_provision` até um refresh “destravar”.
+
+Causa raiz (código):
+- o scheduler usava só `snapshot.receivedAt` / `sentAt` para decidir online;
+- a UI e rotas como `POST /api/stock/import_from_servers` já usavam `resolveHostFreshnessBaseTs()` (inclui `hostState.lastPollReceivedAt` do `/report` com `pollOnly: true`).
+
+Regra canônica:
+- o scheduler **deve** usar a mesma base de frescor que `import_from_servers` e o mesmo numerador conservador de uso (`max(perfis no snapshot, inventário CT)`), alinhado ao `GET /api/stock/servers`.
+
+Evidência:
+- `C:\sitechatbot\index.js` (`stockSchedulerTick`, `resolveHostFreshnessBaseTs`, comentário em `handleReport` sobre `pollOnly`).
+
+Impacto operacional:
+- requer restart do `sitechatbot` para valer.
+
 ---
 
 ### Dashboard — cooldown configurável do Robe por servidor (CANÔNICO, 2026-04-25)

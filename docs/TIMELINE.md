@@ -3439,3 +3439,25 @@ Adendo (ajuste operacional aprovado pelo owner):
   - Runtime V2 state: `C:\conveniente\scripts\robe.js` (campos `lastBlock*` + `consumedTotal` em `dados/robe_v2_queue.json`)
 - **Impacto operacional**:
   - requer restart do `conveniente` para habilitar o novo endpoint e expor o botão/JS novo.
+
+#### 2026-05-13 — [OPERACAO] Reafirmação do “modo enterprise” (humano só reinicia; agente coleta evidência via CT; sem achismo)
+
+- **Mudança**:
+  - reafirmado o contrato operacional: humano só reinicia com `node index.js` e confirma “reiniciado”; agente opera por código + CT (logs/ACK) + organização em docs canônicos; sem achismo e sem segredos em texto puro.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT 2026-05-13 — reiteração; referência ao texto integral anterior)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seções “Cabeçalho obrigatório…” e “Intake de texto bomba”)
+- **Impacto operacional**:
+  - nenhum restart.
+
+#### 2026-05-13 — [SITECHATBOT][ESTOQUE] Scheduler automático: alinhar “online” ao poll (`resolveHostFreshnessBaseTs`) + `used` conservador
+
+- **Mudança**:
+  - `stockSchedulerTick` deixou de usar só `snapshot.receivedAt`/`sentAt` para classificar host online;
+  - passou a usar `resolveHostFreshnessBaseTs` (igual `POST /api/stock/import_from_servers` e coerente com `/report` `pollOnly`);
+  - contagem `used` para vaga agora usa `max(perfis no snapshot, inventário CT em ct_fb_stock_server_profiles)` para alinhar com o numerador “tempo real” do menu Servidores.
+- **Evidência (código/path)**:
+  - `C:\sitechatbot\index.js` (`stockSchedulerTick`, `resolveHostFreshnessBaseTs`, `handleReport` com `pollOnly`)
+  - `c:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “CT estoque — scheduler automático…”)
+- **Impacto operacional**:
+  - requer restart do `sitechatbot` (`node index.js` no host do CT).

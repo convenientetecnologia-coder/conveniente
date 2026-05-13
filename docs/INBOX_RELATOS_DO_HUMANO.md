@@ -2165,3 +2165,45 @@ pedido do humano:
 | 1 | P0 | Implementar helper canônico para arquivar conta excluída em C:/excluidas por data/cidade | in_progress | `C:/conveniente/scripts/excludedArchive.js` |
 | 2 | P0 | Integrar arquivamento no delete manual da API e nos deletes automáticos do worker | in_progress | `C:/conveniente/scripts/api_perfis.js`, `C:/conveniente/scripts/worker.js` |
 | 3 | P1 | Validar formato do TXT e tolerância a erros sem bloquear fluxo de exclusão | pending | `C:/conveniente/scripts/excludedArchive.js` |
+
+---
+
+## RAW_INPUT — 2026-05-13 (Reafirmação do contrato enterprise + disciplina de operação)
+
+```text
+Nota:
+- Reiteração do mesmo “contrato do trabalho” e regras não‑negociáveis já registradas integralmente no passado.
+- Referência do texto integral mais próximo: RAW_INPUT — 2026-04-25 (neste arquivo; “alinhamento de operação / acordo operacional”).
+
+Reforços explícitos nesta reiteração (2026-05-13):
+- operar sem achismo, com evidência citável (path/log key/cmdId/requestId/endpoint);
+- humano não executa comandos nem coleta logs; só reinicia `node index.js` quando o agente pedir e confirma “reiniciado”;
+- agente é o operador técnico: código + coleta via CT + organização em RUNBOOK/LIVRO/TIMELINE;
+- tratar 1 problema por ticket; evitar misturar assuntos;
+- manter disciplina Windows/PowerShell (sem `&&` e sem heredoc `<<EOF`).
+```
+
+### TRIAGE — 2026-05-13 (Reafirmação do contrato enterprise)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P2 | Registrar reiteração do “modo enterprise” (cabeçalho obrigatório, evidência via CT, humano só reinicia) | done | `docs/RUNBOOK_TECNICO.md`, `docs/TIMELINE.md` |
+
+---
+
+## RAW_INPUT — 2026-05-13 (Estoque: servidores liberados + contas disponíveis mas provision não destrava)
+
+```text
+Sintoma (paráfrase operacional):
+- vários servidores liberados para receber conta do estoque, estoque com contas disponíveis;
+- cadastro automático parece “travado”; após abrir menu Servidores e atualizar, o fluxo volta a enfileirar 1 conta por host até o cooldown, e repete o padrão de “engessado”;
+- sensação de CT considerando host offline apesar de operação mostrar online/pronto/vagas.
+
+Hipótese técnica (GPT): divergência entre critério de “online/frescor” no scheduler de estoque vs UI (`resolveHostFreshnessBaseTs` + pollOnly).
+```
+
+### TRIAGE — 2026-05-13 (Scheduler estoque vs frescor do host)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Alinhar `stockSchedulerTick` ao frescor canônico (`resolveHostFreshnessBaseTs`) + uso conservador de `used` (snapshot vs inventário CT) | done | `C:/sitechatbot/index.js`, `docs/RUNBOOK_TECNICO.md` |
