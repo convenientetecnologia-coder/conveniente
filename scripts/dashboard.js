@@ -2082,6 +2082,37 @@ async function execStockProvision(cmd) {
     await sleepMs(Math.min(base + jitter, Math.max(250, budgetMs - waitedMs)));
   }
 
+  // Se o CT informar capacidade manual, aplica no runtime config local antes de criar perfil.
+  // Fonte de verdade operacional: valor manual definido no painel de estoque do CT.
+  const capacityMaxManual = Number(payload && payload.capacityMaxManual || 0) || 0;
+  if (capacityMaxManual > 0) {
+    const capSync = await httpJson('/api/server-config', {
+      method: 'POST',
+      headers: { 'x-operator': lockOwner },
+      timeoutMs: 60_000,
+      body: {
+        capacity: {
+          mode: 'absolute',
+          maxAccountsOverride: Math.max(1, Math.floor(capacityMaxManual))
+        },
+        applyNow: false
+      }
+    });
+    if (!capSync || capSync.ok === false) {
+      const capErr = String((capSync && capSync.error) || 'capacity_sync_failed');
+      throw new Error(`capacity_sync_failed:${capErr}`);
+    }
+    try {
+      provisionAudit.append({
+        event: 'stock_provision_capacity_synced_from_ct',
+        cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+        batchId,
+        requestedCapacityMaxManual: Math.max(1, Math.floor(capacityMaxManual)),
+        appliedMaxAccountsEffective: Number(capSync && capSync.config && capSync.config.capacity && capSync.config.capacity.maxAccountsEffective || 0) || null
+      });
+    } catch {}
+  }
+
   // Política ultra enterprise:
   // - durante provisão, o 1GB/node é "emprestável" (Robe/Virtus ficam controlados)
   // - então o headroom mínimo vira: 2GB (host) + pico de cookies (~1.5GB)

@@ -2241,3 +2241,40 @@ Hipótese técnica (GPT): divergência entre critério de “online/frescor” n
 | item | P | titulo | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Alinhar `stockSchedulerTick` ao frescor canônico (`resolveHostFreshnessBaseTs`) + uso conservador de `used` (snapshot vs inventário CT) | done | `C:/sitechatbot/index.js`, `docs/RUNBOOK_TECNICO.md` |
+
+---
+
+## RAW_INPUT — 2026-05-13 (RM2-A e RM3-D: conta reserva, volta ao estoque, host “pronto”)
+
+```text
+Relato do humano:
+- hosts citados: “ROBE MÃE 2 - A” e “ROBE MÃE 3 - D”;
+- hosts atualizados + CT reiniciado;
+- ao liberar para cadastro: conta é reservada para o host, depois volta para available;
+- percepção operacional: host aparece pronto/com vaga, mas não cadastra conta.
+```
+
+### TRIAGE — 2026-05-13 (Divergência de capacidade CT x worker)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Provar erro real no ACK dos `stock_provision` de RM2-A/RM3-D | done | `dados/commands.log`, `dados/convenientetecnologia.sqlite` |
+| 2 | P0 | Corrigir cálculo de vaga no CT para não ultrapassar capacidade efetiva reportada pelo host | done | `C:/sitechatbot/index.js` |
+
+---
+
+## RAW_INPUT — 2026-05-13 (Capacidade manual no CT é a fonte de verdade)
+
+```text
+Relato do humano:
+- no estoque/servidores do CT a capacidade é definida manualmente;
+- esse valor manual deve mandar no provisionamento;
+- pediu atualização inteligente para evitar conflito CT x worker.
+```
+
+### TRIAGE — 2026-05-13 (Sincronização de capacidade CT -> worker)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Fazer CT usar capacidade manual como autoridade no scheduler/seleção de vagas | done | `C:/sitechatbot/index.js` |
+| 2 | P0 | Enviar capacidade manual no payload de `stock_provision` e aplicar no worker antes de criar perfil | done | `C:/sitechatbot/index.js`, `C:/conveniente/scripts/dashboard.js` |
