@@ -78,6 +78,20 @@ STATUS: done — dossiê forense em docs/checkups/checkup_2026-03-18_dossie_fore
 
 ---
 
+## RAW_INPUT — 2026-05-13 (CT estoque: liberar + cooldown sem `stock_provision`)
+
+```text
+Relato: após restart do sitechatbot, servidores cadastraram; em cooldown; operador liberou manualmente um host com vaga e estoque; host “pronto” mas não cadastrou conta, cooldown voltou a contar e estoque disponível não desceu — sensação de provision “fantasma”.
+
+Causa raiz (código): `setServerCooldown` ao zerar ainda atualizava `last_provision_at`; `POST /api/stock/server_prefs` reaplicava cooldown em todos os hosts com provision `running`; `release_all` usava só snapshot para online.
+
+Correção + evidência: `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js` (`setServerCooldown`); `C:\sitechatbot\index.js` (`/api/stock/server_prefs`, `/api/stock/servers/release_all`). Docs: `docs/TIMELINE.md` + `docs/RUNBOOK_TECNICO.md` (2026-05-13).
+
+STATUS: patch aplicado no workspace; validar no host CT com restart `node index.js` do sitechatbot.
+```
+
+---
+
 ## RAW_INPUT — 2026-04-07 (elevar anti-detect para nível enterprise, por fases)
 
 ```text

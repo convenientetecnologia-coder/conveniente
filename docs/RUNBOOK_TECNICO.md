@@ -1730,6 +1730,28 @@ Evidência:
 Impacto operacional:
 - requer restart do `sitechatbot` para valer.
 
+### CT estoque — cooldown após “Liberar” / salvar prefs (CANÔNICO, 2026-05-13)
+
+Problema histórico:
+- operador via servidor **pronto**, estoque e vaga, mas **sem** novo `stock_provision`; o **timer de cooldown** parecia reiniciar “do nada”, sem baixar “disponíveis” no estoque.
+
+Causa raiz (código):
+- `setServerCooldown` ao zerar cooldown (`cooldown_until=0`) ainda atualizava `last_provision_at`, sugerindo provision recente na UI/tooltip;
+- `POST /api/stock/server_prefs`, após `upsertServerPref`, percorria **todos** os `hostId` com provision `running` e chamava `setServerCooldown` — salvar prefs do servidor A podia **recolocar cooldown** no servidor B;
+- `release_all` calculava “online” só com `snapshot.receivedAt`/`sentAt`, divergindo de hosts que só “respiram” via poll (`resolveHostFreshnessBaseTs`).
+
+Regra canônica:
+- zerar cooldown **não** altera `last_provision_at`;
+- recálculo pós-save de prefs de estoque afeta **apenas** o `hostId` do corpo da requisição (e só se houver provision `running` naquele host);
+- `release_all` usa a mesma base de frescor que o scheduler/UI para conjunto “online”.
+
+Evidência:
+- `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js` (`setServerCooldown`);
+- `C:\sitechatbot\index.js` (`POST /api/stock/server_prefs`, `POST /api/stock/servers/release_all`).
+
+Impacto operacional:
+- requer restart do `sitechatbot` para valer.
+
 ---
 
 ### Dashboard — cooldown configurável do Robe por servidor (CANÔNICO, 2026-04-25)

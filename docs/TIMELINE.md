@@ -31,6 +31,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-05-13 — [CT][OPS] Estoque FB: cooldown “fantasma” ao liberar / salvar prefs de outro host
+
+- **O que**:
+  - ao zerar cooldown (“Liberar”), o CT **não** atualiza mais `last_provision_at` (evita parecer que houve provision sem conta reservada);
+  - `POST /api/stock/server_prefs` só recalcula cooldown do **`hostId` salvo** (antes percorria todos os hosts com `stock_provision` `running` e reiniciava timer alheio);
+  - `POST /api/stock/servers/release_all` passa a usar `resolveHostFreshnessBaseTs` para “online”, alinhado ao scheduler e à UI (poll-only).
+- **Por quê**: relato operacional: host “pronto” + estoque + vaga, sem cadastro e cooldown reiniciando sem baixar disponíveis — mistura de efeito colateral em `server_prefs` e métrica enganosa em `last_provision_at`.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js` (`setServerCooldown`);
+  - `C:\sitechatbot\index.js` (`/api/stock/server_prefs`, `/api/stock/servers/release_all`).
+- **Reinícios**: `sitechatbot` no host do CT (`node index.js`).
+- **Rollback**: reverter os três trechos nos arquivos acima e reiniciar o `sitechatbot`.
+
 #### 2026-05-03 — [CT][OPS] Virtus/Grupos: adicionada coluna “Chamados 3 dias” (janela usada no insight)
 
 - **O que**:
