@@ -44,6 +44,18 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `sitechatbot` no host do CT (`node index.js`).
 - **Rollback**: reverter os três trechos nos arquivos acima e reiniciar o `sitechatbot`.
 
+#### 2026-05-13 — [CT][CONV][OPS] Estoque: `freeMB` fresco no poll (ngrok + relatório 6h)
+
+- **O que**:
+  - o `dashboard` passa a enviar em cada **poll** leve (`pollOnly`) um objeto opcional `pulseSys` com `freeMB`/`totalMB` lidos de `dados/status.json` (sem subir snapshot pesado);
+  - o CT grava isso em `hostState` e o `stockSchedulerTick` usa **`pulseSys` recente** (default: até 180s) para o gate `CT_STOCK_MIN_FREE_MB`, com fallback no snapshot completo.
+- **Por quê**: com `DASHBOARD_FULL_REPORT_INTERVAL_MS` alto (ex.: 6h) o snapshot no CT ficava velho: “online” via poll ok, mas **RAM desatualizada** → sensação de sistema atrasado / `no_headroom` incoerente; não substitui o relatório completo para contagem de perfis.
+- **Evidência**:
+  - `C:\conveniente\scripts\dashboard.js` (poll + `pulseSys`);
+  - `C:\sitechatbot\index.js` (`handleReport` pollOnly + `resolveHostFreeMBForStockScheduler` + `stockSchedulerTick`).
+- **Reinícios**: `sitechatbot` (CT) **e** cada host `conveniente` que roda o dashboard (`node index.js`).
+- **Rollback**: reverter os dois arquivos; opcional `CT_PULSE_SYS_MAX_AGE_MS` volta ao default se ajustado.
+
 #### 2026-05-03 — [CT][OPS] Virtus/Grupos: adicionada coluna “Chamados 3 dias” (janela usada no insight)
 
 - **O que**:

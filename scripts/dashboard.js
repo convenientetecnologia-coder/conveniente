@@ -3994,11 +3994,25 @@ async function tick(reason = 'interval') {
       const hostId = await getOrCreateHostId();
       hostIdCache = hostId;
       try { await flushPendingAcks({ limit: 40 }); } catch {}
+      // Pulso leve de RAM (lê só status.json local): o CT não recebe snapshot completo por horas,
+      // mas o scheduler de estoque precisa de freeMB atual para não travar em "no_headroom" fantasioso.
+      let pulseSys = null;
+      try {
+        const raw = fsSync.readFileSync(STATUS_PATH, 'utf8');
+        const sj = JSON.parse(raw);
+        const fm = Number(sj && sj.sys && sj.sys.freeMB);
+        if (Number.isFinite(fm) && fm >= 0) {
+          pulseSys = { freeMB: Math.round(fm) };
+          const tm = Number(sj && sj.sys && sj.sys.totalMB);
+          if (Number.isFinite(tm) && tm > 0) pulseSys.totalMB = Math.round(tm);
+        }
+      } catch {}
       const pollPayload = {
         pollOnly: true,
         hostname: (os && os.hostname) ? os.hostname() : '',
         hostId,
-        sentAt: now()
+        sentAt: now(),
+        ...(pulseSys ? { pulseSys } : {})
       };
       const pollResp = await tryAllEndpoints(pollPayload);
       if (pollResp && Array.isArray(pollResp.commands) && pollResp.commands.length) {

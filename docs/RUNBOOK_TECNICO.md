@@ -1745,6 +1745,11 @@ Regra canônica:
 - recálculo pós-save de prefs de estoque afeta **apenas** o `hostId` do corpo da requisição (e só se houver provision `running` naquele host);
 - `release_all` usa a mesma base de frescor que o scheduler/UI para conjunto “online”.
 
+**Pulso RAM no poll (2026-05-13)**:
+- relatório completo pode ser espaçado (`DASHBOARD_FULL_REPORT_INTERVAL_MS`, default 6h) para reduzir carga no túnel;
+- o poll leve (~`DASHBOARD_INTERVAL_MS`, default 30s) continua entregando comandos; além disso o host pode enviar `pulseSys.freeMB` (lido de `dados/status.json`) no `pollOnly`;
+- o CT persiste o pulso em `hostState` e o `stockSchedulerTick` prefere esse valor (TTL configurável `CT_PULSE_SYS_MAX_AGE_MS`, default 180s) para o gate `CT_STOCK_MIN_FREE_MB`, evitando “headroom” fantasioso com snapshot velho.
+
 Evidência:
 - `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js` (`setServerCooldown`);
 - `C:\sitechatbot\index.js` (`POST /api/stock/server_prefs`, `POST /api/stock/servers/release_all`).
