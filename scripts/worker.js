@@ -262,6 +262,35 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
     const evidUrl = String(job.evidenceUrl || '').trim();
     const flowId = String(job.flowId || '').trim();
 
+    // Política atual: nunca executar exclusão/arquivamento automático.
+    // Jobs legados da fila viram apenas evidência para revisão manual.
+    try {
+      const nome = profileName;
+      if (nome) {
+        try {
+          await issues.append(
+            nome,
+            'account_banned_detected',
+            `ct_archive_queue_auto_disabled flow=${String(flowId || '').slice(0, 80)} stockAccountId=${sid || ''} at=${new Date().toISOString()}`
+          );
+        } catch {}
+      }
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'ct_archive_queue_skipped_manual_review_policy',
+          flowId: flowId || null,
+          profileName: nome || null,
+          stockAccountId: sid || null,
+          reason: String(reason || '').slice(0, 120)
+        });
+      } catch {}
+      const doneFp = path.join(CT_ARCHIVE_QUEUE_DONE_DIR, f);
+      try { fs.renameSync(fp, doneFp); } catch { try { fs.copyFileSync(fp, doneFp); } catch {} try { fs.unlinkSync(fp); } catch {} }
+      processed++;
+      continue;
+    } catch {}
+
     let b64 = '';
     if (evidPath && fs.existsSync(evidPath)) {
       try { b64 = fs.readFileSync(evidPath).toString('base64'); } catch { b64 = ''; }
@@ -288,54 +317,27 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
       continue;
     }
 
-    // Enterprise: se o CT responder "not_found_assigned", não podemos ficar em loop infinito
-    // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em múltiplos hosts).
-    // Regra pedida: se não há controller e desired.active==false, remover o perfil local imediatamente.
+    // Regra operacional atual: nunca excluir perfil automaticamente.
+    // Se CT responder not_found_assigned, apenas sinaliza para revisão manual.
     try {
       if (String(errStr || '').includes('not_found_assigned')) {
         const nome = profileName;
-        const hasCtrl = controllers.has(nome);
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (!hasCtrl && !isActive && nome) {
+        if (nome) {
           try {
-            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
+            await issues.append(
+              nome,
+              'account_banned_detected',
+              `ct_archive_not_found_assigned flow=${String(flowId || '').slice(0, 80)} stockAccountId=${sid || ''} at=${new Date().toISOString()}`
+            );
           } catch {}
-          // Remoção local best-effort (mesma lógica do banflow)
           try {
-            // CRÍTICO (cluster): NÃO usar loadPerfisJson()/savePerfisJson do worker (shard) para gravar perfis.json,
-            // senão um shard pode sobrescrever o arquivo global com um subconjunto (ou []) e "sumir tudo".
-            let udir = '';
-            try {
-              const man = await manifestStore.read(nome).catch(() => null);
-              if (man && man.userDataDir) udir = String(man.userDataDir);
-            } catch {}
-            if (!udir) {
-              try {
-                const all = fileStore.loadPerfisJson() || [];
-                const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
-                if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
-              } catch {}
-            }
-            if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
-            try {
-              fileStore.withPerfisFileLockUpdate(
-                (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
-                { caller: 'ct_archive_not_found_delete_local', nome }
-              );
-            } catch {}
-          } catch {}
-          try { await fileStore.removeDesired(nome); } catch {}
-          try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-          try {
-            const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-            if (st && Array.isArray(st.perfis)) {
-              st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-              fileStore.writeJsonAtomic(fileStore.statusPath, st);
-            }
-          } catch {}
-          try { await snapshotStatusAndWrite(); } catch {}
-          try {
-            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_deleted_local', flowId: flowId || null, profileName: String(nome||''), ok: true });
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'ct_archive_not_found_manual_review_required',
+              flowId: flowId || null,
+              profileName: String(nome || ''),
+              stockAccountId: sid || null
+            });
           } catch {}
         }
       }
@@ -3826,143 +3828,18 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
       } catch {}
 
-      // 2.5) ANTES de deletar o perfil local: garantir que a conta foi enviada ao CT (Excluídas).
-      // Motivo enterprise: se stockAccountId estiver ausente e o perfil for deletado, o CT pode não conseguir mapear
-      // hostId+profileName => conta some (não aparece em Excluídas).
-      let ctArchiveOk = false;
-      let ctArchiveResp = null;
-      let ctArchiveErr = '';
-      let ctArchiveProceed = false;
-      let ctArchiveProceedReason = '';
+      // Regra operacional atual: nunca excluir/arquivar automaticamente por ban.
+      // Apenas marca flags + issue para revisão humana e eventual exclusão manual.
       try {
-        const rr = await archiveBanWithEvidenceToCT({
-          profileName: nome,
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'auto_banned_manual_review_only',
+          flowId,
+          nome: String(nome || ''),
           stockAccountId: stockAccountId || null,
-          reason: `banned:${String(reason||'banned').slice(0,80)}`,
-          evidenceB64: b64,
-          evidenceUrl: url
+          closeOk: !!closeOk
         });
-        ctArchiveResp = rr || null;
-        ctArchiveOk = !!(rr && rr.ok);
-        ctArchiveErr = rr && rr.ok ? '' : String(rr && rr.error || 'error');
-        if (rr && rr.stockAccountId && !stockAccountId) stockAccountId = Number(rr.stockAccountId) || stockAccountId;
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_archive_banned_ct_predelete',
-            flowId,
-            nome: String(nome||''),
-            ok: !!(rr && rr.ok),
-            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-            stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
-            details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
-          });
-        } catch {}
-        if (!rr || rr.ok !== true) {
-          // CT fora/arq falhou: NÃO deletar se não temos stockAccountId, para não perder o vínculo por profileName.
-          const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
-          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          // NOVA REGRA (pedida): mesmo que CT não consiga mapear (ex.: not_found_assigned),
-          // nós SEMPRE removemos do servidor para evitar duplicidade em múltiplos hosts.
-          // A evidência fica no provision_audit + ct_archive_queue.
-          ctArchiveProceed = true;
-          ctArchiveProceedReason = ctArchiveErr || 'ct_archive_failed_predelete';
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'banflow_ct_archive_failed_proceed_delete',
-              flowId,
-              nome: String(nome||''),
-              stockAccountId: stockAccountId || null,
-              error: String(ctArchiveProceedReason || '').slice(0, 220)
-            });
-          } catch {}
-        }
       } catch {}
-
-      // 3) EXCLUI a conta do servidor usando o mesmo fluxo do DELETE /api/perfis/:nome (sem HTTP).
-      // Regras:
-      // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
-      // - remoção de userDataDir externo é best-effort.
-      try {
-        if (!closeOk) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        } else {
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (isActive) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
-          return { ok: false, error: 'banned_delete_blocked_still_active' };
-        }
-        // Remove userDataDir externo, perfis.json, desired e dir do perfil
-        try {
-          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
-          let udir = '';
-          try {
-            const man = await manifestStore.read(nome).catch(() => null);
-            if (man && man.userDataDir) udir = String(man.userDataDir);
-          } catch {}
-          if (!udir) {
-            try {
-              const all = fileStore.loadPerfisJson() || [];
-              const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
-              if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
-            } catch {}
-          }
-          if (udir && fs.existsSync(udir)) {
-            // remoção best-effort e pode falhar em Windows (arquivo bloqueado).
-            try { fileStore.rimrafSync(udir); } catch {}
-          }
-          try {
-            fileStore.withPerfisFileLockUpdate(
-              (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
-              { caller: 'auto_delete_banned_profile', nome }
-            );
-          } catch {}
-        } catch {}
-        try { await fileStore.removeDesired(nome); } catch {}
-        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-        try {
-          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-          if (st && Array.isArray(st.perfis)) {
-            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-            fileStore.writeJsonAtomic(fileStore.statusPath, st);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: true }); } catch {}
-        }
-      } catch (e) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
-      }
-
-      // 4) (compat) Se por algum motivo não conseguimos arquivar antes, tenta depois também.
-      if (!ctArchiveOk) {
-        try {
-          const rr = ctArchiveResp || await archiveBanWithEvidenceToCT({
-            profileName: nome,
-            stockAccountId: stockAccountId || null,
-            reason: `banned:${String(reason||'banned').slice(0,80)}`,
-            evidenceB64: b64,
-            evidenceUrl: url
-          });
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'auto_archive_banned_ct_postdelete',
-              flowId,
-              nome: String(nome||''),
-              ok: !!(rr && rr.ok),
-              error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-              stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
-              details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
-            });
-          } catch {}
-          if (!rr || rr.ok !== true) {
-            const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
-            try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          }
-        } catch {}
-      }
     } catch {}
     await manifestStore.update(nome, (man) => {
       man = man || {};

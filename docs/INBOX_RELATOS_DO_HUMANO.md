@@ -2278,3 +2278,21 @@ Relato do humano:
 |---|---|---|---|---|
 | 1 | P0 | Fazer CT usar capacidade manual como autoridade no scheduler/seleção de vagas | done | `C:/sitechatbot/index.js` |
 | 2 | P0 | Enviar capacidade manual no payload de `stock_provision` e aplicar no worker antes de criar perfil | done | `C:/sitechatbot/index.js`, `C:/conveniente/scripts/dashboard.js` |
+
+---
+
+## RAW_INPUT — 2026-05-13 (Proibir exclusão automática no servidor)
+
+```text
+Relato do humano:
+- servidor não pode excluir conta automaticamente (ban/2FA/falso positivo etc.);
+- ao detectar problema, apenas marcar pill/issue e manter para revisão humana;
+- exclusão deve ser sempre manual pelo usuário.
+```
+
+### TRIAGE — 2026-05-13 (Desativar auto-delete/auto-exclude)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Remover remoção local automática no retry de archive CT (`not_found_assigned`) | done | `C:/conveniente/scripts/worker.js` |
+| 2 | P0 | Remover fluxo de exclusão/arquivamento automático por ban e deixar apenas flags/issues + auditoria | done | `C:/conveniente/scripts/worker.js` |
