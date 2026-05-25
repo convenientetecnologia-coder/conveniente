@@ -1,30 +1,47 @@
 "use strict";
 
 // Centraliza a origem do endpoint do notificador (sitechatbot).
-// Importante: mantemos compatível com a versão atual que usa ngrok.
 const { readCtConfig } = require("./ctConfig");
 
-function resolveEndpoints() {
-  // Preferência máxima: CT_BASE_URL/CT_URL (base do CT). Isso evita depender de ngrok hardcoded.
-  // Ex.: CT_BASE_URL=https://xxxx.ngrok-free.app  => endpoint report = {base}/report
-  const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
-  if (base) {
-    const b = base.replace(/\/+$/, "");
-    return [`${b}/report`];
+function isNgrokTarget(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) return false;
+  try {
+    const host = String(new URL(value).hostname || "").toLowerCase();
+    return /(?:^|\.)ngrok(?:-free)?\.(?:io|app)$/.test(host);
+  } catch {
+    return /ngrok/i.test(value);
   }
+}
 
-  // Fallback enterprise: config persistido em arquivo (para quando o node roda manualmente sem env).
+function normalizeBase(rawBase) {
+  const base = String(rawBase || "").trim().replace(/\/+$/, "");
+  if (!base || isNgrokTarget(base)) return "";
+  return base;
+}
+
+function resolveEndpoints() {
+  // Preferência máxima: CT_BASE_URL/CT_URL (base do CT).
+  const envBase = normalizeBase(process.env.CT_BASE_URL || process.env.CT_URL || "");
+  if (envBase) return [`${envBase}/report`];
+
+  // Fallback enterprise: config persistido em arquivo (para quando o node roda sem env).
   try {
     const cfg = readCtConfig();
-    if (cfg && cfg.ctBaseUrl) return [`${String(cfg.ctBaseUrl).replace(/\/+$/, "")}/report`];
+    const cfgBase = normalizeBase(cfg && cfg.ctBaseUrl);
+    if (cfgBase) return [`${cfgBase}/report`];
   } catch {}
 
-  // Permite override por env (para futuro multi-ambiente).
+  // Override explícito para URL completa.
   const env = String(process.env.CT_NOTIFIER_REPORT_URL || process.env.NOTIFIER_REPORT_URL || "").trim();
-  if (env) return [env];
-  return [
-    "https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io/report"
-  ];
+  if (env && !isNgrokTarget(env)) return [env];
+
+  // Último fallback oficial (domínio próprio).
+  const defaultBase = normalizeBase(process.env.CT_DEFAULT_BASE_URL || "https://api.convenientetecnologia.com");
+  if (defaultBase) return [`${defaultBase}/report`];
+
+  // Fail-closed: sem endpoint válido não tenta ngrok.
+  return [];
 }
 
 function notifierBaseFromEndpoints() {

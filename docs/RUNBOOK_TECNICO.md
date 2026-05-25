@@ -1138,9 +1138,64 @@ Regra de segurança (P0):
 
 ### Impacto operacional
 
-- Requer restart do `sitechatbot` para valer.---
+- Requer restart do `sitechatbot` para valer.
 
-## Operação enterprise (recomendado) — 3 processos separados (CT / Notificador / Ngrok)
+---
+
+## Operação enterprise (canônico atual) — boot SYSTEM + dashboard operacional
+
+### Objetivo
+
+- Subir stack completo no boot do Windows, sem login humano:
+  - Gate B (`nginx + cloudflared`)
+  - `sitechatbot` core (`index.js`, porta 3000)
+  - `sitechatbot` edge (`indexct.js`, portas 3001/3002/3003)
+  - `notificador` (`index.js`, porta 8789)
+- Expor um dashboard operacional simples para checagem rápida de ONLINE/OFFLINE.
+
+### Tasks de boot (`SYSTEM`) no Task Scheduler
+
+- `GateB-AutoStart-BootSystem` -> `C:/portas/scripts/start_gate_b.ps1`
+- `Sitechatbot-Core-AutoStart-BootSystem` -> `C:/portas/scripts/start_sitechatbot_core.ps1`
+- `Sitechatbot-Edge-AutoStart-BootSystem` -> `C:/portas/scripts/start_sitechatbot_edge.ps1`
+- `Notificador-AutoStart-BootSystem` -> `C:/portas/scripts/start_notificador_worker.ps1`
+- `OpsDashboard-AutoOpen-Logon` -> `C:/portas/scripts/open_ops_dashboard.ps1` (abre painel visual no login do usuário)
+
+### Instalação/atualização das tasks (janela administrativa)
+
+- Instalar/atualizar todas as tasks:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/install_stack_boot_system.ps1`
+- Validar em sessão normal (sem elevação):
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/status_stack_boot_system.ps1`
+  - Esperado: `FOUND_BUT_RESTRICTED` para tasks `SYSTEM`.
+- Validar com elevação (evidência completa):
+  - `C:/portas/cloudflare/outputs/query_boot_task_runner.log`
+  - `C:/portas/cloudflare/outputs/invoke_stack_boot_tasks_once.log`
+  - `C:/portas/cloudflare/outputs/open_ops_dashboard.log`
+
+### Dashboard operacional (canônico)
+
+- URL principal:
+  - `https://convenientetecnologia.com/`
+- Checks internos usados pela página:
+  - `/_ops/health/gateb`
+  - `/_ops/health/sitechatbot_core`
+  - `/_ops/health/sitechatbot_edge`
+  - `/_ops/health/atendimentos`
+  - `/_ops/health/notificador`
+- Status esperado:
+  - `notificador`: `404` em `/health` é considerado ONLINE neste contexto (listener ativo em 8789).
+
+### Operação diária (até corte final do ngrok)
+
+- Não abrir terminais manuais para `sitechatbot` e `notificador` no boot normal.
+- Manter apenas `ngrok` manual enquanto a migração externa ainda não foi concluída.
+- O dashboard abre automaticamente após login do usuário para confirmação visual de stack online.
+- Comandos de suporte:
+  - subir stack completo: `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/start_full_stack.ps1`
+  - parar autostart de boot: `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/uninstall_stack_boot_system.ps1` (janela administrativa).
+
+## Operação enterprise (fallback manual legado) — 3 processos separados (CT / Notificador / Ngrok)
 
 ### Objetivo
 
@@ -1786,3 +1841,60 @@ Evidência mínima:
 - `public/index.html` (modal de servidor simplificado para cooldown);
 - `scripts/worker.js` (`drawRobeCooldownMs` usando config efetiva);
 - `scripts/robe.js` e `scripts/robeVeiculos.js` (fallback local alinhado em `25–50`).
+
+---
+
+### Off-ngrok definitivo (CANÔNICO, 2026-05-25)
+
+Objetivo:
+- remover fallback `*.ngrok.io` do runtime;
+- migrar webhooks críticos para domínio próprio;
+- manter borda pública apenas via Gate B (Cloudflare + Nginx).
+
+Alterações aplicadas:
+- `C:\sitechatbot\index.js`
+  - defaults públicos migrados para `painel.convenientetecnologia.com` / `atendimentos.convenientetecnologia.com`;
+  - `set_ct_config` automático com base default `https://api.convenientetecnologia.com`;
+  - guardrail: bloqueio explícito de `ctBaseUrl` com host ngrok.
+- `C:\sitechatbot\lib\attendanceStore.js` e `C:\sitechatbot\whatsapp\lib\flow.js`
+  - portal motorista sem fallback ngrok.
+- `C:\sitechatbot\convenientetecnologia\ct.env`
+  - `CT_BASE_URL` alinhado para `https://api.convenientetecnologia.com`.
+- `C:\conveniente\dados\ct_config.json` e `C:\conveniente\scripts\notifierEndpoints.js`
+  - base CT alinhada ao domínio final + fail-closed sem fallback ngrok.
+- `C:\site\src\_data\site.json`
+  - `trackingEndpoint` migrado para `https://api.convenientetecnologia.com/convenientetecnologia/api/site/event`.
+- desativação operacional do ngrok:
+  - `C:\sitechatbot\ngrok.js` (decommissioned),
+  - `C:\sitechatbot\ngrok.dual.yml` (`tunnels: {}`),
+  - `C:\sitechatbot\lib\unifiedRuntime.js` (ignora `CT_UNIFIED_START_NGROK`).
+
+Automação de corte externo (executada):
+- script: `node C:\sitechatbot\tools\cutover_external_webhooks_off_ngrok.js`
+- resultados:
+  - WhatsApp webhook override em `https://api.convenientetecnologia.com/webhook` (`subscribed_apps=1`);
+  - Asaas webhook atualizado para `https://api.convenientetecnologia.com/convenientetecnologia/api/asaas/webhook` (`id=70fda287-21c4-4dd5-96d9-2a3c5481bd6d`);
+  - `/flows` marcado como `skipped` quando não há flow ativo no WABA atual via Graph API.
+
+Validação objetiva pós-corte:
+- `GET /webhook` com verify token => `200` + challenge ok;
+- `POST /flows` sem assinatura => `403 signature_invalid` (esperado);
+- `POST /convenientetecnologia/api/asaas/webhook` com token e body vazio => `400 missing_payment_id` (esperado);
+- `/api/site/summary` (com sessão autenticada) apresentou `delta=1` em `pageviews` após beacon no endpoint final;
+- site rebuild/deploy executado: `npm run build` + `npm run deploy:root`.
+
+Estado operacional do túnel legado:
+- processo `ngrok` legado ainda pode existir no host;
+- tentativa de stop sem elevação (`Stop-Process`/`taskkill`) pode retornar `Acesso negado`;
+- nesse caso, o desligamento definitivo do processo legado deve ser concluído com contexto elevado ou no próximo reboot controlado do host.
+
+Rollback imediato:
+1. WhatsApp: restaurar callback override para URL anterior no `/{WABA_ID}/subscribed_apps`.
+2. Asaas: restaurar `url` do webhook anterior (`/v3/webhooks/{id}`).
+3. Site: reverter `trackingEndpoint` para valor anterior e redeploy.
+4. Código/runtime: reverter commit de saneamento off-ngrok.
+
+Reinício necessário após este pacote:
+- `sitechatbot`: sim (mudanças em `index.js`, `unifiedRuntime`, env/config de base);
+- `conveniente`: sim (mudanças em `notifierEndpoints.js` e bloqueio de `set_ct_config`);
+- `site`: não (estático; rebuild/deploy já aplicado).

@@ -3341,6 +3341,18 @@ async function execSetCtConfig(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const ctBaseUrl = (payload.ctBaseUrl !== undefined) ? String(payload.ctBaseUrl || '').trim() : undefined;
   const logIngestSecret = (payload.logIngestSecret !== undefined) ? String(payload.logIngestSecret || '').trim() : undefined;
+  const isNgrokCtBase = (() => {
+    if (!ctBaseUrl) return false;
+    try {
+      const host = String(new URL(ctBaseUrl).hostname || '').toLowerCase();
+      return /(?:^|\.)ngrok(?:-free)?\.(?:io|app)$/.test(host);
+    } catch {
+      return /ngrok/i.test(ctBaseUrl);
+    }
+  })();
+  if (isNgrokCtBase) {
+    throw new Error('set_ct_config_blocked_ngrok_base');
+  }
   const { writeCtConfig } = require('./ctConfig');
   const r = writeCtConfig({ ctBaseUrl, logIngestSecret });
   if (!r || r.ok !== true) throw new Error('set_ct_config_failed');

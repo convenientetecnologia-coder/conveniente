@@ -31,6 +31,252 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-05-25 — [OPS][DOCS][CROSS] Confirmacao visual automatica no logon (dashboard auto-open)
+
+- **O que**:
+  - adicionada task de logon `OpsDashboard-AutoOpen-Logon` para abrir automaticamente `https://convenientetecnologia.com/` apos login do usuario;
+  - criado script `C:/portas/scripts/open_ops_dashboard.ps1`, que aguarda portas chave (`8080/3000/3001/3002/8789`) ficarem online antes de abrir o painel;
+  - instalador/status/remocao do stack atualizados para incluir a task de logon no mesmo pacote operacional.
+- **Por quê**: eliminar incerteza do usuario no pós-reboot quando os processos sobem em segundo plano (Session 0), oferecendo confirmação visual imediata.
+- **Evidência**:
+  - `C:/portas/scripts/open_ops_dashboard.ps1`
+  - `C:/portas/scripts/install_stack_boot_system.ps1`
+  - `C:/portas/scripts/status_stack_boot_system.ps1`
+  - `C:/portas/cloudflare/outputs/open_ops_dashboard.log` (`stack_ready=true` e `dashboard_open=ok`)
+  - `C:/portas/cloudflare/outputs/query_boot_task_runner.log` (`OpsDashboard-AutoOpen-Logon` FOUND, trigger logon, `last_result=0`)
+- **Reinícios**: nenhum; passa a valer no próximo logon/reboot.
+- **Rollback**: remover `OpsDashboard-AutoOpen-Logon` via `uninstall_stack_boot_system.ps1` (elevado) e manter somente verificação manual por URL.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS][CT][NOTIF] Validacao pos-reboot do stack automatico (BOOT SYSTEM) aprovada
+
+- **O que**:
+  - realizado reboot do host com validacao de subida automatica dos componentes de runtime sem abertura manual de terminais para CT/notificador;
+  - confirmado Gate B online, listeners ativos em `3000/3001/3002/3003/8080/8789` e dashboard raiz operacional carregando checks `/_ops/health/*`;
+  - `ngrok` iniciado manualmente apos boot (somente para convivencia durante migracao off-ngrok).
+- **Por quê**: comprovar em campo que a automacao de boot atende o objetivo "ligou host, stack principal sobe sozinho".
+- **Evidência**:
+  - `C:/portas/scripts/status_gate_b.ps1` => `Gate B status: ONLINE`
+  - `C:/portas/scripts/status_stack_boot_system.ps1` => 4 tasks `FOUND_BUT_RESTRICTED` (sessao normal, esperado para task SYSTEM)
+  - `wmic process ...` com `CreationDate` alinhado ao boot para `node/nginx/cloudflared` e `ngrok` em horario posterior manual
+  - `https://convenientetecnologia.com/` => `200` e `dashboard_html_ok`
+  - `https://convenientetecnologia.com/_ops/health/*` => respostas esperadas (`200/302/404`)
+- **Reinícios**: nenhum adicional neste momento (pós-reboot validado).
+- **Rollback**: se necessário, remover tasks de boot (`uninstall_stack_boot_system.ps1`) e retornar ao modo manual por terminal.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS][CT][NOTIF] Stack completo em boot SYSTEM + dashboard operacional raiz
+
+- **O que**:
+  - adicionadas tasks de boot `SYSTEM` para `sitechatbot` core (`3000`), `sitechatbot` edge (`3001/3002/3003`) e `notificador` (`8789`), mantendo `GateB-AutoStart-BootSystem`;
+  - criados scripts de start por serviço (`start_sitechatbot_core.ps1`, `start_sitechatbot_edge.ps1`, `start_notificador_worker.ps1`) e agregador `start_full_stack.ps1`;
+  - raiz `convenientetecnologia.com` virou dashboard operacional com checks em tempo real para Gate B, core, edge, atendimentos e notificador;
+  - Nginx da raiz recebeu rotas `/_ops/health/*` para checagem same-origin no dashboard;
+  - execução de teste das tasks no próprio host (sem reboot) retornou `last_result=0` em 4/4 tasks.
+- **Por quê**: eliminar dependência de abertura manual de terminais para os serviços principais e dar visibilidade operacional imediata em uma única página.
+- **Evidência**:
+  - `C:\portas\scripts\install_stack_boot_system.ps1`
+  - `C:\portas\scripts\status_stack_boot_system.ps1`
+  - `C:\portas\scripts\invoke_stack_boot_tasks_once.ps1`
+  - `C:\portas\cloudflare\outputs\install_stack_boot_system_runner.log`
+  - `C:\portas\cloudflare\outputs\invoke_stack_boot_tasks_once.log`
+  - `C:\portas\nginx\nginx.conf.gate_b.convenientetecnologia.com`
+  - `C:\portas\nginx\html\index.html`
+  - validações HTTP: `/_ops/health/*` (200/302/404 esperado por serviço) e listeners únicos em `3000/3001/3002/3003/8080/8789`.
+- **Reinícios**: nenhum imediato obrigatório; validação final exige reboot do host para provar subida automática no pós-boot.
+- **Rollback**: remover tasks com `C:/portas/scripts/uninstall_stack_boot_system.ps1` (elevado) e retornar ao modo manual (CT/notificador/ngrok em terminais separados).
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS] Boot SYSTEM ativo; autostart de logon desativado
+
+- **O que**:
+  - instalada task de boot `SYSTEM` via `install_gate_b_boot_system.ps1` com trigger `AtStartup`;
+  - removida task interativa `GateB-AutoStart-Logon` para evitar janela/execucao duplicada no login;
+  - ajustado `status_gate_b_autostart.ps1` para reportar `FOUND_BUT_RESTRICTED` quando a task `SYSTEM` existir mas a sessao atual nao tiver permissao para ler detalhes.
+- **Por quê**: garantir subida automática do Gate B no boot do host sem depender de login humano, mantendo operacao silenciosa e previsivel.
+- **Evidência**:
+  - `C:\portas\cloudflare\outputs\install_gate_b_boot_system_runner.log` (install `SYSTEM` concluido)
+  - `C:\portas\cloudflare\outputs\query_boot_task_runner.log` (`BootSystem` FOUND / `Logon` NOT_FOUND)
+  - `C:\portas\scripts\install_gate_b_boot_system.ps1`
+  - `C:\portas\scripts\status_gate_b_autostart.ps1`
+  - `C:\portas\scripts\uninstall_gate_b_autostart.ps1`
+  - status runtime: `C:\portas\scripts\status_gate_b.ps1` => `Gate B status: ONLINE`.
+- **Reinícios**: nenhum nos projetos Node; Gate B segue online.
+- **Rollback**: rodar `uninstall_gate_b_autostart.ps1` para remover task `SYSTEM` e, se necessário, recriar `GateB-AutoStart-Logon`.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS] Preparacao de boot SYSTEM (servico de sistema) com bloqueio de privilegio
+
+- **O que**:
+  - criado instalador de boot no Task Scheduler para conta `SYSTEM`: `C:/portas/scripts/install_gate_b_boot_system.ps1` (trigger `AtStartup`, restart on failure);
+  - ampliado status/remoção de autostart para cobrir ambos os modos (`GateB-AutoStart-BootSystem` e `GateB-AutoStart-Logon`);
+  - tentativas de criar tarefa `SYSTEM` sem sessão elevada retornaram `Acesso negado`, mantendo logon autostart como modo ativo;
+  - removidos artefatos de atalho de desktop para manter operação no padrão automático sem clique.
+- **Por quê**: avançar para prática mais robusta (boot sem login), preservando continuidade operacional com fallback estável enquanto não há elevação administrativa efetiva.
+- **Evidência**:
+  - `C:\portas\scripts\install_gate_b_boot_system.ps1`
+  - `C:\portas\scripts\status_gate_b_autostart.ps1`
+  - `C:\portas\scripts\uninstall_gate_b_autostart.ps1`
+  - comando local: `schtasks /Create ... /SC ONSTART /RU SYSTEM` => `ERRO: Acesso negado.`
+  - status atual: `task=GateB-AutoStart-BootSystem status=NOT_FOUND` e `task=GateB-AutoStart-Logon status=FOUND`.
+- **Reinícios**: nenhum nos projetos Node; runtime Gate B segue online via autostart de logon.
+- **Rollback**: manter somente `GateB-AutoStart-Logon` (estado atual) e remover scripts de boot se não forem mais necessários.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS] Dominio raiz online com acesso canônico por subdominio
+
+- **O que**:
+  - ampliada a automacao Cloudflare para gerenciar tambem `convenientetecnologia.com` e `www.convenientetecnologia.com`, com tratamento de conflito DNS `A/AAAA -> CNAME`;
+  - aplicado novo `plan/apply` e atualizado `config.active.yml` com 8 hostnames (`6 subdominios + raiz + www`);
+  - publicado landing simples no dominio raiz (`C:/portas/nginx/html/index.html`);
+  - removidos atalhos por path na raiz por decisao operacional; acesso humano mantido via subdominios dedicados (`painel...` e `atendimentos...`);
+  - Nginx ajustado para bind local `127.0.0.1:8080` para reduzir prompt recorrente de firewall;
+  - adicionados scripts operacionais `start_gate_b.ps1`, `stop_gate_b.ps1` e `status_gate_b.ps1` para operar Gate B sem depender de `node` em `C:/portas`;
+  - configurado auto-start no logon via Task Scheduler (`GateB-AutoStart-Logon`) com scripts de instalar/status/remover;
+  - validacao final de saude `healthcheck_gate_b.ps1` com 0 falhas obrigatorias.
+- **Por quê**: manter padrao ultra profissional por app/subdominio, reduzir ambiguidade operacional e facilitar rotina diaria do host.
+- **Evidência**:
+  - `C:\portas\scripts\cloudflare_tunnel_api.js`
+  - `C:\portas\cloudflare\outputs\cf_tunnel_plan_20260525_144506.json`
+  - `C:\portas\cloudflare\outputs\cf_tunnel_apply_20260525_144519.json`
+  - `C:\portas\cloudflare\outputs\cf_tunnel_apply_20260525_145953.json`
+  - `C:\portas\cloudflare\config.active.yml`
+  - `C:\portas\nginx\nginx.conf.gate_b.convenientetecnologia.com`
+  - `C:\portas\nginx\html\index.html`
+  - `C:\portas\scripts\start_gate_b.ps1`
+  - `C:\portas\scripts\stop_gate_b.ps1`
+  - `C:\portas\scripts\status_gate_b.ps1`
+  - `C:\portas\scripts\install_gate_b_autostart.ps1`
+  - `C:\portas\scripts\status_gate_b_autostart.ps1`
+  - `C:\portas\scripts\uninstall_gate_b_autostart.ps1`
+  - Task Scheduler: `GateB-AutoStart-Logon`
+  - validação pública determinística: `curl --resolve` com DNS `1.1.1.1` (raiz 200 + 8 hostnames de borda com `/_edge/health`=200).
+- **Reinícios**: nenhum nos projetos Node; apenas recarga/restart dos processos de borda (`nginx` e `cloudflared`).
+- **Rollback**: remover hostnames raiz do tunnel, retirar bloco de raiz do Nginx e voltar o dominio raiz para registro anterior no Cloudflare.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [OPS][DOCS][CROSS] Gate B Fase 1 aplicada com tunnel ativo e validacoes
+
+- **O que**:
+  - executados `plan` e `apply` da automacao `C:/portas/scripts/cloudflare_tunnel_api.js`, com tunnel e DNS dos 5 subdominios aplicados;
+  - atualizados artefatos ativos da borda: `C:/portas/portas.config.json` (`tunnel_id`), `C:/portas/cloudflare/config.active.yml` e credencial local em `C:/portas/cloudflare/credentials/`;
+  - provisionados binarios locais para Gate B no Windows: `C:/portas/bin/cloudflared.exe` e `C:/portas/nginx/nginx-1.29.7/nginx.exe`;
+  - ajustado Nginx para `server_names_hash_bucket_size 128` e healthchecks para eliminar falso-negativo (`leadhook` aceita 404/405 e `PUBLICO_OPCIONAL` nao bloqueia gate obrigatorio);
+  - validacao publica deterministica feita com DNS `1.1.1.1` + `curl --resolve` para evitar oscilacao do DNS local durante propagacao.
+- **Por quê**: concluir a Fase 1 em paralelo ao ngrok, com evidencia tecnica de borda funcional e sem alterar runtime de negocio.
+- **Evidência**:
+  - `C:\portas\cloudflare\outputs\cf_tunnel_plan_20260525_141918.json`
+  - `C:\portas\cloudflare\outputs\cf_tunnel_apply_20260525_141935.json`
+  - `C:\portas\cloudflare\outputs\cf_tunnel_apply_20260525_142008.json`
+  - `C:\portas\portas.config.json`
+  - `C:\portas\cloudflare\config.active.yml`
+  - `C:\portas\scripts\healthcheck_gate_b.ps1`
+  - `C:\portas\index.js`
+  - `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum nos projetos `conveniente/sitechatbot/notificador/site`; somente processos de borda (`nginx` e `cloudflared`) precisam permanecer em execucao.
+- **Rollback**: parar `cloudflared` e `nginx`, manter ngrok como caminho externo principal e ignorar os subdominios ate nova janela.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [DOCS][OPS][CROSS] Gate B com automacao por API (Cloudflare Tunnel + DNS)
+
+- **O que**:
+  - implementado script de automacao API `C:/portas/scripts/cloudflare_tunnel_api.js` com modos `plan` e `apply`;
+  - automacao preparada para: resolver zona, criar/reusar tunnel, fazer upsert DNS dos subdominios e gerar `config.active.yml`;
+  - automacao atualizada para carregar `C:/portas/cloudflare/.env.local` e resolver `CF_ACCOUNT_ID` automaticamente pela zona quando ausente;
+  - adicionados artefatos de suporte:
+    - `C:/portas/cloudflare/.env.template`
+    - `C:/portas/cloudflare/.gitignore`
+    - `C:/portas/docs/AUTOMACAO_CLOUDFLARE_API.md`;
+  - atualizado checklist da Fase 1 para fluxo API-first.
+- **Por quê**: executar Gate B agora, com padrao seguro e repetivel, sem depender de setup manual fragmentado.
+- **Evidência**:
+  - `C:\portas\scripts\cloudflare_tunnel_api.js`
+  - `C:\portas\cloudflare\.env.template`
+  - `C:\portas\docs\AUTOMACAO_CLOUDFLARE_API.md`
+  - `C:\portas\docs\FASE1_GATE_B_PASSO_A_PASSO.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum (bootstrap/automacao de borda; runtime mantido).
+- **Rollback**: remover os novos artefatos de automacao e retornar ao fluxo manual anterior do Gate B.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [DOCS][OPS][CROSS] Gate B Fase 1 com dominio real e templates preenchidos
+
+- **O que**:
+  - aplicado dominio `convenientetecnologia.com` na configuracao de borda (`C:/portas/portas.config.json`);
+  - gerados arquivos de referencia prontos para uso no Gate B:
+    - `C:/portas/nginx/nginx.conf.gate_b.convenientetecnologia.com`
+    - `C:/portas/cloudflare/config.gate_b.convenientetecnologia.com.yml`;
+  - atualizado healthcheck/orquestrador para validar `leadhook` e refletir dominio confirmado;
+  - orquestrador local (`C:/portas/index.js`) passou a reprovar placeholders de Tunnel ID/credencial para evitar falso positivo de validacao;
+  - checklist da Fase 1 atualizado com DNS Cloudflare confirmado.
+- **Por quê**: avancar a borda nova com configuracao real do dominio, mantendo ngrok ativo e sem risco de regressao.
+- **Evidência**:
+  - `C:\portas\portas.config.json`
+  - `C:\portas\nginx\nginx.conf.gate_b.convenientetecnologia.com`
+  - `C:\portas\cloudflare\config.gate_b.convenientetecnologia.com.yml`
+  - `C:\portas\scripts\healthcheck_gate_b.ps1`
+  - `C:\portas\index.js`
+  - `C:\portas\docs\FASE1_GATE_B_PASSO_A_PASSO.md`
+- **Reinícios**: nenhum (bootstrap de borda/documentacao; runtime atual mantido).
+- **Rollback**: remover os arquivos de dominio em `C:/portas` e voltar aos templates genericos.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [DOCS][OPS][CROSS] Bootstrap tecnico da Fase 1 Gate B em C:/portas
+
+- **O que**:
+  - criado bootstrap tecnico da borda em `C:/portas` com config placeholder, template Nginx Gate B, template cloudflared, script de healthcheck e orquestrador local em modo `validate`;
+  - criado guia executavel da etapa em `C:/portas/docs/FASE1_GATE_B_PASSO_A_PASSO.md`;
+  - atualizado checkup canonic com secao de Fase 1 iniciada e evidencia dos artefatos.
+  - ngrok permanece ativo nesta etapa.
+- **Por quê**: iniciar Fase 1 com base operacional auditavel sem alterar codigo de negocio e sem impacto em runtime.
+- **Evidência**:
+  - `C:\portas\portas.config.json`
+  - `C:\portas\nginx\nginx.conf.template`
+  - `C:\portas\cloudflare\config.yml.template`
+  - `C:\portas\scripts\healthcheck_gate_b.ps1`
+  - `C:\portas\index.js`
+  - `C:\portas\docs\FASE1_GATE_B_PASSO_A_PASSO.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum (mudanca tecnica/documental; sem runtime).
+- **Rollback**: remover artefatos de `C:/portas` e reverter os registros documentais desta etapa; ngrok segue como caminho externo ativo.
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
+#### 2026-05-25 — [DOCS][OPS] Diagnostico A/B iniciado e gate provisoriamente definido
+
+- **O que**:
+  - iniciado diagnostico local do Gate A/B para migracao off-ngrok;
+  - resultado atual sem saida conclusiva de rede no ambiente local, com baixa visibilidade operacional de port-forward no ambiente humano;
+  - decisao provisoria por Gate B como caminho inicial, com condicao explicita para reavaliar o Gate A mediante prova tecnica de encaminhamento 80/443 funcional.
+- **Por quê**: reduzir risco operacional imediato e dependencia de modem/roteador enquanto a trilha de evidencia de rede nao fica conclusiva.
+- **Evidência**: `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum (mudanca documental; sem runtime).
+- **Rollback**: atualizar a decisao no checkup e ajustar esta entrada caso surja prova tecnica que habilite o Gate A.
+
+#### 2026-05-25 — [DOCS][OPS] Organizacao inicial de C:/portas para camada de borda
+
+- **O que**:
+  - definido `C:/portas` como diretorio central para artefatos de DNS/HTTPS/Tunnel/Proxy;
+  - criado `C:/portas/README.md` com orientacao de uso e limite de escopo;
+  - reforcada a regra de que `index.js` em `C:/portas` e apenas para orquestracao, sem logica de negocio.
+- **Por quê**: separar claramente operacao de borda da logica de negocio, reduzindo acoplamento e risco operacional.
+- **Evidência**:
+  - `C:\portas\README.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum (mudanca documental/organizacional; sem runtime).
+- **Rollback**: remover esta entrada e ajustar/reverter os docs relacionados (sem impacto em processos Node).
+
+#### 2026-05-25 — [DOCS][CROSS][OPS] Checklist mestre de execucao da migracao off-ngrok (Windows first)
+
+- **O que**:
+  - criado checkup canônico com checklist de ponta a ponta para substituir ngrok por dominio proprio + HTTPS + reverse proxy;
+  - definida trilha de gate A/B para IP dinamico (port forwarding 80/443 vs Cloudflare Tunnel sem portas abertas);
+  - organizada migracao faseada por ondas (humano -> motoristas -> callbacks internos -> webhooks externos -> desligamento ngrok), com criterio de evidencia e rollback por fase.
+- **Por quê**: garantir operacao ultra organizada, sem perda de contexto entre chats e sem regressao na transicao.
+- **Evidência**: `C:\conveniente\docs\checkups\checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
+- **Reinícios**: nenhum (mudanca documental).
+- **Rollback**: remover/ajustar o checkup e esta entrada de timeline (sem impacto em runtime).
+- **THREAD**: `TH-2026-05-25-off-ngrok-windows`
+
 #### 2026-05-13 — [CT][OPS] Estoque FB: cooldown “fantasma” ao liberar / salvar prefs de outro host
 
 - **O que**:
@@ -3486,3 +3732,35 @@ Adendo (ajuste operacional aprovado pelo owner):
   - `c:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “CT estoque — scheduler automático…”)
 - **Impacto operacional**:
   - requer restart do `sitechatbot` (`node index.js` no host do CT).
+
+#### 2026-05-25 — [OFF-NGROK][CT+SITE+CONVENIENTE] Corte final para domínio próprio + decommission runtime ngrok
+
+- **Mudança**:
+  - saneamento de fallback ngrok no runtime (`sitechatbot` + `conveniente`);
+  - atualização externa dos webhooks críticos para domínio final (`WhatsApp /webhook` e Asaas);
+  - migração do beacon do `site` para endpoint final com rebuild/deploy;
+  - decommission operacional de `ngrok.js`/`ngrok.dual.yml` e bloqueio de start ngrok no runtime unificado.
+- **Evidência (código/path)**:
+  - `C:\sitechatbot\index.js`
+  - `C:\sitechatbot\lib\attendanceStore.js`
+  - `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `C:\sitechatbot\convenientetecnologia\ct.env`
+  - `C:\sitechatbot\tools\cutover_external_webhooks_off_ngrok.js`
+  - `C:\sitechatbot\ngrok.js`
+  - `C:\sitechatbot\ngrok.dual.yml`
+  - `C:\sitechatbot\lib\unifiedRuntime.js`
+  - `C:\conveniente\dados\ct_config.json`
+  - `C:\conveniente\scripts\notifierEndpoints.js`
+  - `C:\site\src\_data\site.json`
+- **Evidência (execução)**:
+  - `node C:\sitechatbot\tools\cutover_external_webhooks_off_ngrok.js` =>
+    - `meta_webhook.ok=true` (`subscribed_apps=1`);
+    - `meta_flows.skipped=true` (`no_flows_found_on_waba`);
+    - `asaas_webhook.ok=true` (`action=updated`, `id=70fda287-21c4-4dd5-96d9-2a3c5481bd6d`);
+    - validações: `webhook_verify_status=200`, `flows_status=403(signature_invalid esperado)`, `asaas_status=400(missing_payment_id esperado)`, `site_summary_validation.delta=1`.
+  - `npm run build` + `npm run deploy:root` em `C:\site`.
+- **Observação operacional**:
+  - processo legado `ngrok` pode permanecer ativo se iniciado em contexto elevado anterior; tentativa de parada sem elevação pode retornar `Acesso negado`.
+- **Impacto operacional**:
+  - requer restart de `sitechatbot` e `conveniente` para carregar runtime/config off-ngrok;
+  - `site` não requer restart (estático já publicado).
