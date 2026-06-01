@@ -31,6 +31,76 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-05-26 — [OPS][DOCS][CROSS] Reafirmação do contrato ultra enterprise e governança de triagem
+
+- **O que**:
+  - registrado no INBOX canônico o novo reforço operacional do humano (modo 110% enterprise, humano apenas reinicia com `node index.js`, agente opera investigação/código/documentação);
+  - consolidado o gatilho padrão para textos confusos: abrir triagem por item (P0/P1/P2), sem misturar problemas, e coletar evidência via CT (`logs_manifest` / `fetch_logs`) antes de decisão técnica;
+  - reforçada a obrigatoriedade de uso contínuo dos canônicos (`LIVRO_DE_BORDO`, `RUNBOOK_TECNICO`, `TIMELINE`, `HOST_REGISTRY`) para continuidade entre chats.
+- **Por quê**: reduzir risco de interpretação errada, manter rastreabilidade total e garantir execução repetível em incidentes reais.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT 2026-05-26 + TRIAGE)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seções “Cabeçalho obrigatório” e “Intake de texto bomba”)
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md` (regras 110% enterprise)
+- **Reinícios**: nenhum (mudança documental/processual, sem runtime).
+- **Rollback**: remover a entrada 2026-05-26 do INBOX/TIMELINE se o contrato for substituído por versão oficial posterior.
+
+---
+
+#### 2026-05-26 — [OPS][CROSS][CT][NOTIF] Reinício operacional por atalho (desktop) com autoelevação e restart por componente
+
+- **O que**:
+  - ampliado o executor `C:/portas/scripts/restart_stack_now_elevated.ps1` para suportar `-Target` (`stack`, `gate_b`, `sitechatbot_core`, `sitechatbot_edge`, `notificador`) e autoelevacao via UAC quando necessario;
+  - criados wrappers de restart por alvo (`restart_stack_now.ps1`, `restart_gate_b_now.ps1`, `restart_sitechatbot_core_now.ps1`, `restart_sitechatbot_edge_now.ps1`, `restart_notificador_now.ps1`);
+  - criado instalador de atalhos de desktop (`install_restart_desktop_shortcuts.ps1`) e removedor (`remove_restart_desktop_shortcuts.ps1`);
+  - integrado o ciclo de atalhos ao install/uninstall do stack boot (`install_stack_boot_system.ps1` e `uninstall_stack_boot_system.ps1`);
+  - atalhos criados no desktop do operador com nomes humanos: `REINICIAR - STACK COMPLETO`, `REINICIAR - GATE B`, `REINICIAR - SITECHATBOT CORE`, `REINICIAR - SITECHATBOT EDGE`, `REINICIAR - NOTIFICADOR`.
+- **Por quê**: eliminar bloqueio operacional de reinicio pós-update sem exigir terminal/manual troubleshooting e sem deixar processo duplicado.
+- **Evidência**:
+  - `C:\portas\scripts\restart_stack_now_elevated.ps1`
+  - `C:\portas\scripts\restart_stack_now.ps1`
+  - `C:\portas\scripts\restart_gate_b_now.ps1`
+  - `C:\portas\scripts\restart_sitechatbot_core_now.ps1`
+  - `C:\portas\scripts\restart_sitechatbot_edge_now.ps1`
+  - `C:\portas\scripts\restart_notificador_now.ps1`
+  - `C:\portas\scripts\install_restart_desktop_shortcuts.ps1`
+  - `C:\portas\scripts\remove_restart_desktop_shortcuts.ps1`
+  - execução: `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/install_restart_desktop_shortcuts.ps1`
+  - resultado: atalhos criados em `C:\Users\NOTIFICADOR\Desktop\*.lnk`.
+- **Reinícios**: nenhum restart obrigatório para aplicar os atalhos (podem ser usados imediatamente).
+- **Rollback**:
+  - executar `C:/portas/scripts/remove_restart_desktop_shortcuts.ps1` para remover atalhos;
+  - restaurar `restart_stack_now_elevated.ps1` para a versão anterior se quiser voltar ao restart único legado.
+
+---
+
+#### 2026-05-26 — [OPS][UX][CROSS] Nomenclatura operacional simplificada por arquivo (dashboard + atalhos)
+
+- **O que**:
+  - dashboard `convenientetecnologia.com` passou a exibir labels por arquivo em vez de "Core/Edge":
+    - `sitechatbot/index.js (3000)`,
+    - `sitechatbot/indexct.js (3001)`,
+    - `Atendimentos (3002 via indexct.js)`,
+    - `notificador/index.js (8789)`;
+  - adicionado mapa rapido no topo do dashboard explicando quais portas pertencem a cada arquivo (`index.js`, `indexct.js`, `notificador/index.js`);
+  - atalhos do desktop foram renomeados para o mesmo padrao por arquivo (removendo ambiguidade de "Core/Edge"):
+    - `REINICIAR - sitechatbot index.js (3000)`
+    - `REINICIAR - sitechatbot indexct.js (3001-3003)`
+    - `REINICIAR - notificador index.js (8789)`
+    - `REINICIAR - Gate B (nginx + cloudflared)`
+    - `REINICIAR - TUDO (GateB + index.js + indexct.js + notificador)`.
+- **Por quê**: reduzir erro humano na hora de reiniciar e alinhar o painel com a linguagem real de operacao ("qual arquivo subir/reiniciar").
+- **Evidência**:
+  - `C:\portas\nginx\html\index.html`
+  - `C:\portas\scripts\install_restart_desktop_shortcuts.ps1`
+  - `C:\portas\scripts\remove_restart_desktop_shortcuts.ps1`
+- **Reinícios**: nenhum obrigatório para aplicar nomenclatura; dashboard/atalhos entram em vigor imediatamente.
+- **Rollback**:
+  - reverter `C:/portas/nginx/html/index.html` para labels antigos;
+  - remover e recriar atalhos com os nomes legados via scripts em `C:/portas/scripts`.
+
+---
+
 #### 2026-05-25 — [OPS][DOCS][CROSS] Confirmacao visual automatica no logon (dashboard auto-open)
 
 - **O que**:
@@ -3764,3 +3834,35 @@ Adendo (ajuste operacional aprovado pelo owner):
 - **Impacto operacional**:
   - requer restart de `sitechatbot` e `conveniente` para carregar runtime/config off-ngrok;
   - `site` não requer restart (estático já publicado).
+
+#### 2026-05-26 — [SITECHATBOT][P0][WHATSAPP] Silêncio total do bot durante atendimento humano (sem retomada no meio da conversa)
+
+- **Mudança**:
+  - `whatsapp/lib/flow.js` agora silencia o bot imediatamente quando a conversa está em `HUMAN_HANDOFF_REQUESTED` ou `HUMAN_LOCKED`;
+  - removida a retomada automática de captura de cidade no estado de handoff (default de recovery em `0`);
+  - `whatsapp/lib/db.js` ganhou `dropPendingOutboxForConversation` para limpar prompts pendentes antigos;
+  - `whatsapp/lib/inboxWorker.js` passou a limpar outbox antigo ao entrar em `HUMAN_HANDOFF_REQUESTED`/`HUMAN_LOCKED`, mantendo apenas a resposta corrente.
+- **Evidência (código/path)**:
+  - `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `C:\sitechatbot\whatsapp\lib\db.js`
+  - `C:\sitechatbot\whatsapp\lib\inboxWorker.js`
+- **Evidência (validação local)**:
+  - `node --check C:/sitechatbot/whatsapp/lib/flow.js`
+  - `node --check C:/sitechatbot/whatsapp/lib/db.js`
+  - `node --check C:/sitechatbot/whatsapp/lib/inboxWorker.js`
+  - smoke test: `flow.handleInbound` com conversa em `HUMAN_HANDOFF_REQUESTED` retornando `action=null` e sem outbox.
+- **Impacto operacional**:
+  - requer restart do `sitechatbot` para carregar o guardrail.
+
+#### 2026-06-01 — [CONVENIENTE][P0][ROBE] Hardening de foco em Categoria para bloquear abertura indevida de file picker
+
+- **Mudança**:
+  - mantido o fallback legado `Tab+Enter` de categoria no `robe`, com validação de foco antes do `Enter`, retries e atraso progressivo para host lento;
+  - adicionada checagem de risco de foco em elemento de upload/arquivo antes de confirmar seleção por teclado;
+  - reintroduzido `Tab+Enter` no fluxo legado de categoria do `robeVeiculos`, mantendo seleção por clique/ArrowDown como fallback complementar.
+- **Evidência (código/path)**:
+  - `C:/conveniente/scripts/robe.js`
+  - `C:/conveniente/scripts/robeVeiculos.js`
+  - `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT + TRIAGE 2026-06-01)
+- **Impacto operacional**:
+  - requer restart do `conveniente` para carregar os novos guardrails no runtime.

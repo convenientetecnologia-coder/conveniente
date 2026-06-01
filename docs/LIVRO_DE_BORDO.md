@@ -55,8 +55,10 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
 - **Começar por aqui**
   - Visão geral (o que é cada projeto) — **este arquivo**
   - Continuidade entre chats (handoff pronto para colar no novo chat) — `docs/INFORMACOES_CONTINUIDADE_GPT.md`
+  - Checklist mestre da migração off-ngrok (Windows first, faseado com rollback por etapa) — `docs/checkups/checkup_2026-05-25_plano_execucao_migracao_off_ngrok_windows.md`
   - Consolidado oficial Virtus (estabilidade + mensagens + evidências) — `docs/checkups/checkup_2026-04-25_consolidado_virtus_estabilidade_mensagens.md`
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
+  - Reinício por atalho (desktop, sem terminal manual, nomes por arquivo `index.js/indexct.js`) — `C:/portas/scripts/install_restart_desktop_shortcuts.ps1` + seção canônica em `docs/RUNBOOK_TECNICO.md`
   - Instalação Linux Xubuntu (desktop visual) — `scripts/install_conveniente_linux.sh` + seção canônica no `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
   - Dossiê pré-código (novo fluxo de leads por sorteio/cobrança) — `docs/checkups/checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
@@ -111,7 +113,7 @@ Objetivo: não criar “caminhos paralelos” e não perder contexto entre chats
 
 - **`notificador`** (`C:\notificador`):
   - Worker de WhatsApp (Baileys) que consome/pulsa dados do CT e envia mensagens.
-  - Não parece expor servidor HTTP; opera via polling/API.
+  - Expõe endpoint HTTP local de serviço em `127.0.0.1:8789` (`/v1/lead-service-notify`).
   - Entry: `C:\notificador\index.js`
 
 ---
@@ -129,7 +131,9 @@ Objetivo: não criar “caminhos paralelos” e não perder contexto entre chats
   - Bind: `0.0.0.0`
 
 - **notificador**
-  - Sem porta HTTP detectada no `index.js` (opera por API/polling)
+  - **PORT**: `process.env.NOTIFIER_LEAD_SERVICE_NOTIFY_PORT` (default **8789**)
+  - Bind: `process.env.NOTIFIER_LEAD_SERVICE_NOTIFY_BIND` (default `127.0.0.1`)
+  - Endpoint local: `POST /v1/lead-service-notify` (health indireto em `/health` com `404` esperado)
 
 ---
 
@@ -684,3 +688,65 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
 - Contrato preservado:
   - salvar config **não** reseta cooldown já ativo em conta;
   - apenas cooldowns novos usam a nova faixa configurada.
+
+## 2026-05-21 — CRM Atendimentos (ABC) hotfix de regressões críticas
+
+- Contexto operacional:
+  - após ajustes de latência/sincronização do dashboard de atendimentos, surgiram regressões já tratadas anteriormente no fluxo humano.
+- Sintomas reportados:
+  - vazamento de dados entre orçamento reprovado e novo orçamento do mesmo contato;
+  - campo `Itens` e `Nome` intermitentes/vazios no painel;
+  - mensagem de handoff/humano duplicada no WhatsApp;
+  - `Solicitar orçamento` em cidade `crm_active` (ABC) enviando payload legado (com telefone/link do cliente);
+  - payload ABC incompleto (sem data/hora/checklist expandido) e sem troca consistente de estado do botão no painel.
+- Correções aplicadas em runtime (`C:\sitechatbot`):
+  - `lib/attendanceStore.js`:
+    - reset completo do `ticket_order_snapshot` ao detectar troca de conversa (`switchedConversation`) para impedir mistura de ciclos;
+    - fallback reforçado de `cargo/descricao` via contexto e `free_text.parts`;
+    - enqueue de pedido do atendimento com ID único por envio (evita reaproveitar mensagem antiga);
+    - enriquecimento do payload com `data_servico`, `horario_saida`, `distancia_km` e flags de checklist;
+    - fallback adicional de nome com `conv.profile_name`/`conv.customer_name`/`conv.nome_cliente`.
+  - `lib/pedidosStore.js`:
+    - mensagem ABC expandida para incluir data, horário, distância e checklist:
+      - `Plastico bolha`, `Caixas`, `Monta / desmonta moveis`, `Precisa embalar`;
+    - manutenção da política ABC: sem telefone/link direto do cliente, apenas link da API operacional.
+  - `whatsapp/lib/flow.js`:
+    - bloqueio de reenvio de resposta redundante quando já em `HUMAN_HANDOFF_REQUESTED` com `close_message_sent_at` preenchido.
+  - `lib/attendanceFormatters.js`:
+    - correção de fallback em `presentOrderSnapshotRow` para não “congelar vazio” em `customer_name`/`items`;
+    - uso de `snapshot.items` como saída final, evitando sobrescrita por `items_json` vazio;
+    - inferência extra de nome e itens por `raw_context` (`customer_name`, `nome_cliente`, `profile_name`, `free_text.kind=cargo`).
+- Validação técnica local:
+  - `node --check` nos arquivos alterados: sem erro de sintaxe;
+  - lint dos arquivos alterados: sem erros.
+- Reinício operacional:
+  - necessário restart manual humano no host alvo após cada corte de hotfix (`node index.js`).
+
+## 2026-05-26 — P0 WhatsApp: bot não pode interromper atendimento humano
+
+- Contexto:
+  - incidente real reportado no atendimento: bot respondeu durante conversa já assumida por humano (`atender`).
+- Correção canônica aplicada (`sitechatbot`):
+  - silêncio absoluto em `HUMAN_HANDOFF_REQUESTED` e `HUMAN_LOCKED`;
+  - limpeza de outbox pendente antigo quando a conversa entra em posse humana.
+- Referências:
+  - `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `C:\sitechatbot\whatsapp\lib\db.js`
+  - `C:\sitechatbot\whatsapp\lib\inboxWorker.js`
+  - `C:\conveniente\docs\TIMELINE.md` (entrada 2026-05-26 correspondente)
+- Operação:
+  - após deploy do patch, reiniciar somente `sitechatbot` (`node index.js` no host alvo).
+
+## 2026-06-01 — Robe: hardening anti file-picker no passo Categoria (legacy)
+
+- Contexto:
+  - incidente crônico em produção: durante postagem, foco escapava no fluxo legacy de categoria e `Enter` podia abrir seletor de arquivo.
+- Mudança aplicada (`conveniente`):
+  - `scripts/robe.js`: fallback `Tab+Enter` de categoria legacy foi mantido e reforçado com retries seguros, delay progressivo e validação de foco antes do `Enter`.
+  - `scripts/robeVeiculos.js`: `Tab+Enter` foi reintroduzido como caminho principal no legacy, com guardrail de foco e recuperação automática; clique textual/ArrowDown segue como fallback.
+- Evidência de código:
+  - `C:/conveniente/scripts/robe.js`
+  - `C:/conveniente/scripts/robeVeiculos.js`
+  - `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT + TRIAGE 2026-06-01)
+- Objetivo:
+  - eliminar abertura indevida da janela de arquivo e reduzir falhas de postagem por perda de foco.

@@ -310,6 +310,40 @@ Neste ambiente, “restart” significa: **o humano vai no servidor e reinicia m
 
 O GPT **não** consegue reiniciar os seus processos remotos.
 
+#### Reinício por atalho (desktop) — **CANÔNICO (2026-05-26)**
+
+Objetivo:
+- evitar dor operacional com permissão/terminal ao reiniciar serviços de borda e stack principal;
+- permitir ação humana por duplo clique, com nomes claros e sem duplicar processo.
+
+Scripts canônicos (`C:/portas/scripts`):
+- `restart_stack_now.ps1` (Gate B + sitechatbot core/edge + notificador)
+- `restart_gate_b_now.ps1`
+- `restart_sitechatbot_core_now.ps1`
+- `restart_sitechatbot_edge_now.ps1`
+- `restart_notificador_now.ps1`
+
+Executor:
+- `restart_stack_now_elevated.ps1`
+  - aceita `-Target` (`stack`, `gate_b`, `sitechatbot_core`, `sitechatbot_edge`, `notificador`);
+  - tenta autoelevacao (UAC) quando necessário para evitar falha de permissão.
+
+Atalhos de área de trabalho:
+- instalar/atualizar:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/install_restart_desktop_shortcuts.ps1`
+- remover:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File C:/portas/scripts/remove_restart_desktop_shortcuts.ps1`
+
+Nomes esperados no desktop:
+- `REINICIAR - TUDO (GateB + index.js + indexct.js + notificador)`
+- `REINICIAR - Gate B (nginx + cloudflared)`
+- `REINICIAR - sitechatbot index.js (3000)`
+- `REINICIAR - sitechatbot indexct.js (3001-3003)`
+- `REINICIAR - notificador index.js (8789)`
+
+Evidência pós-restart:
+- logs em `C:/portas/cloudflare/outputs/restart_<target>_now.log`.
+
 #### Mudou `conveniente/scripts/*.js` (runtime core)
 
 - **Reiniciar (humano)**: no host do `conveniente`, parar o processo e subir de novo com `node index.js`.
@@ -1898,3 +1932,56 @@ Reinício necessário após este pacote:
 - `sitechatbot`: sim (mudanças em `index.js`, `unifiedRuntime`, env/config de base);
 - `conveniente`: sim (mudanças em `notifierEndpoints.js` e bloqueio de `set_ct_config`);
 - `site`: não (estático; rebuild/deploy já aplicado).
+
+---
+
+### WhatsApp — Handoff humano com silêncio absoluto do bot (CANÔNICO, 2026-05-26)
+
+Objetivo:
+- impedir que o bot interrompa conversas já assumidas por humano no dashboard (`atender`).
+
+Regra operacional:
+- se a conversa estiver em `HUMAN_HANDOFF_REQUESTED` ou `HUMAN_LOCKED`, o bot **não envia** nenhuma mensagem automática;
+- o bot só volta em novo ciclo quando houver encerramento/resultado do atendimento humano e nova abertura de conversa.
+
+Implementação:
+- `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `shouldSilenceBotForAttendanceStatus` agora também silencia por `step` humano (`HUMAN_HANDOFF_REQUESTED`/`HUMAN_LOCKED`);
+  - `case 'HUMAN_HANDOFF_REQUESTED'` e `case 'HUMAN_LOCKED'` retornam sem outbox;
+  - recovery automático de cidade após handoff desativado por padrão (`WA_CITY_HANDOFF_RECOVERY_ENABLED=0`).
+- `C:\sitechatbot\whatsapp\lib\db.js`
+  - função `dropPendingOutboxForConversation` para remover mensagens pendentes antigas (`new/error`) da conversa.
+- `C:\sitechatbot\whatsapp\lib\inboxWorker.js`
+  - ao travar conversa em humano (`HUMAN_LOCKED`) ou aplicar patch para `HUMAN_HANDOFF_REQUESTED`, limpa o outbox pendente antigo antes de enfileirar novas respostas.
+
+Evidência de validação local:
+- `node --check C:/sitechatbot/whatsapp/lib/flow.js`
+- `node --check C:/sitechatbot/whatsapp/lib/db.js`
+- `node --check C:/sitechatbot/whatsapp/lib/inboxWorker.js`
+- smoke test de `flow.handleInbound` com conversa em handoff retornando `action=null`.
+
+Impacto operacional:
+- requer restart do `sitechatbot` para ativar o guardrail (`node index.js`).
+
+---
+
+### Conveniente/Robe — Guardrail de Categoria (legacy) contra file picker indevido (2026-06-01)
+
+Objetivo:
+- evitar que o fluxo legado de categoria (`Tab+Enter`) escape foco e dispare janela de seleção de arquivo durante postagem.
+
+Implementação:
+- `C:/conveniente/scripts/robe.js`
+  - fallback `Tab+Enter` da categoria legacy permanece ativo como técnica principal;
+  - antes do `Enter`, o runtime valida foco ativo para evitar disparo em contexto de upload/arquivo;
+  - em host mais lento, executa retries com atraso progressivo e recuperação via `Escape` + reabertura do combobox.
+- `C:/conveniente/scripts/robeVeiculos.js`
+  - bloco `Tab+Enter` no passo categoria legacy foi reintroduzido com guardrail de foco e retries;
+  - mantém tentativa por clique textual e fallback com `ArrowDown/Enter` controlado.
+
+Operação:
+- manter `Tab+Enter` ativo no legacy de categoria;
+- ajustar `ROBE_CAT_TAB_DELAY_MS` para host mais lento quando necessário (ex.: 30–60ms).
+
+Reinício:
+- após deploy no `conveniente`, reiniciar runtime no host alvo com `node index.js`.

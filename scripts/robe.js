@@ -1869,19 +1869,60 @@ async function _selectCategoriaByTabsLegacyDom(page, alvo, tabsCount) {
 
   // Regra do Cassio (legacy): Tab N vezes + Enter
   // Timing controlado: manter rápido sem "insanidade" (alvo ~700ms total até Enter).
-  const perTabDelay = Math.max(15, parseInt(process.env.ROBE_CAT_TAB_DELAY_MS || '20', 10) || 20);
+  const perTabDelayBase = Math.max(20, parseInt(process.env.ROBE_CAT_TAB_DELAY_MS || '30', 10) || 30);
   const n = Math.max(1, Math.min(24, parseInt(String(tabsCount || 1), 10) || 1));
-  try {
-    for (let i = 0; i < n; i++) {
-      await page.keyboard.press('Tab');
-      await sleep(perTabDelay);
-    }
-    await page.keyboard.press('Enter');
-  } catch {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const perTabDelay = perTabDelayBase + (attempt * 20);
+    try {
+      if (attempt > 0) {
+        try { await page.keyboard.press('Escape'); } catch {}
+        await sleep(80);
+        try { await combo.click(); } catch {}
+        await sleep(jitter(120, 220));
+      }
 
-  await sleep(jitter(220, 320));
-  const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
-  return ok ? { ok: true, method: `tab_legacy_${n}` } : { ok: false, reason: 'legacy_tab_not_applied' };
+      for (let i = 0; i < n; i++) {
+        await page.keyboard.press('Tab');
+        await sleep(perTabDelay);
+      }
+
+      const focusCheck = await page.evaluate(() => {
+        const txt = v => String(v || '').trim();
+        const el = document.activeElement;
+        if (!el) return { safe: false, risk: false, reason: 'no_active_element' };
+        const tag = txt(el.tagName).toLowerCase();
+        const type = txt(el.getAttribute && el.getAttribute('type')).toLowerCase();
+        const role = txt(el.getAttribute && el.getAttribute('role')).toLowerCase();
+        const aria = txt(el.getAttribute && el.getAttribute('aria-label')).toLowerCase();
+        const text = txt(el.textContent).toLowerCase();
+        const fileRisk = (tag === 'input' && type === 'file') || /arquivo|anexo|upload|foto|video/.test(`${aria} ${text}`);
+        if (fileRisk) return { safe: false, risk: true, reason: 'file_focus_risk' };
+        const inCategoriaContext =
+          aria.includes('categoria') ||
+          role === 'option' ||
+          role === 'radio' ||
+          role === 'menuitemradio' ||
+          role === 'listbox' ||
+          !!el.closest('[role="listbox"], [role="menu"], [role="combobox"], [aria-label*="Categoria"], [aria-label*="categoria"]');
+        return { safe: !!inCategoriaContext, risk: false, reason: inCategoriaContext ? 'ok' : 'focus_outside_categoria' };
+      }).catch(() => ({ safe: false, risk: false, reason: 'focus_eval_failed' }));
+
+      if (!focusCheck.safe) {
+        if (focusCheck.risk) {
+          try { await page.keyboard.press('Escape'); } catch {}
+          await sleep(120);
+        }
+        continue;
+      }
+
+      await page.keyboard.press('Enter');
+      await sleep(jitter(220, 340));
+      const ok = await _assertCategoriaApplied(page, alvo).catch(() => false);
+      if (ok) return { ok: true, method: `tab_legacy_${n}_attempt_${attempt + 1}` };
+    } catch {}
+  }
+
+  return { ok: false, reason: 'legacy_tab_not_applied_safe_retries' };
 }
 
 async function _selectCategoriaByClickLegacyDom(page, alvo) {

@@ -1072,27 +1072,69 @@ async function selecionarCategoriaMoveis(page) {
     return;
   }
 
-  // Legacy DOM (combobox/tab-enter): “Móveis”
+  // Legacy DOM (Tab+Enter protegido): Tab segue como caminho principal quando categoria por texto falha.
   const combo = await findComboboxByLabel(page, 'Categoria', 7000);
   if (!combo) throw new Error('Combobox "Categoria" não localizado.');
   await combo.click();
   await sleep(jitter(220, 380));
-  try {
-    await page.keyboard.press('Tab');
-    await sleep(jitter(120, 200));
-    await page.keyboard.press('Enter');
-    await sleep(jitter(220, 360));
-  } catch {}
 
-  const ok1 = await page.evaluate(() => {
-    const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
-      .find(l => l.textContent && l.textContent.includes('Categoria'));
-    if (!lab) return false;
-    const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
-    if (!box) return false;
-    return /Móveis/.test(box.innerText || '');
-  });
-  if (ok1) return;
+  const tabDelayBase = Math.max(20, parseInt(process.env.ROBE_CAT_TAB_DELAY_MS || '30', 10) || 30);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tabDelay = tabDelayBase + (attempt * 20);
+    try {
+      if (attempt > 0) {
+        try { await page.keyboard.press('Escape'); } catch {}
+        await sleep(80);
+        await combo.click();
+        await sleep(jitter(140, 240));
+      }
+
+      await page.keyboard.press('Tab');
+      await sleep(tabDelay);
+
+      const focusCheck = await page.evaluate(() => {
+        const txt = v => String(v || '').trim();
+        const el = document.activeElement;
+        if (!el) return { safe: false, risk: false, reason: 'no_active_element' };
+        const tag = txt(el.tagName).toLowerCase();
+        const type = txt(el.getAttribute && el.getAttribute('type')).toLowerCase();
+        const role = txt(el.getAttribute && el.getAttribute('role')).toLowerCase();
+        const aria = txt(el.getAttribute && el.getAttribute('aria-label')).toLowerCase();
+        const text = txt(el.textContent).toLowerCase();
+        const fileRisk = (tag === 'input' && type === 'file') || /arquivo|anexo|upload|foto|video/.test(`${aria} ${text}`);
+        if (fileRisk) return { safe: false, risk: true, reason: 'file_focus_risk' };
+        const inCategoriaContext =
+          aria.includes('categoria') ||
+          role === 'option' ||
+          role === 'radio' ||
+          role === 'menuitemradio' ||
+          role === 'listbox' ||
+          !!el.closest('[role="listbox"], [role="menu"], [role="combobox"], [aria-label*="Categoria"], [aria-label*="categoria"]');
+        return { safe: !!inCategoriaContext, risk: false, reason: inCategoriaContext ? 'ok' : 'focus_outside_categoria' };
+      }).catch(() => ({ safe: false, risk: false, reason: 'focus_eval_failed' }));
+
+      if (!focusCheck.safe) {
+        if (focusCheck.risk) {
+          try { await page.keyboard.press('Escape'); } catch {}
+          await sleep(120);
+        }
+        continue;
+      }
+
+      await page.keyboard.press('Enter');
+      await sleep(jitter(220, 360));
+    } catch {}
+
+    const ok1 = await page.evaluate(() => {
+      const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
+        .find(l => l.textContent && l.textContent.includes('Categoria'));
+      if (!lab) return false;
+      const box = lab.querySelector('.xjyslct, [class*="xjyslct"]');
+      if (!box) return false;
+      return /Móveis/.test(box.innerText || '');
+    });
+    if (ok1) return;
+  }
 
   await combo.click();
   await sleep(jitter(180, 300));

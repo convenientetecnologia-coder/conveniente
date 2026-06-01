@@ -67,6 +67,83 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 
 ## RAW_INPUT (colar aqui)
 
+## RAW_INPUT — 2026-05-26 (Reforço máximo do contrato ultra enterprise + início de nova rodada)
+
+```text
+Relato do humano (Cassio):
+- pedido explícito para operar em padrão "110% ultra enterprise", com máxima organização e precisão;
+- confirmação de modelo operacional: humano não investiga, não roda comandos, não coleta log manual;
+- humano só reinicia processo com `node index.js` e confirma "reiniciado";
+- agente é operador técnico completo: editar código, criar/enfileirar comandos CT, coletar logs detalhados, registrar docs, commit/push;
+- exigência de evidência para decisões (path, log key, cmdId/requestId, endpoint), sem achismo;
+- reforço de comunicação em português claro, com atenção a possíveis ambiguidades na expressão humana;
+- exigência de uso contínuo dos canônicos:
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+  - `C:\conveniente\docs\TIMELINE.md`
+  - `C:\conveniente\docs\checkups\README.md`
+  - `C:\conveniente\docs\checkups\TEMPLATE_CHECKUP.md`
+  - `C:\conveniente\docs\checkup_geral_2026-01-29.md`
+  - `C:\conveniente\docs\HOST_REGISTRY.md`
+- regra para texto confuso com múltiplos problemas:
+  - abrir triagem item a item (1 problema por ticket), classificar P0/P1/P2, status `need_evidence` / `in_progress` / `done`,
+  - apontar gaps de evidência (hostId, cmdId, log keys, reprodução),
+  - coletar evidência via CT (`logs_manifest` / `fetch_logs`) sem pedir investigação manual do humano.
+```
+
+### TRIAGE — 2026-05-26 (Contrato operacional ultra enterprise)
+
+| item | P | titulo | status | o que falta de evidência | links |
+|---|---|---|---|---|---|
+| 1 | P2 | Registrar oficialmente a reiteração do contrato operacional (humano reinicia; agente opera por código + CT + docs) | done | nenhuma (registro documental) | `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md`, `C:/conveniente/docs/RUNBOOK_TECNICO.md`, `C:/conveniente/docs/LIVRO_DE_BORDO.md` |
+| 2 | P1 | Reforçar governança de triagem para "texto bomba" com tickets separados e estados (`need_evidence/in_progress/done`) | done | nenhuma (processo canônico já definido) | `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md`, `C:/conveniente/docs/RUNBOOK_TECNICO.md` |
+| 3 | P0 | Próxima execução técnica: abrir ticket com sintoma real e coletar evidência via CT sem ação manual do humano | in_progress | relato do sintoma + host alvo (ou hostId) + janela de tempo | `C:/conveniente/docs/HOST_REGISTRY.md` |
+
+---
+
+## RAW_INPUT — 2026-05-26 (Dor de cabeca para reiniciar stack no Windows boot/SYSTEM)
+
+```text
+Relato do humano:
+- stack esta online (Gate B, Sitechatbot Core/Edge, Atendimentos, Notificador), mas reinicios apos atualizacoes estao virando dor de cabeca;
+- com o modelo de auto-start no boot, reiniciar processo por processo virou dificil e, em alguns casos, trava por permissao;
+- em varios chats, ao pedir update + restart, nao fica claro "como reiniciar rapido sem duplicar processos";
+- desejo operacional: atalhos claros na area de trabalho (um por servico e um geral), com duplo clique para reiniciar sem abrir terminal e sem deixar processo duplicado.
+```
+
+### TRIAGE — 2026-05-26 (Restart operacional por atalho)
+
+| item | P | titulo | status | o que falta de evidência | links |
+|---|---|---|---|---|---|
+| 1 | P0 | Criar rotina canônica de restart por componente + stack completo com autoelevacao para evitar erro de permissao | done | nenhuma | `C:/portas/scripts/restart_stack_now_elevated.ps1`, `C:/portas/scripts/restart_stack_now.ps1`, `C:/portas/scripts/restart_gate_b_now.ps1`, `C:/portas/scripts/restart_sitechatbot_core_now.ps1`, `C:/portas/scripts/restart_sitechatbot_edge_now.ps1`, `C:/portas/scripts/restart_notificador_now.ps1` |
+| 2 | P0 | Criar/atualizar atalhos de desktop para reinicio com nomes humanos e operacao por duplo clique | done | nenhuma | `C:/portas/scripts/install_restart_desktop_shortcuts.ps1`, `C:/Users/NOTIFICADOR/Desktop/REINICIAR - STACK COMPLETO.lnk`, `C:/Users/NOTIFICADOR/Desktop/REINICIAR - GATE B.lnk`, `C:/Users/NOTIFICADOR/Desktop/REINICIAR - SITECHATBOT CORE.lnk`, `C:/Users/NOTIFICADOR/Desktop/REINICIAR - SITECHATBOT EDGE.lnk`, `C:/Users/NOTIFICADOR/Desktop/REINICIAR - NOTIFICADOR.lnk` |
+| 3 | P1 | Garantir lifecycle dos atalhos junto da instalacao/remocao do boot stack | done | nenhuma | `C:/portas/scripts/install_stack_boot_system.ps1`, `C:/portas/scripts/uninstall_stack_boot_system.ps1`, `C:/portas/scripts/remove_restart_desktop_shortcuts.ps1` |
+| 4 | P1 | Validacao humana final do fluxo (duplo clique e confirmacao no dashboard) | in_progress | confirmacao do humano apos 1 restart real por atalho | `C:/portas/cloudflare/outputs/restart_stack_now.log`, `C:/portas/cloudflare/outputs/restart_gate_b_now.log`, `C:/portas/cloudflare/outputs/restart_sitechatbot_core_now.log`, `C:/portas/cloudflare/outputs/restart_sitechatbot_edge_now.log`, `C:/portas/cloudflare/outputs/restart_notificador_now.log` |
+
+---
+
+## RAW_INPUT — 2026-05-26 (Nomenclatura confusa no dashboard e nos atalhos)
+
+```text
+Relato do humano:
+- os nomes "Core/Edge" estao confusos para operacao;
+- referencia mental operacional do humano e por arquivo:
+  - sitechatbot/index.js
+  - sitechatbot/indexct.js
+  - notificador/index.js
+- no dashboard de status e nos atalhos, precisa aparecer nome de arquivo para facilitar o restart correto.
+```
+
+### TRIAGE — 2026-05-26 (Padronizar nomes por arquivo)
+
+| item | P | titulo | status | o que falta de evidência | links |
+|---|---|---|---|---|---|
+| 1 | P0 | Trocar labels do dashboard para nomes baseados em arquivo (`index.js`, `indexct.js`, `notificador/index.js`) e explicar que `indexct.js` cobre mais de uma porta | done | nenhuma | `C:/portas/nginx/html/index.html` |
+| 2 | P0 | Renomear atalhos do desktop para nomes de arquivo e remover nomes legados (Core/Edge) | done | nenhuma | `C:/portas/scripts/install_restart_desktop_shortcuts.ps1`, `C:/portas/scripts/remove_restart_desktop_shortcuts.ps1` |
+| 3 | P1 | Reinstalar atalhos e validar leitura humana dos novos nomes | in_progress | confirmacao humana apos teste de 1 duplo clique | `C:/Users/NOTIFICADOR/Desktop/*.lnk` |
+
+---
+
 ```text
 RAW_INPUT (2026-03-18) — RM3 dashboard 95 vs 70 navegadores
 
@@ -2296,3 +2373,371 @@ Relato do humano:
 |---|---|---|---|---|
 | 1 | P0 | Remover remoção local automática no retry de archive CT (`not_found_assigned`) | done | `C:/conveniente/scripts/worker.js` |
 | 2 | P0 | Remover fluxo de exclusão/arquivamento automático por ban e deixar apenas flags/issues + auditoria | done | `C:/conveniente/scripts/worker.js` |
+
+---
+
+## RAW_INPUT — 2026-05-21 (Contrato operacional enterprise + início de nova rodada de debug)
+
+```text
+Relato do humano (Cassio):
+- reforço explícito do contrato operacional enterprise;
+- humano não coleta logs/comandos/evidências: só reinicia `node index.js` e confirma "reiniciado";
+- agente é operador técnico completo: código, coleta de evidência via CT, documentação, commit/push;
+- decisões sem achismo: sempre com evidência citável (path/log key/cmdId/requestId/endpoint);
+- manter linguagem clara e ritmo colaborativo, sem misturar problemas;
+- atualização contínua dos canônicos: LIVRO, RUNBOOK, TIMELINE, CHECKUPS e HOST_REGISTRY;
+- referência adicional informada: "último transcript em c:/sitechatbot/dashboardatendimento".
+```
+
+### TRIAGE — 2026-05-21 (Onboarding operacional + próxima ação)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P2 | Registrar reiteração do contrato operacional enterprise no INBOX canônico | done | `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md` |
+| 2 | P0 | Ler o último transcript de `c:/sitechatbot/dashboardatendimento` e quebrar em tickets independentes (P0/P1/P2) | in_progress | `c:/sitechatbot/dashboardatendimento` |
+
+### TRIAGE DETALHADA — 2026-05-21 (Transcript `C:/sitechatbot/dashboardatendimento.md`)
+
+| item | P | titulo | status | o que falta de evidência | links |
+|---|---|---|---|---|---|
+| 1 | P0 | Duplicidade de mensagem de handoff após clicar em “Atender” (`HUMAN_HANDOFF_REQUESTED`) | need_evidence | `hostId`, `cmdId/requestId` do atendimento, chaves de log do fluxo WhatsApp (`flow`/`outbox`) no intervalo do caso | `C:/sitechatbot/dashboardatendimento.md`, `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 2 | P0 | “Solicitar orçamento” enviando payload legado (telefone/link cliente) em vez de ABC completo | need_evidence | `ticket_id`, payload persistido/enfileirado, mensagem final entregue no grupo, logs de builder ABC x legado | `C:/sitechatbot/dashboardatendimento.md`, `C:/sitechatbot/lib/pedidosStore.js`, `C:/sitechatbot/lib/attendanceStore.js` |
+| 3 | P1 | Botão pós-transição de estado não muda para “Enviar orçamento para cliente” | need_evidence | trilha de transição de status no backend + resposta da API da tela de atendimento | `C:/sitechatbot/dashboardatendimento.md`, `C:/sitechatbot/lib/attendanceStore.js` |
+| 4 | P0 | Campos `Nome` e `Itens` vazios no painel mesmo com conteúdo no chat | need_evidence | `ticket_id` real do caso novo, snapshot salvo no banco, formatter final retornado para UI | `C:/sitechatbot/dashboardatendimento.md`, `C:/sitechatbot/lib/attendanceFormatters.js`, `C:/sitechatbot/lib/attendanceStore.js` |
+
+### CONSOLIDAÇÃO — 2026-05-21
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 2 | P0 | Ler o último transcript de `c:/sitechatbot/dashboardatendimento` e quebrar em tickets independentes (P0/P1/P2) | done | `C:/conveniente/docs/INBOX_RELATOS_DO_HUMANO.md` |
+
+---
+
+## RAW_INPUT — 2026-05-21 (Convivência AB/ABC por cidade + payload ABC completo no grupo)
+
+```text
+Relato do humano:
+- operação atual em dois modelos:
+  - AB: pedido do bot vai direto ao grupo;
+  - ABC: pedido entra no dashboard, atendimento humano solicita orçamento e só então vai ao grupo.
+- requisito de rollout controlado:
+  - Campos dos Goytacazes (RJ) = cidade piloto ABC;
+  - demais cidades seguem AB por enquanto.
+- requisito de conteúdo da mensagem ABC ao grupo:
+  - sem telefone/link do cliente;
+  - com dados completos de orçamento (nome, cidade, data/hora, origem/destino, referências, tipo, ajudante, itens, descrição operacional, checklist e link de orçamento do ticket para API do motorista).
+```
+
+### TRIAGE — 2026-05-21 (AB/ABC coexistência + template ABC)
+
+| item | P | titulo | status | o que falta de evidência | links |
+|---|---|---|---|---|---|
+| 1 | P0 | Garantir roteamento por cidade: Campos (ABC) e demais cidades (AB) sem regressão | in_progress | confirmação em log/audit de 1 pedido AB e 1 pedido ABC após deploy (`flow_mode`, `cidade_uf`, destino de grupo) | `C:/sitechatbot/whatsapp/lib/flow.js`, `C:/sitechatbot/lib/attendanceStore.js`, `C:/sitechatbot/dados/attendance.sqlite` |
+| 2 | P0 | Completar template ABC no `Solicitar orçamento` com todos os campos operacionais e link de orçamento do ticket | in_progress | evidência de mensagem real enviada ao grupo ABC após restart (snapshot da mensagem + `ticket_code`) | `C:/sitechatbot/lib/pedidosStore.js`, `C:/sitechatbot/dashboardatendimento.md` |
+
+### EVIDÊNCIA + RCA — 2026-05-21 (ABC montado correto no backend, downgrade no notificador)
+
+- Evidência de enqueue correto (pedido recente do caso):
+  - `pedidoId`: `wa_48764_1779385263740`
+  - `flow_mode`: `abc`
+  - `ticket_code`: `TICKET-9894`
+  - `message_text` no `pedidos.sqlite`: já em formato `Nova Solicitação! (Fluxo ABC)` com link de orçamento ABC.
+- Evidência de entrega:
+  - `dados/pedidos_audit.jsonl` registrou `sent` para esse `pedidoId` no grupo `120363287626658394@g.us`.
+- Causa raiz confirmada:
+  - no `C:/notificador/index.js`, quando `delivery_mode_effective=legacy`, o envio priorizava `legacy_message` (template AB) em vez de `job.message` (já montado pelo backend com AB/ABC).
+  - isso causava regressão de formato no grupo mesmo com `flow_mode=abc` correto no backend.
+
+### CORREÇÃO APLICADA — 2026-05-21
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 3 | P0 | No notificador, priorizar `job.message` no modo legado para preservar template ABC/AB definido no backend | done | `C:/notificador/index.js` |
+
+---
+
+## RAW_INPUT — 2026-05-21 (UX operacional dos botões no dashboard de atendimentos)
+
+```text
+Relato do humano:
+- falta feedback claro de clique/andamento nos botões;
+- risco de clique repetido (ex.: "Solicitar orçamento" várias vezes sem saber se foi);
+- fluxo desejado:
+  - "Atender" -> "Atendendo..." até concluir claim;
+  - "Solicitar orçamento" -> "Solicitando orçamento..." durante envio;
+  - manter também botão dedicado "Enviar orçamento pro cliente";
+  - permitir novo "Solicitar orçamento" após ajustes no pedido;
+  - liberar "Enviar orçamento pro cliente" somente quando existir preço.
+```
+
+### TRIAGE — 2026-05-21 (Botões de ação com estado explícito)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Implementar loading state em `Atender` para bloquear clique duplicado e mostrar progresso | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 2 | P0 | Separar ações em dois botões fixos (`Solicitar orçamento` / `Enviar orçamento pro cliente`) com habilitação por regra | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.html`, `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 3 | P1 | Garantir re-solicitação de orçamento após ajustes sem perder botão de envio ao cliente | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Confirmação de reenvio + rótulo OK + formato de data ABC)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 4 | P0 | Ao solicitar orçamento pela 2a vez em diante, confirmar com modal "já enviado ao grupo, reenviar?" | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 5 | P1 | Exibir estado visual persistente no botão: `Solicitar orcamento - OK` após primeiro envio | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 6 | P1 | Remover sufixo `(Fluxo ABC)` e formatar `Data do servico` como `dd/mm/aaaa (dia-da-semana)` | done | `C:/sitechatbot/lib/pedidosStore.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Fluxo motorista: contexto completo + vínculo atendente/ticket + captura de orçamento)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 7 | P0 | Primeira mensagem ao motorista deve levar resumo completo do ticket (não só cidade/origem/destino) | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 8 | P0 | Mensagens do atendente para motorista precisam sair tagueadas com `Atendente - TICKET-XXXX` | done | `C:/sitechatbot/lib/attendanceStore.js` |
+| 9 | P0 | ACK ao motorista deve citar atendente responsável e ticket | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 10 | P0 | Aceitar valor numérico simples no contexto de ticket (ex.: `1500`) para registrar orçamento e aparecer no dashboard | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Tempo real do painel + organização do bloco Motoristas)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 11 | P0 | Atualização de orçamento no painel sem F5 (cursor realtime resistente a empates de timestamp) | done | `C:/sitechatbot/lib/attendanceStore.js` |
+| 12 | P1 | Bloco Motoristas mostrar lista limpa por padrão e abrir chat só ao clicar no motorista | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 13 | P1 | Exibir indicação `Nova mensagem` por motorista na lista | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 14 | P0 | Em mensagens de motorista, exigir código explícito do ticket para roteamento ultra organizado | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Assistente de contexto por motorista: 1 ticket vs múltiplos)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 15 | P0 | Se motorista tiver 1 ticket ativo e enviar valor sem ticket explícito, sugerir/confirmar envio direto para esse ticket | done | `C:/sitechatbot/whatsapp/lib/flow.js`, `C:/sitechatbot/lib/attendanceStore.js` |
+| 16 | P0 | Se motorista tiver múltiplos tickets/execuções, abrir menu de assunto (execução/negociação/administrativo) e depois menu de tickets | done | `C:/sitechatbot/whatsapp/lib/flow.js`, `C:/sitechatbot/lib/attendanceStore.js` |
+| 17 | P1 | Seleção de ticket por menu define contexto e permite chat contínuo organizado naquele ticket | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Portal web do motorista por ticket, link vivo enquanto ticket aberto)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 18 | P0 | Criar vínculo de portal por `ticket + motorista` com token estável e bloqueio automático quando ticket fecha | done | `C:/sitechatbot/lib/attendanceStore.js` |
+| 19 | P0 | Expor rotas web/API do portal (`/driver-ticket/:token`) para bootstrap, envio de mensagem e envio de orçamento | done | `C:/sitechatbot/convenientetecnologia-atendimentos/index.js` |
+| 20 | P1 | Implementar UI inicial mobile-first do portal do motorista (resumo, chat e orçamento) | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/driver-ticket.html`, `C:/sitechatbot/convenientetecnologia-atendimentos/public/driver-ticket.css`, `C:/sitechatbot/convenientetecnologia-atendimentos/public/driver-ticket.js` |
+| 21 | P1 | Incluir link do portal nas mensagens de negociação para motorista e nas mensagens do atendente | done | `C:/sitechatbot/whatsapp/lib/flow.js`, `C:/sitechatbot/lib/attendanceStore.js` |
+
+### TRIAGE COMPLEMENTAR — 2026-05-21 (Forçar operação no portal e eliminar parse incorreto de valor no WhatsApp)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 22 | P0 | Evitar parse de valor a partir do número do ticket (ex.: `TICKET-9920` => `R$ 9.920,00`) | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 23 | P0 | WhatsApp do motorista em modo link-first: orçamento e mensagens do ticket somente no portal | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+
+---
+
+## RAW_INPUT — 2026-05-26 (Bot interrompendo atendimento humano em status "atender")
+
+```text
+Relato do humano (caso Kethanlyn Gabriel):
+- bot iniciou atendimento normalmente e, ao não confirmar cidade, transferiu para equipe humana;
+- após o handoff, o bot continuou respondendo no meio da conversa (inclusive depois de mensagens do atendente Cássio);
+- regra operacional exigida: após ir para "atender"/humano, o bot deve ficar totalmente silencioso;
+- bot só pode voltar em novo ciclo após aprovação/reprovação/encerramento do ticket humano.
+```
+
+### TRIAGE — 2026-05-26 (Silêncio absoluto do bot durante atendimento humano)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Bloquear qualquer resposta do bot quando `step` for `HUMAN_HANDOFF_REQUESTED`/`HUMAN_LOCKED` | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 2 | P0 | Limpar mensagens pendentes antigas no outbox ao entrar em atendimento humano (evitar vazamento de prompt atrasado) | done | `C:/sitechatbot/whatsapp/lib/db.js`, `C:/sitechatbot/whatsapp/lib/inboxWorker.js` |
+| 3 | P1 | Validar sintaxe + smoke test do fluxo com conversa em handoff (sem outbox) | done | `node --check C:/sitechatbot/whatsapp/lib/flow.js`, `node --check C:/sitechatbot/whatsapp/lib/db.js`, `node --check C:/sitechatbot/whatsapp/lib/inboxWorker.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Garantia AB x ABC no Virtus + link correto de orçamento)
+
+```text
+Relato do humano:
+- fluxo atual está inconsistente para cidades ABC;
+- bug 1: bot em alguns casos trata cidade ABC como AB e envia direto ao grupo;
+- bug 2: em tickets ABC atendidos no painel, ao clicar "Solicitar orçamento" a mensagem sai com comportamento de AB no link final;
+- regra exigida: AB vai direto para grupo; ABC vai para "Atender" e mantém fluxo de ticket sem regressão.
+```
+
+### TRIAGE — 2026-05-27 (Guardrails anti-regressão AB/ABC)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Impedir downgrade de tickets `crm_active` para fluxo AB em reconciliação/auto-rejeição/dispatch | done | `C:/sitechatbot/lib/attendanceStore.js` |
+| 2 | P0 | Reforçar decisão de cidade ABC no bot usando fallback do ticket vinculado (`wa:{conversationId}`) | done | `C:/sitechatbot/whatsapp/lib/flow.js` |
+| 3 | P0 | Publicar link interno de interesse por ticket para ABC (`/driver-interest/:ticketCode`) com redirecionamento seguro | done | `C:/sitechatbot/lib/pedidosStore.js`, `C:/sitechatbot/convenientetecnologia-atendimentos/index.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Autocomplete de endereço com baixa assertividade)
+
+```text
+Relato do humano:
+- autocomplete exige apagar texto para começar a encontrar opções;
+- endereço válido no Google Maps não aparece no painel mesmo colando completo;
+- busca por cidade simples (ex.: "florianopolis") retorna resultados piores e só melhora ao adicionar UF;
+- necessidade operacional: funcionar bem para rua, bairro, cidade, CEP e ponto de referência com alta velocidade.
+```
+
+### TRIAGE — 2026-05-27 (Qualidade de busca de endereço)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Priorizar busca livre antes de forçar contexto da cidade do ticket para evitar viés de resultado errado | done | `C:/sitechatbot/lib/addressAutocomplete.js` |
+| 2 | P0 | Melhorar ranking de sugestões (cidade/bairro/rua) com score por tokens, tipo do resultado e hint de cidade | done | `C:/sitechatbot/lib/addressAutocomplete.js` |
+| 3 | P1 | Aumentar janela de sugestões e reduzir mínimo de caracteres no frontend para acelerar descoberta | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Busca travada ao colar destino com quebra de linha)
+
+```text
+Relato do humano:
+- ao colar no Destino "rua Lindóia tiné de Souza 24" + quebra de linha + "Bairro kennedy", não aparece nenhuma opção;
+- expectativa operacional: comportamento contínuo estilo Google Maps (digita A, AM, ... e já aparecem opções);
+- exigência: sem travar por cidade raiz do ticket; cidade raiz é só para roteamento de grupo.
+```
+
+### TRIAGE — 2026-05-27 (Modo Google-first sem engessamento)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Habilitar busca com 1 caractere e resposta incremental em cada tecla no frontend | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 2 | P0 | Remover viés obrigatório de `city_uf` na geração de candidatos e manter cidade só como hint de ranking | done | `C:/sitechatbot/lib/addressAutocomplete.js` |
+| 3 | P0 | Coletar mais opções por consulta (autocomplete + geocode + textsearch) para aproximar do comportamento Google Maps | done | `C:/sitechatbot/lib/addressAutocomplete.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Regressão: campo de endereço não aceita espaço ao digitar)
+
+```text
+Relato do humano:
+- após os últimos ajustes, ao digitar origem/destino não está conseguindo inserir espaço normalmente;
+- percepção operacional: a normalização está interferindo no input enquanto o atendente digita;
+- impacto: experiência de digitação ruim e sensação de autocomplete travado/sem retorno.
+```
+
+### TRIAGE — 2026-05-27 (Correção imediata da regressão de digitação)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Parar de sobrescrever `input.value` durante digitação e manter normalização apenas para a query enviada à API | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Autocomplete sem resultados durante digitação contínua)
+
+```text
+Relato do humano:
+- mesmo após correção do espaço, ao digitar origem/destino não aparecem resultados;
+- percepção operacional: fluxo continua quebrado e instável;
+- exigência: busca robusta, contínua e utilizável em tempo real no atendimento.
+```
+
+### TRIAGE — 2026-05-27 (Estabilização de throughput + recuperação automática)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Reduzir explosão de chamadas por tecla no backend (estratégia curta e cache TTL) para evitar vazio por sobrecarga | done | `C:/sitechatbot/lib/addressAutocomplete.js` |
+| 2 | P0 | Tratar erro transitório sem limpar lista agressivamente e com aviso no toolbar no frontend | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 3 | P0 | Reabilitar autocomplete automaticamente após cooldown quando entrar em estado desabilitado por erro duro | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Áudio de cliente com volume oscilando/baixo no player)
+
+```text
+Relato do humano:
+- ao reproduzir áudio de cliente no painel, às vezes começa alto e depois fica muito baixo;
+- repetir play nem sempre resolve; volume percebido fica inconsistente;
+- exigência operacional: áudio sempre no volume alto e inteligível, deixando ajuste fino para o volume do fone/dispositivo.
+```
+
+### TRIAGE — 2026-05-27 (Normalização de loudness no player de áudio)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Aplicar pipeline WebAudio por mensagem (`DynamicsCompressor` + `Gain`) para elevar e estabilizar voz em áudios baixos | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 2 | P0 | Forçar `audio.volume = 1` e ativar boost automaticamente no bind/play de cada card de áudio | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Volume ainda baixo após primeira tentativa de boost)
+
+```text
+Relato do humano:
+- após o primeiro ajuste, ganho percebido foi pequeno ("~5%");
+- áudio continua baixo para operação, ainda com inteligibilidade insuficiente;
+- exigência: volume realmente alto e estável para voz.
+```
+
+### TRIAGE — 2026-05-27 (Boost turbo de voz)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Subir ganho para modo turbo com cadeia `highpass -> presence EQ -> highshelf -> compressor -> limiter -> gain` | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 2 | P0 | Reforçar anti-queda de volume no elemento (`volumechange` força `volume=1` e `muted=false`) | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Áudio estourado e ainda baixo após boost agressivo)
+
+```text
+Relato do humano:
+- mesmo com boost anterior, o áudio passou a estourar e ainda não ficou audível como esperado;
+- problema atual: distorção + inteligibilidade ruim;
+- exigência: volume alto com clareza, sem estourar.
+```
+
+### TRIAGE — 2026-05-27 (AGC adaptativo anti-estouro)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Trocar ganho fixo por ganho adaptativo por áudio (análise pico/RMS com cache e ajuste automático) | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 2 | P0 | Recalibrar cadeia de processamento para reduzir clipping (compressor/limiter mais estáveis + EQ moderado) | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+
+---
+
+## RAW_INPUT — 2026-05-27 (Chat dançando + mensagem não atualiza + copiar mensagem)
+
+```text
+Relato do humano:
+- durante atendimento, a área do chat fica "dançando" (subindo/descendo), atrapalhando leitura e cópia;
+- novas mensagens às vezes notificam, mas não aparecem no chat atual sem sair/entrar de novo;
+- necessidade operacional: menu por mensagem com opção explícita de copiar texto.
+```
+
+### TRIAGE — 2026-05-27 (Estabilidade de conversa + copy por mensagem)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Remover auto-scroll forçado em `renderDetails` e preservar `scrollTop` quando usuário não está no fim da conversa | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js`, `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.css` |
+| 2 | P0 | Garantir refresh da conversa selecionada em evento realtime com reason dedicada (`stream-detail`) para não exigir sair/entrar do ticket | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js` |
+| 3 | P1 | Adicionar menu por mensagem com ação `Copiar mensagem` + fallback de clipboard | done | `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.js`, `C:/sitechatbot/convenientetecnologia-atendimentos/public/app.css` |
+
+---
+
+## RAW_INPUT — 2026-06-01 (Robe abre seletor de arquivo e interrompe postagem)
+
+```text
+Relato do humano:
+- durante a postagem do Robe, ao passar por Categoria no fluxo legado, o uso de Tab/Enter pode sair do foco esperado;
+- quando Enter dispara fora do alvo, abre janela de seleção de arquivo (explorer/file picker);
+- efeito colateral observado: a janela permanece no navegador principal (ex.: aba Virtus), mesmo após fechar aba Robe;
+- impacto operacional: postagem falha/não conclui e múltiplos navegadores acumulam popup de arquivo.
+```
+
+### TRIAGE — 2026-06-01 (Hardening de foco no passo Categoria do Robe)
+
+| item | P | titulo | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Manter `Tab+Enter` no categoria legacy do Robe com guardrail de foco, retries e atraso progressivo para evitar abertura indevida de file picker | done | `C:/conveniente/scripts/robe.js` |
+| 2 | P0 | Reintroduzir `Tab+Enter` no fluxo legado de categoria do Robe Veículos com proteção de foco e fallback complementar | done | `C:/conveniente/scripts/robeVeiculos.js` |
+| 3 | P1 | Coletar evidências de produção via CT para correlacionar falha por host/perfil (`hostId`, `cmdId`, `requestId`, janela) | need_evidence | `logs_manifest`, `fetch_logs` |
+
+#### Evidência mínima faltante para fechar causa raiz com prova completa
+
+- `hostId` afetado (um ou mais) e janela temporal aproximada (início/fim)
+- `cmdId`/`requestId` dos ciclos de postagem que falharam
+- chaves de log do passo categoria/postagem no Robe (`method`, `reason`, `error`)
