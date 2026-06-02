@@ -858,6 +858,19 @@ async function execRobeReleaseAll() {
   const r = await httpJson('/api/robes/release-all', { method:'POST' });
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
 }
+async function execRobeV2Recalc(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const reasonRaw = String(payload.reason || '').trim();
+  const reason = reasonRaw ? reasonRaw.slice(0, 120) : 'ct_remote_recalc';
+  const force = (payload.force === true || payload.force === 1 || payload.force === '1' || String(payload.force || '').toLowerCase() === 'true');
+  const r = await httpJson('/api/robes/v2/recalc', {
+    method: 'POST',
+    body: { reason, force: force !== false },
+    headers: { 'x-operator': `ct_remote:${String(cmd && cmd.id || '').slice(0, 36)}` }
+  });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robe_v2_recalc_failed');
+  return r;
+}
 
 // ===== NOVO: profiles_cleanup (limpeza cirúrgica enterprise) =====
 // Objetivo: desfazer “lixo de testes” sem close_all.
@@ -2909,6 +2922,8 @@ function logsAllowlist() {
     provision_lock: path.join(base, 'provision_lock.json'),
     // útil para auditoria do canal de comandos
     commands: path.join(base, 'commands.log'),
+    // estado real do gerador V2 (fila + falhas/backoff/meta)
+    robe_v2_queue: path.join(base, 'robe_v2_queue.json'),
     // logs do serviço (quando NSSM estiver configurado)
     service_stdout: path.join(base, 'service_stdout.log'),
     service_stderr: path.join(base, 'service_stderr.log')
@@ -3943,6 +3958,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
+      else if (c.type === 'robe_v2_recalc')       { ackDetails = await execRobeV2Recalc(c); }
       else if (c.type === 'delete_perfis')    { ackDetails = await execDeletePerfis(c); }
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }

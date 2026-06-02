@@ -972,7 +972,13 @@ async function pickPostingCityForRunV2() {
       return state;
     });
   }
-  if (!chosen) throw new Error('robe_v2_queue_empty');
+  if (!chosen) {
+    const st = readRobeV2QueueState();
+    const failCount = Math.max(0, Number(st && st.failures && st.failures.count || 0) || 0);
+    const backoffUntil = Math.max(0, Number(st && st.failures && st.failures.backoffUntil || 0) || 0);
+    const lastError = (st && st.meta && st.meta.lastError) ? String(st.meta.lastError) : 'none';
+    throw new Error(`robe_v2_queue_empty:lastError=${lastError}:failures=${failCount}:backoffUntil=${backoffUntil}`);
+  }
   if (queueAfter <= threshold || expiredPlan) {
     scheduleRobeV2Regeneration({ reason: queueAfter <= threshold ? 'prefetch_low_queue' : 'plan_expired', wait: false }).catch(() => {});
   }
@@ -3616,11 +3622,19 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       const cfgNow = serverConfig.readServerConfigEffective();
       robeWorkMode = String(cfgNow && cfgNow.robe && cfgNow.robe.workMode || 'v1').trim().toLowerCase();
     } catch {}
+    let cityPickErr = null;
     try {
       cidadePerfil = await pickPostingCityForRun(nome);
-    } catch {}
+    } catch (e) {
+      cityPickErr = (e && e.message) ? String(e.message) : String(e);
+      stepLog.appendJSONL(nome, 'robe', {
+        attempt: attId,
+        step: 'posting_city_pick_failed',
+        error: cityPickErr
+      });
+    }
     if (!cidadePerfil && robeWorkMode === 'v2_auto') {
-      throw new Error('robe_v2_city_unavailable');
+      throw new Error(`robe_v2_city_unavailable${cityPickErr ? `:${cityPickErr}` : ''}`);
     }
     if (!cidadePerfil) cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
