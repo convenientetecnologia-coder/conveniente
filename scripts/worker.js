@@ -22,7 +22,7 @@ const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
-const { readCtConfig } = require('./ctConfig.js');
+const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 
 // =========================
@@ -484,15 +484,15 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   const cfg = readCtConfig();
   // Fallback enterprise: se ct_config.json não tiver dados, usar env/notifierEndpoints
   // (evita “funciona tudo, mas não arquiva no CT” quando só LOG_INGEST_SECRET está setado via env).
-  let base = String(cfg && cfg.ctBaseUrl || '').trim();
-  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
+  if (!base) base = normalizeCtBaseUrl(process.env.CT_BASE_URL || process.env.CT_URL || '');
   if (!base) {
     try {
       const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
       base = String(notifierBaseFromEndpoints() || '').trim();
     } catch {}
   }
-  base = base.replace(/\/+$/, '');
+  base = normalizeCtBaseUrl(base);
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
@@ -521,15 +521,15 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
 
 async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
   const cfg = readCtConfig();
-  let base = String(cfg && cfg.ctBaseUrl || '').trim();
-  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
+  if (!base) base = normalizeCtBaseUrl(process.env.CT_BASE_URL || process.env.CT_URL || '');
   if (!base) {
     try {
       const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
       base = String(notifierBaseFromEndpoints() || '').trim();
     } catch {}
   }
-  base = base.replace(/\/+$/, '');
+  base = normalizeCtBaseUrl(base);
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
@@ -603,15 +603,15 @@ function _shouldEmitUaFp(nome, kind, windowMs) {
 
 async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } = {}) {
   const cfg = readCtConfig();
-  let base = String(cfg && cfg.ctBaseUrl || '').trim();
-  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
+  if (!base) base = normalizeCtBaseUrl(process.env.CT_BASE_URL || process.env.CT_URL || '');
   if (!base) {
     try {
       const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
       base = String(notifierBaseFromEndpoints() || '').trim();
     } catch {}
   }
-  base = base.replace(/\/+$/, '');
+  base = normalizeCtBaseUrl(base);
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   if (!base || !secret || !hostId || !nome) return { ok: false, error: 'ct_config_missing' };

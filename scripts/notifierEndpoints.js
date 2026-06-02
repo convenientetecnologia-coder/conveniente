@@ -1,7 +1,7 @@
 "use strict";
 
 // Centraliza a origem do endpoint do notificador (sitechatbot).
-const { readCtConfig } = require("./ctConfig");
+const { readCtConfig, normalizeCtBaseUrl } = require("./ctConfig");
 
 function isNgrokTarget(rawValue) {
   const value = String(rawValue || "").trim();
@@ -15,7 +15,7 @@ function isNgrokTarget(rawValue) {
 }
 
 function normalizeBase(rawBase) {
-  const base = String(rawBase || "").trim().replace(/\/+$/, "");
+  const base = normalizeCtBaseUrl(rawBase || "");
   if (!base || isNgrokTarget(base)) return "";
   return base;
 }

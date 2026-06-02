@@ -1229,15 +1229,14 @@ module.exports = (app, workerClient, fileStore) => {
         const fs = require('fs');
         const path = require('path');
         const crypto = require('crypto');
-        const { readCtConfig } = require('./ctConfig');
+        const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig');
         const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
         const CTQ_PENDING = path.join(__dirname, '..', 'dados', 'ct_archive_queue', 'pending');
         const ensureDirSync = (p) => { try { fs.mkdirSync(p, { recursive: true }); } catch {} };
         const readHostId = () => { try { return fs.existsSync(HOSTID_PATH) ? String(fs.readFileSync(HOSTID_PATH, 'utf8') || '').trim() : ''; } catch { return ''; } };
         const hostId = readHostId();
         const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
-        let base = String((cfg && cfg.ctBaseUrl) ? cfg.ctBaseUrl : (process.env.CT_BASE_URL || process.env.CT_URL || '')).trim();
-        base = base.replace(/\/+$/, '');
+        let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) ? cfg.ctBaseUrl : (process.env.CT_BASE_URL || process.env.CT_URL || ''));
         const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
         if (!hostId || !base || !secret) {
           ct = { attempted: true, ok: false, queued: false, error: 'ct_config_missing' };

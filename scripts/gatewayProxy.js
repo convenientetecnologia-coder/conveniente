@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const manifestStore = require("./manifestStore");
-const { readCtConfig } = require("./ctConfig");
+const { readCtConfig, normalizeCtBaseUrl } = require("./ctConfig");
 
 const STATE_PATH = path.join(__dirname, "..", "dados", "gateway_proxy_state.json");
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
@@ -726,7 +726,7 @@ async function reportProxyIssue({ resolved, reason, context } = {}) {
     if (shouldThrottleIssue(slot.slotId, minMs)) return { ok: false, skipped: true, reason: "throttled" };
 
     const cfg = readCtConfig();
-    const ctBaseUrl = String(cfg && cfg.ctBaseUrl || "").trim().replace(/\/+$/, "");
+    const ctBaseUrl = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || "");
     const secret = String(cfg && cfg.logIngestSecret || "").trim();
     if (!ctBaseUrl || !secret) return { ok: false, skipped: true, reason: "missing_ct_config" };
 

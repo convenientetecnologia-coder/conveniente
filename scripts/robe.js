@@ -12,7 +12,7 @@ const logger = require('./logger.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
-const { readCtConfig } = require('./ctConfig.js');
+const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -469,7 +469,7 @@ function loadTotalProfilesCount() {
 
 function resolveCtSecretConfig() {
   const cfg = readCtConfig();
-  let base = String((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || '');
   let secret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
   if (!base || !secret) return { ok: false, error: 'ct_config_missing' };
   base = base.replace(/\/+$/, '');
@@ -745,22 +745,38 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
   const ct = resolveCtSecretConfig();
   if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
   const hostId = readHostIdSafe();
-  try {
+  const canonicalBase = 'https://api.convenientetecnologia.com';
+  const postStats = async (base) => {
     const Aborter = global.AbortController || require('node-abort-controller');
     const ac = new Aborter();
     const timeout = setTimeout(() => { try { ac.abort(); } catch {} }, 10000);
-    const resp = await fetch(`${ct.base}/api/robe/v2/city_stats_secret`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': ct.secret },
-      body: JSON.stringify({ hostId, windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))), cities }),
-      signal: ac.signal
-    });
-    clearTimeout(timeout);
-    const j = await resp.json().catch(() => null);
-    if (!j || j.ok !== true) {
-      return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
+    try {
+      const resp = await fetch(`${base}/api/robe/v2/city_stats_secret`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Log-Secret': ct.secret },
+        body: JSON.stringify({ hostId, windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))), cities }),
+        signal: ac.signal
+      });
+      const j = await resp.json().catch(() => null);
+      if (!j || j.ok !== true) {
+        return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
+      }
+      return { ok: true, statsByCity: j.statsByCity || {}, requestId: j.requestId || null, missingCities: Array.isArray(j.missingCities) ? j.missingCities : [] };
+    } finally {
+      clearTimeout(timeout);
     }
-    return { ok: true, statsByCity: j.statsByCity || {}, requestId: j.requestId || null, missingCities: Array.isArray(j.missingCities) ? j.missingCities : [] };
+  };
+  try {
+    const primary = await postStats(ct.base);
+    if (primary.ok) return primary;
+    // Auto-repair operacional: hosts com ctBaseUrl legado podem cair em 404.
+    // Faz retry único no domínio canônico sem depender de ação manual.
+    if (/^http_404$/i.test(String(primary.error || '')) && String(ct.base).toLowerCase() !== canonicalBase) {
+      const fallback = await postStats(canonicalBase);
+      if (fallback.ok) return fallback;
+      return { ok: false, error: `primary_${primary.error};fallback_${fallback.error}` };
+    }
+    return primary;
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
   }

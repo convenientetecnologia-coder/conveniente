@@ -5,6 +5,22 @@ const path = require("path");
 
 const CT_CONFIG_PATH = path.join(__dirname, "..", "dados", "ct_config.json");
 
+function normalizeCtBaseUrl(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    const pathname = String(u.pathname || "").replace(/\/+$/, "");
+    const normalizedPath = /^\/api$/i.test(pathname) ? "" : pathname;
+    const out = `${u.protocol}//${u.host}${normalizedPath}`.replace(/\/+$/, "");
+    return out;
+  } catch {
+    // Mantém comportamento compatível para valores legacy não-URL,
+    // mas remove sufixo "/api" para evitar /api/api em runtime.
+    return raw.replace(/\/+$/, "").replace(/\/api$/i, "");
+  }
+}
+
 function safeReadJson(filePath) {
   try {
     if (!fs.existsSync(filePath)) return null;
@@ -19,7 +35,7 @@ function safeReadJson(filePath) {
 
 function readCtConfig() {
   const j = safeReadJson(CT_CONFIG_PATH) || {};
-  const ctBaseUrl = String(j.ctBaseUrl || "").trim().replace(/\/+$/, "");
+  const ctBaseUrl = normalizeCtBaseUrl(j.ctBaseUrl || "");
   const logIngestSecret = String(j.logIngestSecret || "").trim();
   return {
     ok: true,
@@ -33,7 +49,7 @@ function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
   try {
     const cur = readCtConfig();
     const next = {
-      ctBaseUrl: (ctBaseUrl !== undefined) ? String(ctBaseUrl || "").trim().replace(/\/+$/, "") : (cur.ctBaseUrl || ""),
+      ctBaseUrl: (ctBaseUrl !== undefined) ? normalizeCtBaseUrl(ctBaseUrl || "") : (cur.ctBaseUrl || ""),
       logIngestSecret: (logIngestSecret !== undefined) ? String(logIngestSecret || "").trim() : (cur.logIngestSecret || ""),
       updatedAt: Date.now()
     };
@@ -45,5 +61,5 @@ function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
   }
 }
 
-module.exports = { CT_CONFIG_PATH, readCtConfig, writeCtConfig };
+module.exports = { CT_CONFIG_PATH, readCtConfig, writeCtConfig, normalizeCtBaseUrl };
 
