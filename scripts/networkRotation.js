@@ -29,6 +29,7 @@ let timer = null;
 let inFlight = false;
 let state = null;
 let localPort = Number(process.env.PORT || 8088) || 8088;
+let lastSnapshotDebugAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -926,7 +927,7 @@ function getStateSnapshot() {
   const manualPendingStale =
     stAligned.manualTriggerPending === true
     && stAligned.inProgress !== true
-    && (now() - Number(stAligned.updatedAt || 0)) > (2 * 60 * 1000);
+    && (now() - Number(stAligned.updatedAt || 0)) > (20 * 1000);
   if (manualPendingStale) {
     saveState({
       manualTriggerPending: false,
@@ -977,6 +978,21 @@ function getStateSnapshot() {
     });
     out.nextRotationAt = repairedNextAt;
     out.countdownSec = Math.max(0, Math.ceil((repairedNextAt - now()) / 1000));
+  }
+  if ((now() - lastSnapshotDebugAt) > 30000) {
+    lastSnapshotDebugAt = now();
+    try {
+      logger.info("[NET-ROTATE] snapshot timer", {
+        enabled: cfg.enabled === true,
+        schedulerEnabled: out.schedulerEnabled === true,
+        inProgress: out.inProgress === true,
+        manualTriggerPending: out.manualTriggerPending === true,
+        countdownSec: Number(out.countdownSec || 0),
+        nextRotationAt: Number(out.nextRotationAt || 0) || 0,
+        intervalMinMinutes: cfg.intervalMinMinutes,
+        intervalMaxMinutes: cfg.intervalMaxMinutes
+      });
+    } catch {}
   }
   return out;
 }
@@ -1039,13 +1055,22 @@ function startNetworkRotationScheduler({ port } = {}) {
     }
     if (cfg && cfg.enabled === true) {
       // Regra operacional: após restart, sempre agenda próximo ciclo para frente (não executa "ciclo atrasado" herdado).
+      const bootNextAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
       saveState({
-        nextRotationAt: now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes),
+        nextRotationAt: bootNextAt,
         inProgress: false,
         inProgressSince: 0,
         manualTriggerPending: false,
         manualTriggerOptions: null
       });
+      try {
+        logger.info("[NET-ROTATE] boot timer armado", {
+          nextRotationAt: bootNextAt,
+          countdownSec: Math.max(0, Math.ceil((bootNextAt - now()) / 1000)),
+          intervalMinMinutes: cfg.intervalMinMinutes,
+          intervalMaxMinutes: cfg.intervalMaxMinutes
+        });
+      } catch {}
       try {
         provisionAudit.append({
           ts: now(),
