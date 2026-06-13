@@ -919,14 +919,30 @@ async function loopTick() {
 function getStateSnapshot() {
   const st = state || loadState();
   const cfg = getRotationConfig();
-  const safeNextRotationAt = sanitizeNextRotationAt(st, cfg);
-  if (safeNextRotationAt !== Number(st.nextRotationAt || 0)) {
+  if (Number(st.schedulerEnabled === true) !== Number(cfg.enabled === true)) {
+    saveState({ schedulerEnabled: cfg.enabled });
+  }
+  const stAligned = state || st;
+  const manualPendingStale =
+    stAligned.manualTriggerPending === true
+    && stAligned.inProgress !== true
+    && (now() - Number(stAligned.updatedAt || 0)) > (2 * 60 * 1000);
+  if (manualPendingStale) {
+    saveState({
+      manualTriggerPending: false,
+      manualTriggerOptions: null,
+      lastError: "manual_trigger_pending_stale_cleared_in_snapshot"
+    });
+  }
+  const stAfterPending = state || stAligned;
+  const safeNextRotationAt = sanitizeNextRotationAt(stAfterPending, cfg);
+  if (safeNextRotationAt !== Number(stAfterPending.nextRotationAt || 0)) {
     saveState({
       nextRotationAt: safeNextRotationAt || (cfg.enabled ? (now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes)) : 0),
       lastError: "next_rotation_sanitized_for_dashboard"
     });
   }
-  const cur = state || st;
+  const cur = state || stAfterPending;
   const out = { ...cur };
   out.intervalMinMinutes = cfg.intervalMinMinutes;
   out.intervalMaxMinutes = cfg.intervalMaxMinutes;
