@@ -156,7 +156,7 @@ function recoverStaleInProgressState(st, { reason = "stale_recovered" } = {}) {
   const cur = (st && typeof st === "object") ? st : (state || loadState());
   if (!cur || cur.inProgress !== true) return false;
   const tNow = now();
-  const startedAt = Number(cur.inProgressSince || cur.updatedAt || cur.lastRotationAt || 0) || 0;
+  const startedAt = Number(cur.inProgressSince || cur.lastRotationAt || 0) || 0;
   const stale = (startedAt <= 0) || ((tNow - startedAt) > INPROGRESS_STALE_MS);
   if (!stale) return false;
   saveState({
@@ -747,6 +747,25 @@ async function triggerNow(reason = "manual_trigger", options = null) {
 function startNetworkRotationScheduler({ port } = {}) {
   localPort = Number(port || localPort || 8088) || 8088;
   state = loadState();
+  // Reinício do processo deve sempre limpar estados transitórios para evitar UI presa em "rotacionando...".
+  if (state && (state.inProgress === true || state.manualTriggerPending === true)) {
+    saveState({
+      inProgress: false,
+      inProgressSince: 0,
+      manualTriggerPending: false,
+      manualTriggerOptions: null,
+      lastError: state.inProgress === true ? "boot_cleared_stale_inprogress" : state.lastError || null
+    });
+    try {
+      provisionAudit.append({
+        ts: now(),
+        event: "network_rotation_boot_state_cleared",
+        ok: true,
+        hadInProgress: !!state.inProgress,
+        hadManualPending: !!state.manualTriggerPending
+      });
+    } catch {}
+  }
   recoverStaleInProgressState(state, { reason: "boot_stale_recovered" });
   if (timer) return;
   timer = setInterval(() => { loopTick().catch(() => {}); }, LOOP_MS);
