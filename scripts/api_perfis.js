@@ -206,7 +206,8 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/network-rotation/trigger-now', async (req, res) => {
     try {
       const reason = String((req.body && req.body.reason) || req.headers['x-operator'] || 'dashboard_manual').slice(0, 120);
-      const r = await networkRotation.triggerNow(reason);
+      const showBrowser = (req.body && typeof req.body.showBrowser === 'boolean') ? req.body.showBrowser : true;
+      const r = await networkRotation.triggerNow(reason, { showBrowser: showBrowser === true });
       return res.json(r);
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });

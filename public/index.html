@@ -1169,21 +1169,7 @@
         <div class="form-row">
           <label>Rotação de IP — tentativas máximas por ciclo</label>
           <input type="number" id="srvNetRotateAttempts" min="1" max="5" step="1" />
-        </div>
-        <div class="form-row">
-          <label>Rotação de IP — gateway/modem (opcional)</label>
-          <input type="text" id="srvNetGatewayHost" placeholder="Ex.: 192.168.2.1" />
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
-            <input type="text" id="srvNetLoginUrl" placeholder="URL login (opcional)" />
-            <input type="text" id="srvNetRebootUrl" placeholder="URL reboot (opcional)" />
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Rotação de IP — credenciais do modem</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="text" id="srvNetUser" placeholder="Usuário" autocomplete="off" />
-            <input type="password" id="srvNetPass" placeholder="Senha" autocomplete="new-password" />
-          </div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Gateway e credenciais são gerenciados automaticamente pelo runtime.</div>
         </div>
         <div class="form-row">
           <label>Modo diário de operação</label>
@@ -1253,11 +1239,6 @@
       const netRotateMinEl = box.querySelector('#srvNetRotateMin');
       const netRotateMaxEl = box.querySelector('#srvNetRotateMax');
       const netRotateAttemptsEl = box.querySelector('#srvNetRotateAttempts');
-      const netGatewayHostEl = box.querySelector('#srvNetGatewayHost');
-      const netLoginUrlEl = box.querySelector('#srvNetLoginUrl');
-      const netRebootUrlEl = box.querySelector('#srvNetRebootUrl');
-      const netUserEl = box.querySelector('#srvNetUser');
-      const netPassEl = box.querySelector('#srvNetPass');
       const dailyModeEl = box.querySelector('#srvDailyMode');
       const dailyCloseStartTimeEl = box.querySelector('#srvDailyCloseStartTime');
       const dailyCloseEndTimeEl = box.querySelector('#srvDailyCloseEndTime');
@@ -1390,11 +1371,6 @@
         if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 60);
         if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 120);
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
-        if (netGatewayHostEl) netGatewayHostEl.value = String(net.gatewayHost || '');
-        if (netLoginUrlEl) netLoginUrlEl.value = String(net.loginUrl || '');
-        if (netRebootUrlEl) netRebootUrlEl.value = String(net.rebootUrl || '');
-        if (netUserEl) netUserEl.value = String(net.modemUsername || '');
-        if (netPassEl) netPassEl.value = String(net.modemPassword || '');
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
           dailyModeEl.value = (mode === 'window_close_open' || daily.enabled === true) ? 'window_close_open' : 'always_on_24h';
@@ -1450,14 +1426,14 @@
             const r = await fetch('/api/network-rotation/trigger-now', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_network_rotation_now' },
-              body: JSON.stringify({ reason: 'ui_manual_rotate_now' })
+              body: JSON.stringify({ reason: 'ui_manual_rotate_now', showBrowser: true })
             }).then(x => x.json()).catch(() => null);
             if (!r || r.ok !== true) {
               throw new Error((r && r.error) ? String(r.error) : 'network_rotation_trigger_failed');
             }
             await showSystemMessageModal({
               title: 'Rotação disparada',
-              message: 'Rotação manual agendada para iniciar agora. O sistema fará pausa, troca de IP e retomada automática.',
+              message: 'Rotação manual agendada para iniciar agora. O sistema fará pausa, troca de IP e retomada automática com navegador visível (com fallback seguro).',
               tone: 'good'
             });
             try { await reloadNetworkRotationState(); } catch {}
@@ -1512,11 +1488,6 @@
           const netMin = Math.floor(Number((netRotateMinEl && netRotateMinEl.value) || 60));
           const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 120));
           const netAttempts = Math.floor(Number((netRotateAttemptsEl && netRotateAttemptsEl.value) || 5));
-          const netGatewayHost = String((netGatewayHostEl && netGatewayHostEl.value) || '').trim();
-          const netLoginUrl = String((netLoginUrlEl && netLoginUrlEl.value) || '').trim();
-          const netRebootUrl = String((netRebootUrlEl && netRebootUrlEl.value) || '').trim();
-          const netUser = String((netUserEl && netUserEl.value) || '').trim();
-          const netPass = String((netPassEl && netPassEl.value) || '').trim();
           const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'always_on_24h').trim().toLowerCase();
           const dailyEnabled = dailyMode === 'window_close_open';
           const dailyCloseStartRaw = String((dailyCloseStartTimeEl && dailyCloseStartTimeEl.value) || '').trim();
@@ -1543,22 +1514,6 @@
             await showSystemMessageModal({
               title: 'Rotação de IP inválida',
               message: 'Tentativas por ciclo deve estar entre 1 e 5.',
-              tone: 'bad'
-            });
-            return;
-          }
-          if (netLoginUrl && !/^https?:\/\//i.test(netLoginUrl)) {
-            await showSystemMessageModal({ title: 'Rotação de IP inválida', message: 'URL de login deve começar com http:// ou https://', tone: 'bad' });
-            return;
-          }
-          if (netRebootUrl && !/^https?:\/\//i.test(netRebootUrl)) {
-            await showSystemMessageModal({ title: 'Rotação de IP inválida', message: 'URL de reboot deve começar com http:// ou https://', tone: 'bad' });
-            return;
-          }
-          if (netEnabled && ((!netUser || !netPass) && !(netUser.length === 0 && netPass.length === 0 && !netLoginUrl && !netRebootUrl))) {
-            await showSystemMessageModal({
-              title: 'Rotação de IP incompleta',
-              message: 'Para ativar com URLs/credenciais manuais, preencha usuário e senha do modem.',
               tone: 'bad'
             });
             return;
@@ -1632,11 +1587,11 @@
               intervalMinMinutes: netMin,
               intervalMaxMinutes: netMax,
               maxAttemptsPerCycle: netAttempts,
-              gatewayHost: netGatewayHost,
-              loginUrl: netLoginUrl,
-              rebootUrl: netRebootUrl,
-              modemUsername: netUser,
-              modemPassword: netPass
+              gatewayHost: '',
+              loginUrl: '',
+              rebootUrl: '',
+              modemUsername: '',
+              modemPassword: ''
             },
             dailyWindow: {
               enabled: dailyEnabled,

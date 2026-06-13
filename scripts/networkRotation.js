@@ -15,6 +15,11 @@ const execAsync = promisify(exec);
 const DADOS_DIR = path.join(__dirname, "..", "dados");
 const STATE_PATH = path.join(DADOS_DIR, "network_rotation_state.json");
 const LOOP_MS = 5000;
+const PUBLIC_IP_REFRESH_MS = 2 * 60 * 1000;
+const AUTO_DEFAULT_MODEM_LOGIN_URL = String(process.env.NETWORK_ROTATION_DEFAULT_LOGIN_URL || "http://192.168.2.1:2080/").trim();
+const AUTO_DEFAULT_MODEM_REBOOT_URL = String(process.env.NETWORK_ROTATION_DEFAULT_REBOOT_URL || "http://192.168.2.1:2080/Reboot").trim();
+const AUTO_DEFAULT_MODEM_USER = String(process.env.NETWORK_ROTATION_DEFAULT_MODEM_USER || "SupAdmin").trim();
+const AUTO_DEFAULT_MODEM_PASSWORD = String(process.env.NETWORK_ROTATION_DEFAULT_MODEM_PASSWORD || "AdminSup3031").trim();
 
 let timer = null;
 let inFlight = false;
@@ -64,7 +69,9 @@ function buildDefaultState() {
     activeGateway: null,
     selectedFlow: null,
     manualTriggerPending: false,
+    manualTriggerOptions: null,
     credentialCache: null, // { username, password, savedAt }
+    lastPublicIpCheckAt: 0,
     lastError: null
   };
 }
@@ -108,6 +115,37 @@ function parseCredentialCandidates(cfgNet = null) {
   const cfgUser = String(cfgNet && cfgNet.modemUsername || "").trim();
   const cfgPass = String(cfgNet && cfgNet.modemPassword || "").trim();
   if (cfgUser && cfgPass) out.unshift({ username: cfgUser, password: cfgPass, source: "server_config" });
+  if (AUTO_DEFAULT_MODEM_USER && AUTO_DEFAULT_MODEM_PASSWORD) {
+    out.push({ username: AUTO_DEFAULT_MODEM_USER, password: AUTO_DEFAULT_MODEM_PASSWORD, source: "autofill_default" });
+  }
+  return out.filter((x, idx, arr) => {
+    const key = `${String(x && x.username || "").trim()}::${String(x && x.password || "").trim()}`;
+    return key !== "::" && arr.findIndex((y) => `${String(y && y.username || "").trim()}::${String(y && y.password || "").trim()}` === key) === idx;
+  });
+}
+
+function getHostFromUrl(url) {
+  try {
+    const u = new URL(String(url || "").trim());
+    return String(u.hostname || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function dedupeFlows(list) {
+  const out = [];
+  const seen = new Set();
+  for (const flow of (Array.isArray(list) ? list : [])) {
+    if (!flow || !flow.loginUrl || !flow.rebootUrl) continue;
+    const key = `${String(flow.loginUrl).trim()}::${String(flow.rebootUrl).trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      ...flow,
+      gatewayHost: String(flow.gatewayHost || getHostFromUrl(flow.loginUrl) || "").trim() || null
+    });
+  }
   return out;
 }
 
@@ -129,7 +167,16 @@ function buildFlowCandidates(gatewayIp) {
   const cfg = serverConfig.readServerConfigEffective({});
   const nr = (cfg && cfg.networkRotation) ? cfg.networkRotation : {};
   const gw = String(gatewayIp || nr.gatewayHost || "").trim();
+  const st = state || loadState();
   const out = [];
+  if (st && st.selectedFlow && st.selectedFlow.loginUrl && st.selectedFlow.rebootUrl) {
+    out.push({
+      name: "state_cached_flow",
+      loginUrl: String(st.selectedFlow.loginUrl).trim(),
+      rebootUrl: String(st.selectedFlow.rebootUrl).trim(),
+      gatewayHost: String(st.selectedFlow.gatewayHost || getHostFromUrl(st.selectedFlow.loginUrl) || "").trim() || null
+    });
+  }
   if (String(nr.loginUrl || "").trim() && String(nr.rebootUrl || "").trim()) {
     out.push({
       name: "config_urls",
@@ -143,7 +190,15 @@ function buildFlowCandidates(gatewayIp) {
     out.push({ name: "gw_https_reboot", loginUrl: `https://${gw}/`, rebootUrl: `https://${gw}/Reboot`, gatewayHost: gw });
     out.push({ name: "gw_http_admin_login", loginUrl: `http://${gw}/admin/login.asp`, rebootUrl: `http://${gw}/Reboot`, gatewayHost: gw });
   }
-  return out;
+  if (AUTO_DEFAULT_MODEM_LOGIN_URL && AUTO_DEFAULT_MODEM_REBOOT_URL) {
+    out.push({
+      name: "autofill_default_urls",
+      loginUrl: AUTO_DEFAULT_MODEM_LOGIN_URL,
+      rebootUrl: AUTO_DEFAULT_MODEM_REBOOT_URL,
+      gatewayHost: getHostFromUrl(AUTO_DEFAULT_MODEM_LOGIN_URL)
+    });
+  }
+  return dedupeFlows(out);
 }
 
 function httpProbe(url, timeoutMs = 4000) {
@@ -187,6 +242,25 @@ async function getPublicIp() {
     } catch {}
   }
   return null;
+}
+
+async function refreshPublicIpSnapshot({ force = false } = {}) {
+  const st = state || loadState();
+  const tNow = now();
+  const shouldRefresh = force
+    || !st.lastPublicIpCheckAt
+    || ((tNow - Number(st.lastPublicIpCheckAt || 0)) >= PUBLIC_IP_REFRESH_MS);
+  if (!shouldRefresh) return st.currentPublicIp || null;
+  const ip = await getPublicIp();
+  if (ip) {
+    saveState({
+      currentPublicIp: ip,
+      lastPublicIpCheckAt: tNow
+    });
+  } else {
+    saveState({ lastPublicIpCheckAt: tNow });
+  }
+  return ip || st.currentPublicIp || null;
 }
 
 async function httpJson(url, body = null, timeoutMs = 45000) {
@@ -257,13 +331,34 @@ async function findRebootButton(page) {
   return null;
 }
 
-async function runRebootAttempt({ flow, credential, cfg, timeline }) {
-  const browser = await puppeteer.launch({
-    headless: true,
+async function launchBrowserForAttempt({ showBrowser = false, timeline = null, flow = null }) {
+  const baseOptions = {
     defaultViewport: { width: 1366, height: 768 },
     ignoreHTTPSErrors: true,
     args: ["--ignore-certificate-errors"]
-  });
+  };
+  if (showBrowser) {
+    try {
+      const b = await puppeteer.launch({ ...baseOptions, headless: false });
+      if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "visible", flow: flow && flow.name ? flow.name : null });
+      return b;
+    } catch (e) {
+      if (Array.isArray(timeline)) {
+        timeline.push({
+          ts: now(),
+          step: "browser_visible_launch_failed_fallback_headless",
+          error: (e && e.message) ? String(e.message) : String(e)
+        });
+      }
+    }
+  }
+  const b = await puppeteer.launch({ ...baseOptions, headless: true });
+  if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "headless", flow: flow && flow.name ? flow.name : null });
+  return b;
+}
+
+async function runRebootAttempt({ flow, credential, cfg, timeline, showBrowser = false }) {
+  const browser = await launchBrowserForAttempt({ showBrowser, timeline, flow });
   const page = await browser.newPage();
   page.setDefaultTimeout(20000);
   try {
@@ -324,7 +419,7 @@ function getRotationConfig() {
   };
 }
 
-async function runCycle() {
+async function runCycle({ manualOptions = null } = {}) {
   const cfg = getRotationConfig();
   const cfgAll = serverConfig.readServerConfigEffective({});
   const cfgNet = (cfgAll && cfgAll.networkRotation) ? cfgAll.networkRotation : {};
@@ -353,6 +448,9 @@ async function runCycle() {
   });
 
   let ipBefore = await getPublicIp();
+  if (!ipBefore) {
+    ipBefore = await refreshPublicIpSnapshot({ force: true });
+  }
   let ipCurrent = ipBefore || state.currentPublicIp || null;
   let selectedFlow = null;
   let selectedCredential = null;
@@ -363,6 +461,7 @@ async function runCycle() {
   let resumeResult = null;
   let pausedNames = [];
   let rebootDetected = false;
+  const manualShowBrowser = !!(manualOptions && manualOptions.showBrowser === true);
 
   try {
     pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
@@ -384,8 +483,15 @@ async function runCycle() {
       const flow = flows[i % flows.length];
       selectedFlow = flow;
       selectedCredential = cred;
-      timeline.push({ ts: now(), step: "attempt_begin", attempt: attempts, flow: flow.name, credSource: cred.source || "unknown" });
-      const rr = await runRebootAttempt({ flow, credential: cred, cfg, timeline });
+      timeline.push({
+        ts: now(),
+        step: "attempt_begin",
+        attempt: attempts,
+        flow: flow.name,
+        credSource: cred.source || "unknown",
+        showBrowser: manualShowBrowser
+      });
+      const rr = await runRebootAttempt({ flow, credential: cred, cfg, timeline, showBrowser: manualShowBrowser });
       if (!rr.ok) {
         timeline.push({ ts: now(), step: "attempt_fail", attempt: attempts, error: rr.error || "attempt_failed" });
         continue;
@@ -455,7 +561,15 @@ async function runCycle() {
     currentPublicIp: ipCurrent || state.currentPublicIp || null,
     nextRotationAt: cfg.enabled ? (doneAt + nextDelay) : 0,
     manualTriggerPending: false,
-    selectedFlow: selectedFlow ? { name: selectedFlow.name, loginUrl: selectedFlow.loginUrl, rebootUrl: selectedFlow.rebootUrl } : null,
+    manualTriggerOptions: null,
+    activeGateway: (selectedFlow && selectedFlow.gatewayHost) ? String(selectedFlow.gatewayHost) : (gateway || null),
+    selectedFlow: selectedFlow ? {
+      name: selectedFlow.name,
+      loginUrl: selectedFlow.loginUrl,
+      rebootUrl: selectedFlow.rebootUrl,
+      gatewayHost: selectedFlow.gatewayHost || null
+    } : null,
+    lastPublicIpCheckAt: now(),
     lastError: cycleError || null
   };
   if (selectedCredential && changed) {
@@ -487,6 +601,7 @@ async function loopTick() {
   try {
     const cfg = getRotationConfig();
     const st = state || loadState();
+    try { await refreshPublicIpSnapshot({ force: false }); } catch {}
     if (cfg.enabled !== !!st.schedulerEnabled) {
       const patch = { schedulerEnabled: cfg.enabled };
       if (cfg.enabled && !st.nextRotationAt) patch.nextRotationAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
@@ -505,8 +620,11 @@ async function loopTick() {
     if (now() < Number(cur.nextRotationAt || 0)) return;
     try {
       if (manualPending) {
-        saveState({ manualTriggerPending: false });
-        await runCycle();
+        const manualOptions = (cur && cur.manualTriggerOptions && typeof cur.manualTriggerOptions === "object")
+          ? { ...cur.manualTriggerOptions }
+          : null;
+        saveState({ manualTriggerPending: false, manualTriggerOptions: null });
+        await runCycle({ manualOptions });
       } else {
         await runCycle();
       }
@@ -532,11 +650,14 @@ function getStateSnapshot() {
   return out;
 }
 
-async function triggerNow(reason = "manual_trigger") {
+async function triggerNow(reason = "manual_trigger", options = null) {
   saveState({
     nextRotationAt: now(),
     manualTriggerPending: true,
-    triggerReason: String(reason || "").slice(0, 120)
+    triggerReason: String(reason || "").slice(0, 120),
+    manualTriggerOptions: {
+      showBrowser: !!(options && options.showBrowser === true)
+    }
   });
   return { ok: true };
 }
