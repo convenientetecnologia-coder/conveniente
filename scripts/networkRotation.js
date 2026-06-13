@@ -16,6 +16,8 @@ const DADOS_DIR = path.join(__dirname, "..", "dados");
 const STATE_PATH = path.join(DADOS_DIR, "network_rotation_state.json");
 const LOOP_MS = 5000;
 const PUBLIC_IP_REFRESH_MS = 2 * 60 * 1000;
+const BROWSER_LAUNCH_TIMEOUT_MS = Math.max(5000, Number(process.env.NETWORK_ROTATION_BROWSER_LAUNCH_TIMEOUT_MS || 25000) || 25000);
+const INPROGRESS_STALE_MS = Math.max(60 * 1000, Number(process.env.NETWORK_ROTATION_INPROGRESS_STALE_MS || (25 * 60 * 1000)) || (25 * 60 * 1000));
 const AUTO_DEFAULT_MODEM_LOGIN_URL = String(process.env.NETWORK_ROTATION_DEFAULT_LOGIN_URL || "http://192.168.2.1:2080/").trim();
 const AUTO_DEFAULT_MODEM_REBOOT_URL = String(process.env.NETWORK_ROTATION_DEFAULT_REBOOT_URL || "http://192.168.2.1:2080/Reboot").trim();
 const AUTO_DEFAULT_MODEM_USER = String(process.env.NETWORK_ROTATION_DEFAULT_MODEM_USER || "SupAdmin").trim();
@@ -62,6 +64,7 @@ function buildDefaultState() {
     lastRotationOk: null,
     lastRotationSummary: null,
     inProgress: false,
+    inProgressSince: 0,
     currentPublicIp: null,
     previousPublicIp: null,
     attemptsLastCycle: 0,
@@ -147,6 +150,28 @@ function dedupeFlows(list) {
     });
   }
   return out;
+}
+
+async function withTimeout(promise, timeoutMs, timeoutLabel = "operation_timeout") {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(timeoutLabel));
+    }, Math.max(1000, Number(timeoutMs) || 1000));
+    promise.then((v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      reject(e);
+    });
+  });
 }
 
 async function getDefaultGatewayIpv4() {
@@ -339,7 +364,11 @@ async function launchBrowserForAttempt({ showBrowser = false, timeline = null, f
   };
   if (showBrowser) {
     try {
-      const b = await puppeteer.launch({ ...baseOptions, headless: false });
+      const b = await withTimeout(
+        puppeteer.launch({ ...baseOptions, headless: false }),
+        BROWSER_LAUNCH_TIMEOUT_MS,
+        "visible_browser_launch_timeout"
+      );
       if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "visible", flow: flow && flow.name ? flow.name : null });
       return b;
     } catch (e) {
@@ -352,7 +381,11 @@ async function launchBrowserForAttempt({ showBrowser = false, timeline = null, f
       }
     }
   }
-  const b = await puppeteer.launch({ ...baseOptions, headless: true });
+  const b = await withTimeout(
+    puppeteer.launch({ ...baseOptions, headless: true }),
+    BROWSER_LAUNCH_TIMEOUT_MS,
+    "headless_browser_launch_timeout"
+  );
   if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "headless", flow: flow && flow.name ? flow.name : null });
   return b;
 }
@@ -440,6 +473,7 @@ async function runCycle({ manualOptions = null } = {}) {
 
   saveState({
     inProgress: true,
+    inProgressSince: now(),
     schedulerEnabled: cfg.enabled,
     activeGateway: gateway || null,
     lastError: null,
@@ -550,6 +584,7 @@ async function runCycle({ manualOptions = null } = {}) {
 
   const nextStatePatch = {
     inProgress: false,
+    inProgressSince: 0,
     schedulerEnabled: cfg.enabled,
     lastRotationAt: t0,
     lastRotationFinishedAt: doneAt,
@@ -609,14 +644,37 @@ async function loopTick() {
       saveState(patch);
     }
     const cur0 = state || st;
-    const manualPending = cur0.manualTriggerPending === true;
+    if (cur0 && cur0.inProgress === true) {
+      const startedAt = Number(cur0.inProgressSince || 0) || 0;
+      if (startedAt > 0 && (now() - startedAt) > INPROGRESS_STALE_MS) {
+        const recoveredAt = now();
+        saveState({
+          inProgress: false,
+          inProgressSince: 0,
+          manualTriggerPending: false,
+          manualTriggerOptions: null,
+          lastError: "rotation_cycle_stale_recovered",
+          lastRotationFinishedAt: recoveredAt
+        });
+        try {
+          provisionAudit.append({
+            ts: recoveredAt,
+            event: "network_rotation_stale_recovered",
+            ok: false,
+            error: "rotation_cycle_stale_recovered"
+          });
+        } catch {}
+      }
+    }
+    const cur1 = state || st;
+    if (cur1.inProgress) return;
+    const manualPending = cur1.manualTriggerPending === true;
     if (!cfg.enabled && !manualPending) return;
     const cur = state || st;
     if (!cur.nextRotationAt) {
       saveState({ nextRotationAt: now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes) });
       return;
     }
-    if (cur.inProgress) return;
     if (now() < Number(cur.nextRotationAt || 0)) return;
     try {
       if (manualPending) {
