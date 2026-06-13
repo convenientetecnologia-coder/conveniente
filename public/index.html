@@ -1186,16 +1186,30 @@
           </div>
         </div>
         <div class="form-row">
-          <label>Janela diária — fechamento e abertura automáticos</label>
-          <select id="srvDailyWindowEnabled">
-            <option value="0">Desativado</option>
-            <option value="1">Ativado</option>
+          <label>Modo diário de operação</label>
+          <select id="srvDailyMode">
+            <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
+            <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
           </select>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
-            <input type="time" id="srvDailyCloseTime" />
-            <input type="time" id="srvDailyOpenTime" />
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Fechar: início
+              <input type="time" id="srvDailyCloseStartTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Fechar: fim
+              <input type="time" id="srvDailyCloseEndTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Abrir: início
+              <input type="time" id="srvDailyOpenStartTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Abrir: fim
+              <input type="time" id="srvDailyOpenEndTime" />
+            </label>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">No horário de fechar, executa o mesmo fluxo do botão Fechar Todos e valida que não sobrou navegador ativo. No horário de abrir, executa Abrir Todos 24h.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 23:00-00:00, abrir 06:00-07:00.</div>
         </div>
         <div class="form-row">
           <label>Robe — tipo de trabalho</label>
@@ -1244,9 +1258,11 @@
       const netRebootUrlEl = box.querySelector('#srvNetRebootUrl');
       const netUserEl = box.querySelector('#srvNetUser');
       const netPassEl = box.querySelector('#srvNetPass');
-      const dailyWindowEnabledEl = box.querySelector('#srvDailyWindowEnabled');
-      const dailyCloseTimeEl = box.querySelector('#srvDailyCloseTime');
-      const dailyOpenTimeEl = box.querySelector('#srvDailyOpenTime');
+      const dailyModeEl = box.querySelector('#srvDailyMode');
+      const dailyCloseStartTimeEl = box.querySelector('#srvDailyCloseStartTime');
+      const dailyCloseEndTimeEl = box.querySelector('#srvDailyCloseEndTime');
+      const dailyOpenStartTimeEl = box.querySelector('#srvDailyOpenStartTime');
+      const dailyOpenEndTimeEl = box.querySelector('#srvDailyOpenEndTime');
       const memGovEnterEl = box.querySelector('#srvMemGovEnter');
       const memGovExitEl = box.querySelector('#srvMemGovExit');
       const memHostBaseEl = box.querySelector('#srvMemHostBase');
@@ -1379,16 +1395,29 @@
         if (netRebootUrlEl) netRebootUrlEl.value = String(net.rebootUrl || '');
         if (netUserEl) netUserEl.value = String(net.modemUsername || '');
         if (netPassEl) netPassEl.value = String(net.modemPassword || '');
-        if (dailyWindowEnabledEl) dailyWindowEnabledEl.value = daily.enabled === true ? '1' : '0';
-        if (dailyCloseTimeEl) {
-          const hh = String(Number(daily.closeHour || 23)).padStart(2, '0');
-          const mm = String(Number(daily.closeMinute || 0)).padStart(2, '0');
-          dailyCloseTimeEl.value = `${hh}:${mm}`;
+        if (dailyModeEl) {
+          const mode = String(daily.executionMode || '').trim().toLowerCase();
+          dailyModeEl.value = (mode === 'window_close_open' || daily.enabled === true) ? 'window_close_open' : 'always_on_24h';
         }
-        if (dailyOpenTimeEl) {
-          const hh = String(Number(daily.openHour || 7)).padStart(2, '0');
-          const mm = String(Number(daily.openMinute || 0)).padStart(2, '0');
-          dailyOpenTimeEl.value = `${hh}:${mm}`;
+        if (dailyCloseStartTimeEl) {
+          const hh = String(Number(daily.closeWindowStartHour || 23)).padStart(2, '0');
+          const mm = String(Number(daily.closeWindowStartMinute || 0)).padStart(2, '0');
+          dailyCloseStartTimeEl.value = `${hh}:${mm}`;
+        }
+        if (dailyCloseEndTimeEl) {
+          const hh = String(Number(daily.closeWindowEndHour || 0)).padStart(2, '0');
+          const mm = String(Number(daily.closeWindowEndMinute || 0)).padStart(2, '0');
+          dailyCloseEndTimeEl.value = `${hh}:${mm}`;
+        }
+        if (dailyOpenStartTimeEl) {
+          const hh = String(Number(daily.openWindowStartHour || 6)).padStart(2, '0');
+          const mm = String(Number(daily.openWindowStartMinute || 0)).padStart(2, '0');
+          dailyOpenStartTimeEl.value = `${hh}:${mm}`;
+        }
+        if (dailyOpenEndTimeEl) {
+          const hh = String(Number(daily.openWindowEndHour || 7)).padStart(2, '0');
+          const mm = String(Number(daily.openWindowEndMinute || 0)).padStart(2, '0');
+          dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
         workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
@@ -1488,9 +1517,12 @@
           const netRebootUrl = String((netRebootUrlEl && netRebootUrlEl.value) || '').trim();
           const netUser = String((netUserEl && netUserEl.value) || '').trim();
           const netPass = String((netPassEl && netPassEl.value) || '').trim();
-          const dailyEnabled = String((dailyWindowEnabledEl && dailyWindowEnabledEl.value) || '0') === '1';
-          const dailyCloseRaw = String((dailyCloseTimeEl && dailyCloseTimeEl.value) || '').trim();
-          const dailyOpenRaw = String((dailyOpenTimeEl && dailyOpenTimeEl.value) || '').trim();
+          const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'always_on_24h').trim().toLowerCase();
+          const dailyEnabled = dailyMode === 'window_close_open';
+          const dailyCloseStartRaw = String((dailyCloseStartTimeEl && dailyCloseStartTimeEl.value) || '').trim();
+          const dailyCloseEndRaw = String((dailyCloseEndTimeEl && dailyCloseEndTimeEl.value) || '').trim();
+          const dailyOpenStartRaw = String((dailyOpenStartTimeEl && dailyOpenStartTimeEl.value) || '').trim();
+          const dailyOpenEndRaw = String((dailyOpenEndTimeEl && dailyOpenEndTimeEl.value) || '').trim();
           if (!Number.isFinite(cooldownMin) || !Number.isFinite(cooldownMax) || cooldownMin < 1 || cooldownMax < 1 || cooldownMin > 1440 || cooldownMax > 1440 || cooldownMax < cooldownMin) {
             await showSystemMessageModal({
               title: 'Configuração inválida',
@@ -1538,22 +1570,26 @@
             if (!Number.isFinite(h) || !Number.isFinite(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) return null;
             return { h, m: mm };
           };
-          const closeHm = parseHm(dailyCloseRaw);
-          const openHm = parseHm(dailyOpenRaw);
-          if (!closeHm || !openHm) {
+          const closeStartHm = parseHm(dailyCloseStartRaw);
+          const closeEndHm = parseHm(dailyCloseEndRaw);
+          const openStartHm = parseHm(dailyOpenStartRaw);
+          const openEndHm = parseHm(dailyOpenEndRaw);
+          if (!closeStartHm || !closeEndHm || !openStartHm || !openEndHm) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
-              message: 'Defina horários válidos no formato HH:MM para fechar e abrir.',
+              message: 'Defina horários válidos no formato HH:MM para início/fim das janelas de fechar e abrir.',
               tone: 'bad'
             });
             return;
           }
-          const closeMin = (closeHm.h * 60) + closeHm.m;
-          const openMin = (openHm.h * 60) + openHm.m;
-          if (openMin >= closeMin) {
+          const hmToMin = ({ h, m }) => (h * 60) + m;
+          const windowDuration = (startMin, endMin) => (endMin > startMin) ? (endMin - startMin) : ((24 * 60 - startMin) + endMin);
+          const closeDur = windowDuration(hmToMin(closeStartHm), hmToMin(closeEndHm));
+          const openDur = windowDuration(hmToMin(openStartHm), hmToMin(openEndHm));
+          if (closeDur < 1 || closeDur > (12 * 60) || openDur < 1 || openDur > (12 * 60)) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
-              message: 'Abertura deve ser antes do fechamento (ex.: abre 07:00 e fecha 23:00).',
+              message: 'Cada janela (fechar/abrir) deve ter duração entre 1 minuto e 12 horas.',
               tone: 'bad'
             });
             return;
@@ -1604,10 +1640,15 @@
             },
             dailyWindow: {
               enabled: dailyEnabled,
-              closeHour: closeHm.h,
-              closeMinute: closeHm.m,
-              openHour: openHm.h,
-              openMinute: openHm.m
+              executionMode: dailyMode === 'window_close_open' ? 'window_close_open' : 'always_on_24h',
+              closeWindowStartHour: closeStartHm.h,
+              closeWindowStartMinute: closeStartHm.m,
+              closeWindowEndHour: closeEndHm.h,
+              closeWindowEndMinute: closeEndHm.m,
+              openWindowStartHour: openStartHm.h,
+              openWindowStartMinute: openStartHm.m,
+              openWindowEndHour: openEndHm.h,
+              openWindowEndMinute: openEndHm.m
             },
             robe: {
               cooldownMinMinutes: cooldownMin,

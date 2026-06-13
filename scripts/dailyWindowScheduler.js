@@ -42,8 +42,9 @@ function buildDefaultState() {
     inProgress: false,
     lastCloseAt: 0,
     lastOpenAt: 0,
-    lastCloseKey: "",
-    lastOpenKey: "",
+    nextCloseAt: 0,
+    nextOpenAt: 0,
+    scheduleSignature: "",
     lastError: null
   };
 }
@@ -75,11 +76,64 @@ async function httpJson(url, body = null, timeoutMs = 180000) {
   }
 }
 
-function getNowDateMeta() {
-  const d = new Date();
-  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const minutes = d.getHours() * 60 + d.getMinutes();
-  return { key, minutes };
+function localMidnightTs(ts) {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function hmToMin(h, m) {
+  const hh = Math.max(0, Math.min(23, Math.floor(Number(h) || 0)));
+  const mm = Math.max(0, Math.min(59, Math.floor(Number(m) || 0)));
+  return (hh * 60) + mm;
+}
+
+function randomBetweenMs(startMs, endMs) {
+  const s = Number(startMs) || 0;
+  const e = Number(endMs) || 0;
+  if (e <= s) return s;
+  const span = e - s;
+  return s + Math.floor(Math.random() * (span + 1));
+}
+
+function computeNextRandomAtFromWindow({ nowTs, startMin, endMin, skipCurrentInterval = false }) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const baseMidnight = localMidnightTs(nowTs);
+  const crossesMidnight = endMin <= startMin;
+  const intervals = [];
+  for (let offset = -1; offset <= 3; offset += 1) {
+    const start = baseMidnight + (offset * dayMs) + (startMin * 60000);
+    const end = baseMidnight + (offset * dayMs) + (endMin * 60000) + (crossesMidnight ? dayMs : 0);
+    intervals.push({ start, end });
+  }
+  intervals.sort((a, b) => a.start - b.start);
+  const leadMs = 5000;
+  const minTs = nowTs + leadMs;
+  for (const interval of intervals) {
+    if (interval.end < minTs) continue;
+    if (skipCurrentInterval && interval.start <= minTs && minTs <= interval.end) continue;
+    const fromTs = Math.max(interval.start, minTs);
+    if (fromTs <= interval.end) return randomBetweenMs(fromTs, interval.end);
+  }
+  return nowTs + (60 * 60 * 1000);
+}
+
+function getDailyWindowMeta(dw) {
+  const closeWindowStartMin = hmToMin(dw.closeWindowStartHour, dw.closeWindowStartMinute);
+  const closeWindowEndMin = hmToMin(dw.closeWindowEndHour, dw.closeWindowEndMinute);
+  const openWindowStartMin = hmToMin(dw.openWindowStartHour, dw.openWindowStartMinute);
+  const openWindowEndMin = hmToMin(dw.openWindowEndHour, dw.openWindowEndMinute);
+  const signature = [
+    closeWindowStartMin, closeWindowEndMin,
+    openWindowStartMin, openWindowEndMin
+  ].join("|");
+  return {
+    closeWindowStartMin,
+    closeWindowEndMin,
+    openWindowStartMin,
+    openWindowEndMin,
+    signature
+  };
 }
 
 async function listActiveNames() {
@@ -99,7 +153,7 @@ async function waitAllClosed({ timeoutMs = 8 * 60 * 1000 } = {}) {
   return { ok: activeRemaining.length === 0, activeRemaining };
 }
 
-async function runCloseRoutine({ dayKey }) {
+async function runCloseRoutine() {
   const first = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, {}, 20 * 60 * 1000);
   if (!first || first.ok !== true) {
     return { ok: false, error: (first && first.error) ? String(first.error) : "close_all_failed" };
@@ -117,16 +171,16 @@ async function runCloseRoutine({ dayKey }) {
       activeRemaining: verify.activeRemaining
     };
   }
-  saveState({ lastCloseAt: now(), lastCloseKey: dayKey, lastError: null });
+  saveState({ lastCloseAt: now(), lastError: null });
   return { ok: true };
 }
 
-async function runOpenRoutine({ dayKey }) {
+async function runOpenRoutine() {
   const r = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/open-all-24h`, {}, 5 * 60 * 1000);
   if (!r || r.ok !== true) {
     return { ok: false, error: (r && r.error) ? String(r.error) : "open_all_failed" };
   }
-  saveState({ lastOpenAt: now(), lastOpenKey: dayKey, lastError: null });
+  saveState({ lastOpenAt: now(), lastError: null });
   return { ok: true };
 }
 
@@ -136,31 +190,108 @@ async function tick() {
   try {
     const cfg = serverConfig.readServerConfigEffective({});
     const dw = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
-    if (dw.enabled !== true) return;
+    const mode = String(dw.executionMode || "").trim().toLowerCase();
+    const windowModeEnabled = (mode === "window_close_open") && dw.enabled === true;
+    if (!windowModeEnabled) {
+      const cur = state || loadState();
+      if (Number(cur.nextCloseAt || 0) > 0 || Number(cur.nextOpenAt || 0) > 0 || String(cur.scheduleSignature || "").length) {
+        saveState({ nextCloseAt: 0, nextOpenAt: 0, scheduleSignature: "", inProgress: false });
+      }
+      return;
+    }
 
-    const closeTargetMin = (Number(dw.closeHour || 0) * 60) + Number(dw.closeMinute || 0);
-    const openTargetMin = (Number(dw.openHour || 0) * 60) + Number(dw.openMinute || 0);
-    const meta = getNowDateMeta();
+    const nowTs = now();
+    const meta = getDailyWindowMeta(dw);
     const cur = state || loadState();
-    // Janela diária padrão (aberto no intervalo [open, close), fechado fora dele).
-    const inOpenWindow = meta.minutes >= openTargetMin && meta.minutes < closeTargetMin;
-    const inCloseWindow = !inOpenWindow;
-    const dueClose = inCloseWindow && cur.lastCloseKey !== meta.key;
-    const dueOpen = inOpenWindow && cur.lastOpenKey !== meta.key;
+    const changedSchedule = String(cur.scheduleSignature || "") !== String(meta.signature || "");
+    if (changedSchedule) {
+      cur.nextCloseAt = computeNextRandomAtFromWindow({
+        nowTs,
+        startMin: meta.closeWindowStartMin,
+        endMin: meta.closeWindowEndMin
+      });
+      cur.nextOpenAt = computeNextRandomAtFromWindow({
+        nowTs,
+        startMin: meta.openWindowStartMin,
+        endMin: meta.openWindowEndMin
+      });
+      cur.scheduleSignature = meta.signature;
+      saveState({
+        nextCloseAt: cur.nextCloseAt,
+        nextOpenAt: cur.nextOpenAt,
+        scheduleSignature: cur.scheduleSignature
+      });
+    } else {
+      if (!Number(cur.nextCloseAt) || Number(cur.nextCloseAt) < (nowTs - 60 * 1000)) {
+        cur.nextCloseAt = computeNextRandomAtFromWindow({
+          nowTs,
+          startMin: meta.closeWindowStartMin,
+          endMin: meta.closeWindowEndMin
+        });
+        saveState({ nextCloseAt: cur.nextCloseAt });
+      }
+      if (!Number(cur.nextOpenAt) || Number(cur.nextOpenAt) < (nowTs - 60 * 1000)) {
+        cur.nextOpenAt = computeNextRandomAtFromWindow({
+          nowTs,
+          startMin: meta.openWindowStartMin,
+          endMin: meta.openWindowEndMin
+        });
+        saveState({ nextOpenAt: cur.nextOpenAt });
+      }
+    }
+
+    const dueClose = Number(cur.nextCloseAt || 0) > 0 && nowTs >= Number(cur.nextCloseAt || 0);
+    const dueOpen = Number(cur.nextOpenAt || 0) > 0 && nowTs >= Number(cur.nextOpenAt || 0);
 
     if (dueClose) {
       saveState({ inProgress: true });
-      const rr = await runCloseRoutine({ dayKey: meta.key });
-      saveState({ inProgress: false, lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "close_unknown_error") });
-      try { provisionAudit.append({ ts: now(), event: "daily_window_close", ok: !!(rr && rr.ok === true), error: rr && rr.error ? String(rr.error) : null }); } catch {}
+      const rr = await runCloseRoutine();
+      const nextCloseAt = computeNextRandomAtFromWindow({
+        nowTs: now(),
+        startMin: meta.closeWindowStartMin,
+        endMin: meta.closeWindowEndMin,
+        skipCurrentInterval: true
+      });
+      saveState({
+        inProgress: false,
+        nextCloseAt,
+        lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "close_unknown_error")
+      });
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_close",
+          ok: !!(rr && rr.ok === true),
+          error: rr && rr.error ? String(rr.error) : null,
+          nextCloseAt
+        });
+      } catch {}
       if (!rr.ok) logger.warn("[DAILY-WINDOW] close falhou", rr || {});
       return;
     }
     if (dueOpen) {
       saveState({ inProgress: true });
-      const rr = await runOpenRoutine({ dayKey: meta.key });
-      saveState({ inProgress: false, lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "open_unknown_error") });
-      try { provisionAudit.append({ ts: now(), event: "daily_window_open", ok: !!(rr && rr.ok === true), error: rr && rr.error ? String(rr.error) : null }); } catch {}
+      const rr = await runOpenRoutine();
+      const nextOpenAt = computeNextRandomAtFromWindow({
+        nowTs: now(),
+        startMin: meta.openWindowStartMin,
+        endMin: meta.openWindowEndMin,
+        skipCurrentInterval: true
+      });
+      saveState({
+        inProgress: false,
+        nextOpenAt,
+        lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "open_unknown_error")
+      });
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_open",
+          ok: !!(rr && rr.ok === true),
+          error: rr && rr.error ? String(rr.error) : null,
+          nextOpenAt
+        });
+      } catch {}
       if (!rr.ok) logger.warn("[DAILY-WINDOW] open falhou", rr || {});
     }
   } catch (e) {

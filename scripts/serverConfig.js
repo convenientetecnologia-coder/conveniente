@@ -76,10 +76,15 @@ const DEFAULTS = Object.freeze({
   },
   dailyWindow: {
     enabled: false,
-    closeHour: 23,
-    closeMinute: 0,
-    openHour: 7,
-    openMinute: 0
+    executionMode: "always_on_24h",
+    closeWindowStartHour: 23,
+    closeWindowStartMinute: 0,
+    closeWindowEndHour: 0,
+    closeWindowEndMinute: 0,
+    openWindowStartHour: 6,
+    openWindowStartMinute: 0,
+    openWindowEndHour: 7,
+    openWindowEndMinute: 0
   }
 });
 
@@ -90,6 +95,16 @@ function toNum(v, fallback = 0) {
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
+}
+
+function hmToMin(h, m) {
+  return (Math.max(0, Math.min(23, Math.floor(Number(h) || 0))) * 60) + Math.max(0, Math.min(59, Math.floor(Number(m) || 0)));
+}
+
+function windowDurationMinutes(startMin, endMin) {
+  const s = Math.max(0, Math.min(1439, Math.floor(Number(startMin) || 0)));
+  const e = Math.max(0, Math.min(1439, Math.floor(Number(endMin) || 0)));
+  return e > s ? (e - s) : ((1440 - s) + e);
 }
 
 function cityNormKey(v) {
@@ -230,10 +245,28 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const rebootUrl = String(net.rebootUrl || DEFAULTS.networkRotation.rebootUrl).trim().slice(0, 240);
   const modemUsername = String(net.modemUsername || DEFAULTS.networkRotation.modemUsername).trim().slice(0, 120);
   const modemPassword = String(net.modemPassword || DEFAULTS.networkRotation.modemPassword).trim().slice(0, 180);
-  const closeHour = clamp(Math.floor(toNum(daily.closeHour, DEFAULTS.dailyWindow.closeHour)), 0, 23);
-  const closeMinute = clamp(Math.floor(toNum(daily.closeMinute, DEFAULTS.dailyWindow.closeMinute)), 0, 59);
-  const openHour = clamp(Math.floor(toNum(daily.openHour, DEFAULTS.dailyWindow.openHour)), 0, 23);
-  const openMinute = clamp(Math.floor(toNum(daily.openMinute, DEFAULTS.dailyWindow.openMinute)), 0, 59);
+  const closeWindowStartHour = clamp(Math.floor(toNum(
+    daily.closeWindowStartHour,
+    (daily.closeHour !== undefined ? daily.closeHour : DEFAULTS.dailyWindow.closeWindowStartHour)
+  )), 0, 23);
+  const closeWindowStartMinute = clamp(Math.floor(toNum(
+    daily.closeWindowStartMinute,
+    (daily.closeMinute !== undefined ? daily.closeMinute : DEFAULTS.dailyWindow.closeWindowStartMinute)
+  )), 0, 59);
+  const closeWindowEndHour = clamp(Math.floor(toNum(daily.closeWindowEndHour, DEFAULTS.dailyWindow.closeWindowEndHour)), 0, 23);
+  const closeWindowEndMinute = clamp(Math.floor(toNum(daily.closeWindowEndMinute, DEFAULTS.dailyWindow.closeWindowEndMinute)), 0, 59);
+  const openWindowStartHour = clamp(Math.floor(toNum(
+    daily.openWindowStartHour,
+    (daily.openHour !== undefined ? daily.openHour : DEFAULTS.dailyWindow.openWindowStartHour)
+  )), 0, 23);
+  const openWindowStartMinute = clamp(Math.floor(toNum(
+    daily.openWindowStartMinute,
+    (daily.openMinute !== undefined ? daily.openMinute : DEFAULTS.dailyWindow.openWindowStartMinute)
+  )), 0, 59);
+  const openWindowEndHour = clamp(Math.floor(toNum(daily.openWindowEndHour, DEFAULTS.dailyWindow.openWindowEndHour)), 0, 23);
+  const openWindowEndMinute = clamp(Math.floor(toNum(daily.openWindowEndMinute, DEFAULTS.dailyWindow.openWindowEndMinute)), 0, 59);
+  const executionModeRaw = String(daily.executionMode || "").trim().toLowerCase();
+  const executionMode = (executionModeRaw === "window_close_open") ? "window_close_open" : "always_on_24h";
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -302,11 +335,16 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       modemPassword
     },
     dailyWindow: {
-      enabled: daily.enabled === true,
-      closeHour,
-      closeMinute,
-      openHour,
-      openMinute
+      enabled: daily.enabled === true || executionMode === "window_close_open",
+      executionMode,
+      closeWindowStartHour,
+      closeWindowStartMinute,
+      closeWindowEndHour,
+      closeWindowEndMinute,
+      openWindowStartHour,
+      openWindowStartMinute,
+      openWindowEndHour,
+      openWindowEndMinute
     }
   };
 
@@ -445,7 +483,18 @@ function validateServerConfigPayload(payload) {
     if (daily.enabled !== undefined && typeof daily.enabled !== "boolean") {
       errors.push("dailyWindow.enabled_invalido");
     }
-    const intFields = ["closeHour", "closeMinute", "openHour", "openMinute"];
+    if (daily.executionMode !== undefined) {
+      const mode = String(daily.executionMode || "").trim().toLowerCase();
+      if (!["always_on_24h", "window_close_open"].includes(mode)) {
+        errors.push("dailyWindow.executionMode_invalido");
+      }
+    }
+    const intFields = [
+      "closeWindowStartHour", "closeWindowStartMinute", "closeWindowEndHour", "closeWindowEndMinute",
+      "openWindowStartHour", "openWindowStartMinute", "openWindowEndHour", "openWindowEndMinute",
+      // legado
+      "closeHour", "closeMinute", "openHour", "openMinute"
+    ];
     for (const f of intFields) {
       if (daily[f] !== undefined) {
         const n = toNum(daily[f], NaN);
@@ -468,10 +517,17 @@ function validateServerConfigPayload(payload) {
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
     return { ok: false, error: "validation_failed", details: ["robe.window_intervalo_invalido"] };
   }
-  const dailyOpenMin = (Number(normalized.dailyWindow.openHour || 0) * 60) + Number(normalized.dailyWindow.openMinute || 0);
-  const dailyCloseMin = (Number(normalized.dailyWindow.closeHour || 0) * 60) + Number(normalized.dailyWindow.closeMinute || 0);
-  if (dailyOpenMin >= dailyCloseMin) {
-    return { ok: false, error: "validation_failed", details: ["dailyWindow.intervalo_invalido_open_deve_ser_antes_do_close"] };
+  const closeStartMin = hmToMin(normalized.dailyWindow.closeWindowStartHour, normalized.dailyWindow.closeWindowStartMinute);
+  const closeEndMin = hmToMin(normalized.dailyWindow.closeWindowEndHour, normalized.dailyWindow.closeWindowEndMinute);
+  const openStartMin = hmToMin(normalized.dailyWindow.openWindowStartHour, normalized.dailyWindow.openWindowStartMinute);
+  const openEndMin = hmToMin(normalized.dailyWindow.openWindowEndHour, normalized.dailyWindow.openWindowEndMinute);
+  const closeDur = windowDurationMinutes(closeStartMin, closeEndMin);
+  const openDur = windowDurationMinutes(openStartMin, openEndMin);
+  if (closeDur < 1 || closeDur > 720) {
+    return { ok: false, error: "validation_failed", details: ["dailyWindow.close_window_invalida"] };
+  }
+  if (openDur < 1 || openDur > 720) {
+    return { ok: false, error: "validation_failed", details: ["dailyWindow.open_window_invalida"] };
   }
   return { ok: true, normalized };
 }
@@ -530,10 +586,15 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
     },
     dailyWindow: {
       enabled: v.normalized.dailyWindow.enabled,
-      closeHour: v.normalized.dailyWindow.closeHour,
-      closeMinute: v.normalized.dailyWindow.closeMinute,
-      openHour: v.normalized.dailyWindow.openHour,
-      openMinute: v.normalized.dailyWindow.openMinute
+      executionMode: v.normalized.dailyWindow.executionMode,
+      closeWindowStartHour: v.normalized.dailyWindow.closeWindowStartHour,
+      closeWindowStartMinute: v.normalized.dailyWindow.closeWindowStartMinute,
+      closeWindowEndHour: v.normalized.dailyWindow.closeWindowEndHour,
+      closeWindowEndMinute: v.normalized.dailyWindow.closeWindowEndMinute,
+      openWindowStartHour: v.normalized.dailyWindow.openWindowStartHour,
+      openWindowStartMinute: v.normalized.dailyWindow.openWindowStartMinute,
+      openWindowEndHour: v.normalized.dailyWindow.openWindowEndHour,
+      openWindowEndMinute: v.normalized.dailyWindow.openWindowEndMinute
     }
   };
   try {
