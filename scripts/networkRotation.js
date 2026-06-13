@@ -30,6 +30,7 @@ let inFlight = false;
 let state = null;
 let localPort = Number(process.env.PORT || 8088) || 8088;
 let lastSnapshotDebugAt = 0;
+let schedulerBootAt = now();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -956,6 +957,22 @@ function getStateSnapshot() {
   }
   out.countdownSec = out.nextRotationAt ? Math.max(0, Math.ceil((Number(out.nextRotationAt) - now()) / 1000)) : null;
   const maxCountdownSec = ((Math.max(10, Number(cfg.intervalMaxMinutes || 120)) + 10) * 60);
+  const bootWindowRearmNeeded =
+    cfg.enabled === true
+    && out.inProgress !== true
+    && out.manualTriggerPending !== true
+    && (now() - schedulerBootAt) <= (3 * 60 * 1000)
+    && Number(out.nextRotationAt || 0) <= now();
+  if (bootWindowRearmNeeded) {
+    const repairedNextAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
+    saveState({
+      nextRotationAt: repairedNextAt,
+      schedulerEnabled: true,
+      lastError: "boot_window_next_rotation_rearmed_in_snapshot"
+    });
+    out.nextRotationAt = repairedNextAt;
+    out.countdownSec = Math.max(0, Math.ceil((repairedNextAt - now()) / 1000));
+  }
   const staleManualPending =
     out.manualTriggerPending === true
     && out.inProgress !== true
@@ -1032,6 +1049,7 @@ async function triggerNow(reason = "manual_trigger", options = null) {
 }
 
 function startNetworkRotationScheduler({ port } = {}) {
+  schedulerBootAt = now();
   localPort = Number(port || localPort || 8088) || 8088;
   state = loadState();
   if (state && state.selectedFlow && !isValidFlow(state.selectedFlow)) {
