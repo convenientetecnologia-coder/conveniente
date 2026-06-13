@@ -96,8 +96,10 @@ function saveState(patch = null) {
 }
 
 function pickRandomDelayMs(minMinutes, maxMinutes) {
-  const minMs = Math.floor(Math.max(1, Number(minMinutes) || 60) * 60 * 1000);
-  const maxMs = Math.floor(Math.max(minMs, Number(maxMinutes) || 120) * 60 * 1000);
+  const minMin = Math.max(1, Number(minMinutes) || 60);
+  const maxMin = Math.max(minMin, Number(maxMinutes) || 120);
+  const minMs = Math.floor(minMin * 60 * 1000);
+  const maxMs = Math.floor(maxMin * 60 * 1000);
   if (maxMs <= minMs) return minMs;
   return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
 }
