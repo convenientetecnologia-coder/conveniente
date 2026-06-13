@@ -583,6 +583,10 @@ async function runCycle({ manualOptions = null } = {}) {
     if (!changed) {
       cycleError = rebootDetected ? "ip_not_changed_after_max_attempts" : "reboot_not_confirmed";
     }
+  } catch (e) {
+    cycleError = cycleError || ((e && e.message) ? String(e.message) : String(e));
+    timeline.push({ ts: now(), step: "cycle_exception", error: cycleError });
+    logger.warn("[NET-ROTATE] excecao durante ciclo", { error: cycleError });
   } finally {
     try {
       resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`, { pausedNames });
@@ -690,6 +694,16 @@ async function loopTick() {
     const manualPending = cur1.manualTriggerPending === true;
     if (!cfg.enabled && !manualPending) return;
     const cur = state || st;
+    const nowTs = now();
+    const maxFutureMs = (Math.max(1, Number(cfg.intervalMaxMinutes || 120)) * 60 * 1000) + (10 * 60 * 1000);
+    const nextTs = Number(cur.nextRotationAt || 0) || 0;
+    if (nextTs > 0 && ((nextTs - nowTs) > maxFutureMs)) {
+      saveState({
+        nextRotationAt: nowTs + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes),
+        lastError: "next_rotation_out_of_range_rescheduled"
+      });
+      return;
+    }
     if (!cur.nextRotationAt) {
       saveState({ nextRotationAt: now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes) });
       return;
