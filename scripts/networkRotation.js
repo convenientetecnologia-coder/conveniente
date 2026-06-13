@@ -767,6 +767,26 @@ function startNetworkRotationScheduler({ port } = {}) {
     } catch {}
   }
   recoverStaleInProgressState(state, { reason: "boot_stale_recovered" });
+  try {
+    const cfg = getRotationConfig();
+    if (cfg && cfg.enabled === true) {
+      // Regra operacional: após restart, sempre agenda próximo ciclo para frente (não executa "ciclo atrasado" herdado).
+      saveState({
+        nextRotationAt: now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes),
+        inProgress: false,
+        inProgressSince: 0,
+        manualTriggerPending: false,
+        manualTriggerOptions: null
+      });
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "network_rotation_boot_rescheduled",
+          ok: true
+        });
+      } catch {}
+    }
+  } catch {}
   if (timer) return;
   timer = setInterval(() => { loopTick().catch(() => {}); }, LOOP_MS);
   try { if (typeof timer.unref === "function") timer.unref(); } catch {}
