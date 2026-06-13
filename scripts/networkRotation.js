@@ -928,6 +928,8 @@ function getStateSnapshot() {
   }
   const cur = state || st;
   const out = { ...cur };
+  out.intervalMinMinutes = cfg.intervalMinMinutes;
+  out.intervalMaxMinutes = cfg.intervalMaxMinutes;
   if (out.credentialCache) {
     out.credentialCache = {
       username: out.credentialCache.username || null,
@@ -936,6 +938,16 @@ function getStateSnapshot() {
     };
   }
   out.countdownSec = out.nextRotationAt ? Math.max(0, Math.ceil((Number(out.nextRotationAt) - now()) / 1000)) : null;
+  const maxCountdownSec = ((Math.max(10, Number(cfg.intervalMaxMinutes || 120)) + 10) * 60);
+  if (cfg.enabled === true && Number.isFinite(Number(out.countdownSec || 0)) && Number(out.countdownSec || 0) > maxCountdownSec) {
+    const repairedNextAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
+    saveState({
+      nextRotationAt: repairedNextAt,
+      lastError: "next_rotation_out_of_range_repaired_in_snapshot"
+    });
+    out.nextRotationAt = repairedNextAt;
+    out.countdownSec = Math.max(0, Math.ceil((repairedNextAt - now()) / 1000));
+  }
   return out;
 }
 

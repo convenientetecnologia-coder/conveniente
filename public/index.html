@@ -1936,16 +1936,20 @@
       return await fetch('/api/perfis').then(r => r.json()).catch(() => null);
     }
     let __networkRotationState = null;
-    function fmtNextRotation(ts) {
+    function fmtNextRotation(ts, countdownSec) {
+      const remain = Number(countdownSec);
+      if (Number.isFinite(remain) && remain >= 0) {
+        const total = Math.max(0, Math.floor(remain));
+        const m = Math.floor(total / 60);
+        const s = total % 60;
+        return `${m}m ${s}s`;
+      }
       const n = Number(ts || 0) || 0;
       if (!n) return '--';
       const diff = Math.max(0, Math.floor((n - Date.now()) / 1000));
-      const h = Math.floor(diff / 3600);
-      const m = Math.floor((diff % 3600) / 60);
+      const m = Math.floor(diff / 60);
       const s = diff % 60;
-      if (h > 0) return `${h}h ${m}m ${s}s`;
-      if (m > 0) return `${m}m ${s}s`;
-      return `${s}s`;
+      return `${m}m ${s}s`;
     }
     function paintNetworkRotationMetrics() {
       const ipEl = document.getElementById('mPublicIp');
@@ -1963,10 +1967,15 @@
         nextEl.style.color = '#f0b429';
         return;
       }
-      const txt = fmtNextRotation(st.nextRotationAt);
+      const maxMinutes = Math.max(10, Number(st.intervalMaxMinutes || 120) || 120);
+      const maxCountdownSec = (maxMinutes + 10) * 60;
+      const remainSecRaw = Number(st.countdownSec);
+      const remainSec = (Number.isFinite(remainSecRaw) && remainSecRaw >= 0 && remainSecRaw <= maxCountdownSec)
+        ? remainSecRaw
+        : null;
+      const txt = fmtNextRotation(st.nextRotationAt, remainSec);
       nextEl.textContent = txt;
-      const remainSec = Number(st.countdownSec || 0);
-      nextEl.style.color = (remainSec > 0 && remainSec <= 60) ? '#f0b429' : '';
+      nextEl.style.color = (remainSec !== null && remainSec > 0 && remainSec <= 60) ? '#f0b429' : '';
     }
     async function reloadNetworkRotationState() {
       try {
