@@ -366,6 +366,27 @@ function createCluster() {
         }
         return { ok: false, error: 'partial_fail', results };
       }
+      if (type === 'network-rotation-pause-runtime' || type === 'network-rotation-resume-runtime') {
+        const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
+        const allOk = results.every(r => r && r.ok !== false);
+        const merged = {
+          ok: allOk,
+          results,
+          pausedNames: [],
+          resumedNames: [],
+          failed: [],
+          skipped: []
+        };
+        for (const r of results) {
+          if (r && Array.isArray(r.pausedNames)) merged.pausedNames.push(...r.pausedNames);
+          if (r && Array.isArray(r.resumedNames)) merged.resumedNames.push(...r.resumedNames);
+          if (r && Array.isArray(r.failed)) merged.failed.push(...r.failed);
+          if (r && Array.isArray(r.skipped)) merged.skipped.push(...r.skipped);
+        }
+        merged.pausedNames = Array.from(new Set(merged.pausedNames.filter(Boolean)));
+        merged.resumedNames = Array.from(new Set(merged.resumedNames.filter(Boolean)));
+        return merged;
+      }
     }
     if (type === 'get-status' && !nome) {
       const allPerfis = fileStore.loadPerfisJson() || [];

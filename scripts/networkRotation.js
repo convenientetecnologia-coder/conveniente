@@ -361,11 +361,21 @@ async function runCycle() {
   let cycleError = null;
   let pauseResult = null;
   let resumeResult = null;
+  let pausedNames = [];
   let rebootDetected = false;
 
   try {
-    pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/invoke-human-all-active`, {});
-    timeline.push({ ts: now(), step: "pause_all_active", ok: !!(pauseResult && pauseResult.ok === true) });
+    pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
+    pausedNames = Array.isArray(pauseResult && pauseResult.pausedNames) ? pauseResult.pausedNames : [];
+    timeline.push({
+      ts: now(),
+      step: "pause_runtime",
+      ok: !!(pauseResult && pauseResult.ok === true),
+      pausedCount: pausedNames.length
+    });
+    if (!pauseResult || pauseResult.ok !== true) {
+      throw new Error((pauseResult && pauseResult.error) ? String(pauseResult.error) : "pause_runtime_failed");
+    }
     await sleep(cfg.pauseBeforeRotationSec * 1000);
 
     for (let i = 0; i < cfg.maxAttemptsPerCycle; i += 1) {
@@ -402,10 +412,15 @@ async function runCycle() {
     }
   } finally {
     try {
-      resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/human-resume-all`, {});
-      timeline.push({ ts: now(), step: "resume_all", ok: !!(resumeResult && resumeResult.ok === true) });
+      resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`, { pausedNames });
+      timeline.push({
+        ts: now(),
+        step: "resume_runtime",
+        ok: !!(resumeResult && resumeResult.ok === true),
+        resumed: Number(resumeResult && resumeResult.resumed || 0) || 0
+      });
     } catch (e) {
-      timeline.push({ ts: now(), step: "resume_all", ok: false, error: (e && e.message) ? e.message : String(e) });
+      timeline.push({ ts: now(), step: "resume_runtime", ok: false, error: (e && e.message) ? e.message : String(e) });
     }
   }
 
@@ -421,6 +436,7 @@ async function runCycle() {
     ipBefore: ipBefore || null,
     ipAfter: ipCurrent || null,
     flow: selectedFlow ? selectedFlow.name : null,
+    pausedCount: pausedNames.length,
     pauseOk: !!(pauseResult && pauseResult.ok === true),
     resumeOk: !!(resumeResult && resumeResult.ok === true),
     error: cycleError

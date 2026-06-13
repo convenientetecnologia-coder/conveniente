@@ -213,6 +213,32 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  app.post('/api/network-rotation/pause-runtime', async (req, res) => {
+    try {
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable' });
+      }
+      const reason = String((req.body && req.body.reason) || req.headers['x-operator'] || 'network_rotation').slice(0, 120);
+      const r = await workerClient.sendWorkerCommand('network-rotation-pause-runtime', { reason }, { timeoutMs: 180000 });
+      return res.json(r || { ok: false, error: 'pause_runtime_failed' });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  app.post('/api/network-rotation/resume-runtime', async (req, res) => {
+    try {
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable' });
+      }
+      const pausedNames = Array.isArray(req.body && req.body.pausedNames) ? req.body.pausedNames : [];
+      const r = await workerClient.sendWorkerCommand('network-rotation-resume-runtime', { pausedNames }, { timeoutMs: 180000 });
+      return res.json(r || { ok: false, error: 'resume_runtime_failed' });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ===== PASSO 2 — Adicionar endpoint GET /api/perfis/:nome/manifest =====
   // GET /api/perfis/:nome/manifest — devolve manifest.json do perfil
   app.get('/api/perfis/:nome/manifest', async (req, res) => {

@@ -10621,6 +10621,58 @@ const handlers = {
     return { ok: true };
   },
 
+  async ['network-rotation-pause-runtime']({ reason } = {}) {
+    try {
+      const operator = `network_rotation_pause:${String(reason || 'runtime').slice(0, 80)}`;
+      const waitBusyMs = Math.max(5000, Number(process.env.NETWORK_ROTATION_WAIT_BUSY_MS || 120000) || 120000);
+      const waitPauseMs = Math.max(3000, Number(process.env.NETWORK_ROTATION_WAIT_PAUSE_MS || 45000) || 45000);
+      const q = await waitGlobalQuiesce({
+        opKind: 'network_rotation',
+        operator,
+        targetNome: null,
+        waitBusyMs,
+        waitPauseMs,
+        require: true
+      });
+      const pausedNames = Array.isArray(q && q.paused) ? q.paused.map((x) => String(x && x.nome || '').trim()).filter(Boolean) : [];
+      return {
+        ok: true,
+        pausedCount: pausedNames.length,
+        pausedNames,
+        elapsedMs: Number(q && q.elapsedMs || 0) || 0
+      };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  },
+
+  async ['network-rotation-resume-runtime']({ pausedNames } = {}) {
+    const names = Array.isArray(pausedNames) ? pausedNames.map((n) => String(n || '').trim()).filter(Boolean) : [];
+    if (!names.length) return { ok: true, resumed: 0, failed: [], skipped: [] };
+    const resumed = [];
+    const failed = [];
+    const skipped = [];
+    for (const nome of names) {
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        skipped.push({ nome, reason: 'controller_unavailable' });
+        continue;
+      }
+      if (ctrl.humanControl || ctrl.configurando) {
+        skipped.push({ nome, reason: 'human_or_config_mode' });
+        continue;
+      }
+      try {
+        const r = await start_work({ nome, operator: 'network_rotation_resume' });
+        if (r && r.ok === true) resumed.push(nome);
+        else failed.push({ nome, error: (r && r.error) ? String(r.error) : 'start_work_failed' });
+      } catch (e) {
+        failed.push({ nome, error: (e && e.message) ? String(e.message) : String(e) });
+      }
+    }
+    return { ok: failed.length === 0, resumed: resumed.length, resumedNames: resumed, failed, skipped };
+  },
+
   async ['robe-v2-warmup']({ reason, force }) {
     try {
       logger.info('[HANDLER] robe-v2-warmup chamada', { force: !!force, reason: reason ? String(reason).slice(0, 120) : null });
