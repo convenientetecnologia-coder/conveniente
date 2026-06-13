@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const http = require("http");
 const https = require("https");
 const { exec } = require("child_process");
@@ -189,6 +190,37 @@ function sanitizeNextRotationAt(st, cfg) {
   if (nextTs <= 0) return 0;
   if ((nextTs - nowTs) > maxFutureMs) return 0;
   return nextTs;
+}
+
+function findChromeStable() {
+  const envChrome = String(process.env.CHROME_PATH || "").trim();
+  if (envChrome && fs.existsSync(envChrome)) return envChrome;
+  const envChromium = String(process.env.CHROMIUM_PATH || "").trim();
+  if (envChromium && fs.existsSync(envChromium)) return envChromium;
+  const candidates = [];
+  if (process.platform === "win32") {
+    candidates.push(
+      path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env["PROGRAMFILES(X86)"] || "", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe")
+    );
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome")
+    );
+  } else {
+    candidates.push(
+      "/opt/google/chrome/chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/google-chrome",
+      "/snap/bin/chromium"
+    );
+  }
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return null;
 }
 
 function recoverStaleInProgressState(st, { reason = "stale_recovered" } = {}) {
@@ -394,27 +426,66 @@ async function clearAndTypeHandle(handle, value) {
   await handle.type(String(value || ""), { delay: 28 });
 }
 
-async function getLoginInputHandles(page) {
-  const inputs = await page.$$("input");
-  const visible = [];
-  for (const h of inputs) {
-    const m = await h.evaluate((el) => {
+async function isVisibleInputHandle(handle) {
+  if (!handle) return false;
+  try {
+    return await handle.evaluate((el) => {
       const st = window.getComputedStyle(el);
       const r = el.getBoundingClientRect();
-      return {
-        visible: st.display !== "none" && st.visibility !== "hidden" && r.width > 0 && r.height > 0 && !el.disabled && !el.readOnly,
-        type: (el.getAttribute("type") || "text").toLowerCase()
-      };
+      return st.display !== "none"
+        && st.visibility !== "hidden"
+        && r.width > 0
+        && r.height > 0
+        && !el.disabled
+        && !el.readOnly;
     });
-    if (m.visible) visible.push({ handle: h, type: m.type });
+  } catch {
+    return false;
   }
-  const pass = visible.find((x) => x.type === "password") || null;
-  const user = visible.find((x) => ["text", "email", "tel", ""].includes(x.type)) || null;
-  return { userInput: user ? user.handle : null, passInput: pass ? pass.handle : null };
 }
 
-async function clickLikelyButton(page, regex) {
-  return page.evaluate((pattern) => {
+async function firstVisibleHandle(frameOrPage, selectors) {
+  for (const sel of selectors) {
+    let handles = [];
+    try { handles = await frameOrPage.$$(sel); } catch { handles = []; }
+    for (const h of handles) {
+      if (await isVisibleInputHandle(h)) return h;
+    }
+  }
+  return null;
+}
+
+async function getLoginInputHandles(page) {
+  const frames = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
+  const userSelectors = [
+    "input[name*='user' i]",
+    "input[id*='user' i]",
+    "input[name*='login' i]",
+    "input[id*='login' i]",
+    "input[type='text']",
+    "input[type='email']",
+    "input[type='tel']",
+    "input:not([type])"
+  ];
+  const passSelectors = [
+    "input[type='password']",
+    "input[name*='pass' i]",
+    "input[id*='pass' i]",
+    "input[name*='senha' i]",
+    "input[id*='senha' i]"
+  ];
+  for (const frame of frames) {
+    const userInput = await firstVisibleHandle(frame, userSelectors);
+    const passInput = await firstVisibleHandle(frame, passSelectors);
+    if (userInput && passInput) {
+      return { frame, userInput, passInput };
+    }
+  }
+  return { frame: page.mainFrame(), userInput: null, passInput: null };
+}
+
+async function clickLikelyButton(frameOrPage, regex) {
+  return frameOrPage.evaluate((pattern) => {
     const rx = new RegExp(pattern, "i");
     const isVisible = (el) => {
       const st = window.getComputedStyle(el);
@@ -441,11 +512,25 @@ async function findRebootButton(page) {
 }
 
 async function launchBrowserForAttempt({ showBrowser = false, timeline = null, flow = null }) {
+  const executablePath = findChromeStable();
+  const launchArgs = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-extensions",
+    "--ignore-certificate-errors",
+    "--lang=pt-BR",
+    "--window-size=1366,768",
+    "--start-maximized"
+  ];
   const baseOptions = {
-    defaultViewport: { width: 1366, height: 768 },
+    defaultViewport: null,
     ignoreHTTPSErrors: true,
-    args: ["--ignore-certificate-errors"]
+    args: launchArgs,
+    protocolTimeout: 60000
   };
+  if (executablePath) {
+    baseOptions.executablePath = executablePath;
+  }
   if (showBrowser) {
     try {
       const b = await withTimeout(
@@ -453,14 +538,21 @@ async function launchBrowserForAttempt({ showBrowser = false, timeline = null, f
         BROWSER_LAUNCH_TIMEOUT_MS,
         "visible_browser_launch_timeout"
       );
-      if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "visible", flow: flow && flow.name ? flow.name : null });
+      if (Array.isArray(timeline)) timeline.push({
+        ts: now(),
+        step: "browser_launch",
+        mode: "visible",
+        flow: flow && flow.name ? flow.name : null,
+        executablePath: executablePath || "bundled"
+      });
       return b;
     } catch (e) {
       if (Array.isArray(timeline)) {
         timeline.push({
           ts: now(),
           step: "browser_visible_launch_failed_fallback_headless",
-          error: (e && e.message) ? String(e.message) : String(e)
+          error: (e && e.message) ? String(e.message) : String(e),
+          executablePathTried: executablePath || "bundled"
         });
       }
     }
@@ -470,25 +562,32 @@ async function launchBrowserForAttempt({ showBrowser = false, timeline = null, f
     BROWSER_LAUNCH_TIMEOUT_MS,
     "headless_browser_launch_timeout"
   );
-  if (Array.isArray(timeline)) timeline.push({ ts: now(), step: "browser_launch", mode: "headless", flow: flow && flow.name ? flow.name : null });
+  if (Array.isArray(timeline)) timeline.push({
+    ts: now(),
+    step: "browser_launch",
+    mode: "headless",
+    flow: flow && flow.name ? flow.name : null,
+    executablePath: executablePath || "bundled"
+  });
   return b;
 }
 
 async function runRebootAttempt({ flow, credential, cfg, timeline, showBrowser = false }) {
   const browser = await launchBrowserForAttempt({ showBrowser, timeline, flow });
   const page = await browser.newPage();
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(30000);
   try {
-    await page.goto(flow.loginUrl, { waitUntil: "domcontentloaded" });
+    await page.bringToFront().catch(() => {});
+    await page.goto(flow.loginUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
     await sleep(1000);
-    const { userInput, passInput } = await getLoginInputHandles(page);
+    const { frame, userInput, passInput } = await getLoginInputHandles(page);
     if (!userInput || !passInput) return { ok: false, error: "login_inputs_not_found" };
     await clearAndTypeHandle(userInput, credential.username);
     await clearAndTypeHandle(passInput, credential.password);
-    const clickedLogin = await clickLikelyButton(page, /(login|entrar|sign in|ok)/i);
-    if (!clickedLogin) await page.keyboard.press("Enter");
+    const clickedLogin = await clickLikelyButton(frame || page, /(login|entrar|sign in|ok|acessar)/i);
+    if (!clickedLogin) await passInput.press("Enter").catch(async () => { await page.keyboard.press("Enter").catch(() => {}); });
     await sleep(2200);
-    await page.goto(flow.rebootUrl, { waitUntil: "domcontentloaded" });
+    await page.goto(flow.rebootUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
     await sleep(1200);
     const rebootBtn = await findRebootButton(page);
     if (!rebootBtn) return { ok: false, error: "reboot_button_not_found" };
@@ -515,6 +614,8 @@ async function runRebootAttempt({ flow, credential, cfg, timeline, showBrowser =
     if (!upOk) return { ok: false, error: "network_up_not_detected" };
     await sleep(cfg.postRotationStabilizeSec * 1000);
     return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   } finally {
     try { await browser.close(); } catch {}
   }
@@ -585,10 +686,10 @@ async function runCycle({ manualOptions = null } = {}) {
     manual: manualShowBrowser,
     flowCandidates: flows.length,
     credentialCandidates: credentials.length,
-    flowPreview: flows.slice(0, 4).map((f) => ({
+    flowPreviewJson: JSON.stringify(flows.slice(0, 4).map((f) => ({
       name: f && f.name ? f.name : null,
       loginUrl: f && f.loginUrl ? f.loginUrl : null
-    }))
+    })))
   });
 
   try {
