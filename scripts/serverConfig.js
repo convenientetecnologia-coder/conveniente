@@ -73,6 +73,13 @@ const DEFAULTS = Object.freeze({
     rebootUrl: "",
     modemUsername: "",
     modemPassword: ""
+  },
+  dailyWindow: {
+    enabled: false,
+    closeHour: 23,
+    closeMinute: 0,
+    openHour: 7,
+    openMinute: 0
   }
 });
 
@@ -149,6 +156,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const memRaw = (r.memory && typeof r.memory === "object") ? r.memory : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
+  const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
@@ -222,6 +230,10 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const rebootUrl = String(net.rebootUrl || DEFAULTS.networkRotation.rebootUrl).trim().slice(0, 240);
   const modemUsername = String(net.modemUsername || DEFAULTS.networkRotation.modemUsername).trim().slice(0, 120);
   const modemPassword = String(net.modemPassword || DEFAULTS.networkRotation.modemPassword).trim().slice(0, 180);
+  const closeHour = clamp(Math.floor(toNum(daily.closeHour, DEFAULTS.dailyWindow.closeHour)), 0, 23);
+  const closeMinute = clamp(Math.floor(toNum(daily.closeMinute, DEFAULTS.dailyWindow.closeMinute)), 0, 59);
+  const openHour = clamp(Math.floor(toNum(daily.openHour, DEFAULTS.dailyWindow.openHour)), 0, 23);
+  const openMinute = clamp(Math.floor(toNum(daily.openMinute, DEFAULTS.dailyWindow.openMinute)), 0, 59);
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -288,6 +300,13 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       rebootUrl,
       modemUsername,
       modemPassword
+    },
+    dailyWindow: {
+      enabled: daily.enabled === true,
+      closeHour,
+      closeMinute,
+      openHour,
+      openMinute
     }
   };
 
@@ -306,7 +325,8 @@ function validateServerConfigPayload(payload) {
   const robe = (p.robe && typeof p.robe === "object") ? p.robe : null;
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
-  if (!cap && !robe && !mem && !net) return { ok: false, error: "payload_sem_campos_reconhecidos" };
+  const daily = (p.dailyWindow && typeof p.dailyWindow === "object") ? p.dailyWindow : null;
+  if (!cap && !robe && !mem && !net && !daily) return { ok: false, error: "payload_sem_campos_reconhecidos" };
 
   const errors = [];
   if (cap) {
@@ -421,6 +441,18 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (daily) {
+    if (daily.enabled !== undefined && typeof daily.enabled !== "boolean") {
+      errors.push("dailyWindow.enabled_invalido");
+    }
+    const intFields = ["closeHour", "closeMinute", "openHour", "openMinute"];
+    for (const f of intFields) {
+      if (daily[f] !== undefined) {
+        const n = toNum(daily[f], NaN);
+        if (!Number.isFinite(n)) errors.push(`dailyWindow.${f}_invalido`);
+      }
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
@@ -429,11 +461,17 @@ function validateServerConfigPayload(payload) {
     capacity: { ...DEFAULTS.capacity, ...((readServerConfigRaw() || {}).capacity || {}), ...(cap || {}) },
     robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) },
     memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) },
-    networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) }
+    networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) },
+    dailyWindow: { ...DEFAULTS.dailyWindow, ...((readServerConfigRaw() || {}).dailyWindow || {}), ...(daily || {}) }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
     return { ok: false, error: "validation_failed", details: ["robe.window_intervalo_invalido"] };
+  }
+  const dailyOpenMin = (Number(normalized.dailyWindow.openHour || 0) * 60) + Number(normalized.dailyWindow.openMinute || 0);
+  const dailyCloseMin = (Number(normalized.dailyWindow.closeHour || 0) * 60) + Number(normalized.dailyWindow.closeMinute || 0);
+  if (dailyOpenMin >= dailyCloseMin) {
+    return { ok: false, error: "validation_failed", details: ["dailyWindow.intervalo_invalido_open_deve_ser_antes_do_close"] };
   }
   return { ok: true, normalized };
 }
@@ -489,6 +527,13 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       rebootUrl: v.normalized.networkRotation.rebootUrl,
       modemUsername: v.normalized.networkRotation.modemUsername,
       modemPassword: v.normalized.networkRotation.modemPassword
+    },
+    dailyWindow: {
+      enabled: v.normalized.dailyWindow.enabled,
+      closeHour: v.normalized.dailyWindow.closeHour,
+      closeMinute: v.normalized.dailyWindow.closeMinute,
+      openHour: v.normalized.dailyWindow.openHour,
+      openMinute: v.normalized.dailyWindow.openMinute
     }
   };
   try {

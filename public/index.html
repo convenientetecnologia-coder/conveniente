@@ -1186,6 +1186,18 @@
           </div>
         </div>
         <div class="form-row">
+          <label>Janela diária — fechamento e abertura automáticos</label>
+          <select id="srvDailyWindowEnabled">
+            <option value="0">Desativado</option>
+            <option value="1">Ativado</option>
+          </select>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+            <input type="time" id="srvDailyCloseTime" />
+            <input type="time" id="srvDailyOpenTime" />
+          </div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">No horário de fechar, executa o mesmo fluxo do botão Fechar Todos e valida que não sobrou navegador ativo. No horário de abrir, executa Abrir Todos 24h.</div>
+        </div>
+        <div class="form-row">
           <label>Robe — tipo de trabalho</label>
           <select id="srvRobeWorkMode">
             <option value="v1">Robe V1</option>
@@ -1232,6 +1244,9 @@
       const netRebootUrlEl = box.querySelector('#srvNetRebootUrl');
       const netUserEl = box.querySelector('#srvNetUser');
       const netPassEl = box.querySelector('#srvNetPass');
+      const dailyWindowEnabledEl = box.querySelector('#srvDailyWindowEnabled');
+      const dailyCloseTimeEl = box.querySelector('#srvDailyCloseTime');
+      const dailyOpenTimeEl = box.querySelector('#srvDailyOpenTime');
       const memGovEnterEl = box.querySelector('#srvMemGovEnter');
       const memGovExitEl = box.querySelector('#srvMemGovExit');
       const memHostBaseEl = box.querySelector('#srvMemHostBase');
@@ -1352,6 +1367,7 @@
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         const mem = (cfg && cfg.memory) ? cfg.memory : {};
         const net = (cfg && cfg.networkRotation) ? cfg.networkRotation : {};
+        const daily = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
         cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
         cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
         if (netRotateEnabledEl) netRotateEnabledEl.value = net.enabled === true ? '1' : '0';
@@ -1363,6 +1379,17 @@
         if (netRebootUrlEl) netRebootUrlEl.value = String(net.rebootUrl || '');
         if (netUserEl) netUserEl.value = String(net.modemUsername || '');
         if (netPassEl) netPassEl.value = String(net.modemPassword || '');
+        if (dailyWindowEnabledEl) dailyWindowEnabledEl.value = daily.enabled === true ? '1' : '0';
+        if (dailyCloseTimeEl) {
+          const hh = String(Number(daily.closeHour || 23)).padStart(2, '0');
+          const mm = String(Number(daily.closeMinute || 0)).padStart(2, '0');
+          dailyCloseTimeEl.value = `${hh}:${mm}`;
+        }
+        if (dailyOpenTimeEl) {
+          const hh = String(Number(daily.openHour || 7)).padStart(2, '0');
+          const mm = String(Number(daily.openMinute || 0)).padStart(2, '0');
+          dailyOpenTimeEl.value = `${hh}:${mm}`;
+        }
         workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
@@ -1461,6 +1488,9 @@
           const netRebootUrl = String((netRebootUrlEl && netRebootUrlEl.value) || '').trim();
           const netUser = String((netUserEl && netUserEl.value) || '').trim();
           const netPass = String((netPassEl && netPassEl.value) || '').trim();
+          const dailyEnabled = String((dailyWindowEnabledEl && dailyWindowEnabledEl.value) || '0') === '1';
+          const dailyCloseRaw = String((dailyCloseTimeEl && dailyCloseTimeEl.value) || '').trim();
+          const dailyOpenRaw = String((dailyOpenTimeEl && dailyOpenTimeEl.value) || '').trim();
           if (!Number.isFinite(cooldownMin) || !Number.isFinite(cooldownMax) || cooldownMin < 1 || cooldownMax < 1 || cooldownMin > 1440 || cooldownMax > 1440 || cooldownMax < cooldownMin) {
             await showSystemMessageModal({
               title: 'Configuração inválida',
@@ -1497,6 +1527,33 @@
             await showSystemMessageModal({
               title: 'Rotação de IP incompleta',
               message: 'Para ativar com URLs/credenciais manuais, preencha usuário e senha do modem.',
+              tone: 'bad'
+            });
+            return;
+          }
+          const parseHm = (txt) => {
+            const m = String(txt || '').match(/^(\d{2}):(\d{2})$/);
+            if (!m) return null;
+            const h = Number(m[1]); const mm = Number(m[2]);
+            if (!Number.isFinite(h) || !Number.isFinite(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+            return { h, m: mm };
+          };
+          const closeHm = parseHm(dailyCloseRaw);
+          const openHm = parseHm(dailyOpenRaw);
+          if (!closeHm || !openHm) {
+            await showSystemMessageModal({
+              title: 'Janela diária inválida',
+              message: 'Defina horários válidos no formato HH:MM para fechar e abrir.',
+              tone: 'bad'
+            });
+            return;
+          }
+          const closeMin = (closeHm.h * 60) + closeHm.m;
+          const openMin = (openHm.h * 60) + openHm.m;
+          if (openMin >= closeMin) {
+            await showSystemMessageModal({
+              title: 'Janela diária inválida',
+              message: 'Abertura deve ser antes do fechamento (ex.: abre 07:00 e fecha 23:00).',
               tone: 'bad'
             });
             return;
@@ -1544,6 +1601,13 @@
               rebootUrl: netRebootUrl,
               modemUsername: netUser,
               modemPassword: netPass
+            },
+            dailyWindow: {
+              enabled: dailyEnabled,
+              closeHour: closeHm.h,
+              closeMinute: closeHm.m,
+              openHour: openHm.h,
+              openMinute: openHm.m
             },
             robe: {
               cooldownMinMinutes: cooldownMin,
