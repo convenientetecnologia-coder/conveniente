@@ -956,6 +956,24 @@ function getStateSnapshot() {
   }
   out.countdownSec = out.nextRotationAt ? Math.max(0, Math.ceil((Number(out.nextRotationAt) - now()) / 1000)) : null;
   const maxCountdownSec = ((Math.max(10, Number(cfg.intervalMaxMinutes || 120)) + 10) * 60);
+  const staleManualPending =
+    out.manualTriggerPending === true
+    && out.inProgress !== true
+    && Number(out.nextRotationAt || 0) > 0
+    && (now() - Number(out.nextRotationAt || 0)) > 15000;
+  if (staleManualPending) {
+    const repairedNextAt = cfg.enabled ? (now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes)) : 0;
+    saveState({
+      manualTriggerPending: false,
+      manualTriggerOptions: null,
+      nextRotationAt: repairedNextAt,
+      schedulerEnabled: cfg.enabled,
+      lastError: "manual_trigger_pending_stale_rearmed_in_snapshot"
+    });
+    out.manualTriggerPending = false;
+    out.nextRotationAt = repairedNextAt;
+    out.countdownSec = repairedNextAt ? Math.max(0, Math.ceil((repairedNextAt - now()) / 1000)) : null;
+  }
   if (cfg.enabled === true && Number.isFinite(Number(out.countdownSec || 0)) && Number(out.countdownSec || 0) > maxCountdownSec) {
     const repairedNextAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
     saveState({
@@ -968,7 +986,6 @@ function getStateSnapshot() {
   const zeroStuck =
     cfg.enabled === true
     && out.inProgress !== true
-    && out.manualTriggerPending !== true
     && Number(out.countdownSec || 0) <= 0;
   if (zeroStuck) {
     const repairedNextAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);

@@ -1967,6 +1967,11 @@
         nextEl.style.color = '#f0b429';
         return;
       }
+      if (st.manualTriggerPending === true) {
+        nextEl.textContent = 'preparando rotação...';
+        nextEl.style.color = '#f0b429';
+        return;
+      }
       const maxMinutes = Math.max(10, Number(st.intervalMaxMinutes || 120) || 120);
       const maxCountdownSec = (maxMinutes + 10) * 60;
       const remainSecRaw = Number(st.countdownSec);
