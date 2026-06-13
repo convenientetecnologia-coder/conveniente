@@ -18,6 +18,7 @@ const LOOP_MS = 5000;
 const PUBLIC_IP_REFRESH_MS = 2 * 60 * 1000;
 const BROWSER_LAUNCH_TIMEOUT_MS = Math.max(5000, Number(process.env.NETWORK_ROTATION_BROWSER_LAUNCH_TIMEOUT_MS || 25000) || 25000);
 const INPROGRESS_STALE_MS = Math.max(60 * 1000, Number(process.env.NETWORK_ROTATION_INPROGRESS_STALE_MS || (25 * 60 * 1000)) || (25 * 60 * 1000));
+const CYCLE_TIMEOUT_MS = Math.max(60 * 1000, Number(process.env.NETWORK_ROTATION_CYCLE_TIMEOUT_MS || (15 * 60 * 1000)) || (15 * 60 * 1000));
 const AUTO_DEFAULT_MODEM_LOGIN_URL = String(process.env.NETWORK_ROTATION_DEFAULT_LOGIN_URL || "http://192.168.2.1:2080/").trim();
 const AUTO_DEFAULT_MODEM_REBOOT_URL = String(process.env.NETWORK_ROTATION_DEFAULT_REBOOT_URL || "http://192.168.2.1:2080/Reboot").trim();
 const AUTO_DEFAULT_MODEM_USER = String(process.env.NETWORK_ROTATION_DEFAULT_MODEM_USER || "SupAdmin").trim();
@@ -331,6 +332,15 @@ async function httpJson(url, body = null, timeoutMs = 45000) {
   }
 }
 
+async function listActiveProfileNames() {
+  const st = await httpJson(`http://127.0.0.1:${localPort}/api/status`, null, 30000);
+  const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+  return perfis
+    .filter((p) => p && p.active === true)
+    .map((p) => String(p && p.nome || "").trim())
+    .filter(Boolean);
+}
+
 async function clearAndTypeHandle(handle, value) {
   await handle.click({ clickCount: 3 });
   await handle.press("Backspace");
@@ -521,6 +531,7 @@ async function runCycle({ manualOptions = null } = {}) {
   let pauseResult = null;
   let resumeResult = null;
   let pausedNames = [];
+  let shouldPauseRuntime = true;
   let rebootDetected = false;
   const manualShowBrowser = !!(manualOptions && manualOptions.showBrowser === true);
   logger.info("[NET-ROTATE] ciclo iniciado", {
@@ -530,16 +541,28 @@ async function runCycle({ manualOptions = null } = {}) {
   });
 
   try {
-    pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
-    pausedNames = Array.isArray(pauseResult && pauseResult.pausedNames) ? pauseResult.pausedNames : [];
-    timeline.push({
-      ts: now(),
-      step: "pause_runtime",
-      ok: !!(pauseResult && pauseResult.ok === true),
-      pausedCount: pausedNames.length
-    });
-    if (!pauseResult || pauseResult.ok !== true) {
-      throw new Error((pauseResult && pauseResult.error) ? String(pauseResult.error) : "pause_runtime_failed");
+    const activeNames = await listActiveProfileNames().catch(() => []);
+    shouldPauseRuntime = Array.isArray(activeNames) && activeNames.length > 0;
+    if (shouldPauseRuntime) {
+      pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
+      pausedNames = Array.isArray(pauseResult && pauseResult.pausedNames) ? pauseResult.pausedNames : [];
+      timeline.push({
+        ts: now(),
+        step: "pause_runtime",
+        ok: !!(pauseResult && pauseResult.ok === true),
+        pausedCount: pausedNames.length
+      });
+      if (!pauseResult || pauseResult.ok !== true) {
+        throw new Error((pauseResult && pauseResult.error) ? String(pauseResult.error) : "pause_runtime_failed");
+      }
+    } else {
+      timeline.push({
+        ts: now(),
+        step: "pause_runtime_skipped_no_active_profiles",
+        ok: true
+      });
+      pauseResult = { ok: true, pausedNames: [] };
+      pausedNames = [];
     }
     await sleep(cfg.pauseBeforeRotationSec * 1000);
 
@@ -589,13 +612,18 @@ async function runCycle({ manualOptions = null } = {}) {
     logger.warn("[NET-ROTATE] excecao durante ciclo", { error: cycleError });
   } finally {
     try {
-      resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`, { pausedNames });
-      timeline.push({
-        ts: now(),
-        step: "resume_runtime",
-        ok: !!(resumeResult && resumeResult.ok === true),
-        resumed: Number(resumeResult && resumeResult.resumed || 0) || 0
-      });
+      if (shouldPauseRuntime) {
+        resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`, { pausedNames });
+        timeline.push({
+          ts: now(),
+          step: "resume_runtime",
+          ok: !!(resumeResult && resumeResult.ok === true),
+          resumed: Number(resumeResult && resumeResult.resumed || 0) || 0
+        });
+      } else {
+        resumeResult = { ok: true, resumed: 0, resumedNames: [] };
+        timeline.push({ ts: now(), step: "resume_runtime_skipped_no_active_profiles", ok: true });
+      }
     } catch (e) {
       timeline.push({ ts: now(), step: "resume_runtime", ok: false, error: (e && e.message) ? e.message : String(e) });
     }
@@ -715,12 +743,21 @@ async function loopTick() {
           ? { ...cur.manualTriggerOptions }
           : null;
         saveState({ manualTriggerPending: false, manualTriggerOptions: null });
-        await runCycle({ manualOptions });
+        await withTimeout(runCycle({ manualOptions }), CYCLE_TIMEOUT_MS, "network_rotation_cycle_timeout");
       } else {
-        await runCycle();
+        await withTimeout(runCycle(), CYCLE_TIMEOUT_MS, "network_rotation_cycle_timeout");
       }
     } catch (e) {
       logger.warn("[NET-ROTATE] ciclo com falha", { error: (e && e.message) ? e.message : String(e) });
+      try {
+        saveState({
+          inProgress: false,
+          inProgressSince: 0,
+          manualTriggerPending: false,
+          manualTriggerOptions: null,
+          lastError: (e && e.message) ? String(e.message) : String(e)
+        });
+      } catch {}
     }
   } finally {
     inFlight = false;
