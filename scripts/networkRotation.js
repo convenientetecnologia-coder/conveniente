@@ -141,7 +141,7 @@ function dedupeFlows(list) {
   const out = [];
   const seen = new Set();
   for (const flow of (Array.isArray(list) ? list : [])) {
-    if (!flow || !flow.loginUrl || !flow.rebootUrl) continue;
+    if (!isValidFlow(flow)) continue;
     const key = `${String(flow.loginUrl).trim()}::${String(flow.rebootUrl).trim()}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -151,6 +151,44 @@ function dedupeFlows(list) {
     });
   }
   return out;
+}
+
+function isUsableIpv4(ip) {
+  const v = String(ip || "").trim();
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(v)) return false;
+  if (v === "0.0.0.0") return false;
+  return true;
+}
+
+function isBlockedHost(host) {
+  const h = String(host || "").trim().toLowerCase();
+  if (!h) return true;
+  if (h === "0.0.0.0") return true;
+  return false;
+}
+
+function isValidFlow(flow) {
+  try {
+    if (!flow || !flow.loginUrl || !flow.rebootUrl) return false;
+    const lu = new URL(String(flow.loginUrl).trim());
+    const ru = new URL(String(flow.rebootUrl).trim());
+    if (isBlockedHost(lu.hostname)) return false;
+    if (isBlockedHost(ru.hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeNextRotationAt(st, cfg) {
+  const cur = (st && typeof st === "object") ? st : {};
+  const nowTs = now();
+  const maxIntervalMin = Math.max(10, Number(cfg && cfg.intervalMaxMinutes || 120) || 120);
+  const maxFutureMs = (maxIntervalMin * 60 * 1000) + (10 * 60 * 1000);
+  const nextTs = Number(cur.nextRotationAt || 0) || 0;
+  if (nextTs <= 0) return 0;
+  if ((nextTs - nowTs) > maxFutureMs) return 0;
+  return nextTs;
 }
 
 function recoverStaleInProgressState(st, { reason = "stale_recovered" } = {}) {
@@ -205,12 +243,20 @@ async function withTimeout(promise, timeoutMs, timeoutLabel = "operation_timeout
 async function getDefaultGatewayIpv4() {
   try {
     const { stdout } = await execAsync("route print -4");
-    const line = String(stdout || "")
+    const lines = String(stdout || "")
       .split(/\r?\n/)
-      .find((l) => /\b0\.0\.0\.0\b/.test(l) && /\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(l));
-    if (!line) return null;
-    const ips = line.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g) || [];
-    return ips.length >= 2 ? ips[1] : null;
+      .map((l) => String(l || "").trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      const cols = line.split(/\s+/);
+      // Formato típico do Windows:
+      // 0.0.0.0  0.0.0.0  <gateway>  <interface>  <metric>
+      if (cols.length < 3) continue;
+      if (cols[0] !== "0.0.0.0" || cols[1] !== "0.0.0.0") continue;
+      const gw = cols[2];
+      if (isUsableIpv4(gw)) return gw;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -219,7 +265,8 @@ async function getDefaultGatewayIpv4() {
 function buildFlowCandidates(gatewayIp) {
   const cfg = serverConfig.readServerConfigEffective({});
   const nr = (cfg && cfg.networkRotation) ? cfg.networkRotation : {};
-  const gw = String(gatewayIp || nr.gatewayHost || "").trim();
+  const gwRaw = String(gatewayIp || nr.gatewayHost || "").trim();
+  const gw = isUsableIpv4(gwRaw) ? gwRaw : "";
   const st = state || loadState();
   const out = [];
   if (st && st.selectedFlow && st.selectedFlow.loginUrl && st.selectedFlow.rebootUrl) {
@@ -496,7 +543,7 @@ async function runCycle({ manualOptions = null } = {}) {
   const t0 = now();
   const timeline = [{ ts: t0, step: "cycle_start" }];
   const gateway = await getDefaultGatewayIpv4();
-  const flows = buildFlowCandidates(gateway);
+  const flows = buildFlowCandidates(gateway).filter(isValidFlow);
   const baseCredentials = parseCredentialCandidates(cfgNet);
   const cached = state && state.credentialCache && state.credentialCache.username && state.credentialCache.password
     ? [{ username: state.credentialCache.username, password: state.credentialCache.password, source: "cache" }]
@@ -537,7 +584,11 @@ async function runCycle({ manualOptions = null } = {}) {
   logger.info("[NET-ROTATE] ciclo iniciado", {
     manual: manualShowBrowser,
     flowCandidates: flows.length,
-    credentialCandidates: credentials.length
+    credentialCandidates: credentials.length,
+    flowPreview: flows.slice(0, 4).map((f) => ({
+      name: f && f.name ? f.name : null,
+      loginUrl: f && f.loginUrl ? f.loginUrl : null
+    }))
   });
 
   try {
@@ -766,7 +817,16 @@ async function loopTick() {
 
 function getStateSnapshot() {
   const st = state || loadState();
-  const out = { ...st };
+  const cfg = getRotationConfig();
+  const safeNextRotationAt = sanitizeNextRotationAt(st, cfg);
+  if (safeNextRotationAt !== Number(st.nextRotationAt || 0)) {
+    saveState({
+      nextRotationAt: safeNextRotationAt || (cfg.enabled ? (now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes)) : 0),
+      lastError: "next_rotation_sanitized_for_dashboard"
+    });
+  }
+  const cur = state || st;
+  const out = { ...cur };
   if (out.credentialCache) {
     out.credentialCache = {
       username: out.credentialCache.username || null,
@@ -798,6 +858,13 @@ async function triggerNow(reason = "manual_trigger", options = null) {
 function startNetworkRotationScheduler({ port } = {}) {
   localPort = Number(port || localPort || 8088) || 8088;
   state = loadState();
+  if (state && state.selectedFlow && !isValidFlow(state.selectedFlow)) {
+    saveState({
+      selectedFlow: null,
+      activeGateway: null,
+      lastError: "invalid_cached_flow_cleared_on_boot"
+    });
+  }
   // Reinício do processo deve sempre limpar estados transitórios para evitar UI presa em "rotacionando...".
   if (state && (state.inProgress === true || state.manualTriggerPending === true)) {
     saveState({
@@ -820,6 +887,13 @@ function startNetworkRotationScheduler({ port } = {}) {
   recoverStaleInProgressState(state, { reason: "boot_stale_recovered" });
   try {
     const cfg = getRotationConfig();
+    const safeNextAt = sanitizeNextRotationAt(state || loadState(), cfg);
+    if (safeNextAt !== Number((state && state.nextRotationAt) || 0)) {
+      saveState({
+        nextRotationAt: safeNextAt || (cfg.enabled ? (now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes)) : 0),
+        lastError: "next_rotation_sanitized_on_boot"
+      });
+    }
     if (cfg && cfg.enabled === true) {
       // Regra operacional: após restart, sempre agenda próximo ciclo para frente (não executa "ciclo atrasado" herdado).
       saveState({
