@@ -152,6 +152,33 @@ function dedupeFlows(list) {
   return out;
 }
 
+function recoverStaleInProgressState(st, { reason = "stale_recovered" } = {}) {
+  const cur = (st && typeof st === "object") ? st : (state || loadState());
+  if (!cur || cur.inProgress !== true) return false;
+  const tNow = now();
+  const startedAt = Number(cur.inProgressSince || cur.updatedAt || cur.lastRotationAt || 0) || 0;
+  const stale = (startedAt <= 0) || ((tNow - startedAt) > INPROGRESS_STALE_MS);
+  if (!stale) return false;
+  saveState({
+    inProgress: false,
+    inProgressSince: 0,
+    manualTriggerPending: false,
+    manualTriggerOptions: null,
+    lastError: reason,
+    lastRotationFinishedAt: tNow
+  });
+  try {
+    provisionAudit.append({
+      ts: tNow,
+      event: "network_rotation_stale_recovered",
+      ok: false,
+      error: reason
+    });
+  } catch {}
+  try { logger.warn("[NET-ROTATE] estado inProgress recuperado", { reason, startedAt }); } catch {}
+  return true;
+}
+
 async function withTimeout(promise, timeoutMs, timeoutLabel = "operation_timeout") {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -496,6 +523,11 @@ async function runCycle({ manualOptions = null } = {}) {
   let pausedNames = [];
   let rebootDetected = false;
   const manualShowBrowser = !!(manualOptions && manualOptions.showBrowser === true);
+  logger.info("[NET-ROTATE] ciclo iniciado", {
+    manual: manualShowBrowser,
+    flowCandidates: flows.length,
+    credentialCandidates: credentials.length
+  });
 
   try {
     pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
@@ -528,6 +560,7 @@ async function runCycle({ manualOptions = null } = {}) {
       const rr = await runRebootAttempt({ flow, credential: cred, cfg, timeline, showBrowser: manualShowBrowser });
       if (!rr.ok) {
         timeline.push({ ts: now(), step: "attempt_fail", attempt: attempts, error: rr.error || "attempt_failed" });
+        logger.warn("[NET-ROTATE] tentativa falhou", { attempt: attempts, flow: flow.name, error: rr.error || "attempt_failed" });
         continue;
       }
       rebootDetected = true;
@@ -615,6 +648,12 @@ async function runCycle({ manualOptions = null } = {}) {
     };
   }
   saveState(nextStatePatch);
+  logger.info("[NET-ROTATE] ciclo finalizado", {
+    ok: changed,
+    attempts,
+    rebootDetected,
+    error: cycleError || null
+  });
   try {
     provisionAudit.append({
       ts: doneAt,
@@ -637,6 +676,7 @@ async function loopTick() {
     const cfg = getRotationConfig();
     const st = state || loadState();
     try { await refreshPublicIpSnapshot({ force: false }); } catch {}
+    recoverStaleInProgressState(st, { reason: "rotation_cycle_stale_recovered" });
     if (cfg.enabled !== !!st.schedulerEnabled) {
       const patch = { schedulerEnabled: cfg.enabled };
       if (cfg.enabled && !st.nextRotationAt) patch.nextRotationAt = now() + pickRandomDelayMs(cfg.intervalMinMinutes, cfg.intervalMaxMinutes);
@@ -644,28 +684,7 @@ async function loopTick() {
       saveState(patch);
     }
     const cur0 = state || st;
-    if (cur0 && cur0.inProgress === true) {
-      const startedAt = Number(cur0.inProgressSince || 0) || 0;
-      if (startedAt > 0 && (now() - startedAt) > INPROGRESS_STALE_MS) {
-        const recoveredAt = now();
-        saveState({
-          inProgress: false,
-          inProgressSince: 0,
-          manualTriggerPending: false,
-          manualTriggerOptions: null,
-          lastError: "rotation_cycle_stale_recovered",
-          lastRotationFinishedAt: recoveredAt
-        });
-        try {
-          provisionAudit.append({
-            ts: recoveredAt,
-            event: "network_rotation_stale_recovered",
-            ok: false,
-            error: "rotation_cycle_stale_recovered"
-          });
-        } catch {}
-      }
-    }
+    recoverStaleInProgressState(cur0, { reason: "rotation_cycle_stale_recovered" });
     const cur1 = state || st;
     if (cur1.inProgress) return;
     const manualPending = cur1.manualTriggerPending === true;
@@ -709,6 +728,7 @@ function getStateSnapshot() {
 }
 
 async function triggerNow(reason = "manual_trigger", options = null) {
+  recoverStaleInProgressState(state || loadState(), { reason: "manual_trigger_stale_recovered" });
   saveState({
     nextRotationAt: now(),
     manualTriggerPending: true,
@@ -717,12 +737,17 @@ async function triggerNow(reason = "manual_trigger", options = null) {
       showBrowser: !!(options && options.showBrowser === true)
     }
   });
+  logger.info("[NET-ROTATE] trigger manual recebido", {
+    reason: String(reason || "").slice(0, 120),
+    showBrowser: !!(options && options.showBrowser === true)
+  });
   return { ok: true };
 }
 
 function startNetworkRotationScheduler({ port } = {}) {
   localPort = Number(port || localPort || 8088) || 8088;
   state = loadState();
+  recoverStaleInProgressState(state, { reason: "boot_stale_recovered" });
   if (timer) return;
   timer = setInterval(() => { loopTick().catch(() => {}); }, LOOP_MS);
   try { if (typeof timer.unref === "function") timer.unref(); } catch {}
