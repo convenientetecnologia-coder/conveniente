@@ -276,6 +276,8 @@
       <div class="metric"><span>Fila</span><b id="mFila">0</b></div>
       <div class="metric"><span>RAM</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
+      <div class="metric"><span>IP atual</span><b id="mPublicIp">--</b></div>
+      <div class="metric"><span>Próx. troca IP</span><b id="mNextSwap">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
       <div class="metric clickable" id="metricBanned" style="display:none"><span>Banidas</span><b id="mBanidas">0</b></div>
@@ -1150,6 +1152,40 @@
           </div>
         </div>
         <div class="form-row">
+          <label>Rotação de IP — ativar agendamento automático</label>
+          <select id="srvNetRotateEnabled">
+            <option value="1">Ativo</option>
+            <option value="0">Desativado</option>
+          </select>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Quando ativo, o servidor pausa o trabalho, reinicia o modem e valida troca real de IP.</div>
+        </div>
+        <div class="form-row">
+          <label>Rotação de IP — janela aleatória (mín / máx, em minutos)</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input type="number" id="srvNetRotateMin" min="10" max="1440" step="1" />
+            <input type="number" id="srvNetRotateMax" min="10" max="1440" step="1" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Rotação de IP — tentativas máximas por ciclo</label>
+          <input type="number" id="srvNetRotateAttempts" min="1" max="5" step="1" />
+        </div>
+        <div class="form-row">
+          <label>Rotação de IP — gateway/modem (opcional)</label>
+          <input type="text" id="srvNetGatewayHost" placeholder="Ex.: 192.168.2.1" />
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+            <input type="text" id="srvNetLoginUrl" placeholder="URL login (opcional)" />
+            <input type="text" id="srvNetRebootUrl" placeholder="URL reboot (opcional)" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Rotação de IP — credenciais do modem</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input type="text" id="srvNetUser" placeholder="Usuário" autocomplete="off" />
+            <input type="password" id="srvNetPass" placeholder="Senha" autocomplete="new-password" />
+          </div>
+        </div>
+        <div class="form-row">
           <label>Robe — tipo de trabalho</label>
           <select id="srvRobeWorkMode">
             <option value="v1">Robe V1</option>
@@ -1178,6 +1214,7 @@
         </div>
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
+          <button class="btn btn-amarelo" id="srvRotateNow">Rotacionar IP agora</button>
           <button class="btn primary" id="srvCfgSave">Salvar</button>
         </div>
       `;
@@ -1186,6 +1223,15 @@
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
       const cdMaxEl = box.querySelector('#srvCooldownMax');
+      const netRotateEnabledEl = box.querySelector('#srvNetRotateEnabled');
+      const netRotateMinEl = box.querySelector('#srvNetRotateMin');
+      const netRotateMaxEl = box.querySelector('#srvNetRotateMax');
+      const netRotateAttemptsEl = box.querySelector('#srvNetRotateAttempts');
+      const netGatewayHostEl = box.querySelector('#srvNetGatewayHost');
+      const netLoginUrlEl = box.querySelector('#srvNetLoginUrl');
+      const netRebootUrlEl = box.querySelector('#srvNetRebootUrl');
+      const netUserEl = box.querySelector('#srvNetUser');
+      const netPassEl = box.querySelector('#srvNetPass');
       const memGovEnterEl = box.querySelector('#srvMemGovEnter');
       const memGovExitEl = box.querySelector('#srvMemGovExit');
       const memHostBaseEl = box.querySelector('#srvMemHostBase');
@@ -1198,6 +1244,7 @@
       const globalCitiesToggleAllEl = box.querySelector('#srvGlobalCitiesToggleAll');
       const globalCitiesClearFilterEl = box.querySelector('#srvGlobalCitiesClearFilter');
       const closeBtn = box.querySelector('#srvCfgClose');
+      const rotateNowBtn = box.querySelector('#srvRotateNow');
       const saveBtn = box.querySelector('#srvCfgSave');
       let globalCitiesAll = [];
       let globalCitiesSelected = [];
@@ -1304,8 +1351,18 @@
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         const mem = (cfg && cfg.memory) ? cfg.memory : {};
+        const net = (cfg && cfg.networkRotation) ? cfg.networkRotation : {};
         cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
         cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
+        if (netRotateEnabledEl) netRotateEnabledEl.value = net.enabled === true ? '1' : '0';
+        if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 60);
+        if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 120);
+        if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
+        if (netGatewayHostEl) netGatewayHostEl.value = String(net.gatewayHost || '');
+        if (netLoginUrlEl) netLoginUrlEl.value = String(net.loginUrl || '');
+        if (netRebootUrlEl) netRebootUrlEl.value = String(net.rebootUrl || '');
+        if (netUserEl) netUserEl.value = String(net.modemUsername || '');
+        if (netPassEl) netPassEl.value = String(net.modemPassword || '');
         workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
@@ -1330,6 +1387,35 @@
       })();
 
       closeBtn.onclick = () => overlay.remove();
+      if (rotateNowBtn) {
+        rotateNowBtn.onclick = async () => {
+          try {
+            setBtnLoading(rotateNowBtn, true, 'Rotacionando...');
+            const r = await fetch('/api/network-rotation/trigger-now', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_network_rotation_now' },
+              body: JSON.stringify({ reason: 'ui_manual_rotate_now' })
+            }).then(x => x.json()).catch(() => null);
+            if (!r || r.ok !== true) {
+              throw new Error((r && r.error) ? String(r.error) : 'network_rotation_trigger_failed');
+            }
+            await showSystemMessageModal({
+              title: 'Rotação disparada',
+              message: 'Rotação manual agendada para iniciar agora. O sistema fará pausa, troca de IP e retomada automática.',
+              tone: 'good'
+            });
+            try { await reloadNetworkRotationState(); } catch {}
+          } catch (e) {
+            await showSystemMessageModal({
+              title: 'Falha ao rotacionar IP',
+              message: 'Não foi possível iniciar a rotação manual: ' + String(e && e.message || e),
+              tone: 'bad'
+            });
+          } finally {
+            setBtnLoading(rotateNowBtn, false);
+          }
+        };
+      }
       box.addEventListener('change', (ev) => {
         const target = ev && ev.target;
         if (!(target instanceof HTMLInputElement)) return;
@@ -1366,10 +1452,51 @@
         try {
           const cooldownMin = Math.floor(Number(cdMinEl.value || 25));
           const cooldownMax = Math.floor(Number(cdMaxEl.value || 50));
+          const netEnabled = String((netRotateEnabledEl && netRotateEnabledEl.value) || '0') === '1';
+          const netMin = Math.floor(Number((netRotateMinEl && netRotateMinEl.value) || 60));
+          const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 120));
+          const netAttempts = Math.floor(Number((netRotateAttemptsEl && netRotateAttemptsEl.value) || 5));
+          const netGatewayHost = String((netGatewayHostEl && netGatewayHostEl.value) || '').trim();
+          const netLoginUrl = String((netLoginUrlEl && netLoginUrlEl.value) || '').trim();
+          const netRebootUrl = String((netRebootUrlEl && netRebootUrlEl.value) || '').trim();
+          const netUser = String((netUserEl && netUserEl.value) || '').trim();
+          const netPass = String((netPassEl && netPassEl.value) || '').trim();
           if (!Number.isFinite(cooldownMin) || !Number.isFinite(cooldownMax) || cooldownMin < 1 || cooldownMax < 1 || cooldownMin > 1440 || cooldownMax > 1440 || cooldownMax < cooldownMin) {
             await showSystemMessageModal({
               title: 'Configuração inválida',
               message: 'Cooldown inválido: use minutos entre 1 e 1440, com máximo maior ou igual ao mínimo.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (!Number.isFinite(netMin) || !Number.isFinite(netMax) || !Number.isFinite(netAttempts) || netMin < 10 || netMax < 10 || netMin > 1440 || netMax > 1440 || netMax < netMin) {
+            await showSystemMessageModal({
+              title: 'Rotação de IP inválida',
+              message: 'Janela de rotação inválida: use valores entre 10 e 1440 minutos, com máximo maior ou igual ao mínimo.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (netAttempts < 1 || netAttempts > 5) {
+            await showSystemMessageModal({
+              title: 'Rotação de IP inválida',
+              message: 'Tentativas por ciclo deve estar entre 1 e 5.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (netLoginUrl && !/^https?:\/\//i.test(netLoginUrl)) {
+            await showSystemMessageModal({ title: 'Rotação de IP inválida', message: 'URL de login deve começar com http:// ou https://', tone: 'bad' });
+            return;
+          }
+          if (netRebootUrl && !/^https?:\/\//i.test(netRebootUrl)) {
+            await showSystemMessageModal({ title: 'Rotação de IP inválida', message: 'URL de reboot deve começar com http:// ou https://', tone: 'bad' });
+            return;
+          }
+          if (netEnabled && ((!netUser || !netPass) && !(netUser.length === 0 && netPass.length === 0 && !netLoginUrl && !netRebootUrl))) {
+            await showSystemMessageModal({
+              title: 'Rotação de IP incompleta',
+              message: 'Para ativar com URLs/credenciais manuais, preencha usuário e senha do modem.',
               tone: 'bad'
             });
             return;
@@ -1407,6 +1534,17 @@
               reservePer8GbMb,
               provisionSpikeMb
             },
+            networkRotation: {
+              enabled: netEnabled,
+              intervalMinMinutes: netMin,
+              intervalMaxMinutes: netMax,
+              maxAttemptsPerCycle: netAttempts,
+              gatewayHost: netGatewayHost,
+              loginUrl: netLoginUrl,
+              rebootUrl: netRebootUrl,
+              modemUsername: netUser,
+              modemPassword: netPass
+            },
             robe: {
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
@@ -1423,7 +1561,7 @@
           fillFromConfig(r.config);
           await showSystemMessageModal({
             title: 'Configuração salva',
-            message: 'Configuração salva com sucesso. Cooldowns já ativos não são alterados; política de fotos e parâmetros de RAM passam a valer conforme o worker lê o arquivo (em poucos segundos, sem reinício).',
+            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.',
             tone: 'good'
           });
           try { await reloadPerfis(); } catch {}
@@ -1737,13 +1875,60 @@
       } catch {}
       return await fetch('/api/perfis').then(r => r.json()).catch(() => null);
     }
+    let __networkRotationState = null;
+    function fmtNextRotation(ts) {
+      const n = Number(ts || 0) || 0;
+      if (!n) return '--';
+      const diff = Math.max(0, Math.floor((n - Date.now()) / 1000));
+      const h = Math.floor(diff / 3600);
+      const m = Math.floor((diff % 3600) / 60);
+      const s = diff % 60;
+      if (h > 0) return `${h}h ${m}m ${s}s`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+    function paintNetworkRotationMetrics() {
+      const ipEl = document.getElementById('mPublicIp');
+      const nextEl = document.getElementById('mNextSwap');
+      const st = __networkRotationState;
+      if (!ipEl || !nextEl || !st) return;
+      ipEl.textContent = st.currentPublicIp ? String(st.currentPublicIp) : '--';
+      if (st.schedulerEnabled !== true) {
+        nextEl.textContent = 'desativado';
+        nextEl.style.color = '';
+        return;
+      }
+      if (st.inProgress === true) {
+        nextEl.textContent = 'rotacionando...';
+        nextEl.style.color = '#f0b429';
+        return;
+      }
+      const txt = fmtNextRotation(st.nextRotationAt);
+      nextEl.textContent = txt;
+      const remainSec = Number(st.countdownSec || 0);
+      nextEl.style.color = (remainSec > 0 && remainSec <= 60) ? '#f0b429' : '';
+    }
+    async function reloadNetworkRotationState() {
+      try {
+        const r = await fetch('/api/network-rotation/state').then(x => x.json()).catch(() => null);
+        if (r && r.ok === true && r.state) {
+          __networkRotationState = r.state;
+          paintNetworkRotationMetrics();
+        }
+      } catch {}
+    }
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
-      const [st, perfisResp] = await Promise.all([
+      const [st, perfisResp, netRotate] = await Promise.all([
         safeGetStatus(),
-        safeListPerfis()
+        safeListPerfis(),
+        fetch('/api/network-rotation/state').then(x => x.json()).catch(() => null)
       ]);
+      if (netRotate && netRotate.ok === true && netRotate.state) {
+        __networkRotationState = netRotate.state;
+      }
+      paintNetworkRotationMetrics();
 
       // ====== NOVO: progresso do "Abrir Todos" (openAll) vindo do backend ======
       try {
@@ -2671,6 +2856,8 @@
 
     // Intervalo periódico de métricas (3s)
     setInterval(updateSysMetrics, 3000);
+    setInterval(paintNetworkRotationMetrics, 1000);
+    setInterval(reloadNetworkRotationState, 15000);
 
     // 4.3 Modal: Cidades com contagem de contas
     function showCidadesContagemModal({ contagens, totalPerfis }) {

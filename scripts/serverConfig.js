@@ -57,6 +57,22 @@ const DEFAULTS = Object.freeze({
     },
     photoDeletePolicy: "after_all_working_posted",
     cidadesExtrasGlobais: []
+  },
+  networkRotation: {
+    enabled: false,
+    intervalMinMinutes: 60,
+    intervalMaxMinutes: 120,
+    maxAttemptsPerCycle: 5,
+    pauseBeforeRotationSec: 60,
+    postRotationStabilizeSec: 30,
+    maxWaitDownSec: 120,
+    maxWaitUpSec: 300,
+    pollSec: 5,
+    gatewayHost: "",
+    loginUrl: "",
+    rebootUrl: "",
+    modemUsername: "",
+    modemPassword: ""
   }
 });
 
@@ -132,6 +148,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
   const memRaw = (r.memory && typeof r.memory === "object") ? r.memory : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
+  const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
@@ -190,6 +207,21 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const hostBaseMb = clamp(Math.floor(toNum(memRaw.hostBaseMb, DEFAULTS.memory.hostBaseMb)), 256, 16384);
   const reservePer8GbMb = clamp(Math.floor(toNum(memRaw.reservePer8GbMb, DEFAULTS.memory.reservePer8GbMb)), 0, 8192);
   const provisionSpikeMb = clamp(Math.floor(toNum(memRaw.provisionSpikeMb, DEFAULTS.memory.provisionSpikeMb)), 256, 8192);
+  const intervalMinRaw = Math.floor(toNum(net.intervalMinMinutes, DEFAULTS.networkRotation.intervalMinMinutes));
+  const intervalMaxRaw = Math.floor(toNum(net.intervalMaxMinutes, DEFAULTS.networkRotation.intervalMaxMinutes));
+  const intervalMinMinutes = clamp(Math.min(intervalMinRaw, intervalMaxRaw), 10, 24 * 60);
+  const intervalMaxMinutes = clamp(Math.max(intervalMinRaw, intervalMaxRaw), intervalMinMinutes, 24 * 60);
+  const maxAttemptsPerCycle = clamp(Math.floor(toNum(net.maxAttemptsPerCycle, DEFAULTS.networkRotation.maxAttemptsPerCycle)), 1, 5);
+  const pauseBeforeRotationSec = clamp(Math.floor(toNum(net.pauseBeforeRotationSec, DEFAULTS.networkRotation.pauseBeforeRotationSec)), 5, 300);
+  const postRotationStabilizeSec = clamp(Math.floor(toNum(net.postRotationStabilizeSec, DEFAULTS.networkRotation.postRotationStabilizeSec)), 5, 180);
+  const maxWaitDownSec = clamp(Math.floor(toNum(net.maxWaitDownSec, DEFAULTS.networkRotation.maxWaitDownSec)), 10, 300);
+  const maxWaitUpSec = clamp(Math.floor(toNum(net.maxWaitUpSec, DEFAULTS.networkRotation.maxWaitUpSec)), 20, 900);
+  const pollSec = clamp(Math.floor(toNum(net.pollSec, DEFAULTS.networkRotation.pollSec)), 2, 20);
+  const gatewayHost = String(net.gatewayHost || DEFAULTS.networkRotation.gatewayHost).trim().slice(0, 120);
+  const loginUrl = String(net.loginUrl || DEFAULTS.networkRotation.loginUrl).trim().slice(0, 240);
+  const rebootUrl = String(net.rebootUrl || DEFAULTS.networkRotation.rebootUrl).trim().slice(0, 240);
+  const modemUsername = String(net.modemUsername || DEFAULTS.networkRotation.modemUsername).trim().slice(0, 120);
+  const modemPassword = String(net.modemPassword || DEFAULTS.networkRotation.modemPassword).trim().slice(0, 180);
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -240,6 +272,22 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       },
       photoDeletePolicy,
       cidadesExtrasGlobais
+    },
+    networkRotation: {
+      enabled: net.enabled === true,
+      intervalMinMinutes,
+      intervalMaxMinutes,
+      maxAttemptsPerCycle,
+      pauseBeforeRotationSec,
+      postRotationStabilizeSec,
+      maxWaitDownSec,
+      maxWaitUpSec,
+      pollSec,
+      gatewayHost,
+      loginUrl,
+      rebootUrl,
+      modemUsername,
+      modemPassword
     }
   };
 
@@ -257,7 +305,8 @@ function validateServerConfigPayload(payload) {
   const cap = (p.capacity && typeof p.capacity === "object") ? p.capacity : null;
   const robe = (p.robe && typeof p.robe === "object") ? p.robe : null;
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
-  if (!cap && !robe && !mem) return { ok: false, error: "payload_sem_campos_reconhecidos" };
+  const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
+  if (!cap && !robe && !mem && !net) return { ok: false, error: "payload_sem_campos_reconhecidos" };
 
   const errors = [];
   if (cap) {
@@ -347,6 +396,31 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (net) {
+    const intFields = ["intervalMinMinutes", "intervalMaxMinutes", "maxAttemptsPerCycle", "pauseBeforeRotationSec", "postRotationStabilizeSec", "maxWaitDownSec", "maxWaitUpSec", "pollSec"];
+    for (const f of intFields) {
+      if (net[f] !== undefined) {
+        const n = toNum(net[f], NaN);
+        if (!Number.isFinite(n)) errors.push(`networkRotation.${f}_invalido`);
+      }
+    }
+    if (net.enabled !== undefined && typeof net.enabled !== "boolean") {
+      errors.push("networkRotation.enabled_invalido");
+    }
+    const urlFields = ["loginUrl", "rebootUrl"];
+    for (const f of urlFields) {
+      if (net[f] !== undefined) {
+        const v = String(net[f] || "").trim();
+        if (v && !/^https?:\/\//i.test(v)) errors.push(`networkRotation.${f}_url_invalido`);
+      }
+    }
+    const strFields = ["gatewayHost", "modemUsername", "modemPassword"];
+    for (const f of strFields) {
+      if (net[f] !== undefined && typeof net[f] !== "string") {
+        errors.push(`networkRotation.${f}_invalido`);
+      }
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
@@ -354,7 +428,8 @@ function validateServerConfigPayload(payload) {
     ...(readServerConfigRaw() || {}),
     capacity: { ...DEFAULTS.capacity, ...((readServerConfigRaw() || {}).capacity || {}), ...(cap || {}) },
     robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) },
-    memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) }
+    memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) },
+    networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
@@ -398,6 +473,22 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
+    },
+    networkRotation: {
+      enabled: v.normalized.networkRotation.enabled,
+      intervalMinMinutes: v.normalized.networkRotation.intervalMinMinutes,
+      intervalMaxMinutes: v.normalized.networkRotation.intervalMaxMinutes,
+      maxAttemptsPerCycle: v.normalized.networkRotation.maxAttemptsPerCycle,
+      pauseBeforeRotationSec: v.normalized.networkRotation.pauseBeforeRotationSec,
+      postRotationStabilizeSec: v.normalized.networkRotation.postRotationStabilizeSec,
+      maxWaitDownSec: v.normalized.networkRotation.maxWaitDownSec,
+      maxWaitUpSec: v.normalized.networkRotation.maxWaitUpSec,
+      pollSec: v.normalized.networkRotation.pollSec,
+      gatewayHost: v.normalized.networkRotation.gatewayHost,
+      loginUrl: v.normalized.networkRotation.loginUrl,
+      rebootUrl: v.normalized.networkRotation.rebootUrl,
+      modemUsername: v.normalized.networkRotation.modemUsername,
+      modemPassword: v.normalized.networkRotation.modemPassword
     }
   };
   try {

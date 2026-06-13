@@ -35,6 +35,7 @@ const manifestStore = require('./manifestStore.js');
 const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
 const serverConfig = require('./serverConfig.js');
+const networkRotation = require('./networkRotation.js');
 
 module.exports = (app, workerClient, fileStore) => {
   // ===== Maintenance: provision lock =====
@@ -189,6 +190,24 @@ module.exports = (app, workerClient, fileStore) => {
         operator
       }, { timeoutMs: 180000 });
       return res.json({ ok: true, result: r || null });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  app.get('/api/network-rotation/state', (req, res) => {
+    try {
+      return res.json({ ok: true, state: networkRotation.getStateSnapshot() });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  app.post('/api/network-rotation/trigger-now', async (req, res) => {
+    try {
+      const reason = String((req.body && req.body.reason) || req.headers['x-operator'] || 'dashboard_manual').slice(0, 120);
+      const r = await networkRotation.triggerNow(reason);
+      return res.json(r);
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }

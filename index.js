@@ -63,6 +63,7 @@ const fileStore = require('./scripts/fileStore.js');
 
 // supervisor interno unificado (importação obrigatória — side effect: inicializa timers ttl/probe)
 const supervisor = require('./scripts/supervisor.js');
+const networkRotation = require('./scripts/networkRotation.js');
 
 // Dashboard monitor
 const { startDashboardMonitor } = require('./scripts/dashboard.js');
@@ -241,6 +242,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
     // <<< INICIA O MONITOR DE TELEMETRIA, EXATAMENTE AQUI >>>
     startDashboardMonitor();
+    networkRotation.startNetworkRotationScheduler({ port: PORT });
   });
 })();
 
