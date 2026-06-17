@@ -685,6 +685,87 @@ function buildQuickSnapshot(status) {
   };
 }
 
+function buildPollLightTelemetry(status) {
+  const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
+  const counts = {
+    perfis: perfis.length,
+    ativos: perfis.filter((p) => p && p.active).length,
+    trabalhando: perfis.filter((p) => p && p.trabalhando).length
+  };
+  const accountsAgg = { total: 0 };
+  const flagsAgg = {
+    totalPerfis: 0,
+    human_invoked: 0,
+    messenger_pin: 0,
+    problem: 0,
+    virtus_offline: 0,
+    login_required: 0,
+    login_cookies_failed: 0,
+    appeal_submitted: 0
+  };
+
+  for (const p of perfis) {
+    if (!p) continue;
+    const banned = p.banned === true;
+    const loginRequired = p.loginRequired === true;
+    const reason = String(p.loginReason || "").trim().toLowerCase();
+    let kind = "ok";
+    if (banned) {
+      kind = "banned";
+    } else if (loginRequired) {
+      if (reason.includes("captcha") || reason.includes("checkpoint")) kind = "captcha";
+      else if (reason === "login_form") kind = "login";
+      else if (reason.includes("session")) kind = "session";
+      else if (reason.includes("2fa") || reason.includes("two_factor")) kind = "two_factor";
+      else if (reason.includes("identity")) kind = "identity";
+      else if (reason.includes("consent")) kind = "consent";
+      else kind = "login_other";
+    } else {
+      const r = p && p.nome ? String(p.nome) : "";
+      const robeRec = (status && status.robes && typeof status.robes === "object" && r) ? status.robes[r] : null;
+      const isLimit = !!(
+        robeRec &&
+        (String(robeRec.estado || "").toLowerCase() === "paused_limit" ||
+         String(robeRec.pauseReason || "").toLowerCase() === "limit_posting") &&
+        Number(robeRec.cooldownSec || 0) > 0
+      );
+      if (isLimit) kind = "limit_exceeded";
+    }
+    accountsAgg[kind] = (Number(accountsAgg[kind] || 0) || 0) + 1;
+    accountsAgg.total++;
+
+    flagsAgg.totalPerfis++;
+    if (p.humanControl === true || p.humanHold === true) flagsAgg.human_invoked++;
+    if (p.messengerPin === true) flagsAgg.messenger_pin++;
+    if (p.problem === true) flagsAgg.problem++;
+    if (p.virtusOnline === false) flagsAgg.virtus_offline++;
+    if (p.loginRequired === true) flagsAgg.login_required++;
+    if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
+    if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
+  }
+
+  accountsAgg.lr_total = ["captcha", "login", "session", "two_factor", "identity", "consent", "login_other"]
+    .reduce((acc, k) => acc + (Number(accountsAgg[k] || 0) || 0), 0);
+
+  const quick = buildQuickSnapshot(status);
+  return {
+    counts,
+    accountsAgg,
+    flagsAgg,
+    quick: {
+      perfisCount: Number(quick && quick.perfisCount || 0) || 0,
+      activeCount: Number(quick && quick.activeCount || 0) || 0,
+      workingCount: Number(quick && quick.workingCount || 0) || 0,
+      fotosCount: Number(quick && quick.fotosCount || 0) || 0,
+      sys: {
+        freeMB: Number(quick && quick.sys && quick.sys.freeMB),
+        totalMB: Number(quick && quick.sys && quick.sys.totalMB),
+        cpuApprox: Number(quick && quick.sys && quick.sys.cpuApprox)
+      }
+    }
+  };
+}
+
 async function postPayload(url, payload) {
   let bodyStr;
   let body = null;
@@ -4056,6 +4137,7 @@ async function tick(reason = 'interval') {
       // Pulso leve de RAM (lê só status.json local): o CT não recebe snapshot completo por horas,
       // mas o scheduler de estoque precisa de freeMB atual para não travar em "no_headroom" fantasioso.
       let pulseSys = null;
+      let pollLight = null;
       try {
         const raw = fsSync.readFileSync(STATUS_PATH, 'utf8');
         const sj = JSON.parse(raw);
@@ -4065,13 +4147,15 @@ async function tick(reason = 'interval') {
           const tm = Number(sj && sj.sys && sj.sys.totalMB);
           if (Number.isFinite(tm) && tm > 0) pulseSys.totalMB = Math.round(tm);
         }
+        pollLight = buildPollLightTelemetry(sj);
       } catch {}
       const pollPayload = {
         pollOnly: true,
         hostname: (os && os.hostname) ? os.hostname() : '',
         hostId,
         sentAt: now(),
-        ...(pulseSys ? { pulseSys } : {})
+        ...(pulseSys ? { pulseSys } : {}),
+        ...(pollLight ? { pollLight } : {})
       };
       const pollResp = await tryAllEndpoints(pollPayload);
       if (pollResp && Array.isArray(pollResp.commands) && pollResp.commands.length) {
