@@ -17,7 +17,7 @@ const gatewayProxy = require('./gatewayProxy');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
-const FULL_REPORT_INTERVAL_MS = parseInt(process.env.DASHBOARD_FULL_REPORT_INTERVAL_MS || '21600000', 10); // 6h padrão
+const FULL_REPORT_INTERVAL_MS = parseInt(process.env.DASHBOARD_FULL_REPORT_INTERVAL_MS || '300000', 10); // 5 min padrão
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const ACK_PENDING_PATH = path.join(__dirname, '..', 'dados', 'acks_pending.json');
