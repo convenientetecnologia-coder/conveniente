@@ -8,6 +8,11 @@ const provisionAudit = require("./provisionAudit.js");
 
 const LOOP_MS = 30000;
 const STATE_PATH = path.join(__dirname, "..", "dados", "daily_window_scheduler_state.json");
+const OPEN_VERIFY_ENABLED = !/^(0|false|no|off)$/i.test(String(process.env.DAILY_WINDOW_OPEN_VERIFY_ENABLED || "1").trim());
+const OPEN_VERIFY_REQUIRE_WORKING = !/^(0|false|no|off)$/i.test(String(process.env.DAILY_WINDOW_OPEN_REQUIRE_WORKING || "1").trim());
+const OPEN_VERIFY_TIMEOUT_MS = Math.max(60_000, Number(process.env.DAILY_WINDOW_OPEN_VERIFY_TIMEOUT_MS || (30 * 60 * 1000)) || (30 * 60 * 1000));
+const OPEN_VERIFY_POLL_MS = Math.max(1_000, Number(process.env.DAILY_WINDOW_OPEN_VERIFY_POLL_MS || 5_000) || 5_000);
+const OPEN_VERIFY_RETRY_MAX = Math.max(1, Number(process.env.DAILY_WINDOW_OPEN_VERIFY_RETRY_MAX || 2) || 2);
 
 let timer = null;
 let inFlight = false;
@@ -176,12 +181,130 @@ async function runCloseRoutine() {
 }
 
 async function runOpenRoutine() {
-  const r = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/open-all-24h`, {}, 5 * 60 * 1000);
-  if (!r || r.ok !== true) {
-    return { ok: false, error: (r && r.error) ? String(r.error) : "open_all_failed" };
+  const readProgress = async () => {
+    const st = await httpJson(`http://127.0.0.1:${localPort}/api/status`, null, 90_000);
+    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    const total = perfis.length;
+    const active = perfis.filter((p) => p && p.active === true).length;
+    const working = perfis.filter((p) => p && p.trabalhando === true).length;
+    const openAll = (st && st.openAll && typeof st.openAll === "object") ? st.openAll : null;
+    return { total, active, working, openAll };
+  };
+
+  const waitOpenConverged = async ({ targetTotal, requireWorking, timeoutMs, pollMs }) => {
+    const t0 = now();
+    let peakActive = 0;
+    let peakWorking = 0;
+    let lastProgressAt = t0;
+    let last = null;
+    while ((now() - t0) < timeoutMs) {
+      const snap = await readProgress();
+      last = snap;
+      if (snap.active > peakActive || snap.working > peakWorking) {
+        peakActive = Math.max(peakActive, snap.active);
+        peakWorking = Math.max(peakWorking, snap.working);
+        lastProgressAt = now();
+      }
+      const activeOk = snap.active >= targetTotal;
+      const workingOk = !requireWorking || (snap.working >= targetTotal);
+      if (activeOk && workingOk) {
+        return {
+          ok: true,
+          total: snap.total,
+          active: snap.active,
+          working: snap.working,
+          peakActive,
+          peakWorking,
+          elapsedMs: now() - t0
+        };
+      }
+      await sleep(pollMs);
+    }
+    return {
+      ok: false,
+      error: "open_all_not_converged",
+      total: last ? last.total : 0,
+      active: last ? last.active : 0,
+      working: last ? last.working : 0,
+      peakActive,
+      peakWorking,
+      elapsedMs: now() - t0,
+      stalledMs: Math.max(0, now() - lastProgressAt),
+      openAllState: (last && last.openAll) ? {
+        active: !!last.openAll.active,
+        lastError: last.openAll.lastError ? String(last.openAll.lastError) : null,
+        partial: !!last.openAll.partial,
+        partialReason: last.openAll.partialReason ? String(last.openAll.partialReason) : null
+      } : null
+    };
+  };
+
+  const verifyEnabled = OPEN_VERIFY_ENABLED;
+  const requireWorking = OPEN_VERIFY_REQUIRE_WORKING;
+  const attempts = [];
+  for (let attempt = 1; attempt <= OPEN_VERIFY_RETRY_MAX; attempt += 1) {
+    const r = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/open-all-24h`, {}, 5 * 60 * 1000);
+    if (!r || r.ok !== true) {
+      return { ok: false, error: (r && r.error) ? String(r.error) : "open_all_failed", attempt };
+    }
+    const targetTotal = Math.max(0, Number(r && r.total) || 0);
+    let verify = {
+      ok: true,
+      total: targetTotal,
+      active: targetTotal,
+      working: targetTotal,
+      elapsedMs: 0
+    };
+    if (verifyEnabled) {
+      verify = await waitOpenConverged({
+        targetTotal,
+        requireWorking,
+        timeoutMs: OPEN_VERIFY_TIMEOUT_MS,
+        pollMs: OPEN_VERIFY_POLL_MS
+      });
+    }
+    attempts.push({ attempt, targetTotal, verify });
+    try {
+      provisionAudit.append({
+        ts: now(),
+        event: "daily_window_open_verify_attempt",
+        attempt,
+        targetTotal,
+        verifyOk: !!verify.ok,
+        active: Number(verify.active || 0) || 0,
+        working: Number(verify.working || 0) || 0,
+        elapsedMs: Number(verify.elapsedMs || 0) || 0,
+        error: verify && verify.error ? String(verify.error) : null
+      });
+    } catch {}
+    if (verify.ok) {
+      saveState({ lastOpenAt: now(), lastError: null });
+      return {
+        ok: true,
+        attempt,
+        targetTotal,
+        verifyEnabled,
+        requireWorking,
+        active: Number(verify.active || 0) || 0,
+        working: Number(verify.working || 0) || 0,
+        elapsedMs: Number(verify.elapsedMs || 0) || 0,
+        attempts
+      };
+    }
+    if (attempt < OPEN_VERIFY_RETRY_MAX) {
+      await sleep(3_000);
+    }
   }
-  saveState({ lastOpenAt: now(), lastError: null });
-  return { ok: true };
+  const lastAttempt = attempts.length ? attempts[attempts.length - 1] : null;
+  return {
+    ok: false,
+    error: lastAttempt && lastAttempt.verify && lastAttempt.verify.error
+      ? String(lastAttempt.verify.error)
+      : "open_all_not_converged",
+    verifyEnabled,
+    requireWorking,
+    attempts
+  };
 }
 
 async function tick() {
@@ -289,7 +412,13 @@ async function tick() {
           event: "daily_window_open",
           ok: !!(rr && rr.ok === true),
           error: rr && rr.error ? String(rr.error) : null,
-          nextOpenAt
+          nextOpenAt,
+          verifyEnabled: !!(rr && rr.verifyEnabled),
+          requireWorking: !!(rr && rr.requireWorking),
+          attempt: Number(rr && rr.attempt || 0) || 0,
+          active: Number(rr && rr.active || 0) || 0,
+          working: Number(rr && rr.working || 0) || 0,
+          elapsedMs: Number(rr && rr.elapsedMs || 0) || 0
         });
       } catch {}
       if (!rr.ok) logger.warn("[DAILY-WINDOW] open falhou", rr || {});
