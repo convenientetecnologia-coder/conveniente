@@ -192,22 +192,106 @@ async function logIssue(nome, type, message) {
   }
 }
 
-// Carrega JSON de atendimento.json (array de respostas randomizáveis)
-let mensagensAtendimento = [];
+// Carrega JSON de atendimento.json (modo composto por blocos)
+let atendimentoConfig = null;
+const LINK_RANDOM_MIN_DIGITS = 1;
+const LINK_RANDOM_MAX_DIGITS = 12;
+
+function sanitizeBlockLine(raw) {
+  const s = String(raw || '').replace(/\r/g, '').trim();
+  if (!s) return '';
+  const noIdx = s.replace(/^\s*\d+\s*[.)-]?\s*/, '').trim();
+  return noIdx;
+}
+
+function sanitizeBlockArray(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of arr) {
+    const clean = sanitizeBlockLine(item);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
+function pickRandomFrom(arr) {
+  if (!Array.isArray(arr) || !arr.length) return '';
+  return String(arr[randomBetween(0, arr.length - 1)] || '').trim();
+}
+
+function makeRandomDigits(n) {
+  const len = Math.max(LINK_RANDOM_MIN_DIGITS, Math.min(LINK_RANDOM_MAX_DIGITS, Number(n || 0) || 6));
+  let out = '';
+  for (let i = 0; i < len; i++) out += String(randomBetween(0, 9));
+  return out;
+}
+
+function normalizeAtendimentoConfig(data) {
+  const cfg = (data && typeof data === 'object') ? data : {};
+  const block1 = sanitizeBlockArray(cfg.block1);
+  const block2 = sanitizeBlockArray(cfg.block2);
+  const block4 = sanitizeBlockArray(cfg.block4);
+  const phones = sanitizeBlockArray(cfg.phones);
+  const wa = (cfg.wa && typeof cfg.wa === 'object') ? cfg.wa : {};
+  const waBase = String(wa.base || '').trim();
+  const randomDigits = Math.max(
+    LINK_RANDOM_MIN_DIGITS,
+    Math.min(LINK_RANDOM_MAX_DIGITS, Number(wa.randomDigits || 6) || 6)
+  );
+  if (!block1.length || !block2.length || !block4.length || !phones.length || !waBase) {
+    return { ok: false, error: 'invalid_atendimento_config' };
+  }
+  return {
+    ok: true,
+    value: {
+      block1,
+      block2,
+      block4,
+      phones,
+      wa: { base: waBase, randomDigits }
+    }
+  };
+}
+
+function buildComposedAtendimentoMessage(cfgIn) {
+  const n = normalizeAtendimentoConfig(cfgIn);
+  if (!n.ok) return { ok: false, error: n.error };
+  const cfg = n.value;
+  const b1 = pickRandomFrom(cfg.block1);
+  const b2 = pickRandomFrom(cfg.block2);
+  const b4 = pickRandomFrom(cfg.block4);
+  const phone = pickRandomFrom(cfg.phones);
+  const code = makeRandomDigits(cfg.wa.randomDigits);
+  const link = `${cfg.wa.base}${code}`;
+  const msg = [
+    b1,
+    '',
+    b2,
+    '',
+    `👉 ${link}`,
+    '',
+    b4,
+    `👉 ${phone}`
+  ].join('\n').trim();
+  if (!msg) return { ok: false, error: 'empty_message' };
+  return { ok: true, message: msg, meta: { link, code, phone } };
+}
+
 (async () => {
   try {
     const file = await fs.readFile(path.join(__dirname, '../dados/atendimento.json'), 'utf8');
     const data = JSON.parse(file);
-    if (Array.isArray(data)) {
-      mensagensAtendimento = data;
-    } else if (Array.isArray(data.messages)) {
-      mensagensAtendimento = data.messages;
-    } else {
-      mensagensAtendimento = [];
-    }
+    const normalized = normalizeAtendimentoConfig(data);
+    if (!normalized.ok) throw new Error(normalized.error || 'invalid_atendimento_config');
+    atendimentoConfig = normalized.value;
   } catch (e) {
     logger.error('[VIRTUS] ERRO ao carregar atendimento.json', {}, e);
-    mensagensAtendimento = [];
+    atendimentoConfig = null;
   }
 })();
 
@@ -1504,18 +1588,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         } catch {}
 
-        // 2) Se não houver custom, cai no atendimento.json como hoje
+        // 2) Se não houver custom, usa o novo modo composto obrigatório
         if (!msg) {
-          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
+          if (!atendimentoConfig) {
+            logger.error('atendimento.json inválido/ausente no modo composto. Não será enviada resposta!', { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
             return;
           }
-          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-          if (Array.isArray(msg)) msg = msg.join('\n');
-          if (typeof msg !== 'string') msg = String(msg);
+          const built = buildComposedAtendimentoMessage(atendimentoConfig);
+          if (!built || built.ok !== true || !String(built.message || '').trim()) {
+            logger.error('falha ao montar mensagem composta de atendimento', {
+              nome,
+              chatId,
+              error: built && built.error ? String(built.error) : 'build_failed'
+            });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          msg = String(built.message || '').trim();
         }
 
         if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
