@@ -262,34 +262,42 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
     const evidUrl = String(job.evidenceUrl || '').trim();
     const flowId = String(job.flowId || '').trim();
 
-    // Política atual: nunca executar exclusão/arquivamento automático.
-    // Jobs legados da fila viram apenas evidência para revisão manual.
-    try {
-      const nome = profileName;
-      if (nome) {
-        try {
-          await issues.append(
-            nome,
-            'account_banned_detected',
-            `ct_archive_queue_auto_disabled flow=${String(flowId || '').slice(0, 80)} stockAccountId=${sid || ''} at=${new Date().toISOString()}`
-          );
-        } catch {}
-      }
+    // Política enterprise:
+    // - manutenção do bloqueio para arquivamentos automáticos de ban/flags
+    // - EXCEÇÃO: exclusão manual (reason=manual_delete:*) deve continuar para o CT.
+    const reasonNorm = String(reason || '').trim().toLowerCase();
+    const isManualDeleteFlow =
+      reasonNorm.startsWith('manual_delete') ||
+      reasonNorm.startsWith('ct_delete_on_server') ||
+      reasonNorm.startsWith('ct_delete_perfis_ack');
+    if (!isManualDeleteFlow) {
       try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'ct_archive_queue_skipped_manual_review_policy',
-          flowId: flowId || null,
-          profileName: nome || null,
-          stockAccountId: sid || null,
-          reason: String(reason || '').slice(0, 120)
-        });
+        const nome = profileName;
+        if (nome) {
+          try {
+            await issues.append(
+              nome,
+              'account_banned_detected',
+              `ct_archive_queue_auto_disabled flow=${String(flowId || '').slice(0, 80)} stockAccountId=${sid || ''} at=${new Date().toISOString()}`
+            );
+          } catch {}
+        }
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'ct_archive_queue_skipped_manual_review_policy',
+            flowId: flowId || null,
+            profileName: nome || null,
+            stockAccountId: sid || null,
+            reason: String(reason || '').slice(0, 120)
+          });
+        } catch {}
+        const doneFp = path.join(CT_ARCHIVE_QUEUE_DONE_DIR, f);
+        try { fs.renameSync(fp, doneFp); } catch { try { fs.copyFileSync(fp, doneFp); } catch {} try { fs.unlinkSync(fp); } catch {} }
+        processed++;
+        continue;
       } catch {}
-      const doneFp = path.join(CT_ARCHIVE_QUEUE_DONE_DIR, f);
-      try { fs.renameSync(fp, doneFp); } catch { try { fs.copyFileSync(fp, doneFp); } catch {} try { fs.unlinkSync(fp); } catch {} }
-      processed++;
-      continue;
-    } catch {}
+    }
 
     let b64 = '';
     if (evidPath && fs.existsSync(evidPath)) {
