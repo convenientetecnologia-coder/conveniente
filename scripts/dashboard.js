@@ -39,6 +39,7 @@ let lastFullReportAt = 0;
 let hostIdCache = null;
 // ===== ALTERAÇÃO FIM =====================================
 let lastJsonlAutoRotateAt = 0;
+let virtusMetricsCache = { at: 0, key: '', value: null };
 
 // ===== Guardrail: close_all durante provision =====
 // Regras:
@@ -190,6 +191,128 @@ async function readAggregatedStatus() {
     };
   } catch (e) {
     return { perfis: [], robes: {}, robeQueue: [], ts: Date.now(), error: 'sem snapshot' };
+  }
+}
+
+function buildUtcMinus3DayWindow(dayDelta) {
+  const nowMs = Date.now();
+  const shifted = new Date(nowMs - (3 * 60 * 60 * 1000));
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const d = shifted.getUTCDate() + (Number(dayDelta || 0) || 0);
+  const startMs = Date.UTC(y, m, d, 3, 0, 0, 0);
+  const endMs = startMs + (24 * 60 * 60 * 1000);
+  return {
+    startMs,
+    endMs,
+    startSec: Math.floor(startMs / 1000),
+    endSec: Math.floor(endMs / 1000)
+  };
+}
+
+function collectVirtusProfileNames(status) {
+  const set = new Set();
+  try {
+    const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
+    for (const p of perfis) {
+      const nome = String(p && p.nome || '').trim();
+      if (nome) set.add(nome);
+    }
+  } catch {}
+  try {
+    const desiredPath = path.join(__dirname, '..', 'dados', 'desired.json');
+    if (fsSync.existsSync(desiredPath)) {
+      const desired = JSON.parse(fsSync.readFileSync(desiredPath, 'utf8'));
+      const perfisObj = (desired && typeof desired === 'object' && desired.perfis && typeof desired.perfis === 'object')
+        ? desired.perfis
+        : null;
+      if (perfisObj) {
+        for (const nome of Object.keys(perfisObj)) {
+          const n = String(nome || '').trim();
+          if (n) set.add(n);
+        }
+      }
+    }
+  } catch {}
+  return Array.from(set);
+}
+
+function computeVirtusMetricsFromChats(status) {
+  const names = collectVirtusProfileNames(status);
+  const base = path.join(__dirname, '..', 'dados', 'perfis');
+  const today = buildUtcMinus3DayWindow(0);
+  const yesterday = buildUtcMinus3DayWindow(-1);
+  let profilesWithFile = 0;
+  let profilesMissingFile = 0;
+  let parseErrors = 0;
+  let todayCount = 0;
+  let yesterdayCount = 0;
+
+  for (const nome of names) {
+    try {
+      const fp = path.join(base, nome, 'chats_respondidos.json');
+      if (!fsSync.existsSync(fp)) {
+        profilesMissingFile += 1;
+        continue;
+      }
+      profilesWithFile += 1;
+      let obj = null;
+      try {
+        obj = JSON.parse(fsSync.readFileSync(fp, 'utf8'));
+      } catch {
+        parseErrors += 1;
+        continue;
+      }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue;
+      for (const v of Object.values(obj)) {
+        const t = Number(v || 0) || 0;
+        if (!t) continue;
+        if (t >= today.startSec && t < today.endSec) todayCount += 1;
+        if (t >= yesterday.startSec && t < yesterday.endSec) yesterdayCount += 1;
+      }
+    } catch {
+      parseErrors += 1;
+    }
+  }
+
+  return {
+    source: 'chats_respondidos',
+    generatedAt: Date.now(),
+    timezone: 'UTC-3',
+    profiles: {
+      expected: names.length,
+      withFile: profilesWithFile,
+      missingFile: profilesMissingFile,
+      parseErrors
+    },
+    windows: {
+      yesterday: {
+        startSec: yesterday.startSec,
+        endSec: yesterday.endSec,
+        chatsRespondidos: yesterdayCount
+      },
+      today: {
+        startSec: today.startSec,
+        endSec: today.endSec,
+        chatsRespondidos: todayCount
+      }
+    }
+  };
+}
+
+function getVirtusMetricsCached(status) {
+  try {
+    const names = collectVirtusProfileNames(status).sort();
+    const key = names.join('|');
+    const nowMs = Date.now();
+    if (virtusMetricsCache.value && virtusMetricsCache.key === key && (nowMs - Number(virtusMetricsCache.at || 0)) < 25000) {
+      return virtusMetricsCache.value;
+    }
+    const value = computeVirtusMetricsFromChats(status);
+    virtusMetricsCache = { at: nowMs, key, value };
+    return value;
+  } catch {
+    return null;
   }
 }
 
@@ -4232,6 +4355,9 @@ async function tick(reason = 'interval') {
     }
 
     const quick = buildQuickSnapshot(status);
+    try {
+      status.virtusMetrics = getVirtusMetricsCached(status);
+    } catch {}
 
     // Verifica se precisa solicitar config (ctBaseUrl ou logIngestSecret ausentes)
     const cfg = readCtConfig();
