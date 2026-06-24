@@ -2980,6 +2980,43 @@ function logsSecret() {
 function logsAllowlist() {
   const base = path.join(__dirname, '..', 'dados');
   const repo = path.join(__dirname, '..');
+  const perfisDir = path.join(base, 'perfis');
+  function safeKey(v) {
+    return String(v || '')
+      .trim()
+      .replace(/[^\w.-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 180);
+  }
+  function collectProfileNames() {
+    const set = new Set();
+    try {
+      const desiredPath = path.join(base, 'desired.json');
+      if (fsSync.existsSync(desiredPath)) {
+        const desired = JSON.parse(fsSync.readFileSync(desiredPath, 'utf8'));
+        const perfisObj = (desired && typeof desired === 'object' && desired.perfis && typeof desired.perfis === 'object')
+          ? desired.perfis
+          : null;
+        if (perfisObj) {
+          for (const nome of Object.keys(perfisObj)) {
+            const n = String(nome || '').trim();
+            if (n) set.add(n);
+          }
+        }
+      }
+    } catch {}
+    try {
+      if (fsSync.existsSync(perfisDir)) {
+        const ents = fsSync.readdirSync(perfisDir, { withFileTypes: true });
+        for (const ent of ents) {
+          if (!ent || !ent.isDirectory || !ent.isDirectory()) continue;
+          const n = String(ent.name || '').trim();
+          if (n) set.add(n);
+        }
+      }
+    } catch {}
+    return Array.from(set);
+  }
   const allow = {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
@@ -3009,6 +3046,19 @@ function logsAllowlist() {
     service_stdout: path.join(base, 'service_stdout.log'),
     service_stderr: path.join(base, 'service_stderr.log')
   };
+  // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
+  // Chaves:
+  // - virtus_step_<perfil>: dados/perfis/<perfil>/virtus-step.log
+  // - chats_respondidos_<perfil>: dados/perfis/<perfil>/chats_respondidos.json
+  try {
+    const nomes = collectProfileNames();
+    for (const nome of nomes) {
+      const sk = safeKey(nome);
+      if (!sk) continue;
+      allow[`virtus_step_${sk}`] = path.join(perfisDir, nome, 'virtus-step.log');
+      allow[`chats_respondidos_${sk}`] = path.join(perfisDir, nome, 'chats_respondidos.json');
+    }
+  } catch {}
   const statusNodeMax = Math.max(6, parseInt(process.env.STATUS_NODE_ALLOWLIST_MAX || '16', 10) || 16);
   for (let i = 1; i <= statusNodeMax; i += 1) {
     allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
