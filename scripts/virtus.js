@@ -235,15 +235,13 @@ function normalizeAtendimentoConfig(data) {
   const cfg = (data && typeof data === 'object') ? data : {};
   const block1 = sanitizeBlockArray(cfg.block1);
   const block2 = sanitizeBlockArray(cfg.block2);
-  const block4 = sanitizeBlockArray(cfg.block4);
-  const phones = sanitizeBlockArray(cfg.phones);
   const wa = (cfg.wa && typeof cfg.wa === 'object') ? cfg.wa : {};
   const waBase = String(wa.base || '').trim();
   const randomDigits = Math.max(
     LINK_RANDOM_MIN_DIGITS,
     Math.min(LINK_RANDOM_MAX_DIGITS, Number(wa.randomDigits || 6) || 6)
   );
-  if (!block1.length || !block2.length || !block4.length || !phones.length || !waBase) {
+  if (!block1.length || !block2.length || !waBase) {
     return { ok: false, error: 'invalid_atendimento_config' };
   }
   return {
@@ -251,8 +249,6 @@ function normalizeAtendimentoConfig(data) {
     value: {
       block1,
       block2,
-      block4,
-      phones,
       wa: { base: waBase, randomDigits }
     }
   };
@@ -264,8 +260,6 @@ function buildComposedAtendimentoMessage(cfgIn) {
   const cfg = n.value;
   const b1 = pickRandomFrom(cfg.block1);
   const b2 = pickRandomFrom(cfg.block2);
-  const b4 = pickRandomFrom(cfg.block4);
-  const phone = pickRandomFrom(cfg.phones);
   const code = makeRandomDigits(cfg.wa.randomDigits);
   const link = `${cfg.wa.base}${code}`;
   const msg = [
@@ -273,13 +267,10 @@ function buildComposedAtendimentoMessage(cfgIn) {
     '',
     b2,
     '',
-    `👉 ${link}`,
-    '',
-    b4,
-    `👉 ${phone}`
+    `👉 ${link}`
   ].join('\n').trim();
   if (!msg) return { ok: false, error: 'empty_message' };
-  return { ok: true, message: msg, meta: { link, code, phone } };
+  return { ok: true, message: msg, meta: { link, code } };
 }
 
 (async () => {
