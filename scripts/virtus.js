@@ -194,8 +194,6 @@ async function logIssue(nome, type, message) {
 
 // Carrega JSON de atendimento.json (modo composto por blocos)
 let atendimentoConfig = null;
-const LINK_RANDOM_MIN_DIGITS = 1;
-const LINK_RANDOM_MAX_DIGITS = 12;
 
 function sanitizeBlockLine(raw) {
   const s = String(raw || '').replace(/\r/g, '').trim();
@@ -224,24 +222,14 @@ function pickRandomFrom(arr) {
   return String(arr[randomBetween(0, arr.length - 1)] || '').trim();
 }
 
-function makeRandomDigits(n) {
-  const len = Math.max(LINK_RANDOM_MIN_DIGITS, Math.min(LINK_RANDOM_MAX_DIGITS, Number(n || 0) || 6));
-  let out = '';
-  for (let i = 0; i < len; i++) out += String(randomBetween(0, 9));
-  return out;
-}
-
 function normalizeAtendimentoConfig(data) {
   const cfg = (data && typeof data === 'object') ? data : {};
   const block1 = sanitizeBlockArray(cfg.block1);
   const block2 = sanitizeBlockArray(cfg.block2);
-  const wa = (cfg.wa && typeof cfg.wa === 'object') ? cfg.wa : {};
-  const waBase = String(wa.base || '').trim();
-  const randomDigits = Math.max(
-    LINK_RANDOM_MIN_DIGITS,
-    Math.min(LINK_RANDOM_MAX_DIGITS, Number(wa.randomDigits || 6) || 6)
-  );
-  if (!block1.length || !block2.length || !waBase) {
+  const phones = sanitizeBlockArray(cfg.phones || cfg.phoneNumbers || cfg.phoneBlock);
+  const secondDelayMsMin = Math.max(1000, Number(cfg.secondDelayMsMin || 5000) || 5000);
+  const secondDelayMsMax = Math.max(secondDelayMsMin, Number(cfg.secondDelayMsMax || 12000) || 12000);
+  if (!block1.length || !block2.length || !phones.length) {
     return { ok: false, error: 'invalid_atendimento_config' };
   }
   return {
@@ -249,7 +237,9 @@ function normalizeAtendimentoConfig(data) {
     value: {
       block1,
       block2,
-      wa: { base: waBase, randomDigits }
+      phones,
+      secondDelayMsMin,
+      secondDelayMsMax
     }
   };
 }
@@ -260,17 +250,22 @@ function buildComposedAtendimentoMessage(cfgIn) {
   const cfg = n.value;
   const b1 = pickRandomFrom(cfg.block1);
   const b2 = pickRandomFrom(cfg.block2);
-  const code = makeRandomDigits(cfg.wa.randomDigits);
-  const link = `${cfg.wa.base}${code}`;
-  const msg = [
+  const phone = pickRandomFrom(cfg.phones);
+  const message1 = [
     b1,
     '',
-    b2,
-    '',
-    `👉 ${link}`
+    b2
   ].join('\n').trim();
-  if (!msg) return { ok: false, error: 'empty_message' };
-  return { ok: true, message: msg, meta: { link, code } };
+  const message2 = String(phone || '').replace(/\s+/g, '').trim();
+  if (!message1 || !message2) return { ok: false, error: 'empty_message' };
+  const delayMs = randomBetween(
+    Math.max(1000, Number(cfg.secondDelayMsMin || 5000) || 5000),
+    Math.max(
+      Math.max(1000, Number(cfg.secondDelayMsMin || 5000) || 5000),
+      Number(cfg.secondDelayMsMax || 12000) || 12000
+    )
+  );
+  return { ok: true, message1, message2, meta: { delayMs } };
 }
 
 (async () => {
@@ -1570,54 +1565,69 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         resetFail(chatId);
 
+        // Monta payload padrão de 2 etapas (texto + telefone)
+        if (!atendimentoConfig) {
+          logger.error('atendimento.json inválido/ausente no modo composto. Não será enviada resposta!', { nome, chatId });
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+        const built = buildComposedAtendimentoMessage(atendimentoConfig);
+        if (!built || built.ok !== true || !String(built.message1 || '').trim() || !String(built.message2 || '').trim()) {
+          logger.error('falha ao montar mensagem composta de atendimento (2 etapas)', {
+            nome,
+            chatId,
+            error: built && built.error ? String(built.error) : 'build_failed'
+          });
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+        let msg1 = String(built.message1 || '').trim();
+        const msg2 = String(built.message2 || '').trim();
+        const msg2DelayMs = Math.max(1000, Number(built?.meta?.delayMs || 7000) || 7000);
+
         // 1) Verifica customização por manifest (mensagem personalizada Virtus)
-        let msg = null;
         try {
           const man = await manifestStore.read(nome).catch(()=>null);
           if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
-            msg = String(man.customVirtusMessage).trim();
+            msg1 = String(man.customVirtusMessage).trim();
           }
         } catch {}
-
-        // 2) Se não houver custom, usa o novo modo composto obrigatório
-        if (!msg) {
-          if (!atendimentoConfig) {
-            logger.error('atendimento.json inválido/ausente no modo composto. Não será enviada resposta!', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          const built = buildComposedAtendimentoMessage(atendimentoConfig);
-          if (!built || built.ok !== true || !String(built.message || '').trim()) {
-            logger.error('falha ao montar mensagem composta de atendimento', {
-              nome,
-              chatId,
-              error: built && built.error ? String(built.error) : 'build_failed'
-            });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          msg = String(built.message || '').trim();
-        }
 
         if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
 
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare_step1', chatId });
         try { await campo.focus(); } catch {}
         const isFocused = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
         if (!isFocused) { try { await campo.focus(); } catch {} }
 
-        // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-        await sendMessageSafe(p, campo, msg, nome, chatId);
-        // -----------------------------------------------------
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
+        // Envia mensagem 1 (texto composto block1 + block2)
+        await sendMessageSafe(p, campo, msg1, nome, chatId);
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok_step1', chatId });
 
-        log(`Mensagem enviada para chat ${chatId}`);
+        // Delay anti-spam antes da mensagem 2 (telefone puro)
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_wait_step2', chatId, delayMs: msg2DelayMs });
+        await sleep(msg2DelayMs);
+
+        if (!running) throw new Error('virtus_stopped_before_step2');
+        if (!browser || browser.isConnected?.() === false) throw new Error('browser_disconnected_before_step2');
+        if (!p || p.isClosed?.()) throw new Error('page_closed_before_step2');
+
+        campo = await waitForComposer(p, 8000);
+        if (!campo) throw new Error('composer_missing_before_step2');
+        try { await campo.focus(); } catch {}
+        const isFocusedStep2 = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
+        if (!isFocusedStep2) { try { await campo.focus(); } catch {} }
+
+        await sendMessageSafe(p, campo, msg2, nome, chatId);
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok_step2', chatId, phoneDigits: msg2.length });
+
+        log(`Mensagens (2 etapas) enviadas para chat ${chatId}`);
         // Ledger: remove pending ANTES de gravar responded (commit)
         try { await pendingDel(nome, chatId); } catch {}
         const tsNow = agoraEpoch();
