@@ -198,7 +198,9 @@ let atendimentoConfig = null;
 function sanitizeBlockLine(raw) {
   const s = String(raw || '').replace(/\r/g, '').trim();
   if (!s) return '';
-  const noIdx = s.replace(/^\s*\d+\s*[.)-]?\s*/, '').trim();
+  // Remove apenas prefixos de enumeração (ex.: "1.", "2)", "3 - "),
+  // sem apagar linhas que são somente números (ex.: telefone).
+  const noIdx = s.replace(/^\s*\d+\s*[.)-]\s*/, '').trim();
   return noIdx;
 }
 
