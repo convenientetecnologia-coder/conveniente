@@ -1206,6 +1206,14 @@
           <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras da conta + extras globais. Robe V2 automatizado usa apenas as cidades globais do servidor com distribuição por Habitantes x Insight.</div>
         </div>
         <div class="form-row">
+          <label>Virtus — motor de execução</label>
+          <select id="srvVirtusEngine">
+            <option value="legacy">Virtus Legacy (padrão seguro)</option>
+            <option value="delta">Virtus Delta (CDP + WS)</option>
+          </select>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Define qual motor o worker inicia para todos os perfis. Valor persistido no desired.json para troca dinâmica sem editar arquivo manual.</div>
+        </div>
+        <div class="form-row">
           <label>Robe — política de deleção de foto</label>
           <select id="srvPhotoDeletePolicy">
             <option value="after_all_working_posted">Postar em todas as contas trabalhando, depois apagar</option>
@@ -1250,6 +1258,7 @@
       const memPer8El = box.querySelector('#srvMemPer8');
       const memProvSpikeEl = box.querySelector('#srvMemProvisionSpike');
       const workModeEl = box.querySelector('#srvRobeWorkMode');
+      const virtusEngineEl = box.querySelector('#srvVirtusEngine');
       const photoPolicyEl = box.querySelector('#srvPhotoDeletePolicy');
       const globalCitiesFilterEl = box.querySelector('#srvGlobalCitiesFilter');
       const globalCitiesWrapEl = box.querySelector('#srvGlobalCitiesWrap');
@@ -1396,6 +1405,7 @@
           dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
         workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
+        if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'legacy') === 'delta' ? 'delta' : 'legacy';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
@@ -1614,7 +1624,8 @@
                 syncGlobalSelectedFromChecks();
                 return uniqueCities(globalCitiesSelected);
               })()
-            }
+            },
+            virtusEngine: String((virtusEngineEl && virtusEngineEl.value) || 'legacy') === 'delta' ? 'delta' : 'legacy'
           };
           setBtnLoading(saveBtn, true, 'Salvando...');
           const r = await saveServerConfig(payload, { applyNow: false });

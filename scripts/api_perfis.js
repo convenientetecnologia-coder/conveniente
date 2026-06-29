@@ -38,6 +38,26 @@ const serverConfig = require('./serverConfig.js');
 const networkRotation = require('./networkRotation.js');
 
 module.exports = (app, workerClient, fileStore) => {
+  const normalizeVirtusEngine = (v) => {
+    const s = String(v || '').trim().toLowerCase();
+    if (s === 'delta') return 'delta';
+    if (s === 'legacy') return 'legacy';
+    return null;
+  };
+  const readDesiredVirtusEngine = () => {
+    try {
+      const desired = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+      const eng =
+        (desired && desired._autoMode && desired._autoMode.engine) ||
+        (desired && desired.autoMode && desired.autoMode.engine) ||
+        (desired && desired.engine) ||
+        '';
+      return normalizeVirtusEngine(eng) || 'legacy';
+    } catch {
+      return 'legacy';
+    }
+  };
+
   // ===== Maintenance: provision lock =====
   // GET status do lock (para diagnosticar maintenance_provision)
   app.get('/api/maintenance/provision-lock', (req, res) => {
@@ -102,9 +122,10 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       const totalMemMB = serverConfig.getTotalMemMB();
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });
+      const virtusEngine = readDesiredVirtusEngine();
       return res.json({
         ok: true,
-        config: effective,
+        config: { ...effective, virtusEngine },
         meta: {
           source: effective.source,
           path: serverConfig.CONFIG_PATH,
@@ -116,23 +137,40 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  app.post('/api/server-config', (req, res) => {
+  app.post('/api/server-config', async (req, res) => {
     try {
       const operator = String(req.headers['x-operator'] || 'dashboard').slice(0, 180);
       const payload = (req.body && typeof req.body === 'object')
         ? ((req.body.config && typeof req.body.config === 'object') ? req.body.config : req.body)
         : {};
       const applyNow = !!(req.body && req.body.applyNow === true);
+      const requestedVirtusEngine = normalizeVirtusEngine(
+        payload && Object.prototype.hasOwnProperty.call(payload, 'virtusEngine') ? payload.virtusEngine : null
+      );
       const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
       if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+      if (requestedVirtusEngine) {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired = (desired && typeof desired === 'object') ? desired : {};
+          desired._autoMode = (desired._autoMode && typeof desired._autoMode === 'object') ? desired._autoMode : {};
+          desired.autoMode = (desired.autoMode && typeof desired.autoMode === 'object') ? desired.autoMode : {};
+          desired._autoMode.engine = requestedVirtusEngine;
+          desired.autoMode.engine = requestedVirtusEngine;
+          desired.engine = requestedVirtusEngine;
+          return desired;
+        });
+      }
       const totalMemMB = serverConfig.getTotalMemMB();
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });
+      const virtusEngine = readDesiredVirtusEngine();
+      const effectiveWithVirtusEngine = { ...effective, virtusEngine };
       try {
         provisionAudit.append({
           ts: Date.now(),
           event: 'server_config_updated',
           by: operator,
           source: effective.source,
+          virtusEngine,
           capacityMode: effective && effective.capacity ? effective.capacity.mode : null,
           maxAccountsEffective: effective && effective.capacity ? effective.capacity.maxAccountsEffective : null,
           applyNowRequested: applyNow
@@ -153,27 +191,27 @@ module.exports = (app, workerClient, fileStore) => {
 
       const finish = async (result) => {
         const robeV2WarmupResult = await tryWarmupV2();
-        return res.json({ ok: true, config: effective, applyNowResult: result || null, robeV2WarmupResult: robeV2WarmupResult || null });
+        return res.json({ ok: true, config: effectiveWithVirtusEngine, applyNowResult: result || null, robeV2WarmupResult: robeV2WarmupResult || null });
       };
       if (!applyNow) return finish(null);
       if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
-        return res.json({ ok: false, error: 'worker_client_unavailable', configSaved: true, config: effective });
+        return res.json({ ok: false, error: 'worker_client_unavailable', configSaved: true, config: effectiveWithVirtusEngine });
       }
-      workerClient.sendWorkerCommand('robe-replan-all', {
-        reason: 'server_config_apply_now',
-        operator
-      }, { timeoutMs: 180000 })
-        .then((r) => finish(r || { ok: false, error: 'empty_replan_response' }))
-        .catch((e) => {
-          return res.json({
-            ok: false,
-            error: 'apply_now_failed',
-            details: (e && e.message) || String(e),
-            configSaved: true,
-            config: effective
-          });
+      try {
+        const r = await workerClient.sendWorkerCommand('robe-replan-all', {
+          reason: 'server_config_apply_now',
+          operator
+        }, { timeoutMs: 180000 });
+        return finish(r || { ok: false, error: 'empty_replan_response' });
+      } catch (e) {
+        return res.json({
+          ok: false,
+          error: 'apply_now_failed',
+          details: (e && e.message) || String(e),
+          configSaved: true,
+          config: effectiveWithVirtusEngine
         });
-      return;
+      }
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
