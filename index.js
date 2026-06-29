@@ -507,10 +507,13 @@ fileStore.ensurePerfisJson();
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// Boot sequencial: bootstrap -> cluster -> listen
+// Boot sequencial: bootstrap de serviço -> cluster -> listen
 (async () => {
   await maybeBootstrapService();
-  await maybeBootstrapGateBToken();
+  // Gate B bootstrap roda em background para nunca travar subida do sistema.
+  maybeBootstrapGateBToken().catch((e) => {
+    logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
+  });
   // Política definida (triagem inbox): após restart, começar fechado.
   // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
   // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.
