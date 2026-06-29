@@ -66,7 +66,13 @@ async function maybeBootstrapGateBToken() {
   const DATA_DIR = path.join(__dirname, 'dados');
   const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
   const BUNDLE_PATH = path.join(DATA_DIR, 'gate_b_bundle.json');
-  const BOOTSTRAP_URL = String(process.env.CONVENIENTE_CT_BOOTSTRAP_URL || process.env.CT_BOOTSTRAP_URL || 'https://convenientetecnologia.com/api/edge/bootstrap').trim();
+  // TACADA RESILIÊNCIA: rota oficial corrigida (base). Pode ser sobrescrita via env.
+  // Importante: esta URL precisa bater na rota /api/edge/bootstrap do CT (direto ou via rewrite do proxy).
+  const BOOTSTRAP_URL = String(
+    process.env.CONVENIENTE_CT_BOOTSTRAP_URL ||
+    process.env.CT_BOOTSTRAP_URL ||
+    'https://convenientetecnologia.com'
+  ).trim();
   const BOOTSTRAP_SECRET = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
 
   const readHostId = () => {
@@ -126,6 +132,22 @@ async function maybeBootstrapGateBToken() {
     }
   };
 
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
+  const pickRetryDelayMs = () => {
+    const base = 5000;
+    const jitter = 2000;
+    return base + Math.floor(Math.random() * jitter);
+  };
+
+  const resolveBootstrapUrl = () => {
+    const u = String(BOOTSTRAP_URL || '').trim().replace(/\/+$/, '');
+    if (!u) return '';
+    // Se o operador passar URL completa, respeita.
+    if (/\/api\/edge\/bootstrap$/i.test(u)) return u;
+    // Regra: por padrão, POST na base (proxy pode reescrever). Se quiser path, defina env com o path.
+    return u;
+  };
+
   try {
     const existing = readBundle();
     if (existing && existing.tunnelToken) {
@@ -142,44 +164,77 @@ async function maybeBootstrapGateBToken() {
       return;
     }
 
-    // Bootstrap por CT (best-effort; não bloqueia boot se falhar).
+    // Bootstrap por CT (RESILIÊNCIA INFINITA; BLOQUEIA boot do cluster até sucesso).
+    // Se não houver fetch, NÃO pode seguir boot. Fica em espera limpa até o operador corrigir runtime.
     if (typeof fetch !== 'function') {
-      logger.warn('[GATE_B][BOOTSTRAP] fetch_unavailable: pulando bootstrap remoto');
-      return;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        logger.warn('⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: fetch_unavailable). Aguardando 5 segundos para re-tentativa automática...');
+        await sleepMs(pickRetryDelayMs());
+      }
     }
 
-    const hostId = readHostId();
-    const body = {
-      hostId: (hostId || getOrCreateHostId()) || null,
-      hostname: os.hostname(),
-      ts: Date.now(),
-      want: 'gate_b_token_v1'
-    };
-    const headers = { 'content-type': 'application/json' };
-    if (BOOTSTRAP_SECRET) headers['x-bootstrap-secret'] = BOOTSTRAP_SECRET;
+    // Loop infinito de handshake: não libera cluster sem bundle completo.
+    // Critério: HTTP 200 + tunnelToken.
+    // Se falhar, espera 5-7s com jitter e tenta novamente.
+    // Observação: se o CT estiver offline, a VM fica em "espera limpa" até a central voltar.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const url = resolveBootstrapUrl();
+      const hostId = (readHostId() || getOrCreateHostId()) || null;
+      const body = {
+        hostId,
+        hostname: os.hostname(),
+        ts: Date.now(),
+        want: 'gate_b_token_v1'
+      };
+      const headers = { 'content-type': 'application/json' };
+      if (BOOTSTRAP_SECRET) headers['x-bootstrap-secret'] = BOOTSTRAP_SECRET;
 
-    const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), 4500);
-    try {
-      const res = await fetch(BOOTSTRAP_URL, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
-      const raw = await res.text().catch(() => '');
-      if (!res.ok) {
-        logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_http_fail', { status: res.status });
-        return;
+      let status = 0;
+      try {
+        const controller = new AbortController();
+        const to = setTimeout(() => controller.abort(), 6500);
+        try {
+          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+          status = Number(res.status || 0) || 0;
+          const raw = await res.text().catch(() => '');
+          if (!res.ok) {
+            logger.warn(`⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: ${status}). Aguardando 5 segundos para re-tentativa automática...`);
+            try { if (raw) logger.warn('[GATE_B][RETRY] corpo_resposta', { status, raw: String(raw).slice(0, 220) }); } catch {}
+            await sleepMs(pickRetryDelayMs());
+            continue;
+          }
+          const parsed = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
+          const tunnelToken = parsed && parsed.tunnelToken ? String(parsed.tunnelToken).trim() : '';
+          const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
+          const infraSecret = parsed && parsed.infraSecret ? String(parsed.infraSecret).trim() : '';
+          if (!tunnelToken) {
+            logger.warn(`⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: ${status}). Aguardando 5 segundos para re-tentativa automática...`);
+            logger.warn('[GATE_B][RETRY] ct_bootstrap_missing_token');
+            await sleepMs(pickRetryDelayMs());
+            continue;
+          }
+          // Cache local de bundle (autonomia pós-configuração)
+          writeBundleAtomic({
+            hostFqdn: hostFqdn || null,
+            tunnelToken,
+            infraSecret: infraSecret || null,
+            updatedAt: Date.now(),
+            source: 'ct_bootstrap'
+          });
+          const ok = spawnCloudflaredToken(tunnelToken);
+          logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
+          return;
+        } finally {
+          clearTimeout(to);
+        }
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        logger.warn(`⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: ${status || 'ERR'}). Aguardando 5 segundos para re-tentativa automática...`);
+        logger.warn('[GATE_B][RETRY] excecao', { error: msg });
+        await sleepMs(pickRetryDelayMs());
       }
-      const parsed = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
-      const tunnelToken = parsed && parsed.tunnelToken ? String(parsed.tunnelToken).trim() : '';
-      const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
-      if (!tunnelToken) {
-        logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_missing_token');
-        return;
-      }
-      const infraSecret = String(process.env.VIRTUS_DELTA_INFRA_SECRET || process.env.INFRA_SECRET || '').trim() || null;
-      writeBundleAtomic({ hostFqdn: hostFqdn || null, tunnelToken, infraSecret, updatedAt: Date.now(), source: 'ct_bootstrap' });
-      const ok = spawnCloudflaredToken(tunnelToken);
-      logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
-    } finally {
-      clearTimeout(to);
     }
   } catch (e) {
     logger.warn('[GATE_B][BOOTSTRAP] excecao (best-effort)', { error: (e && e.message) || String(e) });
