@@ -151,6 +151,85 @@ function shouldEmitLeadText(textoLimpo) {
   return true;
 }
 
+function _normCityKey(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function _pick(arr) {
+  const a = Array.isArray(arr) ? arr : [];
+  if (!a.length) return "";
+  return String(a[Math.floor(Math.random() * a.length)] || "").trim();
+}
+
+function _parseShortRoutesFromEnv() {
+  const raw = String(process.env.VIRTUS_DELTA_ROTAS_CURTAS || "").trim();
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(/[,;\n]/g)
+      .map((s) => _normCityKey(s))
+      .filter(Boolean)
+  );
+}
+
+const _SHORT_ROUTES = _parseShortRoutesFromEnv();
+
+function _routeKindFromCity(cidade) {
+  const c = String(cidade || "").trim();
+  if (!c) return "pendente";
+  const key = _normCityKey(c);
+  if (_SHORT_ROUTES.size && _SHORT_ROUTES.has(key)) return "curta";
+  return "longa";
+}
+
+const ATENDIMENTO_DELTA_PATH = path.join(__dirname, "..", "dados", "atendimentodelta.json");
+let _atDeltaCache = { atMs: 0, parsed: null };
+
+function readAtendimentoDeltaConfigSync() {
+  const ttlMs = Math.max(2_000, Number(process.env.VIRTUS_DELTA_ATENDIMENTO_CACHE_TTL_MS || 20_000) || 20_000);
+  const now = Date.now();
+  if (_atDeltaCache.parsed && (now - _atDeltaCache.atMs) < ttlMs) return _atDeltaCache.parsed;
+  try {
+    const raw = String(fsSync.readFileSync(ATENDIMENTO_DELTA_PATH, "utf8") || "").replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw);
+    _atDeltaCache = { atMs: now, parsed };
+    return parsed;
+  } catch {
+    _atDeltaCache = { atMs: now, parsed: null };
+    return null;
+  }
+}
+
+function generateDeltaGreeting({ cidade } = {}) {
+  try {
+    const cfg = readAtendimentoDeltaConfigSync() || {};
+    const h = new Date().getHours();
+    const bloco1 =
+      (h >= 6 && h <= 11) ? _pick(cfg.bloco1_bom_dia) :
+      (h >= 12 && h <= 17) ? _pick(cfg.bloco1_boa_tarde) :
+      _pick(cfg.bloco1_boa_noite);
+
+    const bloco2 = _pick(cfg.bloco2_comercial);
+    const bloco3 = _pick(cfg.bloco3_frota);
+
+    const rk = _routeKindFromCity(cidade);
+    const bloco4 =
+      (rk === "curta") ? _pick(cfg.bloco4_gatilho_ab) :
+      (rk === "longa") ? _pick(cfg.bloco4_gatilho_abc) :
+      _pick(cfg.bloco4_gatilho_pendente);
+
+    const out = [bloco1, bloco2, bloco3, bloco4].map((s) => String(s || "").trim()).filter(Boolean).join("\n");
+    return out;
+  } catch {
+    return "Olá! Está disponível sim.\nPode me passar seu WhatsApp com DDD para eu te chamar por lá e agilizar?";
+  }
+}
+
 async function extractCityFromMarketplaceDom(page) {
   try {
     if (!page) return null;
@@ -1129,6 +1208,7 @@ async function startVirtusDeltaStandaloneRuntime({
 
   const seenKeys = new Set();
   const autoReplyText = String(process.env.VIRTUS_DELTA_AUTO_REPLY_TEXT || "").replace(/\r/g, "");
+  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "").trim() === "1";
   const autoReplyThreads = new Map(); // threadKey -> tsMs
   const autoReplyMinIntervalMs = Math.max(
     5_000,
@@ -1239,7 +1319,8 @@ async function startVirtusDeltaStandaloneRuntime({
           `[virtusDelta][network_impact] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} texto="${texto.slice(0, 120)}" op=${String(ev?.operacao_meta || ev?.operation || "")}`
         );
 
-        if (autoReplyText) {
+        const autoMsg = autoReplyText ? autoReplyText : (autoGreetingEnabled ? generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null }) : "");
+        if (autoMsg) {
           const last = Number(autoReplyThreads.get(threadKey) || 0);
           const now = Date.now();
           if (!last || now - last >= autoReplyMinIntervalMs) {
@@ -1249,7 +1330,7 @@ async function startVirtusDeltaStandaloneRuntime({
                 await sendReplyFlow({
                   page,
                   threadKey,
-                  textoResposta: autoReplyText,
+                  textoResposta: autoMsg,
                   fromNetworkLead: true,
                 });
                 logInfo(`[virtusDelta][reply] done thread_key=${threadKey} ok=sim (network_lead)`);
@@ -1340,6 +1421,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   let running = true;
   const enqueue = createSerialQueue();
+  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "").trim() === "1";
+  const autoReplyMinIntervalMs = Math.max(
+    5_000,
+    Number(process.env.VIRTUS_DELTA_AUTO_REPLY_MIN_INTERVAL_MS || 60_000) || 60_000
+  );
+  const autoReplyThreads = new Map();
 
   function epochOk() {
     try {
@@ -1463,6 +1550,24 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         try {
           ctWs.sendJson({ event: "lead_capturado", ...payload });
         } catch (_) {}
+
+        // Primeiro atendimento automático (opcional, produção OFF por default).
+        if (autoGreetingEnabled) {
+          const last = Number(autoReplyThreads.get(threadKey) || 0);
+          const now = Date.now();
+          if (!last || now - last >= autoReplyMinIntervalMs) {
+            autoReplyThreads.set(threadKey, now);
+            const textoResposta = generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null });
+            if (textoResposta) {
+              enqueue(async () => {
+                try {
+                  if (!running || !epochOk()) return;
+                  await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: true });
+                } catch (_) {}
+              });
+            }
+          }
+        }
       }
     } catch (_) {
       // nunca crashar por frame corrompido
@@ -1518,6 +1623,7 @@ module.exports = {
   startVirtusDeltaWorkerRuntime,
   killGhostChromeForProfile,
   killGhostVirtusDeltaProcesses,
+  generateDeltaGreeting,
   extractCityFromMarketplaceDom,
   prepareDomForNetworkLead,
   forceSidebarRefreshByMessagesRoot,

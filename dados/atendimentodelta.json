@@ -1,0 +1,34 @@
+{
+  "bloco1_bom_dia": [
+    "Oi, bom dia, sim, está disponível!",
+    "Olá, bom dia! Está disponível sim."
+  ],
+  "bloco1_boa_tarde": [
+    "Opa, boa tarde, sim, está disponível!",
+    "Olá, boa tarde! Está disponível sim."
+  ],
+  "bloco1_boa_noite": [
+    "Opa, boa noite, sim, está disponível! Tudo bem?",
+    "Olá, boa noite! Está disponível sim."
+  ],
+  "bloco2_comercial": [
+    "Temos o melhor preço da nossa região com qualidade.",
+    "Garantimos o frete mais barato para você."
+  ],
+  "bloco3_frota": [
+    "Trabalhamos com carretos de pequeno, médio e grande porte.",
+    "Temos caminhão baú e utilitários abertos ou fechados."
+  ],
+  "bloco4_gatilho_ab": [
+    "Qual o seu WhatsApp com DDD para eu te chamar direto por lá e agilizar?",
+    "Pode me passar o seu Zap com o DDD?"
+  ],
+  "bloco4_gatilho_abc": [
+    "O que você precisa transportar para eu calcular seu orçamento agora?",
+    "Me passa a lista do que você vai mudar para eu ver o preço para você."
+  ],
+  "bloco4_gatilho_pendente": [
+    "Para qual cidade e bairro você precisa do serviço de frete?",
+    "Qual seria a cidade de origem e destino da mudança?"
+  ]
+}
