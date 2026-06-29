@@ -9,7 +9,11 @@ const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');
-const virtusHelper = require('./virtus.js');
+const legacyVirtus = require('./virtus.js');
+let deltaVirtus = null;
+try { deltaVirtus = require('./virtusDelta.js'); } catch { deltaVirtus = null; }
+// Compat: código antigo ainda referencia virtusHelper.* em alguns pontos (ex.: garantirMarketplace).
+const virtusHelper = legacyVirtus;
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
@@ -24,6 +28,32 @@ const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
+
+function currentVirtusEngine(autoMode) {
+  // 🛡️ Default seguro: se engine ausente/nula/indefinida => legacy
+  try {
+    const v = autoMode && autoMode.engine ? String(autoMode.engine).trim().toLowerCase() : '';
+    return v === 'delta' ? 'delta' : 'legacy';
+  } catch {
+    return 'legacy';
+  }
+}
+
+function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
+  const eng = currentVirtusEngine(autoMode);
+  const baseCfg = {
+    restrictTab: 0,
+    epoch: cfg.epoch || 0,
+    slowMode: (autoMode && autoMode.mode !== 'full'),
+    governorMode: (autoMode && autoMode.mode) || 'full'
+  };
+  if (eng === 'delta' && deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') {
+    try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (WebSocket Ativo).', { nome }); } catch {}
+    return deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
+  }
+  try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR LEGADO (Texto Fixo).', { nome }); } catch {}
+  return legacyVirtus.startVirtus(browser, nome, baseCfg);
+}
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -2943,7 +2973,7 @@ async function appealMonitorCheckNow(nome, ctrl) {
       try {
         ctrl.humanControl = false;
         if (automationAllowed(ctrl)) {
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl.trabalhando = true;
         }
         try { unfreezeCooldownIfWorking(nome); } catch {}
@@ -3647,7 +3677,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
       try {
         ctrl.humanControl = false;
         if (automationAllowed(ctrl)) {
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl.trabalhando = true;
         }
         try { unfreezeCooldownIfWorking(nome); } catch {}
@@ -7505,7 +7535,7 @@ async function robeTickGlobal() {
           robeUpdateMeta(nome, { emExecucao: false });
           if (virtusWasRunning && automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
             } catch {
@@ -7523,7 +7553,7 @@ async function robeTickGlobal() {
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
             } catch (e) {
               ctrl.virtus = null;
@@ -7581,9 +7611,13 @@ async function stopVirtus(nome) {
 const ctrl = controllers.get(nome);
 if (!ctrl) return;
 try {
-if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-await ctrl.virtus.stop().catch(()=>{});
-}
+  // Compat: startVirtus/startVirtusDeltaRuntime retornam Promise (async). Precisamos resolver antes de chamar stop().
+  const v = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
+    ? await ctrl.virtus.catch(() => null)
+    : ctrl.virtus;
+  if (v && typeof v.stop === 'function') {
+    await v.stop().catch(()=>{});
+  }
 } catch {}
 ctrl.virtus = null;
 ctrl.trabalhando = false;
@@ -7947,12 +7981,7 @@ async function start_work({ nome, operator }) {
     if (ctrl.trabalhando && !ctrl.virtus && !ctrl._virtusStarting) {
       try {
         ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
-        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, {
-          restrictTab: 0,
-          epoch: ctrl.virtusEpoch,
-          slowMode: (autoMode && autoMode.mode !== 'full'),
-          governorMode: (autoMode && autoMode.mode) || 'full'
-        });
+        ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch });
         try { await snapshotStatusAndWrite(); } catch {}
         logger.info('[HANDLER] start_work ok (reconciled trabalhando without virtus)', { nome });
         return { ok: true, reconciled: 'trabalhando_without_virtus' };
@@ -8046,7 +8075,7 @@ async function start_work({ nome, operator }) {
       // não abrir aba extra de Marketplace no pós-cadastro.
       // Isso evita abrir/fechar aba 1 sem necessidade e reduz cutucada.
 
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+      ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch });
 
     ctrl.trabalhando = true;
       try {
@@ -8879,7 +8908,7 @@ const handlers = {
               if (!c || !c.browser || !c.browser.isConnected?.()) continue;
               if (!automationAllowed(c)) continue;
               c.virtusEpoch = (c.virtusEpoch || 0);
-              c.virtus = virtusHelper.startVirtus(c.browser, n, { restrictTab: 0, epoch: c.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              c.virtus = startVirtusByEngine(c.browser, n, autoMode, { epoch: c.virtusEpoch });
               c.trabalhando = true;
               try { unfreezeCooldownIfWorking(n); } catch {}
               resumed.push(n);
@@ -8907,7 +8936,7 @@ const handlers = {
             const want = d2 && d2.perfis ? (d2.perfis[nome] || {}) : {};
             if (want && want.virtus !== 'off' && ctrl && ctrl.browser && ctrl.browser.isConnected?.() && automationAllowed(ctrl)) {
               ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch });
               ctrl.trabalhando = true;
               try { unfreezeCooldownIfWorking(nome); } catch {}
             }
@@ -9714,12 +9743,7 @@ const handlers = {
             if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.()) return false;
             if (ctrlR.humanControl === true || ctrlR.configurando === true) return false;
             if (!automationAllowed(ctrlR)) return false;
-            ctrlR.virtus = virtusHelper.startVirtus(ctrlR.browser, n, {
-              restrictTab: 0,
-              epoch: ctrlR.virtusEpoch || 0,
-              slowMode: (autoMode && autoMode.mode !== 'full'),
-              governorMode: (autoMode && autoMode.mode) || 'full'
-            });
+            ctrlR.virtus = startVirtusByEngine(ctrlR.browser, n, autoMode, { epoch: ctrlR.virtusEpoch || 0 });
             ctrlR.trabalhando = true;
             resumed.push(n);
             return true;
@@ -9841,12 +9865,7 @@ const handlers = {
                 pushStep({ step: 'post_success_start_virtus_denied', error: 'automation_not_allowed' });
               } else {
                 ctrlNow.virtusEpoch = (ctrlNow.virtusEpoch || 0);
-                ctrlNow.virtus = virtusHelper.startVirtus(ctrlNow.browser, nome, {
-                  restrictTab: 0,
-                  epoch: ctrlNow.virtusEpoch,
-                  slowMode: (autoMode && autoMode.mode !== 'full'),
-                  governorMode: (autoMode && autoMode.mode) || 'full'
-                });
+                ctrlNow.virtus = startVirtusByEngine(ctrlNow.browser, nome, autoMode, { epoch: ctrlNow.virtusEpoch });
                 ctrlNow.trabalhando = true;
                 try { await browserHelper.forceCloseExtras(ctrlNow.browser); } catch {}
                 try { await snapshotStatusAndWrite(); } catch {}
@@ -9913,7 +9932,7 @@ const handlers = {
                 if (!c || !c.browser || !c.browser.isConnected?.()) continue;
                 if (!automationAllowed(c)) continue;
                 c.virtusEpoch = (c.virtusEpoch || 0);
-                c.virtus = virtusHelper.startVirtus(c.browser, n, { restrictTab: 0, epoch: c.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+                c.virtus = startVirtusByEngine(c.browser, n, autoMode, { epoch: c.virtusEpoch });
                 c.trabalhando = true;
                 try { unfreezeCooldownIfWorking(n); } catch {}
                 resumed.push(n);
@@ -10364,7 +10383,7 @@ const handlers = {
 
       if (!appealDetectedInPreflight) {
         if (automationAllowed(ctrl)) {
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl.trabalhando = true;
         }
         try { unfreezeCooldownIfWorking(nome); } catch {}
@@ -10561,7 +10580,7 @@ const handlers = {
               robeUpdateMeta(nome, { emExecucao: false });
               if (virtusWasRunning && automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+                  ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
                 } catch {
@@ -10579,7 +10598,7 @@ const handlers = {
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+                  ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                 } catch (e) {
                   ctrl.virtus = null;
@@ -11156,6 +11175,19 @@ try {
 
 const perfisArr = loadPerfisJson();
 const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
+// Chave seletora dinâmica de motores (hot-swapping):
+// - fonte: desired.json (ex.: desired._autoMode.engine = "delta")
+// - default seguro: legacy
+try {
+  const eng =
+    (desiredSnap && desiredSnap._autoMode && desiredSnap._autoMode.engine) ||
+    (desiredSnap && desiredSnap.autoMode && desiredSnap.autoMode.engine) ||
+    (desiredSnap && desiredSnap.engine) ||
+    '';
+  autoMode.engine = String(eng || '').trim().toLowerCase() === 'delta' ? 'delta' : 'legacy';
+} catch {
+  autoMode.engine = 'legacy';
+}
 const perfis = [];
 // #region agent log
 // Forense enterprise: detectar e registrar (via provision_audit) quedas de working/Virtus inesperadas,
@@ -13856,12 +13888,7 @@ async function nurseTick() {
           }
         } catch {}
         try {
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, {
-            restrictTab: 0,
-            epoch: ctrl.virtusEpoch || 0,
-            slowMode: (autoMode && autoMode.mode !== 'full'),
-            governorMode: (autoMode && autoMode.mode) || 'full'
-          });
+          ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
           ctrl.trabalhando = true;
           try {

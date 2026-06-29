@@ -1,0 +1,1457 @@
+const fs = require("fs/promises");
+const fsSync = require("fs");
+const path = require("path");
+const express = require("express");
+let WebSocket = null;
+try {
+  WebSocket = require("ws");
+} catch (_) {
+  WebSocket = null;
+}
+
+let puppeteer = null;
+try {
+  const pExtra = require("puppeteer-extra");
+  const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+  pExtra.use(StealthPlugin());
+  puppeteer = pExtra;
+} catch (_) {
+  puppeteer = require("puppeteer");
+}
+
+const {
+  decodeWebSocketPayload,
+  extractInnerPayload,
+  extractWsMessageEvents,
+  decodeEscapedText,
+} = require("./teste_login.js");
+
+let killChromeProfileProcesses = null;
+try {
+  killChromeProfileProcesses = require("./browser.js").killChromeProfileProcesses;
+} catch (_) {}
+
+const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || "info").trim().toLowerCase();
+
+function logInfo(...args) {
+  if (LOG_LEVEL === "silent") return;
+  console.log(...args);
+}
+
+function logDebug(...args) {
+  if (LOG_LEVEL === "debug") console.log(...args);
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function randomBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/** Guardrails de timing humano — produção (centenas de VMs). Override via env *_MS_MIN / *_MS_MAX. */
+function envMs(minKey, maxKey, defMin, defMax) {
+  const min = Math.max(0, Number(process.env[minKey] ?? defMin) || defMin);
+  const max = Math.max(min, Number(process.env[maxKey] ?? defMax) || defMax);
+  return { min, max };
+}
+
+const HUMAN_TIMINGS = {
+  /** Pausa perceptiva pós-lead (Fabiana): padrão 3–7s */
+  reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
+  /** Antes de clicar no filtro Marketplace */
+  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 450, 950),
+  /** Após ativar Marketplace — DOM lateral estabilizar */
+  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 900, 1800),
+  /** Antes de clicar no card do cliente */
+  preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 600, 1400),
+  /** Após abrir o chat — ler contexto antes de digitar */
+  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 1200, 2400),
+  /** Antes de focar o composer */
+  preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 400, 850),
+  /** Entre foco e primeira tecla */
+  preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 500, 1100),
+  /** Por caractere */
+  char: envMs("VIRTUS_DELTA_HUMAN_CHAR_MS_MIN", "VIRTUS_DELTA_HUMAN_CHAR_MS_MAX", 55, 120),
+  /** Após Shift+Enter */
+  lineBreak: envMs("VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MIN", "VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MAX", 45, 110),
+  /** Antes do Enter final */
+  preSend: envMs("VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MAX", 350, 900),
+  /** Após envio */
+  postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 280, 550),
+  /** delay do page.click */
+  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 60, 140),
+  /** Entre scrolls no sidebar */
+  scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 200, 380),
+  /** Refresh DOM / retries */
+  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 250, 500),
+};
+
+function clickDelayMs() {
+  return randomBetween(HUMAN_TIMINGS.click.min, HUMAN_TIMINGS.click.max);
+}
+
+async function humanPause(bucket, label) {
+  const b = HUMAN_TIMINGS[bucket];
+  if (!b) return 0;
+  const ms = randomBetween(b.min, b.max);
+  if (label) logInfo(`[virtusDelta][human_pause] ${label} ms=${ms}`);
+  await sleep(ms);
+  return ms;
+}
+
+async function humanReactionDelay(fromNetworkLead) {
+  const bucket = fromNetworkLead ? "reaction" : "preThreadClick";
+  await humanPause(bucket, fromNetworkLead ? "reaction_post_lead" : "reaction_api_reply");
+}
+
+function logHumanTimingsBoot() {
+  logInfo(
+    `[virtusDelta][boot] human_timings reaction=${HUMAN_TIMINGS.reaction.min}-${HUMAN_TIMINGS.reaction.max}ms post_open=${HUMAN_TIMINGS.postThreadOpen.min}-${HUMAN_TIMINGS.postThreadOpen.max}ms char=${HUMAN_TIMINGS.char.min}-${HUMAN_TIMINGS.char.max}ms`
+  );
+}
+
+function resolveServerId() {
+  const fromStatus = String(process.env.STATUS_FILE_NAME || "").trim();
+  if (fromStatus) return fromStatus;
+  const fromTag = String(process.env.FB_SERVER_ID || process.env.SERVER_ID || "").trim();
+  if (fromTag) return fromTag;
+  return "VM_UNK";
+}
+
+function resolveAccountLogin() {
+  const v = String(process.env.FB_ACCOUNT_LOGIN || process.env.ACCOUNT_LOGIN || "").trim();
+  return v || null;
+}
+
+function readHostIdSync() {
+  // Fonte de verdade do cluster (auditado): dados/.telemetry_hostid
+  // - NÃO deriva de hostname/hardware hoje; é UUID persistido.
+  try {
+    const hostIdPath = path.join(__dirname, "..", "dados", ".telemetry_hostid");
+    if (fsSync.existsSync(hostIdPath)) {
+      const v = String(fsSync.readFileSync(hostIdPath, "utf8") || "").trim();
+      return v || "";
+    }
+  } catch (_) {}
+  return "";
+}
+
+function shouldEmitLeadText(textoLimpo) {
+  const t = String(textoLimpo || "").trim();
+  if (!t) return false;
+  if (t.startsWith("mid.")) return false;
+  // Bloqueio cirúrgico: tokens fantasmas de status (Meta), sem matar números curtos legítimos (ex.: DDD "48").
+  if (/^\d+$/.test(t)) {
+    if (t === "32" || t === "38") return false;
+    // IDs/ruídos longos (ex.: sender/thread numeric puro) não são texto humano.
+    if (t.length >= 6) return false;
+  }
+  return true;
+}
+
+function buildCtWsUrlCandidates() {
+  const envUrl = String(process.env.VIRTUS_DELTA_CT_WS_URL || "").trim();
+  if (envUrl) return [envUrl];
+  // Default conservador: seguir diretriz macro (domínio público). Mantém fallback para api.*.
+  return ["wss://convenientetecnologia.com/ws", "wss://api.convenientetecnologia.com/ws"];
+}
+
+function createCtWsTransport({ serverId, getAccountLogin, onMessage }) {
+  const reconnectIntervalMs = Math.max(500, Number(process.env.VIRTUS_DELTA_WS_RECONNECT_INTERVAL_MS || 3000) || 3000);
+  const sendQueueMax = Math.max(20, Math.min(2000, Number(process.env.VIRTUS_DELTA_WS_SEND_QUEUE_MAX || 300) || 300));
+  const urls = buildCtWsUrlCandidates();
+
+  let urlIdx = 0;
+  let ws = null;
+  let closedByUser = false;
+  let isOpen = false;
+  const sendQueue = [];
+  const messageHandler = typeof onMessage === "function" ? onMessage : null;
+
+  const safeSend = (obj) => {
+    try {
+      const msg = JSON.stringify(obj);
+      if (WebSocket && isOpen && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+        return { ok: true, sent: true };
+      }
+      sendQueue.push(msg);
+      while (sendQueue.length > sendQueueMax) sendQueue.shift();
+      return { ok: true, sent: false, queued: true };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  };
+
+  const flushQueue = () => {
+    if (!isOpen || !ws || ws.readyState !== WebSocket.OPEN) return;
+    while (sendQueue.length) {
+      const msg = sendQueue.shift();
+      try {
+        ws.send(msg);
+      } catch (_) {
+        // se falhou no meio, re-enfileira e sai
+        if (msg) sendQueue.unshift(msg);
+        break;
+      }
+    }
+  };
+
+  const sendAuth = () => {
+    const accountLogin = (typeof getAccountLogin === "function" ? getAccountLogin() : null) || null;
+    safeSend({ event: "auth", server_id: String(serverId || "").trim() || null, account_login: accountLogin });
+  };
+
+  const connect = () => {
+    if (closedByUser) return;
+    if (!WebSocket) {
+      logInfo("[virtusDelta][ws] ws_dependency_missing: instale 'ws' para habilitar CT reverse channel");
+      return;
+    }
+    const targetUrl = urls[Math.max(0, Math.min(urlIdx, urls.length - 1))] || urls[0];
+    urlIdx = (urlIdx + 1) % Math.max(1, urls.length);
+
+    try {
+      isOpen = false;
+      ws = new WebSocket(targetUrl, {
+        handshakeTimeout: Math.max(1000, Number(process.env.VIRTUS_DELTA_WS_HANDSHAKE_TIMEOUT_MS || 8000) || 8000),
+      });
+    } catch (e) {
+      logInfo(`[virtusDelta][ws] connect_fail url=${targetUrl} err=${e && e.message ? e.message : String(e)}`);
+      setTimeout(connect, reconnectIntervalMs).unref?.();
+      return;
+    }
+
+    ws.on("open", () => {
+      isOpen = true;
+      logInfo(`[virtusDelta][ws] connected url=${targetUrl}`);
+      try {
+        sendAuth();
+        flushQueue();
+      } catch (_) {}
+    });
+
+    if (messageHandler) {
+      try {
+        ws.on("message", (data) => messageHandler(data));
+      } catch (_) {}
+    }
+
+    ws.on("close", (code, reason) => {
+      isOpen = false;
+      if (closedByUser) return;
+      logInfo(`[virtusDelta][ws] closed code=${code} reason=${String(reason || "").slice(0, 180)}`);
+      setTimeout(connect, reconnectIntervalMs).unref?.();
+    });
+
+    ws.on("error", (err) => {
+      // não crashar: erro costuma preceder close
+      logInfo(`[virtusDelta][ws] error=${err && err.message ? err.message : String(err)}`);
+    });
+  };
+
+  const close = () => {
+    closedByUser = true;
+    isOpen = false;
+    try {
+      if (ws) ws.close();
+    } catch (_) {}
+  };
+
+  connect();
+
+  return {
+    sendJson: safeSend,
+    sendAuth,
+    flushQueue,
+    close,
+    getState: () => ({ ok: true, open: isOpen, queued: sendQueue.length, reconnectIntervalMs, candidates: urls }),
+    _getWsUnsafe: () => ws,
+  };
+}
+
+async function captureDomForense(page) {
+  return await page.evaluate(() => {
+    const truncate = (s, max = 2200) => {
+      const v = String(s || "");
+      return v.length > max ? v.slice(0, max) + "…[trunc]" : v;
+    };
+
+    const pickFirstOuter = (selectors) => {
+      for (const sel of selectors) {
+        try {
+          const el = document.querySelector(sel);
+          if (el) return truncate(el.outerHTML || "");
+        } catch (_) {}
+      }
+      return "";
+    };
+
+    const composerHtml = pickFirstOuter([
+      'div[contenteditable="true"][role="textbox"]',
+      'div[role="textbox"][contenteditable="true"]',
+      'div[aria-label="Mensagem"]',
+      'div[aria-label*="mensagem"]',
+      'div[contenteditable="true"][aria-label]',
+    ]);
+
+    const sendHtml = pickFirstOuter([
+      // Botão de enviar (quando há texto)
+      '[role="button"][aria-label="Enviar"]',
+      '[role="button"][aria-label*="Enviar"]',
+      '[role="button"][aria-label="Send"]',
+      '[role="button"][aria-label*="Send"]',
+      '[role="button"][aria-label="Enviar"]',
+      '[role="button"][aria-label*="Enviar"]',
+      '[role="button"][aria-label="Send"]',
+      '[role="button"][aria-label*="Send"]',
+      '[aria-label="Enviar"][role="button"]',
+      '[aria-label="Send"][role="button"]',
+    ]);
+
+    return {
+      composer_outerHTML: composerHtml,
+      send_outerHTML: sendHtml,
+    };
+  });
+}
+
+async function postWebhookJson(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
+  const u = String(url || "").trim();
+  if (!u) return { ok: false, error: "webhook_url_empty" };
+
+  const body = JSON.stringify(payload);
+
+  if (typeof fetch === "function") {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(u, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body,
+        signal: controller.signal,
+      });
+      const text = await res.text().catch(() => "");
+      return { ok: res.ok, status: res.status, body: text.slice(0, 2000) };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    } finally {
+      clearTimeout(to);
+    }
+  }
+
+  return { ok: false, error: "fetch_unavailable" };
+}
+
+async function killGhostChromeForProfile(profileDir) {
+  const dir = String(profileDir || "").trim();
+  if (!dir) return { ok: false, killed: 0 };
+
+  let killedChrome = 0;
+  if (typeof killChromeProfileProcesses === "function") {
+    try {
+      killChromeProfileProcesses(dir);
+      killedChrome = 1;
+    } catch (_) {}
+  }
+
+  // Fallback Windows: matar chrome.exe cujo cmdline contém o user-data-dir
+  if (process.platform === "win32") {
+    try {
+      const { execSync } = require("child_process");
+      const norm = dir.replace(/\\/g, "\\\\");
+      const ps = [
+        "$procs = Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" -ErrorAction SilentlyContinue",
+        "| Where-Object { $_.CommandLine -like '*${norm}*' }",
+        "| Select-Object -ExpandProperty ProcessId",
+        "foreach ($pid in $procs) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }",
+      ].join(" ");
+      execSync(`powershell -NoProfile -Command "${ps}"`, { stdio: "ignore", windowsHide: true });
+    } catch (_) {}
+  }
+
+  await humanPause("domSettle", "ghost_chrome_settle");
+  return { ok: true, killed: killedChrome };
+}
+
+async function killGhostVirtusDeltaProcesses({ port, profileDir } = {}) {
+  if (process.platform !== "win32") return;
+  const ownPid = process.pid;
+  const portStr = port ? String(port) : "";
+  const dirNorm = String(profileDir || "").replace(/\\/g, "\\\\");
+
+  try {
+    const { execSync } = require("child_process");
+    const filters = ["$_.Name -eq 'node.exe'", `$_.ProcessId -ne ${ownPid}`];
+    if (portStr) filters.push(`$_.CommandLine -like '*VIRTUS_DELTA_PORT=${portStr}*'`);
+    if (dirNorm) filters.push(`$_.CommandLine -like '*${dirNorm}*'`);
+    const ps = [
+      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue",
+      `| Where-Object { ${filters.join(" -and ")} }`,
+      "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    ].join(" ");
+    execSync(`powershell -NoProfile -Command "${ps}"`, { stdio: "ignore", windowsHide: true });
+  } catch (_) {}
+  await humanPause("domSettle", "ghost_node_settle");
+}
+
+async function isThreadCardVisible(page, threadKey) {
+  const t = String(threadKey || "").trim();
+  if (!t) return false;
+  const selectors = [
+    `a[href="/messages/t/${t}/"]`,
+    `a[href="/messages/t/${t}"]`,
+    `a[href*="/messages/e2ee/t/${t}"]`,
+    `a[href*="/messages/t/${t}"]`,
+  ];
+  for (const sel of selectors) {
+    const el = await page.$(sel).catch(() => null);
+    if (el) return true;
+  }
+  return false;
+}
+
+async function isMarketplaceFilterActive(page) {
+  return Boolean(
+    await page
+      .evaluate(() => {
+        const isSelected = (el) => {
+          if (!el) return false;
+          if (el.getAttribute("aria-current") === "page") return true;
+          if (el.getAttribute("aria-selected") === "true") return true;
+          if (el.getAttribute("aria-pressed") === "true") return true;
+          return Boolean(el.closest('[aria-current="page"],[aria-selected="true"]'));
+        };
+        const mentionsMarketplace = (el) => {
+          const txt = String(el.innerText || el.textContent || "").trim().toLowerCase();
+          const label = String(el.getAttribute("aria-label") || "").trim().toLowerCase();
+          return txt.includes("marketplace") || label.includes("marketplace");
+        };
+
+        for (const a of document.querySelectorAll('a[href*="/messages/"]')) {
+          if (mentionsMarketplace(a) && isSelected(a)) return true;
+        }
+        for (const b of document.querySelectorAll('div[data-virtualized="false"] div[role="button"]')) {
+          if (!mentionsMarketplace(b)) continue;
+          if (isSelected(b)) return true;
+        }
+        return false;
+      })
+      .catch(() => false)
+  );
+}
+
+async function ensureMarketplaceFilterActive(page) {
+  const activeBefore = await isMarketplaceFilterActive(page);
+  if (activeBefore) {
+    logInfo("[virtusDelta][marketplace] filter_already_active=sim");
+    return { ok: true, already_active: true, active_after: true };
+  }
+
+  logInfo("[virtusDelta][marketplace] activating_filter...");
+  await humanPause("preMarketplace", "pre_marketplace_click");
+  const click = await clickMarketplaceFilterIfPresent(page);
+  await humanPause("postMarketplace", "post_marketplace_click");
+
+  let activeAfter = await isMarketplaceFilterActive(page);
+  if (!activeAfter && !click.changed) {
+    // Segunda tentativa (ícone SVG sem label) — bounded
+    const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
+    for (const b of buttons.slice(0, 8)) {
+      try {
+        const hasSvg = await b.evaluate((el) => Boolean(el.querySelector("svg")));
+        if (!hasSvg) continue;
+        await b.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("domSettle", "marketplace_icon_retry");
+        activeAfter = await isMarketplaceFilterActive(page);
+        if (activeAfter || click.changed) break;
+      } catch (_) {}
+    }
+  }
+
+  logInfo(
+    `[virtusDelta][marketplace] activate result=${JSON.stringify({ ...click, active_before: activeBefore, active_after: activeAfter })}`
+  );
+  return { ...click, active_before: activeBefore, active_after: activeAfter };
+}
+
+async function isMarketplaceFilterVisible(page) {
+  const anchors = await page.$$('a[href*="/messages/"]').catch(() => []);
+  for (const a of anchors) {
+    try {
+      const ok = await a.evaluate((el) => {
+        const txt = String(el.innerText || el.textContent || "").trim().toLowerCase();
+        if (txt.includes("marketplace")) return true;
+        return Array.from(el.querySelectorAll("span")).some(
+          (s) => String(s.innerText || s.textContent || "").trim().toLowerCase() === "marketplace"
+        );
+      });
+      if (ok) return true;
+    } catch (_) {}
+  }
+
+  const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
+  for (const b of buttons) {
+    try {
+      const ok = await b.evaluate((el) => {
+        if (!el.querySelector("svg")) return false;
+        const label = String(el.getAttribute("aria-label") || "").trim().toLowerCase();
+        const txt = String(el.innerText || el.textContent || "").trim().toLowerCase();
+        return label.includes("marketplace") || txt.includes("marketplace");
+      });
+      if (ok) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function forceSidebarRefreshByMessagesRoot(page) {
+  const before = await page
+    .evaluate(() => {
+      const hrefs = Array.from(document.querySelectorAll('a[href*="/messages"]'))
+        .map((a) => String(a.getAttribute("href") || "").trim())
+        .filter(Boolean)
+        .slice(0, 16);
+      return `${location.pathname}::${hrefs.join("|")}`;
+    })
+    .catch(() => "");
+
+  const rootSelectors = ['a[href="/messages/"]', 'a[href="/messages"]', 'a[href*="/messages/"][role="link"]'];
+  for (const sel of rootSelectors) {
+    const els = await page.$$(sel).catch(() => []);
+    for (const el of els) {
+      try {
+        const isNewOnly = await el.evaluate((node) => {
+          const h = String(node.getAttribute("href") || "").trim();
+          return h === "/messages/" || h === "/messages";
+        });
+        if (!isNewOnly) continue;
+        await el.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("domSettle", "messages_root_click");
+        const after = await page
+          .evaluate(() => {
+            const hrefs = Array.from(document.querySelectorAll('a[href*="/messages"]'))
+              .map((a) => String(a.getAttribute("href") || "").trim())
+              .filter(Boolean)
+              .slice(0, 16);
+            return `${location.pathname}::${hrefs.join("|")}`;
+          })
+          .catch(() => "");
+        if (after && after !== before) {
+          logInfo(`[virtusDelta][dom_force] messages_root_click changed sidebar`);
+          return { ok: true, changed: true, strategy: "messages_root" };
+        }
+        return { ok: true, changed: false, strategy: "messages_root" };
+      } catch (_) {}
+    }
+  }
+  return { ok: false, changed: false, strategy: "messages_root_missing" };
+}
+
+async function prepareDomForNetworkLead(page, threadKey) {
+  const t = String(threadKey || "").trim();
+
+  // SEMPRE ativar o filtro Marketplace (existir no DOM ≠ estar selecionado).
+  const mp = await ensureMarketplaceFilterActive(page);
+
+  let cardVisible = await isThreadCardVisible(page, t);
+  logInfo(
+    `[virtusDelta][dom_prep] thread_key=${t} card_visible=${cardVisible ? "sim" : "nao"} marketplace_active=${mp.active_after ? "sim" : "nao"}`
+  );
+
+  if (!cardVisible) {
+    const root = await forceSidebarRefreshByMessagesRoot(page);
+    logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
+    await humanPause("domSettle", "dom_prep_root_settle");
+    if (!(await isMarketplaceFilterActive(page))) {
+      await ensureMarketplaceFilterActive(page);
+    }
+    cardVisible = await isThreadCardVisible(page, t);
+  }
+
+  return { ok: true, cardVisible, marketplace: mp };
+}
+
+async function clickMarketplaceFilterIfPresent(page) {
+  const getSig = () =>
+    page
+      .evaluate(() => {
+        const hrefs = Array.from(document.querySelectorAll('a[href]'))
+          .map((a) => String(a.getAttribute("href") || "").trim())
+          .filter(Boolean)
+          .filter((h) => h.includes("/messages"))
+          .slice(0, 14);
+        const path = String(location.pathname || "").trim();
+        return `${path}::${hrefs.join("|")}`;
+      })
+      .catch(() => "");
+
+  const before = await getSig();
+
+  // 1) âncoras contendo label Marketplace (sem depender de notificações)
+  const anchors = await page.$$('a[href*="/messages/"]').catch(() => []);
+  for (const a of anchors) {
+    try {
+      const ok = await a.evaluate((el) => {
+        const txt = String(el.innerText || el.textContent || '').trim().toLowerCase();
+        if (txt.includes('marketplace')) return true;
+        const spans = Array.from(el.querySelectorAll('span'));
+        return spans.some((s) => String(s.innerText || s.textContent || '').trim().toLowerCase() === 'marketplace');
+      });
+      if (ok) {
+        await a.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("domSettle", "marketplace_anchor_click");
+        const after = await getSig();
+        if (after && after !== before) return { ok: true, changed: true, strategy: "anchor_label" };
+        break;
+      }
+    } catch (_) {}
+  }
+
+  // 2) botões com SVG (assinatura da lojinha) dentro da lateral
+  const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
+  // 2a) tentativa “forte” quando existe texto/aria-label Marketplace
+  for (const b of buttons) {
+    try {
+      const ok = await b.evaluate((el) => {
+        if (!el.querySelector('svg')) return false;
+        const label = String(el.getAttribute('aria-label') || '').trim().toLowerCase();
+        const txt = String(el.innerText || el.textContent || '').trim().toLowerCase();
+        return label.includes('marketplace') || txt === 'marketplace' || txt.includes('marketplace');
+      });
+      if (ok) {
+        await b.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("domSettle", "marketplace_button_click");
+        const after = await getSig();
+        if (after && after !== before) return { ok: true, changed: true, strategy: "button_label" };
+        break;
+      }
+    } catch (_) {}
+  }
+
+  // 2b) fallback: em algumas contas o botão Marketplace é SOMENTE ícone (SVG) sem texto.
+  // Tentamos clique bounded (máx 6 botões) e validamos por mudança do sidebar/rota.
+  const svgButtons = [];
+  for (const b of buttons) {
+    try {
+      const hasSvg = await b.evaluate((el) => Boolean(el.querySelector("svg")));
+      if (hasSvg) svgButtons.push(b);
+    } catch (_) {}
+  }
+  for (const b of svgButtons.slice(0, 6)) {
+    try {
+      await b.click({ delay: clickDelayMs() }).catch(() => {});
+      await humanPause("domSettle", "marketplace_svg_fallback");
+      const after = await getSig();
+      if (after && after !== before) return { ok: true, changed: true, strategy: "svg_icon_fallback" };
+    } catch (_) {}
+  }
+
+  const afterFinal = await getSig();
+  return { ok: Boolean(afterFinal && afterFinal !== before), changed: Boolean(afterFinal && afterFinal !== before), strategy: "none" };
+}
+
+async function extractMarketplaceItemLink(page) {
+  const href = await page.evaluate(() => {
+    const host = location.origin || '';
+    const a =
+      document.querySelector('div[class*="x1a8lsjc"] a[href*="/marketplace/item/"]') ||
+      document.querySelector('a[href*="/marketplace/item/"]');
+    if (!a) return '';
+    const h = String(a.getAttribute('href') || '').trim();
+    if (!h) return '';
+    if (h.startsWith('http')) return h;
+    return host + h;
+  }).catch(() => "");
+  return String(href || "").trim();
+}
+
+async function readComposerText(page) {
+  return String(
+    await page
+      .evaluate(() => {
+        const el =
+          document.querySelector('div[role="textbox"][contenteditable="true"]') ||
+          document.querySelector('div[contenteditable="true"][role="textbox"]');
+        if (!el) return "";
+        return String(el.innerText || el.textContent || "").trim();
+      })
+      .catch(() => "")
+  ).trim();
+}
+
+async function clickSendButtonIfPresent(page) {
+  const sels = [
+    '[role="button"][aria-label="Enviar"]',
+    '[role="button"][aria-label*="Enviar"]',
+    '[role="button"][aria-label="Send"]',
+    '[role="button"][aria-label*="Send"]',
+  ];
+  for (const sel of sels) {
+    const btn = await page.$(sel).catch(() => null);
+    if (!btn) continue;
+    const visible = await btn
+      .evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      })
+      .catch(() => false);
+    if (!visible) continue;
+    await btn.click({ delay: clickDelayMs() }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function ensureComposerFocused(page) {
+  const sels = [
+    'div[role="textbox"][contenteditable="true"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[aria-label="Mensagem"]',
+    'div[aria-label*="mensagem"]',
+    'div[role="textbox"][contenteditable="true"]',
+  ];
+
+  let handle = null;
+  for (const sel of sels) {
+    handle = await page.$(sel).catch(() => null);
+    if (handle) break;
+  }
+  if (!handle) throw new Error("composer_missing");
+
+  await handle.click({ delay: clickDelayMs() }).catch(() => {});
+  await humanPause("preComposer", "composer_focus");
+
+  const existing = await readComposerText(page);
+  if (!existing) return handle;
+
+  const ctrlKey = process.platform === "darwin" ? "Meta" : "Control";
+  try {
+    await page.keyboard.down(ctrlKey);
+    await page.keyboard.press("KeyA");
+    await page.keyboard.up(ctrlKey);
+  } catch (_) {}
+  try {
+    await page.keyboard.press("Backspace");
+  } catch (_) {}
+
+  return handle;
+}
+
+async function typeHumanized(page, textoResposta) {
+  const full = String(textoResposta || "").replace(/\r/g, "");
+  for (const ch of full) {
+    if (ch === "\n") {
+      try {
+        await page.keyboard.down("Shift");
+        await page.keyboard.press("Enter");
+        await page.keyboard.up("Shift");
+      } catch (_) {}
+      await humanPause("lineBreak", "shift_enter");
+      continue;
+    }
+    try {
+      await page.keyboard.sendCharacter(ch);
+    } catch (_) {
+      try {
+        await page.keyboard.type(ch, { delay: 0 });
+      } catch (_) {}
+    }
+    await humanPause("char", null);
+  }
+}
+
+async function scrollSidebarShort(page) {
+  await page.evaluate(() => {
+    const candidates = [];
+    const nav = document.querySelector('div[role="navigation"]');
+    if (nav) candidates.push(nav);
+    const grids = Array.from(document.querySelectorAll('div[role="grid"],div[role="rowgroup"]'));
+    candidates.push(...grids);
+    const anyScrollable = Array.from(document.querySelectorAll("div"))
+      .filter((d) => d && d.scrollHeight > d.clientHeight + 40)
+      .slice(0, 12);
+    candidates.push(...anyScrollable);
+
+    const uniq = [];
+    const seen = new Set();
+    for (const c of candidates) {
+      if (!c || !c.scrollBy) continue;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      uniq.push(c);
+    }
+    const target = uniq[0] || document.scrollingElement || document.body;
+    try {
+      target.scrollBy(0, 520);
+    } catch (_) {}
+  });
+}
+
+async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) {
+  const t = String(threadKey || "").trim();
+  if (!t) throw new Error("thread_key_empty");
+
+  // Espera curta e segura pelo carregamento do sidebar (sem polling agressivo).
+  // Objetivo: evitar tentar clicar antes dos cards existirem no DOM.
+  try {
+    await page.waitForFunction(
+      () => {
+        const hrefs = Array.from(document.querySelectorAll('a[href*="/messages"]'))
+          .map((a) => String(a.getAttribute("href") || ""))
+          .filter(Boolean);
+        const nonNew = hrefs.filter((h) => !h.includes("/messages/new"));
+        return nonNew.length >= 1;
+      },
+      { timeout: 8000 }
+    );
+  } catch (_) {}
+
+  const selectors = [
+    `a[href="/messages/t/${t}/"]`,
+    `a[href="/messages/t/${t}"]`,
+    `a[href*="/messages/e2ee/t/${t}"]`,
+    `a[href*="/messages/t/${t}"]`,
+    `a[href*="${t}"]`,
+  ];
+
+  for (let i = 0; i < maxScrollSteps; i++) {
+    for (const sel of selectors) {
+      const a = await page.$(sel).catch(() => null);
+      if (a) {
+        await humanPause("preThreadClick", "pre_thread_card_click");
+        await a.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("postThreadOpen", "post_thread_card_click");
+        return { ok: true, scrolled: i, matched_selector: sel };
+      }
+    }
+    await scrollSidebarShort(page).catch(() => {});
+    await humanPause("scroll", "sidebar_scroll");
+  }
+
+  let hrefPreview = [];
+  try {
+    hrefPreview = await page.$$eval("a[href]", (els) =>
+      els
+        .map((e) => String(e.getAttribute("href") || "").trim())
+        .filter(Boolean)
+        .filter((h) => h.includes("/messages"))
+        .slice(0, 25)
+    );
+  } catch (_) {}
+
+  // Fallback de homologação (sem goto/reload): clicar no chat atualmente aberto.
+  // Isso valida o pipeline de acessibilidade mesmo quando o thread_key do barramento
+  // não corresponde ao ID que aparece no href do card lateral.
+  try {
+    const current = String(await page.evaluate(() => location.pathname || "")).trim();
+    if (current.includes("/messages/") && current.includes("/t/")) {
+      const fallbackSel = `a[href*="${current}"]`;
+      const a2 = await page.$(fallbackSel).catch(() => null);
+      if (a2) {
+        await humanPause("preThreadClick", "pre_thread_fallback_click");
+        await a2.click({ delay: clickDelayMs() }).catch(() => {});
+        await humanPause("postThreadOpen", "post_thread_fallback_click");
+        return { ok: true, scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current };
+      }
+    }
+  } catch (_) {}
+
+  return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
+}
+
+async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false } = {}) {
+  const t = String(threadKey || "").trim();
+  logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
+
+  await humanReactionDelay(fromNetworkLead);
+
+  if (fromNetworkLead) {
+    try {
+      await prepareDomForNetworkLead(page, threadKey);
+    } catch (e) {
+      logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
+    }
+  }
+
+  try {
+    await ensureMarketplaceFilterActive(page);
+  } catch (_) {}
+
+  const open = await openThreadByClick(page, threadKey);
+  if (!open.ok) {
+    if (fromNetworkLead) {
+      try {
+        logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
+        await forceSidebarRefreshByMessagesRoot(page);
+        await humanPause("domSettle", "open_thread_retry_root");
+        await ensureMarketplaceFilterActive(page);
+        await humanPause("postMarketplace", "open_thread_retry_marketplace");
+      } catch (_) {}
+      const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
+      if (open2.ok) {
+        Object.assign(open, open2);
+      }
+    }
+  }
+
+  if (!open.ok) {
+    logInfo(`[virtusDelta][reply] openThread FAIL thread_key=${t} error=${open.error}`);
+    if (open.href_preview && open.href_preview.length) {
+      logInfo(`[virtusDelta][reply] href_preview=${JSON.stringify(open.href_preview)}`);
+    }
+    return open;
+  }
+  logInfo(
+    `[virtusDelta][reply] openThread OK thread_key=${t} scrolled=${open.scrolled} selector=${String(open.matched_selector || "")}`
+  );
+
+  await humanPause("postThreadOpen", "post_open_read_context");
+
+  // Link do classificado (Coletor 101)
+  try {
+    const itemLink = await extractMarketplaceItemLink(page);
+    if (itemLink) logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+  } catch (_) {}
+
+  await ensureComposerFocused(page);
+  await humanPause("preTyping", "pre_typing");
+  if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
+    try {
+      const dom = await captureDomForense(page);
+      logInfo(`[virtusDelta][DOM] thread_key=${t} composer_outerHTML=${dom.composer_outerHTML}`);
+      logInfo(`[virtusDelta][DOM] thread_key=${t} send_outerHTML=${dom.send_outerHTML}`);
+    } catch (_) {}
+  }
+  await typeHumanized(page, textoResposta);
+  let composed = await readComposerText(page);
+  logInfo(`[virtusDelta][composer] after_type chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+
+  if (!composed || composed.length < 3) {
+    logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
+    await humanPause("domSettle", "composer_retry_settle");
+    await ensureComposerFocused(page);
+    await humanPause("preTyping", "pre_typing_retry");
+    await typeHumanized(page, textoResposta);
+    composed = await readComposerText(page);
+    logInfo(`[virtusDelta][composer] after_retry chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+  }
+
+  if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
+    try {
+      const dom2 = await captureDomForense(page);
+      logInfo(`[virtusDelta][DOM] thread_key=${t} after_type_send_outerHTML=${dom2.send_outerHTML}`);
+    } catch (_) {}
+  }
+  await humanPause("preSend", "pre_enter_send");
+  if (composed && composed.length >= 3) {
+    await page.keyboard.press("Enter");
+    logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
+    await humanPause("postSend", "post_enter_send");
+    const afterEnter = await readComposerText(page);
+    if (afterEnter && afterEnter.length >= 3) {
+      const clicked = await clickSendButtonIfPresent(page);
+      logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
+    }
+  } else {
+    const clicked = await clickSendButtonIfPresent(page);
+    logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
+    if (!clicked) return { ok: false, error: "composer_text_not_registered" };
+  }
+  return { ok: true };
+}
+
+function createSerialQueue() {
+  let chain = Promise.resolve();
+  return (fn) => {
+    chain = chain.then(fn).catch(() => {});
+    return chain;
+  };
+}
+
+async function loadCookies(filePath) {
+  const raw = await fs.readFile(filePath, "utf8");
+  const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("Arquivo de cookies invalido: esperado array com ao menos 1 cookie.");
+  }
+  return parsed;
+}
+
+async function startVirtusDeltaStandaloneRuntime({
+  accountLogin,
+  serverId,
+  webhookUrl,
+  webhookSecret,
+  expressPort,
+  chromeExecutable,
+  userDataDir,
+  cookiesFile,
+  startUrl,
+} = {}) {
+  const diskServerId = readHostIdSync();
+  const SERVER_ID = diskServerId || serverId || resolveServerId();
+  const ACCOUNT_LOGIN = accountLogin || resolveAccountLogin();
+  const WEBHOOK_URL = String(webhookUrl || process.env.VIRTUS_DELTA_WEBHOOK_URL || "").trim();
+  const WEBHOOK_SECRET = String(webhookSecret || process.env.VIRTUS_DELTA_WEBHOOK_SECRET || "").trim();
+  const PORT = Number(expressPort || process.env.VIRTUS_DELTA_PORT || 4000);
+  const DUMP_DOM = process.env.VIRTUS_DELTA_DUMP_DOM === "1";
+
+  const executablePath =
+    chromeExecutable ||
+    process.env.CHROME_PATH ||
+    path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
+  const profileDir =
+    userDataDir ||
+    process.env.VIRTUS_DELTA_USER_DATA_DIR ||
+    path.join(__dirname, "..", "dados", "chrome-session-virtus-delta");
+  const cookieFp =
+    cookiesFile ||
+    process.env.VIRTUS_DELTA_COOKIES_FILE ||
+    path.join(__dirname, "..", "dados", "facebook_test_cookies.local.json");
+  const urlInicial = startUrl || process.env.VIRTUS_DELTA_START_URL || "https://www.facebook.com/messages";
+
+  logInfo(
+    `[virtusDelta][boot] server_id=${SERVER_ID} account_login=${ACCOUNT_LOGIN || "null"} port=${PORT} url=${urlInicial}`
+  );
+  logInfo(`[virtusDelta][boot] user_data_dir=${profileDir}`);
+  logInfo(`[virtusDelta][boot] cookies_file=${cookieFp}`);
+  if (DUMP_DOM) logInfo(`[virtusDelta][boot] dom_dump=enabled`);
+  logHumanTimingsBoot();
+  let ctWs = null;
+
+  await killGhostVirtusDeltaProcesses({ port: PORT, profileDir });
+  const ghost = await killGhostChromeForProfile(profileDir);
+  logInfo(`[virtusDelta][boot] ghost_chrome_cleanup=${ghost.ok ? "ok" : "skip"}`);
+
+  const browser = await puppeteer.launch({
+    headless: false,
+    executablePath,
+    userDataDir: profileDir,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-features=IsolateOrigins,site-per-process"],
+    defaultViewport: null,
+  });
+
+  // Garantir janela única (evita perda de cache por abas duplicadas)
+  const existingPages = await browser.pages().catch(() => []);
+  const page = existingPages[0] || (await browser.newPage());
+  for (const p of existingPages.slice(1)) {
+    try {
+      await p.close();
+    } catch (_) {}
+  }
+  browser.on("targetcreated", async (target) => {
+    try {
+      if (target.type() !== "page") return;
+      const newPage = await target.page();
+      if (!newPage || newPage === page) return;
+      const pages = await browser.pages();
+      if (pages.length > 1) await newPage.close().catch(() => {});
+    } catch (_) {}
+  });
+  try {
+    if (cookieFp && fsSync.existsSync(cookieFp)) {
+      const cookies = await loadCookies(cookieFp);
+      try {
+        await page.setCookie(...cookies);
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  await page.goto(urlInicial, { waitUntil: "domcontentloaded", timeout: 45000 });
+  try {
+    const currentUrl = page.url();
+    const title = await page.title();
+    const facebookCookies = await page.cookies("https://www.facebook.com");
+    const fallbackCookies = await page.cookies("https://facebook.com");
+    const allCookies = [...facebookCookies, ...fallbackCookies];
+    const cUserCookie = allCookies.find((cookie) => cookie.name === "c_user");
+    logInfo(`[virtusDelta][boot] page_url=${currentUrl}`);
+    logInfo(`[virtusDelta][boot] page_title=${title}`);
+    logInfo(`[virtusDelta][boot] cookie_c_user_present=${cUserCookie ? "sim" : "nao"}`);
+  } catch (_) {}
+
+  const cdpSession = await page.target().createCDPSession();
+  await cdpSession.send("Network.enable");
+  logInfo(`[virtusDelta][boot] CDP Network.enable ok`);
+
+  const seenKeys = new Set();
+  const autoReplyText = String(process.env.VIRTUS_DELTA_AUTO_REPLY_TEXT || "").replace(/\r/g, "");
+  const autoReplyThreads = new Map(); // threadKey -> tsMs
+  const autoReplyMinIntervalMs = Math.max(
+    5_000,
+    Number(process.env.VIRTUS_DELTA_AUTO_REPLY_MIN_INTERVAL_MS || 60_000) || 60_000
+  );
+  const sendWebhookSafe = (payload) => {
+    if (!WEBHOOK_URL) return;
+    const headers = {};
+    if (WEBHOOK_SECRET) headers["x-virtus-secret"] = WEBHOOK_SECRET;
+    postWebhookJson(WEBHOOK_URL, payload, { headers }).catch(() => {});
+  };
+
+  const enqueue = createSerialQueue();
+
+  ctWs = createCtWsTransport({
+    serverId: SERVER_ID,
+    getAccountLogin: () => ACCOUNT_LOGIN,
+    onMessage: (data) => {
+      try {
+        const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
+        const msg = JSON.parse(raw);
+        const comando = String(msg?.comando || msg?.event || "").trim();
+        if (comando !== "enviar-mensagem-delta") return;
+        const threadKey = String(msg?.thread_key || "").trim();
+        const textoResposta = String(msg?.texto_resposta || msg?.texto || msg?.texto_limpo || "").replace(/\r/g, "");
+        if (!threadKey || !textoResposta) return;
+
+        enqueue(async () => {
+          try {
+            await sendReplyFlow({
+              page,
+              threadKey,
+              textoResposta,
+              fromNetworkLead: false,
+            });
+            logInfo(`[virtusDelta][ws_cmd] done comando=enviar-mensagem-delta thread_key=${threadKey} ok=sim`);
+          } catch (e) {
+            logInfo(
+              `[virtusDelta][ws_cmd] crash comando=enviar-mensagem-delta thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
+            );
+          }
+        });
+      } catch (_) {
+        // nunca crashar por msg inválida
+      }
+    },
+  });
+
+  cdpSession.on("Network.webSocketFrameReceived", (event) => {
+    try {
+      const response = event?.response || {};
+      const opcode = Number(response?.opcode ?? -1);
+      const payloadData = response?.payloadData || "";
+      const decoded = decodeWebSocketPayload(payloadData, opcode);
+      const inner = extractInnerPayload(decoded);
+
+      let events = [];
+      try {
+        events = extractWsMessageEvents(inner, "");
+      } catch (_) {
+        events = [];
+      }
+
+      for (const ev of events) {
+        const threadKey = String(ev?.thread_key || "").trim();
+        const texto = decodeEscapedText(String(ev?.message_text || "")).trim();
+        if (!threadKey) continue;
+        if (!shouldEmitLeadText(texto)) continue;
+
+        const key = `${ACCOUNT_LOGIN || ""}|${threadKey}|${texto}|${String(ev?.operacao_meta || ev?.operation || "")}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        if (seenKeys.size > 8000) {
+          const first = seenKeys.values().next().value;
+          if (first) seenKeys.delete(first);
+        }
+
+        const payload = {
+          server_id: SERVER_ID,
+          account_login: ACCOUNT_LOGIN,
+          thread_key: threadKey,
+          texto_limpo: texto,
+        };
+        // Barramento do "Vai": envia para CT pelo canal WS (sem persistir JSONL local)
+        try {
+          if (ctWs && typeof ctWs.sendJson === "function") ctWs.sendJson({ event: "lead_capturado", ...payload });
+        } catch (_) {}
+        // Fallback opcional (legado): webhook HTTP, se configurado
+        try {
+          if (WEBHOOK_URL) sendWebhookSafe(payload);
+        } catch (_) {}
+
+        logInfo(
+          `[virtusDelta][network_impact] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} texto="${texto.slice(0, 120)}" op=${String(ev?.operacao_meta || ev?.operation || "")}`
+        );
+
+        if (autoReplyText) {
+          const last = Number(autoReplyThreads.get(threadKey) || 0);
+          const now = Date.now();
+          if (!last || now - last >= autoReplyMinIntervalMs) {
+            autoReplyThreads.set(threadKey, now);
+            enqueue(async () => {
+              try {
+                await sendReplyFlow({
+                  page,
+                  threadKey,
+                  textoResposta: autoReplyText,
+                  fromNetworkLead: true,
+                });
+                logInfo(`[virtusDelta][reply] done thread_key=${threadKey} ok=sim (network_lead)`);
+              } catch (e) {
+                logInfo(
+                  `[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
+                );
+              }
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // nunca crashar por frame corrompido
+    }
+  });
+
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+
+  app.get("/health", (_req, res) => res.json({ ok: true }));
+
+  app.post("/api/enviar-resposta", (req, res) => {
+    try {
+      const thread_key = String(req.body?.thread_key || "").trim();
+      const texto_resposta = String(req.body?.texto_resposta || "").replace(/\r/g, "");
+      if (!thread_key || !texto_resposta) {
+        return res.status(400).json({ ok: false, error: "missing_thread_key_or_texto_resposta" });
+      }
+
+      enqueue(async () => {
+        try {
+          const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta });
+          logInfo(`[virtusDelta][reply] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
+        } catch (e) {
+          logInfo(
+            `[virtusDelta][reply] crash thread_key=${String(thread_key)} err=${e && e.message ? e.message : String(e)}`
+          );
+        }
+      });
+
+      return res.json({ ok: true, queued: true });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
+    }
+  });
+
+  const server = await new Promise((resolve) => {
+    const s = app.listen(PORT, "127.0.0.1", () => resolve(s));
+  });
+  logInfo(`[virtusDelta][boot] express_listening=http://127.0.0.1:${PORT}`);
+  logInfo(`[virtusDelta][boot] mode=passive_listening auto_reply=${autoReplyText ? "enabled" : "disabled"}`);
+
+  return {
+    ok: true,
+    server_id: SERVER_ID,
+    account_login: ACCOUNT_LOGIN,
+    express_port: PORT,
+    ws: ctWs ? ctWs.getState() : { ok: false, error: "ws_disabled" },
+    browser,
+    page,
+    shutdown: async () => {
+      try {
+        await new Promise((r) => server.close(() => r()));
+      } catch (_) {}
+      try {
+        if (ctWs && typeof ctWs.close === "function") ctWs.close();
+      } catch (_) {}
+      try {
+        await browser.close();
+      } catch (_) {}
+    },
+  };
+}
+
+async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
+  const requiredEpoch = Number(cfg && cfg.epoch != null ? cfg.epoch : 0) || 0;
+  const restrictTab = (cfg && cfg.restrictTab != null) ? (Number(cfg.restrictTab) || 0) : 0;
+  const slowMode = !!(cfg && cfg.slowMode);
+
+  const SERVER_ID = readHostIdSync() || resolveServerId();
+  const ACCOUNT_LOGIN = (cfg && cfg.accountLogin) ? String(cfg.accountLogin).trim() : (String(nome || "").trim() || resolveAccountLogin());
+
+  const startUrl = String((cfg && cfg.startUrl) || process.env.VIRTUS_DELTA_START_URL || "https://www.facebook.com/messages").trim();
+
+  let running = true;
+  const enqueue = createSerialQueue();
+
+  function epochOk() {
+    try {
+      if (browser && browser._fenceEpochMap && typeof browser._fenceEpochMap[nome] !== "undefined") {
+        return browser._fenceEpochMap[nome] === requiredEpoch;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const pages = await browser.pages().catch(() => []);
+  const page = pages[restrictTab] || pages[0] || (await browser.newPage());
+
+  // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
+  try {
+    const u0 = String(page.url ? page.url() : "");
+    if (!/facebook\.com\/messages/i.test(u0)) {
+      await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    }
+  } catch (_) {}
+
+  logInfo(`[virtusDelta][boot][worker] nome=${String(nome || "")} engine=delta epoch=${requiredEpoch} slowMode=${slowMode ? "sim" : "nao"} url=${String(page.url ? page.url() : "")}`);
+
+  let cdpSession = null;
+  try {
+    cdpSession = await page.target().createCDPSession();
+    await cdpSession.send("Network.enable");
+  } catch (e) {
+    return {
+      stop: async () => {},
+      ok: false,
+      error: e && e.message ? e.message : String(e),
+    };
+  }
+
+  const ctWs = createCtWsTransport({
+    serverId: SERVER_ID,
+    getAccountLogin: () => ACCOUNT_LOGIN,
+    onMessage: (data) => {
+      try {
+        if (!running || !epochOk()) return;
+        const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
+        const msg = JSON.parse(raw);
+        const comando = String(msg?.comando || msg?.event || "").trim();
+        if (comando !== "enviar-mensagem-delta") return;
+        const threadKey = String(msg?.thread_key || "").trim();
+        const textoResposta = String(msg?.texto_resposta || msg?.texto || msg?.texto_limpo || "").replace(/\r/g, "");
+        if (!threadKey || !textoResposta) return;
+
+        enqueue(async () => {
+          try {
+            if (!running || !epochOk()) return;
+            await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: false });
+            logInfo(`[virtusDelta][ws_cmd] done comando=enviar-mensagem-delta thread_key=${threadKey} ok=sim (worker_engine)`);
+          } catch (e) {
+            logInfo(
+              `[virtusDelta][ws_cmd] crash comando=enviar-mensagem-delta thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
+            );
+          }
+        });
+      } catch (_) {}
+    },
+  });
+
+  const seenKeys = new Set();
+
+  const onFrame = (event) => {
+    try {
+      if (!running || !epochOk()) return;
+      const response = event?.response || {};
+      const opcode = Number(response?.opcode ?? -1);
+      const payloadData = response?.payloadData || "";
+      const decoded = decodeWebSocketPayload(payloadData, opcode);
+      const inner = extractInnerPayload(decoded);
+
+      let events = [];
+      try {
+        events = extractWsMessageEvents(inner, "");
+      } catch (_) {
+        events = [];
+      }
+
+      for (const ev of events) {
+        const threadKey = String(ev?.thread_key || "").trim();
+        const texto = decodeEscapedText(String(ev?.message_text || "")).trim();
+        if (!threadKey) continue;
+        if (!shouldEmitLeadText(texto)) continue;
+
+        const key = `${ACCOUNT_LOGIN || ""}|${threadKey}|${texto}|${String(ev?.operacao_meta || ev?.operation || "")}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        if (seenKeys.size > 8000) {
+          const first = seenKeys.values().next().value;
+          if (first) seenKeys.delete(first);
+        }
+
+        const payload = {
+          server_id: SERVER_ID,
+          account_login: ACCOUNT_LOGIN,
+          thread_key: threadKey,
+          texto_limpo: texto,
+        };
+
+        try {
+          ctWs.sendJson({ event: "lead_capturado", ...payload });
+        } catch (_) {}
+      }
+    } catch (_) {
+      // nunca crashar por frame corrompido
+    }
+  };
+
+  try {
+    cdpSession.on("Network.webSocketFrameReceived", onFrame);
+  } catch (_) {}
+
+  return {
+    ok: true,
+    engine: "delta",
+    server_id: SERVER_ID,
+    account_login: ACCOUNT_LOGIN,
+    page,
+    ws: ctWs ? ctWs.getState() : { ok: false, error: "ws_disabled" },
+    stop: async () => {
+      running = false;
+      try {
+        if (cdpSession && typeof cdpSession.removeListener === "function") {
+          cdpSession.removeListener("Network.webSocketFrameReceived", onFrame);
+        }
+      } catch (_) {}
+      try {
+        if (cdpSession && typeof cdpSession.detach === "function") await cdpSession.detach();
+      } catch (_) {}
+      try {
+        if (ctWs && typeof ctWs.close === "function") ctWs.close();
+      } catch (_) {}
+    },
+  };
+}
+
+async function startVirtusDeltaRuntime() {
+  // Overload:
+  // - (browser, nome, cfg) => runtime acoplado ao worker (retorna { stop() })
+  // - ({...opts})         => runtime standalone (retorna { shutdown() })
+  const a0 = arguments[0];
+  const a1 = arguments[1];
+  const a2 = arguments[2];
+  const looksLikeBrowser = a0 && typeof a0.pages === "function";
+  if (looksLikeBrowser) return await startVirtusDeltaWorkerRuntime(a0, a1, a2 || {});
+  return await startVirtusDeltaStandaloneRuntime((a0 && typeof a0 === "object") ? a0 : {});
+}
+
+module.exports = {
+  startVirtusDeltaRuntime,
+  startVirtusDeltaStandaloneRuntime,
+  startVirtusDeltaWorkerRuntime,
+  killGhostChromeForProfile,
+  killGhostVirtusDeltaProcesses,
+  prepareDomForNetworkLead,
+  forceSidebarRefreshByMessagesRoot,
+  ensureMarketplaceFilterActive,
+  isMarketplaceFilterActive,
+  HUMAN_TIMINGS,
+  humanPause,
+};
+
+if (require.main === module) {
+  startVirtusDeltaStandaloneRuntime()
+    .then((r) => {
+      if (!r || r.ok !== true) process.exit(1);
+      process.on("SIGINT", () => r.shutdown().finally(() => process.exit(0)));
+      process.on("SIGTERM", () => r.shutdown().finally(() => process.exit(0)));
+    })
+    .catch((e) => {
+      console.error("[virtusDelta][fatal]", e && e.stack ? e.stack : e);
+      process.exit(1);
+    });
+}
+
