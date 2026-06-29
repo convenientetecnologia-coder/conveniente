@@ -5,6 +5,7 @@ const cors = require('cors');
 // const bodyParser = require('body-parser'); // Não é necessário, pois estamos usando express.json/express.urlencoded
 const open = require('open'); // <-- adicione/mova isso aqui!
 const fs = require('fs');
+const os = require('os');
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
@@ -56,6 +57,117 @@ async function maybeBootstrapService() {
       await bs.boot();
     }
   } catch {}
+}
+
+// Bootstrap Gate B (token) — modo HTTP stateless (prepara push direto por subdomínios dinâmicos).
+// Observação: o CT ainda precisa expor o endpoint de bootstrap que devolve { hostFqdn, tunnelToken }.
+async function maybeBootstrapGateBToken() {
+  const DATA_DIR = path.join(__dirname, 'dados');
+  const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
+  const BUNDLE_PATH = path.join(DATA_DIR, 'gate_b_bundle.json');
+  const BOOTSTRAP_URL = String(process.env.CONVENIENTE_CT_BOOTSTRAP_URL || process.env.CT_BOOTSTRAP_URL || 'https://convenientetecnologia.com/api/edge/bootstrap').trim();
+  const BOOTSTRAP_SECRET = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
+
+  const readHostId = () => {
+    try {
+      if (!fs.existsSync(HOSTID_PATH)) return '';
+      return String(fs.readFileSync(HOSTID_PATH, 'utf8') || '').trim();
+    } catch {
+      return '';
+    }
+  };
+
+  const readBundle = () => {
+    try {
+      if (!fs.existsSync(BUNDLE_PATH)) return null;
+      const raw = String(fs.readFileSync(BUNDLE_PATH, 'utf8') || '').trim();
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeBundleAtomic = (bundle) => {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    } catch {}
+    const tmp = `${BUNDLE_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(bundle, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, BUNDLE_PATH);
+  };
+
+  const spawnCloudflaredToken = (token) => {
+    try {
+      const { spawn } = require('child_process');
+      const preferred = String(process.env.CLOUDFLARED_EXE || '').trim();
+      const candidate = preferred || (fs.existsSync('C:/portas/bin/cloudflared.exe') ? 'C:/portas/bin/cloudflared.exe' : 'cloudflared');
+      const args = ['tunnel', 'run', '--token', String(token)];
+      const child = spawn(candidate, args, { stdio: 'ignore', windowsHide: true, detached: true });
+      try { child.unref(); } catch {}
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    const existing = readBundle();
+    if (existing && existing.tunnelToken) {
+      const ok = spawnCloudflaredToken(existing.tunnelToken);
+      logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
+      return;
+    }
+
+    const tokenEnv = String(process.env.CONVENIENTE_GATE_B_TUNNEL_TOKEN || '').trim();
+    if (tokenEnv) {
+      writeBundleAtomic({ hostFqdn: existing && existing.hostFqdn ? existing.hostFqdn : null, tunnelToken: tokenEnv, updatedAt: Date.now(), source: 'env' });
+      const ok = spawnCloudflaredToken(tokenEnv);
+      logger.info('[GATE_B][BOOTSTRAP] token_env: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
+      return;
+    }
+
+    // Bootstrap por CT (best-effort; não bloqueia boot se falhar).
+    if (typeof fetch !== 'function') {
+      logger.warn('[GATE_B][BOOTSTRAP] fetch_unavailable: pulando bootstrap remoto');
+      return;
+    }
+
+    const hostId = readHostId();
+    const body = {
+      hostId: hostId || null,
+      hostname: os.hostname(),
+      ts: Date.now(),
+      want: 'gate_b_token_v1'
+    };
+    const headers = { 'content-type': 'application/json' };
+    if (BOOTSTRAP_SECRET) headers['x-bootstrap-secret'] = BOOTSTRAP_SECRET;
+
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 4500);
+    try {
+      const res = await fetch(BOOTSTRAP_URL, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+      const raw = await res.text().catch(() => '');
+      if (!res.ok) {
+        logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_http_fail', { status: res.status });
+        return;
+      }
+      const parsed = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
+      const tunnelToken = parsed && parsed.tunnelToken ? String(parsed.tunnelToken).trim() : '';
+      const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
+      if (!tunnelToken) {
+        logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_missing_token');
+        return;
+      }
+      writeBundleAtomic({ hostFqdn: hostFqdn || null, tunnelToken, updatedAt: Date.now(), source: 'ct_bootstrap' });
+      const ok = spawnCloudflaredToken(tunnelToken);
+      logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
+    } finally {
+      clearTimeout(to);
+    }
+  } catch (e) {
+    logger.warn('[GATE_B][BOOTSTRAP] excecao (best-effort)', { error: (e && e.message) || String(e) });
+  }
 }
 
 // Helpers/pontes
@@ -211,6 +323,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 // Boot sequencial: bootstrap -> cluster -> listen
 (async () => {
   await maybeBootstrapService();
+  await maybeBootstrapGateBToken();
   // Política definida (triagem inbox): após restart, começar fechado.
   // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
   // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.

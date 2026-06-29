@@ -2,12 +2,7 @@ const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
 const express = require("express");
-let WebSocket = null;
-try {
-  WebSocket = require("ws");
-} catch (_) {
-  WebSocket = null;
-}
+const crypto = require("crypto");
 
 let puppeteer = null;
 try {
@@ -44,6 +39,255 @@ function logDebug(...args) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// =========================
+// DELTA: Fila em disco (JSONL) + loop HTTP stateless (sem WebSocket)
+// =========================
+
+const DELTA_QUEUE_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.jsonl");
+const DELTA_CURSOR_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.cursor.json");
+const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.compact.lock");
+
+function safeJsonParse(str) {
+  try {
+    return JSON.parse(String(str || ""));
+  } catch {
+    return null;
+  }
+}
+
+function readCursorOffsetSync() {
+  try {
+    if (!fsSync.existsSync(DELTA_CURSOR_PATH)) return 0;
+    const raw = String(fsSync.readFileSync(DELTA_CURSOR_PATH, "utf8") || "").trim();
+    const parsed = safeJsonParse(raw) || {};
+    const off = Number(parsed.byteOffset || 0) || 0;
+    return off >= 0 ? off : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeCursorOffsetSync(byteOffset) {
+  const off = Math.max(0, Number(byteOffset || 0) || 0);
+  const tmp = `${DELTA_CURSOR_PATH}.tmp`;
+  try {
+    fsSync.mkdirSync(path.dirname(DELTA_CURSOR_PATH), { recursive: true });
+  } catch (_) {}
+  fsSync.writeFileSync(tmp, JSON.stringify({ byteOffset: off, updatedAt: Date.now() }) + "\n", "utf8");
+  fsSync.renameSync(tmp, DELTA_CURSOR_PATH);
+}
+
+function computeIdempotencyKey(payload) {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const base = [
+    String(p.server_id || ""),
+    String(p.account_login || ""),
+    String(p.thread_key || ""),
+    String(p.texto_limpo || ""),
+    String(p.operacao_meta || p.operation || ""),
+  ].join("|");
+  return crypto.createHash("sha1").update(base).digest("hex");
+}
+
+function appendPendingJsonlSync(payload) {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const line = JSON.stringify({
+    ts: Date.now(),
+    event: "lead_capturado",
+    idempotency_key: computeIdempotencyKey(p),
+    ...p,
+  });
+  try {
+    fsSync.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true });
+  } catch (_) {}
+  fsSync.appendFileSync(DELTA_QUEUE_PATH, line + "\n", "utf8");
+  // RAM free: desreferenciar e (se possível) sugerir GC.
+  try {
+    // eslint-disable-next-line no-global-assign
+    payload = null;
+  } catch (_) {}
+  try {
+    if (typeof global.gc === "function") global.gc();
+  } catch (_) {}
+}
+
+function readNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkBytes = 64 * 1024, maxLineBytes = 2 * 1024 * 1024 } = {}) {
+  const off = Math.max(0, Number(offsetBytes || 0) || 0);
+  if (!fsSync.existsSync(filePath)) return { ok: true, eof: true, offset: off };
+  const stat = fsSync.statSync(filePath);
+  const size = Number(stat.size || 0) || 0;
+  if (off >= size) return { ok: true, eof: true, offset: off };
+
+  const fd = fsSync.openSync(filePath, "r");
+  try {
+    let cursor = off;
+    let acc = Buffer.alloc(0);
+    let foundNl = -1;
+    while (cursor < size) {
+      const remain = size - cursor;
+      const toRead = Math.max(1, Math.min(remain, chunkBytes));
+      const buf = Buffer.allocUnsafe(toRead);
+      const n = fsSync.readSync(fd, buf, 0, toRead, cursor);
+      if (!n) break;
+      const slice = buf.subarray(0, n);
+      acc = Buffer.concat([acc, slice], acc.length + slice.length);
+      if (acc.length > maxLineBytes) return { ok: false, error: "line_too_large", offset: off };
+      foundNl = acc.indexOf(0x0a); // \n
+      if (foundNl >= 0) break;
+      cursor += n;
+    }
+
+    if (foundNl < 0) {
+      // última linha sem newline
+      const line = acc.toString("utf8").replace(/\r$/, "");
+      return { ok: true, eof: false, line, nextOffset: size, offset: off, newline: false };
+    }
+
+    const lineBuf = acc.subarray(0, foundNl);
+    const line = lineBuf.toString("utf8").replace(/\r$/, "");
+    const nextOffset = off + foundNl + 1;
+    return { ok: true, eof: false, line, nextOffset, offset: off, newline: true };
+  } finally {
+    try { fsSync.closeSync(fd); } catch (_) {}
+  }
+}
+
+function tryAcquireCompactLock() {
+  try {
+    const fd = fsSync.openSync(DELTA_COMPACT_LOCK_PATH, "wx");
+    try { fsSync.writeFileSync(fd, String(Date.now()), "utf8"); } catch (_) {}
+    try { fsSync.closeSync(fd); } catch (_) {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseCompactLock() {
+  try { fsSync.unlinkSync(DELTA_COMPACT_LOCK_PATH); } catch (_) {}
+}
+
+function compactQueueFileIfNeededSync(currentOffsetBytes) {
+  const off = Math.max(0, Number(currentOffsetBytes || 0) || 0);
+  const COMPACT_THRESHOLD = 10 * 1024 * 1024; // 10MB
+  if (off < COMPACT_THRESHOLD) return { ok: true, skipped: true, reason: "offset_below_threshold" };
+  if (!fsSync.existsSync(DELTA_QUEUE_PATH)) return { ok: true, skipped: true, reason: "queue_missing" };
+  if (!tryAcquireCompactLock()) return { ok: true, skipped: true, reason: "lock_busy" };
+
+  try {
+    const stat = fsSync.statSync(DELTA_QUEUE_PATH);
+    const size = Number(stat.size || 0) || 0;
+    if (off >= size) {
+      // tudo consumido: zera com truncamento simples
+      fsSync.writeFileSync(DELTA_QUEUE_PATH, "", "utf8");
+      writeCursorOffsetSync(0);
+      return { ok: true, compacted: true, truncated: true };
+    }
+
+    const tmp = `${DELTA_QUEUE_PATH}.tmp`;
+    const fd = fsSync.openSync(DELTA_QUEUE_PATH, "r");
+    const outFd = fsSync.openSync(tmp, "w");
+    try {
+      const CHUNK = 256 * 1024;
+      let pos = off;
+      while (pos < size) {
+        const remain = size - pos;
+        const toRead = Math.max(1, Math.min(remain, CHUNK));
+        const buf = Buffer.allocUnsafe(toRead);
+        const n = fsSync.readSync(fd, buf, 0, toRead, pos);
+        if (!n) break;
+        fsSync.writeSync(outFd, buf, 0, n);
+        pos += n;
+      }
+    } finally {
+      try { fsSync.closeSync(outFd); } catch (_) {}
+      try { fsSync.closeSync(fd); } catch (_) {}
+    }
+
+    fsSync.renameSync(tmp, DELTA_QUEUE_PATH);
+    writeCursorOffsetSync(0);
+    return { ok: true, compacted: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  } finally {
+    releaseCompactLock();
+  }
+}
+
+let __deltaIngestLoopRunning = false;
+let __deltaIngestBackoffMs = 900;
+let __deltaIngestKickRequested = false;
+
+async function deltaIngestTick({ ctIngestUrl, deltaSecret } = {}) {
+  if (__deltaIngestLoopRunning) return;
+  __deltaIngestLoopRunning = true;
+  try {
+    const ingestUrl = String(ctIngestUrl || process.env.VIRTUS_DELTA_CT_INGEST_URL || "https://convenientetecnologia.com/api/messenger-delta/ingest").trim();
+    const secret = String(deltaSecret || process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || "").trim();
+    if (!ingestUrl) return;
+
+    let offset = readCursorOffsetSync();
+    const lineRes = readNextJsonlLineByOffsetSync(DELTA_QUEUE_PATH, offset);
+    if (!lineRes.ok) {
+      __deltaIngestBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(__deltaIngestBackoffMs * 1.6)));
+      return;
+    }
+    if (lineRes.eof) {
+      __deltaIngestBackoffMs = 1200;
+      return;
+    }
+    const line = String(lineRes.line || "").trim();
+    const nextOffset = Number(lineRes.nextOffset || offset) || offset;
+    if (!line) {
+      writeCursorOffsetSync(nextOffset);
+      __deltaIngestBackoffMs = 900;
+      return;
+    }
+    const payload = safeJsonParse(line);
+    if (!payload) {
+      // linha corrompida: pula para não travar
+      writeCursorOffsetSync(nextOffset);
+      __deltaIngestBackoffMs = 1500;
+      return;
+    }
+
+    const headers = { "content-type": "application/json" };
+    if (secret) headers["x-delta-secret"] = secret;
+    if (payload.idempotency_key) headers["x-idempotency-key"] = String(payload.idempotency_key);
+
+    const res = await postWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
+    if (res && res.status === 200) {
+      writeCursorOffsetSync(nextOffset);
+      try { compactQueueFileIfNeededSync(nextOffset); } catch (_) {}
+      __deltaIngestBackoffMs = 650;
+      return;
+    }
+
+    __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
+  } finally {
+    __deltaIngestLoopRunning = false;
+  }
+}
+
+function startDeltaIngestLoopOnce({ ctIngestUrl, deltaSecret } = {}) {
+  if (startDeltaIngestLoopOnce._started) return;
+  startDeltaIngestLoopOnce._started = true;
+
+  const loop = async () => {
+    __deltaIngestKickRequested = false;
+    try { await deltaIngestTick({ ctIngestUrl, deltaSecret }); } catch (_) {}
+    const jitter = Math.floor(Math.random() * 220);
+    const waitMs = __deltaIngestKickRequested ? 100 : (__deltaIngestBackoffMs + jitter);
+    setTimeout(loop, waitMs).unref?.();
+  };
+
+  setTimeout(loop, 300).unref?.();
+}
+
+function kickDeltaIngestLoop() {
+  __deltaIngestKickRequested = true;
 }
 
 function randomBetween(min, max) {
@@ -277,127 +521,6 @@ async function extractCityFromMarketplaceDom(page) {
   } catch {
     return null;
   }
-}
-
-function buildCtWsUrlCandidates() {
-  const envUrl = String(process.env.VIRTUS_DELTA_CT_WS_URL || "").trim();
-  if (envUrl) return [envUrl];
-  // Default conservador: seguir diretriz macro (domínio público). Mantém fallback para api.*.
-  return ["wss://convenientetecnologia.com/ws", "wss://api.convenientetecnologia.com/ws"];
-}
-
-function createCtWsTransport({ serverId, getAccountLogin, onMessage }) {
-  const reconnectIntervalMs = Math.max(500, Number(process.env.VIRTUS_DELTA_WS_RECONNECT_INTERVAL_MS || 3000) || 3000);
-  const sendQueueMax = Math.max(20, Math.min(2000, Number(process.env.VIRTUS_DELTA_WS_SEND_QUEUE_MAX || 300) || 300));
-  const urls = buildCtWsUrlCandidates();
-
-  let urlIdx = 0;
-  let ws = null;
-  let closedByUser = false;
-  let isOpen = false;
-  const sendQueue = [];
-  const messageHandler = typeof onMessage === "function" ? onMessage : null;
-
-  const safeSend = (obj) => {
-    try {
-      const msg = JSON.stringify(obj);
-      if (WebSocket && isOpen && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(msg);
-        return { ok: true, sent: true };
-      }
-      sendQueue.push(msg);
-      while (sendQueue.length > sendQueueMax) sendQueue.shift();
-      return { ok: true, sent: false, queued: true };
-    } catch (e) {
-      return { ok: false, error: e && e.message ? e.message : String(e) };
-    }
-  };
-
-  const flushQueue = () => {
-    if (!isOpen || !ws || ws.readyState !== WebSocket.OPEN) return;
-    while (sendQueue.length) {
-      const msg = sendQueue.shift();
-      try {
-        ws.send(msg);
-      } catch (_) {
-        // se falhou no meio, re-enfileira e sai
-        if (msg) sendQueue.unshift(msg);
-        break;
-      }
-    }
-  };
-
-  const sendAuth = () => {
-    const accountLogin = (typeof getAccountLogin === "function" ? getAccountLogin() : null) || null;
-    safeSend({ event: "auth", server_id: String(serverId || "").trim() || null, account_login: accountLogin });
-  };
-
-  const connect = () => {
-    if (closedByUser) return;
-    if (!WebSocket) {
-      logInfo("[virtusDelta][ws] ws_dependency_missing: instale 'ws' para habilitar CT reverse channel");
-      return;
-    }
-    const targetUrl = urls[Math.max(0, Math.min(urlIdx, urls.length - 1))] || urls[0];
-    urlIdx = (urlIdx + 1) % Math.max(1, urls.length);
-
-    try {
-      isOpen = false;
-      ws = new WebSocket(targetUrl, {
-        handshakeTimeout: Math.max(1000, Number(process.env.VIRTUS_DELTA_WS_HANDSHAKE_TIMEOUT_MS || 8000) || 8000),
-      });
-    } catch (e) {
-      logInfo(`[virtusDelta][ws] connect_fail url=${targetUrl} err=${e && e.message ? e.message : String(e)}`);
-      setTimeout(connect, reconnectIntervalMs).unref?.();
-      return;
-    }
-
-    ws.on("open", () => {
-      isOpen = true;
-      logInfo(`[virtusDelta][ws] connected url=${targetUrl}`);
-      try {
-        sendAuth();
-        flushQueue();
-      } catch (_) {}
-    });
-
-    if (messageHandler) {
-      try {
-        ws.on("message", (data) => messageHandler(data));
-      } catch (_) {}
-    }
-
-    ws.on("close", (code, reason) => {
-      isOpen = false;
-      if (closedByUser) return;
-      logInfo(`[virtusDelta][ws] closed code=${code} reason=${String(reason || "").slice(0, 180)}`);
-      setTimeout(connect, reconnectIntervalMs).unref?.();
-    });
-
-    ws.on("error", (err) => {
-      // não crashar: erro costuma preceder close
-      logInfo(`[virtusDelta][ws] error=${err && err.message ? err.message : String(err)}`);
-    });
-  };
-
-  const close = () => {
-    closedByUser = true;
-    isOpen = false;
-    try {
-      if (ws) ws.close();
-    } catch (_) {}
-  };
-
-  connect();
-
-  return {
-    sendJson: safeSend,
-    sendAuth,
-    flushQueue,
-    close,
-    getState: () => ({ ok: true, open: isOpen, queued: sendQueue.length, reconnectIntervalMs, candidates: urls }),
-    _getWsUnsafe: () => ws,
-  };
 }
 
 async function captureDomForense(page) {
@@ -1112,8 +1235,8 @@ async function loadCookies(filePath) {
 async function startVirtusDeltaStandaloneRuntime({
   accountLogin,
   serverId,
-  webhookUrl,
-  webhookSecret,
+  ctIngestUrl,
+  deltaSecret,
   expressPort,
   chromeExecutable,
   userDataDir,
@@ -1123,8 +1246,8 @@ async function startVirtusDeltaStandaloneRuntime({
   const diskServerId = readHostIdSync();
   const SERVER_ID = diskServerId || serverId || resolveServerId();
   const ACCOUNT_LOGIN = accountLogin || resolveAccountLogin();
-  const WEBHOOK_URL = String(webhookUrl || process.env.VIRTUS_DELTA_WEBHOOK_URL || "").trim();
-  const WEBHOOK_SECRET = String(webhookSecret || process.env.VIRTUS_DELTA_WEBHOOK_SECRET || "").trim();
+  const CT_INGEST_URL = String(ctIngestUrl || process.env.VIRTUS_DELTA_CT_INGEST_URL || "").trim();
+  const DELTA_SECRET = String(deltaSecret || process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || "").trim();
   const PORT = Number(expressPort || process.env.VIRTUS_DELTA_PORT || 4000);
   const DUMP_DOM = process.env.VIRTUS_DELTA_DUMP_DOM === "1";
 
@@ -1149,7 +1272,7 @@ async function startVirtusDeltaStandaloneRuntime({
   logInfo(`[virtusDelta][boot] cookies_file=${cookieFp}`);
   if (DUMP_DOM) logInfo(`[virtusDelta][boot] dom_dump=enabled`);
   logHumanTimingsBoot();
-  let ctWs = null;
+  startDeltaIngestLoopOnce({ ctIngestUrl: CT_INGEST_URL, deltaSecret: DELTA_SECRET });
 
   await killGhostVirtusDeltaProcesses({ port: PORT, profileDir });
   const ghost = await killGhostChromeForProfile(profileDir);
@@ -1227,48 +1350,8 @@ async function startVirtusDeltaStandaloneRuntime({
     cityTimer = setInterval(() => updateCityCache().catch(() => {}), Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_CACHE_MS || 30_000) || 30_000));
     cityTimer.unref?.();
   } catch {}
-  const sendWebhookSafe = (payload) => {
-    if (!WEBHOOK_URL) return;
-    const headers = {};
-    if (WEBHOOK_SECRET) headers["x-virtus-secret"] = WEBHOOK_SECRET;
-    postWebhookJson(WEBHOOK_URL, payload, { headers }).catch(() => {});
-  };
 
   const enqueue = createSerialQueue();
-
-  ctWs = createCtWsTransport({
-    serverId: SERVER_ID,
-    getAccountLogin: () => ACCOUNT_LOGIN,
-    onMessage: (data) => {
-      try {
-        const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
-        const msg = JSON.parse(raw);
-        const comando = String(msg?.comando || msg?.event || "").trim();
-        if (comando !== "enviar-mensagem-delta") return;
-        const threadKey = String(msg?.thread_key || "").trim();
-        const textoResposta = String(msg?.texto_resposta || msg?.texto || msg?.texto_limpo || "").replace(/\r/g, "");
-        if (!threadKey || !textoResposta) return;
-
-        enqueue(async () => {
-          try {
-            await sendReplyFlow({
-              page,
-              threadKey,
-              textoResposta,
-              fromNetworkLead: false,
-            });
-            logInfo(`[virtusDelta][ws_cmd] done comando=enviar-mensagem-delta thread_key=${threadKey} ok=sim`);
-          } catch (e) {
-            logInfo(
-              `[virtusDelta][ws_cmd] crash comando=enviar-mensagem-delta thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
-            );
-          }
-        });
-      } catch (_) {
-        // nunca crashar por msg inválida
-      }
-    },
-  });
 
   cdpSession.on("Network.webSocketFrameReceived", (event) => {
     try {
@@ -1305,14 +1388,12 @@ async function startVirtusDeltaStandaloneRuntime({
           thread_key: threadKey,
           texto_limpo: texto,
           cidade: cityCache && cityCache.value ? cityCache.value : null,
+          operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
         };
-        // Barramento do "Vai": envia para CT pelo canal WS (sem persistir JSONL local)
+        // Barramento do "Vai" (novo): persiste em disco e deixa o loop HTTP entregar com ACK 200.
         try {
-          if (ctWs && typeof ctWs.sendJson === "function") ctWs.sendJson({ event: "lead_capturado", ...payload });
-        } catch (_) {}
-        // Fallback opcional (legado): webhook HTTP, se configurado
-        try {
-          if (WEBHOOK_URL) sendWebhookSafe(payload);
+          appendPendingJsonlSync(payload);
+          kickDeltaIngestLoop();
         } catch (_) {}
 
         logInfo(
@@ -1353,6 +1434,42 @@ async function startVirtusDeltaStandaloneRuntime({
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
+  const INFRA_SECRET = String(process.env.VIRTUS_DELTA_INFRA_SECRET || process.env.INFRA_SECRET || "").trim();
+  const infraAuthOk = (req) => {
+    if (!INFRA_SECRET) return false;
+    const got = String(req.headers["x-infra-secret"] || "").trim();
+    return got && got === INFRA_SECRET;
+  };
+
+  // Novo contrato (push HTTP direto): CT -> VM
+  // Payload: { thread_key, texto_resposta }
+  app.post("/api/infra/command", (req, res) => {
+    try {
+      if (!INFRA_SECRET) return res.status(500).json({ ok: false, error: "infra_secret_not_configured" });
+      if (!infraAuthOk(req)) return res.status(403).json({ ok: false, error: "forbidden" });
+
+      const thread_key = String(req.body?.thread_key || "").trim();
+      const texto_resposta = String(req.body?.texto_resposta || "").replace(/\r/g, "");
+      if (!thread_key || !texto_resposta) {
+        return res.status(400).json({ ok: false, error: "missing_thread_key_or_texto_resposta" });
+      }
+
+      enqueue(async () => {
+        try {
+          const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta, fromNetworkLead: false });
+          logInfo(`[virtusDelta][infra_cmd] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
+        } catch (e) {
+          logInfo(`[virtusDelta][infra_cmd] crash thread_key=${String(thread_key)} err=${e && e.message ? e.message : String(e)}`);
+        }
+      });
+
+      return res.json({ ok: true, queued: true });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
+    }
+  });
+
+  // Compat legado local (sem segredo): útil em debug/ops local.
   app.post("/api/enviar-resposta", (req, res) => {
     try {
       const thread_key = String(req.body?.thread_key || "").trim();
@@ -1389,15 +1506,11 @@ async function startVirtusDeltaStandaloneRuntime({
     server_id: SERVER_ID,
     account_login: ACCOUNT_LOGIN,
     express_port: PORT,
-    ws: ctWs ? ctWs.getState() : { ok: false, error: "ws_disabled" },
     browser,
     page,
     shutdown: async () => {
       try {
         await new Promise((r) => server.close(() => r()));
-      } catch (_) {}
-      try {
-        if (ctWs && typeof ctWs.close === "function") ctWs.close();
       } catch (_) {}
       try {
         if (cityTimer) clearInterval(cityTimer);
@@ -1463,35 +1576,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       error: e && e.message ? e.message : String(e),
     };
   }
-
-  const ctWs = createCtWsTransport({
-    serverId: SERVER_ID,
-    getAccountLogin: () => ACCOUNT_LOGIN,
-    onMessage: (data) => {
-      try {
-        if (!running || !epochOk()) return;
-        const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
-        const msg = JSON.parse(raw);
-        const comando = String(msg?.comando || msg?.event || "").trim();
-        if (comando !== "enviar-mensagem-delta") return;
-        const threadKey = String(msg?.thread_key || "").trim();
-        const textoResposta = String(msg?.texto_resposta || msg?.texto || msg?.texto_limpo || "").replace(/\r/g, "");
-        if (!threadKey || !textoResposta) return;
-
-        enqueue(async () => {
-          try {
-            if (!running || !epochOk()) return;
-            await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: false });
-            logInfo(`[virtusDelta][ws_cmd] done comando=enviar-mensagem-delta thread_key=${threadKey} ok=sim (worker_engine)`);
-          } catch (e) {
-            logInfo(
-              `[virtusDelta][ws_cmd] crash comando=enviar-mensagem-delta thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
-            );
-          }
-        });
-      } catch (_) {}
-    },
-  });
+  // Ingest loop (HTTP): roda em background e consome a fila JSONL.
+  startDeltaIngestLoopOnce({});
 
   const seenKeys = new Set();
   let cityCache = { at: 0, value: null };
@@ -1545,10 +1631,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           thread_key: threadKey,
           texto_limpo: texto,
           cidade: cityCache && cityCache.value ? cityCache.value : null,
+          operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
         };
-
         try {
-          ctWs.sendJson({ event: "lead_capturado", ...payload });
+          appendPendingJsonlSync(payload);
+          kickDeltaIngestLoop();
         } catch (_) {}
 
         // Primeiro atendimento automático (opcional, produção OFF por default).
@@ -1584,7 +1671,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     server_id: SERVER_ID,
     account_login: ACCOUNT_LOGIN,
     page,
-    ws: ctWs ? ctWs.getState() : { ok: false, error: "ws_disabled" },
     stop: async () => {
       running = false;
       try {
@@ -1597,9 +1683,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (_) {}
       try {
         if (cdpSession && typeof cdpSession.detach === "function") await cdpSession.detach();
-      } catch (_) {}
-      try {
-        if (ctWs && typeof ctWs.close === "function") ctWs.close();
       } catch (_) {}
     },
   };

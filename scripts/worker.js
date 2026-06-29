@@ -59,7 +59,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     governorMode: (autoMode && autoMode.mode) || 'full'
   };
   if (eng === 'delta' && deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') {
-    try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (WebSocket Ativo).', { nome }); } catch {}
+    try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (HTTP stateless + fila JSONL em disco).', { nome }); } catch {}
     return deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
   }
   try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR LEGADO (Texto Fixo).', { nome }); } catch {}
