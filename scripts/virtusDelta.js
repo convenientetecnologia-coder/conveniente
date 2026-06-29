@@ -151,6 +151,55 @@ function shouldEmitLeadText(textoLimpo) {
   return true;
 }
 
+async function extractCityFromMarketplaceDom(page) {
+  try {
+    if (!page) return null;
+    const res = await page.evaluate(() => {
+      const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const norm = (s) =>
+        clean(s)
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+
+      const nodes = Array.from(document.querySelectorAll("span,div,a")).slice(0, 4500);
+      for (const el of nodes) {
+        const t = clean(el.textContent || "");
+        if (!t) continue;
+        const nt = norm(t);
+        const has = nt.includes("anunciado em") || nt.includes("listed in");
+        if (!has) continue;
+
+        // Caso 1: o próprio texto já contém "Anunciado em X"
+        const m = t.match(/anunciado em\s*(.+)$/i) || t.match(/listed in\s*(.+)$/i);
+        if (m && m[1]) {
+          const v = clean(m[1]).replace(/^[:\-]\s*/, "");
+          if (v) return { ok: true, value: v, source: "inline_text" };
+        }
+
+        // Caso 2: existe um <a> dentro ou próximo do label
+        const cand =
+          (el.querySelector && el.querySelector("a")) ||
+          (el.parentElement && el.parentElement.querySelector && el.parentElement.querySelector("a")) ||
+          (el.nextElementSibling && (el.nextElementSibling.closest ? el.nextElementSibling.closest("a") : null)) ||
+          null;
+
+        if (cand) {
+          const v = clean(cand.textContent || "");
+          if (v) return { ok: true, value: v, source: "near_anchor" };
+        }
+      }
+      return { ok: false, value: null };
+    });
+    const v = res && res.ok ? String(res.value || "").trim() : "";
+    if (!v) return null;
+    // Hardening: limite e higienização
+    return v.replace(/\s+/g, " ").trim().slice(0, 80);
+  } catch {
+    return null;
+  }
+}
+
 function buildCtWsUrlCandidates() {
   const envUrl = String(process.env.VIRTUS_DELTA_CT_WS_URL || "").trim();
   if (envUrl) return [envUrl];
@@ -1085,6 +1134,19 @@ async function startVirtusDeltaStandaloneRuntime({
     5_000,
     Number(process.env.VIRTUS_DELTA_AUTO_REPLY_MIN_INTERVAL_MS || 60_000) || 60_000
   );
+  let cityCache = { at: 0, value: null };
+  let cityTimer = null;
+  const updateCityCache = async () => {
+    try {
+      const v = await extractCityFromMarketplaceDom(page);
+      if (v) cityCache = { at: Date.now(), value: v };
+    } catch {}
+  };
+  try {
+    await updateCityCache();
+    cityTimer = setInterval(() => updateCityCache().catch(() => {}), Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_CACHE_MS || 30_000) || 30_000));
+    cityTimer.unref?.();
+  } catch {}
   const sendWebhookSafe = (payload) => {
     if (!WEBHOOK_URL) return;
     const headers = {};
@@ -1162,6 +1224,7 @@ async function startVirtusDeltaStandaloneRuntime({
           account_login: ACCOUNT_LOGIN,
           thread_key: threadKey,
           texto_limpo: texto,
+          cidade: cityCache && cityCache.value ? cityCache.value : null,
         };
         // Barramento do "Vai": envia para CT pelo canal WS (sem persistir JSONL local)
         try {
@@ -1256,6 +1319,9 @@ async function startVirtusDeltaStandaloneRuntime({
         if (ctWs && typeof ctWs.close === "function") ctWs.close();
       } catch (_) {}
       try {
+        if (cityTimer) clearInterval(cityTimer);
+      } catch (_) {}
+      try {
         await browser.close();
       } catch (_) {}
     },
@@ -1341,6 +1407,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   });
 
   const seenKeys = new Set();
+  let cityCache = { at: 0, value: null };
+  let cityTimer = null;
+  const updateCityCache = async () => {
+    try {
+      if (!running || !epochOk()) return;
+      const v = await extractCityFromMarketplaceDom(page);
+      if (v) cityCache = { at: Date.now(), value: v };
+    } catch {}
+  };
+  try {
+    await updateCityCache();
+    cityTimer = setInterval(() => updateCityCache().catch(() => {}), Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_CACHE_MS || 30_000) || 30_000));
+    cityTimer.unref?.();
+  } catch {}
 
   const onFrame = (event) => {
     try {
@@ -1377,6 +1457,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           account_login: ACCOUNT_LOGIN,
           thread_key: threadKey,
           texto_limpo: texto,
+          cidade: cityCache && cityCache.value ? cityCache.value : null,
         };
 
         try {
@@ -1401,6 +1482,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     ws: ctWs ? ctWs.getState() : { ok: false, error: "ws_disabled" },
     stop: async () => {
       running = false;
+      try {
+        if (cityTimer) clearInterval(cityTimer);
+      } catch (_) {}
       try {
         if (cdpSession && typeof cdpSession.removeListener === "function") {
           cdpSession.removeListener("Network.webSocketFrameReceived", onFrame);
@@ -1434,6 +1518,7 @@ module.exports = {
   startVirtusDeltaWorkerRuntime,
   killGhostChromeForProfile,
   killGhostVirtusDeltaProcesses,
+  extractCityFromMarketplaceDom,
   prepareDomForNetworkLead,
   forceSidebarRefreshByMessagesRoot,
   ensureMarketplaceFilterActive,

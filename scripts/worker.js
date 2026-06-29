@@ -29,6 +29,17 @@ const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 
+async function _stopVirtusRunnerMaybePromise(v) {
+  try {
+    const runner = (v && typeof v.then === 'function') ? await v.catch(() => null) : v;
+    if (runner && typeof runner.stop === 'function') {
+      await runner.stop().catch(() => {});
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 function currentVirtusEngine(autoMode) {
   // 🛡️ Default seguro: se engine ausente/nula/indefinida => legacy
   try {
@@ -7459,9 +7470,9 @@ async function robeTickGlobal() {
         }
         mainPage = ctrl.mainPage;
 
-        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-          virtusWasRunning = true;
-          try { await ctrl.virtus.stop(); } catch {}
+        if (ctrl && ctrl.virtus) {
+          const stopped = await _stopVirtusRunnerMaybePromise(ctrl.virtus);
+          if (stopped) virtusWasRunning = true;
           ctrl.virtus = null;
         }
 
@@ -7762,8 +7773,8 @@ try {
   });
 } catch {}
 try {
-  if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-    await ctrl.virtus.stop().catch(()=>{});
+  if (ctrl && ctrl.virtus) {
+    await _stopVirtusRunnerMaybePromise(ctrl.virtus);
   }
 } catch {}
 
@@ -8350,9 +8361,7 @@ const handlers = {
   }
   // antes de mexer em browser:
   try {
-    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-      await ctrl.virtus.stop();
-    }
+    if (ctrl.virtus) await _stopVirtusRunnerMaybePromise(ctrl.virtus);
   } catch {}
   ctrl.virtus = null;
   ctrl.trabalhando = false;
@@ -10480,9 +10489,9 @@ const handlers = {
             }
             mainPage = ctrl.mainPage;
 
-            if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-              virtusWasRunning = true;
-              try { await ctrl.virtus.stop(); } catch {}
+            if (ctrl && ctrl.virtus) {
+              const stopped = await _stopVirtusRunnerMaybePromise(ctrl.virtus);
+              if (stopped) virtusWasRunning = true;
               ctrl.virtus = null;
             }
 
@@ -14526,9 +14535,7 @@ async function gracefulShutdown(reason) {
     try { robeQueue.clear(); } catch {}
     for (const [nome, ctrl] of controllers) {
       try {
-        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-          await ctrl.virtus.stop().catch(()=>{});
-        }
+        if (ctrl && ctrl.virtus) await _stopVirtusRunnerMaybePromise(ctrl.virtus);
       } catch {}
     }
     for (const [nome, ctrl] of controllers) {
