@@ -4127,7 +4127,9 @@ async function execProvisionUnlock(cmd) {
 // ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
   const incoming = Array.isArray(cmds) ? cmds.filter(Boolean) : [];
-  if (!incoming.length) return;
+  if (!incoming.length) {
+    return { ok: true, results: [] };
+  }
 
   // Enterprise: em lotes com tempestade de gateway, processar só o último comando
   // de gateway no lote atual (os anteriores ficam superseded) para não atrasar provision.
@@ -4161,113 +4163,89 @@ async function applyCommands(cmds = []) {
   }
   const ordered = [...prioritized, ...regular];
 
-  // ACK imediato dos gateway superseded (evita fila/ACK pendente sem execução útil).
+  const results = [];
   for (const c of superseded) {
     try {
-      await ackCommand(c && c.id, true, null, {
+      results.push({
+        id: c && c.id ? String(c.id) : null,
+        type: c && c.type ? String(c.type) : null,
         ok: true,
         skipped: true,
         reason: 'superseded_by_newer_gateway_command_in_same_batch'
-      }, c && c.type);
+      });
     } catch {}
   }
 
   for (const c of ordered) {
     try {
       if (!c || !c.type) continue;
-      let ackDetails = null;
+      const cmdId = c && c.id ? String(c.id).trim() : '';
+      const cmdType = String(c.type || '').trim();
+      // Compat: Gemini mencionou `data`, legado usa `payload`.
+      if (!c.payload && c.data && typeof c.data === 'object') c.payload = c.data;
+      let details = null;
       if (c.type === 'close_all')             {
         // Ultra enterprise: close_all só pode ser executado quando explicitamente humano (UI / operador).
         // Qualquer close_all “automático” (deploy/script) é bloqueado para evitar side-effects e instabilidade.
         if (!isHumanCloseAll(c)) {
-          try { await ackCommand(c.id, false, 'close_all_blocked_not_human', { blocked: true }, c && c.type); } catch {}
+          results.push({ id: cmdId || null, type: cmdType, ok: false, error: 'close_all_blocked_not_human', details: { blocked: true } });
           continue;
         }
         // Guardrail: nunca executar close_all automaticamente no meio de provisão.
         if (provisionLock.isActive()) {
-          if (isHumanCloseAll(c)) {
-            // Deferir: não ACK agora (mantém pendente no CT); executa automaticamente após provisão.
-            if (!deferredCloseAllCmdId) {
-              deferredCloseAllCmdId = String(c.id || '').trim() || null;
-              deferredCloseAllPayload = (c && c.payload && typeof c.payload === 'object') ? c.payload : null;
-              deferredCloseAllEnqueuedAt = Date.now();
-              logger.warn('[DASH][CMD] close_all deferido (provision_lock ativo)', { cmdId: deferredCloseAllCmdId });
-            } else {
-              // Já existe um deferido; para evitar “fila infinita” de close_all durante provisão.
-              try { await ackCommand(c.id, false, 'close_all_deferred_already_exists', { deferredExistingCmdId: deferredCloseAllCmdId }, c && c.type); } catch {}
-            }
-            continue;
-          }
-          // Não-humano: bloqueia e ACK erro imediato (não pode existir close_all “surpresa”)
-          try { await ackCommand(c.id, false, 'close_all_blocked_due_provision', { blocked: true, reason: 'provision_lock' }, c && c.type); } catch {}
+          results.push({ id: cmdId || null, type: cmdType, ok: false, error: 'close_all_blocked_due_provision', details: { blocked: true, reason: 'provision_lock' } });
           continue;
         }
         await execCloseAll(c);
-        if (deferredCloseAllCmdId && String(c.id || '').trim() === deferredCloseAllCmdId) {
-          deferredCloseAllCmdId = null;
-          deferredCloseAllPayload = null;
-          deferredCloseAllEnqueuedAt = 0;
-        }
+        results.push({ id: cmdId || null, type: cmdType, ok: true });
       }
-      else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
-      else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
-      else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
-      else if (c.type === 'robe_v2_recalc')       { ackDetails = await execRobeV2Recalc(c); }
-      else if (c.type === 'delete_perfis')    { ackDetails = await execDeletePerfis(c); }
-      else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
-      else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
-      else if (c.type === 'login_remediate') { ackDetails = await execLoginRemediate(c); }
-      else if (c.type === 'profiles_cleanup') { ackDetails = await execProfilesCleanup(c); }
-      else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
-      else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
-      else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
-      else if (c.type === 'backup_restore_probe') { ackDetails = await execBackupRestoreProbe(c); }
-      else if (c.type === 'backup_restore_merge') { ackDetails = await execBackupRestoreMerge(c); }
-      else if (c.type === 'backups_manifest')     { ackDetails = await execBackupsManifest(c); }
-      else if (c.type === 'profiles_fs_audit')    { ackDetails = await execProfilesFsAudit(c); }
-      else if (c.type === 'profiles_purge_dirs')  { ackDetails = await execProfilesPurgeDirs(c); }
-      else if (c.type === 'profiles_manifest_probe') { ackDetails = await execProfilesManifestProbe(c); }
-      else if (c.type === 'profiles_relink_orphans') { ackDetails = await execProfilesRelinkOrphans(c); }
-      else if (c.type === 'repair_perfis_json') { ackDetails = await execRepairPerfisJson(c); }
-      else if (c.type === 'profiles_backfill_labels') { ackDetails = await execProfilesBackfillLabels(c); }
-      else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
-      else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
-      else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
-      else if (c.type === 'health_bundle')    { await execHealthBundle(c); }
-      else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
-      else if (c.type === 'set_groq_config')  { ackDetails = await execSetGroqConfig(c); }
-      else if (c.type === 'reseed_host_id')   { ackDetails = await execReseedHostId(c); }
-      else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { ackDetails = await execGatewaySetProxies(c); }
-      else if (c.type === 'force_full_report') {
-        // Força próximo tick a enviar payload completo imediatamente.
-        lastFullReportAt = 0;
-        pending = true;
-        ackDetails = { ok: true, forced: true };
-      }
-      else if (c.type === 'rotate_logs')      { ackDetails = await execRotateLogs(c); }
-      else if (c.type === 'self_update')      { await execSelfUpdate(c); }
+      else if (c.type === 'open_all_24h')     { await execOpenAll24h(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'robe_v2_recalc')       { details = await execRobeV2Recalc(c); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
+      else if (c.type === 'delete_perfis')    { details = await execDeletePerfis(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'migrate_profiles') { details = await execMigrateProfiles(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'stock_provision') { details = await execStockProvision(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'login_remediate') { details = await execLoginRemediate(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'profiles_cleanup') { details = await execProfilesCleanup(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'provision_unlock') { details = await execProvisionUnlock(c); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
+      else if (c.type === 'stock_export_profiles') { details = await execStockExportProfiles(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'stock_push_account_update') { details = await execStockPushAccountUpdate(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'backup_restore_probe') { details = await execBackupRestoreProbe(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'backup_restore_merge') { details = await execBackupRestoreMerge(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'backups_manifest')     { details = await execBackupsManifest(c); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
+      else if (c.type === 'profiles_fs_audit')    { details = await execProfilesFsAudit(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'profiles_purge_dirs')  { details = await execProfilesPurgeDirs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'profiles_manifest_probe') { details = await execProfilesManifestProbe(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'profiles_relink_orphans') { details = await execProfilesRelinkOrphans(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'repair_perfis_json') { details = await execRepairPerfisJson(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'profiles_backfill_labels') { details = await execProfilesBackfillLabels(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'fetch_logs')       { await execFetchLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'logs_manifest')    { await execLogsManifest(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'health_bundle')    { await execHealthBundle(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'set_ct_config')    { details = await execSetCtConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'set_groq_config')  { details = await execSetGroqConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'reseed_host_id')   { details = await execReseedHostId(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { details = await execGatewaySetProxies(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'force_full_report') { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, forced: true } }); }
+      else if (c.type === 'rotate_logs')      { details = await execRotateLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'self_update')      { await execSelfUpdate(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
-      // ACK enterprise: se o handler retornou {ok:false}, refletir falha no CT + carregar detalhes.
-      if (ackDetails && ackDetails.ok === false) {
-        try {
-          const msg =
-            ackDetails.profilesCount !== undefined
-              ? `fail profiles=${ackDetails.profilesCount}`
-              : (ackDetails.okCount !== undefined || ackDetails.failCount !== undefined)
-              ? `fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`
-              : (ackDetails.error ? String(ackDetails.error) : 'fail');
-          await ackCommand(c.id, false, msg, ackDetails, c && c.type);
-        } catch {}
-      } else {
-        try { await ackCommand(c.id, true, null, ackDetails, c && c.type); } catch {}
-      }
     } catch (e) {
       logger.warn('[DASH][CMD] falha ao executar ' + (c && c.type), { error: e && e.message || e });
-      // ACK de erro
-      try { await ackCommand(c && c.id, false, (e && e.message) || String(e), null, c && c.type); } catch {}
+      results.push({
+        id: c && c.id ? String(c.id) : null,
+        type: c && c.type ? String(c.type) : null,
+        ok: false,
+        error: (e && e.message) ? String(e.message) : String(e),
+        details: null
+      });
     }
   }
+  const okAll = results.every((r) => r && r.ok === true);
+  return { ok: okAll, results };
 }
 // ===== ALTERAÇÃO FIM ===============================================
 
@@ -4432,31 +4410,55 @@ async function tick(reason = 'interval') {
   } finally {
     inFlight = false;
     lastTickDoneAt = Date.now();
-    // Se alguém marcou pending durante a execução, roda imediatamente (sem esperar POLL_INTERVAL_MS).
-    if (pending) {
-      pending = false;
-      try { setImmediate(() => { tick('pending').catch(() => {}); }); } catch {}
-      return;
-    }
-    // Loop "após concluir": agenda próximo tick só depois de concluir este.
-    // Isso evita concorrência e garante que não existe "cancelamento" de envio por overlap.
-    if (timer !== null) {
-      try { if (timer) clearTimeout(timer); } catch {}
-      try { timer = setTimeout(() => { tick('interval').catch(() => {}); }, POLL_INTERVAL_MS); } catch {}
-    }
   }
 }
 
 function startDashboardMonitor() {
-  if (timer) return;
-  // Marca como "ativo" antes do primeiro tick, para permitir agendamento no finally.
-  timer = 0;
-  tick('boot').catch(() => {});
-
-  const stop = () => { try { if (timer) clearTimeout(timer); } catch {} timer = null; };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  process.once('exit', stop);
+  // DESATIVADO POR DIRETRIZ (TACADA 1): extinção do polling/loop automático.
+  // Este módulo agora deve ser acionado por gatilho HTTP stateless (command-bus).
+  return;
 }
 
-module.exports = { startDashboardMonitor };
+const COMMAND_HANDLERS = Object.freeze({
+  close_all: execCloseAll,
+  open_all_24h: execOpenAll24h,
+  robes_pause_24h_all: execRobePauseAll,
+  robes_release_all: execRobeReleaseAll,
+  robe_v2_recalc: execRobeV2Recalc,
+  delete_perfis: execDeletePerfis,
+  migrate_profiles: execMigrateProfiles,
+  stock_provision: execStockProvision,
+  login_remediate: execLoginRemediate,
+  profiles_cleanup: execProfilesCleanup,
+  provision_unlock: execProvisionUnlock,
+  stock_export_profiles: execStockExportProfiles,
+  stock_push_account_update: execStockPushAccountUpdate,
+  backup_restore_probe: execBackupRestoreProbe,
+  backup_restore_merge: execBackupRestoreMerge,
+  backups_manifest: execBackupsManifest,
+  profiles_fs_audit: execProfilesFsAudit,
+  profiles_purge_dirs: execProfilesPurgeDirs,
+  profiles_manifest_probe: execProfilesManifestProbe,
+  profiles_relink_orphans: execProfilesRelinkOrphans,
+  repair_perfis_json: execRepairPerfisJson,
+  profiles_backfill_labels: execProfilesBackfillLabels,
+  fetch_logs: execFetchLogs,
+  fetch_logs_query: execFetchLogsQuery,
+  logs_manifest: execLogsManifest,
+  health_bundle: execHealthBundle,
+  set_ct_config: execSetCtConfig,
+  set_groq_config: execSetGroqConfig,
+  reseed_host_id: execReseedHostId,
+  gateway_set_proxies: execGatewaySetProxies,
+  gateway_reconcile: execGatewaySetProxies,
+  rotate_logs: execRotateLogs,
+  self_update: execSelfUpdate
+});
+
+module.exports = {
+  // polling morto (mantido apenas por compat, mas não inicia timers)
+  startDashboardMonitor,
+  // barramento novo: processamento direto
+  applyCommands,
+  COMMAND_HANDLERS
+};

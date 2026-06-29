@@ -6,6 +6,7 @@ const cors = require('cors');
 const open = require('open'); // <-- adicione/mova isso aqui!
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
@@ -76,6 +77,20 @@ async function maybeBootstrapGateBToken() {
       return '';
     }
   };
+  const getOrCreateHostId = () => {
+    try {
+      const existing = readHostId();
+      if (existing) return existing;
+      try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+      const id = (crypto && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : crypto.randomBytes(16).toString('hex');
+      fs.writeFileSync(HOSTID_PATH, String(id) + '\n', 'utf8');
+      return String(id);
+    } catch {
+      try { return crypto.randomBytes(16).toString('hex'); } catch { return String(Date.now()); }
+    }
+  };
 
   const readBundle = () => {
     try {
@@ -135,7 +150,7 @@ async function maybeBootstrapGateBToken() {
 
     const hostId = readHostId();
     const body = {
-      hostId: hostId || null,
+      hostId: (hostId || getOrCreateHostId()) || null,
       hostname: os.hostname(),
       ts: Date.now(),
       want: 'gate_b_token_v1'
@@ -159,7 +174,8 @@ async function maybeBootstrapGateBToken() {
         logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_missing_token');
         return;
       }
-      writeBundleAtomic({ hostFqdn: hostFqdn || null, tunnelToken, updatedAt: Date.now(), source: 'ct_bootstrap' });
+      const infraSecret = String(process.env.VIRTUS_DELTA_INFRA_SECRET || process.env.INFRA_SECRET || '').trim() || null;
+      writeBundleAtomic({ hostFqdn: hostFqdn || null, tunnelToken, infraSecret, updatedAt: Date.now(), source: 'ct_bootstrap' });
       const ok = spawnCloudflaredToken(tunnelToken);
       logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
     } finally {
@@ -179,11 +195,11 @@ const networkRotation = require('./scripts/networkRotation.js');
 const dailyWindowScheduler = require('./scripts/dailyWindowScheduler.js');
 
 // Dashboard monitor
-const { startDashboardMonitor } = require('./scripts/dashboard.js');
+const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
 
 // Inicialização
 const app = express();
-const PORT = parseInt(process.env.PORT || '8088', 10);
+const PORT = 8088;
 
 // Inicia backup automático (rollback rápido do conveniente)
 startAutoBackupConveniente();
@@ -221,7 +237,7 @@ app.use((req, res, next) => {
     // Libera CORS somente para as origens válidas e undefined
     res.header('Access-Control-Allow-Origin', origin || '*');
     res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Infra-Secret');
     if (req.method === 'OPTIONS') {
       // Pré-flight para CORS
       return res.sendStatus(204);
@@ -240,6 +256,61 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 // ===================== Fim Body Parsers =====================
+
+// ===================== Infra Auth (Gate B) =====================
+function __readJsonFileSafe(p) {
+  try {
+    if (!fs.existsSync(p)) return null;
+    const raw = String(fs.readFileSync(p, 'utf8') || '').trim();
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    return (j && typeof j === 'object') ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+function __resolveInfraSecret() {
+  const env = String(process.env.VIRTUS_DELTA_INFRA_SECRET || process.env.INFRA_SECRET || '').trim();
+  if (env) return env;
+  try {
+    const bundlePath = path.join(__dirname, 'dados', 'gate_b_bundle.json');
+    const b = __readJsonFileSafe(bundlePath);
+    const fromBundle =
+      (b && (b.infraSecret || b.infra_secret || b.infraSECRET)) ? String(b.infraSecret || b.infra_secret || b.infraSECRET).trim() : '';
+    if (fromBundle) return fromBundle;
+  } catch {}
+  return '';
+}
+
+function __infraAuth(req, res, next) {
+  const expected = __resolveInfraSecret();
+  if (!expected) return res.status(500).json({ ok: false, error: 'infra_secret_not_configured' });
+  const got = String(req.headers['x-infra-secret'] || '').trim();
+  if (!got || got !== expected) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  return next();
+}
+
+// Protege todos os endpoints de infra (consumidos externamente via Gate B)
+app.use('/api/infra', __infraAuth);
+
+// Barramento Universal de Comandos (Tacada 1): execução síncrona + resposta 200 (sem ACK separado)
+app.post('/api/infra/command-bus', async (req, res) => {
+  try {
+    const payload = (req && req.body && typeof req.body === 'object') ? req.body : {};
+    const commands = Array.isArray(payload.commands) ? payload.commands : null;
+    if (!commands) return res.status(400).json({ ok: false, error: 'missing_commands_array' });
+    const out = await applyInfraCommands(commands);
+    return res.status(200).json({
+      ok: true,
+      executedAt: Date.now(),
+      ...(out && typeof out === 'object' ? out : { ok: true, results: [] })
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
+  }
+});
+// ===================== Fim Infra Auth =====================
 
 // ===================== Middleware de autenticação (REMOVIDO) =====================
 
@@ -354,8 +425,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
     }
 
-    // <<< INICIA O MONITOR DE TELEMETRIA, EXATAMENTE AQUI >>>
-    startDashboardMonitor();
+    // Monitor legacy (polling) foi extinto (Tacada 1). Infra agora é event-driven via /api/infra/command-bus.
     networkRotation.startNetworkRotationScheduler({ port: PORT });
     dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
   });
