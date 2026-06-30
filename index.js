@@ -70,6 +70,7 @@ let __gateBCloudflaredStarted = false;
 let __gateBCloudflaredChild = null;
 let __gateBCloudflaredRestartTimer = null;
 let __gateBCloudflaredLastExit = null;
+let __gateBProvisioningPendingUntil = 0;
 let __gateBEdgeProbeTimer = null;
 let __gateBEdgeProbeState = { consecutiveFailures: 0, lastStatus: null, lastError: null, lastOkAt: null, lastForceRefreshAt: null };
 let __gateBRuntime = {
@@ -82,6 +83,10 @@ let __gateBRuntime = {
 
 function __gateBRuntimePath() {
   return path.join(__dirname, 'dados', 'gate_b_runtime.json');
+}
+
+function __gateBCloudflaredLogPath() {
+  return path.join(__dirname, 'dados', 'gate_b_cloudflared.log');
 }
 
 function __gateBWriteRuntimeAtomic(nextState) {
@@ -188,6 +193,18 @@ async function maybeBootstrapGateBToken() {
     }
   };
 
+  const readCloudflaredTail = (maxLines = 6) => {
+    try {
+      const p = __gateBCloudflaredLogPath();
+      if (!fs.existsSync(p)) return [];
+      const raw = String(fs.readFileSync(p, 'utf8') || '');
+      const lines = raw.split(/\r?\n/).map((s) => String(s || '').trim()).filter(Boolean);
+      return lines.slice(-Math.max(1, Number(maxLines || 6) || 6));
+    } catch {
+      return [];
+    }
+  };
+
   const ensureCloudflaredExe = async () => {
     const preferred = String(process.env.CLOUDFLARED_EXE || '').trim();
     if (preferred) {
@@ -265,15 +282,27 @@ async function maybeBootstrapGateBToken() {
       } catch {}
       const candidate = await ensureCloudflaredExe();
       if (!candidate) return false;
+      let outFd = null;
+      try {
+        const logPath = __gateBCloudflaredLogPath();
+        try { fs.mkdirSync(path.dirname(logPath), { recursive: true }); } catch {}
+        outFd = fs.openSync(logPath, 'a');
+      } catch {}
       __gateBUpdateRuntime({
         cloudflared: {
           ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
           exePath: String(candidate),
-          spawnError: null
+          spawnError: null,
+          logPath: __gateBCloudflaredLogPath()
         }
       });
       const args = ['tunnel', 'run', '--token', String(token)];
-      const child = spawn(candidate, args, { stdio: 'ignore', windowsHide: true, detached: true });
+      const child = spawn(candidate, args, {
+        stdio: ['ignore', outFd != null ? outFd : 'ignore', outFd != null ? outFd : 'ignore'],
+        windowsHide: true,
+        detached: true
+      });
+      try { if (outFd != null) fs.closeSync(outFd); } catch {}
       __gateBCloudflaredChild = child;
       __gateBUpdateRuntime({
         cloudflared: {
@@ -304,7 +333,8 @@ async function maybeBootstrapGateBToken() {
           cloudflared: {
             ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
             started: false,
-            lastExit: __gateBCloudflaredLastExit || null
+            lastExit: __gateBCloudflaredLastExit || null,
+            tail: readCloudflaredTail(8)
           }
         });
         try {
@@ -312,7 +342,11 @@ async function maybeBootstrapGateBToken() {
         } catch {}
         try {
           if (__gateBCloudflaredRestartTimer) return;
-          const waitMs = Math.max(3000, Number(process.env.GATE_B_CLOUDFLARED_RESTART_MS || 5000) || 5000);
+          const baseWaitMs = Math.max(3000, Number(process.env.GATE_B_CLOUDFLARED_RESTART_MS || 5000) || 5000);
+          const inProvisioningWindow = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
+          const waitMs = inProvisioningWindow
+            ? Math.max(baseWaitMs, (Number(__gateBProvisioningPendingUntil || 0) - Date.now()) + 1000)
+            : baseWaitMs;
           __gateBCloudflaredRestartTimer = setTimeout(() => {
             __gateBCloudflaredRestartTimer = null;
             try {
@@ -367,8 +401,11 @@ async function maybeBootstrapGateBToken() {
   };
 
   const tryBootstrapOnce = async (opts = {}) => {
-    const forceRefresh = isTruthy(opts && opts.forceRefresh);
-    const forceReason = String((opts && opts.reason) || '').trim() || null;
+    const requestedForceRefresh = isTruthy(opts && opts.forceRefresh);
+    const requestedForceReason = String((opts && opts.reason) || '').trim() || null;
+    const provisioningPending = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
+    const forceRefresh = requestedForceRefresh || provisioningPending;
+    const forceReason = requestedForceReason || (provisioningPending ? 'ct_provisioning_pending' : null);
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
@@ -526,11 +563,21 @@ async function maybeBootstrapGateBToken() {
               // “primeiro mundo”: CT está provisionando; retenta rápido sem esperar 60s
               const ms = Math.max(3000, Math.floor(retryAfterSec * 1000));
               logger.warn('[GATE_B][RETRY] ct_provisioning', { retryAfterSec, url });
+              __gateBProvisioningPendingUntil = Date.now() + ms + 2000;
+              __gateBUpdateRuntime({
+                bootstrap: {
+                  ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+                  provisioningPendingUntil: __gateBProvisioningPendingUntil
+                }
+              });
+              if (forceRefresh) {
+                stopCloudflaredChild();
+              }
               try {
                 if (__gateBRetryTimer) { clearTimeout(__gateBRetryTimer); __gateBRetryTimer = null; }
                 __gateBRetryTimer = setTimeout(async () => {
                   __gateBRetryTimer = null;
-                  try { await tryBootstrapOnce(); } catch {}
+                  try { await tryBootstrapOnce({ forceRefresh: true, reason: 'ct_provisioning_poll' }); } catch {}
                 }, ms);
                 try { __gateBRetryTimer.unref?.(); } catch {}
               } catch {}
@@ -602,9 +649,11 @@ async function maybeBootstrapGateBToken() {
               lastOkAt: Date.now(),
               lastStatus,
               forceRefresh: !!forceRefresh,
-              forceReason
+              forceReason,
+              provisioningPendingUntil: null
             }
           });
+          __gateBProvisioningPendingUntil = 0;
           const tokenRotated = !!previousToken && previousToken !== tunnelToken;
           if ((__gateBCloudflaredStarted && tokenRotated) || forceRefresh) {
             stopCloudflaredChild();
