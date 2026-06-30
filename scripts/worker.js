@@ -2412,7 +2412,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     const isDelta = (() => { try { return isDeltaMotorEnabledRuntime(); } catch { return false; } })();
     const targetUrl =
       isDelta
-        ? 'https://www.facebook.com/'
+        ? 'https://www.facebook.com/messages'
         : (prefer === 'messenger')
           ? 'https://www.messenger.com/marketplace'
           : (prefer === 'facebook_messages')
@@ -14354,6 +14354,22 @@ async function isPageLikelyAlive(page, nome) {
 async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
+  // Blindagem Delta (P0): o motor Delta não pode sofrer mutações agressivas de UI
+  // (goto messenger.com/marketplace, newPage+close mainPage, reloads) oriundas do healthcheck legado.
+  try {
+    if (isDeltaMotorEnabledRuntime()) {
+      const last = Number(st.deltaHealthBypassLastAt || 0) || 0;
+      if (!last || (now - last) > 30_000) {
+        st.deltaHealthBypassLastAt = now;
+        try {
+          logger.info('[DELTA_HEALTH_BYPASS] recoveryStep desativado para motor delta', { nome, step });
+        } catch {}
+        try { provisionAudit.append({ ts: now, event: 'delta_health_bypass_recoveryStep', nome: String(nome || ''), step: String(step || '') }); } catch {}
+        try { await issues.append(nome, 'mil_action', `delta_health_bypass recoveryStep step=${String(step || '')}`); } catch {}
+      }
+      return false;
+    }
+  } catch {}
   if (st.nextTryAt && st.nextTryAt > now) return false;
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
@@ -14419,6 +14435,24 @@ async function escalateToReopen(nome, reason='health_reopen') {
 
 async function healthTick() {
   if (controllers.size === 0) { return; }
+  // Blindagem Delta (P0): desliga healthTick/recoveryStep no motor Delta.
+  // Em Delta, a “saúde” é gerida pelo runtime delta (CDP listener + fila JSONL),
+  // e o legado aqui pode induzir loops (marketplace abre/fecha).
+  try {
+    if (isDeltaMotorEnabledRuntime()) {
+      const now = Date.now();
+      robeMeta.system = robeMeta.system || {};
+      const last = Number(robeMeta.system.deltaHealthBypassLastAt || 0) || 0;
+      if (!last || (now - last) > 60_000) {
+        robeMeta.system.deltaHealthBypassLastAt = now;
+        try {
+          logger.info('[DELTA_HEALTH_BYPASS] healthTick desativado para o motor Delta.');
+        } catch {}
+        try { provisionAudit.append({ ts: now, event: 'delta_health_bypass_healthTick', controllers: controllers.size }); } catch {}
+      }
+      return;
+    }
+  } catch {}
   for (const [nome, ctrl] of controllers) {
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;

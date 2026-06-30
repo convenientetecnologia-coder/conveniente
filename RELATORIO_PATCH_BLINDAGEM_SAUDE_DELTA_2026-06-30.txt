@@ -1,0 +1,90 @@
+RELATÓRIO — PATCH “BLINDAGEM DE SAÚDE” (DELTA) — 2026-06-30
+Projeto: C:\conveniente
+
+Objetivo
+- Eliminar o último loop mutador de UI no Delta causado por healthcheck legado:
+  - healthTick()
+  - recoveryStep()
+- Remover “double-goto” observado pelo operador (home -> /messages) no bootstrap do perfil em modo Delta.
+- Garantir rastreabilidade com logs detalhados (sem achismo).
+
+
+1) Mudanças aplicadas
+
+1.1) scripts/worker.js — Bypass absoluto do healthcheck no Delta
+- No topo de recoveryStep(nome, page, step):
+  - Se motor Delta:
+    - Loga em stdout:
+      [DELTA_HEALTH_BYPASS] recoveryStep desativado para motor delta { nome, step }
+    - Persiste prova em:
+      - C:\conveniente\dados\provision_audit.jsonl
+        event=delta_health_bypass_recoveryStep
+      - C:\conveniente\dados\perfis\<NOME>\issues.json
+        type=mil_action message="delta_health_bypass recoveryStep step=<step>"
+    - Retorna false e impede:
+      - navHome -> messenger.com/marketplace
+      - newPage -> newPage + goto marketplace + close(mainPage)
+      - reload
+
+- No topo de healthTick():
+  - Se motor Delta:
+    - Loga em stdout (debounce 60s):
+      [DELTA_HEALTH_BYPASS] healthTick desativado para o motor Delta.
+    - Persiste prova em:
+      - C:\conveniente\dados\provision_audit.jsonl
+        event=delta_health_bypass_healthTick
+    - Retorna e não executa nenhum passo legado.
+
+Debounce / Anti-ruído:
+- recoveryStep: no máximo 1 log a cada 30s por perfil.
+- healthTick: no máximo 1 log a cada 60s (global).
+
+
+1.2) scripts/worker.js — Entrada humana (quando delta)
+- ensureHumanNonBlankEntryPage():
+  - Em delta, targetUrl agora força:
+    https://www.facebook.com/messages
+  - Proíbe messenger.com (evita conflito de rota)
+
+
+1.3) scripts/browser.js — Remoção do “double-goto”
+- configureProfile():
+  - Em delta:
+    - p0 (aba 0) entra direto em:
+      https://www.facebook.com/messages
+    - p2 (aba 2) também usa:
+      https://www.facebook.com/messages
+  - Em legacy:
+    - Mantém comportamento anterior:
+      p0 -> https://www.facebook.com/
+      p2 -> https://www.messenger.com/marketplace
+
+
+2) Como provar no RM6 (logs)
+
+2.1) stdout do node (terminal)
+- Procurar:
+  - [DELTA_HEALTH_BYPASS]
+  - [DELTA][NETWORK] / [DELTA][QUEUE] / [DELTA][CITY] / [DELTA][TYPING] / [DELTA][INGEST] / [DELTA][SUCCESS]
+
+2.2) Audit JSONL do cluster
+- Arquivo:
+  C:\conveniente\dados\provision_audit.jsonl
+- Filtrar:
+  Select-String -Path "C:\conveniente\dados\provision_audit.jsonl" -Pattern "delta_health_bypass"
+
+2.3) Issues por perfil
+- Arquivo:
+  C:\conveniente\dados\perfis\<NOME>\issues.json
+- Filtrar:
+  Select-String -Path "C:\conveniente\dados\perfis\<NOME>\issues.json" -Pattern "delta_health_bypass|health_recover|health_escalate"
+
+
+3) Critério de aceite do patch
+- Em motor delta:
+  - Não ocorrer mais “marketplace abre/fecha” por mutação legada
+  - Aparecer logs de bypass (prova)
+  - Bootstrap entrar direto em /messages (sem home -> messages)
+
+Fim.
+

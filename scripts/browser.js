@@ -2914,8 +2914,11 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // Blindagem Delta: em delta, a aba 2 NÃO pode navegar para messenger.com (conflito de rotas).
   // Em vez disso, mantém o alvo em facebook.com (ambiente estável do delta).
   const msgUrl = isDeltaMotorEnabledRuntime()
-    ? 'https://www.facebook.com/'
+    ? 'https://www.facebook.com/messages'
     : 'https://www.messenger.com/marketplace';
+  const fb0Url = isDeltaMotorEnabledRuntime()
+    ? 'https://www.facebook.com/messages'
+    : 'https://www.facebook.com/';
 
   // Aba 0 — Facebook base
   try {
@@ -2925,7 +2928,8 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     throw e;
   }
   await injectCookies(p0, cookies);
-  try { await p0.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+  // Delta: evitar “double-goto” (home -> messages). Entrar direto no /messages.
+  try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
   try {
     const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 3 }).catch(()=>null);
