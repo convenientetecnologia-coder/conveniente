@@ -1,0 +1,66 @@
+RELATÓRIO MASTER — COLETA REMOTA DE LOGS (INFRA) — 2026-06-30
+Projeto: C:\conveniente
+
+Contexto
+- O operador realiza testes no servidor (RM6 ou qualquer outro).
+- O sistema estava ok em laboratório, mas em produção voltou a apresentar “abre/fecha” ao tocar Marketplace no Messages.
+- A partir de agora, a coleta de evidência NÃO depende do humano executar comando.
+- Tudo é puxado via endpoint autenticado (infra).
+
+
+1) Endpoint novo: /api/infra/debug-bundle (AUTENTICADO)
+Arquivo: C:\conveniente\index.js
+
+Rota:
+- POST /api/infra/debug-bundle
+Header obrigatório:
+- x-infra-secret: <INFRA_SECRET>
+
+Body (JSON):
+{
+  "hostId": "<opcional: força bater no host certo>",
+  "nome": "<opcional: nome do perfil>",
+  "tailLines": 220,
+  "issuesItems": 60
+}
+
+Resposta (JSON) inclui:
+- hostId (UUID persistido em dados/.telemetry_hostid)
+- desired (resumo do desired.json + engine)
+- status.json (snapshot bruto + preview sanitizado)
+- provisionAuditTail (tail do dados/provision_audit.jsonl)
+- issuesTail (tail dos últimos N eventos do issues.json do perfil)
+- hints de strings esperadas em stdout (DELTA_BYPASS, DELTA_HEALTH_BYPASS, etc)
+
+Sanitização:
+- Redação best-effort de:
+  - x-infra-secret, infraSecret, logIngestSecret
+  - cookies comuns (c_user=, xs=)
+  - password em JSON
+
+Limites:
+- tailLines: min 50, max 2000
+- issuesItems: min 10, max 400
+- leitura tail em bytes: max 512KB
+
+
+2) Como usar no dia-a-dia (operador “não executa comando”)
+Fluxo:
+- Operador testa no servidor X.
+- Operador informa: “testei no hostId=... nome=...”.
+- O coletor chama:
+  POST /api/infra/debug-bundle
+  com hostId e nome do perfil.
+
+Com isso, a equipe obtém:
+- prova de bypasses (ou ausência deles)
+- quais automações/loops dispararam
+- quais “mil_action” aconteceram
+
+
+3) Arquivos de relatório anteriores (referência)
+- C:\conveniente\RELATORIO_RM6_DELTA_MARKETPLACE_ABRE_FECHA_2026-06-30.txt
+- C:\conveniente\RELATORIO_PATCH_BLINDAGEM_SAUDE_DELTA_2026-06-30.txt
+
+Fim.
+

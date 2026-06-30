@@ -534,6 +534,169 @@ app.post('/api/infra/command-bus', async (req, res) => {
     return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
   }
 });
+
+// ===================== Infra Debug Bundle (forense via endpoint) =====================
+// Objetivo: permitir coleta remota pós-teste SEM operador executar comandos.
+// Protegido por x-infra-secret (app.use('/api/infra', __infraAuth)).
+
+function __asPosInt(v, def, { min = 0, max = 10_000 } = {}) {
+  try {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return def;
+    const i = Math.floor(n);
+    if (i < min) return min;
+    if (i > max) return max;
+    return i;
+  } catch {
+    return def;
+  }
+}
+
+function __redactText(s) {
+  try {
+    let out = String(s == null ? '' : s);
+    // tokens/secrets genéricos
+    out = out.replace(/(x-infra-secret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
+    out = out.replace(/(infraSecret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
+    out = out.replace(/(logIngestSecret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
+    // cookies comuns
+    out = out.replace(/c_user=\d+/gi, 'c_user=[REDACTED]');
+    out = out.replace(/xs=[^;\\s]+/gi, 'xs=[REDACTED]');
+    // senha em JSON (best-effort)
+    out = out.replace(/("password"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2');
+    return out;
+  } catch {
+    return '';
+  }
+}
+
+function __tailTextFileLines(p, { maxLines = 200, maxBytes = 256 * 1024 } = {}) {
+  const lines = [];
+  try {
+    if (!p || !fs.existsSync(p)) return { ok: true, missing: true, path: String(p || ''), lines: [] };
+    const stat = fs.statSync(p);
+    const size = Number(stat.size || 0) || 0;
+    if (size <= 0) return { ok: true, empty: true, path: String(p), lines: [] };
+    const toRead = Math.max(1, Math.min(size, Math.max(8 * 1024, Number(maxBytes || 0) || 0)));
+    const fd = fs.openSync(p, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(toRead);
+      const start = Math.max(0, size - toRead);
+      fs.readSync(fd, buf, 0, toRead, start);
+      const txt = buf.toString('utf8');
+      const parts = txt.split(/\r?\n/).filter(Boolean);
+      const tail = parts.slice(Math.max(0, parts.length - Math.max(1, Number(maxLines || 0) || 1)));
+      for (const l of tail) lines.push(__redactText(l));
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+    return { ok: true, path: String(p), bytesRead: toRead, fileSize: size, lines };
+  } catch (e) {
+    return { ok: false, path: String(p || ''), error: (e && e.message) ? String(e.message) : String(e), lines };
+  }
+}
+
+function __readDesiredSummary() {
+  try {
+    const desiredPath = path.join(__dirname, 'dados', 'desired.json');
+    const d = __readJsonFileSafe(desiredPath) || {};
+    const eng =
+      (d && d._autoMode && d._autoMode.engine) ||
+      (d && d.autoMode && d.autoMode.engine) ||
+      (d && d.engine) || '';
+    return {
+      ok: true,
+      engine: String(eng || '').trim().toLowerCase() || null,
+      openAll: d && d._openAll ? d._openAll : null,
+      autoOpen: d && d._autoOpen ? d._autoOpen : null,
+      perfisCount: d && d.perfis ? Object.keys(d.perfis || {}).length : 0,
+    };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+function __readIssuesTailForProfile(nome, { maxItems = 50 } = {}) {
+  try {
+    const n = String(nome || '').trim();
+    if (!n) return { ok: true, skipped: true, reason: 'missing_nome', items: [] };
+    const p = path.join(__dirname, 'dados', 'perfis', n, 'issues.json');
+    const j = __readJsonFileSafe(p);
+    if (!j) return { ok: true, missing: true, path: p, items: [] };
+    const arr = Array.isArray(j) ? j : (Array.isArray(j.issues) ? j.issues : []);
+    const tail = arr.slice(Math.max(0, arr.length - Math.max(1, Number(maxItems || 0) || 1)));
+    const items = tail.map((it) => {
+      try {
+        const o = (it && typeof it === 'object') ? it : { value: it };
+        const msg = o.message ? __redactText(o.message) : (o.msg ? __redactText(o.msg) : null);
+        return {
+          ts: o.ts || null,
+          type: o.type || null,
+          message: msg,
+        };
+      } catch {
+        return { value: __redactText(String(it || '')) };
+      }
+    });
+    return { ok: true, path: p, total: arr.length, items };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), items: [] };
+  }
+}
+
+app.post('/api/infra/debug-bundle', async (req, res) => {
+  try {
+    const payload = (req && req.body && typeof req.body === 'object') ? req.body : {};
+    const requestedHostId = payload.hostId ? String(payload.hostId || '').trim() : '';
+    const hostId = __readOrCreateServerEventHostId();
+    if (requestedHostId && requestedHostId !== hostId) {
+      return res.status(404).json({ ok: false, error: 'hostid_mismatch', hostId });
+    }
+
+    const nome = payload.nome ? String(payload.nome || '').trim() : '';
+    const lines = __asPosInt(payload.tailLines, 220, { min: 50, max: 2000 });
+    const issuesN = __asPosInt(payload.issuesItems, 60, { min: 10, max: 400 });
+
+    const out = {
+      ok: true,
+      collectedAt: Date.now(),
+      hostId,
+      pid: process.pid,
+      cwd: process.cwd(),
+      node: process.version,
+      nome: nome || null,
+      desired: __readDesiredSummary(),
+      status: __readJsonFileSafe(path.join(__dirname, 'dados', 'status.json')),
+      provisionAuditTail: __tailTextFileLines(path.join(__dirname, 'dados', 'provision_audit.jsonl'), { maxLines: lines, maxBytes: 512 * 1024 }),
+      workerStdHints: {
+        expect: [
+          '[DELTA_BYPASS]',
+          '[DELTA_HEALTH_BYPASS]',
+          '[DELTA][NETWORK]',
+          '[DELTA][QUEUE]',
+          '[DELTA][CITY]',
+          '[DELTA][TYPING]',
+          '[DELTA][INGEST]',
+          '[DELTA][SUCCESS]'
+        ]
+      },
+      issuesTail: __readIssuesTailForProfile(nome, { maxItems: issuesN }),
+    };
+
+    // Sanitize top-level status if present
+    try {
+      if (out.status) {
+        const raw = __redactText(JSON.stringify(out.status));
+        out.statusRedactedPreview = raw.slice(0, 2000);
+      }
+    } catch {}
+
+    return res.status(200).json(out);
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
+  }
+});
+// ===================== Fim Infra Debug Bundle =====================
 // ===================== Fim Infra Auth =====================
 
 // ===================== Server Event Bridge (delta + heartbeat) =====================
