@@ -4868,6 +4868,7 @@ const perfisDir = path.join(__dirname, '../dados', 'perfis');
 
 const desiredPath = path.join(__dirname, '../dados', 'desired.json');
 const statusPath  = path.join(__dirname, '../dados', STATUS_FILE_NAME);
+const virtusEnginePath = path.join(__dirname, '../dados', 'virtus_engine.json');
 
 function readJsonFile(file, fallback) {
 try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -4901,6 +4902,16 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 } catch {}
 }
 
+function readStickyVirtusEngineRuntime() {
+  try {
+    const j = readJsonFile(virtusEnginePath, null);
+    const s = String(j && j.engine || '').trim().toLowerCase();
+    return s === 'delta' ? 'delta' : (s === 'legacy' ? 'legacy' : null);
+  } catch {
+    return null;
+  }
+}
+
 function readDesiredVirtusEngineRuntime() {
   // Contrato rígido: qualquer valor inválido cai em legacy (fail-safe).
   try {
@@ -4910,9 +4921,12 @@ function readDesiredVirtusEngineRuntime() {
       (desired && desired.autoMode && desired.autoMode.engine) ||
       (desired && desired.engine) ||
       '';
-    return String(eng || '').trim().toLowerCase() === 'delta' ? 'delta' : 'legacy';
+    const normalized = String(eng || '').trim().toLowerCase();
+    if (normalized === 'delta') return 'delta';
+    if (normalized === 'legacy') return 'legacy';
+    return readStickyVirtusEngineRuntime() || 'legacy';
   } catch {
-    return 'legacy';
+    return readStickyVirtusEngineRuntime() || 'legacy';
   }
 }
 
