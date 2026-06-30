@@ -246,6 +246,26 @@ async function maybeBootstrapGateBToken() {
             continue;
           }
           const raw = await res.text().catch(() => '');
+          if (lastStatus === 202) {
+            const parsed202 = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
+            const retryAfterSec = Number(parsed202 && parsed202.retryAfterSec || 0) || 0;
+            if (retryAfterSec > 0 && retryAfterSec < 600) {
+              // “primeiro mundo”: CT está provisionando; retenta rápido sem esperar 60s
+              const ms = Math.max(3000, Math.floor(retryAfterSec * 1000));
+              logger.warn('[GATE_B][RETRY] ct_provisioning', { retryAfterSec, url });
+              try {
+                if (__gateBRetryTimer) { clearTimeout(__gateBRetryTimer); __gateBRetryTimer = null; }
+                __gateBRetryTimer = setTimeout(async () => {
+                  __gateBRetryTimer = null;
+                  try { await tryBootstrapOnce(); } catch {}
+                }, ms);
+                try { __gateBRetryTimer.unref?.(); } catch {}
+              } catch {}
+              return false;
+            }
+            lastError = 'ct_provisioning';
+            continue;
+          }
           if (!res.ok) {
             lastError = `status_${lastStatus}`;
             try { if (raw) logger.warn('[GATE_B][RETRY] corpo_resposta', { status: lastStatus, ct: contentType, raw: String(raw).slice(0, 220), url }); } catch {}
