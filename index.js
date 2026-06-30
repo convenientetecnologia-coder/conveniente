@@ -126,13 +126,86 @@ async function maybeBootstrapGateBToken() {
     fs.renameSync(tmp, BUNDLE_PATH);
   };
 
-  const spawnCloudflaredToken = (token) => {
+  const ensureCloudflaredExe = async () => {
+    const preferred = String(process.env.CLOUDFLARED_EXE || '').trim();
+    if (preferred) {
+      try {
+        if (fs.existsSync(preferred)) return preferred;
+      } catch {}
+    }
+
+    const bundled = 'C:/portas/bin/cloudflared.exe';
+    try {
+      if (fs.existsSync(bundled)) return bundled;
+    } catch {}
+
+    const localDir = path.join(DATA_DIR, 'bin');
+    const localExe = path.join(localDir, 'cloudflared.exe');
+    try {
+      if (fs.existsSync(localExe)) return localExe;
+    } catch {}
+
+    // Auto-provisiona o binário (Windows x64). Não depende de npm.
+    const url = String(
+      process.env.CLOUDFLARED_DOWNLOAD_URL ||
+      'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+    ).trim();
+    try {
+      const https = require('https');
+      fs.mkdirSync(localDir, { recursive: true });
+      const tmp = `${localExe}.tmp`;
+
+      const download = (u, depth = 0) => new Promise((resolve, reject) => {
+        if (depth > 5) return reject(new Error('cloudflared_download_redirect_loop'));
+        const req = https.get(u, { timeout: 15000 }, (res) => {
+          const sc = Number(res.statusCode || 0) || 0;
+          const loc = String(res.headers && res.headers.location || '').trim();
+          if ([301, 302, 303, 307, 308].includes(sc) && loc) {
+            try { res.resume(); } catch {}
+            const next = /^https?:\/\//i.test(loc) ? loc : new URL(loc, u).toString();
+            return resolve(download(next, depth + 1));
+          }
+          if (sc < 200 || sc >= 300) {
+            try { res.resume(); } catch {}
+            return reject(new Error(`cloudflared_download_http_${sc}`));
+          }
+          const out = fs.createWriteStream(tmp);
+          res.pipe(out);
+          out.on('finish', () => {
+            try { out.close(() => resolve(true)); } catch { resolve(true); }
+          });
+          out.on('error', reject);
+        });
+        req.on('timeout', () => {
+          try { req.destroy(new Error('cloudflared_download_timeout')); } catch {}
+        });
+        req.on('error', reject);
+      });
+
+      logger.warn('[GATE_B][BOOTSTRAP] baixando cloudflared.exe (auto)', { url });
+      await download(url);
+      fs.renameSync(tmp, localExe);
+      logger.info('[GATE_B][BOOTSTRAP] cloudflared.exe pronto', { path: localExe });
+      return localExe;
+    } catch (e) {
+      try { fs.unlinkSync(`${localExe}.tmp`); } catch {}
+      logger.warn('[GATE_B][BOOTSTRAP] falha ao baixar cloudflared.exe (best-effort)', { error: (e && e.message) || String(e) });
+      return '';
+    }
+  };
+
+  const spawnCloudflaredToken = async (token) => {
     try {
       const { spawn } = require('child_process');
-      const preferred = String(process.env.CLOUDFLARED_EXE || '').trim();
-      const candidate = preferred || (fs.existsSync('C:/portas/bin/cloudflared.exe') ? 'C:/portas/bin/cloudflared.exe' : 'cloudflared');
+      // Não usar "cloudflared" no PATH: queremos caminho determinístico para evitar ENOENT.
+      const candidate = await ensureCloudflaredExe();
+      if (!candidate) return false;
       const args = ['tunnel', 'run', '--token', String(token)];
       const child = spawn(candidate, args, { stdio: 'ignore', windowsHide: true, detached: true });
+      child.once('error', (err) => {
+        // CRÍTICO: sem isso, ENOENT vira uncaughtException e mata o master.
+        try { logger.warn('[GATE_B][BOOTSTRAP] cloudflared spawn falhou', { error: (err && err.message) || String(err) }); } catch {}
+      });
       try { child.unref(); } catch {}
       return true;
     } catch {
@@ -182,7 +255,7 @@ async function maybeBootstrapGateBToken() {
       const existing = readBundle();
       if (existing && existing.tunnelToken) {
         if (!__gateBCloudflaredStarted) {
-          const ok = spawnCloudflaredToken(existing.tunnelToken);
+          const ok = await spawnCloudflaredToken(existing.tunnelToken);
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
@@ -199,7 +272,7 @@ async function maybeBootstrapGateBToken() {
           source: 'env'
         });
         if (!__gateBCloudflaredStarted) {
-          const ok = spawnCloudflaredToken(tokenEnv);
+          const ok = await spawnCloudflaredToken(tokenEnv);
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] token_env: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
@@ -305,7 +378,7 @@ async function maybeBootstrapGateBToken() {
             source: 'ct_bootstrap'
           });
           if (!__gateBCloudflaredStarted) {
-            const ok = spawnCloudflaredToken(tunnelToken);
+            const ok = await spawnCloudflaredToken(tunnelToken);
             __gateBCloudflaredStarted = !!ok;
             logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
           } else {
