@@ -29,6 +29,9 @@ dados/perfis.json
 dados/supervisor_state.json
 dados/fotos_postadas.json
 dados/ct_config.json
+dados/gate_b_bundle.json
+dados/gate_b_runtime.json
+dados/gate_b_cloudflared.log
 dados/groq_config.json
 dados/build.json
 dados/provision_audit.jsonl

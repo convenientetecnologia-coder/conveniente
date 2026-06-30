@@ -147,7 +147,7 @@ async function maybeBootstrapGateBToken() {
   const EDGE_LOCAL_RECOVERY_COOLDOWN_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_LOCAL_RECOVERY_COOLDOWN_MS || 120000) || 120000);
   const EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS = Math.max(1, Number(process.env.GATE_B_EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS || 3) || 3);
   const EDGE_FORCE_ON_PROLONGED_OUTAGE_MS = Math.max(120000, Number(process.env.GATE_B_EDGE_FORCE_ON_PROLONGED_OUTAGE_MS || 600000) || 600000);
-  const FORCE_REFRESH_MIN_INTERVAL_MS = Math.max(120000, Number(process.env.GATE_B_FORCE_REFRESH_MIN_INTERVAL_MS || 900000) || 900000);
+  const FORCE_REFRESH_MIN_INTERVAL_MS = Math.max(120000, Number(process.env.GATE_B_FORCE_REFRESH_MIN_INTERVAL_MS || 1800000) || 1800000);
   const FORCE_REFRESH_BOOT_GRACE_MS = Math.max(0, Number(process.env.GATE_B_FORCE_REFRESH_BOOT_GRACE_MS || 30000) || 30000);
   const gateBBootAt = Date.now();
 
@@ -185,6 +185,28 @@ async function maybeBootstrapGateBToken() {
       const raw = String(fs.readFileSync(BUNDLE_PATH, 'utf8') || '').trim();
       const parsed = raw ? JSON.parse(raw) : null;
       return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const sanitizeBundleForCurrentHost = (bundle, currentHostId) => {
+    try {
+      const b = bundle && typeof bundle === 'object' ? bundle : null;
+      if (!b) return null;
+      const hostId = String(currentHostId || '').trim().toLowerCase();
+      if (!hostId) return b;
+      const hf = String(b.hostFqdn || '').trim().toLowerCase();
+      if (!hf) return b;
+      const expectedPrefix = `${hostId}.`;
+      if (hf.startsWith(expectedPrefix)) return b;
+      try {
+        logger.warn('[GATE_B][BOOTSTRAP] bundle legado incompatível com host atual; descartando cache local', {
+          hostId: currentHostId,
+          bundleHostFqdn: b.hostFqdn
+        });
+      } catch {}
+      return null;
     } catch {
       return null;
     }
@@ -519,7 +541,7 @@ async function maybeBootstrapGateBToken() {
           __gateBCloudflaredChild = null;
         }
       } catch {}
-      const existing = readBundle();
+      const existing = sanitizeBundleForCurrentHost(readBundle(), hostIdLocal);
       try {
         const ex = existing && typeof existing === 'object' ? existing : null;
         __gateBUpdateRuntime({
@@ -1415,8 +1437,15 @@ async function __readLocalStatusForEventBridge() {
 function __resolveCtServerEventConfig() {
   try {
     const cfg = readCtConfig();
+    const fromCfg = String((cfg && cfg.ctBaseUrl) || '').trim();
+    const isLegacyNgrokUrl = (raw) => {
+      const s = String(raw || '').trim().toLowerCase();
+      return !!s && (s.includes('.ngrok.io') || s.includes('.ngrok-free.app') || s.includes('.ngrok.app'));
+    };
+    const allowNgrok = String(process.env.CT_ALLOW_NGROK_URL || '').trim() === '1';
+    const cfgCtBaseUrl = (fromCfg && !(isLegacyNgrokUrl(fromCfg) && !allowNgrok)) ? fromCfg : '';
     const ctBaseUrlRaw = String(
-      (cfg && cfg.ctBaseUrl) ||
+      cfgCtBaseUrl ||
       process.env.CT_BASE_URL ||
       process.env.CT_URL ||
       'https://api.convenientetecnologia.com'
