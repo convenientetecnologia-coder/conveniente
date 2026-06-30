@@ -51,7 +51,13 @@ function currentVirtusEngine(autoMode) {
 }
 
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
-  const eng = currentVirtusEngine(autoMode);
+  // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
+  // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
+  const engFromDesired = readDesiredVirtusEngineRuntime();
+  if (autoMode && typeof autoMode === 'object') {
+    autoMode.engine = engFromDesired;
+  }
+  const eng = engFromDesired || currentVirtusEngine(autoMode);
   const baseCfg = {
     restrictTab: 0,
     epoch: cfg.epoch || 0,
@@ -4893,6 +4899,21 @@ function ensureDesired() {
 try {
 if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 } catch {}
+}
+
+function readDesiredVirtusEngineRuntime() {
+  // Contrato rígido: qualquer valor inválido cai em legacy (fail-safe).
+  try {
+    const desired = readJsonFile(desiredPath, { perfis: {} }) || {};
+    const eng =
+      (desired && desired._autoMode && desired._autoMode.engine) ||
+      (desired && desired.autoMode && desired.autoMode.engine) ||
+      (desired && desired.engine) ||
+      '';
+    return String(eng || '').trim().toLowerCase() === 'delta' ? 'delta' : 'legacy';
+  } catch {
+    return 'legacy';
+  }
 }
 
 function manifestPathOf(nome) {
@@ -11187,16 +11208,7 @@ const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
 // Chave seletora dinâmica de motores (hot-swapping):
 // - fonte: desired.json (ex.: desired._autoMode.engine = "delta")
 // - default seguro: legacy
-try {
-  const eng =
-    (desiredSnap && desiredSnap._autoMode && desiredSnap._autoMode.engine) ||
-    (desiredSnap && desiredSnap.autoMode && desiredSnap.autoMode.engine) ||
-    (desiredSnap && desiredSnap.engine) ||
-    '';
-  autoMode.engine = String(eng || '').trim().toLowerCase() === 'delta' ? 'delta' : 'legacy';
-} catch {
-  autoMode.engine = 'legacy';
-}
+autoMode.engine = readDesiredVirtusEngineRuntime();
 const perfis = [];
 // #region agent log
 // Forense enterprise: detectar e registrar (via provision_audit) quedas de working/Virtus inesperadas,
