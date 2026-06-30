@@ -837,7 +837,7 @@ async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable")
   const maxRounds = Math.max(3, MARKETPLACE_STABILITY_ROUNDS * 2);
 
   for (let i = 0; i < maxRounds; i++) {
-    await humanPause("domSettle", `${label}_dom_settle`);
+    await humanPause("domSettle", null);
     let ok = false;
     let sig = "";
     try {
@@ -900,7 +900,23 @@ async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable")
   await humanPause("marketplaceLoad", `${label}_final_load`);
 }
 
-async function ensureMarketplaceFilterActive(page) {
+async function waitMarketplaceActiveStable(page, { timeoutMs = 35000, rounds = 2 } = {}) {
+  const start = Date.now();
+  let okRounds = 0;
+  while (Date.now() - start < timeoutMs) {
+    const active = await isMarketplaceFilterActive(page);
+    if (active) {
+      okRounds += 1;
+      if (okRounds >= Math.max(1, rounds)) return true;
+    } else {
+      okRounds = 0;
+    }
+    await sleep(Math.max(700, MARKETPLACE_STABILITY_GAP_MS));
+  }
+  return false;
+}
+
+async function ensureMarketplaceFilterActiveCore(page) {
   const now = Date.now();
   const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
   const lastClickAt = Number(guard.lastClickAt || 0) || 0;
@@ -914,6 +930,16 @@ async function ensureMarketplaceFilterActive(page) {
     try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: now }; } catch (_) {}
     logInfo("[virtusDelta][marketplace] filter_already_active=sim");
     return { ok: true, already_active: true, active_after: true };
+  }
+
+  // Se clicamos há pouco, não reclicar: primeiro aguardar estabilização real do feed.
+  if (lastClickAt && now - lastClickAt < 45000) {
+    await waitForMarketplaceUiStable(page, "marketplace_recent_click");
+    const activeAfterRecent = await waitMarketplaceActiveStable(page, { timeoutMs: 30000, rounds: 2 });
+    if (activeAfterRecent) {
+      try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
+      return { ok: true, already_active: true, guarded_recent_click: true, active_before: activeBefore, active_after: true };
+    }
   }
 
   if (lastClickAt && now - lastClickAt < 15000) {
@@ -944,17 +970,17 @@ async function ensureMarketplaceFilterActive(page) {
   } catch (_) {}
   await humanPause("postMarketplace", "post_marketplace_click");
 
-  let activeAfter = await isMarketplaceFilterActive(page);
+  let activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 35000, rounds: 2 });
   if (!activeAfter && click.changed) {
     await humanPause("domSettle", "marketplace_changed_recheck");
-    activeAfter = await isMarketplaceFilterActive(page);
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 22000, rounds: 2 });
   }
   if (!activeAfter && !click.changed) {
     // Retry seguro: revalida carregamento e tenta novamente somente via seletor seguro.
     await waitForMarketplaceUiStable(page, "marketplace_safe_retry");
     const retry = await clickMarketplaceFilterIfPresent(page);
     await humanPause("domSettle", "marketplace_safe_retry_settle");
-    activeAfter = await isMarketplaceFilterActive(page);
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 26000, rounds: 2 });
     if (retry && retry.changed) {
       try {
         page.__virtusDeltaMarketplaceGuard = {
@@ -971,7 +997,7 @@ async function ensureMarketplaceFilterActive(page) {
     await humanPause("domSettle", "marketplace_recover_once");
     const recover = await clickMarketplaceFilterIfPresent(page);
     await humanPause("domSettle", "marketplace_recover_settle");
-    activeAfter = await isMarketplaceFilterActive(page);
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 26000, rounds: 2 });
     if (recover && recover.changed) {
       try {
         page.__virtusDeltaMarketplaceGuard = {
@@ -995,6 +1021,26 @@ async function ensureMarketplaceFilterActive(page) {
     `[virtusDelta][marketplace] activate result=${JSON.stringify({ ...click, active_before: activeBefore, active_after: activeAfter })}`
   );
   return { ...click, active_before: activeBefore, active_after: activeAfter };
+}
+
+async function ensureMarketplaceFilterActive(page) {
+  if (!page) return { ok: false, error: "no_page" };
+  const prev = page.__virtusDeltaMarketplaceQueue || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  page.__virtusDeltaMarketplaceQueue = prev
+    .catch(() => {})
+    .then(() => gate)
+    .catch(() => {});
+
+  await prev.catch(() => {});
+  try {
+    return await ensureMarketplaceFilterActiveCore(page);
+  } finally {
+    try { release(); } catch (_) {}
+  }
 }
 
 async function isMarketplaceFilterVisible(page) {
