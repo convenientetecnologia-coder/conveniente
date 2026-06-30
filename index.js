@@ -70,6 +70,41 @@ let __gateBCloudflaredStarted = false;
 let __gateBCloudflaredChild = null;
 let __gateBCloudflaredRestartTimer = null;
 let __gateBCloudflaredLastExit = null;
+let __gateBRuntime = {
+  updatedAt: 0,
+  hostId: null,
+  bundle: null, // { present, hostFqdn, hasTunnelToken, hasInfraSecret, source, updatedAt }
+  bootstrap: null, // { lastAttemptAt, lastOkAt, lastStatus, lastError, lastUrl }
+  cloudflared: null // { started, startAt, exePath, spawnError, lastExit }
+};
+
+function __gateBRuntimePath() {
+  return path.join(__dirname, 'dados', 'gate_b_runtime.json');
+}
+
+function __gateBWriteRuntimeAtomic(nextState) {
+  try {
+    const p = __gateBRuntimePath();
+    try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch {}
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(nextState || {}, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __gateBUpdateRuntime(patch) {
+  try {
+    const now = Date.now();
+    const base = (__gateBRuntime && typeof __gateBRuntime === 'object') ? __gateBRuntime : {};
+    const merged = { ...base, ...(patch && typeof patch === 'object' ? patch : {}) };
+    merged.updatedAt = now;
+    __gateBRuntime = merged;
+    __gateBWriteRuntimeAtomic(merged);
+  } catch {}
+}
 
 async function maybeBootstrapGateBToken() {
   const DATA_DIR = path.join(__dirname, 'dados');
@@ -206,12 +241,34 @@ async function maybeBootstrapGateBToken() {
       } catch {}
       const candidate = await ensureCloudflaredExe();
       if (!candidate) return false;
+      __gateBUpdateRuntime({
+        cloudflared: {
+          ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
+          exePath: String(candidate),
+          spawnError: null
+        }
+      });
       const args = ['tunnel', 'run', '--token', String(token)];
       const child = spawn(candidate, args, { stdio: 'ignore', windowsHide: true, detached: true });
       __gateBCloudflaredChild = child;
+      __gateBUpdateRuntime({
+        cloudflared: {
+          ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
+          started: true,
+          startAt: Date.now(),
+          exePath: String(candidate)
+        }
+      });
       child.once('error', (err) => {
         // CRÍTICO: sem isso, ENOENT vira uncaughtException e mata o master.
         try { logger.warn('[GATE_B][BOOTSTRAP] cloudflared spawn falhou', { error: (err && err.message) || String(err) }); } catch {}
+        __gateBUpdateRuntime({
+          cloudflared: {
+            ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
+            started: false,
+            spawnError: (err && err.message) ? String(err.message) : String(err)
+          }
+        });
       });
       child.once('exit', (code, signal) => {
         try {
@@ -219,6 +276,13 @@ async function maybeBootstrapGateBToken() {
         } catch {}
         __gateBCloudflaredChild = null;
         __gateBCloudflaredStarted = false;
+        __gateBUpdateRuntime({
+          cloudflared: {
+            ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
+            started: false,
+            lastExit: __gateBCloudflaredLastExit || null
+          }
+        });
         try {
           logger.warn('[GATE_B][BOOTSTRAP] cloudflared encerrou; agendando auto-restart', { code: code == null ? null : Number(code), signal: signal == null ? null : String(signal) });
         } catch {}
@@ -282,6 +346,16 @@ async function maybeBootstrapGateBToken() {
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
+      const hostIdLocal = (readHostId() || getOrCreateHostId()) || null;
+      __gateBUpdateRuntime({
+        hostId: hostIdLocal,
+        bootstrap: {
+          ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+          lastUrl: null,
+          lastStatus: null,
+          lastError: null
+        }
+      });
       try {
         if (__gateBCloudflaredStarted && __gateBCloudflaredChild && __gateBCloudflaredChild.exitCode != null) {
           __gateBCloudflaredStarted = false;
@@ -289,6 +363,19 @@ async function maybeBootstrapGateBToken() {
         }
       } catch {}
       const existing = readBundle();
+      try {
+        const ex = existing && typeof existing === 'object' ? existing : null;
+        __gateBUpdateRuntime({
+          bundle: {
+            present: !!ex,
+            hostFqdn: ex && ex.hostFqdn ? String(ex.hostFqdn) : null,
+            hasTunnelToken: !!(ex && ex.tunnelToken),
+            hasInfraSecret: !!(ex && ex.infraSecret),
+            source: ex && ex.source ? String(ex.source) : null,
+            updatedAt: ex && typeof ex.updatedAt === 'number' ? ex.updatedAt : null
+          }
+        });
+      } catch {}
       if (existing && existing.tunnelToken) {
         if (!__gateBCloudflaredStarted) {
           const ok = await spawnCloudflaredToken(existing.tunnelToken);
@@ -307,6 +394,16 @@ async function maybeBootstrapGateBToken() {
           updatedAt: Date.now(),
           source: 'env'
         });
+        __gateBUpdateRuntime({
+          bundle: {
+            present: true,
+            hostFqdn: existing && existing.hostFqdn ? String(existing.hostFqdn) : null,
+            hasTunnelToken: true,
+            hasInfraSecret: !!(existing && existing.infraSecret),
+            source: 'env',
+            updatedAt: Date.now()
+          }
+        });
         if (!__gateBCloudflaredStarted) {
           const ok = await spawnCloudflaredToken(tokenEnv);
           __gateBCloudflaredStarted = !!ok;
@@ -317,6 +414,13 @@ async function maybeBootstrapGateBToken() {
 
       if (typeof fetch !== 'function') {
         logger.warn('[GATE_B][RETRY] fetch_unavailable');
+        __gateBUpdateRuntime({
+          bootstrap: {
+            ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+            lastAttemptAt: Date.now(),
+            lastError: 'fetch_unavailable'
+          }
+        });
         scheduleRetry();
         return false;
       }
@@ -324,11 +428,18 @@ async function maybeBootstrapGateBToken() {
       const urls = resolveBootstrapUrls();
       if (!urls.length) {
         logger.warn('[GATE_B][RETRY] bootstrap_url_empty');
+        __gateBUpdateRuntime({
+          bootstrap: {
+            ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+            lastAttemptAt: Date.now(),
+            lastError: 'bootstrap_url_empty'
+          }
+        });
         scheduleRetry();
         return false;
       }
 
-      const hostId = (readHostId() || getOrCreateHostId()) || null;
+      const hostId = hostIdLocal;
       const body = {
         hostId,
         hostname: os.hostname(),
@@ -340,13 +451,34 @@ async function maybeBootstrapGateBToken() {
 
       let lastStatus = 0;
       let lastError = '';
+      __gateBUpdateRuntime({
+        bootstrap: {
+          ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+          lastAttemptAt: Date.now(),
+          lastUrl: urls[0] ? String(urls[0]) : null,
+          lastStatus: null,
+          lastError: null
+        }
+      });
 
       for (const url of urls) {
         const controller = new AbortController();
         const to = setTimeout(() => controller.abort(), 6500);
         try {
+          __gateBUpdateRuntime({
+            bootstrap: {
+              ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+              lastUrl: String(url)
+            }
+          });
           const res = await fetch(url, { method: 'POST', redirect: 'manual', headers, body: JSON.stringify(body), signal: controller.signal });
           lastStatus = Number(res.status || 0) || 0;
+          __gateBUpdateRuntime({
+            bootstrap: {
+              ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+              lastStatus
+            }
+          });
           const contentType = String(res.headers.get('content-type') || '');
           const location = String(res.headers.get('location') || '');
           if (lastStatus >= 300 && lastStatus < 400) {
@@ -399,6 +531,16 @@ async function maybeBootstrapGateBToken() {
               updatedAt: Date.now(),
               source: 'ct_bootstrap_partial'
             });
+            __gateBUpdateRuntime({
+              bundle: {
+                present: true,
+                hostFqdn: hostFqdn ? String(hostFqdn) : ((existing && existing.hostFqdn) ? String(existing.hostFqdn) : null),
+                hasTunnelToken: !!(tunnelToken || (existing && existing.tunnelToken)),
+                hasInfraSecret: !!(infraSecret || (existing && existing.infraSecret)),
+                source: 'ct_bootstrap_partial',
+                updatedAt: Date.now()
+              }
+            });
           }
 
           if (!tunnelToken) {
@@ -412,6 +554,21 @@ async function maybeBootstrapGateBToken() {
             infraSecret: infraSecret || null,
             updatedAt: Date.now(),
             source: 'ct_bootstrap'
+          });
+          __gateBUpdateRuntime({
+            bundle: {
+              present: true,
+              hostFqdn: hostFqdn ? String(hostFqdn) : null,
+              hasTunnelToken: true,
+              hasInfraSecret: !!infraSecret,
+              source: 'ct_bootstrap',
+              updatedAt: Date.now()
+            },
+            bootstrap: {
+              ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+              lastOkAt: Date.now(),
+              lastStatus
+            }
           });
           if (!__gateBCloudflaredStarted) {
             const ok = await spawnCloudflaredToken(tunnelToken);
@@ -428,12 +585,26 @@ async function maybeBootstrapGateBToken() {
 
       logger.warn(`⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: ${lastStatus || 'ERR'}). Aguardando 60 segundos para re-tentativa automática...`);
       if (lastError) logger.warn('[GATE_B][RETRY] motivo', { error: lastError });
+      __gateBUpdateRuntime({
+        bootstrap: {
+          ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+          lastStatus: lastStatus || null,
+          lastError: lastError || null
+        }
+      });
       scheduleRetry();
       return false;
     } catch (e) {
       const msg = (e && e.message) ? String(e.message) : String(e);
       logger.warn(`⚠️ [GATE_B][RETRY] Falha no provisionamento central (Status: ERR). Aguardando 60 segundos para re-tentativa automática...`);
       logger.warn('[GATE_B][RETRY] excecao', { error: msg });
+      __gateBUpdateRuntime({
+        bootstrap: {
+          ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+          lastStatus: null,
+          lastError: msg
+        }
+      });
       scheduleRetry();
       return false;
     } finally {

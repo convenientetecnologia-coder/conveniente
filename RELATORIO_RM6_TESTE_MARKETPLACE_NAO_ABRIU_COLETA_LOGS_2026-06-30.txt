@@ -1,0 +1,68 @@
+RELATÓRIO — RM6 (Delta) — Teste “Marketplace não abriu” + tentativa de coleta de logs
+Data: 2026-06-30
+
+Resumo executivo (sem achismo)
+- O RM6 foi atualizado e iniciado (operador).
+- Tentamos coletar logs via endpoint remoto (`POST /api/infra/debug-bundle`) usando o host público do Edge (`<hostId>.convenientetecnologia.com`).
+- A coleta NÃO foi possível porque o host público do RM6 continua respondendo **HTTP 503 (Cloudflare)**, indicando que o túnel Edge (cloudflared) não está conectado/saudável nesse momento.
+- Consequência direta: o CT não consegue alcançar o RM6 por endpoints (nem `debug-bundle`, nem `command-bus`) enquanto o 503 persistir.
+
+Identificação do RM6
+- hostId (Robe Mãe 6): `aba80611-8b8a-46ed-a852-f5f0d573c03b`
+- hostFqdn (Edge): `aba80611-8b8a-46ed-a852-f5f0d573c03b.convenientetecnologia.com`
+
+1) Evidência objetiva do bloqueio (túnel indisponível)
+Probe HTTP no hostFqdn do RM6 (externo)
+- `curl.exe -I --max-time 15 https://aba80611-8b8a-46ed-a852-f5f0d573c03b.convenientetecnologia.com/`
+- Resultado:
+  - `HTTP/1.1 503 Service Unavailable`
+  - `Server: cloudflare`
+  - `CF-RAY: a13fcdce7a7d02fd-GRU`
+
+Tentativa de coleta do bundle remoto (CT → RM6)
+- Ferramenta: `C:\sitechatbot\tools\pull_edge_debug_bundle.js`
+- Execução:
+  - `node tools/pull_edge_debug_bundle.js aba80611-8b8a-46ed-a852-f5f0d573c03b --tailLines 2000 --issuesItems 400`
+- Resultado:
+  - HTTP status: 503
+  - arquivo gravado (resposta vazia): `C:\conveniente\dados\debug_bundle_aba80611-8b8a-46ed-a852-f5f0d573c03b_1782850119149.json`
+
+2) O que dá para extrair do CT agora (sem acesso inbound)
+Como o inbound (Edge) está 503, só conseguimos evidência via telemetria “server → CT” (snapshots).
+
+Snapshot CT usado (RM6)
+- Caminho:
+  - `C:\sitechatbot\dados\aba80611-8b8a-46ed-a852-f5f0d573c03b-de0a1299b8.json`
+- Extração compacta (gerada localmente pelo script `extract_snapshot_summary.js`):
+  - hostId: aba80611-8b8a-46ed-a852-f5f0d573c03b
+  - hostname: DESKTOP-9OULHH9
+  - sentAt: 1782850475087
+  - receivedAt: 1782850477809
+  - perfisCount: 11
+  - active: 0 (nenhum perfil ativo no instante do snapshot)
+  - existem perfis inativos com issues acumulados (ex.: `rio_de_janeiro-...` com issuesCount=52)
+
+3) Conclusão técnica (por que “não tem como puxar logs do teste agora”)
+- O endpoint `debug-bundle` funciona quando o CT consegue chegar na VM.
+- Hoje o canal CT → VM depende do Edge (`hostFqdn`) estar “up”.
+- Com `503 Service Unavailable` no Cloudflare, o CT fica bloqueado e não há como coletar o bundle remoto nem logs sob demanda (fetch_logs) até o túnel recuperar.
+
+4) Ação corretiva aplicada (universal, para todos os servidores)
+Objetivo
+- Nunca mais ficar “cego” por causa de túnel 503, e conseguir diagnosticar por que o cloudflared não sobe/conecta sem precisar de comando humano.
+
+Mudança aplicada no Conveniente (main)
+- Implementação de telemetria do Gate B em disco:
+  - `C:\conveniente\dados\gate_b_runtime.json` (sem segredos: não grava token/infraSecret; só flags/erros/timestamps)
+- Exposição do estado no `/api/status`:
+  - `gateB.bundle`: se existe bundle, se tem tunnel token, se tem infra secret, hostFqdn, source, updatedAt
+  - `gateB.runtime`: último bootstrap/erro e estado do cloudflared (started/lastExit/spawnError/exePath)
+- Impacto:
+  - Mesmo que o Edge esteja 503, o RM6 ainda consegue “falar” com o CT via telemetria (server → CT),
+    e o CT passa a enxergar o motivo (token ausente, download do exe falhou, cloudflared saindo, etc.)
+
+Próximo passo (objetivo)
+- Atualizar e reiniciar o RM6 com esse patch de telemetria do Gate B.
+- Após isso, ler novamente o snapshot do CT e verificar o bloco `status.gateB` para identificar a causa exata do 503.
+- Quando o hostFqdn deixar de responder 503, repetimos a coleta do `debug-bundle` e geramos o relatório com logs completos do teste do marketplace.
+

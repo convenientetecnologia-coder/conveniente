@@ -5,6 +5,54 @@ module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
+const path = require('path');
+const fs = require('fs');
+
+function __readJsonSafeFallback(p, defVal) {
+  try {
+    if (fileStore && typeof fileStore.readJsonSafe === 'function') {
+      return fileStore.readJsonSafe(p, defVal);
+    }
+  } catch {}
+  try {
+    if (!fs.existsSync(p)) return defVal;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return defVal;
+  }
+}
+
+function __readGateBStateSafe() {
+  try {
+    const bundlePath = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
+    const runtimePath = path.join(__dirname, '..', 'dados', 'gate_b_runtime.json');
+    const b = __readJsonSafeFallback(bundlePath, null);
+    const r = __readJsonSafeFallback(runtimePath, null);
+    const hasToken = !!(b && (b.tunnelToken || b.tunnel_token));
+    const hasInfra = !!(b && (b.infraSecret || b.infra_secret || b.infraSECRET));
+    const hostFqdn = (b && (b.hostFqdn || b.host_fqdn)) ? String(b.hostFqdn || b.host_fqdn).trim() : null;
+    const source = (b && b.source) ? String(b.source) : null;
+    const updatedAt = (b && typeof b.updatedAt === 'number') ? b.updatedAt : null;
+    return {
+      bundle: {
+        present: !!b,
+        hostFqdn,
+        hasTunnelToken: hasToken,
+        hasInfraSecret: hasInfra,
+        source,
+        updatedAt
+      },
+      runtime: (r && typeof r === 'object') ? {
+        updatedAt: (typeof r.updatedAt === 'number') ? r.updatedAt : null,
+        hostId: r.hostId ? String(r.hostId) : null,
+        bootstrap: r.bootstrap || null,
+        cloudflared: r.cloudflared || null
+      } : null
+    };
+  } catch {
+    return { bundle: { present: false, hostFqdn: null, hasTunnelToken: false, hasInfraSecret: false, source: null, updatedAt: null }, runtime: null };
+  }
+}
 // Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
@@ -475,6 +523,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       return serverConfig.readServerConfigEffective({});
     }
   })();
+  const gateB = __readGateBStateSafe();
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -488,6 +537,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     openAll,
     autoOpen,
     serverConfig: serverConfigEffective,
+    gateB,
     ts: Date.now()
   });
   return;
@@ -564,6 +614,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   const serverConfigEffective = (() => {
     try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
   })();
+  const gateB = __readGateBStateSafe();
   res.json({
     perfis: perfisSkeleton,
     robes: {},
@@ -594,7 +645,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
         };
       } catch { return { enabled: false, changedAt: 0, changedBy: null }; }
     })(),
-    serverConfig: serverConfigEffective
+    serverConfig: serverConfigEffective,
+    gateB
   });
 }
 
