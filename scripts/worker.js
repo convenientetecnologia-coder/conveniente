@@ -2494,13 +2494,18 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
-      // Espera UI real do Messenger Marketplace (anti-atropelo).
+      // Espera UI real do canal do engine (anti-atropelo).
       try {
         const tMsg0 = Date.now();
         let okMsg = false;
         let errMsg = '';
+        const desiredEngineAtProbe = readDesiredVirtusEngineRuntime();
         try {
-          await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
+          if (desiredEngineAtProbe === 'delta') {
+            await pg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          } else {
+            await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
+          }
           okMsg = true;
         } catch (e) {
           okMsg = false;
@@ -2512,6 +2517,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             event: 'bootstrap_messenger_ready',
             nome: String(nome||''),
             source: String(source||''),
+            engine: desiredEngineAtProbe,
             ok: !!okMsg,
             durMs: Date.now() - tMsg0,
             error: okMsg ? null : String(errMsg || '').slice(0, 180),
@@ -5649,8 +5655,13 @@ async function activateOnce(nome, source = '', operator = '') {
                   try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
                   const isBlank = (!u0 || u0 === 'about:blank');
                   if (isBlank) {
-                    // Fluxo enterprise: primeiro Messenger (Virtus). Só depois validamos Facebook/Robe.
-                    await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
+                    // Em Delta, evita passo inicial em marketplace para não "piscar" legacy.
+                    const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
+                    const preferEntry = desiredEngineAtOpen === 'delta' ? 'facebook' : 'messenger';
+                    await ensureNonBlankEntryPage(nome, ctrl, {
+                      prefer: preferEntry,
+                      reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry'
+                    });
                   }
                 } catch {}
                 try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}

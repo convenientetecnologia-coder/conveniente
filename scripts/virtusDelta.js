@@ -776,23 +776,29 @@ async function isMarketplaceFilterActive(page) {
   return Boolean(
     await page
       .evaluate(() => {
+        const hrefNow = String(location.href || "").toLowerCase();
+        if (hrefNow.includes("marketplace")) return true;
+        if (hrefNow.includes("/messages") && hrefNow.includes("folder=marketplace")) return true;
+
         const isSelected = (el) => {
           if (!el) return false;
           if (el.getAttribute("aria-current") === "page") return true;
           if (el.getAttribute("aria-selected") === "true") return true;
           if (el.getAttribute("aria-pressed") === "true") return true;
+          if (el.getAttribute("aria-checked") === "true") return true;
           return Boolean(el.closest('[aria-current="page"],[aria-selected="true"]'));
         };
         const mentionsMarketplace = (el) => {
           const txt = String(el.innerText || el.textContent || "").trim().toLowerCase();
           const label = String(el.getAttribute("aria-label") || "").trim().toLowerCase();
-          return txt.includes("marketplace") || label.includes("marketplace");
+          const href = String(el.getAttribute("href") || "").trim().toLowerCase();
+          return txt.includes("marketplace") || label.includes("marketplace") || href.includes("marketplace");
         };
 
-        for (const a of document.querySelectorAll('a[href*="/messages/"]')) {
+        for (const a of document.querySelectorAll('a[href*="/messages/"],a[href*="marketplace"]')) {
           if (mentionsMarketplace(a) && isSelected(a)) return true;
         }
-        for (const b of document.querySelectorAll('div[data-virtualized="false"] div[role="button"]')) {
+        for (const b of document.querySelectorAll('div[data-virtualized="false"] div[role="button"],[role="tab"],[role="button"][aria-label*="Marketplace"]')) {
           if (!mentionsMarketplace(b)) continue;
           if (isSelected(b)) return true;
         }
@@ -815,6 +821,10 @@ async function ensureMarketplaceFilterActive(page) {
   await humanPause("postMarketplace", "post_marketplace_click");
 
   let activeAfter = await isMarketplaceFilterActive(page);
+  if (!activeAfter && click.changed) {
+    await humanPause("domSettle", "marketplace_changed_recheck");
+    activeAfter = await isMarketplaceFilterActive(page);
+  }
   if (!activeAfter && !click.changed) {
     // Segunda tentativa (ícone SVG sem label) — bounded
     const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
@@ -943,19 +953,23 @@ async function clickMarketplaceFilterIfPresent(page) {
           .filter((h) => h.includes("/messages"))
           .slice(0, 14);
         const path = String(location.pathname || "").trim();
-        return `${path}::${hrefs.join("|")}`;
+        const search = String(location.search || "").trim();
+        const hash = String(location.hash || "").trim();
+        return `${path}${search}${hash}::${hrefs.join("|")}`;
       })
       .catch(() => "");
 
   const before = await getSig();
 
   // 1) âncoras contendo label Marketplace (sem depender de notificações)
-  const anchors = await page.$$('a[href*="/messages/"]').catch(() => []);
+  const anchors = await page.$$('a[href*="/messages/"],a[href*="marketplace"]').catch(() => []);
   for (const a of anchors) {
     try {
       const ok = await a.evaluate((el) => {
         const txt = String(el.innerText || el.textContent || '').trim().toLowerCase();
         if (txt.includes('marketplace')) return true;
+        const href = String(el.getAttribute("href") || "").trim().toLowerCase();
+        if (href.includes("marketplace")) return true;
         const spans = Array.from(el.querySelectorAll('span'));
         return spans.some((s) => String(s.innerText || s.textContent || '').trim().toLowerCase() === 'marketplace');
       });
@@ -963,14 +977,15 @@ async function clickMarketplaceFilterIfPresent(page) {
         await a.click({ delay: clickDelayMs() }).catch(() => {});
         await humanPause("domSettle", "marketplace_anchor_click");
         const after = await getSig();
-        if (after && after !== before) return { ok: true, changed: true, strategy: "anchor_label" };
+        const activeAfter = await isMarketplaceFilterActive(page);
+        if ((after && after !== before) || activeAfter) return { ok: true, changed: true, strategy: "anchor_label" };
         break;
       }
     } catch (_) {}
   }
 
   // 2) botões com SVG (assinatura da lojinha) dentro da lateral
-  const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
+  const buttons = await page.$$('div[data-virtualized="false"] div[role="button"],[role="tab"],[role="button"]').catch(() => []);
   // 2a) tentativa “forte” quando existe texto/aria-label Marketplace
   for (const b of buttons) {
     try {
@@ -984,7 +999,8 @@ async function clickMarketplaceFilterIfPresent(page) {
         await b.click({ delay: clickDelayMs() }).catch(() => {});
         await humanPause("domSettle", "marketplace_button_click");
         const after = await getSig();
-        if (after && after !== before) return { ok: true, changed: true, strategy: "button_label" };
+        const activeAfter = await isMarketplaceFilterActive(page);
+        if ((after && after !== before) || activeAfter) return { ok: true, changed: true, strategy: "button_label" };
         break;
       }
     } catch (_) {}
@@ -1004,7 +1020,8 @@ async function clickMarketplaceFilterIfPresent(page) {
       await b.click({ delay: clickDelayMs() }).catch(() => {});
       await humanPause("domSettle", "marketplace_svg_fallback");
       const after = await getSig();
-      if (after && after !== before) return { ok: true, changed: true, strategy: "svg_icon_fallback" };
+      const activeAfter = await isMarketplaceFilterActive(page);
+      if ((after && after !== before) || activeAfter) return { ok: true, changed: true, strategy: "svg_icon_fallback" };
     } catch (_) {}
   }
 
@@ -1431,6 +1448,12 @@ async function startVirtusDeltaStandaloneRuntime({
     logInfo(`[virtusDelta][boot] page_title=${title}`);
     logInfo(`[virtusDelta][boot] cookie_c_user_present=${cUserCookie ? "sim" : "nao"}`);
   } catch (_) {}
+  try {
+    const mpBoot = await ensureMarketplaceFilterActive(page);
+    logInfo(`[virtusDelta][boot] marketplace_boot=${JSON.stringify(mpBoot)}`);
+  } catch (e) {
+    logInfo(`[virtusDelta][boot] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`);
+  }
 
   const cdpSession = await page.target().createCDPSession();
   await cdpSession.send("Network.enable");
@@ -1669,6 +1692,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     }
   } catch (_) {}
+  try {
+    const mpBoot = await ensureMarketplaceFilterActive(page);
+    logInfo(`[virtusDelta][boot][worker] marketplace_boot=${JSON.stringify(mpBoot)}`);
+  } catch (e) {
+    logInfo(
+      `[virtusDelta][boot][worker] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`
+    );
+  }
 
   logInfo(`[virtusDelta][boot][worker] nome=${String(nome || "")} engine=delta epoch=${requiredEpoch} slowMode=${slowMode ? "sim" : "nao"} url=${String(page.url ? page.url() : "")}`);
 
