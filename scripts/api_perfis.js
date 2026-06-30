@@ -36,7 +36,6 @@ const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
 const serverConfig = require('./serverConfig.js');
 const networkRotation = require('./networkRotation.js');
-const VIRTUS_ENGINE_PATH = path.join(__dirname, '..', 'dados', 'virtus_engine.json');
 
 module.exports = (app, workerClient, fileStore) => {
   const normalizeVirtusEngine = (v) => {
@@ -44,28 +43,6 @@ module.exports = (app, workerClient, fileStore) => {
     if (s === 'delta') return 'delta';
     if (s === 'legacy') return 'legacy';
     return null;
-  };
-  const readStickyVirtusEngine = () => {
-    try {
-      const j = fileStore.readJsonSafe(VIRTUS_ENGINE_PATH, null);
-      const eng = normalizeVirtusEngine(j && j.engine);
-      return eng || null;
-    } catch {
-      return null;
-    }
-  };
-  const persistStickyVirtusEngine = (engine, operator) => {
-    try {
-      const eng = normalizeVirtusEngine(engine);
-      if (!eng) return false;
-      return !!fileStore.writeJsonAtomic(VIRTUS_ENGINE_PATH, {
-        engine: eng,
-        updatedAt: Date.now(),
-        updatedBy: String(operator || 'unknown').slice(0, 180)
-      });
-    } catch {
-      return false;
-    }
   };
   const readDesiredVirtusEngine = () => {
     try {
@@ -75,10 +52,35 @@ module.exports = (app, workerClient, fileStore) => {
         (desired && desired.autoMode && desired.autoMode.engine) ||
         (desired && desired.engine) ||
         '';
-      return normalizeVirtusEngine(eng) || readStickyVirtusEngine() || 'legacy';
+      return normalizeVirtusEngine(eng) || 'legacy';
     } catch {
-      return readStickyVirtusEngine() || 'legacy';
+      return 'legacy';
     }
+  };
+  const hasServerConfigFields = (payload) => {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    return !!(
+      (p.capacity && typeof p.capacity === 'object') ||
+      (p.robe && typeof p.robe === 'object') ||
+      (p.memory && typeof p.memory === 'object') ||
+      (p.networkRotation && typeof p.networkRotation === 'object') ||
+      (p.dailyWindow && typeof p.dailyWindow === 'object')
+    );
+  };
+  const extractRequestedVirtusEngine = (payload) => {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    const candidates = [
+      p.virtusEngine,
+      p.engine,
+      p.virtus && p.virtus.engine,
+      p.autoMode && p.autoMode.engine,
+      p._autoMode && p._autoMode.engine
+    ];
+    for (const c of candidates) {
+      const eng = normalizeVirtusEngine(c);
+      if (eng) return eng;
+    }
+    return null;
   };
 
   // ===== Maintenance: provision lock =====
@@ -167,14 +169,27 @@ module.exports = (app, workerClient, fileStore) => {
         ? ((req.body.config && typeof req.body.config === 'object') ? req.body.config : req.body)
         : {};
       const applyNow = !!(req.body && req.body.applyNow === true);
-      const requestedVirtusEngine = normalizeVirtusEngine(
-        payload && Object.prototype.hasOwnProperty.call(payload, 'virtusEngine') ? payload.virtusEngine : null
-      );
-      const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
-      if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+      const requestedVirtusEngine = extractRequestedVirtusEngine(payload);
+      const hasConfigFields = hasServerConfigFields(payload);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'server_config_engine_input',
+          by: operator,
+          applyNowRequested: applyNow,
+          requestedVirtusEngine: requestedVirtusEngine || null,
+          payloadHasConfigFields: hasConfigFields,
+          payloadKeys: Object.keys(payload || {}).slice(0, 30)
+        });
+      } catch {}
+      if (hasConfigFields) {
+        const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
+        if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+      } else if (!requestedVirtusEngine) {
+        return res.json({ ok: false, error: 'payload_sem_campos_reconhecidos' });
+      }
       if (requestedVirtusEngine) {
-        const stickyOk = persistStickyVirtusEngine(requestedVirtusEngine, operator);
-        let desiredOk = true;
+        let desiredOk = false;
         try {
           await fileStore.withDesiredFileLockUpdate((desired) => {
             desired = (desired && typeof desired === 'object') ? desired : {};
@@ -185,16 +200,25 @@ module.exports = (app, workerClient, fileStore) => {
             desired.engine = requestedVirtusEngine;
             return desired;
           });
+          desiredOk = true;
         } catch (e) {
-          desiredOk = false;
-          logger.warn('[SERVER_CONFIG] falha ao persistir engine no desired.json (fallback sticky ativo)', {
+          logger.warn('[SERVER_CONFIG] falha ao persistir engine no desired.json', {
             requestedVirtusEngine,
             error: (e && e.message) || String(e)
           });
         }
-        if (!stickyOk && !desiredOk) {
+        if (!desiredOk) {
           return res.json({ ok: false, error: 'virtus_engine_persist_failed' });
         }
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'server_config_engine_persist',
+            by: operator,
+            requestedVirtusEngine,
+            desiredOk
+          });
+        } catch {}
       }
       const totalMemMB = serverConfig.getTotalMemMB();
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });

@@ -53,11 +53,20 @@ function currentVirtusEngine(autoMode) {
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
   // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
-  const engFromDesired = readDesiredVirtusEngineRuntime();
+  const engResolved = resolveDesiredVirtusEngineRuntime();
+  const engFromDesired = engResolved.engine;
   if (autoMode && typeof autoMode === 'object') {
     autoMode.engine = engFromDesired;
   }
   const eng = engFromDesired || currentVirtusEngine(autoMode);
+  try {
+    logger.info('[ENGINE_SWITCH][RESOLVE]', {
+      nome,
+      selected: eng,
+      source: engResolved.source || 'legacy_default',
+      desiredRaw: engResolved.desiredRaw || null
+    });
+  } catch {}
   const baseCfg = {
     restrictTab: 0,
     epoch: cfg.epoch || 0,
@@ -4868,7 +4877,6 @@ const perfisDir = path.join(__dirname, '../dados', 'perfis');
 
 const desiredPath = path.join(__dirname, '../dados', 'desired.json');
 const statusPath  = path.join(__dirname, '../dados', STATUS_FILE_NAME);
-const virtusEnginePath = path.join(__dirname, '../dados', 'virtus_engine.json');
 
 function readJsonFile(file, fallback) {
 try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -4902,18 +4910,8 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 } catch {}
 }
 
-function readStickyVirtusEngineRuntime() {
-  try {
-    const j = readJsonFile(virtusEnginePath, null);
-    const s = String(j && j.engine || '').trim().toLowerCase();
-    return s === 'delta' ? 'delta' : (s === 'legacy' ? 'legacy' : null);
-  } catch {
-    return null;
-  }
-}
-
-function readDesiredVirtusEngineRuntime() {
-  // Contrato rígido: qualquer valor inválido cai em legacy (fail-safe).
+function resolveDesiredVirtusEngineRuntime() {
+  // Contrato determinístico: a engine vem de desired.json (sem fallback lateral).
   try {
     const desired = readJsonFile(desiredPath, { perfis: {} }) || {};
     const eng =
@@ -4922,11 +4920,20 @@ function readDesiredVirtusEngineRuntime() {
       (desired && desired.engine) ||
       '';
     const normalized = String(eng || '').trim().toLowerCase();
-    if (normalized === 'delta') return 'delta';
-    if (normalized === 'legacy') return 'legacy';
-    return readStickyVirtusEngineRuntime() || 'legacy';
+    if (normalized === 'delta') return { engine: 'delta', source: 'desired', desiredRaw: normalized };
+    if (normalized === 'legacy') return { engine: 'legacy', source: 'desired', desiredRaw: normalized };
+    return { engine: 'legacy', source: 'legacy_default', desiredRaw: normalized || null };
   } catch {
-    return readStickyVirtusEngineRuntime() || 'legacy';
+    return { engine: 'legacy', source: 'legacy_default_on_error', desiredRaw: null };
+  }
+}
+
+function readDesiredVirtusEngineRuntime() {
+  // Contrato rígido: qualquer valor inválido cai em legacy (fail-safe).
+  try {
+    return resolveDesiredVirtusEngineRuntime().engine || 'legacy';
+  } catch {
+    return 'legacy';
   }
 }
 
