@@ -1178,7 +1178,6 @@ let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
 let __serverEventLastSentAt = 0;
-let __serverEventPreferredCtBaseUrl = null;
 
 function __serverEventHostIdPath() {
   return path.join(__dirname, 'dados', '.telemetry_hostid');
@@ -1313,21 +1312,24 @@ async function __readLocalStatusForEventBridge() {
 function __resolveCtServerEventConfig() {
   try {
     const cfg = readCtConfig();
-    const ctBaseUrl = String(
+    const ctBaseUrlRaw = String(
       (cfg && cfg.ctBaseUrl) ||
       process.env.CT_BASE_URL ||
       process.env.CT_URL ||
+      'https://api.convenientetecnologia.com'
+    ).trim();
+    const ctBaseUrl = ctBaseUrlRaw.replace(/\/+$/, '');
+    const explicitEventUrl = String(
+      process.env.CT_SERVER_EVENT_URL ||
+      process.env.CONVENIENTE_CT_SERVER_EVENT_URL ||
       ''
-    ).trim().replace(/\/+$/, '');
+    ).trim();
+    const eventUrl = explicitEventUrl
+      ? explicitEventUrl.replace(/\/+$/, '')
+      : `${ctBaseUrl}/api/servers/event_secret`;
     const logSecret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
-    const fallbackBase = 'https://api.convenientetecnologia.com';
-    const candidates = [];
-    if (__serverEventPreferredCtBaseUrl) candidates.push(String(__serverEventPreferredCtBaseUrl).trim().replace(/\/+$/, ''));
-    if (ctBaseUrl) candidates.push(ctBaseUrl);
-    candidates.push(fallbackBase);
-    const ctBaseUrls = Array.from(new Set(candidates.filter(Boolean)));
-    if (!ctBaseUrls.length || !logSecret) return null;
-    return { ctBaseUrl: ctBaseUrls[0], ctBaseUrls, logSecret };
+    if (!eventUrl || !logSecret) return null;
+    return { ctBaseUrl, eventUrl, logSecret };
   } catch {
     return null;
   }
@@ -1336,42 +1338,29 @@ function __resolveCtServerEventConfig() {
 async function __postServerEventToCt(payload) {
   const cfg = __resolveCtServerEventConfig();
   if (!cfg) return { ok: false, skipped: true, error: 'ct_config_incomplete' };
-  const tried = [];
-  for (const baseUrl of (cfg.ctBaseUrls || [cfg.ctBaseUrl])) {
-    const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), 8000);
-    try {
-      const target = `${String(baseUrl || '').replace(/\/+$/, '')}/api/servers/event_secret`;
-      tried.push(target);
-      const res = await fetch(target, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-log-secret': cfg.logSecret
-        },
-        body: JSON.stringify(payload || {}),
-        signal: controller.signal
-      });
-      if (res.ok) {
-        __serverEventPreferredCtBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
-        return { ok: true, status: res.status, ctBaseUrl: __serverEventPreferredCtBaseUrl };
-      }
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(cfg.eventUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-log-secret': cfg.logSecret
+      },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal
+    });
+    if (!res.ok) {
       const body = await res.text().catch(() => '');
       const errPreview = String(body || '').slice(0, 180);
-      const isRetriable = Number(res.status || 0) >= 500 || /<!doctype html>|<html/i.test(errPreview);
-      if (!isRetriable) {
-        return { ok: false, status: res.status, ctBaseUrl: String(baseUrl || ''), error: `event_post_http_${res.status}:${errPreview}`, tried };
-      }
-    } catch (e) {
-      // tenta próximo candidato
-      if (String(e && e.name || '') === 'AbortError') {
-        // timeout explícito entra como retentável
-      }
-    } finally {
-      clearTimeout(to);
+      return { ok: false, status: res.status, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl, error: `event_post_http_${res.status}:${errPreview}` };
     }
+    return { ok: true, status: res.status, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl };
+  } catch (e) {
+    return { ok: false, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl, error: (e && e.message) || String(e) };
+  } finally {
+    clearTimeout(to);
   }
-  return { ok: false, error: 'event_post_all_candidates_failed', tried };
 }
 
 async function __serverEventBridgeTick(reason) {
@@ -1406,7 +1395,7 @@ async function __serverEventBridgeTick(reason) {
         error: out.error || 'unknown',
         status: out.status || null,
         ctBaseUrl: out.ctBaseUrl || null,
-        tried: out.tried || null
+        eventUrl: out.eventUrl || null
       });
     }
   } catch (e) {
