@@ -2389,7 +2389,9 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     const targetUrl =
       (prefer === 'messenger')
         ? 'https://www.messenger.com/marketplace'
-        : 'https://www.facebook.com/';
+        : (prefer === 'facebook_messages')
+          ? 'https://www.facebook.com/messages'
+          : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (eNav) {
@@ -5657,7 +5659,7 @@ async function activateOnce(nome, source = '', operator = '') {
                   if (isBlank) {
                     // Em Delta, evita passo inicial em marketplace para não "piscar" legacy.
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
-                    const preferEntry = desiredEngineAtOpen === 'delta' ? 'facebook' : 'messenger';
+                    const preferEntry = desiredEngineAtOpen === 'delta' ? 'facebook_messages' : 'messenger';
                     await ensureNonBlankEntryPage(nome, ctrl, {
                       prefer: preferEntry,
                       reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry'

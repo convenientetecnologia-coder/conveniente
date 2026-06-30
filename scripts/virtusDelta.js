@@ -809,15 +809,46 @@ async function isMarketplaceFilterActive(page) {
 }
 
 async function ensureMarketplaceFilterActive(page) {
+  const now = Date.now();
+  const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
+  const lastClickAt = Number(guard.lastClickAt || 0) || 0;
+  const inFlight = Number(guard.inFlightUntil || 0) || 0;
+  if (inFlight > now) {
+    return { ok: false, skipped: true, reason: "in_flight_guard", active_before: false, active_after: false };
+  }
+
   const activeBefore = await isMarketplaceFilterActive(page);
   if (activeBefore) {
+    try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: now }; } catch (_) {}
     logInfo("[virtusDelta][marketplace] filter_already_active=sim");
     return { ok: true, already_active: true, active_after: true };
   }
 
+  if (lastClickAt && now - lastClickAt < 4500) {
+    await humanPause("domSettle", "marketplace_guard_recheck");
+    const activeAfterGuard = await isMarketplaceFilterActive(page);
+    if (activeAfterGuard) {
+      try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
+      return { ok: true, already_active: true, guarded: true, active_before: activeBefore, active_after: true };
+    }
+  }
+
   logInfo("[virtusDelta][marketplace] activating_filter...");
+  try {
+    page.__virtusDeltaMarketplaceGuard = {
+      ...guard,
+      inFlightUntil: Date.now() + 4000,
+    };
+  } catch (_) {}
   await humanPause("preMarketplace", "pre_marketplace_click");
   const click = await clickMarketplaceFilterIfPresent(page);
+  try {
+    page.__virtusDeltaMarketplaceGuard = {
+      ...(page.__virtusDeltaMarketplaceGuard || {}),
+      inFlightUntil: 0,
+      lastClickAt: click && click.changed ? Date.now() : lastClickAt,
+    };
+  } catch (_) {}
   await humanPause("postMarketplace", "post_marketplace_click");
 
   let activeAfter = await isMarketplaceFilterActive(page);
@@ -838,6 +869,31 @@ async function ensureMarketplaceFilterActive(page) {
         if (activeAfter || click.changed) break;
       } catch (_) {}
     }
+  }
+
+  if (!activeAfter && click.changed) {
+    // Se "entrou e saiu" por re-render/duplo evento, faz um retorno único e validado.
+    await humanPause("domSettle", "marketplace_recover_once");
+    const recover = await clickMarketplaceFilterIfPresent(page);
+    await humanPause("domSettle", "marketplace_recover_settle");
+    activeAfter = await isMarketplaceFilterActive(page);
+    if (recover && recover.changed) {
+      try {
+        page.__virtusDeltaMarketplaceGuard = {
+          ...(page.__virtusDeltaMarketplaceGuard || {}),
+          lastClickAt: Date.now(),
+        };
+      } catch (_) {}
+    }
+  }
+
+  if (activeAfter) {
+    try {
+      page.__virtusDeltaMarketplaceGuard = {
+        ...(page.__virtusDeltaMarketplaceGuard || {}),
+        lastStableAt: Date.now(),
+      };
+    } catch (_) {}
   }
 
   logInfo(
@@ -961,10 +1017,25 @@ async function clickMarketplaceFilterIfPresent(page) {
 
   const before = await getSig();
 
+  const isSelectedHandle = async (h) => {
+    return Boolean(
+      await h.evaluate((el) => {
+        if (!el) return false;
+        if (el.getAttribute("aria-current") === "page") return true;
+        if (el.getAttribute("aria-selected") === "true") return true;
+        if (el.getAttribute("aria-pressed") === "true") return true;
+        if (el.getAttribute("aria-checked") === "true") return true;
+        return Boolean(el.closest('[aria-current="page"],[aria-selected="true"],[aria-pressed="true"],[aria-checked="true"]'));
+      }).catch(() => false)
+    );
+  };
+
   // 1) âncoras contendo label Marketplace (sem depender de notificações)
   const anchors = await page.$$('a[href*="/messages/"],a[href*="marketplace"]').catch(() => []);
   for (const a of anchors) {
     try {
+      const selected = await isSelectedHandle(a);
+      if (selected) return { ok: true, changed: false, strategy: "anchor_already_selected" };
       const ok = await a.evaluate((el) => {
         const txt = String(el.innerText || el.textContent || '').trim().toLowerCase();
         if (txt.includes('marketplace')) return true;
@@ -989,6 +1060,8 @@ async function clickMarketplaceFilterIfPresent(page) {
   // 2a) tentativa “forte” quando existe texto/aria-label Marketplace
   for (const b of buttons) {
     try {
+      const selected = await isSelectedHandle(b);
+      if (selected) return { ok: true, changed: false, strategy: "button_already_selected" };
       const ok = await b.evaluate((el) => {
         if (!el.querySelector('svg')) return false;
         const label = String(el.getAttribute('aria-label') || '').trim().toLowerCase();
@@ -1017,6 +1090,8 @@ async function clickMarketplaceFilterIfPresent(page) {
   }
   for (const b of svgButtons.slice(0, 6)) {
     try {
+      const selected = await isSelectedHandle(b);
+      if (selected) return { ok: true, changed: false, strategy: "svg_already_selected" };
       await b.click({ delay: clickDelayMs() }).catch(() => {});
       await humanPause("domSettle", "marketplace_svg_fallback");
       const after = await getSig();
