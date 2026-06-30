@@ -71,6 +71,10 @@ let __gateBCloudflaredChild = null;
 let __gateBCloudflaredRestartTimer = null;
 let __gateBCloudflaredLastExit = null;
 let __gateBProvisioningPendingUntil = 0;
+let __gateBLastForceRefreshAt = 0;
+let __gateBLastForceRefreshReason = null;
+let __gateBCredentialRefreshNeeded = false;
+let __gateBCredentialRefreshReason = null;
 let __gateBEdgeProbeTimer = null;
 let __gateBEdgeProbeState = { consecutiveFailures: 0, lastStatus: null, lastError: null, lastOkAt: null, lastForceRefreshAt: null };
 let __gateBRuntime = {
@@ -131,6 +135,9 @@ async function maybeBootstrapGateBToken() {
   const EDGE_PROBE_INTERVAL_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_PROBE_INTERVAL_MS || 45000) || 45000);
   const EDGE_PROBE_FAIL_THRESHOLD = Math.max(2, Number(process.env.GATE_B_EDGE_PROBE_FAIL_THRESHOLD || 3) || 3);
   const EDGE_FORCE_REFRESH_COOLDOWN_MS = Math.max(60000, Number(process.env.GATE_B_FORCE_REFRESH_COOLDOWN_MS || 600000) || 600000);
+  const FORCE_REFRESH_MIN_INTERVAL_MS = Math.max(120000, Number(process.env.GATE_B_FORCE_REFRESH_MIN_INTERVAL_MS || 900000) || 900000);
+  const FORCE_REFRESH_BOOT_GRACE_MS = Math.max(0, Number(process.env.GATE_B_FORCE_REFRESH_BOOT_GRACE_MS || 30000) || 30000);
+  const gateBBootAt = Date.now();
 
   const isTruthy = (v) => {
     const s = String(v == null ? '' : v).trim().toLowerCase();
@@ -203,6 +210,43 @@ async function maybeBootstrapGateBToken() {
     } catch {
       return [];
     }
+  };
+
+  const __canAttemptForceRefresh = (reason) => {
+    const now = Date.now();
+    if (now - gateBBootAt < FORCE_REFRESH_BOOT_GRACE_MS) {
+      return { ok: false, blockedBy: 'boot_grace', waitMs: Math.max(0, FORCE_REFRESH_BOOT_GRACE_MS - (now - gateBBootAt)) };
+    }
+    if (__gateBLastForceRefreshAt && (now - __gateBLastForceRefreshAt < FORCE_REFRESH_MIN_INTERVAL_MS)) {
+      return { ok: false, blockedBy: 'force_refresh_interval', waitMs: Math.max(0, FORCE_REFRESH_MIN_INTERVAL_MS - (now - __gateBLastForceRefreshAt)) };
+    }
+    return { ok: true, blockedBy: null, waitMs: 0, reason: String(reason || '').trim() || null };
+  };
+
+  const __markForceRefresh = (reason) => {
+    __gateBLastForceRefreshAt = Date.now();
+    __gateBLastForceRefreshReason = String(reason || '').trim() || null;
+    __gateBUpdateRuntime({
+      bootstrap: {
+        ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+        lastForceRefreshAt: __gateBLastForceRefreshAt,
+        lastForceRefreshReason: __gateBLastForceRefreshReason
+      }
+    });
+  };
+
+  const __isCredentialInvalidSignal = (line) => {
+    const s = String(line || '').toLowerCase();
+    if (!s) return false;
+    return (
+      s.includes('invalid token')
+      || s.includes('token is invalid')
+      || s.includes('unauthorized')
+      || s.includes('authentication failed')
+      || s.includes('failed to get tunnel')
+      || s.includes('tunnel not found')
+      || s.includes('credential') && s.includes('invalid')
+    );
   };
 
   const ensureCloudflaredExe = async () => {
@@ -329,12 +373,23 @@ async function maybeBootstrapGateBToken() {
         } catch {}
         __gateBCloudflaredChild = null;
         __gateBCloudflaredStarted = false;
+        const tail = readCloudflaredTail(8);
+        const credentialInvalid = tail.some((l) => __isCredentialInvalidSignal(l));
+        if (credentialInvalid) {
+          __gateBCredentialRefreshNeeded = true;
+          __gateBCredentialRefreshReason = 'cloudflared_credential_invalid';
+        }
         __gateBUpdateRuntime({
           cloudflared: {
             ...( (__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {} ),
             started: false,
             lastExit: __gateBCloudflaredLastExit || null,
-            tail: readCloudflaredTail(8)
+            tail
+          },
+          bootstrap: {
+            ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+            credentialRefreshNeeded: __gateBCredentialRefreshNeeded,
+            credentialRefreshReason: __gateBCredentialRefreshReason
           }
         });
         try {
@@ -344,7 +399,16 @@ async function maybeBootstrapGateBToken() {
           if (__gateBCloudflaredRestartTimer) return;
           const baseWaitMs = Math.max(3000, Number(process.env.GATE_B_CLOUDFLARED_RESTART_MS || 5000) || 5000);
           const inProvisioningWindow = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
-          const shouldForceRefreshOnExit = !inProvisioningWindow && (Number(code) === 1);
+          let shouldForceRefreshOnExit = !inProvisioningWindow && __gateBCredentialRefreshNeeded;
+          if (shouldForceRefreshOnExit) {
+            const gate = __canAttemptForceRefresh(__gateBCredentialRefreshReason || 'cloudflared_credential_invalid');
+            if (!gate.ok) {
+              shouldForceRefreshOnExit = false;
+              try {
+                logger.info('[GATE_B][BOOTSTRAP] force_refresh_suprimido', { reason: __gateBCredentialRefreshReason || 'cloudflared_credential_invalid', blockedBy: gate.blockedBy, waitMs: gate.waitMs });
+              } catch {}
+            }
+          }
           const waitMs = inProvisioningWindow
             ? Math.max(baseWaitMs, (Number(__gateBProvisioningPendingUntil || 0) - Date.now()) + 1000)
             : baseWaitMs;
@@ -354,7 +418,7 @@ async function maybeBootstrapGateBToken() {
               const p = (typeof tryBootstrapOnce === 'function')
                 ? tryBootstrapOnce({
                     forceRefresh: shouldForceRefreshOnExit,
-                    reason: shouldForceRefreshOnExit ? 'cloudflared_exit_code1' : 'cloudflared_exit'
+                    reason: shouldForceRefreshOnExit ? (__gateBCredentialRefreshReason || 'cloudflared_credential_invalid') : 'cloudflared_exit'
                   })
                 : maybeBootstrapGateBToken();
               p.catch((e) => {
@@ -410,11 +474,20 @@ async function maybeBootstrapGateBToken() {
   const tryBootstrapOnce = async (opts = {}) => {
     const requestedForceRefresh = isTruthy(opts && opts.forceRefresh);
     const requestedForceReason = String((opts && opts.reason) || '').trim() || null;
+    const forceGate = requestedForceRefresh ? __canAttemptForceRefresh(requestedForceReason || 'force_refresh') : { ok: false };
     const provisioningPending = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
     // Importante: durante janela de provisioning pendente, fazemos "poll" normal (sem force),
     // mas sem reaproveitar token velho localmente.
-    const forceRefresh = requestedForceRefresh;
+    const forceRefresh = requestedForceRefresh && !!forceGate.ok;
     const forceReason = requestedForceReason || (requestedForceRefresh ? 'manual_force_refresh' : null);
+    if (requestedForceRefresh && !forceRefresh) {
+      try {
+        logger.info('[GATE_B][BOOTSTRAP] force_refresh_suprimido', { reason: forceReason, blockedBy: forceGate.blockedBy, waitMs: forceGate.waitMs });
+      } catch {}
+    }
+    if (forceRefresh) {
+      __markForceRefresh(forceReason);
+    }
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
@@ -662,11 +735,15 @@ async function maybeBootstrapGateBToken() {
               lastStatus,
               forceRefresh: !!forceRefresh,
               forceReason,
+              credentialRefreshNeeded: false,
+              credentialRefreshReason: null,
               provisioningPending: false,
               provisioningPendingUntil: null
             }
           });
           __gateBProvisioningPendingUntil = 0;
+          __gateBCredentialRefreshNeeded = false;
+          __gateBCredentialRefreshReason = null;
           const tokenRotated = !!previousToken && previousToken !== tunnelToken;
           if ((__gateBCloudflaredStarted && tokenRotated) || forceRefresh) {
             stopCloudflaredChild();
@@ -759,15 +836,16 @@ async function maybeBootstrapGateBToken() {
         const now = Date.now();
         const lastForce = Number(__gateBEdgeProbeState.lastForceRefreshAt || 0) || 0;
         const inCooldown = now - lastForce < EDGE_FORCE_REFRESH_COOLDOWN_MS;
-        if (nextFails >= EDGE_PROBE_FAIL_THRESHOLD && !inCooldown) {
+        if (nextFails >= EDGE_PROBE_FAIL_THRESHOLD && !inCooldown && __gateBCredentialRefreshNeeded) {
           __gateBEdgeProbeState.lastForceRefreshAt = now;
-          logger.warn('[GATE_B][EDGE_PROBE] falha persistente detectada; solicitando reprovisionamento no CT', {
+          logger.warn('[GATE_B][EDGE_PROBE] falha persistente + credencial invalida; solicitando reprovisionamento no CT', {
             hostFqdn,
             status: status || null,
             error: errMsg || null,
-            consecutiveFailures: nextFails
+            consecutiveFailures: nextFails,
+            reason: __gateBCredentialRefreshReason
           });
-          await tryBootstrapOnce({ forceRefresh: true, reason: `edge_probe_${status || 'err'}` });
+          await tryBootstrapOnce({ forceRefresh: true, reason: __gateBCredentialRefreshReason || `edge_probe_${status || 'err'}` });
         }
       }
 
@@ -778,6 +856,12 @@ async function maybeBootstrapGateBToken() {
           intervalMs: EDGE_PROBE_INTERVAL_MS,
           failThreshold: EDGE_PROBE_FAIL_THRESHOLD,
           cooldownMs: EDGE_FORCE_REFRESH_COOLDOWN_MS,
+          forceRefreshMinIntervalMs: FORCE_REFRESH_MIN_INTERVAL_MS,
+          forceRefreshBootGraceMs: FORCE_REFRESH_BOOT_GRACE_MS,
+          lastForceRefreshAt: __gateBLastForceRefreshAt || null,
+          lastForceRefreshReason: __gateBLastForceRefreshReason || null,
+          credentialRefreshNeeded: __gateBCredentialRefreshNeeded,
+          credentialRefreshReason: __gateBCredentialRefreshReason,
           ...__gateBEdgeProbeState
         }
       });
