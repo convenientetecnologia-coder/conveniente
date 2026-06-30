@@ -31,6 +31,26 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-06-29 — [CROSS][CONV][CT][OPS] Servidores event-driven: delta + heartbeat (10 min) + probe automático do CT
+
+- **O que**:
+  - `conveniente/index.js` ganhou bridge de eventos para CT: envia `server_delta` quando estado muda (`stateHash`) e `heartbeat` quando fica em silêncio (default 10 min);
+  - `sitechatbot/index.js` ganhou `POST /api/servers/event_secret` (auth `x-log-secret`) para atualizar presença/contadores e salvar snapshot quando vier `status`;
+  - `sitechatbot/index.js` ganhou watchdog de silêncio (`CT_SERVER_EVENT_SILENCE_MS`) que dispara `infra_ping` via `command-bus` quando host fica mudo;
+  - `conveniente/scripts/dashboard.js` passou a aceitar comando `infra_ping` (pong/no-op) para probe leve.
+- **Por quê**: remover dependência de polling pesado contínuo e manter menu `/servidores` atualizado por evento, com fallback automático de probe.
+- **Evidência**:
+  - `C:\conveniente\index.js`
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\sitechatbot\index.js`
+- **Reinícios**:
+  - `conveniente`: sim (`node index.js`) nos hosts alvo;
+  - `sitechatbot`: sim (`node index.js`) no CT.
+- **Rollback**:
+  - reverter trechos do bridge/endpoint/probe e voltar ao comportamento anterior; reiniciar `conveniente` e `sitechatbot`.
+
+---
+
 #### 2026-05-26 — [OPS][DOCS][CROSS] Reafirmação do contrato ultra enterprise e governança de triagem
 
 - **O que**:

@@ -4231,6 +4231,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'force_full_report') { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, forced: true } }); }
       else if (c.type === 'rotate_logs')      { details = await execRotateLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'infra_ping')       { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, pong: true, ts: Date.now() } }); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
     } catch (e) {
@@ -4452,7 +4453,8 @@ const COMMAND_HANDLERS = Object.freeze({
   gateway_set_proxies: execGatewaySetProxies,
   gateway_reconcile: execGatewaySetProxies,
   rotate_logs: execRotateLogs,
-  self_update: execSelfUpdate
+  self_update: execSelfUpdate,
+  infra_ping: async () => ({ ok: true, pong: true, ts: Date.now() })
 });
 
 module.exports = {

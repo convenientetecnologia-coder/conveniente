@@ -419,6 +419,7 @@ const dailyWindowScheduler = require('./scripts/dailyWindowScheduler.js');
 
 // Dashboard monitor
 const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
+const { readCtConfig } = require('./scripts/ctConfig.js');
 
 // Inicialização
 const app = express();
@@ -534,6 +535,237 @@ app.post('/api/infra/command-bus', async (req, res) => {
   }
 });
 // ===================== Fim Infra Auth =====================
+
+// ===================== Server Event Bridge (delta + heartbeat) =====================
+const SERVER_EVENT_CHECK_INTERVAL_MS = Math.max(2000, Number(process.env.SERVER_EVENT_CHECK_INTERVAL_MS || 5000) || 5000);
+const SERVER_EVENT_HEARTBEAT_MS = Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 600000) || 600000); // 10 min
+let __serverEventBridgeTimer = null;
+let __serverEventBridgeInFlight = false;
+let __serverEventLastHash = '';
+let __serverEventLastSentAt = 0;
+
+function __serverEventHostIdPath() {
+  return path.join(__dirname, 'dados', '.telemetry_hostid');
+}
+
+function __readOrCreateServerEventHostId() {
+  const p = __serverEventHostIdPath();
+  try {
+    if (fs.existsSync(p)) {
+      const v = String(fs.readFileSync(p, 'utf8') || '').trim();
+      if (v) return v;
+    }
+  } catch {}
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const id = (crypto && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : crypto.randomBytes(16).toString('hex');
+    fs.writeFileSync(p, String(id) + '\n', 'utf8');
+    return String(id);
+  } catch {
+    try { return crypto.randomBytes(16).toString('hex'); } catch { return String(Date.now()); }
+  }
+}
+
+function __classifyAccountState(perfil, robeRec) {
+  const p = perfil || {};
+  const banned = p.banned === true;
+  const loginRequired = p.loginRequired === true;
+  const reason = String(p.loginReason || '').trim().toLowerCase();
+  if (banned) return 'banned';
+  if (loginRequired) {
+    if (reason.includes('captcha') || reason.includes('checkpoint')) return 'captcha';
+    if (reason === 'login_form') return 'login';
+    if (reason.includes('session')) return 'session';
+    if (reason.includes('2fa') || reason.includes('two_factor')) return 'two_factor';
+    if (reason.includes('identity')) return 'identity';
+    if (reason.includes('consent')) return 'consent';
+    return 'login_other';
+  }
+  const isLimit = !!(
+    robeRec &&
+    (String(robeRec.estado || '').toLowerCase() === 'paused_limit' ||
+      String(robeRec.pauseReason || '').toLowerCase() === 'limit_posting') &&
+    Number(robeRec.cooldownSec || 0) > 0
+  );
+  return isLimit ? 'limit_exceeded' : 'ok';
+}
+
+function __buildServerEventTelemetry(status) {
+  const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
+  const robes = (status && status.robes && typeof status.robes === 'object') ? status.robes : {};
+  const sys = (status && status.sys && typeof status.sys === 'object') ? status.sys : {};
+
+  const accountsAgg = { total: 0 };
+  const flagsAgg = {
+    totalPerfis: 0,
+    human_invoked: 0,
+    messenger_pin: 0,
+    problem: 0,
+    virtus_offline: 0,
+    login_required: 0,
+    login_cookies_failed: 0,
+    appeal_submitted: 0
+  };
+
+  for (const p of perfis) {
+    if (!p) continue;
+    const nome = String(p.nome || '').trim();
+    const kind = __classifyAccountState(p, nome ? robes[nome] : null);
+    accountsAgg[kind] = (Number(accountsAgg[kind] || 0) || 0) + 1;
+    accountsAgg.total++;
+
+    flagsAgg.totalPerfis++;
+    if (p.humanControl === true || p.humanHold === true) flagsAgg.human_invoked++;
+    if (p.messengerPin === true) flagsAgg.messenger_pin++;
+    if (p.problem === true) flagsAgg.problem++;
+    if (p.virtusOnline === false) flagsAgg.virtus_offline++;
+    if (p.loginRequired === true) flagsAgg.login_required++;
+    if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
+    if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
+  }
+  accountsAgg.lr_total = ['captcha', 'login', 'session', 'two_factor', 'identity', 'consent', 'login_other']
+    .reduce((acc, k) => acc + (Number(accountsAgg[k] || 0) || 0), 0);
+
+  const quick = {
+    perfisCount: perfis.length,
+    activeCount: perfis.filter((p) => p && p.active).length,
+    workingCount: perfis.filter((p) => p && p.trabalhando).length,
+    sys: {
+      freeMB: Number(sys.freeMB || 0) || 0,
+      totalMB: Number(sys.totalMB || 0) || 0,
+      cpuApprox: Number(sys.cpuApprox || 0) || 0
+    }
+  };
+
+  const signature = {
+    perfis: perfis.map((p) => ({
+      n: String(p && p.nome || ''),
+      a: !!(p && p.active),
+      w: !!(p && p.trabalhando),
+      lr: !!(p && p.loginRequired),
+      lrr: String(p && p.loginReason || ''),
+      b: !!(p && p.banned),
+      hc: !!(p && p.humanControl),
+      hh: !!(p && p.humanHold),
+      mp: !!(p && p.messengerPin),
+      pb: !!(p && p.problem),
+      vo: (p && p.virtusOnline === false) ? 0 : 1
+    })),
+    quick
+  };
+
+  const stateHash = crypto.createHash('sha1').update(JSON.stringify(signature)).digest('hex');
+  return { accountsAgg, flagsAgg, quick, stateHash };
+}
+
+async function __readLocalStatusForEventBridge() {
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`http://127.0.0.1:${PORT}/api/status`, { method: 'GET', signal: controller.signal });
+    if (!res.ok) throw new Error(`status_http_${res.status}`);
+    const json = await res.json();
+    if (!json || typeof json !== 'object') throw new Error('status_invalid_json');
+    return json;
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+function __resolveCtServerEventConfig() {
+  try {
+    const cfg = readCtConfig();
+    const ctBaseUrl = String(
+      (cfg && cfg.ctBaseUrl) ||
+      process.env.CT_BASE_URL ||
+      process.env.CT_URL ||
+      ''
+    ).trim().replace(/\/+$/, '');
+    const logSecret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
+    if (!ctBaseUrl || !logSecret) return null;
+    return { ctBaseUrl, logSecret };
+  } catch {
+    return null;
+  }
+}
+
+async function __postServerEventToCt(payload) {
+  const cfg = __resolveCtServerEventConfig();
+  if (!cfg) return { ok: false, skipped: true, error: 'ct_config_incomplete' };
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`${cfg.ctBaseUrl}/api/servers/event_secret`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-log-secret': cfg.logSecret
+      },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, status: res.status, error: `event_post_http_${res.status}:${String(body || '').slice(0, 180)}` };
+    }
+    return { ok: true, status: res.status };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+async function __serverEventBridgeTick(reason) {
+  if (__serverEventBridgeInFlight) return;
+  __serverEventBridgeInFlight = true;
+  try {
+    const status = await __readLocalStatusForEventBridge();
+    const hostId = __readOrCreateServerEventHostId();
+    const telemetry = __buildServerEventTelemetry(status);
+    const now = Date.now();
+    const changed = telemetry.stateHash !== __serverEventLastHash;
+    const heartbeatDue = !__serverEventLastSentAt || ((now - __serverEventLastSentAt) >= SERVER_EVENT_HEARTBEAT_MS);
+    if (!changed && !heartbeatDue && reason !== 'boot') return;
+
+    const payload = {
+      hostId,
+      hostname: String(os.hostname() || ''),
+      sentAt: now,
+      eventType: changed ? 'server_delta' : 'heartbeat',
+      stateHash: telemetry.stateHash,
+      quick: telemetry.quick,
+      accountsAgg: telemetry.accountsAgg,
+      flagsAgg: telemetry.flagsAgg,
+      ...(changed ? { status } : {})
+    };
+    const out = await __postServerEventToCt(payload);
+    if (out && out.ok) {
+      __serverEventLastHash = telemetry.stateHash;
+      __serverEventLastSentAt = now;
+    } else if (out && !out.skipped) {
+      logger.warn('[SERVER_EVENT_BRIDGE] falha ao postar evento no CT', { error: out.error || 'unknown', status: out.status || null });
+    }
+  } catch (e) {
+    logger.warn('[SERVER_EVENT_BRIDGE] tick falhou', { error: (e && e.message) || String(e) });
+  } finally {
+    __serverEventBridgeInFlight = false;
+  }
+}
+
+function startServerEventBridge() {
+  try {
+    if (__serverEventBridgeTimer) return;
+    __serverEventBridgeTick('boot').catch(() => {});
+    __serverEventBridgeTimer = setInterval(() => {
+      __serverEventBridgeTick('interval').catch(() => {});
+    }, SERVER_EVENT_CHECK_INTERVAL_MS);
+    try { __serverEventBridgeTimer.unref?.(); } catch {}
+  } catch {}
+}
+// ===================== Fim Server Event Bridge =====================
 
 // ===================== Middleware de autenticação (REMOVIDO) =====================
 
@@ -652,6 +884,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     }
 
     // Monitor legacy (polling) foi extinto (Tacada 1). Infra agora é event-driven via /api/infra/command-bus.
+    startServerEventBridge();
     networkRotation.startNetworkRotationScheduler({ port: PORT });
     dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
   });

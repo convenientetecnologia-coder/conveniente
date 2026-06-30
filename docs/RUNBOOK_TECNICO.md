@@ -42,6 +42,38 @@ Referência canônica (detalhamento do contrato + “formato de relato mínimo�
 
 ---
 
+### Servidores event-driven (delta + heartbeat + probe) — CANÔNICO (2026-06-29)
+
+Objetivo:
+- manter o menu `/servidores` atualizado por evento (mudou -> envia);
+- evitar spam de telemetria sem perder detecção de online/offline.
+
+Contrato operacional:
+- `conveniente` envia `server_delta` quando `stateHash` muda;
+- se nada mudar, envia `heartbeat` a cada `SERVER_EVENT_HEARTBEAT_MS` (default `600000` = 10 min);
+- CT considera host online por qualquer evento recebido (`lastPollReceivedAt`);
+- CT roda watchdog de silêncio e, se passar `CT_SERVER_EVENT_SILENCE_MS` (default 10 min), envia `infra_ping` via `/api/infra/command-bus`;
+- `infra_ping` no `conveniente` é no-op com `pong=true` (probe leve).
+
+Endpoints:
+- VM -> CT: `POST /api/servers/event_secret` (auth `x-log-secret` / `LOG_INGEST_SECRET`);
+- CT -> VM: `POST /api/infra/command-bus` (auth `x-infra-secret`), comando `infra_ping`.
+
+Env vars principais:
+- `conveniente`:
+  - `SERVER_EVENT_CHECK_INTERVAL_MS` (default `5000`)
+  - `SERVER_EVENT_HEARTBEAT_MS` (default `600000`)
+- `sitechatbot`:
+  - `CT_SERVER_EVENT_SILENCE_MS` (default `600000`)
+  - `CT_SERVER_EVENT_PROBE_INTERVAL_MS` (default `60000`)
+  - `CT_SERVER_EVENT_PROBE_GAP_MS` (default `60000`)
+
+Reinício para ativar:
+- `sitechatbot`: `node index.js`
+- `conveniente`: `node index.js`
+
+---
+
 ### Xubuntu 24.04 LTS (desktop) — instalação e operação visual do `conveniente` (CANÔNICO)
 
 Objetivo: preparar host Linux com 1 comando e manter operação diária com sessão gráfica ativa + navegadores visíveis.
