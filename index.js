@@ -1178,6 +1178,7 @@ let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
 let __serverEventLastSentAt = 0;
+let __serverEventPreferredCtBaseUrl = null;
 
 function __serverEventHostIdPath() {
   return path.join(__dirname, 'dados', '.telemetry_hostid');
@@ -1319,8 +1320,14 @@ function __resolveCtServerEventConfig() {
       ''
     ).trim().replace(/\/+$/, '');
     const logSecret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
-    if (!ctBaseUrl || !logSecret) return null;
-    return { ctBaseUrl, logSecret };
+    const fallbackBase = 'https://api.convenientetecnologia.com';
+    const candidates = [];
+    if (__serverEventPreferredCtBaseUrl) candidates.push(String(__serverEventPreferredCtBaseUrl).trim().replace(/\/+$/, ''));
+    if (ctBaseUrl) candidates.push(ctBaseUrl);
+    candidates.push(fallbackBase);
+    const ctBaseUrls = Array.from(new Set(candidates.filter(Boolean)));
+    if (!ctBaseUrls.length || !logSecret) return null;
+    return { ctBaseUrl: ctBaseUrls[0], ctBaseUrls, logSecret };
   } catch {
     return null;
   }
@@ -1329,28 +1336,42 @@ function __resolveCtServerEventConfig() {
 async function __postServerEventToCt(payload) {
   const cfg = __resolveCtServerEventConfig();
   if (!cfg) return { ok: false, skipped: true, error: 'ct_config_incomplete' };
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(`${cfg.ctBaseUrl}/api/servers/event_secret`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-log-secret': cfg.logSecret
-      },
-      body: JSON.stringify(payload || {}),
-      signal: controller.signal
-    });
-    if (!res.ok) {
+  const tried = [];
+  for (const baseUrl of (cfg.ctBaseUrls || [cfg.ctBaseUrl])) {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 8000);
+    try {
+      const target = `${String(baseUrl || '').replace(/\/+$/, '')}/api/servers/event_secret`;
+      tried.push(target);
+      const res = await fetch(target, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-log-secret': cfg.logSecret
+        },
+        body: JSON.stringify(payload || {}),
+        signal: controller.signal
+      });
+      if (res.ok) {
+        __serverEventPreferredCtBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+        return { ok: true, status: res.status, ctBaseUrl: __serverEventPreferredCtBaseUrl };
+      }
       const body = await res.text().catch(() => '');
-      return { ok: false, status: res.status, error: `event_post_http_${res.status}:${String(body || '').slice(0, 180)}` };
+      const errPreview = String(body || '').slice(0, 180);
+      const isRetriable = Number(res.status || 0) >= 500 || /<!doctype html>|<html/i.test(errPreview);
+      if (!isRetriable) {
+        return { ok: false, status: res.status, ctBaseUrl: String(baseUrl || ''), error: `event_post_http_${res.status}:${errPreview}`, tried };
+      }
+    } catch (e) {
+      // tenta próximo candidato
+      if (String(e && e.name || '') === 'AbortError') {
+        // timeout explícito entra como retentável
+      }
+    } finally {
+      clearTimeout(to);
     }
-    return { ok: true, status: res.status };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
-  } finally {
-    clearTimeout(to);
   }
+  return { ok: false, error: 'event_post_all_candidates_failed', tried };
 }
 
 async function __serverEventBridgeTick(reason) {
@@ -1381,7 +1402,12 @@ async function __serverEventBridgeTick(reason) {
       __serverEventLastHash = telemetry.stateHash;
       __serverEventLastSentAt = now;
     } else if (out && !out.skipped) {
-      logger.warn('[SERVER_EVENT_BRIDGE] falha ao postar evento no CT', { error: out.error || 'unknown', status: out.status || null });
+      logger.warn('[SERVER_EVENT_BRIDGE] falha ao postar evento no CT', {
+        error: out.error || 'unknown',
+        status: out.status || null,
+        ctBaseUrl: out.ctBaseUrl || null,
+        tried: out.tried || null
+      });
     }
   } catch (e) {
     logger.warn('[SERVER_EVENT_BRIDGE] tick falhou', { error: (e && e.message) || String(e) });
