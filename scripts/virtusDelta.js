@@ -412,9 +412,11 @@ const HUMAN_TIMINGS = {
   /** Pausa perceptiva pós-lead (Fabiana): padrão 3–7s */
   reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
   /** Antes de clicar no filtro Marketplace */
-  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 450, 950),
+  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 1200, 2200),
   /** Após ativar Marketplace — DOM lateral estabilizar */
-  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 900, 1800),
+  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 1800, 3200),
+  /** Janela extra para carregamento real da UI antes de clicar no Marketplace */
+  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 1400, 2600),
   /** Antes de clicar no card do cliente */
   preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 600, 1400),
   /** Após abrir o chat — ler contexto antes de digitar */
@@ -432,11 +434,11 @@ const HUMAN_TIMINGS = {
   /** Após envio */
   postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 280, 550),
   /** delay do page.click */
-  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 60, 140),
+  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 120, 260),
   /** Entre scrolls no sidebar */
   scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 200, 380),
   /** Refresh DOM / retries */
-  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 250, 500),
+  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 700, 1400),
 };
 
 function clickDelayMs() {
@@ -820,6 +822,37 @@ async function isMarketplaceFilterActive(page) {
   );
 }
 
+async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable") {
+  await humanPause("domSettle", `${label}_dom_settle`);
+  try {
+    await page.waitForFunction(
+      () => {
+        try {
+          if (document.readyState !== "complete" && document.readyState !== "interactive") return false;
+          if (document.querySelector('[aria-busy="true"]')) return false;
+          const controls = Array.from(
+            document.querySelectorAll(
+              'a[href*="folder=marketplace"],[role="tab"],header [role="button"],nav [role="button"],[role="navigation"] [role="button"]'
+            )
+          );
+          return controls.some((el) => {
+            const txt = String(el.textContent || "").trim().toLowerCase();
+            const al = String(el.getAttribute("aria-label") || "").trim().toLowerCase();
+            const href = String(el.getAttribute("href") || "").trim().toLowerCase();
+            if (href.includes("/messages/t/") || href.includes("/messages/e2ee/t/")) return false;
+            if (href.includes("/marketplace/item/")) return false;
+            return txt.includes("marketplace") || al.includes("marketplace") || href.includes("folder=marketplace");
+          });
+        } catch (_) {
+          return false;
+        }
+      },
+      { timeout: 12000 }
+    );
+  } catch (_) {}
+  await humanPause("marketplaceLoad", `${label}_final_load`);
+}
+
 async function ensureMarketplaceFilterActive(page) {
   const now = Date.now();
   const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
@@ -836,7 +869,7 @@ async function ensureMarketplaceFilterActive(page) {
     return { ok: true, already_active: true, active_after: true };
   }
 
-  if (lastClickAt && now - lastClickAt < 4500) {
+  if (lastClickAt && now - lastClickAt < 8000) {
     await humanPause("domSettle", "marketplace_guard_recheck");
     const activeAfterGuard = await isMarketplaceFilterActive(page);
     if (activeAfterGuard) {
@@ -849,9 +882,10 @@ async function ensureMarketplaceFilterActive(page) {
   try {
     page.__virtusDeltaMarketplaceGuard = {
       ...guard,
-      inFlightUntil: Date.now() + 4000,
+      inFlightUntil: Date.now() + 9000,
     };
   } catch (_) {}
+  await waitForMarketplaceUiStable(page, "marketplace_pre_click");
   await humanPause("preMarketplace", "pre_marketplace_click");
   const click = await clickMarketplaceFilterIfPresent(page);
   try {
@@ -869,22 +903,24 @@ async function ensureMarketplaceFilterActive(page) {
     activeAfter = await isMarketplaceFilterActive(page);
   }
   if (!activeAfter && !click.changed) {
-    // Segunda tentativa (ícone SVG sem label) — bounded
-    const buttons = await page.$$('div[data-virtualized="false"] div[role="button"]').catch(() => []);
-    for (const b of buttons.slice(0, 8)) {
+    // Retry seguro: revalida carregamento e tenta novamente somente via seletor seguro.
+    await waitForMarketplaceUiStable(page, "marketplace_safe_retry");
+    const retry = await clickMarketplaceFilterIfPresent(page);
+    await humanPause("domSettle", "marketplace_safe_retry_settle");
+    activeAfter = await isMarketplaceFilterActive(page);
+    if (retry && retry.changed) {
       try {
-        const hasSvg = await b.evaluate((el) => Boolean(el.querySelector("svg")));
-        if (!hasSvg) continue;
-        await b.click({ delay: clickDelayMs() }).catch(() => {});
-        await humanPause("domSettle", "marketplace_icon_retry");
-        activeAfter = await isMarketplaceFilterActive(page);
-        if (activeAfter || click.changed) break;
+        page.__virtusDeltaMarketplaceGuard = {
+          ...(page.__virtusDeltaMarketplaceGuard || {}),
+          lastClickAt: Date.now(),
+        };
       } catch (_) {}
     }
   }
 
   if (!activeAfter && click.changed) {
     // Se "entrou e saiu" por re-render/duplo evento, faz um retorno único e validado.
+    await waitForMarketplaceUiStable(page, "marketplace_recover");
     await humanPause("domSettle", "marketplace_recover_once");
     const recover = await clickMarketplaceFilterIfPresent(page);
     await humanPause("domSettle", "marketplace_recover_settle");
