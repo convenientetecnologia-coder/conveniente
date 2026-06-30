@@ -70,6 +70,8 @@ let __gateBCloudflaredStarted = false;
 let __gateBCloudflaredChild = null;
 let __gateBCloudflaredRestartTimer = null;
 let __gateBCloudflaredLastExit = null;
+let __gateBEdgeProbeTimer = null;
+let __gateBEdgeProbeState = { consecutiveFailures: 0, lastStatus: null, lastError: null, lastOkAt: null, lastForceRefreshAt: null };
 let __gateBRuntime = {
   updatedAt: 0,
   hostId: null,
@@ -120,6 +122,15 @@ async function maybeBootstrapGateBToken() {
     'https://api.convenientetecnologia.com/api/edge/bootstrap'
   ).trim();
   const BOOTSTRAP_SECRET = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
+  const EDGE_PROBE_ENABLED = String(process.env.GATE_B_EDGE_PROBE_ENABLED || '1').trim() !== '0';
+  const EDGE_PROBE_INTERVAL_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_PROBE_INTERVAL_MS || 45000) || 45000);
+  const EDGE_PROBE_FAIL_THRESHOLD = Math.max(2, Number(process.env.GATE_B_EDGE_PROBE_FAIL_THRESHOLD || 3) || 3);
+  const EDGE_FORCE_REFRESH_COOLDOWN_MS = Math.max(60000, Number(process.env.GATE_B_FORCE_REFRESH_COOLDOWN_MS || 600000) || 600000);
+
+  const isTruthy = (v) => {
+    const s = String(v == null ? '' : v).trim().toLowerCase();
+    return v === true || s === '1' || s === 'true' || s === 'yes';
+  };
 
   const readHostId = () => {
     try {
@@ -162,6 +173,19 @@ async function maybeBootstrapGateBToken() {
     const tmp = `${BUNDLE_PATH}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(bundle, null, 2) + '\n', 'utf8');
     fs.renameSync(tmp, BUNDLE_PATH);
+  };
+
+  const stopCloudflaredChild = () => {
+    try {
+      const child = __gateBCloudflaredChild;
+      if (!child || child.exitCode != null) return false;
+      try { child.kill('SIGTERM'); } catch {}
+      __gateBCloudflaredChild = null;
+      __gateBCloudflaredStarted = false;
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const ensureCloudflaredExe = async () => {
@@ -342,7 +366,9 @@ async function maybeBootstrapGateBToken() {
     } catch {}
   };
 
-  const tryBootstrapOnce = async () => {
+  const tryBootstrapOnce = async (opts = {}) => {
+    const forceRefresh = isTruthy(opts && opts.forceRefresh);
+    const forceReason = String((opts && opts.reason) || '').trim() || null;
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
@@ -377,12 +403,12 @@ async function maybeBootstrapGateBToken() {
         });
       } catch {}
       if (existing && existing.tunnelToken) {
-        if (!__gateBCloudflaredStarted) {
+        if (!forceRefresh && !__gateBCloudflaredStarted) {
           const ok = await spawnCloudflaredToken(existing.tunnelToken);
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
-        return true;
+        if (!forceRefresh) return true;
       }
 
       const tokenEnv = String(process.env.CONVENIENTE_GATE_B_TUNNEL_TOKEN || '').trim();
@@ -446,6 +472,10 @@ async function maybeBootstrapGateBToken() {
         ts: Date.now(),
         want: 'gate_b_token_v1'
       };
+      if (forceRefresh) {
+        body.forceRefresh = true;
+        if (forceReason) body.reason = forceReason;
+      }
       const headers = { 'content-type': 'application/json' };
       if (BOOTSTRAP_SECRET) headers['x-bootstrap-secret'] = BOOTSTRAP_SECRET;
 
@@ -457,7 +487,9 @@ async function maybeBootstrapGateBToken() {
           lastAttemptAt: Date.now(),
           lastUrl: urls[0] ? String(urls[0]) : null,
           lastStatus: null,
-          lastError: null
+          lastError: null,
+          forceRefresh: !!forceRefresh,
+          forceReason
         }
       });
 
@@ -521,6 +553,7 @@ async function maybeBootstrapGateBToken() {
           const tunnelToken = parsed && parsed.tunnelToken ? String(parsed.tunnelToken).trim() : '';
           const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
           const infraSecret = parsed && parsed.infraSecret ? String(parsed.infraSecret).trim() : '';
+          const previousToken = String((existing && existing.tunnelToken) ? existing.tunnelToken : '').trim();
 
           // Sempre cacheia host/secret quando vier (mesmo sem tunnel token), para reduzir acoplamento.
           if (hostFqdn || infraSecret) {
@@ -567,15 +600,21 @@ async function maybeBootstrapGateBToken() {
             bootstrap: {
               ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
               lastOkAt: Date.now(),
-              lastStatus
+              lastStatus,
+              forceRefresh: !!forceRefresh,
+              forceReason
             }
           });
+          const tokenRotated = !!previousToken && previousToken !== tunnelToken;
+          if ((__gateBCloudflaredStarted && tokenRotated) || forceRefresh) {
+            stopCloudflaredChild();
+          }
           if (!__gateBCloudflaredStarted) {
             const ok = await spawnCloudflaredToken(tunnelToken);
             __gateBCloudflaredStarted = !!ok;
-            logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
+            logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: cloudflared_token_start=' + (ok ? 'ok' : 'fail'), { forceRefresh, tokenRotated });
           } else {
-            logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: bundle atualizado (cloudflared já ativo)');
+            logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: bundle atualizado (cloudflared já ativo)', { forceRefresh, tokenRotated });
           }
           return;
         } finally {
@@ -612,8 +651,88 @@ async function maybeBootstrapGateBToken() {
     }
   };
 
+  const isEdgeFailureStatus = (status) => {
+    const s = Number(status || 0) || 0;
+    return [502, 503, 520, 521, 522, 523, 524, 525, 526].includes(s);
+  };
+
+  const probePublicEdgeHealth = async () => {
+    try {
+      if (typeof fetch !== 'function') return;
+      const bundle = readBundle();
+      const hostFqdn = String((bundle && bundle.hostFqdn) ? bundle.hostFqdn : '').trim();
+      if (!hostFqdn) return;
+      const base = /^https?:\/\//i.test(hostFqdn) ? hostFqdn.replace(/\/+$/, '') : `https://${hostFqdn}`.replace(/\/+$/, '');
+      const probeUrl = `${base}/api/status`;
+      const controller = new AbortController();
+      const to = setTimeout(() => controller.abort(), 5500);
+      let status = 0;
+      let errMsg = '';
+      try {
+        const res = await fetch(probeUrl, { method: 'GET', redirect: 'manual', signal: controller.signal });
+        status = Number(res.status || 0) || 0;
+      } catch (e) {
+        errMsg = (e && e.message) ? String(e.message) : String(e);
+      } finally {
+        clearTimeout(to);
+      }
+
+      const ok = !errMsg && status >= 200 && status < 500 && !isEdgeFailureStatus(status);
+      if (ok) {
+        __gateBEdgeProbeState = {
+          ...__gateBEdgeProbeState,
+          consecutiveFailures: 0,
+          lastStatus: status || null,
+          lastError: null,
+          lastOkAt: Date.now()
+        };
+      } else {
+        const nextFails = Number(__gateBEdgeProbeState.consecutiveFailures || 0) + 1;
+        __gateBEdgeProbeState = {
+          ...__gateBEdgeProbeState,
+          consecutiveFailures: nextFails,
+          lastStatus: status || null,
+          lastError: errMsg || (status ? `status_${status}` : 'edge_probe_failed')
+        };
+        const now = Date.now();
+        const lastForce = Number(__gateBEdgeProbeState.lastForceRefreshAt || 0) || 0;
+        const inCooldown = now - lastForce < EDGE_FORCE_REFRESH_COOLDOWN_MS;
+        if (nextFails >= EDGE_PROBE_FAIL_THRESHOLD && !inCooldown) {
+          __gateBEdgeProbeState.lastForceRefreshAt = now;
+          logger.warn('[GATE_B][EDGE_PROBE] falha persistente detectada; solicitando reprovisionamento no CT', {
+            hostFqdn,
+            status: status || null,
+            error: errMsg || null,
+            consecutiveFailures: nextFails
+          });
+          await tryBootstrapOnce({ forceRefresh: true, reason: `edge_probe_${status || 'err'}` });
+        }
+      }
+
+      __gateBUpdateRuntime({
+        edgeProbe: {
+          hostFqdn,
+          enabled: EDGE_PROBE_ENABLED,
+          intervalMs: EDGE_PROBE_INTERVAL_MS,
+          failThreshold: EDGE_PROBE_FAIL_THRESHOLD,
+          cooldownMs: EDGE_FORCE_REFRESH_COOLDOWN_MS,
+          ...__gateBEdgeProbeState
+        }
+      });
+    } catch {}
+  };
+
   // Primeira tentativa no boot (não bloqueante).
   await tryBootstrapOnce();
+  if (EDGE_PROBE_ENABLED) {
+    if (!__gateBEdgeProbeTimer) {
+      __gateBEdgeProbeTimer = setInterval(() => {
+        probePublicEdgeHealth().catch(() => {});
+      }, EDGE_PROBE_INTERVAL_MS);
+      try { __gateBEdgeProbeTimer.unref?.(); } catch {}
+    }
+    probePublicEdgeHealth().catch(() => {});
+  }
 }
 
 // Helpers/pontes
