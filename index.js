@@ -76,7 +76,16 @@ let __gateBLastForceRefreshReason = null;
 let __gateBCredentialRefreshNeeded = false;
 let __gateBCredentialRefreshReason = null;
 let __gateBEdgeProbeTimer = null;
-let __gateBEdgeProbeState = { consecutiveFailures: 0, lastStatus: null, lastError: null, lastOkAt: null, lastForceRefreshAt: null };
+let __gateBEdgeProbeState = {
+  consecutiveFailures: 0,
+  lastStatus: null,
+  lastError: null,
+  lastOkAt: null,
+  lastForceRefreshAt: null,
+  outageSince: null,
+  localRecoveryAttempts: 0,
+  lastLocalRecoveryAt: null
+};
 let __gateBRuntime = {
   updatedAt: 0,
   hostId: null,
@@ -135,6 +144,9 @@ async function maybeBootstrapGateBToken() {
   const EDGE_PROBE_INTERVAL_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_PROBE_INTERVAL_MS || 45000) || 45000);
   const EDGE_PROBE_FAIL_THRESHOLD = Math.max(2, Number(process.env.GATE_B_EDGE_PROBE_FAIL_THRESHOLD || 3) || 3);
   const EDGE_FORCE_REFRESH_COOLDOWN_MS = Math.max(60000, Number(process.env.GATE_B_FORCE_REFRESH_COOLDOWN_MS || 600000) || 600000);
+  const EDGE_LOCAL_RECOVERY_COOLDOWN_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_LOCAL_RECOVERY_COOLDOWN_MS || 120000) || 120000);
+  const EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS = Math.max(1, Number(process.env.GATE_B_EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS || 3) || 3);
+  const EDGE_FORCE_ON_PROLONGED_OUTAGE_MS = Math.max(120000, Number(process.env.GATE_B_EDGE_FORCE_ON_PROLONGED_OUTAGE_MS || 600000) || 600000);
   const FORCE_REFRESH_MIN_INTERVAL_MS = Math.max(120000, Number(process.env.GATE_B_FORCE_REFRESH_MIN_INTERVAL_MS || 900000) || 900000);
   const FORCE_REFRESH_BOOT_GRACE_MS = Math.max(0, Number(process.env.GATE_B_FORCE_REFRESH_BOOT_GRACE_MS || 30000) || 30000);
   const gateBBootAt = Date.now();
@@ -823,29 +835,62 @@ async function maybeBootstrapGateBToken() {
           consecutiveFailures: 0,
           lastStatus: status || null,
           lastError: null,
-          lastOkAt: Date.now()
+          lastOkAt: Date.now(),
+          outageSince: null,
+          localRecoveryAttempts: 0,
+          lastLocalRecoveryAt: null
         };
       } else {
         const nextFails = Number(__gateBEdgeProbeState.consecutiveFailures || 0) + 1;
+        const now = Date.now();
+        const outageSince = Number(__gateBEdgeProbeState.outageSince || 0) || now;
         __gateBEdgeProbeState = {
           ...__gateBEdgeProbeState,
           consecutiveFailures: nextFails,
           lastStatus: status || null,
-          lastError: errMsg || (status ? `status_${status}` : 'edge_probe_failed')
+          lastError: errMsg || (status ? `status_${status}` : 'edge_probe_failed'),
+          outageSince
         };
-        const now = Date.now();
         const lastForce = Number(__gateBEdgeProbeState.lastForceRefreshAt || 0) || 0;
         const inCooldown = now - lastForce < EDGE_FORCE_REFRESH_COOLDOWN_MS;
-        if (nextFails >= EDGE_PROBE_FAIL_THRESHOLD && !inCooldown && __gateBCredentialRefreshNeeded) {
-          __gateBEdgeProbeState.lastForceRefreshAt = now;
-          logger.warn('[GATE_B][EDGE_PROBE] falha persistente + credencial invalida; solicitando reprovisionamento no CT', {
-            hostFqdn,
-            status: status || null,
-            error: errMsg || null,
-            consecutiveFailures: nextFails,
-            reason: __gateBCredentialRefreshReason
-          });
-          await tryBootstrapOnce({ forceRefresh: true, reason: __gateBCredentialRefreshReason || `edge_probe_${status || 'err'}` });
+        if (nextFails >= EDGE_PROBE_FAIL_THRESHOLD) {
+          const lastLocalRecoveryAt = Number(__gateBEdgeProbeState.lastLocalRecoveryAt || 0) || 0;
+          const localRecoveryAttempts = Number(__gateBEdgeProbeState.localRecoveryAttempts || 0) || 0;
+          const localRecoveryCooldownOk = !lastLocalRecoveryAt || (now - lastLocalRecoveryAt >= EDGE_LOCAL_RECOVERY_COOLDOWN_MS);
+          const canAttemptLocalRecovery = localRecoveryCooldownOk && (localRecoveryAttempts < EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS);
+          const prolongedOutage = now - outageSince >= EDGE_FORCE_ON_PROLONGED_OUTAGE_MS;
+
+          if (__gateBCredentialRefreshNeeded && !inCooldown) {
+            __gateBEdgeProbeState.lastForceRefreshAt = now;
+            logger.warn('[GATE_B][EDGE_PROBE] falha persistente + credencial invalida; solicitando reprovisionamento no CT', {
+              hostFqdn,
+              status: status || null,
+              error: errMsg || null,
+              consecutiveFailures: nextFails,
+              reason: __gateBCredentialRefreshReason
+            });
+            await tryBootstrapOnce({ forceRefresh: true, reason: __gateBCredentialRefreshReason || `edge_probe_${status || 'err'}` });
+          } else if (canAttemptLocalRecovery) {
+            __gateBEdgeProbeState.localRecoveryAttempts = localRecoveryAttempts + 1;
+            __gateBEdgeProbeState.lastLocalRecoveryAt = now;
+            logger.warn('[GATE_B][EDGE_PROBE] falha persistente; tentando autocura local sem CT', {
+              hostFqdn,
+              consecutiveFailures: nextFails,
+              localRecoveryAttempt: __gateBEdgeProbeState.localRecoveryAttempts,
+              maxAttempts: EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS
+            });
+            stopCloudflaredChild();
+            await tryBootstrapOnce({ forceRefresh: false, reason: 'edge_probe_local_recover' });
+          } else if (!inCooldown && prolongedOutage) {
+            __gateBEdgeProbeState.lastForceRefreshAt = now;
+            logger.warn('[GATE_B][EDGE_PROBE] indisponibilidade prolongada; escalando para CT', {
+              hostFqdn,
+              consecutiveFailures: nextFails,
+              outageMs: now - outageSince,
+              reason: 'edge_probe_prolonged_outage'
+            });
+            await tryBootstrapOnce({ forceRefresh: true, reason: 'edge_probe_prolonged_outage' });
+          }
         }
       }
 
@@ -856,6 +901,9 @@ async function maybeBootstrapGateBToken() {
           intervalMs: EDGE_PROBE_INTERVAL_MS,
           failThreshold: EDGE_PROBE_FAIL_THRESHOLD,
           cooldownMs: EDGE_FORCE_REFRESH_COOLDOWN_MS,
+          localRecoveryCooldownMs: EDGE_LOCAL_RECOVERY_COOLDOWN_MS,
+          localRecoveryMaxAttempts: EDGE_LOCAL_RECOVERY_MAX_ATTEMPTS,
+          forceOnProlongedOutageMs: EDGE_FORCE_ON_PROLONGED_OUTAGE_MS,
           forceRefreshMinIntervalMs: FORCE_REFRESH_MIN_INTERVAL_MS,
           forceRefreshBootGraceMs: FORCE_REFRESH_BOOT_GRACE_MS,
           lastForceRefreshAt: __gateBLastForceRefreshAt || null,
