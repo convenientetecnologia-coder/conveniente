@@ -67,6 +67,9 @@ async function maybeBootstrapService() {
 let __gateBRetryTimer = null;
 let __gateBInFlight = false;
 let __gateBCloudflaredStarted = false;
+let __gateBCloudflaredChild = null;
+let __gateBCloudflaredRestartTimer = null;
+let __gateBCloudflaredLastExit = null;
 
 async function maybeBootstrapGateBToken() {
   const DATA_DIR = path.join(__dirname, 'dados');
@@ -198,13 +201,40 @@ async function maybeBootstrapGateBToken() {
     try {
       const { spawn } = require('child_process');
       // Não usar "cloudflared" no PATH: queremos caminho determinístico para evitar ENOENT.
+      try {
+        if (__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null) return true;
+      } catch {}
       const candidate = await ensureCloudflaredExe();
       if (!candidate) return false;
       const args = ['tunnel', 'run', '--token', String(token)];
       const child = spawn(candidate, args, { stdio: 'ignore', windowsHide: true, detached: true });
+      __gateBCloudflaredChild = child;
       child.once('error', (err) => {
         // CRÍTICO: sem isso, ENOENT vira uncaughtException e mata o master.
         try { logger.warn('[GATE_B][BOOTSTRAP] cloudflared spawn falhou', { error: (err && err.message) || String(err) }); } catch {}
+      });
+      child.once('exit', (code, signal) => {
+        try {
+          __gateBCloudflaredLastExit = { at: Date.now(), code: code == null ? null : Number(code), signal: signal == null ? null : String(signal) };
+        } catch {}
+        __gateBCloudflaredChild = null;
+        __gateBCloudflaredStarted = false;
+        try {
+          logger.warn('[GATE_B][BOOTSTRAP] cloudflared encerrou; agendando auto-restart', { code: code == null ? null : Number(code), signal: signal == null ? null : String(signal) });
+        } catch {}
+        try {
+          if (__gateBCloudflaredRestartTimer) return;
+          const waitMs = Math.max(3000, Number(process.env.GATE_B_CLOUDFLARED_RESTART_MS || 5000) || 5000);
+          __gateBCloudflaredRestartTimer = setTimeout(() => {
+            __gateBCloudflaredRestartTimer = null;
+            try {
+              maybeBootstrapGateBToken().catch((e) => {
+                try { logger.warn('[GATE_B][BOOTSTRAP] auto-restart falhou', { error: (e && e.message) || String(e) }); } catch {}
+              });
+            } catch {}
+          }, waitMs);
+          try { __gateBCloudflaredRestartTimer.unref?.(); } catch {}
+        } catch {}
       });
       try { child.unref(); } catch {}
       return true;
@@ -252,6 +282,12 @@ async function maybeBootstrapGateBToken() {
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
+      try {
+        if (__gateBCloudflaredStarted && __gateBCloudflaredChild && __gateBCloudflaredChild.exitCode != null) {
+          __gateBCloudflaredStarted = false;
+          __gateBCloudflaredChild = null;
+        }
+      } catch {}
       const existing = readBundle();
       if (existing && existing.tunnelToken) {
         if (!__gateBCloudflaredStarted) {

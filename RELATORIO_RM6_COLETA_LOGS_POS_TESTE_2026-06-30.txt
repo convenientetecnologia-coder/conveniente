@@ -1,0 +1,94 @@
+RELATÓRIO — RM6 (Delta) — Coleta Remota de Logs pós-teste (marketplace abre/fecha)
+Data: 2026-06-30
+
+Contexto
+- Sintoma reportado (operador): ao iniciar teste no RM6, o robô abre o Marketplace e fecha imediatamente (loop/sensibilidade do DOM).
+- Objetivo: coletar evidência (logs) sem “achismo”, via endpoint remoto recém-criado `POST /api/infra/debug-bundle`.
+
+Identificação do servidor (CT)
+- hostId (RM6 / Robe Mãe 6): aba80611-8b8a-46ed-a852-f5f0d573c03b
+- hostFqdn (Edge/Tunnel esperado pelo CT): aba80611-8b8a-46ed-a852-f5f0d573c03b.convenientetecnologia.com
+- Fonte: `C:\sitechatbot\dados\server_names.json` + tabela `ct_edge_hosts` no SQLite do CT
+  - DB: `C:\sitechatbot\dados\convenientetecnologia.sqlite`
+
+1) Resultado da tentativa de coleta remota (debug-bundle)
+Resumo
+- A coleta falhou por indisponibilidade do túnel (Edge) do RM6.
+- Evidência objetiva: o hostFqdn do RM6 responde `HTTP/1.1 503 Service Unavailable` pelo Cloudflare (ou seja: túnel não está conectado/saudável).
+- Consequência: nenhum endpoint remoto da VM (incluindo `/api/infra/debug-bundle`) fica acessível externamente neste momento.
+
+Evidência (probe HTTP no hostFqdn do RM6)
+- Comando executado localmente:
+  - `curl.exe -I --max-time 15 https://aba80611-8b8a-46ed-a852-f5f0d573c03b.convenientetecnologia.com/`
+- Resposta recebida:
+  - `HTTP/1.1 503 Service Unavailable`
+  - `Server: cloudflare`
+  - `CF-RAY: a13fb703efdbf17b-GRU`
+
+Tentativa de coleta via ferramenta local (CT → Edge hostFqdn → debug-bundle)
+- Ferramenta criada: `C:\sitechatbot\tools\pull_edge_debug_bundle.js`
+- Execução (RM6):
+  - `node tools/pull_edge_debug_bundle.js aba80611-8b8a-46ed-a852-f5f0d573c03b --tailLines 1200 --issuesItems 200`
+- Resultado:
+  - status HTTP: 503
+  - arquivo de saída (resposta vazia): `C:\conveniente\dados\debug_bundle_aba80611-8b8a-46ed-a852-f5f0d573c03b_1782849055211.json`
+
+2) Implicação operacional (por que “não dá para puxar logs agora”)
+- O desenho “inteligente” (endpoint remoto) depende de um pré-requisito: o **túnel Edge (cloudflared)** do host estar saudável.
+- Enquanto o hostFqdn do RM6 estiver em 503 (Cloudflare), o CT não consegue:
+  - enviar comandos infra via `/api/infra/command-bus`
+  - coletar `debug-bundle`
+  - processar “logs sob demanda” (fetch_logs) para esse host
+
+3) Correção aplicada no código (universal / todos os servidores)
+Problema estrutural observado no bootstrap Gate B do `Conveniênte`
+- O processo do cloudflared é iniciado (detached/unref) e marcado como “started”.
+- Se o cloudflared **encerra** depois (crash/restart do Windows/network flap), o runtime pode ficar “sem túnel” indefinidamente, porque:
+  - não havia handler de `exit` para zerar o flag e reagendar restart automático.
+
+Hotfix implementado (Conveniênte)
+- Arquivo: `C:\conveniente\index.js`
+- Ajustes:
+  - manter referência do child do cloudflared (`__gateBCloudflaredChild`)
+  - em `exit`, zerar `__gateBCloudflaredStarted` e agendar auto-restart chamando `maybeBootstrapGateBToken()` após um pequeno delay
+  - evitar “started=true” com child morto (sanity check no começo do bootstrap)
+- Variável opcional:
+  - `GATE_B_CLOUDFLARED_RESTART_MS` (default: 5000ms)
+
+4) Linha do tempo de patches recentes (Conveniente / main)
+- Commits mais recentes (últimos 10):
+  - 073fcad feat: add infra debug-bundle endpoint for remote log collection
+  - 8bae2da fix: permanent bypass on healthTick recoveryStep mutation and enforce direct messages entry page
+  - e1ee012 feat: permanent hot-fix bypass legacy watchdogs and inject enterprise forensic delta logs
+  - 0147ffc fix: aguardar messages estabilizar antes do primeiro clique em marketplace
+  - 0186221 fix: serializar ativação do marketplace e aguardar estabilização real
+  - 24281a8 fix: endurecer modo seguro para escala contínua de browsers
+  - 0da8c40 fix: humanizar ritmo e travar cliques prematuros no marketplace
+  - 4d4525d fix: blindar clique do marketplace contra alvos errados
+  - 9d327d4 fix: estabilizar entrada delta em messages e marketplace
+  - ad63086 fix: harden delta marketplace activation and boot path
+
+5) Próximo passo objetivo (sem achismo)
+Critério de prontidão do túnel Edge do RM6
+- Quando o RM6 estiver com o cloudflared de pé, o `hostFqdn` deve parar de responder 503.
+- Assim que isso ocorrer, a coleta remota volta a funcionar e conseguimos:
+  - chamar `POST /api/infra/debug-bundle` e obter `desired/status/provision_audit/issues`
+  - enfileirar “logs sob demanda” a partir do CT (se aplicável)
+
+6) Snapshot CT (estado do RM6 no momento do registro)
+- Snapshot usado:
+  - `C:\sitechatbot\dados\aba80611-8b8a-46ed-a852-f5f0d573c03b-de0a1299b8.json`
+- Extração compacta (gerada via `C:\sitechatbot\tools\extract_snapshot_summary.js`):
+  - hostId: aba80611-8b8a-46ed-a852-f5f0d573c03b
+  - hostname: DESKTOP-9OULHH9
+  - sentAt: 1782849624492
+  - receivedAt: 1782849627127
+  - perfisCount: 11
+  - active perfis (1):
+    - cascavel-1777928117601 (Cascavel) active=true trabalhando=true numPages=1 virtusOnline=true issuesCount=0 closingReason=null
+  - inactive perfis com issues (>0): 9 (ex.: rio_de_janeiro... issuesCount=52)
+
+Observação importante
+- Este relatório registra a evidência objetiva do bloqueio atual (túnel 503) e o hotfix universal para reduzir a chance de ficar sem túnel novamente.
+- Assim que o hostFqdn do RM6 voltar a responder (200/401, etc.), refazemos a coleta e geramos um segundo relatório com o bundle real do teste.
+
