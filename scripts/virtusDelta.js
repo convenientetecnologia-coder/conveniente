@@ -14,12 +14,86 @@ try {
   puppeteer = require("puppeteer");
 }
 
-const {
-  decodeWebSocketPayload,
-  extractInnerPayload,
-  extractWsMessageEvents,
-  decodeEscapedText,
-} = require("./teste_login.js");
+let __wsHelpers = null;
+let __wsHelpersLoadError = null;
+try {
+  __wsHelpers = require("./teste_login.js");
+} catch (e) {
+  __wsHelpers = null;
+  __wsHelpersLoadError = e;
+}
+
+function __fallbackDecodeEscapedText(value) {
+  if (typeof value !== "string") return "";
+  try {
+    return JSON.parse(`"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+  } catch (_) {
+    return value;
+  }
+}
+
+function __fallbackDecodeWebSocketPayload(payloadData, opcode) {
+  if (typeof payloadData !== "string" || payloadData.length === 0) return "";
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(payloadData) && payloadData.length % 4 === 0;
+  const shouldDecodeBase64 = opcode === 2 || looksLikeBase64;
+  if (!shouldDecodeBase64) return payloadData;
+  try {
+    const decoded = Buffer.from(payloadData, "base64").toString("utf8");
+    const printableCount = (decoded.match(/[\x09\x0A\x0D\x20-\x7E]/g) || []).length;
+    const ratio = decoded.length ? printableCount / decoded.length : 0;
+    return ratio >= 0.75 ? decoded : payloadData;
+  } catch (_) {
+    return payloadData;
+  }
+}
+
+function __fallbackExtractInnerPayload(decoded) {
+  if (typeof decoded !== "string" || decoded.length === 0) return "";
+  const firstBrace = decoded.indexOf("{");
+  if (firstBrace === -1) return decoded;
+  const candidate = decoded.slice(firstBrace);
+  try {
+    const outer = JSON.parse(candidate);
+    if (outer && typeof outer.payload === "string") {
+      try {
+        return JSON.parse(outer.payload);
+      } catch (_) {
+        return outer.payload;
+      }
+    }
+    return candidate;
+  } catch (_) {
+    return candidate;
+  }
+}
+
+function __fallbackExtractWsMessageEvents(input) {
+  const asText = typeof input === "string" ? input : (() => {
+    try {
+      return JSON.stringify(input);
+    } catch (_) {
+      return String(input || "");
+    }
+  })();
+  return [{ raw: asText }];
+}
+
+const decodeWebSocketPayload =
+  __wsHelpers && typeof __wsHelpers.decodeWebSocketPayload === "function"
+    ? __wsHelpers.decodeWebSocketPayload
+    : __fallbackDecodeWebSocketPayload;
+const extractInnerPayload =
+  __wsHelpers && typeof __wsHelpers.extractInnerPayload === "function"
+    ? __wsHelpers.extractInnerPayload
+    : __fallbackExtractInnerPayload;
+const extractWsMessageEvents =
+  __wsHelpers && typeof __wsHelpers.extractWsMessageEvents === "function"
+    ? __wsHelpers.extractWsMessageEvents
+    : __fallbackExtractWsMessageEvents;
+const decodeEscapedText =
+  __wsHelpers && typeof __wsHelpers.decodeEscapedText === "function"
+    ? __wsHelpers.decodeEscapedText
+    : __fallbackDecodeEscapedText;
 
 let killChromeProfileProcesses = null;
 try {
@@ -35,6 +109,14 @@ function logInfo(...args) {
 
 function logDebug(...args) {
   if (LOG_LEVEL === "debug") console.log(...args);
+}
+
+if (!__wsHelpers && __wsHelpersLoadError) {
+  logInfo(
+    `[delta] WARN: helpers de teste_login indisponíveis; usando fallback interno (${String(
+      __wsHelpersLoadError && (__wsHelpersLoadError.message || __wsHelpersLoadError)
+    )})`
+  );
 }
 
 function sleep(ms) {

@@ -11,7 +11,25 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 const browserHelper = require('./browser.js');
 const legacyVirtus = require('./virtus.js');
 let deltaVirtus = null;
-try { deltaVirtus = require('./virtusDelta.js'); } catch { deltaVirtus = null; }
+let deltaVirtusLoadError = null;
+function loadDeltaVirtusRuntime() {
+  try {
+    const mod = require('./virtusDelta.js');
+    if (mod && typeof mod.startVirtusDeltaRuntime === 'function') {
+      deltaVirtus = mod;
+      deltaVirtusLoadError = null;
+      return true;
+    }
+    deltaVirtus = null;
+    deltaVirtusLoadError = new Error('delta_runtime_export_invalid');
+    return false;
+  } catch (e) {
+    deltaVirtus = null;
+    deltaVirtusLoadError = e;
+    return false;
+  }
+}
+loadDeltaVirtusRuntime();
 // Compat: código antigo ainda referencia virtusHelper.* em alguns pontos (ex.: garantirMarketplace).
 const virtusHelper = legacyVirtus;
 const robeHelper   = require('./robe.js');
@@ -73,9 +91,24 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     slowMode: (autoMode && autoMode.mode !== 'full'),
     governorMode: (autoMode && autoMode.mode) || 'full'
   };
-  if (eng === 'delta' && deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') {
-    try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (HTTP stateless + fila JSONL em disco).', { nome }); } catch {}
-    return deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
+  if (eng === 'delta') {
+    if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') {
+      // Retry defensivo em runtime: evita ficar preso a uma falha transitória de require no boot.
+      loadDeltaVirtusRuntime();
+    }
+    if (deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') {
+      try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (HTTP stateless + fila JSONL em disco).', { nome }); } catch {}
+      return deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
+    }
+    const errMsg = (deltaVirtusLoadError && (deltaVirtusLoadError.stack || deltaVirtusLoadError.message)) || 'delta_runtime_unavailable';
+    try {
+      logger.error('[ENGINE_SWITCH][DELTA_UNAVAILABLE] Delta selecionado mas runtime indisponível. Abortando fallback para legacy.', {
+        nome,
+        error: String(errMsg).slice(0, 2000)
+      });
+    } catch {}
+    // Contrato estrito: seleção Delta não pode cair silenciosamente em Legacy.
+    throw new Error('delta_selected_but_runtime_unavailable');
   }
   try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR LEGADO (Texto Fixo).', { nome }); } catch {}
   return legacyVirtus.startVirtus(browser, nome, baseCfg);
