@@ -14,16 +14,7 @@ try {
   puppeteer = require("puppeteer");
 }
 
-let __wsHelpers = null;
-let __wsHelpersLoadError = null;
-try {
-  __wsHelpers = require("./teste_login.js");
-} catch (e) {
-  __wsHelpers = null;
-  __wsHelpersLoadError = e;
-}
-
-function __fallbackDecodeEscapedText(value) {
+function decodeEscapedText(value) {
   if (typeof value !== "string") return "";
   try {
     return JSON.parse(`"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
@@ -32,7 +23,7 @@ function __fallbackDecodeEscapedText(value) {
   }
 }
 
-function __fallbackDecodeWebSocketPayload(payloadData, opcode) {
+function decodeWebSocketPayload(payloadData, opcode) {
   if (typeof payloadData !== "string" || payloadData.length === 0) return "";
   const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(payloadData) && payloadData.length % 4 === 0;
   const shouldDecodeBase64 = opcode === 2 || looksLikeBase64;
@@ -47,7 +38,7 @@ function __fallbackDecodeWebSocketPayload(payloadData, opcode) {
   }
 }
 
-function __fallbackExtractInnerPayload(decoded) {
+function extractInnerPayload(decoded) {
   if (typeof decoded !== "string" || decoded.length === 0) return "";
   const firstBrace = decoded.indexOf("{");
   if (firstBrace === -1) return decoded;
@@ -67,33 +58,75 @@ function __fallbackExtractInnerPayload(decoded) {
   }
 }
 
-function __fallbackExtractWsMessageEvents(input) {
-  const asText = typeof input === "string" ? input : (() => {
+function extractThreadAndText(source) {
+  const text = typeof source === "string" ? source : (() => {
     try {
-      return JSON.stringify(input);
+      return JSON.stringify(source);
     } catch (_) {
-      return String(input || "");
+      return String(source || "");
     }
   })();
-  return [{ raw: asText }];
+
+  const threadMatch =
+    text.match(/"thread_key"\s*:\s*"?(?<t1>\d+)"?/i) ||
+    text.match(/"thread_id"\s*:\s*"?(?<t2>\d+)"?/i) ||
+    text.match(/"thread_fbid"\s*:\s*"?(?<t3>\d+)"?/i);
+  const bodyMatch =
+    text.match(/"text"\s*:\s*"(?<m1>(?:\\.|[^"\\])*)"/i) ||
+    text.match(/"body"\s*:\s*"(?<m2>(?:\\.|[^"\\])*)"/i) ||
+    text.match(/"snippet"\s*:\s*"(?<m3>(?:\\.|[^"\\])*)"/i);
+
+  const threadKey = threadMatch?.groups?.t1 || threadMatch?.groups?.t2 || threadMatch?.groups?.t3 || "";
+  const rawMessage = bodyMatch?.groups?.m1 || bodyMatch?.groups?.m2 || bodyMatch?.groups?.m3 || "";
+
+  return {
+    threadKey,
+    text: decodeEscapedText(rawMessage),
+  };
 }
 
-const decodeWebSocketPayload =
-  __wsHelpers && typeof __wsHelpers.decodeWebSocketPayload === "function"
-    ? __wsHelpers.decodeWebSocketPayload
-    : __fallbackDecodeWebSocketPayload;
-const extractInnerPayload =
-  __wsHelpers && typeof __wsHelpers.extractInnerPayload === "function"
-    ? __wsHelpers.extractInnerPayload
-    : __fallbackExtractInnerPayload;
-const extractWsMessageEvents =
-  __wsHelpers && typeof __wsHelpers.extractWsMessageEvents === "function"
-    ? __wsHelpers.extractWsMessageEvents
-    : __fallbackExtractWsMessageEvents;
-const decodeEscapedText =
-  __wsHelpers && typeof __wsHelpers.decodeEscapedText === "function"
-    ? __wsHelpers.decodeEscapedText
-    : __fallbackDecodeEscapedText;
+function extractWsMessageEvents(input, accountUserId = "") {
+  const seen = new Set();
+  const out = [];
+  const pushEvent = (src, operation = "message") => {
+    const parsed = extractThreadAndText(src);
+    const thread_key = String(parsed.threadKey || "").trim();
+    const message_text = String(parsed.text || "").trim();
+    if (!thread_key || !message_text) return;
+    const k = `${thread_key}|${message_text}|${operation}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({
+      operation,
+      thread_key,
+      message_text,
+      sender_id: "",
+      account_user_id: String(accountUserId || ""),
+      direction: "nao_classificado",
+      source_layer: "delta_internal",
+    });
+  };
+
+  const walk = (node, op = "message") => {
+    if (!node) return;
+    if (typeof node === "string") {
+      pushEvent(node, op);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, op);
+      return;
+    }
+    if (typeof node === "object") {
+      pushEvent(node, op);
+      const nextOp = String(node.operation || node.operacao_meta || op || "message");
+      for (const v of Object.values(node)) walk(v, nextOp);
+    }
+  };
+
+  walk(input, "message");
+  return out;
+}
 
 let killChromeProfileProcesses = null;
 try {
@@ -109,14 +142,6 @@ function logInfo(...args) {
 
 function logDebug(...args) {
   if (LOG_LEVEL === "debug") console.log(...args);
-}
-
-if (!__wsHelpers && __wsHelpersLoadError) {
-  logInfo(
-    `[delta] WARN: helpers de teste_login indisponíveis; usando fallback interno (${String(
-      __wsHelpersLoadError && (__wsHelpersLoadError.message || __wsHelpersLoadError)
-    )})`
-  );
 }
 
 function sleep(ms) {
