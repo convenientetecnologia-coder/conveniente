@@ -344,13 +344,20 @@ async function maybeBootstrapGateBToken() {
           if (__gateBCloudflaredRestartTimer) return;
           const baseWaitMs = Math.max(3000, Number(process.env.GATE_B_CLOUDFLARED_RESTART_MS || 5000) || 5000);
           const inProvisioningWindow = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
+          const shouldForceRefreshOnExit = !inProvisioningWindow && (Number(code) === 1);
           const waitMs = inProvisioningWindow
             ? Math.max(baseWaitMs, (Number(__gateBProvisioningPendingUntil || 0) - Date.now()) + 1000)
             : baseWaitMs;
           __gateBCloudflaredRestartTimer = setTimeout(() => {
             __gateBCloudflaredRestartTimer = null;
             try {
-              maybeBootstrapGateBToken().catch((e) => {
+              const p = (typeof tryBootstrapOnce === 'function')
+                ? tryBootstrapOnce({
+                    forceRefresh: shouldForceRefreshOnExit,
+                    reason: shouldForceRefreshOnExit ? 'cloudflared_exit_code1' : 'cloudflared_exit'
+                  })
+                : maybeBootstrapGateBToken();
+              p.catch((e) => {
                 try { logger.warn('[GATE_B][BOOTSTRAP] auto-restart falhou', { error: (e && e.message) || String(e) }); } catch {}
               });
             } catch {}
@@ -571,6 +578,7 @@ async function maybeBootstrapGateBToken() {
               __gateBUpdateRuntime({
                 bootstrap: {
                   ...( (__gateBRuntime && __gateBRuntime.bootstrap) ? __gateBRuntime.bootstrap : {} ),
+                  provisioningPending: true,
                   provisioningPendingUntil: __gateBProvisioningPendingUntil
                 }
               });
@@ -654,6 +662,7 @@ async function maybeBootstrapGateBToken() {
               lastStatus,
               forceRefresh: !!forceRefresh,
               forceReason,
+              provisioningPending: false,
               provisioningPendingUntil: null
             }
           });
