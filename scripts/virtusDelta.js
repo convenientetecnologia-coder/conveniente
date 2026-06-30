@@ -449,6 +449,14 @@ const MARKETPLACE_STABILITY_GAP_MS = Math.max(
   800,
   Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_GAP_MS || 1800) || 1800
 );
+const MESSAGES_BOOT_STABILITY_ROUNDS = Math.max(
+  2,
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 3) || 3
+);
+const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
+  900,
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 2000) || 2000
+);
 
 function clickDelayMs() {
   return randomBetween(HUMAN_TIMINGS.click.min, HUMAN_TIMINGS.click.max);
@@ -898,6 +906,67 @@ async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable")
   }
 
   await humanPause("marketplaceLoad", `${label}_final_load`);
+}
+
+async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
+  let stableRounds = 0;
+  let lastSig = "";
+  const maxRounds = Math.max(4, MESSAGES_BOOT_STABILITY_ROUNDS * 2 + 1);
+
+  for (let i = 0; i < maxRounds; i++) {
+    await humanPause("domSettle", `${label}_dom_settle`);
+    let ok = false;
+    let sig = "";
+    try {
+      const out = await page.evaluate(() => {
+        try {
+          const ready = document.readyState === "complete" || document.readyState === "interactive";
+          const path = String(location.pathname || "").toLowerCase();
+          const isMessages = path.includes("/messages");
+          const busy = !!document.querySelector('[aria-busy="true"]');
+          const tablist = !!document.querySelector('[role="tablist"]');
+          const inboxSearch =
+            !!document.querySelector('input[aria-label*="Pesquisar no Messenger"]') ||
+            !!document.querySelector('input[aria-label*="Search in Messenger"]');
+          const threadCount = Math.min(
+            50,
+            document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length
+          );
+          const sig0 = `${path}|tabs=${tablist ? 1 : 0}|search=${inboxSearch ? 1 : 0}|threads=${threadCount}`;
+          return {
+            ok: ready && isMessages && !busy && tablist && (inboxSearch || threadCount > 0),
+            sig: sig0,
+          };
+        } catch (_) {
+          return { ok: false, sig: "" };
+        }
+      });
+      ok = !!(out && out.ok);
+      sig = String((out && out.sig) || "");
+    } catch (_) {
+      ok = false;
+      sig = "";
+    }
+
+    if (ok && sig && sig === lastSig) {
+      stableRounds += 1;
+    } else if (ok && sig) {
+      stableRounds = 1;
+      lastSig = sig;
+    } else {
+      stableRounds = 0;
+      lastSig = "";
+    }
+
+    if (stableRounds >= MESSAGES_BOOT_STABILITY_ROUNDS) {
+      logInfo(`[virtusDelta][boot] ${label}=ok rounds=${stableRounds}`);
+      return true;
+    }
+    await sleep(MESSAGES_BOOT_STABILITY_GAP_MS);
+  }
+
+  logInfo(`[virtusDelta][boot] ${label}=timeout rounds=${stableRounds}`);
+  return false;
 }
 
 async function waitMarketplaceActiveStable(page, { timeoutMs = 35000, rounds = 2 } = {}) {
@@ -1684,6 +1753,9 @@ async function startVirtusDeltaStandaloneRuntime({
 
   await page.goto(urlInicial, { waitUntil: "domcontentloaded", timeout: 45000 });
   try {
+    await waitForMessagesBootStable(page, "messages_ready_standalone");
+  } catch (_) {}
+  try {
     const currentUrl = page.url();
     const title = await page.title();
     const facebookCookies = await page.cookies("https://www.facebook.com");
@@ -1937,6 +2009,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (!/facebook\.com\/messages/i.test(u0)) {
       await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     }
+  } catch (_) {}
+  try {
+    await waitForMessagesBootStable(page, "messages_ready_worker");
   } catch (_) {}
   try {
     const mpBoot = await ensureMarketplaceFilterActive(page);
