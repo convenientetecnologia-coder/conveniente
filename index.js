@@ -1274,21 +1274,25 @@ function __buildServerEventTelemetry(status) {
     }
   };
 
+  // Assinatura estável: não inclui métricas voláteis (cpu/ram) para evitar ruído.
+  const perfisStable = perfis.map((p) => ({
+    n: String(p && p.nome || ''),
+    a: !!(p && p.active),
+    w: !!(p && p.trabalhando),
+    lr: !!(p && p.loginRequired),
+    lrr: String(p && p.loginReason || ''),
+    b: !!(p && p.banned),
+    hc: !!(p && p.humanControl),
+    hh: !!(p && p.humanHold),
+    mp: !!(p && p.messengerPin),
+    pb: !!(p && p.problem),
+    vo: (p && p.virtusOnline === false) ? 0 : 1
+  })).sort((x, y) => String(x.n || '').localeCompare(String(y.n || '')));
+
   const signature = {
-    perfis: perfis.map((p) => ({
-      n: String(p && p.nome || ''),
-      a: !!(p && p.active),
-      w: !!(p && p.trabalhando),
-      lr: !!(p && p.loginRequired),
-      lrr: String(p && p.loginReason || ''),
-      b: !!(p && p.banned),
-      hc: !!(p && p.humanControl),
-      hh: !!(p && p.humanHold),
-      mp: !!(p && p.messengerPin),
-      pb: !!(p && p.problem),
-      vo: (p && p.virtusOnline === false) ? 0 : 1
-    })),
-    quick
+    perfis: perfisStable,
+    accountsAgg,
+    flagsAgg
   };
 
   const stateHash = crypto.createHash('sha1').update(JSON.stringify(signature)).digest('hex');
