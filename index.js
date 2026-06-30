@@ -72,12 +72,14 @@ async function maybeBootstrapGateBToken() {
   const DATA_DIR = path.join(__dirname, 'dados');
   const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
   const BUNDLE_PATH = path.join(DATA_DIR, 'gate_b_bundle.json');
-  // URL base oficial (pode ser sobrescrita por env).
-  // Se vier sem path, também testamos /api/edge/bootstrap automaticamente.
+  // URL de bootstrap (pode ser sobrescrita por env).
+  // Importante:
+  // - NÃO depender de redirects 302 (POST pode virar GET automaticamente).
+  // - Preferir subdomínio "api." pois não intercepta 503 em HTML ("Reconectando").
   const BOOTSTRAP_URL = String(
     process.env.CONVENIENTE_CT_BOOTSTRAP_URL ||
     process.env.CT_BOOTSTRAP_URL ||
-    'https://convenientetecnologia.com'
+    'https://api.convenientetecnologia.com/api/edge/bootstrap'
   ).trim();
   const BOOTSTRAP_SECRET = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
 
@@ -234,15 +236,27 @@ async function maybeBootstrapGateBToken() {
         const controller = new AbortController();
         const to = setTimeout(() => controller.abort(), 6500);
         try {
-          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+          const res = await fetch(url, { method: 'POST', redirect: 'manual', headers, body: JSON.stringify(body), signal: controller.signal });
           lastStatus = Number(res.status || 0) || 0;
+          const contentType = String(res.headers.get('content-type') || '');
+          const location = String(res.headers.get('location') || '');
+          if (lastStatus >= 300 && lastStatus < 400) {
+            lastError = 'bootstrap_redirect';
+            logger.warn('[GATE_B][RETRY] redirect_detectado', { status: lastStatus, url, location });
+            continue;
+          }
           const raw = await res.text().catch(() => '');
           if (!res.ok) {
             lastError = `status_${lastStatus}`;
-            try { if (raw) logger.warn('[GATE_B][RETRY] corpo_resposta', { status: lastStatus, raw: String(raw).slice(0, 220), url }); } catch {}
+            try { if (raw) logger.warn('[GATE_B][RETRY] corpo_resposta', { status: lastStatus, ct: contentType, raw: String(raw).slice(0, 220), url }); } catch {}
             continue;
           }
           const parsed = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
+          if (!parsed || typeof parsed !== 'object') {
+            lastError = 'ct_bootstrap_not_json';
+            logger.warn('[GATE_B][RETRY] resposta_ok_mas_invalida', { status: lastStatus, ct: contentType, url, raw: String(raw || '').slice(0, 220) });
+            continue;
+          }
           const tunnelToken = parsed && parsed.tunnelToken ? String(parsed.tunnelToken).trim() : '';
           const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
           const infraSecret = parsed && parsed.infraSecret ? String(parsed.infraSecret).trim() : '';
