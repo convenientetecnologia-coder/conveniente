@@ -777,8 +777,20 @@ async function isMarketplaceFilterActive(page) {
     await page
       .evaluate(() => {
         const hrefNow = String(location.href || "").toLowerCase();
-        if (hrefNow.includes("marketplace")) return true;
-        if (hrefNow.includes("/messages") && hrefNow.includes("folder=marketplace")) return true;
+        const pathNow = String(location.pathname || "").toLowerCase();
+        const searchNow = String(location.search || "").toLowerCase();
+        if (pathNow.includes("/marketplace/item/")) return false;
+        if (pathNow.includes("/messages") && searchNow.includes("folder=marketplace")) return true;
+
+        const h1s = Array.from(document.querySelectorAll("h1,[role='heading']"));
+        const hasMarketplaceHeading = h1s.some((h) =>
+          String(h.textContent || "").trim().toLowerCase() === "marketplace"
+        );
+        const gridLabels = Array.from(document.querySelectorAll('[role="grid"][aria-label]'));
+        const hasMarketplaceGrid = gridLabels.some((g) =>
+          String(g.getAttribute("aria-label") || "").trim().toLowerCase().includes("marketplace")
+        );
+        if (pathNow.includes("/messages") && hasMarketplaceHeading && hasMarketplaceGrid) return true;
 
         const isSelected = (el) => {
           if (!el) return false;
@@ -795,7 +807,7 @@ async function isMarketplaceFilterActive(page) {
           return txt.includes("marketplace") || label.includes("marketplace") || href.includes("marketplace");
         };
 
-        for (const a of document.querySelectorAll('a[href*="/messages/"],a[href*="marketplace"]')) {
+        for (const a of document.querySelectorAll('a[href*="/messages/"],a[href*="folder=marketplace"],a[href*="marketplace"]')) {
           if (mentionsMarketplace(a) && isSelected(a)) return true;
         }
         for (const b of document.querySelectorAll('div[data-virtualized="false"] div[role="button"],[role="tab"],[role="button"][aria-label*="Marketplace"]')) {
@@ -1017,6 +1029,29 @@ async function clickMarketplaceFilterIfPresent(page) {
 
   const before = await getSig();
 
+  const isSafeMarketplaceControl = async (h) => {
+    return Boolean(
+      await h.evaluate((el) => {
+        const href = String(el.getAttribute("href") || "").trim().toLowerCase();
+        if (href.includes("/messages/t/") || href.includes("/messages/e2ee/t/")) return false;
+        if (href.includes("/marketplace/item/")) return false;
+        if (href && !href.includes("folder=marketplace") && !href.includes("/messages") && !href.includes("marketplace")) return false;
+
+        const rowAncestor = el.closest('[role="row"],[role="gridcell"],[role="grid"],[role="tabpanel"]');
+        if (rowAncestor) return false;
+
+        const txt = String(el.innerText || el.textContent || "").trim().toLowerCase();
+        const label = String(el.getAttribute("aria-label") || "").trim().toLowerCase();
+        const mentionsMarketplace = txt.includes("marketplace") || label.includes("marketplace") || href.includes("marketplace");
+        if (!mentionsMarketplace) return false;
+
+        // Filtro esperado costuma estar em área de navegação/abas/header, não no feed de threads.
+        const navAncestor = el.closest('[role="tablist"],header,nav,[role="navigation"]');
+        return Boolean(navAncestor || href.includes("folder=marketplace"));
+      }).catch(() => false)
+    );
+  };
+
   const isSelectedHandle = async (h) => {
     return Boolean(
       await h.evaluate((el) => {
@@ -1034,6 +1069,8 @@ async function clickMarketplaceFilterIfPresent(page) {
   const anchors = await page.$$('a[href*="/messages/"],a[href*="marketplace"]').catch(() => []);
   for (const a of anchors) {
     try {
+      const safe = await isSafeMarketplaceControl(a);
+      if (!safe) continue;
       const selected = await isSelectedHandle(a);
       if (selected) return { ok: true, changed: false, strategy: "anchor_already_selected" };
       const ok = await a.evaluate((el) => {
@@ -1056,17 +1093,19 @@ async function clickMarketplaceFilterIfPresent(page) {
   }
 
   // 2) botões com SVG (assinatura da lojinha) dentro da lateral
-  const buttons = await page.$$('div[data-virtualized="false"] div[role="button"],[role="tab"],[role="button"]').catch(() => []);
+  const buttons = await page.$$('[role="tab"],header [role="button"],nav [role="button"],[role="navigation"] [role="button"]').catch(() => []);
   // 2a) tentativa “forte” quando existe texto/aria-label Marketplace
   for (const b of buttons) {
     try {
+      const safe = await isSafeMarketplaceControl(b);
+      if (!safe) continue;
       const selected = await isSelectedHandle(b);
       if (selected) return { ok: true, changed: false, strategy: "button_already_selected" };
       const ok = await b.evaluate((el) => {
-        if (!el.querySelector('svg')) return false;
         const label = String(el.getAttribute('aria-label') || '').trim().toLowerCase();
         const txt = String(el.innerText || el.textContent || '').trim().toLowerCase();
-        return label.includes('marketplace') || txt === 'marketplace' || txt.includes('marketplace');
+        const href = String(el.getAttribute("href") || "").trim().toLowerCase();
+        return label.includes('marketplace') || txt === 'marketplace' || txt.includes('marketplace') || href.includes("folder=marketplace");
       });
       if (ok) {
         await b.click({ delay: clickDelayMs() }).catch(() => {});
@@ -1080,15 +1119,18 @@ async function clickMarketplaceFilterIfPresent(page) {
   }
 
   // 2b) fallback: em algumas contas o botão Marketplace é SOMENTE ícone (SVG) sem texto.
-  // Tentamos clique bounded (máx 6 botões) e validamos por mudança do sidebar/rota.
+  // Segurança: não clicar ícones genéricos (3 pontinhos/ações por thread), pois causam saídas acidentais.
+  // Só tenta ícones quando estiverem em tablist/header/nav e passarem o filtro de segurança.
   const svgButtons = [];
   for (const b of buttons) {
     try {
       const hasSvg = await b.evaluate((el) => Boolean(el.querySelector("svg")));
-      if (hasSvg) svgButtons.push(b);
+      if (!hasSvg) continue;
+      const safe = await isSafeMarketplaceControl(b);
+      if (safe) svgButtons.push(b);
     } catch (_) {}
   }
-  for (const b of svgButtons.slice(0, 6)) {
+  for (const b of svgButtons.slice(0, 2)) {
     try {
       const selected = await isSelectedHandle(b);
       if (selected) return { ok: true, changed: false, strategy: "svg_already_selected" };
