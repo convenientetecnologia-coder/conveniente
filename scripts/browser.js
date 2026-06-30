@@ -15,6 +15,37 @@ const gatewayProxy = require('./gatewayProxy');
 
 puppeteer.use(StealthPlugin());
 
+const DESIRED_ENGINE_PATH = path.join(__dirname, '..', 'dados', 'desired.json');
+let __desiredEngineCache = { at: 0, engine: 'legacy' };
+function readDesiredVirtusEngineRuntimeBestEffort() {
+  try {
+    // Override operacional (portável):
+    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return 'delta';
+  } catch {}
+  try {
+    const now = Date.now();
+    if (__desiredEngineCache && __desiredEngineCache.at && (now - __desiredEngineCache.at) < 2000) {
+      return __desiredEngineCache.engine || 'legacy';
+    }
+    const raw = fs.readFileSync(DESIRED_ENGINE_PATH, 'utf8');
+    const desired = raw ? JSON.parse(raw) : null;
+    const eng =
+      (desired && desired._autoMode && desired._autoMode.engine) ||
+      (desired && desired.autoMode && desired.autoMode.engine) ||
+      (desired && desired.engine) ||
+      '';
+    const normalized = String(eng || '').trim().toLowerCase();
+    const out = (normalized === 'delta') ? 'delta' : 'legacy';
+    __desiredEngineCache = { at: now, engine: out };
+    return out;
+  } catch {
+    return 'legacy';
+  }
+}
+function isDeltaMotorEnabledRuntime() {
+  return readDesiredVirtusEngineRuntimeBestEffort() === 'delta';
+}
+
 /**
  * Traz a janela do navegador para frente e maximiza.
  * Use SOMENTE ao injetar cookies ou invocar humano.
@@ -2880,7 +2911,11 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.messenger.com/marketplace';
+  // Blindagem Delta: em delta, a aba 2 NÃO pode navegar para messenger.com (conflito de rotas).
+  // Em vez disso, mantém o alvo em facebook.com (ambiente estável do delta).
+  const msgUrl = isDeltaMotorEnabledRuntime()
+    ? 'https://www.facebook.com/'
+    : 'https://www.messenger.com/marketplace';
 
   // Aba 0 — Facebook base
   try {

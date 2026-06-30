@@ -68,6 +68,20 @@ function currentVirtusEngine(autoMode) {
   }
 }
 
+function isDeltaMotorEnabledRuntime() {
+  // Portável (todos os servidores):
+  // - Override operacional por env: FB_MOTOR_DELTA=1
+  // - Fonte de verdade: desired.json (resolveDesiredVirtusEngineRuntime)
+  try {
+    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
+  } catch {}
+  try {
+    const r = resolveDesiredVirtusEngineRuntime();
+    return !!(r && r.engine === 'delta');
+  } catch {}
+  return false;
+}
+
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
   // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
@@ -2258,6 +2272,12 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
   const t0 = Date.now();
   const safeUrl = () => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
   const u0 = safeUrl();
+  try {
+    if (isDeltaMotorEnabledRuntime()) {
+      try { logger.info('[DELTA_BYPASS] reloadPageEnterprise ignorado (motor delta)', { nome, tag }); } catch {}
+      return { ok: false, method: 'delta_bypass', durMs: 0, error: 'delta_bypass', urlBefore: u0, urlAfter: u0 };
+    }
+  } catch {}
   let ok = false;
   let method = '';
   let error = null;
@@ -2386,12 +2406,18 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     if (!p0) return { ok: false, error: 'no_page' };
     try { await p0.bringToFront?.().catch(()=>{}); } catch {}
 
+    // Blindagem Delta:
+    // - Proíbe navegação para messenger.com quando o motor delta está selecionado.
+    // - Força alvo seguro em facebook.com (ambiente estável do delta).
+    const isDelta = (() => { try { return isDeltaMotorEnabledRuntime(); } catch { return false; } })();
     const targetUrl =
-      (prefer === 'messenger')
-        ? 'https://www.messenger.com/marketplace'
-        : (prefer === 'facebook_messages')
-          ? 'https://www.facebook.com/messages'
-          : 'https://www.facebook.com/';
+      isDelta
+        ? 'https://www.facebook.com/'
+        : (prefer === 'messenger')
+          ? 'https://www.messenger.com/marketplace'
+          : (prefer === 'facebook_messages')
+            ? 'https://www.facebook.com/messages'
+            : 'https://www.facebook.com/';
     try {
       await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (eNav) {
@@ -4338,6 +4364,12 @@ function isOkFromSnapshot(snap) {
   return (snap.rows > 0 || snap.anchors > 0);
 }
 async function tryFixPhantom(nome, page) {
+  try {
+    if (isDeltaMotorEnabledRuntime()) {
+      try { logger.info('[DELTA_BYPASS] tryFixPhantom ignorado (motor delta)', { nome }); } catch {}
+      return false;
+    }
+  } catch {}
   const ctrlGuard = controllers.get(nome);
   if (ctrlGuard && (ctrlGuard.humanControl === true || ctrlGuard.configurando === true)) return false;
   const ph = getPhantomState(nome);
@@ -11891,6 +11923,12 @@ async function pageReadyBasic(p0) {
 
 async function tryReloadShort(p0, nome, attempt) {
   try {
+    if (isDeltaMotorEnabledRuntime()) {
+      try { logger.info('[DELTA_BYPASS] tryReloadShort ignorado (motor delta)', { nome, attempt }); } catch {}
+      return false;
+    }
+  } catch {}
+  try {
     if (process.env.NURSE_DEBUG === '1') {
       await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt} url=${(p0 && p0.url && p0.url()) || ''} readyState=${await (async () => { try { return await p0.evaluate(()=>document.readyState); } catch { return '-'; } })()} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
     }
@@ -14252,7 +14290,16 @@ setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickM
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
 
 // Inicializa reloadManager após todos os sistemas estarem prontos
-reloadManager.startReloadManager(controllers, robeMeta);
+try {
+  if (!isDeltaMotorEnabledRuntime()) {
+    reloadManager.startReloadManager(controllers, robeMeta);
+  } else {
+    try { logger.info('[DELTA_BYPASS] reloadManager desativado no motor delta'); } catch {}
+  }
+} catch {
+  // Fail-safe: se o check falhar por qualquer motivo, mantém o comportamento legado.
+  reloadManager.startReloadManager(controllers, robeMeta);
+}
 
 async function wirePageObservers(nome, page) {
   const st = getHealth(nome);

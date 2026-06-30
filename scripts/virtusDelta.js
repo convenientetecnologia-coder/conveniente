@@ -140,6 +140,16 @@ function logInfo(...args) {
   console.log(...args);
 }
 
+function logDelta(tag, msg, extra = null) {
+  try {
+    const ts = Date.now();
+    const t = String(tag || "").trim().toUpperCase();
+    const base = `[DELTA][${t}] ${String(msg || "").trim()} ts=${ts}`;
+    if (extra && typeof extra === "object") return logInfo(base, extra);
+    return logInfo(base);
+  } catch (_) {}
+}
+
 function logDebug(...args) {
   if (LOG_LEVEL === "debug") console.log(...args);
 }
@@ -364,8 +374,20 @@ async function deltaIngestTick({ ctIngestUrl, deltaSecret } = {}) {
     if (secret) headers["x-delta-secret"] = secret;
     if (payload.idempotency_key) headers["x-idempotency-key"] = String(payload.idempotency_key);
 
+    logDelta(
+      "INGEST",
+      `🚀 Enviando payload stateless para o CT. Aguardando ACK 200...`,
+      {
+        server_id: payload.server_id || SERVER_ID,
+        account_login: payload.account_login || ACCOUNT_LOGIN || "",
+        thread_key: payload.thread_key || "",
+        op: payload.operacao_meta || payload.operation || "",
+        nextOffset,
+      }
+    );
     const res = await postWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
     if (res && res.status === 200) {
+      logDelta("SUCCESS", `✅ ACK 200 recebido da Central. Avançando cursor de bytes em disco. RAM LIMPA.`, { nextOffset });
       writeCursorOffsetSync(nextOffset);
       try { compactQueueFileIfNeededSync(nextOffset); } catch (_) {}
       __deltaIngestBackoffMs = 650;
@@ -473,7 +495,10 @@ async function humanPause(bucket, label) {
 
 async function humanReactionDelay(fromNetworkLead) {
   const bucket = fromNetworkLead ? "reaction" : "preThreadClick";
-  await humanPause(bucket, fromNetworkLead ? "reaction_post_lead" : "reaction_api_reply");
+  const ms = await humanPause(bucket, fromNetworkLead ? "reaction_post_lead" : "reaction_api_reply");
+  if (fromNetworkLead) {
+    logDelta("QUEUE", `⏳ Movido para a fila humana. Aguardando delay de segurança...`, { ms });
+  }
 }
 
 function logHumanTimingsBoot() {
@@ -1187,6 +1212,7 @@ async function forceSidebarRefreshByMessagesRoot(page) {
 
 async function prepareDomForNetworkLead(page, threadKey) {
   const t = String(threadKey || "").trim();
+  logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
   // SEMPRE ativar o filtro Marketplace (existir no DOM ≠ estar selecionado).
   const mp = await ensureMarketplaceFilterActive(page);
@@ -1433,6 +1459,7 @@ async function ensureComposerFocused(page) {
 
 async function typeHumanized(page, textoResposta) {
   const full = String(textoResposta || "").replace(/\r/g, "");
+  logDelta("TYPING", `⌨️ Injetando fatiador combinatório do atendimentodelta.json caractere por caractere.`, { chars: full.length });
   for (const ch of full) {
     if (ch === "\n") {
       try {
@@ -1838,10 +1865,16 @@ async function startVirtusDeltaStandaloneRuntime({
           cidade: cityCache && cityCache.value ? cityCache.value : null,
           operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
         };
+        logDelta("NETWORK", `🔴 Lead interceptado na rede. ThreadKey: ${threadKey}`, {
+          account_login: ACCOUNT_LOGIN || "",
+          op: payload.operacao_meta,
+          chars: texto.length,
+        });
         // Barramento do "Vai" (novo): persiste em disco e deixa o loop HTTP entregar com ACK 200.
         try {
           appendPendingJsonlSync(payload);
           kickDeltaIngestLoop();
+          logDelta("QUEUE", `⏳ Movido para a fila humana. Aguardando delay de segurança...`, { threadKey });
         } catch (_) {}
 
         logInfo(
