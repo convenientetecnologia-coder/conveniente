@@ -404,8 +404,10 @@ async function maybeBootstrapGateBToken() {
     const requestedForceRefresh = isTruthy(opts && opts.forceRefresh);
     const requestedForceReason = String((opts && opts.reason) || '').trim() || null;
     const provisioningPending = Number(__gateBProvisioningPendingUntil || 0) > Date.now();
-    const forceRefresh = requestedForceRefresh || provisioningPending;
-    const forceReason = requestedForceReason || (provisioningPending ? 'ct_provisioning_pending' : null);
+    // Importante: durante janela de provisioning pendente, fazemos "poll" normal (sem force),
+    // mas sem reaproveitar token velho localmente.
+    const forceRefresh = requestedForceRefresh;
+    const forceReason = requestedForceReason || (requestedForceRefresh ? 'manual_force_refresh' : null);
     if (__gateBInFlight) return false;
     __gateBInFlight = true;
     try {
@@ -440,12 +442,13 @@ async function maybeBootstrapGateBToken() {
         });
       } catch {}
       if (existing && existing.tunnelToken) {
-        if (!forceRefresh && !__gateBCloudflaredStarted) {
+        const shouldReuseExistingToken = !forceRefresh && !provisioningPending;
+        if (shouldReuseExistingToken && !__gateBCloudflaredStarted) {
           const ok = await spawnCloudflaredToken(existing.tunnelToken);
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
-        if (!forceRefresh) return true;
+        if (shouldReuseExistingToken) return true;
       }
 
       const tokenEnv = String(process.env.CONVENIENTE_GATE_B_TUNNEL_TOKEN || '').trim();
@@ -526,7 +529,8 @@ async function maybeBootstrapGateBToken() {
           lastStatus: null,
           lastError: null,
           forceRefresh: !!forceRefresh,
-          forceReason
+          forceReason,
+          provisioningPending
         }
       });
 
@@ -570,14 +574,14 @@ async function maybeBootstrapGateBToken() {
                   provisioningPendingUntil: __gateBProvisioningPendingUntil
                 }
               });
-              if (forceRefresh) {
+              if (requestedForceRefresh) {
                 stopCloudflaredChild();
               }
               try {
                 if (__gateBRetryTimer) { clearTimeout(__gateBRetryTimer); __gateBRetryTimer = null; }
                 __gateBRetryTimer = setTimeout(async () => {
                   __gateBRetryTimer = null;
-                  try { await tryBootstrapOnce({ forceRefresh: true, reason: 'ct_provisioning_poll' }); } catch {}
+                  try { await tryBootstrapOnce({ forceRefresh: false, reason: 'ct_provisioning_poll' }); } catch {}
                 }, ms);
                 try { __gateBRetryTimer.unref?.(); } catch {}
               } catch {}
