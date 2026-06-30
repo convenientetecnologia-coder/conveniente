@@ -1168,19 +1168,67 @@ app.post('/api/infra/debug-bundle', async (req, res) => {
     return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
   }
 });
+
+app.post('/api/infra/server-event-log', (req, res) => {
+  try {
+    const payload = (req && req.body && typeof req.body === 'object') ? req.body : {};
+    const lines = __asPosInt(payload.tailLines, 220, { min: 20, max: 4000 });
+    const tail = __tailTextFileLines(__serverEventLogPath(), { maxLines: lines, maxBytes: 512 * 1024 });
+    return res.status(200).json({
+      ok: true,
+      collectedAt: Date.now(),
+      hostId: __readOrCreateServerEventHostId(),
+      bridgeState: {
+        lastHash: __serverEventLastHash || null,
+        lastSentAt: __serverEventLastSentAt || null,
+        lastDeltaSentAt: __serverEventLastDeltaSentAt || null,
+        pendingHash: __serverEventPendingHash || null,
+        pendingTicks: Number(__serverEventPendingTicks || 0) || 0,
+        checkIntervalMs: SERVER_EVENT_CHECK_INTERVAL_MS,
+        heartbeatMs: SERVER_EVENT_HEARTBEAT_MS,
+        deltaMinIntervalMs: SERVER_EVENT_DELTA_MIN_INTERVAL_MS,
+        changeConfirmTicks: SERVER_EVENT_CHANGE_CONFIRM_TICKS
+      },
+      tail
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
+  }
+});
 // ===================== Fim Infra Debug Bundle =====================
 // ===================== Fim Infra Auth =====================
 
 // ===================== Server Event Bridge (delta + heartbeat) =====================
 const SERVER_EVENT_CHECK_INTERVAL_MS = Math.max(2000, Number(process.env.SERVER_EVENT_CHECK_INTERVAL_MS || 5000) || 5000);
 const SERVER_EVENT_HEARTBEAT_MS = Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 600000) || 600000); // 10 min
+const SERVER_EVENT_DELTA_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SERVER_EVENT_DELTA_MIN_INTERVAL_MS || 30000) || 30000);
+const SERVER_EVENT_CHANGE_CONFIRM_TICKS = Math.max(1, Number(process.env.SERVER_EVENT_CHANGE_CONFIRM_TICKS || 2) || 2);
 let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
 let __serverEventLastSentAt = 0;
+let __serverEventLastDeltaSentAt = 0;
+let __serverEventPendingHash = '';
+let __serverEventPendingTicks = 0;
 
 function __serverEventHostIdPath() {
   return path.join(__dirname, 'dados', '.telemetry_hostid');
+}
+
+function __serverEventLogPath() {
+  return path.join(__dirname, 'dados', 'server_event_bridge.log');
+}
+
+function __appendServerEventBridgeLog(event, extra = {}) {
+  try {
+    const p = __serverEventLogPath();
+    try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch {}
+    fs.appendFileSync(p, JSON.stringify({
+      ts: Date.now(),
+      event: String(event || '').trim() || 'bridge_event',
+      ...((extra && typeof extra === 'object') ? extra : {})
+    }) + '\n', 'utf8');
+  } catch {}
 }
 
 function __readOrCreateServerEventHostId() {
@@ -1275,19 +1323,22 @@ function __buildServerEventTelemetry(status) {
   };
 
   // Assinatura estável: não inclui métricas voláteis (cpu/ram) para evitar ruído.
-  const perfisStable = perfis.map((p) => ({
-    n: String(p && p.nome || ''),
-    a: !!(p && p.active),
-    w: !!(p && p.trabalhando),
-    lr: !!(p && p.loginRequired),
-    lrr: String(p && p.loginReason || ''),
-    b: !!(p && p.banned),
-    hc: !!(p && p.humanControl),
-    hh: !!(p && p.humanHold),
-    mp: !!(p && p.messengerPin),
-    pb: !!(p && p.problem),
-    vo: (p && p.virtusOnline === false) ? 0 : 1
-  })).sort((x, y) => String(x.n || '').localeCompare(String(y.n || '')));
+  const perfisStable = perfis.map((p) => {
+    const nome = String(p && p.nome || '').trim();
+    const stateKind = __classifyAccountState(p, nome ? robes[nome] : null);
+    return {
+      n: nome,
+      st: stateKind,
+      a: !!(p && p.active),
+      w: !!(p && p.trabalhando),
+      b: !!(p && p.banned),
+      hc: !!(p && p.humanControl),
+      hh: !!(p && p.humanHold),
+      mp: !!(p && p.messengerPin),
+      pb: !!(p && p.problem),
+      vo: (p && p.virtusOnline === false) ? 0 : 1
+    };
+  }).sort((x, y) => String(x.n || '').localeCompare(String(y.n || '')));
 
   const signature = {
     perfis: perfisStable,
@@ -1377,32 +1428,85 @@ async function __serverEventBridgeTick(reason) {
     const now = Date.now();
     const changed = telemetry.stateHash !== __serverEventLastHash;
     const heartbeatDue = !__serverEventLastSentAt || ((now - __serverEventLastSentAt) >= SERVER_EVENT_HEARTBEAT_MS);
-    if (!changed && !heartbeatDue && reason !== 'boot') return;
+    if (changed) {
+      if (__serverEventPendingHash === telemetry.stateHash) {
+        __serverEventPendingTicks = (Number(__serverEventPendingTicks || 0) || 0) + 1;
+      } else {
+        __serverEventPendingHash = telemetry.stateHash;
+        __serverEventPendingTicks = 1;
+      }
+    } else {
+      __serverEventPendingHash = '';
+      __serverEventPendingTicks = 0;
+    }
+    const deltaConfirmed = changed && (reason === 'boot' || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
+    const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
+    const shouldSendDelta = deltaConfirmed && deltaRateOk;
+    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot') {
+      __appendServerEventBridgeLog('bridge_skip_noop', {
+        hostId,
+        changed,
+        pendingTicks: __serverEventPendingTicks,
+        heartbeatDue: false
+      });
+      return;
+    }
 
     const payload = {
       hostId,
       hostname: String(os.hostname() || ''),
       sentAt: now,
-      eventType: changed ? 'server_delta' : 'heartbeat',
+      eventType: shouldSendDelta ? 'server_delta' : 'heartbeat',
       stateHash: telemetry.stateHash,
       quick: telemetry.quick,
       accountsAgg: telemetry.accountsAgg,
       flagsAgg: telemetry.flagsAgg,
-      ...(changed ? { status } : {})
+      ...(shouldSendDelta ? { status } : {})
     };
     const out = await __postServerEventToCt(payload);
     if (out && out.ok) {
-      __serverEventLastHash = telemetry.stateHash;
+      if (shouldSendDelta) {
+        __serverEventLastHash = telemetry.stateHash;
+        __serverEventLastDeltaSentAt = now;
+        __serverEventPendingHash = '';
+        __serverEventPendingTicks = 0;
+      }
       __serverEventLastSentAt = now;
+      __appendServerEventBridgeLog('bridge_sent', {
+        hostId,
+        eventType: payload.eventType,
+        stateHash: telemetry.stateHash,
+        pendingTicks: __serverEventPendingTicks,
+        status: out.status || null,
+        ctBaseUrl: out.ctBaseUrl || null,
+        eventUrl: out.eventUrl || null
+      });
     } else if (out && !out.skipped) {
+      __appendServerEventBridgeLog('bridge_send_failed', {
+        hostId,
+        eventType: payload.eventType,
+        stateHash: telemetry.stateHash,
+        pendingTicks: __serverEventPendingTicks,
+        error: out.error || 'unknown',
+        status: out.status || null,
+        ctBaseUrl: out.ctBaseUrl || null,
+        eventUrl: out.eventUrl || null
+      });
       logger.warn('[SERVER_EVENT_BRIDGE] falha ao postar evento no CT', {
         error: out.error || 'unknown',
         status: out.status || null,
         ctBaseUrl: out.ctBaseUrl || null,
         eventUrl: out.eventUrl || null
       });
+    } else {
+      __appendServerEventBridgeLog('bridge_send_skipped', {
+        hostId,
+        eventType: payload.eventType,
+        reason: out && out.error ? String(out.error) : 'skipped'
+      });
     }
   } catch (e) {
+    __appendServerEventBridgeLog('bridge_tick_exception', { error: (e && e.message) || String(e) });
     logger.warn('[SERVER_EVENT_BRIDGE] tick falhou', { error: (e && e.message) || String(e) });
   } finally {
     __serverEventBridgeInFlight = false;
