@@ -120,6 +120,16 @@ function shouldBypassNurseZombie(nome, source = 'nurse') {
       } catch {}
     }
   } catch {}
+  try {
+    const ev = `delta_nurse_bypass:${String(source || 'nurse')}`;
+    global.lastDeltaEvent = ev;
+    global.lastDeltaEventAt = Date.now();
+    if (nome) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].lastEngineEvent = ev;
+      robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
+    }
+  } catch {}
   return true;
 }
 
@@ -2453,12 +2463,22 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     const isDelta = (() => { try { return isDeltaMotorEnabledRuntime(); } catch { return false; } })();
     const targetUrl =
       isDelta
-        ? 'https://www.facebook.com/'
+        ? 'https://www.facebook.com/messages'
         : (prefer === 'messenger')
           ? 'https://www.messenger.com/marketplace'
           : (prefer === 'facebook_messages')
             ? 'https://www.facebook.com/messages'
             : 'https://www.facebook.com/';
+    try {
+      if (isDelta) {
+        const ev = 'delta_bootstrap_target_messages';
+        global.lastDeltaEvent = ev;
+        global.lastDeltaEventAt = Date.now();
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].lastEngineEvent = ev;
+        robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
+      }
+    } catch {}
     try {
       if (/messenger\.com\/marketplace/i.test(String(targetUrl || ''))) {
         await __gotoMarketplaceTracked(p0, { nome, source: 'ensure_human_non_blank_entry', timeoutMs: 45000, swallow: false });
@@ -2575,7 +2595,19 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         const desiredEngineAtProbe = readDesiredVirtusEngineRuntime();
         try {
           if (desiredEngineAtProbe === 'delta') {
-            await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+            const cur = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+            const alreadyOnMessages = /facebook\.com\/messages/i.test(cur);
+            if (!alreadyOnMessages) {
+              await pg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+            }
+            try {
+              const ev = alreadyOnMessages ? 'delta_bootstrap_messages_skip_goto' : 'delta_bootstrap_messages_goto';
+              global.lastDeltaEvent = ev;
+              global.lastDeltaEventAt = Date.now();
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].lastEngineEvent = ev;
+              robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
+            } catch {}
           } else {
             await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
           }
@@ -7554,6 +7586,14 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
     try { logger.info('[DELTA_ROBE_BLOCK] Módulo Robe suspenso para preservar o isolamento da escuta passiva.', { nome }); } catch {}
     try { provisionAudit.append({ ts: Date.now(), event: 'delta_robe_block', nome: String(nome || ''), source: 'startRobeDynamic' }); } catch {}
     try { await reportAction(nome, 'mil_action', 'delta_robe_block: modulo robe suspenso no motor delta'); } catch {}
+    try {
+      const ev = 'delta_robe_block';
+      global.lastDeltaEvent = ev;
+      global.lastDeltaEventAt = Date.now();
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].lastEngineEvent = ev;
+      robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
+    } catch {}
     return { ok: true, skipped: true, reason: 'delta_robe_block' };
   }
   let manifest = null;
@@ -11569,6 +11609,22 @@ perfis.push({
   problem,
   robeMode,
   stockAccountId,
+  last_main_url: (() => {
+    try {
+      const ctrlSnap = controllers.get(nome);
+      if (!ctrlSnap || !ctrlSnap.mainPage || typeof ctrlSnap.mainPage.url !== 'function') return null;
+      return String(ctrlSnap.mainPage.url() || '').slice(0, 320);
+    } catch {
+      return null;
+    }
+  })(),
+  last_engine_event: (() => {
+    try {
+      return String(robeMeta[nome]?.lastEngineEvent || global.lastDeltaEvent || 'none');
+    } catch {
+      return 'none';
+    }
+  })(),
   robeDailyPlanSummary,
   robeSessionSummary
 });
@@ -11791,6 +11847,8 @@ const statusObj = {
   robes,
   robeQueue: robeQueueList,
   autoMode,
+  last_engine_event: (() => { try { return String(global.lastDeltaEvent || 'none'); } catch { return 'none'; } })(),
+  last_engine_event_at: (() => { try { return Number(global.lastDeltaEventAt || 0) || null; } catch { return null; } })(),
   sys,
   serverConfig: (() => {
     try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
