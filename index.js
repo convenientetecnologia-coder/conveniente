@@ -1158,6 +1158,97 @@ app.post('/api/infra/command-bus', async (req, res) => {
         continue;
       }
 
+      if (t === 'execute_deep_cleanup') {
+        let bytesLiberados = 0;
+        const alvosLixo = [
+          'dados/server_event_bridge.log',
+          'dados/logger.log',
+          'dados/issues_fallback.log',
+          'dados/gate_b_cloudflared.log'
+        ];
+        let arquivosZerados = 0;
+        let stepLogsDeletados = 0;
+        let erros = 0;
+        const deletedStepLogs = [];
+
+        // 1) Zera logs globais (sem deletar arquivo)
+        for (const relativo of alvosLixo) {
+          const p = path.join(__dirname, relativo);
+          if (!fs.existsSync(p)) continue;
+          try {
+            const st = fs.statSync(p);
+            bytesLiberados += Number(st && st.size || 0) || 0;
+            fs.writeFileSync(p, '', 'utf8');
+            arquivosZerados++;
+          } catch {
+            erros++;
+          }
+        }
+
+        // 2) Remove apenas *-step.log >24h em dados/perfis/*/
+        try {
+          const perfisDir = path.join(__dirname, 'dados', 'perfis');
+          if (fs.existsSync(perfisDir)) {
+            const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+            const perfis = fs.readdirSync(perfisDir, { withFileTypes: true });
+            for (const ent of perfis) {
+              try {
+                if (!ent || !ent.isDirectory || !ent.isDirectory()) continue;
+                const sub = path.join(perfisDir, ent.name);
+                const files = fs.readdirSync(sub, { withFileTypes: true });
+                for (const f of files) {
+                  try {
+                    if (!f || !f.isFile || !f.isFile()) continue;
+                    const name = String(f.name || '');
+                    if (!name.toLowerCase().endsWith('-step.log')) continue;
+                    const fp = path.join(sub, name);
+                    const st = fs.statSync(fp);
+                    const m = Number(st && st.mtimeMs || 0) || 0;
+                    if (m > 0 && m < cutoff) {
+                      bytesLiberados += Number(st && st.size || 0) || 0;
+                      fs.unlinkSync(fp);
+                      stepLogsDeletados++;
+                      if (deletedStepLogs.length < 30) deletedStepLogs.push(path.join('dados', 'perfis', ent.name, name));
+                    }
+                  } catch {
+                    erros++;
+                  }
+                }
+              } catch {
+                erros++;
+              }
+            }
+          }
+        } catch {
+          erros++;
+        }
+
+        try {
+          forensicLog('INFRA_CLEANUP', 'execute_deep_cleanup', {
+            mb_liberados: (bytesLiberados / (1024 * 1024)),
+            arquivosZerados,
+            stepLogsDeletados,
+            erros
+          });
+        } catch {}
+
+        results[i] = {
+          id: cmd && cmd.id ? String(cmd.id) : null,
+          type: 'execute_deep_cleanup',
+          ok: true,
+          meta: {
+            mb_liberados: (bytesLiberados / (1024 * 1024)).toFixed(2),
+            bytesLiberados,
+            arquivosZerados,
+            stepLogsDeletados,
+            deletedStepLogs,
+            erros
+          }
+        };
+        if (typeof global.gc === 'function') global.gc();
+        continue;
+      }
+
       normal.push(cmd);
       normalIdx.push(i);
     }

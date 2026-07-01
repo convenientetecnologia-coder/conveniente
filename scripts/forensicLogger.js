@@ -34,7 +34,9 @@ function rotateForensicLogs24h() {
         if (!ent || !ent.isFile || !ent.isFile()) continue;
         const name = String(ent.name || '');
         const lower = name.toLowerCase();
-        if (!(lower.endsWith('.log') || lower.endsWith('.jsonl'))) continue;
+        // Segurança máxima: só rotaciona os logs forenses gerados por este módulo.
+        // Não remove outros .log/.jsonl do diretório dados/ (podem conter evidências/produtivo).
+        if (!(lower.startsWith('forensic_edge_') && (lower.endsWith('.log') || lower.endsWith('.jsonl')))) continue;
         const fp = path.join(DATA_DIR, name);
         const st = fs.statSync(fp);
         const m = Number(st && st.mtimeMs || 0) || 0;
