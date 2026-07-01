@@ -166,19 +166,7 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
     try {
       const u = new URL(String(rawUrl || ""));
       const host = String(u.hostname || "").toLowerCase();
-      const path0 = String(u.pathname || "").toLowerCase();
       if (!(host === "www.facebook.com" || host === "facebook.com")) return false;
-
-      // Bloqueio cirúrgico: apenas rotas sabidamente conflitantes com o modo passivo.
-      // Não bloquear marketplace geral para não causar "abre e fecha" por excesso de restrição.
-      if (
-        path0.includes("/marketplace/create/item") ||
-        path0.includes("/marketplace/you/selling") ||
-        path0.includes("/marketplace/item/")
-      ) {
-        return false;
-      }
-
       return true;
     } catch {
       return false;
@@ -521,6 +509,18 @@ const HUMAN_TIMINGS = {
   /** Refresh DOM / retries */
   domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 1200, 2600),
 };
+const NEW_CHAT_WARMUP_DELAY = envMs(
+  "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MIN",
+  "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MAX",
+  60_000,
+  120_000
+);
+const CROSS_THREAD_SEND_GAP = envMs(
+  "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MIN",
+  "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MAX",
+  5_000,
+  15_000
+);
 
 const MARKETPLACE_STABILITY_ROUNDS = Math.max(
   2,
@@ -539,10 +539,27 @@ const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
   Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 2000) || 2000
 );
 const DELTA_MARKETPLACE_AUTOFILTER_ENABLED =
-  String(process.env.VIRTUS_DELTA_MARKETPLACE_AUTOFILTER || "0").trim() === "1";
+  String(process.env.VIRTUS_DELTA_MARKETPLACE_AUTOFILTER || "1").trim() === "1";
+const DELTA_MARKETPLACE_ENFORCER_ENABLED =
+  String(process.env.VIRTUS_DELTA_MARKETPLACE_ENFORCER || (DELTA_MARKETPLACE_AUTOFILTER_ENABLED ? "1" : "0")).trim() === "1";
+const DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS = Math.max(
+  6000,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS || 12000) || 12000
+);
+const DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS = Math.max(
+  12000,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS || 45000) || 45000
+);
 
 function clickDelayMs() {
   return randomBetween(HUMAN_TIMINGS.click.min, HUMAN_TIMINGS.click.max);
+}
+
+function randomRangeMs(rangeObj, fallbackMin = 0, fallbackMax = 0) {
+  const r = rangeObj && typeof rangeObj === "object" ? rangeObj : { min: fallbackMin, max: fallbackMax };
+  const min = Math.max(0, Number(r.min || fallbackMin) || fallbackMin);
+  const max = Math.max(min, Number(r.max || fallbackMax) || fallbackMax);
+  return randomBetween(min, max);
 }
 
 async function humanPause(bucket, label) {
@@ -884,7 +901,12 @@ async function isMarketplaceFilterActive(page) {
         const hrefNow = String(location.href || "").toLowerCase();
         const pathNow = String(location.pathname || "").toLowerCase();
         const searchNow = String(location.search || "").toLowerCase();
+        const isThreadView =
+          pathNow.includes("/messages/t/") ||
+          pathNow.includes("/messages/e2ee/t/");
         if (pathNow.includes("/marketplace/item/")) return false;
+        // Thread aberto não é feed de chats do marketplace.
+        if (isThreadView && !searchNow.includes("folder=marketplace")) return false;
         if (pathNow.includes("/messages") && searchNow.includes("folder=marketplace")) return true;
 
         const h1s = Array.from(document.querySelectorAll("h1,[role='heading']"));
@@ -1125,6 +1147,29 @@ async function ensureMarketplaceFilterActiveCore(page) {
   } catch (_) {}
   await humanPause("postMarketplace", "post_marketplace_click");
 
+  // Quando o alvo é o item "Marketplace" dentro da grade de conversas,
+  // evitamos esperas longas: aplicamos retorno rápido e deixamos o enforcer manter o estado.
+  if (click && click.strategy === "conversation_row_marketplace") {
+    const activeQuick = await isMarketplaceFilterActive(page).catch(() => false);
+    const activeAfterQuick = Boolean(activeQuick || click.selected_after_click);
+    if (activeAfterQuick) {
+      try {
+        page.__virtusDeltaMarketplaceGuard = {
+          ...(page.__virtusDeltaMarketplaceGuard || {}),
+          lastStableAt: Date.now(),
+        };
+      } catch (_) {}
+    }
+    const quickOut = {
+      ...click,
+      active_before: activeBefore,
+      active_after: activeAfterQuick,
+      quick_path: true,
+    };
+    logInfo(`[virtusDelta][marketplace] activate result=${JSON.stringify(quickOut)}`);
+    return quickOut;
+  }
+
   let activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 35000, rounds: 2 });
   if (!activeAfter && click.changed) {
     await humanPause("domSettle", "marketplace_changed_recheck");
@@ -1163,6 +1208,25 @@ async function ensureMarketplaceFilterActiveCore(page) {
     }
   }
 
+  let routeFallback = null;
+  if (!activeAfter) {
+    // Fallback determinístico: manter no feed de chats do marketplace dentro de /messages.
+    const fallbackUrl = "https://www.facebook.com/messages/?folder=marketplace";
+    try {
+      await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await humanPause("domSettle", "marketplace_route_fallback_settle");
+      activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 22000, rounds: 2 });
+      routeFallback = { attempted: true, ok: !!activeAfter, url: fallbackUrl };
+    } catch (e) {
+      routeFallback = {
+        attempted: true,
+        ok: false,
+        url: fallbackUrl,
+        error: e && e.message ? String(e.message) : String(e),
+      };
+    }
+  }
+
   if (activeAfter) {
     try {
       page.__virtusDeltaMarketplaceGuard = {
@@ -1173,9 +1237,9 @@ async function ensureMarketplaceFilterActiveCore(page) {
   }
 
   logInfo(
-    `[virtusDelta][marketplace] activate result=${JSON.stringify({ ...click, active_before: activeBefore, active_after: activeAfter })}`
+    `[virtusDelta][marketplace] activate result=${JSON.stringify({ ...click, active_before: activeBefore, active_after: activeAfter, route_fallback: routeFallback })}`
   );
-  return { ...click, active_before: activeBefore, active_after: activeAfter };
+  return { ...click, active_before: activeBefore, active_after: activeAfter, route_fallback: routeFallback };
 }
 
 async function ensureMarketplaceFilterActive(page) {
@@ -1196,6 +1260,103 @@ async function ensureMarketplaceFilterActive(page) {
   } finally {
     try { release(); } catch (_) {}
   }
+}
+
+function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
+  if (!page || !DELTA_MARKETPLACE_ENFORCER_ENABLED) {
+    logInfo(
+      `[virtusDelta][marketplace_enforcer] scope=${scope} status=skipped reason=enforcer_disabled`
+    );
+    return { stop: () => {} };
+  }
+
+  let stopped = false;
+  let inFlight = false;
+
+  const tick = async () => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      const currentUrl = String(page.url ? page.url() : "").toLowerCase();
+      if (!currentUrl.includes("facebook.com")) return;
+      const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
+      const now = Date.now();
+
+      if (!currentUrl.includes("facebook.com/messages")) {
+        const outsideSince = Number(guard.outsideMessagesSince || 0) || now;
+        try {
+          page.__virtusDeltaMarketplaceGuard = {
+            ...guard,
+            outsideMessagesSince: outsideSince,
+          };
+        } catch (_) {}
+        const outsideFor = now - outsideSince;
+        if (outsideFor < DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS) return;
+        logInfo(
+          `[virtusDelta][marketplace_enforcer] scope=${scope} action=return_messages reason=outside_messages outside_for_ms=${outsideFor} url=${currentUrl}`
+        );
+        await page.goto("https://www.facebook.com/messages", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        await humanPause("domSettle", "marketplace_enforcer_return_messages");
+      } else {
+        try {
+          page.__virtusDeltaMarketplaceGuard = {
+            ...guard,
+            outsideMessagesSince: 0,
+          };
+        } catch (_) {}
+      }
+
+      const active = await isMarketplaceFilterActive(page);
+      if (active) {
+        try {
+          page.__virtusDeltaMarketplaceGuard = {
+            ...((page && page.__virtusDeltaMarketplaceGuard) || {}),
+            marketplaceInactiveSince: 0,
+          };
+        } catch (_) {}
+        return;
+      }
+      // Janela de calma também quando estamos em /messages/t/...:
+      // evita "abre/fecha" repetitivo enquanto a thread está aberta.
+      const guardNow = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
+      const inactiveSince = Number(guardNow.marketplaceInactiveSince || 0) || now;
+      try {
+        page.__virtusDeltaMarketplaceGuard = {
+          ...guardNow,
+          marketplaceInactiveSince: inactiveSince,
+        };
+      } catch (_) {}
+      const inactiveFor = now - inactiveSince;
+      if (inactiveFor < DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS) return;
+      logInfo(
+        `[virtusDelta][marketplace_enforcer] scope=${scope} action=reactivate reason=marketplace_inactive url=${currentUrl}`
+      );
+      const out = await ensureMarketplaceFilterActive(page);
+      logInfo(`[virtusDelta][marketplace_enforcer] scope=${scope} result=${JSON.stringify(out)}`);
+    } catch (e) {
+      logInfo(
+        `[virtusDelta][marketplace_enforcer] scope=${scope} action=fail err=${e && e.message ? e.message : String(e)}`
+      );
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    tick().catch(() => {});
+  }, DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS);
+  timer.unref?.();
+  setTimeout(() => tick().catch(() => {}), 2500).unref?.();
+  logInfo(
+    `[virtusDelta][marketplace_enforcer] scope=${scope} status=armed interval_ms=${DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS}`
+  );
+
+  return {
+    stop: () => {
+      stopped = true;
+      try { clearInterval(timer); } catch (_) {}
+    },
+  };
 }
 
 async function isMarketplaceFilterVisible(page) {
@@ -1315,6 +1476,149 @@ async function clickMarketplaceFilterIfPresent(page) {
       .catch(() => "");
 
   const before = await getSig();
+
+  // 0) alvo principal no Facebook Messages: linha "Marketplace" dentro do grid de conversas.
+  const conversationMarketplaceButtons = await page.$$(
+    [
+      '[role="grid"][aria-label*="Convers"] [role="button"]',
+      '[role="grid"][aria-label*="convers"] [role="button"]',
+      '[role="grid"][aria-label*="Chat"] [role="button"]',
+      '[role="grid"][aria-label*="chat"] [role="button"]',
+      '[role="grid"][aria-label*="Conversation"] [role="button"]',
+      '[role="grid"][aria-label*="conversation"] [role="button"]',
+    ].join(",")
+  ).catch(() => []);
+  for (const b of conversationMarketplaceButtons) {
+    try {
+      const probe = await b.evaluate((el) => {
+        const norm = (s) =>
+          String(s || "")
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .trim()
+            .toLowerCase();
+        const aria = norm(el.getAttribute("aria-label") || "");
+        const txt = norm(el.innerText || el.textContent || "");
+        if (!txt.includes("marketplace") && !aria.includes("marketplace")) {
+          return { ok: false, reason: "no_marketplace_text" };
+        }
+        if (aria.includes("mais opcoes") || aria.includes("more options")) {
+          return { ok: false, reason: "options_button" };
+        }
+        // Evita botao de tres pontos (acoes por thread).
+        const hasMoreIcon = !!el.querySelector('svg path[d*="M2.25 10a1.75"]');
+        if (hasMoreIcon) return { ok: false, reason: "more_icon" };
+        const hasHouseIcon = !!el.querySelector('svg path[d*="M1.137 2.519"],svg path[d*="A2.131 2.131"]');
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 8 && r.height > 8;
+        const selectedBefore =
+          el.getAttribute("aria-current") === "page" ||
+          el.getAttribute("aria-selected") === "true" ||
+          el.getAttribute("aria-pressed") === "true" ||
+          Boolean(el.closest('[aria-current="page"],[aria-selected="true"],[aria-pressed="true"]'));
+        return { ok: true, hasHouseIcon, txt, aria, visible, selectedBefore };
+      }).catch(() => ({ ok: false, reason: "eval_fail" }));
+      if (!probe || !probe.ok) continue;
+      if (!probe.visible) continue;
+
+      await b.evaluate((el) => {
+        try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }); } catch (_) {}
+      }).catch(() => {});
+      try {
+        const labelPoint = await b.evaluate((el) => {
+          const norm = (s) =>
+            String(s || "")
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .trim()
+              .toLowerCase();
+          const nodes = Array.from(el.querySelectorAll("span,div"));
+          const labelNode = nodes.find((n) => norm(n.textContent || "") === "marketplace");
+          if (!labelNode) return null;
+          const r = labelNode.getBoundingClientRect();
+          if (r.width <= 2 || r.height <= 2) return null;
+          return { x: Math.floor(r.left + r.width / 2), y: Math.floor(r.top + r.height / 2) };
+        }).catch(() => null);
+        if (labelPoint && Number.isFinite(labelPoint.x) && Number.isFinite(labelPoint.y)) {
+          await page.mouse.click(labelPoint.x, labelPoint.y, { delay: clickDelayMs() });
+        }
+      } catch (_) {}
+      try {
+        const bb = await b.boundingBox();
+        if (bb && bb.width > 8 && bb.height > 8) {
+          await page.mouse.click(
+            Math.floor(bb.x + bb.width / 2),
+            Math.floor(bb.y + bb.height / 2),
+            { delay: clickDelayMs() }
+          );
+        }
+      } catch (_) {}
+      await b.click({ delay: clickDelayMs() }).catch(() => {});
+      // Algumas variações do Facebook exigem sequência de ponteiro para efetivar seleção.
+      const selectedAfterClick = await b.evaluate((el) => {
+        const isSelected = () =>
+          el.getAttribute("aria-current") === "page" ||
+          el.getAttribute("aria-selected") === "true" ||
+          el.getAttribute("aria-pressed") === "true" ||
+          Boolean(el.closest('[aria-current="page"],[aria-selected="true"],[aria-pressed="true"]'));
+        if (isSelected()) return true;
+        try {
+          const r = el.getBoundingClientRect();
+          const cx = Math.floor(r.left + r.width / 2);
+          const cy = Math.floor(r.top + r.height / 2);
+          const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+          el.dispatchEvent(new MouseEvent("mousedown", opts));
+          el.dispatchEvent(new MouseEvent("mouseup", opts));
+          el.dispatchEvent(new MouseEvent("click", opts));
+        } catch (_) {}
+        return isSelected();
+      }).catch(() => false);
+      let selectedAfterKeyboard = false;
+      if (!selectedAfterClick) {
+        try {
+          await b.focus().catch(() => {});
+          await page.keyboard.press("Enter").catch(() => {});
+          selectedAfterKeyboard = await b.evaluate((el) => {
+            return (
+              el.getAttribute("aria-current") === "page" ||
+              el.getAttribute("aria-selected") === "true" ||
+              el.getAttribute("aria-pressed") === "true" ||
+              Boolean(el.closest('[aria-current="page"],[aria-selected="true"],[aria-pressed="true"]'))
+            );
+          }).catch(() => false);
+        } catch (_) {}
+      }
+      let selectedAfterDoubleClick = false;
+      if (!selectedAfterClick && !selectedAfterKeyboard) {
+        try {
+          await b.click({ delay: clickDelayMs() }).catch(() => {});
+          await b.click({ delay: clickDelayMs() }).catch(() => {});
+          selectedAfterDoubleClick = await b.evaluate((el) => {
+            return (
+              el.getAttribute("aria-current") === "page" ||
+              el.getAttribute("aria-selected") === "true" ||
+              el.getAttribute("aria-pressed") === "true" ||
+              Boolean(el.closest('[aria-current="page"],[aria-selected="true"],[aria-pressed="true"]'))
+            );
+          }).catch(() => false);
+        } catch (_) {}
+      }
+      await humanPause("domSettle", "marketplace_conversation_row_click");
+      const after = await getSig();
+      const activeAfter = await isMarketplaceFilterActive(page);
+      if (selectedAfterClick || selectedAfterKeyboard || selectedAfterDoubleClick || (after && after !== before) || activeAfter) {
+        return {
+          ok: true,
+          changed: true,
+          strategy: "conversation_row_marketplace",
+          has_house_icon: !!probe.hasHouseIcon,
+          selected_after_click: !!selectedAfterClick,
+          selected_after_keyboard: !!selectedAfterKeyboard,
+          selected_after_double_click: !!selectedAfterDoubleClick,
+        };
+      }
+    } catch (_) {}
+  }
 
   const isSafeMarketplaceControl = async (h) => {
     return Boolean(
@@ -1878,14 +2182,12 @@ async function startVirtusDeltaStandaloneRuntime({
 
   const seenKeys = new Set();
   const autoReplyText = String(process.env.VIRTUS_DELTA_AUTO_REPLY_TEXT || "").replace(/\r/g, "");
-  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "").trim() === "1";
-  const autoReplyThreads = new Map(); // threadKey -> tsMs
-  const autoReplyMinIntervalMs = Math.max(
-    5_000,
-    Number(process.env.VIRTUS_DELTA_AUTO_REPLY_MIN_INTERVAL_MS || 60_000) || 60_000
-  );
+  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
+  const autoGreetingSentThreads = new Set(); // threadKey
+  const autoGreetingTimers = new Map(); // threadKey -> Timeout
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
+  const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: "standalone" });
   const updateCityCache = async () => {
     try {
       const v = await extractCityFromMarketplaceDom(page);
@@ -1899,6 +2201,8 @@ async function startVirtusDeltaStandaloneRuntime({
   } catch {}
 
   const enqueue = createSerialQueue();
+  let lastOperatorThread = "";
+  let lastOperatorSendAt = 0;
 
   cdpSession.on("Network.webSocketFrameReceived", (event) => {
     try {
@@ -1954,26 +2258,35 @@ async function startVirtusDeltaStandaloneRuntime({
         );
 
         const autoMsg = autoReplyText ? autoReplyText : (autoGreetingEnabled ? generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null }) : "");
-        if (autoMsg) {
-          const last = Number(autoReplyThreads.get(threadKey) || 0);
-          const now = Date.now();
-          if (!last || now - last >= autoReplyMinIntervalMs) {
-            autoReplyThreads.set(threadKey, now);
-            enqueue(async () => {
-              try {
-                await sendReplyFlow({
-                  page,
-                  threadKey,
-                  textoResposta: autoMsg,
-                  fromNetworkLead: true,
-                });
-                logInfo(`[virtusDelta][reply] done thread_key=${threadKey} ok=sim (network_lead)`);
-              } catch (e) {
-                logInfo(
-                  `[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
-                );
-              }
-            });
+        if (autoMsg && !autoGreetingSentThreads.has(threadKey)) {
+          if (!autoGreetingTimers.has(threadKey)) {
+            const delayMs = randomRangeMs(NEW_CHAT_WARMUP_DELAY, 60_000, 120_000);
+            logInfo(
+              `[virtusDelta][lead_queue] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} action=scheduled_initial_greeting delay_ms=${delayMs}`
+            );
+            const timer = setTimeout(() => {
+              autoGreetingTimers.delete(threadKey);
+              enqueue(async () => {
+                try {
+                  await sendReplyFlow({
+                    page,
+                    threadKey,
+                    textoResposta: autoMsg,
+                    fromNetworkLead: true,
+                  });
+                  autoGreetingSentThreads.add(threadKey);
+                  logInfo(`[virtusDelta][reply] done thread_key=${threadKey} ok=sim (network_lead_initial)`);
+                } catch (e) {
+                  logInfo(
+                    `[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
+                  );
+                }
+              });
+            }, delayMs);
+            timer.unref?.();
+            autoGreetingTimers.set(threadKey, timer);
+          } else {
+            logInfo(`[virtusDelta][lead_queue] thread_key=${threadKey} action=already_scheduled_initial_greeting`);
           }
         }
       }
@@ -2009,7 +2322,18 @@ async function startVirtusDeltaStandaloneRuntime({
 
       enqueue(async () => {
         try {
+          const currentThread = String(thread_key || "");
+          const switchingThread = !!(lastOperatorThread && lastOperatorThread !== currentThread);
+          if (switchingThread && lastOperatorSendAt) {
+            const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
+            logInfo(`[virtusDelta][send_gap] mode=infra_cross_thread from=${lastOperatorThread} to=${currentThread} wait_ms=${waitMs}`);
+            await sleep(waitMs);
+          }
           const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta, fromNetworkLead: false });
+          if (r && r.ok) {
+            lastOperatorThread = currentThread;
+            lastOperatorSendAt = Date.now();
+          }
           logInfo(`[virtusDelta][infra_cmd] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
         } catch (e) {
           logInfo(`[virtusDelta][infra_cmd] crash thread_key=${String(thread_key)} err=${e && e.message ? e.message : String(e)}`);
@@ -2033,7 +2357,18 @@ async function startVirtusDeltaStandaloneRuntime({
 
       enqueue(async () => {
         try {
+          const currentThread = String(thread_key || "");
+          const switchingThread = !!(lastOperatorThread && lastOperatorThread !== currentThread);
+          if (switchingThread && lastOperatorSendAt) {
+            const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
+            logInfo(`[virtusDelta][send_gap] mode=legacy_cross_thread from=${lastOperatorThread} to=${currentThread} wait_ms=${waitMs}`);
+            await sleep(waitMs);
+          }
           const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta });
+          if (r && r.ok) {
+            lastOperatorThread = currentThread;
+            lastOperatorSendAt = Date.now();
+          }
           logInfo(`[virtusDelta][reply] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
         } catch (e) {
           logInfo(
@@ -2063,10 +2398,19 @@ async function startVirtusDeltaStandaloneRuntime({
     page,
     shutdown: async () => {
       try {
+        marketplaceEnforcer.stop();
+      } catch (_) {}
+      try {
         await new Promise((r) => server.close(() => r()));
       } catch (_) {}
       try {
         if (cityTimer) clearInterval(cityTimer);
+      } catch (_) {}
+      try {
+        for (const t of autoGreetingTimers.values()) {
+          try { clearTimeout(t); } catch (_) {}
+        }
+        autoGreetingTimers.clear();
       } catch (_) {}
       try {
         await browser.close();
@@ -2087,12 +2431,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   let running = true;
   const enqueue = createSerialQueue();
-  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "").trim() === "1";
-  const autoReplyMinIntervalMs = Math.max(
-    5_000,
-    Number(process.env.VIRTUS_DELTA_AUTO_REPLY_MIN_INTERVAL_MS || 60_000) || 60_000
-  );
-  const autoReplyThreads = new Map();
+  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
+  const autoGreetingSentThreads = new Set(); // threadKey
+  const autoGreetingTimers = new Map(); // threadKey -> Timeout
+  let lastCrossThreadSendAt = 0;
+  let lastCrossThreadKey = "";
 
   function epochOk() {
     try {
@@ -2151,6 +2494,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const seenKeys = new Set();
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
+  const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: `worker:${String(nome || "")}` });
   const updateCityCache = async () => {
     try {
       if (!running || !epochOk()) return;
@@ -2202,26 +2546,51 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           cidade: cityCache && cityCache.value ? cityCache.value : null,
           operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
         };
+        logInfo(
+          `[virtusDelta][network] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} chars=${texto.length} op=${payload.operacao_meta || ""}`
+        );
         try {
           appendPendingJsonlSync(payload);
           kickDeltaIngestLoop();
+          logInfo(`[virtusDelta][network] queued_jsonl thread_key=${threadKey}`);
         } catch (_) {}
 
         // Primeiro atendimento automático (opcional, produção OFF por default).
-        if (autoGreetingEnabled) {
-          const last = Number(autoReplyThreads.get(threadKey) || 0);
-          const now = Date.now();
-          if (!last || now - last >= autoReplyMinIntervalMs) {
-            autoReplyThreads.set(threadKey, now);
+        if (autoGreetingEnabled && !autoGreetingSentThreads.has(threadKey)) {
+          if (!autoGreetingTimers.has(threadKey)) {
             const textoResposta = generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null });
             if (textoResposta) {
-              enqueue(async () => {
-                try {
-                  if (!running || !epochOk()) return;
-                  await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: true });
-                } catch (_) {}
-              });
+              const delayMs = randomRangeMs(NEW_CHAT_WARMUP_DELAY, 60_000, 120_000);
+              logInfo(
+                `[virtusDelta][lead_queue] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} action=scheduled_initial_greeting delay_ms=${delayMs}`
+              );
+              const timer = setTimeout(() => {
+                autoGreetingTimers.delete(threadKey);
+                enqueue(async () => {
+                  try {
+                    if (!running || !epochOk()) return;
+                    const currentThread = String(threadKey || "");
+                    const switchingThread = !!(lastCrossThreadKey && lastCrossThreadKey !== currentThread);
+                    if (switchingThread && lastCrossThreadSendAt) {
+                      const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
+                      logInfo(`[virtusDelta][send_gap] mode=cross_thread from=${lastCrossThreadKey} to=${currentThread} wait_ms=${waitMs}`);
+                      await sleep(waitMs);
+                    }
+                    await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: true });
+                    autoGreetingSentThreads.add(currentThread);
+                    lastCrossThreadKey = currentThread;
+                    lastCrossThreadSendAt = Date.now();
+                    logInfo(`[virtusDelta][reply] done thread_key=${currentThread} ok=sim (network_lead_initial)`);
+                  } catch (e) {
+                    logInfo(`[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`);
+                  }
+                });
+              }, delayMs);
+              timer.unref?.();
+              autoGreetingTimers.set(threadKey, timer);
             }
+          } else {
+            logInfo(`[virtusDelta][lead_queue] thread_key=${threadKey} action=already_scheduled_initial_greeting`);
           }
         }
       }
@@ -2243,7 +2612,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     stop: async () => {
       running = false;
       try {
+        marketplaceEnforcer.stop();
+      } catch (_) {}
+      try {
         if (cityTimer) clearInterval(cityTimer);
+      } catch (_) {}
+      try {
+        for (const t of autoGreetingTimers.values()) {
+          try { clearTimeout(t); } catch (_) {}
+        }
+        autoGreetingTimers.clear();
       } catch (_) {}
       try {
         if (cdpSession && typeof cdpSession.removeListener === "function") {

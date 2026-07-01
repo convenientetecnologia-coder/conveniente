@@ -7647,6 +7647,31 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
 }
 
 async function robeTickGlobal() {
+  // Delta opera escuta/passivo em messages + marketplace UI; Robe não deve ciclar nesse modo.
+  const deltaModeActive = (() => {
+    try {
+      if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
+    } catch {}
+    try {
+      if (readDesiredVirtusEngineRuntime() === 'delta') return true;
+    } catch {}
+    return false;
+  })();
+  if (deltaModeActive) {
+    try {
+      robeTickGlobal._lastDeltaSkipLogAt = robeTickGlobal._lastDeltaSkipLogAt || 0;
+      const now = Date.now();
+      const last = Number(robeTickGlobal._lastDeltaSkipLogAt || 0) || 0;
+      if (!last || (now - last) > 30000) {
+        robeTickGlobal._lastDeltaSkipLogAt = now;
+        logger.info('[DELTA_ROBE_BLOCK] robeTickGlobal ignorado: Delta ativo, evitando restart concorrente.', {
+          source: 'robeTickGlobal'
+        });
+      }
+    } catch {}
+    return;
+  }
+
   // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
   try {
     if (provisionLock.isActive()) {
