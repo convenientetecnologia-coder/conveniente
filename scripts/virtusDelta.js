@@ -167,11 +167,19 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
       const u = new URL(String(rawUrl || ""));
       const host = String(u.hostname || "").toLowerCase();
       const path0 = String(u.pathname || "").toLowerCase();
-      if (host === "www.facebook.com" || host === "facebook.com") {
-        // Delta só opera no Messages; tudo fora desse domínio/path é considerado desvio.
-        return path0.startsWith("/messages");
+      if (!(host === "www.facebook.com" || host === "facebook.com")) return false;
+
+      // Bloqueio cirúrgico: apenas rotas sabidamente conflitantes com o modo passivo.
+      // Não bloquear marketplace geral para não causar "abre e fecha" por excesso de restrição.
+      if (
+        path0.includes("/marketplace/create/item") ||
+        path0.includes("/marketplace/you/selling") ||
+        path0.includes("/marketplace/item/")
+      ) {
+        return false;
       }
-      return false;
+
+      return true;
     } catch {
       return false;
     }
