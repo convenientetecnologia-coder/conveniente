@@ -1,7 +1,7 @@
 {
   "mode": "composed_whatsapp_v3_two_step",
   "phones": [
-    "5551981861260"
+    "51981861260"
   ],
   "secondDelayMsMin": 5000,
   "secondDelayMsMax": 12000,
