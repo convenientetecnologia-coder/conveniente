@@ -1066,11 +1066,59 @@ app.post('/api/infra/command-bus', async (req, res) => {
     const payload = (req && req.body && typeof req.body === 'object') ? req.body : {};
     const commands = Array.isArray(payload.commands) ? payload.commands : null;
     if (!commands) return res.status(400).json({ ok: false, error: 'missing_commands_array' });
-    const out = await applyInfraCommands(commands);
+
+    // =============================
+    // FUSÃO OPERACIONAL (FASE 2):
+    // Intercepta comandos Delta de resposta (Messenger) e entrega por IPC ao worker dono da conta.
+    // =============================
+    const incoming = commands.filter(Boolean);
+    const results = new Array(incoming.length);
+    const normal = [];
+    const normalIdx = [];
+
+    for (let i = 0; i < incoming.length; i++) {
+      const cmd = incoming[i] && typeof incoming[i] === 'object' ? incoming[i] : {};
+      const t = String(cmd.type || '').trim();
+      if (t === 'delta_reply') {
+        const nome = String(cmd.nome || '').trim();
+        const thread_key = String(cmd.thread_key || '').trim();
+        const texto_resposta = String(cmd.texto_resposta || '').replace(/\r/g, '');
+        if (!nome || !thread_key || !texto_resposta) {
+          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
+          continue;
+        }
+        if (!clusterClient || typeof clusterClient.sendWorkerCommand !== 'function') {
+          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'cluster_not_ready' };
+          continue;
+        }
+        try {
+          const r = await clusterClient.sendWorkerCommand(
+            'delta-reply-task',
+            { nome, thread_key, texto_resposta },
+            { timeoutMs: 60000 }
+          );
+          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: !!(r && r.ok !== false), details: r || null };
+        } catch (e) {
+          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+        }
+        continue;
+      }
+
+      normal.push(cmd);
+      normalIdx.push(i);
+    }
+
+    const out = normal.length ? await applyInfraCommands(normal) : { ok: true, results: [] };
+    const outResults = (out && Array.isArray(out.results)) ? out.results : [];
+    for (let j = 0; j < normalIdx.length; j++) {
+      results[normalIdx[j]] = outResults[j] || { ok: false, error: 'missing_result' };
+    }
+
+    const okAll = results.every((r) => r && r.ok === true);
     return res.status(200).json({
-      ok: true,
+      ok: okAll,
       executedAt: Date.now(),
-      ...(out && typeof out === 'object' ? out : { ok: true, results: [] })
+      results
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });

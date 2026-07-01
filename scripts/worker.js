@@ -8507,6 +8507,8 @@ const handlers = {
   async deactivate({ nome, reason, policy }) {
   return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
+  // FUSÃO OPERACIONAL: garante limpeza do Ouvido Delta (CDP) ao desativar perfil.
+  try { await __deltaDetachCdpSession(nome); } catch {}
   try {
     provisionAudit.append({
       ts: Date.now(),
@@ -10305,6 +10307,36 @@ const handlers = {
   },
 
   start_work,
+
+  // FUSÃO OPERACIONAL (FASE 2/3):
+  // Recebe resposta do Maestro :8088 via IPC e executa pelas MÃOS (virtusDelta) com fila serial.
+  async ['delta-reply-task']({ nome, thread_key, texto_resposta }) {
+    return lockProfileAction(nome, async () => {
+      const n = String(nome || '').trim();
+      const tk = String(thread_key || '').trim();
+      const tr = String(texto_resposta || '').replace(/\r/g, '');
+      if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
+
+      const ctrl = controllers.get(n);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        return { ok: false, error: 'browser_not_connected' };
+      }
+      if (!ctrl.virtus) {
+        return { ok: false, error: 'virtus_not_running' };
+      }
+
+      const runner = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
+        ? await ctrl.virtus.catch(() => null)
+        : ctrl.virtus;
+      if (!runner || typeof runner.enqueueDeltaReply !== 'function') {
+        return { ok: false, error: 'delta_hands_unavailable' };
+      }
+
+      try { logger.info('[DELTA][HANDS] delta-reply-task recebido', { nome: n, thread_key: tk, chars: tr.length }); } catch {}
+      const out = await runner.enqueueDeltaReply({ thread_key: tk, texto_resposta: tr });
+      return out && typeof out === 'object' ? out : { ok: true };
+    });
+  },
 
   async invoke_human({ nome }) {
     return lockProfileAction(nome, async () => {
@@ -14566,6 +14598,449 @@ try {
   reloadManager.startReloadManager(controllers, robeMeta);
 }
 
+// =========================
+// DELTA (OUVIDO): CDP + fila JSONL + ingest HTTP stateless (migrado do virtusDelta.js)
+// =========================
+const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.jsonl');
+const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
+const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
+
+function __deltaSafeJsonParse(str) {
+  try { return JSON.parse(String(str || '')); } catch { return null; }
+}
+
+function __deltaReadCursorOffsetSync() {
+  try {
+    if (!fs.existsSync(DELTA_CURSOR_PATH)) return 0;
+    const raw = String(fs.readFileSync(DELTA_CURSOR_PATH, 'utf8') || '').trim();
+    const parsed = __deltaSafeJsonParse(raw) || {};
+    const off = Number(parsed.byteOffset || 0) || 0;
+    return off >= 0 ? off : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function __deltaWriteCursorOffsetSync(byteOffset) {
+  const off = Math.max(0, Number(byteOffset || 0) || 0);
+  const tmp = `${DELTA_CURSOR_PATH}.tmp`;
+  try { fs.mkdirSync(path.dirname(DELTA_CURSOR_PATH), { recursive: true }); } catch {}
+  fs.writeFileSync(tmp, JSON.stringify({ byteOffset: off, updatedAt: Date.now() }) + '\n', 'utf8');
+  fs.renameSync(tmp, DELTA_CURSOR_PATH);
+}
+
+function __deltaComputeIdempotencyKey(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const base = [
+    String(p.server_id || ''),
+    String(p.account_login || ''),
+    String(p.thread_key || ''),
+    String(p.texto_limpo || ''),
+    String(p.operacao_meta || p.operation || ''),
+  ].join('|');
+  return crypto.createHash('sha1').update(base).digest('hex');
+}
+
+function __deltaAppendPendingJsonlSync(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const line = JSON.stringify({
+    ts: Date.now(),
+    event: 'lead_capturado',
+    idempotency_key: __deltaComputeIdempotencyKey(p),
+    ...p,
+  });
+  try { fs.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true }); } catch {}
+  fs.appendFileSync(DELTA_QUEUE_PATH, line + '\n', 'utf8');
+  try { if (typeof global.gc === 'function') global.gc(); } catch {}
+}
+
+function __deltaReadNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkBytes = 64 * 1024, maxLineBytes = 2 * 1024 * 1024 } = {}) {
+  const off = Math.max(0, Number(offsetBytes || 0) || 0);
+  if (!fs.existsSync(filePath)) return { ok: true, eof: true, offset: off };
+  const stat = fs.statSync(filePath);
+  const size = Number(stat.size || 0) || 0;
+  if (off >= size) return { ok: true, eof: true, offset: off };
+
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    let cursor = off;
+    let acc = Buffer.alloc(0);
+    let foundNl = -1;
+    while (cursor < size) {
+      const remain = size - cursor;
+      const toRead = Math.max(1, Math.min(remain, chunkBytes));
+      const buf = Buffer.allocUnsafe(toRead);
+      const n = fs.readSync(fd, buf, 0, toRead, cursor);
+      if (!n) break;
+      const slice = buf.subarray(0, n);
+      acc = Buffer.concat([acc, slice], acc.length + slice.length);
+      if (acc.length > maxLineBytes) return { ok: false, error: 'line_too_large', offset: off };
+      foundNl = acc.indexOf(0x0a); // \n
+      if (foundNl >= 0) break;
+      cursor += n;
+    }
+
+    if (foundNl < 0) {
+      const line = acc.toString('utf8').replace(/\r$/, '');
+      return { ok: true, eof: false, line, nextOffset: size, offset: off, newline: false };
+    }
+
+    const lineBuf = acc.subarray(0, foundNl);
+    const line = lineBuf.toString('utf8').replace(/\r$/, '');
+    const nextOffset = off + foundNl + 1;
+    return { ok: true, eof: false, line, nextOffset, offset: off, newline: true };
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
+function __deltaTryAcquireCompactLock() {
+  try {
+    const fd = fs.openSync(DELTA_COMPACT_LOCK_PATH, 'wx');
+    try { fs.writeFileSync(fd, String(Date.now()), 'utf8'); } catch {}
+    try { fs.closeSync(fd); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+function __deltaReleaseCompactLock() { try { fs.unlinkSync(DELTA_COMPACT_LOCK_PATH); } catch {} }
+
+function __deltaCompactQueueFileIfNeededSync(currentOffsetBytes) {
+  const off = Math.max(0, Number(currentOffsetBytes || 0) || 0);
+  const COMPACT_THRESHOLD = 10 * 1024 * 1024; // 10MB
+  if (off < COMPACT_THRESHOLD) return { ok: true, skipped: true, reason: 'offset_below_threshold' };
+  if (!fs.existsSync(DELTA_QUEUE_PATH)) return { ok: true, skipped: true, reason: 'queue_missing' };
+  if (!__deltaTryAcquireCompactLock()) return { ok: true, skipped: true, reason: 'lock_busy' };
+  try {
+    const stat = fs.statSync(DELTA_QUEUE_PATH);
+    const size = Number(stat.size || 0) || 0;
+    if (off >= size) {
+      fs.writeFileSync(DELTA_QUEUE_PATH, '', 'utf8');
+      __deltaWriteCursorOffsetSync(0);
+      return { ok: true, compacted: true, truncated: true };
+    }
+    const tmp = `${DELTA_QUEUE_PATH}.tmp`;
+    const fd = fs.openSync(DELTA_QUEUE_PATH, 'r');
+    const outFd = fs.openSync(tmp, 'w');
+    try {
+      const CHUNK = 256 * 1024;
+      let pos = off;
+      while (pos < size) {
+        const remain = size - pos;
+        const toRead = Math.max(1, Math.min(remain, CHUNK));
+        const buf = Buffer.allocUnsafe(toRead);
+        const n = fs.readSync(fd, buf, 0, toRead, pos);
+        if (!n) break;
+        fs.writeSync(outFd, buf, 0, n);
+        pos += n;
+      }
+    } finally {
+      try { fs.closeSync(outFd); } catch {}
+      try { fs.closeSync(fd); } catch {}
+    }
+    fs.renameSync(tmp, DELTA_QUEUE_PATH);
+    __deltaWriteCursorOffsetSync(0);
+    return { ok: true, compacted: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  } finally {
+    __deltaReleaseCompactLock();
+  }
+}
+
+async function __deltaPostWebhookJson(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
+  const u = String(url || '').trim();
+  if (!u) return { ok: false, error: 'webhook_url_empty' };
+  const body = JSON.stringify(payload || {});
+  if (typeof fetch !== 'function') return { ok: false, error: 'fetch_unavailable' };
+
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(u, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body,
+      signal: controller.signal
+    });
+    const text = await res.text().catch(() => '');
+    return { ok: res.ok, status: res.status, body: String(text || '').slice(0, 2000) };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+let __deltaIngestLoopRunning = false;
+let __deltaIngestBackoffMs = 900;
+let __deltaIngestKickRequested = false;
+async function __deltaIngestTick() {
+  if (__deltaIngestLoopRunning) return;
+  __deltaIngestLoopRunning = true;
+  try {
+    const ingestUrl = String(process.env.VIRTUS_DELTA_CT_INGEST_URL || 'https://convenientetecnologia.com/api/messenger-delta/ingest').trim();
+    const secret = String(process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || '').trim();
+    if (!ingestUrl) return;
+
+    const offset = __deltaReadCursorOffsetSync();
+    const lineRes = __deltaReadNextJsonlLineByOffsetSync(DELTA_QUEUE_PATH, offset);
+    if (!lineRes.ok) {
+      __deltaIngestBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(__deltaIngestBackoffMs * 1.6)));
+      return;
+    }
+    if (lineRes.eof) { __deltaIngestBackoffMs = 1200; return; }
+
+    const line = String(lineRes.line || '').trim();
+    const nextOffset = Number(lineRes.nextOffset || offset) || offset;
+    if (!line) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = 900; return; }
+
+    const payload = __deltaSafeJsonParse(line);
+    if (!payload) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = 1500; return; }
+
+    const headers = {};
+    if (secret) headers['x-delta-secret'] = secret;
+    if (payload.idempotency_key) headers['x-idempotency-key'] = String(payload.idempotency_key);
+
+    try {
+      logger.info('[DELTA][INGEST] enviando stateless para CT', {
+        account_login: payload.account_login || null,
+        thread_key: payload.thread_key || null,
+        nextOffset
+      });
+    } catch {}
+
+    const res = await __deltaPostWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
+    if (res && res.status === 200) {
+      try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
+      __deltaWriteCursorOffsetSync(nextOffset);
+      try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
+      try { if (typeof global.gc === 'function') global.gc(); } catch {}
+      __deltaIngestBackoffMs = 650;
+      return;
+    }
+    __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
+  } finally {
+    __deltaIngestLoopRunning = false;
+  }
+}
+
+function __deltaStartIngestLoopOnce() {
+  if (__deltaStartIngestLoopOnce._started) return;
+  __deltaStartIngestLoopOnce._started = true;
+  const loop = async () => {
+    __deltaIngestKickRequested = false;
+    try { await __deltaIngestTick(); } catch {}
+    const jitter = Math.floor(Math.random() * 220);
+    const waitMs = __deltaIngestKickRequested ? 100 : (__deltaIngestBackoffMs + jitter);
+    setTimeout(loop, waitMs).unref?.();
+  };
+  setTimeout(loop, 300).unref?.();
+}
+function __deltaKickIngestLoop() { __deltaIngestKickRequested = true; }
+
+function __deltaDecodeEscapedText(value) {
+  if (typeof value !== 'string') return '';
+  try { return JSON.parse(`"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`); }
+  catch { return value; }
+}
+function __deltaDecodeWebSocketPayload(payloadData, opcode) {
+  if (typeof payloadData !== 'string' || payloadData.length === 0) return '';
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(payloadData) && payloadData.length % 4 === 0;
+  const shouldDecodeBase64 = opcode === 2 || looksLikeBase64;
+  if (!shouldDecodeBase64) return payloadData;
+  try {
+    const decoded = Buffer.from(payloadData, 'base64').toString('utf8');
+    const printableCount = (decoded.match(/[\x09\x0A\x0D\x20-\x7E]/g) || []).length;
+    const ratio = decoded.length ? printableCount / decoded.length : 0;
+    return ratio >= 0.75 ? decoded : payloadData;
+  } catch {
+    return payloadData;
+  }
+}
+function __deltaExtractInnerPayload(decoded) {
+  if (typeof decoded !== 'string' || decoded.length === 0) return '';
+  const firstBrace = decoded.indexOf('{');
+  if (firstBrace === -1) return decoded;
+  const candidate = decoded.slice(firstBrace);
+  try {
+    const outer = JSON.parse(candidate);
+    if (outer && typeof outer.payload === 'string') {
+      try { return JSON.parse(outer.payload); } catch { return outer.payload; }
+    }
+    return candidate;
+  } catch {
+    return candidate;
+  }
+}
+function __deltaExtractThreadAndText(source) {
+  const text = (typeof source === 'string') ? source : (() => { try { return JSON.stringify(source); } catch { return String(source || ''); } })();
+  const threadMatch =
+    text.match(/"thread_key"\s*:\s*"?(?<t1>\d+)"?/i) ||
+    text.match(/"thread_id"\s*:\s*"?(?<t2>\d+)"?/i) ||
+    text.match(/"thread_fbid"\s*:\s*"?(?<t3>\d+)"?/i);
+  const bodyMatch =
+    text.match(/"text"\s*:\s*"(?<m1>(?:\\.|[^"\\])*)"/i) ||
+    text.match(/"body"\s*:\s*"(?<m2>(?:\\.|[^"\\])*)"/i) ||
+    text.match(/"snippet"\s*:\s*"(?<m3>(?:\\.|[^"\\])*)"/i);
+  const threadKey = threadMatch?.groups?.t1 || threadMatch?.groups?.t2 || threadMatch?.groups?.t3 || '';
+  const rawMessage = bodyMatch?.groups?.m1 || bodyMatch?.groups?.m2 || bodyMatch?.groups?.m3 || '';
+  return { threadKey, text: __deltaDecodeEscapedText(rawMessage) };
+}
+function __deltaExtractWsMessageEvents(input) {
+  const seen = new Set();
+  const out = [];
+  const pushEvent = (src, operation = 'message') => {
+    const parsed = __deltaExtractThreadAndText(src);
+    const thread_key = String(parsed.threadKey || '').trim();
+    const message_text = String(parsed.text || '').trim();
+    if (!thread_key || !message_text) return;
+    const k = `${thread_key}|${message_text}|${operation}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({
+      operation,
+      thread_key,
+      message_text,
+      sender_id: '',
+      account_user_id: '',
+      direction: 'nao_classificado',
+      source_layer: 'delta_internal',
+    });
+  };
+
+  const walk = (node, op = 'message') => {
+    if (!node) return;
+    if (typeof node === 'string') { pushEvent(node, op); return; }
+    if (Array.isArray(node)) { for (const item of node) walk(item, op); return; }
+    if (typeof node === 'object') {
+      pushEvent(node, op);
+      const nextOp = String(node.operation || node.operacao_meta || op || 'message');
+      for (const v of Object.values(node)) walk(v, nextOp);
+    }
+  };
+
+  walk(input, 'message');
+  return out;
+}
+function __deltaShouldEmitLeadText(textoLimpo) {
+  const t = String(textoLimpo || '').trim();
+  if (!t) return false;
+  if (t.startsWith('mid.')) return false;
+  if (/^\d+$/.test(t)) {
+    if (t === '32' || t === '38') return false;
+    if (t.length >= 6) return false;
+  }
+  return true;
+}
+
+async function __deltaDetachCdpSession(nome) {
+  try {
+    const ctrl = controllers.get(nome);
+    if (!ctrl) return false;
+    const s = ctrl.deltaCdpSession;
+    const fn = ctrl.deltaCdpOnFrame;
+    if (s && fn && typeof s.removeListener === 'function') {
+      try { s.removeListener('Network.webSocketFrameReceived', fn); } catch {}
+    }
+    if (s && typeof s.detach === 'function') {
+      try { await s.detach().catch(() => {}); } catch {}
+    }
+    ctrl.deltaCdpSession = null;
+    ctrl.deltaCdpOnFrame = null;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function __deltaAttachCdpEar(nome, page) {
+  if (!isDeltaMotorEnabledRuntime()) return;
+  if (!page || !page.target || typeof page.target !== 'function') return;
+  try {
+    if (page.__deltaCdpEarAttached) return;
+    page.__deltaCdpEarAttached = true;
+  } catch {}
+
+  __deltaStartIngestLoopOnce();
+
+  try {
+    const man = await manifestStore.read(nome).catch(() => null);
+    if (man && man.cidade) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].cidade = String(man.cidade || '').trim() || null;
+    }
+  } catch {}
+
+  try { await __deltaDetachCdpSession(nome); } catch {}
+
+  const ctrl = controllers.get(nome);
+  if (!ctrl) return;
+
+  try {
+    const cdp = await page.target().createCDPSession();
+    await cdp.send('Network.enable');
+
+    const onFrame = async (event) => {
+      try {
+        const response = event && event.response ? event.response : {};
+        const opcode = Number(response.opcode ?? -1);
+        const payloadData = response.payloadData || '';
+        const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
+        const inner = __deltaExtractInnerPayload(decoded);
+
+        let events = [];
+        try { events = __deltaExtractWsMessageEvents(inner) || []; } catch { events = []; }
+        if (!events.length) return;
+
+        robeMeta[nome] = robeMeta[nome] || {};
+        const seen = robeMeta[nome].deltaSeenKeys || new Set();
+        robeMeta[nome].deltaSeenKeys = seen;
+
+        const serverId = readHostIdSync() || '';
+        const cidade = (robeMeta[nome] && robeMeta[nome].cidade) ? robeMeta[nome].cidade : null;
+
+        for (const ev of events) {
+          const threadKey = String(ev && ev.thread_key || '').trim();
+          const texto = __deltaDecodeEscapedText(String(ev && ev.message_text || '')).trim();
+          if (!threadKey) continue;
+          if (!__deltaShouldEmitLeadText(texto)) continue;
+
+          const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
+          const key = `${nome}|${threadKey}|${texto}|${op}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (seen.size > 8000) {
+            const first = seen.values().next().value;
+            if (first) seen.delete(first);
+          }
+
+          const payload = {
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            cidade,
+            operacao_meta: op
+          };
+          __deltaAppendPendingJsonlSync(payload);
+          __deltaKickIngestLoop();
+        }
+      } catch {
+        // nunca crashar o worker por frame corrompido
+      }
+    };
+
+    ctrl.deltaCdpSession = cdp;
+    ctrl.deltaCdpOnFrame = onFrame;
+    cdp.on('Network.webSocketFrameReceived', onFrame);
+    try { logger.info('[DELTA][EAR] CDP ouvido ligado', { nome }); } catch {}
+  } catch (err) {
+    try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
+  }
+}
+
 async function wirePageObservers(nome, page) {
   const st = getHealth(nome);
   try {
@@ -14593,6 +15068,9 @@ async function wirePageObservers(nome, page) {
   page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
+
+  // 👂 Ouvido Delta (CDP) — acopla escuta passiva na própria aba do perfil.
+  try { await __deltaAttachCdpEar(nome, page); } catch {}
 }
 
 async function isPageLikelyAlive(page, nome) {

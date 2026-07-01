@@ -1,7 +1,6 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const express = require("express");
 const crypto = require("crypto");
 
 let puppeteer = null;
@@ -205,266 +204,10 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// =========================
-// DELTA: Fila em disco (JSONL) + loop HTTP stateless (sem WebSocket)
-// =========================
-
-const DELTA_QUEUE_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.jsonl");
-const DELTA_CURSOR_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.cursor.json");
-const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, "..", "dados", "mensagens_pendentes.compact.lock");
-
-function safeJsonParse(str) {
-  try {
-    return JSON.parse(String(str || ""));
-  } catch {
-    return null;
-  }
-}
-
-function readCursorOffsetSync() {
-  try {
-    if (!fsSync.existsSync(DELTA_CURSOR_PATH)) return 0;
-    const raw = String(fsSync.readFileSync(DELTA_CURSOR_PATH, "utf8") || "").trim();
-    const parsed = safeJsonParse(raw) || {};
-    const off = Number(parsed.byteOffset || 0) || 0;
-    return off >= 0 ? off : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeCursorOffsetSync(byteOffset) {
-  const off = Math.max(0, Number(byteOffset || 0) || 0);
-  const tmp = `${DELTA_CURSOR_PATH}.tmp`;
-  try {
-    fsSync.mkdirSync(path.dirname(DELTA_CURSOR_PATH), { recursive: true });
-  } catch (_) {}
-  fsSync.writeFileSync(tmp, JSON.stringify({ byteOffset: off, updatedAt: Date.now() }) + "\n", "utf8");
-  fsSync.renameSync(tmp, DELTA_CURSOR_PATH);
-}
-
-function computeIdempotencyKey(payload) {
-  const p = payload && typeof payload === "object" ? payload : {};
-  const base = [
-    String(p.server_id || ""),
-    String(p.account_login || ""),
-    String(p.thread_key || ""),
-    String(p.texto_limpo || ""),
-    String(p.operacao_meta || p.operation || ""),
-  ].join("|");
-  return crypto.createHash("sha1").update(base).digest("hex");
-}
-
-function appendPendingJsonlSync(payload) {
-  const p = payload && typeof payload === "object" ? payload : {};
-  const line = JSON.stringify({
-    ts: Date.now(),
-    event: "lead_capturado",
-    idempotency_key: computeIdempotencyKey(p),
-    ...p,
-  });
-  try {
-    fsSync.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true });
-  } catch (_) {}
-  fsSync.appendFileSync(DELTA_QUEUE_PATH, line + "\n", "utf8");
-  // RAM free: desreferenciar e (se possível) sugerir GC.
-  try {
-    // eslint-disable-next-line no-global-assign
-    payload = null;
-  } catch (_) {}
-  try {
-    if (typeof global.gc === "function") global.gc();
-  } catch (_) {}
-}
-
-function readNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkBytes = 64 * 1024, maxLineBytes = 2 * 1024 * 1024 } = {}) {
-  const off = Math.max(0, Number(offsetBytes || 0) || 0);
-  if (!fsSync.existsSync(filePath)) return { ok: true, eof: true, offset: off };
-  const stat = fsSync.statSync(filePath);
-  const size = Number(stat.size || 0) || 0;
-  if (off >= size) return { ok: true, eof: true, offset: off };
-
-  const fd = fsSync.openSync(filePath, "r");
-  try {
-    let cursor = off;
-    let acc = Buffer.alloc(0);
-    let foundNl = -1;
-    while (cursor < size) {
-      const remain = size - cursor;
-      const toRead = Math.max(1, Math.min(remain, chunkBytes));
-      const buf = Buffer.allocUnsafe(toRead);
-      const n = fsSync.readSync(fd, buf, 0, toRead, cursor);
-      if (!n) break;
-      const slice = buf.subarray(0, n);
-      acc = Buffer.concat([acc, slice], acc.length + slice.length);
-      if (acc.length > maxLineBytes) return { ok: false, error: "line_too_large", offset: off };
-      foundNl = acc.indexOf(0x0a); // \n
-      if (foundNl >= 0) break;
-      cursor += n;
-    }
-
-    if (foundNl < 0) {
-      // última linha sem newline
-      const line = acc.toString("utf8").replace(/\r$/, "");
-      return { ok: true, eof: false, line, nextOffset: size, offset: off, newline: false };
-    }
-
-    const lineBuf = acc.subarray(0, foundNl);
-    const line = lineBuf.toString("utf8").replace(/\r$/, "");
-    const nextOffset = off + foundNl + 1;
-    return { ok: true, eof: false, line, nextOffset, offset: off, newline: true };
-  } finally {
-    try { fsSync.closeSync(fd); } catch (_) {}
-  }
-}
-
-function tryAcquireCompactLock() {
-  try {
-    const fd = fsSync.openSync(DELTA_COMPACT_LOCK_PATH, "wx");
-    try { fsSync.writeFileSync(fd, String(Date.now()), "utf8"); } catch (_) {}
-    try { fsSync.closeSync(fd); } catch (_) {}
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function releaseCompactLock() {
-  try { fsSync.unlinkSync(DELTA_COMPACT_LOCK_PATH); } catch (_) {}
-}
-
-function compactQueueFileIfNeededSync(currentOffsetBytes) {
-  const off = Math.max(0, Number(currentOffsetBytes || 0) || 0);
-  const COMPACT_THRESHOLD = 10 * 1024 * 1024; // 10MB
-  if (off < COMPACT_THRESHOLD) return { ok: true, skipped: true, reason: "offset_below_threshold" };
-  if (!fsSync.existsSync(DELTA_QUEUE_PATH)) return { ok: true, skipped: true, reason: "queue_missing" };
-  if (!tryAcquireCompactLock()) return { ok: true, skipped: true, reason: "lock_busy" };
-
-  try {
-    const stat = fsSync.statSync(DELTA_QUEUE_PATH);
-    const size = Number(stat.size || 0) || 0;
-    if (off >= size) {
-      // tudo consumido: zera com truncamento simples
-      fsSync.writeFileSync(DELTA_QUEUE_PATH, "", "utf8");
-      writeCursorOffsetSync(0);
-      return { ok: true, compacted: true, truncated: true };
-    }
-
-    const tmp = `${DELTA_QUEUE_PATH}.tmp`;
-    const fd = fsSync.openSync(DELTA_QUEUE_PATH, "r");
-    const outFd = fsSync.openSync(tmp, "w");
-    try {
-      const CHUNK = 256 * 1024;
-      let pos = off;
-      while (pos < size) {
-        const remain = size - pos;
-        const toRead = Math.max(1, Math.min(remain, CHUNK));
-        const buf = Buffer.allocUnsafe(toRead);
-        const n = fsSync.readSync(fd, buf, 0, toRead, pos);
-        if (!n) break;
-        fsSync.writeSync(outFd, buf, 0, n);
-        pos += n;
-      }
-    } finally {
-      try { fsSync.closeSync(outFd); } catch (_) {}
-      try { fsSync.closeSync(fd); } catch (_) {}
-    }
-
-    fsSync.renameSync(tmp, DELTA_QUEUE_PATH);
-    writeCursorOffsetSync(0);
-    return { ok: true, compacted: true };
-  } catch (e) {
-    return { ok: false, error: e && e.message ? e.message : String(e) };
-  } finally {
-    releaseCompactLock();
-  }
-}
-
-let __deltaIngestLoopRunning = false;
-let __deltaIngestBackoffMs = 900;
-let __deltaIngestKickRequested = false;
-
-async function deltaIngestTick({ ctIngestUrl, deltaSecret } = {}) {
-  if (__deltaIngestLoopRunning) return;
-  __deltaIngestLoopRunning = true;
-  try {
-    const ingestUrl = String(ctIngestUrl || process.env.VIRTUS_DELTA_CT_INGEST_URL || "https://convenientetecnologia.com/api/messenger-delta/ingest").trim();
-    const secret = String(deltaSecret || process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || "").trim();
-    if (!ingestUrl) return;
-
-    let offset = readCursorOffsetSync();
-    const lineRes = readNextJsonlLineByOffsetSync(DELTA_QUEUE_PATH, offset);
-    if (!lineRes.ok) {
-      __deltaIngestBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(__deltaIngestBackoffMs * 1.6)));
-      return;
-    }
-    if (lineRes.eof) {
-      __deltaIngestBackoffMs = 1200;
-      return;
-    }
-    const line = String(lineRes.line || "").trim();
-    const nextOffset = Number(lineRes.nextOffset || offset) || offset;
-    if (!line) {
-      writeCursorOffsetSync(nextOffset);
-      __deltaIngestBackoffMs = 900;
-      return;
-    }
-    const payload = safeJsonParse(line);
-    if (!payload) {
-      // linha corrompida: pula para não travar
-      writeCursorOffsetSync(nextOffset);
-      __deltaIngestBackoffMs = 1500;
-      return;
-    }
-
-    const headers = { "content-type": "application/json" };
-    if (secret) headers["x-delta-secret"] = secret;
-    if (payload.idempotency_key) headers["x-idempotency-key"] = String(payload.idempotency_key);
-
-    logDelta(
-      "INGEST",
-      `🚀 Enviando payload stateless para o CT. Aguardando ACK 200...`,
-      {
-        server_id: payload.server_id || SERVER_ID,
-        account_login: payload.account_login || ACCOUNT_LOGIN || "",
-        thread_key: payload.thread_key || "",
-        op: payload.operacao_meta || payload.operation || "",
-        nextOffset,
-      }
-    );
-    const res = await postWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
-    if (res && res.status === 200) {
-      logDelta("SUCCESS", `✅ ACK 200 recebido da Central. Avançando cursor de bytes em disco. RAM LIMPA.`, { nextOffset });
-      writeCursorOffsetSync(nextOffset);
-      try { compactQueueFileIfNeededSync(nextOffset); } catch (_) {}
-      __deltaIngestBackoffMs = 650;
-      return;
-    }
-
-    __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
-  } finally {
-    __deltaIngestLoopRunning = false;
-  }
-}
-
-function startDeltaIngestLoopOnce({ ctIngestUrl, deltaSecret } = {}) {
-  if (startDeltaIngestLoopOnce._started) return;
-  startDeltaIngestLoopOnce._started = true;
-
-  const loop = async () => {
-    __deltaIngestKickRequested = false;
-    try { await deltaIngestTick({ ctIngestUrl, deltaSecret }); } catch (_) {}
-    const jitter = Math.floor(Math.random() * 220);
-    const waitMs = __deltaIngestKickRequested ? 100 : (__deltaIngestBackoffMs + jitter);
-    setTimeout(loop, waitMs).unref?.();
-  };
-
-  setTimeout(loop, 300).unref?.();
-}
-
-function kickDeltaIngestLoop() {
-  __deltaIngestKickRequested = true;
-}
+// NOTE (FUSÃO OPERACIONAL):
+// - A captura de rede (CDP + Network.webSocketFrameReceived) e a fila/ingest stateless (JSONL+cursor)
+//   foram migradas para o `worker.js` (Ouvido).
+// - Este arquivo (`virtusDelta.js`) permanece como **MÃOS** (digitação + fila serial).
 
 function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -2109,7 +1852,7 @@ async function startVirtusDeltaStandaloneRuntime({
   logInfo(`[virtusDelta][boot] cookies_file=${cookieFp}`);
   if (DUMP_DOM) logInfo(`[virtusDelta][boot] dom_dump=enabled`);
   logHumanTimingsBoot();
-  startDeltaIngestLoopOnce({ ctIngestUrl: CT_INGEST_URL, deltaSecret: DELTA_SECRET });
+  // FUSÃO OPERACIONAL (FASE 1/2): ingest/capture removidos deste processo (Ouvido agora é do worker.js).
 
   await killGhostVirtusDeltaProcesses({ port: PORT, profileDir });
   const ghost = await killGhostChromeForProfile(profileDir);
@@ -2176,15 +1919,10 @@ async function startVirtusDeltaStandaloneRuntime({
     logInfo("[virtusDelta][boot] marketplace_boot=skipped reason=autofilter_disabled");
   }
 
-  const cdpSession = await page.target().createCDPSession();
-  await cdpSession.send("Network.enable");
-  logInfo(`[virtusDelta][boot] CDP Network.enable ok`);
+  // FUSÃO OPERACIONAL (FASE 1):
+  // O "Ouvido" (CDP + Network.webSocketFrameReceived) foi removido do virtusDelta e
+  // passou a ser propriedade única do worker.js (escuta passiva + fila/ingest).
 
-  const seenKeys = new Set();
-  const autoReplyText = String(process.env.VIRTUS_DELTA_AUTO_REPLY_TEXT || "").replace(/\r/g, "");
-  const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
-  const autoGreetingSentThreads = new Set(); // threadKey
-  const autoGreetingTimers = new Map(); // threadKey -> Timeout
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
   const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: "standalone" });
@@ -2200,200 +1938,15 @@ async function startVirtusDeltaStandaloneRuntime({
     cityTimer.unref?.();
   } catch {}
 
-  const enqueue = createSerialQueue();
-  let lastOperatorThread = "";
-  let lastOperatorSendAt = 0;
-
-  cdpSession.on("Network.webSocketFrameReceived", (event) => {
-    try {
-      const response = event?.response || {};
-      const opcode = Number(response?.opcode ?? -1);
-      const payloadData = response?.payloadData || "";
-      const decoded = decodeWebSocketPayload(payloadData, opcode);
-      const inner = extractInnerPayload(decoded);
-
-      let events = [];
-      try {
-        events = extractWsMessageEvents(inner, "");
-      } catch (_) {
-        events = [];
-      }
-
-      for (const ev of events) {
-        const threadKey = String(ev?.thread_key || "").trim();
-        const texto = decodeEscapedText(String(ev?.message_text || "")).trim();
-        if (!threadKey) continue;
-        if (!shouldEmitLeadText(texto)) continue;
-
-        const key = `${ACCOUNT_LOGIN || ""}|${threadKey}|${texto}|${String(ev?.operacao_meta || ev?.operation || "")}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        if (seenKeys.size > 8000) {
-          const first = seenKeys.values().next().value;
-          if (first) seenKeys.delete(first);
-        }
-
-        const payload = {
-          server_id: SERVER_ID,
-          account_login: ACCOUNT_LOGIN,
-          thread_key: threadKey,
-          texto_limpo: texto,
-          cidade: cityCache && cityCache.value ? cityCache.value : null,
-          operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
-        };
-        logDelta("NETWORK", `🔴 Lead interceptado na rede. ThreadKey: ${threadKey}`, {
-          account_login: ACCOUNT_LOGIN || "",
-          op: payload.operacao_meta,
-          chars: texto.length,
-        });
-        // Barramento do "Vai" (novo): persiste em disco e deixa o loop HTTP entregar com ACK 200.
-        try {
-          appendPendingJsonlSync(payload);
-          kickDeltaIngestLoop();
-          logDelta("QUEUE", `⏳ Movido para a fila humana. Aguardando delay de segurança...`, { threadKey });
-        } catch (_) {}
-
-        logInfo(
-          `[virtusDelta][network_impact] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} texto="${texto.slice(0, 120)}" op=${String(ev?.operacao_meta || ev?.operation || "")}`
-        );
-
-        const autoMsg = autoReplyText ? autoReplyText : (autoGreetingEnabled ? generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null }) : "");
-        if (autoMsg && !autoGreetingSentThreads.has(threadKey)) {
-          if (!autoGreetingTimers.has(threadKey)) {
-            const delayMs = randomRangeMs(NEW_CHAT_WARMUP_DELAY, 60_000, 120_000);
-            logInfo(
-              `[virtusDelta][lead_queue] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} action=scheduled_initial_greeting delay_ms=${delayMs}`
-            );
-            const timer = setTimeout(() => {
-              autoGreetingTimers.delete(threadKey);
-              enqueue(async () => {
-                try {
-                  await sendReplyFlow({
-                    page,
-                    threadKey,
-                    textoResposta: autoMsg,
-                    fromNetworkLead: true,
-                  });
-                  autoGreetingSentThreads.add(threadKey);
-                  logInfo(`[virtusDelta][reply] done thread_key=${threadKey} ok=sim (network_lead_initial)`);
-                } catch (e) {
-                  logInfo(
-                    `[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`
-                  );
-                }
-              });
-            }, delayMs);
-            timer.unref?.();
-            autoGreetingTimers.set(threadKey, timer);
-          } else {
-            logInfo(`[virtusDelta][lead_queue] thread_key=${threadKey} action=already_scheduled_initial_greeting`);
-          }
-        }
-      }
-    } catch (_) {
-      // nunca crashar por frame corrompido
-    }
-  });
-
-  const app = express();
-  app.use(express.json({ limit: "1mb" }));
-
-  app.get("/health", (_req, res) => res.json({ ok: true }));
-
-  const INFRA_SECRET = String(process.env.VIRTUS_DELTA_INFRA_SECRET || process.env.INFRA_SECRET || "").trim();
-  const infraAuthOk = (req) => {
-    if (!INFRA_SECRET) return false;
-    const got = String(req.headers["x-infra-secret"] || "").trim();
-    return got && got === INFRA_SECRET;
-  };
-
-  // Novo contrato (push HTTP direto): CT -> VM
-  // Payload: { thread_key, texto_resposta }
-  app.post("/api/infra/command", (req, res) => {
-    try {
-      if (!INFRA_SECRET) return res.status(500).json({ ok: false, error: "infra_secret_not_configured" });
-      if (!infraAuthOk(req)) return res.status(403).json({ ok: false, error: "forbidden" });
-
-      const thread_key = String(req.body?.thread_key || "").trim();
-      const texto_resposta = String(req.body?.texto_resposta || "").replace(/\r/g, "");
-      if (!thread_key || !texto_resposta) {
-        return res.status(400).json({ ok: false, error: "missing_thread_key_or_texto_resposta" });
-      }
-
-      enqueue(async () => {
-        try {
-          const currentThread = String(thread_key || "");
-          const switchingThread = !!(lastOperatorThread && lastOperatorThread !== currentThread);
-          if (switchingThread && lastOperatorSendAt) {
-            const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
-            logInfo(`[virtusDelta][send_gap] mode=infra_cross_thread from=${lastOperatorThread} to=${currentThread} wait_ms=${waitMs}`);
-            await sleep(waitMs);
-          }
-          const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta, fromNetworkLead: false });
-          if (r && r.ok) {
-            lastOperatorThread = currentThread;
-            lastOperatorSendAt = Date.now();
-          }
-          logInfo(`[virtusDelta][infra_cmd] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
-        } catch (e) {
-          logInfo(`[virtusDelta][infra_cmd] crash thread_key=${String(thread_key)} err=${e && e.message ? e.message : String(e)}`);
-        }
-      });
-
-      return res.json({ ok: true, queued: true });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
-    }
-  });
-
-  // Compat legado local (sem segredo): útil em debug/ops local.
-  app.post("/api/enviar-resposta", (req, res) => {
-    try {
-      const thread_key = String(req.body?.thread_key || "").trim();
-      const texto_resposta = String(req.body?.texto_resposta || "").replace(/\r/g, "");
-      if (!thread_key || !texto_resposta) {
-        return res.status(400).json({ ok: false, error: "missing_thread_key_or_texto_resposta" });
-      }
-
-      enqueue(async () => {
-        try {
-          const currentThread = String(thread_key || "");
-          const switchingThread = !!(lastOperatorThread && lastOperatorThread !== currentThread);
-          if (switchingThread && lastOperatorSendAt) {
-            const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
-            logInfo(`[virtusDelta][send_gap] mode=legacy_cross_thread from=${lastOperatorThread} to=${currentThread} wait_ms=${waitMs}`);
-            await sleep(waitMs);
-          }
-          const r = await sendReplyFlow({ page, threadKey: thread_key, textoResposta: texto_resposta });
-          if (r && r.ok) {
-            lastOperatorThread = currentThread;
-            lastOperatorSendAt = Date.now();
-          }
-          logInfo(`[virtusDelta][reply] done thread_key=${String(thread_key)} ok=${r && r.ok === true ? "sim" : "nao"}`);
-        } catch (e) {
-          logInfo(
-            `[virtusDelta][reply] crash thread_key=${String(thread_key)} err=${e && e.message ? e.message : String(e)}`
-          );
-        }
-      });
-
-      return res.json({ ok: true, queued: true });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
-    }
-  });
-
-  const server = await new Promise((resolve) => {
-    const s = app.listen(PORT, "127.0.0.1", () => resolve(s));
-  });
-  logInfo(`[virtusDelta][boot] express_listening=http://127.0.0.1:${PORT}`);
-  logInfo(`[virtusDelta][boot] mode=passive_listening auto_reply=${autoReplyText ? "enabled" : "disabled"}`);
+  // FUSÃO OPERACIONAL (FASE 2):
+  // Elimina terminantemente o servidor HTTP individual do virtusDelta.
+  // Entrada de comandos agora é exclusivamente via Maestro :8088 + IPC (index.js -> cluster -> worker).
+  logInfo(`[virtusDelta][boot] standalone_http=disabled reason=fusion_command_bus_ipc`);
 
   return {
     ok: true,
     server_id: SERVER_ID,
     account_login: ACCOUNT_LOGIN,
-    express_port: PORT,
     browser,
     page,
     shutdown: async () => {
@@ -2401,16 +1954,7 @@ async function startVirtusDeltaStandaloneRuntime({
         marketplaceEnforcer.stop();
       } catch (_) {}
       try {
-        await new Promise((r) => server.close(() => r()));
-      } catch (_) {}
-      try {
         if (cityTimer) clearInterval(cityTimer);
-      } catch (_) {}
-      try {
-        for (const t of autoGreetingTimers.values()) {
-          try { clearTimeout(t); } catch (_) {}
-        }
-        autoGreetingTimers.clear();
       } catch (_) {}
       try {
         await browser.close();
@@ -2477,43 +2021,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   logInfo(`[virtusDelta][boot][worker] nome=${String(nome || "")} engine=delta epoch=${requiredEpoch} slowMode=${slowMode ? "sim" : "nao"} url=${String(page.url ? page.url() : "")}`);
 
-  let cdpSession = null;
-  try {
-    cdpSession = await page.target().createCDPSession();
-    await cdpSession.send("Network.enable");
-  } catch (e) {
-    return {
-      stop: async () => {},
-      ok: false,
-      error: e && e.message ? e.message : String(e),
-    };
-  }
-  // Ingest loop (HTTP): roda em background e consome a fila JSONL.
-  startDeltaIngestLoopOnce({});
+  // FUSÃO OPERACIONAL (FASE 1):
+  // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
+  // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
-  const seenKeys = new Set();
-  const wsDiag = {
-    frames: 0,
-    sentFrames: 0,
-    decoded: 0,
-    extractedEvents: 0,
-    eligibleEvents: 0,
-    emitted: 0,
-    errors: 0,
-    sampleBudget: 4,
-    lastLogAt: 0,
-  };
-  const logWsDiag = (force = false) => {
-    const now = Date.now();
-    if (!force && (now - Number(wsDiag.lastLogAt || 0)) < 20_000) return;
-    wsDiag.lastLogAt = now;
-    const opcodes = Object.entries(wsDiag.opcodes || {})
-      .map(([k, v]) => `${k}:${v}`)
-      .join(",");
-    logInfo(
-      `[virtusDelta][ws_diag] account=${ACCOUNT_LOGIN || ""} recv_frames=${wsDiag.frames} sent_frames=${wsDiag.sentFrames} decoded=${wsDiag.decoded} extracted_events=${wsDiag.extractedEvents} eligible_events=${wsDiag.eligibleEvents} emitted=${wsDiag.emitted} errors=${wsDiag.errors} opcodes=${opcodes || "none"}`
-    );
-  };
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
   const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: `worker:${String(nome || "")}` });
@@ -2530,146 +2041,59 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     cityTimer.unref?.();
   } catch {}
 
-  const onFrame = (event) => {
-    try {
-      if (!running || !epochOk()) return;
-      const response = event?.response || {};
-      const opcode = Number(response?.opcode ?? -1);
-      const payloadData = response?.payloadData || "";
-      wsDiag.frames += 1;
-      wsDiag.opcodes = wsDiag.opcodes || {};
-      wsDiag.opcodes[String(opcode)] = Number(wsDiag.opcodes[String(opcode)] || 0) + 1;
-      const decoded = decodeWebSocketPayload(payloadData, opcode);
-      if (decoded) wsDiag.decoded += 1;
-      const inner = extractInnerPayload(decoded);
+  async function enforceGlobalDeltaCooldown() {
+    const minMs = 5_000;
+    const maxMs = 15_000;
+    const delayMs = randomBetween(minMs, maxMs);
+    const last = Number(global.lastDeltaSendTimestamp || 0) || 0;
+    const now = Date.now();
+    const elapsed = now - last;
+    if (!last || elapsed >= delayMs) return { waitedMs: 0, delayMs, elapsedMs: elapsed };
 
-      let events = [];
-      try {
-        events = extractWsMessageEvents(inner, "");
-      } catch (_) {
-        events = [];
+    const remainMs = Math.max(0, delayMs - elapsed);
+    const endAt = now + remainMs;
+
+    let lastLoggedSec = null;
+    while (true) {
+      const leftMs = endAt - Date.now();
+      if (leftMs <= 0) break;
+      const leftSec = Math.max(0, Math.ceil(leftMs / 1000));
+      if (leftSec !== lastLoggedSec) {
+        lastLoggedSec = leftSec;
+        logInfo(`⏳ [DELTA_TIMER] Conta em cooldown. Pronto para o próximo envio em ${leftSec} segundos...`);
       }
-      wsDiag.extractedEvents += Array.isArray(events) ? events.length : 0;
-      if ((!events || events.length === 0) && wsDiag.sampleBudget > 0 && decoded) {
-        wsDiag.sampleBudget -= 1;
-        const sample = String(decoded).replace(/\s+/g, " ").slice(0, 220);
-        logInfo(
-          `[virtusDelta][ws_diag] sample_without_events opcode=${opcode} payload_len=${String(payloadData).length} decoded_sample="${sample}"`
-        );
-      }
-
-      for (const ev of events) {
-        const threadKey = String(ev?.thread_key || "").trim();
-        const texto = decodeEscapedText(String(ev?.message_text || "")).trim();
-        if (!threadKey) continue;
-        if (!shouldEmitLeadText(texto)) continue;
-        wsDiag.eligibleEvents += 1;
-
-        const key = `${ACCOUNT_LOGIN || ""}|${threadKey}|${texto}|${String(ev?.operacao_meta || ev?.operation || "")}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        if (seenKeys.size > 8000) {
-          const first = seenKeys.values().next().value;
-          if (first) seenKeys.delete(first);
-        }
-
-        const payload = {
-          server_id: SERVER_ID,
-          account_login: ACCOUNT_LOGIN,
-          thread_key: threadKey,
-          texto_limpo: texto,
-          cidade: cityCache && cityCache.value ? cityCache.value : null,
-          operacao_meta: String(ev?.operacao_meta || ev?.operation || ""),
-        };
-        logInfo(
-          `[virtusDelta][network] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} chars=${texto.length} op=${payload.operacao_meta || ""}`
-        );
-        wsDiag.emitted += 1;
-        try {
-          appendPendingJsonlSync(payload);
-          kickDeltaIngestLoop();
-          logInfo(`[virtusDelta][network] queued_jsonl thread_key=${threadKey}`);
-        } catch (_) {}
-
-        // Primeiro atendimento automático (opcional, produção OFF por default).
-        if (autoGreetingEnabled && !autoGreetingSentThreads.has(threadKey)) {
-          if (!autoGreetingTimers.has(threadKey)) {
-            const textoResposta = generateDeltaGreeting({ cidade: cityCache && cityCache.value ? cityCache.value : null });
-            if (textoResposta) {
-              const delayMs = randomRangeMs(NEW_CHAT_WARMUP_DELAY, 60_000, 120_000);
-              logInfo(
-                `[virtusDelta][lead_queue] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} action=scheduled_initial_greeting delay_ms=${delayMs}`
-              );
-              const timer = setTimeout(() => {
-                autoGreetingTimers.delete(threadKey);
-                enqueue(async () => {
-                  try {
-                    if (!running || !epochOk()) return;
-                    const currentThread = String(threadKey || "");
-                    const switchingThread = !!(lastCrossThreadKey && lastCrossThreadKey !== currentThread);
-                    if (switchingThread && lastCrossThreadSendAt) {
-                      const waitMs = randomRangeMs(CROSS_THREAD_SEND_GAP, 5_000, 15_000);
-                      logInfo(`[virtusDelta][send_gap] mode=cross_thread from=${lastCrossThreadKey} to=${currentThread} wait_ms=${waitMs}`);
-                      await sleep(waitMs);
-                    }
-                    await sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead: true });
-                    autoGreetingSentThreads.add(currentThread);
-                    lastCrossThreadKey = currentThread;
-                    lastCrossThreadSendAt = Date.now();
-                    logInfo(`[virtusDelta][reply] done thread_key=${currentThread} ok=sim (network_lead_initial)`);
-                  } catch (e) {
-                    logInfo(`[virtusDelta][reply] crash thread_key=${threadKey} err=${e && e.message ? e.message : String(e)}`);
-                  }
-                });
-              }, delayMs);
-              timer.unref?.();
-              autoGreetingTimers.set(threadKey, timer);
-            }
-          } else {
-            logInfo(`[virtusDelta][lead_queue] thread_key=${threadKey} action=already_scheduled_initial_greeting`);
-          }
-        }
-      }
-      logWsDiag(false);
-    } catch (_) {
-      wsDiag.errors += 1;
-      logWsDiag(true);
-      // nunca crashar por frame corrompido
+      await sleep(Math.min(1000, leftMs));
     }
-  };
-  const onFrameSent = (event) => {
-    try {
-      if (!running || !epochOk()) return;
-      const response = event?.response || {};
-      const opcode = Number(response?.opcode ?? -1);
-      wsDiag.sentFrames += 1;
-      wsDiag.opcodes = wsDiag.opcodes || {};
-      const key = `sent_${String(opcode)}`;
-      wsDiag.opcodes[key] = Number(wsDiag.opcodes[key] || 0) + 1;
-      logWsDiag(false);
-    } catch (_) {}
-  };
-  const onWsCreated = (event) => {
-    try {
-      const url = String(event?.url || "");
-      const reqId = String(event?.requestId || "");
-      logInfo(`[virtusDelta][ws_diag] socket_created request_id=${reqId} url=${url}`);
-    } catch (_) {}
-  };
-  const onWsClosed = (event) => {
-    try {
-      const reqId = String(event?.requestId || "");
-      const ts = Number(event?.timestamp || 0) || 0;
-      logInfo(`[virtusDelta][ws_diag] socket_closed request_id=${reqId} ts=${ts}`);
-    } catch (_) {}
-  };
+    return { waitedMs: remainMs, delayMs, elapsedMs: elapsed };
+  }
 
-  try {
-    cdpSession.on("Network.webSocketFrameReceived", onFrame);
-    cdpSession.on("Network.webSocketFrameSent", onFrameSent);
-    cdpSession.on("Network.webSocketCreated", onWsCreated);
-    cdpSession.on("Network.webSocketClosed", onWsClosed);
-  } catch (_) {}
+  async function sendDeltaReplyNow({ threadKey, textoResposta }) {
+    if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
+    const t = String(threadKey || "").trim();
+    const msg = String(textoResposta || "").replace(/\r/g, "");
+    if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
+
+    // Relógio Sentinela Global (5–15s) — regra de ouro: independe de thread_key.
+    await enforceGlobalDeltaCooldown();
+
+    const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false });
+    if (r && r.ok) {
+      global.lastDeltaSendTimestamp = Date.now();
+      lastCrossThreadKey = String(t);
+      lastCrossThreadSendAt = global.lastDeltaSendTimestamp;
+    }
+    return r && typeof r === "object" ? r : { ok: true };
+  }
+
+  const enqueueDeltaReply = ({ thread_key, texto_resposta }) => {
+    return enqueue(async () => {
+      try {
+        return await sendDeltaReplyNow({ threadKey: thread_key, textoResposta: texto_resposta });
+      } catch (e) {
+        return { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+    });
+  };
 
   return {
     ok: true,
@@ -2677,30 +2101,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     server_id: SERVER_ID,
     account_login: ACCOUNT_LOGIN,
     page,
+    enqueueDeltaReply,
     stop: async () => {
       running = false;
+      try { marketplaceEnforcer.stop(); } catch (_) {}
+      try { if (cityTimer) clearInterval(cityTimer); } catch (_) {}
       try {
-        marketplaceEnforcer.stop();
-      } catch (_) {}
-      try {
-        if (cityTimer) clearInterval(cityTimer);
-      } catch (_) {}
-      try {
-        for (const t of autoGreetingTimers.values()) {
-          try { clearTimeout(t); } catch (_) {}
-        }
+        for (const t of autoGreetingTimers.values()) { try { clearTimeout(t); } catch (_) {} }
         autoGreetingTimers.clear();
-      } catch (_) {}
-      try {
-        if (cdpSession && typeof cdpSession.removeListener === "function") {
-          cdpSession.removeListener("Network.webSocketFrameReceived", onFrame);
-          cdpSession.removeListener("Network.webSocketFrameSent", onFrameSent);
-          cdpSession.removeListener("Network.webSocketCreated", onWsCreated);
-          cdpSession.removeListener("Network.webSocketClosed", onWsClosed);
-        }
-      } catch (_) {}
-      try {
-        if (cdpSession && typeof cdpSession.detach === "function") await cdpSession.detach();
       } catch (_) {}
     },
   };
