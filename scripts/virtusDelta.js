@@ -154,6 +154,57 @@ function logDebug(...args) {
   if (LOG_LEVEL === "debug") console.log(...args);
 }
 
+function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
+  try {
+    if (!page || page.__virtusDeltaNavFirewallAttached) return;
+    page.__virtusDeltaNavFirewallAttached = true;
+  } catch (_) {
+    return;
+  }
+
+  const isAllowedNavUrl = (rawUrl) => {
+    try {
+      const u = new URL(String(rawUrl || ""));
+      const host = String(u.hostname || "").toLowerCase();
+      const path0 = String(u.pathname || "").toLowerCase();
+      if (host === "www.facebook.com" || host === "facebook.com") {
+        // Delta só opera no Messages; tudo fora desse domínio/path é considerado desvio.
+        return path0.startsWith("/messages");
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    page.setRequestInterception(true).catch(() => {});
+  } catch (_) {}
+
+  try {
+    page.on("request", (request) => {
+      try {
+        const isNav = !!(request && typeof request.isNavigationRequest === "function" && request.isNavigationRequest());
+        if (!isNav) {
+          request.continue().catch(() => {});
+          return;
+        }
+        const url = String(request && typeof request.url === "function" ? request.url() : "");
+        if (!isAllowedNavUrl(url)) {
+          logInfo(
+            `[DELTA_GUARD] navigation_blocked profile=${String(profileName || "").trim() || "unknown"} url=${url}`
+          );
+          request.abort("blockedbyclient").catch(() => {});
+          return;
+        }
+        request.continue().catch(() => {});
+      } catch (_) {
+        try { request.continue().catch(() => {}); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -1755,6 +1806,7 @@ async function startVirtusDeltaStandaloneRuntime({
   // Garantir janela única (evita perda de cache por abas duplicadas)
   const existingPages = await browser.pages().catch(() => []);
   const page = existingPages[0] || (await browser.newPage());
+  attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN });
   for (const p of existingPages.slice(1)) {
     try {
       await p.close();
@@ -2035,6 +2087,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   const pages = await browser.pages().catch(() => []);
   const page = pages[restrictTab] || pages[0] || (await browser.newPage());
+  attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
 
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {

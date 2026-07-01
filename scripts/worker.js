@@ -11612,17 +11612,18 @@ perfis.push({
   last_main_url: (() => {
     try {
       const ctrlSnap = controllers.get(nome);
-      if (!ctrlSnap || !ctrlSnap.mainPage || typeof ctrlSnap.mainPage.url !== 'function') return null;
-      return String(ctrlSnap.mainPage.url() || '').slice(0, 320);
+      if (!ctrlSnap || !ctrlSnap.mainPage || typeof ctrlSnap.mainPage.url !== 'function') return 'no_page';
+      const u = String(ctrlSnap.mainPage.url() || '').trim();
+      return (u ? u : 'no_page').slice(0, 320);
     } catch {
-      return null;
+      return 'no_page';
     }
   })(),
   last_engine_event: (() => {
     try {
-      return String(robeMeta[nome]?.lastEngineEvent || global.lastDeltaEvent || 'none');
+      return String(robeMeta[nome]?.lastEngineEvent || global.lastDeltaEvent || 'delta_stateless_active');
     } catch {
-      return 'none';
+      return 'delta_stateless_active';
     }
   })(),
   robeDailyPlanSummary,

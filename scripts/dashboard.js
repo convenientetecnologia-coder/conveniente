@@ -3377,7 +3377,7 @@ async function postLogsToNotifier({ requestId, items }) {
   const controller = new (global.AbortController || require('node-abort-controller'))();
   const t = setTimeout(() => { try { controller.abort(); } catch {} }, 8000);
   try {
-    await fetch(`${base}/api/logs/ingest`, {
+    const resp = await fetch(`${base}/api/logs/ingest`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -3391,7 +3391,11 @@ async function postLogsToNotifier({ requestId, items }) {
         items
       }),
       signal: controller.signal
-    }).catch(()=>{});
+    });
+    if (!resp || !resp.ok) {
+      const status = resp ? Number(resp.status || 0) : 0;
+      throw new Error(`logs_ingest_http_${status || 'unknown'}`);
+    }
   } finally {
     clearTimeout(t);
   }
