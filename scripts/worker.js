@@ -4413,10 +4413,13 @@ async function __gotoMarketplaceTracked(page, { nome, source, timeoutMs = 30000,
   const startedAt = Date.now();
   let urlBefore = '';
   try { urlBefore = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
+  const deltaEnabled = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
+  const targetUrl = deltaEnabled ? 'https://www.facebook.com/messages' : 'https://www.messenger.com/marketplace';
+  const action = deltaEnabled ? 'goto_messages_delta_safe' : 'goto_marketplace';
   let ok = false;
   let error = null;
   try {
-    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     ok = true;
   } catch (e) {
     error = (e && e.message) ? String(e.message) : String(e || 'goto_marketplace_failed');
@@ -4427,8 +4430,9 @@ async function __gotoMarketplaceTracked(page, { nome, source, timeoutMs = 30000,
     __appendMarketplaceTrace(nome, {
       traceId,
       source: String(source || ''),
-      action: 'goto_marketplace',
-      targetUrl: 'https://www.messenger.com/marketplace',
+      action,
+      targetUrl,
+      deltaEnabled,
       ok,
       durMs: Math.max(0, Date.now() - startedAt),
       urlBefore: String(urlBefore || '').slice(0, 260),
@@ -9588,14 +9592,18 @@ const handlers = {
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
               // Regra 110% enterprise: para validar Facebook/Marketplace para Robe, usar a rota REAL create/(item|vehicle)
               // conforme robeMode do manifest (evita fechar/prunar a aba "errada" e evita navegação do Messenger para FB).
-              let robeMode = 'itens';
-              try {
-                const manx = await manifestStore.read(nome).catch(()=>null);
-                if (manx && manx.robeMode) robeMode = String(manx.robeMode);
-              } catch {}
-              const targetUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
-                ? 'https://www.facebook.com/marketplace/create/vehicle'
-                : 'https://www.facebook.com/marketplace/create/item';
+              const isDeltaNow = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
+              let targetUrl = 'https://www.facebook.com/messages';
+              if (!isDeltaNow) {
+                let robeMode = 'itens';
+                try {
+                  const manx = await manifestStore.read(nome).catch(()=>null);
+                  if (manx && manx.robeMode) robeMode = String(manx.robeMode);
+                } catch {}
+                targetUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
+                  ? 'https://www.facebook.com/marketplace/create/vehicle'
+                  : 'https://www.facebook.com/marketplace/create/item';
+              }
               await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
@@ -9781,7 +9789,13 @@ const handlers = {
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
           // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
-          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          {
+            const isDeltaNow = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
+            const fbLoginTarget = isDeltaNow
+              ? 'https://www.facebook.com/messages'
+              : 'https://www.facebook.com/marketplace/create/item';
+            await p0.goto(fbLoginTarget, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          }
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
@@ -9844,7 +9858,13 @@ const handlers = {
           // Create item (Robe real)
           let uiCreate = null;
           let lrCreate = null;
-          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          {
+            const isDeltaNow = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
+            const finalCheckTarget = isDeltaNow
+              ? 'https://www.facebook.com/messages'
+              : 'https://www.facebook.com/marketplace/create/item';
+            await p0.goto(finalCheckTarget, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          }
           uiCreate = await uiRetryUnblock('post_login_create_item', 4);
           if (await checkAndAbortIfBanned(p0, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           lrCreate = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
