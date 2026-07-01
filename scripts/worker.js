@@ -82,6 +82,47 @@ function isDeltaMotorEnabledRuntime() {
   return false;
 }
 
+function isDeltaEngineActiveStrict() {
+  try {
+    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
+  } catch {}
+  try {
+    if (autoMode && String(autoMode.engine || '').trim().toLowerCase() === 'delta') return true;
+  } catch {}
+  try {
+    return !!isDeltaMotorEnabledRuntime();
+  } catch {}
+  return false;
+}
+
+function shouldBypassNurseZombie(nome, source = 'nurse') {
+  if (!isDeltaEngineActiveStrict()) return false;
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    const now = Date.now();
+    const last = Number(robeMeta[nome].deltaNurseBypassLastAt || 0) || 0;
+    if (!last || (now - last) > 30_000) {
+      robeMeta[nome].deltaNurseBypassLastAt = now;
+      try {
+        logger.info('[DELTA_NURSE_BYPASS] Bloqueado disparo de quarentena por nurse_zombie no modo Delta.', {
+          nome,
+          source: String(source || '')
+        });
+      } catch {}
+      try {
+        provisionAudit.append({
+          ts: now,
+          event: 'delta_nurse_bypass',
+          nome: String(nome || ''),
+          source: String(source || ''),
+          reason: 'nurse_zombie'
+        });
+      } catch {}
+    }
+  } catch {}
+  return true;
+}
+
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
   // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
@@ -2412,7 +2453,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     const isDelta = (() => { try { return isDeltaMotorEnabledRuntime(); } catch { return false; } })();
     const targetUrl =
       isDelta
-        ? 'https://www.facebook.com/messages'
+        ? 'https://www.facebook.com/'
         : (prefer === 'messenger')
           ? 'https://www.messenger.com/marketplace'
           : (prefer === 'facebook_messages')
@@ -2534,7 +2575,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         const desiredEngineAtProbe = readDesiredVirtusEngineRuntime();
         try {
           if (desiredEngineAtProbe === 'delta') {
-            await pg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+            await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
           } else {
             await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
           }
@@ -7509,6 +7550,12 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
   // #endregion
+  if (isDeltaEngineActiveStrict()) {
+    try { logger.info('[DELTA_ROBE_BLOCK] Módulo Robe suspenso para preservar o isolamento da escuta passiva.', { nome }); } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'delta_robe_block', nome: String(nome || ''), source: 'startRobeDynamic' }); } catch {}
+    try { await reportAction(nome, 'mil_action', 'delta_robe_block: modulo robe suspenso no motor delta'); } catch {}
+    return { ok: true, skipped: true, reason: 'delta_robe_block' };
+  }
   let manifest = null;
   try { manifest = await manifestStore.read(nome); } catch{}
   if (!manifest) {
@@ -8411,6 +8458,9 @@ const handlers = {
   const strictCloseRequired =
     !preserve &&
     /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
+  if (preserve && String(reason || '').trim() === 'nurse_zombie' && shouldBypassNurseZombie(nome, 'deactivate.handler')) {
+    return { ok: true, skipped: true, deltaBypass: true, reason: 'delta_nurse_bypass' };
+  }
   if (preserve && isCloseGuardReason(reason || '')) {
     const certainty = evaluateCloseCertainty(nome, reason || 'unknown', 'deactivate_preserve');
     if (!certainty.allow) {
@@ -11598,6 +11648,23 @@ try {
   // Rate-limit por perfil: 15 min.
   const dmap = (desiredSnap && desiredSnap.perfis && typeof desiredSnap.perfis === 'object') ? desiredSnap.perfis : {};
   for (const x of activeArr) {
+    if (isDeltaEngineActiveStrict()) {
+      try {
+        robeMeta[x.nome] = robeMeta[x.nome] || {};
+        const nowBypass = Date.now();
+        const lastBypass = Number(robeMeta[x.nome].deltaAnomalyBypassLastAt || 0) || 0;
+        if (!lastBypass || (nowBypass - lastBypass) > (5 * 60 * 1000)) {
+          robeMeta[x.nome].deltaAnomalyBypassLastAt = nowBypass;
+          provisionAudit.append({
+            ts: nowBypass,
+            event: 'delta_nurse_bypass_anomaly_profile',
+            nome: String(x.nome || ''),
+            reason: 'anomaly_profile_should_work_but_not'
+          });
+        }
+      } catch {}
+      continue;
+    }
     if (!x || x.trabalhando === true) continue;
     if (x.virtusOnline === true) continue;
     const d = dmap[x.nome];
@@ -13416,6 +13483,10 @@ async function nurseTick() {
             robeMeta[nome].lastDeactivateAt = now;
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
+            if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
+              robeMeta[nome].noPagesStrikes = 0;
+              continue;
+            }
             await registerFailure(nome, 'no_pages', 'external');
             const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             if (!(dres && dres.skipped)) setKillGuard(nome);
@@ -14045,6 +14116,10 @@ async function nurseTick() {
             robeMeta[nome].lastDeactivateAt = now;
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
+            if (shouldBypassNurseZombie(nome, 'nurse.page_zombie')) {
+              robeMeta[nome].zombieStrikes = 0;
+              continue;
+            }
             try { registerFailure(nome, 'zombie', 'external'); } catch {}
             const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             if (!(dres && dres.skipped)) setKillGuard(nome);
