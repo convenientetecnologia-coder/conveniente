@@ -2419,7 +2419,11 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
             ? 'https://www.facebook.com/messages'
             : 'https://www.facebook.com/';
     try {
-      await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      if (/messenger\.com\/marketplace/i.test(String(targetUrl || ''))) {
+        await __gotoMarketplaceTracked(p0, { nome, source: 'ensure_human_non_blank_entry', timeoutMs: 45000, swallow: false });
+      } else {
+        await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      }
     } catch (eNav) {
       const em = (eNav && eNav.message) ? String(eNav.message) : String(eNav || '');
       if (isProxyTunnelLikeError(em)) {
@@ -4305,6 +4309,62 @@ const PHANTOM_CFG = {
   MAX_PHTM_NEWPAGE_30M: 2,
   ESCALATE_AFTER_STEPS: 2
 };
+function __mkMarketplaceTraceId(nome, source) {
+  const n = String(nome || 'unknown').replace(/[^\w.-]+/g, '_').slice(0, 64) || 'unknown';
+  const s = String(source || 'unknown').replace(/[^\w.-]+/g, '_').slice(0, 64) || 'unknown';
+  return `mkt_${Date.now()}_${process.pid}_${n}_${s}_${Math.floor(Math.random() * 1e6)}`;
+}
+function __appendMarketplaceTrace(nome, payload = {}) {
+  try {
+    const out = {
+      ts: Date.now(),
+      event: 'marketplace_trace',
+      nome: String(nome || ''),
+      ...((payload && typeof payload === 'object') ? payload : {})
+    };
+    try { provisionAudit.append(out); } catch {}
+    try {
+      logger.info('[MARKETPLACE_TRACE]', {
+        nome: out.nome,
+        source: out.source || '',
+        action: out.action || '',
+        ok: (typeof out.ok === 'boolean') ? out.ok : null,
+        durMs: Number(out.durMs || 0) || 0,
+        traceId: out.traceId || ''
+      });
+    } catch {}
+  } catch {}
+}
+async function __gotoMarketplaceTracked(page, { nome, source, timeoutMs = 30000, swallow = true } = {}) {
+  const traceId = __mkMarketplaceTraceId(nome, source);
+  const startedAt = Date.now();
+  let urlBefore = '';
+  try { urlBefore = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
+  let ok = false;
+  let error = null;
+  try {
+    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    ok = true;
+  } catch (e) {
+    error = (e && e.message) ? String(e.message) : String(e || 'goto_marketplace_failed');
+    if (!swallow) throw e;
+  } finally {
+    let urlAfter = '';
+    try { urlAfter = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
+    __appendMarketplaceTrace(nome, {
+      traceId,
+      source: String(source || ''),
+      action: 'goto_marketplace',
+      targetUrl: 'https://www.messenger.com/marketplace',
+      ok,
+      durMs: Math.max(0, Date.now() - startedAt),
+      urlBefore: String(urlBefore || '').slice(0, 260),
+      urlAfter: String(urlAfter || '').slice(0, 260),
+      error: error ? String(error).slice(0, 240) : null
+    });
+  }
+  return { ok, traceId, error };
+}
 function _prune(arr, ms) {
   const now = Date.now();
   return (arr||[]).filter(ts => (now - ts) < ms);
@@ -4364,9 +4424,15 @@ function isOkFromSnapshot(snap) {
   return (snap.rows > 0 || snap.anchors > 0);
 }
 async function tryFixPhantom(nome, page) {
+  __appendMarketplaceTrace(nome, {
+    source: 'phantom_fix.entry',
+    action: 'evaluate',
+    deltaEnabled: (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })()
+  });
   try {
     if (isDeltaMotorEnabledRuntime()) {
       try { logger.info('[DELTA_BYPASS] tryFixPhantom ignorado (motor delta)', { nome }); } catch {}
+      __appendMarketplaceTrace(nome, { source: 'phantom_fix.entry', action: 'bypass_delta', ok: true });
       return false;
     }
   } catch {}
@@ -4379,7 +4445,16 @@ async function tryFixPhantom(nome, page) {
   ph.reloads10m = _prune(ph.reloads10m, 10601000);
   ph.newpages30m = _prune(ph.newpages30m, 30601000);
 
-  if ((now - ph.lastActionAt) < PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS) return false;
+  if ((now - ph.lastActionAt) < PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS) {
+    __appendMarketplaceTrace(nome, {
+      source: 'phantom_fix.cooldown',
+      action: 'skip',
+      ok: true,
+      cooldownMs: PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS,
+      ageSinceLastActionMs: Math.max(0, now - Number(ph.lastActionAt || 0))
+    });
+    return false;
+  }
 
   const ctrl = controllers.get(nome);
   if (!ctrl || !ctrl.browser || ctrl.configurando) return false;
@@ -4387,7 +4462,7 @@ async function tryFixPhantom(nome, page) {
 
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
-      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await __gotoMarketplaceTracked(page, { nome, source: 'phantom_fix.navHome', timeoutMs: 30000, swallow: false });
       ph.navs10m.push(now);
       ph.actions10m.push(now);
       ph.lastActionAt = now;
@@ -4413,9 +4488,14 @@ async function tryFixPhantom(nome, page) {
         const man = await manifestStore.read(nome).catch(()=>null);
         await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      await __gotoMarketplaceTracked(np, { nome, source: 'phantom_fix.newPage', timeoutMs: 30000, swallow: true });
+      try {
+        let closedOk = false;
+        try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); closedOk = true; } catch {}
+        __appendMarketplaceTrace(nome, { source: 'phantom_fix.newPage', action: 'close_old_main_page', ok: closedOk });
+      } catch {}
       ctrl2.mainPage = np;
+      __appendMarketplaceTrace(nome, { source: 'phantom_fix.newPage', action: 'swap_main_page', ok: true });
       await wirePageObservers(nome, np);
       ph.newpages30m.push(now);
       ph.actions10m.push(now);
@@ -4425,6 +4505,12 @@ async function tryFixPhantom(nome, page) {
     } catch {}
   }
   ph.failures = (ph.failures || 0) + 1;
+  __appendMarketplaceTrace(nome, {
+    source: 'phantom_fix.escalate',
+    action: 'reopen',
+    ok: false,
+    failures: Number(ph.failures || 0) || 0
+  });
   await issues.append(nome, 'mil_action', `phantom_escalate:reopen failures=${ph.failures}`);
   if (killGuardActive(nome)) {
     await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
@@ -9406,7 +9492,7 @@ const handlers = {
           try {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await __gotoMarketplaceTracked(page, { nome, source: 'login_remediate.pre_check_msg_domain_fix', timeoutMs: 45000, swallow: true });
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -9627,7 +9713,7 @@ const handlers = {
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await __gotoMarketplaceTracked(p0, { nome, source: 'login_remediate.attempt2_msg_begin', timeoutMs: 45000, swallow: true });
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -10469,7 +10555,7 @@ const handlers = {
         let pagesN = [];
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
-          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          await __gotoMarketplaceTracked(pagesN[0], { nome, source: 'human_resume.post_nav', timeoutMs: 30000, swallow: true });
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
@@ -14354,6 +14440,12 @@ async function isPageLikelyAlive(page, nome) {
 async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
+  __appendMarketplaceTrace(nome, {
+    source: `health_recover.${String(step || 'unknown')}`,
+    action: 'evaluate',
+    stage: String(st.stage || ''),
+    cyclesWithoutLife: Number(st?.counters?.cyclesWithoutLife || 0) || 0
+  });
   // Blindagem Delta (P0): o motor Delta não pode sofrer mutações agressivas de UI
   // (goto messenger.com/marketplace, newPage+close mainPage, reloads) oriundas do healthcheck legado.
   try {
@@ -14367,10 +14459,23 @@ async function recoveryStep(nome, page, step) {
         try { provisionAudit.append({ ts: now, event: 'delta_health_bypass_recoveryStep', nome: String(nome || ''), step: String(step || '') }); } catch {}
         try { await issues.append(nome, 'mil_action', `delta_health_bypass recoveryStep step=${String(step || '')}`); } catch {}
       }
+      __appendMarketplaceTrace(nome, {
+        source: `health_recover.${String(step || 'unknown')}`,
+        action: 'bypass_delta',
+        ok: true
+      });
       return false;
     }
   } catch {}
-  if (st.nextTryAt && st.nextTryAt > now) return false;
+  if (st.nextTryAt && st.nextTryAt > now) {
+    __appendMarketplaceTrace(nome, {
+      source: `health_recover.${String(step || 'unknown')}`,
+      action: 'skip_cooldown',
+      ok: true,
+      nextTryAt: Number(st.nextTryAt || 0) || 0
+    });
+    return false;
+  }
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
@@ -14383,7 +14488,7 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    try { await __gotoMarketplaceTracked(page, { nome, source: 'health_recover.navHome', timeoutMs: 30000, swallow: true }); } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
@@ -14404,9 +14509,14 @@ async function recoveryStep(nome, page, step) {
         const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
         await browserHelper.patchPage(nome, np, coords);
       } catch {}
-      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      await __gotoMarketplaceTracked(np, { nome, source: 'health_recover.newPage', timeoutMs: 30000, swallow: true });
+      try {
+        let closedOk = false;
+        try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); closedOk = true; } catch {}
+        __appendMarketplaceTrace(nome, { source: 'health_recover.newPage', action: 'close_old_main_page', ok: closedOk });
+      } catch {}
       ctrl.mainPage = np;
+      __appendMarketplaceTrace(nome, { source: 'health_recover.newPage', action: 'swap_main_page', ok: true });
       await wirePageObservers(nome, np);
       st.counters.newPages30m.push(Date.now());
       st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.newPage;
@@ -14545,17 +14655,27 @@ async function healthTick() {
       st.lastOkAt = now;
       st.stage = 'ok';
       st.counters.cyclesWithoutLife = 0;
+      __appendMarketplaceTrace(nome, { source: 'health_tick', action: 'alive', ok: true, stage: 'ok' });
       clearCloseCertainty(nome, 'page_alive');
       continue;
     }
     const noEventsFor = Math.max(now - st.lastDomEventAt, now - st.lastNetEventAt);
     if (noEventsFor > HEALTH_CFG.DEAD_NO_EVENT_MS) {
       st.counters.cyclesWithoutLife++;
+      __appendMarketplaceTrace(nome, {
+        source: 'health_tick',
+        action: 'no_life_detected',
+        ok: false,
+        noEventsForMs: Number(noEventsFor || 0) || 0,
+        cyclesWithoutLife: Number(st?.counters?.cyclesWithoutLife || 0) || 0,
+        stage: String(st.stage || '')
+      });
       if (st.stage === 'ok') st.stage = 'suspect';
     }
     try {
       const url = page.url ? page.url() : '';
       if (url === 'about:blank' && (now - st.lastDomEventAt) > HEALTH_CFG.ABOUT_BLANK_GRACE_MS) {
+        __appendMarketplaceTrace(nome, { source: 'health_tick', action: 'about_blank_recovery_navHome', ok: null });
         if (await recoveryStep(nome, page, 'navHome')) continue;
       }
     } catch {}
