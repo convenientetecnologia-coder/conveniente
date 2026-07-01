@@ -538,6 +538,8 @@ const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
   900,
   Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 2000) || 2000
 );
+const DELTA_MARKETPLACE_AUTOFILTER_ENABLED =
+  String(process.env.VIRTUS_DELTA_MARKETPLACE_AUTOFILTER || "0").trim() === "1";
 
 function clickDelayMs() {
   return randomBetween(HUMAN_TIMINGS.click.min, HUMAN_TIMINGS.click.max);
@@ -1273,8 +1275,10 @@ async function prepareDomForNetworkLead(page, threadKey) {
   const t = String(threadKey || "").trim();
   logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
-  // SEMPRE ativar o filtro Marketplace (existir no DOM ≠ estar selecionado).
-  const mp = await ensureMarketplaceFilterActive(page);
+  // Modo seguro: não forçar Marketplace por padrão para evitar "abre e sai" no passivo.
+  const mp = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
+    ? await ensureMarketplaceFilterActive(page)
+    : { ok: true, skipped: true, reason: "autofilter_disabled", active_after: false };
 
   let cardVisible = await isThreadCardVisible(page, t);
   logInfo(
@@ -1285,7 +1289,7 @@ async function prepareDomForNetworkLead(page, threadKey) {
     const root = await forceSidebarRefreshByMessagesRoot(page);
     logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
     await humanPause("domSettle", "dom_prep_root_settle");
-    if (!(await isMarketplaceFilterActive(page))) {
+    if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !(await isMarketplaceFilterActive(page))) {
       await ensureMarketplaceFilterActive(page);
     }
     cardVisible = await isThreadCardVisible(page, t);
@@ -1653,9 +1657,11 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
   }
 
-  try {
-    await ensureMarketplaceFilterActive(page);
-  } catch (_) {}
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+    try {
+      await ensureMarketplaceFilterActive(page);
+    } catch (_) {}
+  }
 
   const open = await openThreadByClick(page, threadKey);
   if (!open.ok) {
@@ -1664,8 +1670,10 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
         await forceSidebarRefreshByMessagesRoot(page);
         await humanPause("domSettle", "open_thread_retry_root");
-        await ensureMarketplaceFilterActive(page);
-        await humanPause("postMarketplace", "open_thread_retry_marketplace");
+        if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+          await ensureMarketplaceFilterActive(page);
+          await humanPause("postMarketplace", "open_thread_retry_marketplace");
+        }
       } catch (_) {}
       const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
       if (open2.ok) {
@@ -1853,11 +1861,15 @@ async function startVirtusDeltaStandaloneRuntime({
     logInfo(`[virtusDelta][boot] page_title=${title}`);
     logInfo(`[virtusDelta][boot] cookie_c_user_present=${cUserCookie ? "sim" : "nao"}`);
   } catch (_) {}
-  try {
-    const mpBoot = await ensureMarketplaceFilterActive(page);
-    logInfo(`[virtusDelta][boot] marketplace_boot=${JSON.stringify(mpBoot)}`);
-  } catch (e) {
-    logInfo(`[virtusDelta][boot] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`);
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+    try {
+      const mpBoot = await ensureMarketplaceFilterActive(page);
+      logInfo(`[virtusDelta][boot] marketplace_boot=${JSON.stringify(mpBoot)}`);
+    } catch (e) {
+      logInfo(`[virtusDelta][boot] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`);
+    }
+  } else {
+    logInfo("[virtusDelta][boot] marketplace_boot=skipped reason=autofilter_disabled");
   }
 
   const cdpSession = await page.target().createCDPSession();
@@ -2107,13 +2119,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   try {
     await waitForMessagesBootStable(page, "messages_ready_worker");
   } catch (_) {}
-  try {
-    const mpBoot = await ensureMarketplaceFilterActive(page);
-    logInfo(`[virtusDelta][boot][worker] marketplace_boot=${JSON.stringify(mpBoot)}`);
-  } catch (e) {
-    logInfo(
-      `[virtusDelta][boot][worker] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`
-    );
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+    try {
+      const mpBoot = await ensureMarketplaceFilterActive(page);
+      logInfo(`[virtusDelta][boot][worker] marketplace_boot=${JSON.stringify(mpBoot)}`);
+    } catch (e) {
+      logInfo(
+        `[virtusDelta][boot][worker] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`
+      );
+    }
+  } else {
+    logInfo("[virtusDelta][boot][worker] marketplace_boot=skipped reason=autofilter_disabled");
   }
 
   logInfo(`[virtusDelta][boot][worker] nome=${String(nome || "")} engine=delta epoch=${requiredEpoch} slowMode=${slowMode ? "sim" : "nao"} url=${String(page.url ? page.url() : "")}`);
