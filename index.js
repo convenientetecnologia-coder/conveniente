@@ -10,6 +10,11 @@ const crypto = require('crypto');
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
+const {
+  forensicLog,
+  rotateForensicLogs24h,
+  getActiveForensicLogPath,
+} = require('./scripts/forensicLogger.js');
 
 /**
  * =========================
@@ -1104,6 +1109,55 @@ app.post('/api/infra/command-bus', async (req, res) => {
         continue;
       }
 
+      if (t === 'fetch_forensic_logs') {
+        try {
+          const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+          const linhasDesejadas = Math.min(Math.max(Number(p.linhas || 200) || 200, 20), 2000);
+          const tipo = String(p.tipo || 'all').trim().toLowerCase();
+          const maxBytes = Math.max(8 * 1024, Math.min(2 * 1024 * 1024, Number(p.maxBytes || 512 * 1024) || (512 * 1024)));
+          const logPath = getActiveForensicLogPath();
+
+          const tail = __tailTextFileLines(logPath, { maxLines: linhasDesejadas, maxBytes });
+          if (!tail || tail.ok !== true) {
+            results[i] = {
+              id: cmd && cmd.id ? String(cmd.id) : null,
+              type: 'fetch_forensic_logs',
+              ok: false,
+              error: tail && tail.error ? String(tail.error) : 'tail_failed',
+              meta: { path: logPath }
+            };
+            continue;
+          }
+
+          const linhasTexto = Array.isArray(tail.lines) ? tail.lines : [];
+          const linhasFiltradas = (tipo === 'delta_only')
+            ? linhasTexto.filter((l) => /\[DELTA\]/i.test(String(l || '')) || /"tag"\s*:\s*"DELTA/i.test(String(l || '')))
+            : linhasTexto;
+
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'fetch_forensic_logs',
+            ok: true,
+            lines: linhasFiltradas,
+            meta: {
+              path: logPath,
+              linhas: linhasFiltradas.length,
+              fileSize: tail.fileSize || null,
+              bytesRead: tail.bytesRead || null,
+              tipo
+            }
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'fetch_forensic_logs',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+        continue;
+      }
+
       normal.push(cmd);
       normalIdx.push(i);
     }
@@ -1321,6 +1375,9 @@ const SERVER_EVENT_CHECK_INTERVAL_MS = Math.max(2000, Number(process.env.SERVER_
 const SERVER_EVENT_HEARTBEAT_MS = Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 600000) || 600000); // 10 min
 const SERVER_EVENT_DELTA_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SERVER_EVENT_DELTA_MIN_INTERVAL_MS || 30000) || 30000);
 const SERVER_EVENT_CHANGE_CONFIRM_TICKS = Math.max(1, Number(process.env.SERVER_EVENT_CHANGE_CONFIRM_TICKS || 2) || 2);
+// PATCH OBSERVABILIDADE (2026-07): por padrão, DESATIVADO em produção para matar tráfego zumbi (push/heartbeat).
+// Para reativar explicitamente (homologação), setar: SERVER_EVENT_BRIDGE_ENABLED=1
+const SERVER_EVENT_BRIDGE_ENABLED = String(process.env.SERVER_EVENT_BRIDGE_ENABLED || '').trim() === '1';
 let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
@@ -1640,6 +1697,11 @@ async function __serverEventBridgeTick(reason) {
 
 function startServerEventBridge() {
   try {
+    if (!SERVER_EVENT_BRIDGE_ENABLED) {
+      try { logger.info('[SERVER_EVENT_BRIDGE] desativado (SERVER_EVENT_BRIDGE_ENABLED!=1)'); } catch {}
+      try { forensicLog('OBS', 'server_event_bridge_disabled', { enabled: false }); } catch {}
+      return;
+    }
     if (__serverEventBridgeTimer) return;
     __serverEventBridgeTick('boot').catch(() => {});
     __serverEventBridgeTimer = setInterval(() => {
@@ -1675,6 +1737,7 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 // ===================== CLUSTER MULTI-NODE =====================
 let clusterClient = null;
 async function bootCluster() {
+  try { rotateForensicLogs24h(); } catch {}
   const { createCluster } = require('./scripts/clusterMaster.js');
   logger.info('[BOOT] Construindo cluster multi-node (auto)...');
   clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }

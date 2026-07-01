@@ -7,6 +7,14 @@ const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+let forensicLog = null;
+let rotateForensicLogs24h = null;
+try {
+  const fl = require('./forensicLogger.js');
+  forensicLog = fl && typeof fl.forensicLog === 'function' ? fl.forensicLog : null;
+  rotateForensicLogs24h = fl && typeof fl.rotateForensicLogs24h === 'function' ? fl.rotateForensicLogs24h : null;
+} catch {}
+try { if (typeof rotateForensicLogs24h === 'function') rotateForensicLogs24h(); } catch {}
 
 const browserHelper = require('./browser.js');
 const legacyVirtus = require('./virtus.js');
@@ -14810,16 +14818,35 @@ async function __deltaIngestTick() {
         nextOffset
       });
     } catch {}
+    try {
+      if (typeof forensicLog === 'function') {
+        forensicLog('DELTA', 'ingest_send', {
+          account_login: payload.account_login || null,
+          thread_key: payload.thread_key || null,
+          nextOffset
+        });
+      }
+    } catch {}
 
     const res = await __deltaPostWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
     if (res && res.status === 200) {
       try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
+      try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
       __deltaWriteCursorOffsetSync(nextOffset);
       try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
       try { if (typeof global.gc === 'function') global.gc(); } catch {}
       __deltaIngestBackoffMs = 650;
       return;
     }
+    try {
+      if (typeof forensicLog === 'function') {
+        forensicLog('DELTA', 'ingest_ack_non_200', {
+          status: res && res.status ? Number(res.status) : null,
+          ok: !!(res && res.ok),
+          nextOffset
+        });
+      }
+    } catch {}
     __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
   } finally {
     __deltaIngestLoopRunning = false;
@@ -15036,8 +15063,14 @@ async function __deltaAttachCdpEar(nome, page) {
     ctrl.deltaCdpOnFrame = onFrame;
     cdp.on('Network.webSocketFrameReceived', onFrame);
     try { logger.info('[DELTA][EAR] CDP ouvido ligado', { nome }); } catch {}
+    try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ear_cdp_attached', { nome: String(nome || '') }); } catch {}
   } catch (err) {
     try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
+    try {
+      if (typeof forensicLog === 'function') {
+        forensicLog('DELTA', 'ear_cdp_attach_failed', { nome: String(nome || ''), error: err && err.message ? String(err.message) : String(err) });
+      }
+    } catch {}
   }
 }
 
