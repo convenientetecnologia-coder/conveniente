@@ -2492,6 +2492,24 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   startDeltaIngestLoopOnce({});
 
   const seenKeys = new Set();
+  const wsDiag = {
+    frames: 0,
+    decoded: 0,
+    extractedEvents: 0,
+    eligibleEvents: 0,
+    emitted: 0,
+    errors: 0,
+    sampleBudget: 4,
+    lastLogAt: 0,
+  };
+  const logWsDiag = (force = false) => {
+    const now = Date.now();
+    if (!force && (now - Number(wsDiag.lastLogAt || 0)) < 20_000) return;
+    wsDiag.lastLogAt = now;
+    logInfo(
+      `[virtusDelta][ws_diag] account=${ACCOUNT_LOGIN || ""} frames=${wsDiag.frames} decoded=${wsDiag.decoded} extracted_events=${wsDiag.extractedEvents} eligible_events=${wsDiag.eligibleEvents} emitted=${wsDiag.emitted} errors=${wsDiag.errors}`
+    );
+  };
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
   const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: `worker:${String(nome || "")}` });
@@ -2514,7 +2532,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       const response = event?.response || {};
       const opcode = Number(response?.opcode ?? -1);
       const payloadData = response?.payloadData || "";
+      wsDiag.frames += 1;
       const decoded = decodeWebSocketPayload(payloadData, opcode);
+      if (decoded) wsDiag.decoded += 1;
       const inner = extractInnerPayload(decoded);
 
       let events = [];
@@ -2523,12 +2543,21 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (_) {
         events = [];
       }
+      wsDiag.extractedEvents += Array.isArray(events) ? events.length : 0;
+      if ((!events || events.length === 0) && wsDiag.sampleBudget > 0 && decoded) {
+        wsDiag.sampleBudget -= 1;
+        const sample = String(decoded).replace(/\s+/g, " ").slice(0, 220);
+        logInfo(
+          `[virtusDelta][ws_diag] sample_without_events opcode=${opcode} payload_len=${String(payloadData).length} decoded_sample="${sample}"`
+        );
+      }
 
       for (const ev of events) {
         const threadKey = String(ev?.thread_key || "").trim();
         const texto = decodeEscapedText(String(ev?.message_text || "")).trim();
         if (!threadKey) continue;
         if (!shouldEmitLeadText(texto)) continue;
+        wsDiag.eligibleEvents += 1;
 
         const key = `${ACCOUNT_LOGIN || ""}|${threadKey}|${texto}|${String(ev?.operacao_meta || ev?.operation || "")}`;
         if (seenKeys.has(key)) continue;
@@ -2549,6 +2578,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         logInfo(
           `[virtusDelta][network] account=${ACCOUNT_LOGIN || ""} thread_key=${threadKey} chars=${texto.length} op=${payload.operacao_meta || ""}`
         );
+        wsDiag.emitted += 1;
         try {
           appendPendingJsonlSync(payload);
           kickDeltaIngestLoop();
@@ -2594,7 +2624,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
         }
       }
+      logWsDiag(false);
     } catch (_) {
+      wsDiag.errors += 1;
+      logWsDiag(true);
       // nunca crashar por frame corrompido
     }
   };
