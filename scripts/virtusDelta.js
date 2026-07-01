@@ -2494,6 +2494,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const seenKeys = new Set();
   const wsDiag = {
     frames: 0,
+    sentFrames: 0,
     decoded: 0,
     extractedEvents: 0,
     eligibleEvents: 0,
@@ -2506,8 +2507,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const now = Date.now();
     if (!force && (now - Number(wsDiag.lastLogAt || 0)) < 20_000) return;
     wsDiag.lastLogAt = now;
+    const opcodes = Object.entries(wsDiag.opcodes || {})
+      .map(([k, v]) => `${k}:${v}`)
+      .join(",");
     logInfo(
-      `[virtusDelta][ws_diag] account=${ACCOUNT_LOGIN || ""} frames=${wsDiag.frames} decoded=${wsDiag.decoded} extracted_events=${wsDiag.extractedEvents} eligible_events=${wsDiag.eligibleEvents} emitted=${wsDiag.emitted} errors=${wsDiag.errors}`
+      `[virtusDelta][ws_diag] account=${ACCOUNT_LOGIN || ""} recv_frames=${wsDiag.frames} sent_frames=${wsDiag.sentFrames} decoded=${wsDiag.decoded} extracted_events=${wsDiag.extractedEvents} eligible_events=${wsDiag.eligibleEvents} emitted=${wsDiag.emitted} errors=${wsDiag.errors} opcodes=${opcodes || "none"}`
     );
   };
   let cityCache = { at: 0, value: null };
@@ -2533,6 +2537,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       const opcode = Number(response?.opcode ?? -1);
       const payloadData = response?.payloadData || "";
       wsDiag.frames += 1;
+      wsDiag.opcodes = wsDiag.opcodes || {};
+      wsDiag.opcodes[String(opcode)] = Number(wsDiag.opcodes[String(opcode)] || 0) + 1;
       const decoded = decodeWebSocketPayload(payloadData, opcode);
       if (decoded) wsDiag.decoded += 1;
       const inner = extractInnerPayload(decoded);
@@ -2631,9 +2637,38 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       // nunca crashar por frame corrompido
     }
   };
+  const onFrameSent = (event) => {
+    try {
+      if (!running || !epochOk()) return;
+      const response = event?.response || {};
+      const opcode = Number(response?.opcode ?? -1);
+      wsDiag.sentFrames += 1;
+      wsDiag.opcodes = wsDiag.opcodes || {};
+      const key = `sent_${String(opcode)}`;
+      wsDiag.opcodes[key] = Number(wsDiag.opcodes[key] || 0) + 1;
+      logWsDiag(false);
+    } catch (_) {}
+  };
+  const onWsCreated = (event) => {
+    try {
+      const url = String(event?.url || "");
+      const reqId = String(event?.requestId || "");
+      logInfo(`[virtusDelta][ws_diag] socket_created request_id=${reqId} url=${url}`);
+    } catch (_) {}
+  };
+  const onWsClosed = (event) => {
+    try {
+      const reqId = String(event?.requestId || "");
+      const ts = Number(event?.timestamp || 0) || 0;
+      logInfo(`[virtusDelta][ws_diag] socket_closed request_id=${reqId} ts=${ts}`);
+    } catch (_) {}
+  };
 
   try {
     cdpSession.on("Network.webSocketFrameReceived", onFrame);
+    cdpSession.on("Network.webSocketFrameSent", onFrameSent);
+    cdpSession.on("Network.webSocketCreated", onWsCreated);
+    cdpSession.on("Network.webSocketClosed", onWsClosed);
   } catch (_) {}
 
   return {
@@ -2659,6 +2694,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       try {
         if (cdpSession && typeof cdpSession.removeListener === "function") {
           cdpSession.removeListener("Network.webSocketFrameReceived", onFrame);
+          cdpSession.removeListener("Network.webSocketFrameSent", onFrameSent);
+          cdpSession.removeListener("Network.webSocketCreated", onWsCreated);
+          cdpSession.removeListener("Network.webSocketClosed", onWsClosed);
         }
       } catch (_) {}
       try {
