@@ -15558,10 +15558,24 @@ function __deltaScoreWsUrl(url) {
   if (!u) return -1;
   let score = 0;
   if (/facebook\.com|messenger\.com/.test(u)) score += 1;
-  if (/(marketplace|inbox|messaging|thread|conversation|mercury|chat|graphql|pull|channel|sync|delta)/.test(u)) score += 5;
+  if (/(marketplace|inbox|messaging|thread|conversation|mercury|chat|graphql|pull|channel|sync|delta|lightspeed)/.test(u)) score += 5;
+  if (/(lightspeed|edge-chat|\/chat\?|streamcontroller|realtime)/.test(u)) score += 2;
   if (/(graphql|api\/graphql|api\/v\d+)/.test(u)) score += 2;
   if (/(presence|typing|heartbeat|keepalive|ping|rtc|webrtc|mqtt|status\/|status\?|subscribe\/presence)/.test(u)) score -= 5;
   return score;
+}
+
+const DELTA_WS_BYTES_THRESHOLD = 120;
+
+function __deltaWsUrlSignatures(url) {
+  const u = String(url || '').trim().toLowerCase();
+  if (!u) return [];
+  const out = [];
+  if (/lightspeed/.test(u)) out.push('lightspeed');
+  if (/(marketplace|inbox|messaging|thread|conversation|mercury|chat)/.test(u)) out.push('chat_like');
+  if (/(graphql|api\/graphql)/.test(u)) out.push('graphql_like');
+  if (/(presence|typing|heartbeat|keepalive|ping|rtc|webrtc|mqtt|status\/|status\?|subscribe\/presence)/.test(u)) out.push('control_like');
+  return out;
 }
 
 function __deltaLooksLikeInboxHttpUrl(url) {
@@ -15605,10 +15619,65 @@ function __deltaShouldInspectWsFrame(meta, frameInfo, wsState) {
   const selectedId = String(state.selectedRichWsId || '').trim();
   const reqId = String(m.requestId || '').trim();
   const score = Number(m.richScore || 0) || 0;
+  const payloadBytes = Number(frameInfo && frameInfo.payloadBytes || 0) || 0;
+  if (payloadBytes > DELTA_WS_BYTES_THRESHOLD) return true;
+  if (m.forceDecode === true) return true;
   if (selectedId && reqId && selectedId === reqId) return true;
   if (score >= 3) return true;
   if (__deltaShouldIgnoreWsControlFrame(frameInfo)) return false;
   return true;
+}
+
+function __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded = '') {
+  const raw = String(payloadData || '');
+  if (!raw) return 0;
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length % 4 === 0;
+  if (Number(opcode ?? -1) === 2 || looksLikeBase64) {
+    try { return Buffer.from(raw, 'base64').length; } catch {}
+  }
+  if (typeof decoded === 'string' && decoded) {
+    try { return Buffer.byteLength(decoded, 'utf8'); } catch {}
+  }
+  try { return Buffer.byteLength(raw, 'utf8'); } catch { return raw.length; }
+}
+
+function __deltaHexDumpFromBuffer(buf, maxBytes = 96) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ''), 'utf8');
+  const lim = Math.max(0, Math.min(Number(maxBytes || 0) || 0, b.length));
+  if (!lim) return '';
+  const one = b.subarray(0, lim);
+  return Array.from(one).map((x) => x.toString(16).padStart(2, '0')).join(' ');
+}
+
+function __deltaBuildWsSampleDump({ payloadData, opcode, decoded, inner } = {}) {
+  const rawPayload = String(payloadData || '');
+  const op = Number(opcode ?? -1);
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(rawPayload) && rawPayload.length % 4 === 0;
+  let rawBytes = Buffer.alloc(0);
+  if (rawPayload) {
+    if (op === 2 || looksLikeBase64) {
+      try { rawBytes = Buffer.from(rawPayload, 'base64'); } catch { rawBytes = Buffer.from(rawPayload, 'utf8'); }
+    } else {
+      rawBytes = Buffer.from(rawPayload, 'utf8');
+    }
+  }
+
+  const candidateText =
+    (typeof inner === 'string' && inner.trim()) ? inner :
+    (typeof decoded === 'string' && decoded.trim()) ? decoded :
+    rawBytes.toString('utf8');
+  const sanitizedText = __deltaSanitizeFrameSample(candidateText).slice(0, 1200);
+  const sanitizedBuf = Buffer.from(sanitizedText || '', 'utf8');
+  const payloadB64 = sanitizedBuf.length
+    ? sanitizedBuf.toString('base64')
+    : rawBytes.subarray(0, 192).toString('base64');
+  const payloadHex = __deltaHexDumpFromBuffer(sanitizedBuf.length ? sanitizedBuf : rawBytes, 96);
+  return {
+    payload_b64: String(payloadB64 || '').slice(0, 1200),
+    payload_hex: String(payloadHex || '').slice(0, 1200),
+    sanitized_text: String(sanitizedText || '').slice(0, 1200),
+    raw_bytes: rawBytes.length,
+  };
 }
 
 function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '') {
@@ -15741,6 +15810,9 @@ async function __deltaAttachCdpEar(nome, page) {
       frameSkips: 0,
       httpFallbackHits: 0,
       confirmedRichWsId: '',
+      bytesThreshold: DELTA_WS_BYTES_THRESHOLD,
+      activatedByBytesCount: 0,
+      lastSocketStatsAt: 0,
     };
     ctrl.deltaWsRouteState = wsState;
 
@@ -15753,10 +15825,16 @@ async function __deltaAttachCdpEar(nome, page) {
           requestId: rid,
           url: String(url || '').trim(),
           richScore: __deltaScoreWsUrl(url),
+          signatures: __deltaWsUrlSignatures(url),
+          hasLightspeed: /lightspeed/i.test(String(url || '')),
           createdAt: Date.now(),
           lastSeenAt: 0,
           framesTotal: 0,
           framesDecoded: 0,
+          bytesTotal: 0,
+          maxFrameBytes: 0,
+          forceDecode: false,
+          activatedByBytesAt: 0,
           leads: 0,
         };
         wsState.byId.set(rid, meta);
@@ -15765,7 +15843,42 @@ async function __deltaAttachCdpEar(nome, page) {
       }
       const rescored = __deltaScoreWsUrl(meta.url || url);
       if (rescored > meta.richScore) meta.richScore = rescored;
+      meta.signatures = __deltaWsUrlSignatures(meta.url || url);
+      meta.hasLightspeed = meta.signatures.includes('lightspeed');
       return meta;
+    };
+
+    const emitSocketStatsIfDue = ({ force = false } = {}) => {
+      const now = Date.now();
+      const last = Number(wsState.lastSocketStatsAt || 0) || 0;
+      if (!force && last && (now - last) < 60_000) return;
+      wsState.lastSocketStatsAt = now;
+      const sockets = Array.from(wsState.byId.values())
+        .map((m) => ({
+          requestId: String(m && m.requestId || ''),
+          url: String(m && m.url || '').slice(0, 220),
+          signatures: Array.isArray(m && m.signatures) ? m.signatures.slice(0, 6) : [],
+          richScore: Number(m && m.richScore || 0) || 0,
+          frames: Number(m && m.framesTotal || 0) || 0,
+          bytes: Number(m && m.bytesTotal || 0) || 0,
+          maxFrameBytes: Number(m && m.maxFrameBytes || 0) || 0,
+          forceDecode: !!(m && m.forceDecode),
+          leads: Number(m && m.leads || 0) || 0,
+        }))
+        .sort((a, b) => (b.bytes - a.bytes) || (b.frames - a.frames))
+        .slice(0, 6);
+      const snapshot = {
+        ts: now,
+        nome: String(nome || ''),
+        sockets_seen: Number(wsState.byId.size || 0) || 0,
+        selected_request_id: String(wsState.selectedRichWsId || '') || null,
+        selected_score: Number(wsState.selectedRichScore || 0) || 0,
+        activated_by_bytes_count: Number(wsState.activatedByBytesCount || 0) || 0,
+        frame_skips: Number(wsState.frameSkips || 0) || 0,
+        sockets
+      };
+      try { logger.info('[DELTA][WS][SOCKET_STATS_1M]', snapshot); } catch {}
+      try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ws_socket_stats_1m', snapshot); } catch {}
     };
 
     const selectRichWs = (requestId, reason = '') => {
@@ -15906,17 +16019,35 @@ async function __deltaAttachCdpEar(nome, page) {
         const meta = ensureWsMeta(requestId, url);
         if (!meta) return;
         const score = Number(meta.richScore || 0) || 0;
+        const signatures = Array.isArray(meta.signatures) ? meta.signatures : [];
+        const hasLightspeed = signatures.includes('lightspeed');
         if (score >= 3) selectRichWs(requestId, 'ws_created_url_score');
+        if (hasLightspeed) selectRichWs(requestId, 'ws_created_signature_lightspeed');
         try {
           if (typeof forensicLog === 'function') {
             forensicLog('DELTA', 'ws_created', {
               nome: String(nome || ''),
               requestId,
               url: String(url || '').slice(0, 500),
-              rich_score: score
+              rich_score: score,
+              signatures: signatures.slice(0, 6),
+              has_lightspeed: hasLightspeed
             });
           }
         } catch {}
+        if (hasLightspeed || signatures.includes('chat_like')) {
+          try {
+            if (typeof forensicLog === 'function') {
+              forensicLog('DELTA', 'ws_signature_candidate', {
+                nome: String(nome || ''),
+                requestId,
+                signatures: signatures.slice(0, 6),
+                rich_score: score,
+                url: String(url || '').slice(0, 500),
+              });
+            }
+          } catch {}
+        }
       } catch {}
     };
 
@@ -16011,14 +16142,49 @@ async function __deltaAttachCdpEar(nome, page) {
         const opcode = Number(response.opcode ?? -1);
         const payloadData = response.payloadData || '';
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
+        const payloadBytes = __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded);
         __deltaIncFrameTelemetry('telemetry_frames_decoded', 1);
-        if (wsMeta) wsMeta.framesDecoded = (Number(wsMeta.framesDecoded || 0) || 0) + 1;
+        if (wsMeta) {
+          wsMeta.framesDecoded = (Number(wsMeta.framesDecoded || 0) || 0) + 1;
+          wsMeta.bytesTotal = (Number(wsMeta.bytesTotal || 0) || 0) + payloadBytes;
+          wsMeta.maxFrameBytes = Math.max(Number(wsMeta.maxFrameBytes || 0) || 0, payloadBytes);
+        }
         const inner = __deltaExtractInnerPayload(decoded);
-        const frameInfo = { payloadData, decoded, inner, opcode };
+        const frameInfo = { payloadData, decoded, inner, opcode, payloadBytes };
+
+        if (wsMeta && payloadBytes > DELTA_WS_BYTES_THRESHOLD) {
+          const now = Date.now();
+          const firstActivation = wsMeta.forceDecode !== true;
+          wsMeta.forceDecode = true;
+          if (!wsMeta.activatedByBytesAt) wsMeta.activatedByBytesAt = now;
+          if (firstActivation) {
+            wsState.activatedByBytesCount = (Number(wsState.activatedByBytesCount || 0) || 0) + 1;
+            selectRichWs(requestId, 'ws_frame_bytes_threshold');
+          }
+          const lastDumpAt = Number(wsMeta.lastBigDumpAt || 0) || 0;
+          if (!lastDumpAt || (now - lastDumpAt) >= 60_000) {
+            wsMeta.lastBigDumpAt = now;
+            const dump = __deltaBuildWsSampleDump({ payloadData, opcode, decoded, inner });
+            try {
+              if (typeof forensicLog === 'function') {
+                forensicLog('DELTA', 'ws_bytes_threshold_activated', {
+                  nome: String(nome || ''),
+                  requestId: String(requestId || ''),
+                  url: String((wsMeta && wsMeta.url) || '').slice(0, 500),
+                  payload_bytes: payloadBytes,
+                  threshold: DELTA_WS_BYTES_THRESHOLD,
+                  signatures: Array.isArray(wsMeta.signatures) ? wsMeta.signatures.slice(0, 6) : [],
+                  ...dump
+                });
+              }
+            } catch {}
+          }
+        }
 
         if (!__deltaShouldInspectWsFrame(wsMeta, frameInfo, wsState)) {
           wsState.frameSkips = (Number(wsState.frameSkips || 0) || 0) + 1;
           __deltaEmitFrameTelemetryIfDue();
+          emitSocketStatsIfDue();
           return;
         }
 
@@ -16032,6 +16198,7 @@ async function __deltaAttachCdpEar(nome, page) {
         if (!events.length) {
           __deltaMaybeDumpNoLeadFrameSample(nome, { opcode, payloadData, decoded, inner });
           __deltaEmitFrameTelemetryIfDue();
+          emitSocketStatsIfDue();
           return;
         }
 
@@ -16051,9 +16218,11 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         if (frameHadLead) __deltaIncFrameTelemetry('telemetry_frames_with_leads', 1);
         __deltaEmitFrameTelemetryIfDue();
+        emitSocketStatsIfDue();
       } catch {
         __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
         __deltaEmitFrameTelemetryIfDue();
+        emitSocketStatsIfDue();
         // nunca crashar o worker por frame corrompido
       }
     };
