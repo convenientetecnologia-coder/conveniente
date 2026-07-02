@@ -1466,9 +1466,10 @@ const SERVER_EVENT_CHECK_INTERVAL_MS = Math.max(2000, Number(process.env.SERVER_
 const SERVER_EVENT_HEARTBEAT_MS = Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 600000) || 600000); // 10 min
 const SERVER_EVENT_DELTA_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SERVER_EVENT_DELTA_MIN_INTERVAL_MS || 30000) || 30000);
 const SERVER_EVENT_CHANGE_CONFIRM_TICKS = Math.max(1, Number(process.env.SERVER_EVENT_CHANGE_CONFIRM_TICKS || 2) || 2);
-// PATCH OBSERVABILIDADE (2026-07): por padrão, DESATIVADO em produção para matar tráfego zumbi (push/heartbeat).
-// Para reativar explicitamente (homologação), setar: SERVER_EVENT_BRIDGE_ENABLED=1
-const SERVER_EVENT_BRIDGE_ENABLED = String(process.env.SERVER_EVENT_BRIDGE_ENABLED || '').trim() === '1';
+// Bridge de presença/evento:
+// - default ON para servidor novo ficar visível no CT sem ajuste manual.
+// - escape hatch: SERVER_EVENT_BRIDGE_ENABLED=0 para desligar explicitamente.
+const SERVER_EVENT_BRIDGE_ENABLED = String(process.env.SERVER_EVENT_BRIDGE_ENABLED || '1').trim() !== '0';
 let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
@@ -1656,8 +1657,10 @@ function __resolveCtServerEventConfig() {
       ? explicitEventUrl.replace(/\/+$/, '')
       : `${ctBaseUrl}/api/servers/event_secret`;
     const logSecret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
-    if (!eventUrl || !logSecret) return null;
-    return { ctBaseUrl, eventUrl, logSecret };
+    // Fallback "primeiro mundo": usar também infra secret do bootstrap Gate B.
+    const infraSecret = String(__resolveInfraSecret() || '').trim();
+    if (!eventUrl || (!logSecret && !infraSecret)) return null;
+    return { ctBaseUrl, eventUrl, logSecret, infraSecret };
   } catch {
     return null;
   }
@@ -1669,12 +1672,15 @@ async function __postServerEventToCt(payload) {
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), 8000);
   try {
+    const headers = {
+      'Content-Type': 'application/json'
+    };
+    if (cfg.logSecret) headers['x-log-secret'] = cfg.logSecret;
+    if (cfg.infraSecret) headers['x-infra-secret'] = cfg.infraSecret;
+
     const res = await fetch(cfg.eventUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-log-secret': cfg.logSecret
-      },
+      headers,
       body: JSON.stringify(payload || {}),
       signal: controller.signal
     });
