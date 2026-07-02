@@ -1,0 +1,154 @@
+AUDITORIA FORENSE RM6 - POS TESTE (20:08)
+Data/hora da coleta: 2026-07-02 20:08 (UTC-3)
+Host: aba80611-8b8a-46ed-a852-f5f0d573c03b
+
+============================================================
+1) CONTEXTO
+============================================================
+Entrada de teste informada:
+- "gabarito"
+- "me chama la no whats"
+- "48"
+- "91985634"
+- "top"
+- "foi? sera"
+- "ou nao"
+
+Sintoma reportado:
+- nao respondeu;
+- nao abriu chat;
+- nada chegou no CT.
+
+============================================================
+2) EVIDENCIAS COLETADAS
+============================================================
+Pasta da coleta:
+- C:\conveniente\ops\rm6_pos_teste_20260702_200810\
+
+Arquivos analisados:
+- command_bus_bundle.json
+- debug_bundle.json
+- debug_bundle_cuiaba-1782677786967.json
+- status_public_api.json
+- server_event_log.json
+- ct_db_delta_snapshot.json
+
+============================================================
+3) RESULTADO FORENSE OBJETIVO
+============================================================
+3.1 Escuta universal esta ativa (PROVADO)
+- ws_socket_stats_1m: frame_skips = 0
+- ws_socket_stats_1m: heartbeat_skips = 0
+- network_telemetry_1m: frames_total = 638 / frames_decoded = 638 / parse_errors = 0
+
+Interpretacao:
+- o ouvido esta aberto para todos os frames;
+- nao ha falha de leitura.
+
+------------------------------------------------------------
+3.2 Conexoes relevantes detectadas (PROVADO)
+- ws_created: 10
+- ws_rich_channel_selected: 7
+- ws_signature_candidate: 2
+
+Canais observados:
+- wss://gateway.facebook.com/ws/lightspeed...
+- wss://edge-chat.facebook.com/chat...
+
+------------------------------------------------------------
+3.3 Sinal mais forte desta coleta: lightspeed com alto volume, mas zero lead
+Do ultimo ws_socket_stats_1m:
+- requestId 20728.255 (lightspeed)
+  - frames: 205
+  - bytes: 94497
+  - maxFrameBytes: 20439
+  - leads: 0
+
+- requestId 20728.325 (edge-chat)
+  - frames: 58
+  - bytes: 121
+  - maxFrameBytes: 5
+  - leads: 0
+
+Interpretacao tecnica:
+- o trafego de negocio esta majoritariamente no lightspeed;
+- parser atual nao consegue converter payload desse stream em (thread_key + texto).
+
+------------------------------------------------------------
+3.4 Pipeline de lead continua zerado (PROVADO)
+No forensic da janela:
+- lead_capturado_buffer: 0
+- lead_chat_ativo_realtime: 0
+- lead_consolidado_pos_hands: 0
+- ingest_send: 0
+- ingest_ack_200: 0
+- http_fallback_lead: 0
+
+Conclusao operacional:
+- fluxo nao sai da camada de rede.
+
+------------------------------------------------------------
+3.5 Amostras no-lead seguem majoritariamente em batimento curto
+frame_no_lead_sample (contagem agregada):
+- "0AA=": 69
+- "Cg==": 7
+- "IAIAAA==": 2
+- "DAAAAgAAEwA=": 1
+- "DAAAAgAAHgA=": 1
+
+Observacao:
+- o dump periodico continua capturando mais heartbeat curto do que payload rico;
+- isso nao contradiz o volume alto do lightspeed, apenas indica amostragem enviesada para pacotes pequenos.
+
+------------------------------------------------------------
+3.6 Estado do servidor no instante da falha
+status_public_api:
+- engine: delta
+- perfis totais: 6
+- ativos: 1
+- trabalhando: 1
+- humanHold: 4
+- banned: 1
+
+Risco paralelo:
+- topologia com 1 unico perfil ativo permanece fragil.
+
+------------------------------------------------------------
+3.7 CT permanece sem cards delta
+ct_db_delta_snapshot:
+- ct_messenger_delta_chats_count.n = 0
+
+============================================================
+4) CONCLUSAO FORENSE FINAL
+============================================================
+Resposta direta:
+- NAO disparou.
+
+Causa mais provavel (com evidencia):
+- o stream lightspeed concentra trafego relevante (94 KB, frame ate 20 KB),
+  mas o extrator semantico atual nao traduz esse payload em thread_key + texto.
+
+Estado atual do problema:
+- nao e falha de attach;
+- nao e falha de decode;
+- nao e bloqueio por limiar;
+- e incompatibilidade de parsing semantico com protocolo/payload do lightspeed.
+
+============================================================
+5) PROXIMO PASSO CIRURGICO RECOMENDADO
+============================================================
+Implementar decodificador especifico para frames binarios do lightspeed:
+- extracao por envelope binario (nao depender de JSON puro);
+- dump forense dedicado para frames lightspeed com payload > 0 bytes, com:
+  - requestId
+  - opcode
+  - payload_len
+  - base64 sanitizado
+  - hexdump curto
+  - tentativa de decode incremental
+- correlacionar evento parseado com thread_key e texto para alimentar o mesmo Fluxo 1.
+
+Objetivo:
+- converter o volume real do lightspeed em lead util.
+
+Fim do laudo.
