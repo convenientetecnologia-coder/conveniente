@@ -1,0 +1,197 @@
+AUDITORIA FORENSE DE CAPTACAO - SAUDACAO E COLETA DELTA (READ-ONLY)
+Data: 2026-07-02
+Escopo auditado:
+- C:\conveniente\index.js
+- C:\conveniente\scripts\worker.js
+- C:\conveniente\scripts\virtusDelta.js
+Modo: leitura estrita (sem alteracao de codigo produtivo nesta rodada de auditoria)
+
+====================================================================
+RESUMO EXECUTIVO
+====================================================================
+1) Coleta de cidade/perfil:
+- No fluxo de atendimento Delta (Maos), nao ha abertura de novo browser por chat.
+- O envio usa a mesma page do runtime do perfil.
+- Existe fila serial por runtime para evitar concorrencia destrutiva.
+- A coleta de cidade no fluxo atual auditado e feita por chamada a coletor dedicado via referencia em virtusDelta.
+
+2) Saudacao:
+- O atendimentoDelta e montado como mensagem unica composta de 4 blocos.
+- A separacao de paragrafos usa quebra de linha, e o motor simula Shift+Enter no composer.
+- O envio no chat e um unico disparo (Enter final), nao multiplos baloes por bloco.
+
+3) Dependencia de CT para classificar AB/ABC/pendente:
+- Nao foi encontrado HTTP de ida ao CT dentro da janela de 1-2 minutos para resolver tipo de cidade antes de responder.
+- A resolucao de texto e local no servidor (composicao local da saudacao).
+
+4) Ingestao final:
+- O POST final para CT acontece no worker, no loop de ingestao.
+- No chat novo, o desenho atual manda para CT quando nasce o consolidado pos-maos (evento unico de consolidacao).
+- Em chat ativo, os eventos seguem em tempo real (payloads separados por mensagem).
+
+====================================================================
+1) MECANICA ATUAL DE RASPAGEM DA CIDADE E PERFIL
+====================================================================
+
+1.1 Funcoes de DOM mapeadas
+- `prepareDomForNetworkLead` em `scripts/virtusDelta.js` L1155-L1180
+  - prepara o DOM (filtro Marketplace, refresh do sidebar, visibilidade do card do thread).
+- `extractMarketplaceItemLink` em `scripts/virtusDelta.js` L1460-L1473
+  - extrai URL do item (`/marketplace/item/`) via DOM e normaliza para URL absoluta.
+- `extractCityFromMarketplaceDom` em `scripts/virtusDelta.js` L426-L473
+  - varre DOM buscando labels "Anunciado em / Listed in" e extrai valor de cidade.
+
+1.2 Como a coleta e disparada no fluxo de saudacao
+- `sendDeltaGreetingNow` em `scripts/virtusDelta.js` L2166-L2294
+  - cria `itemLinkPromise` e sincroniza `resolveItemLink` (L2180-L2189).
+  - monta `cityCollectionPromise` aguardando link e acionando coletor (L2191-L2200).
+  - no envio da saudacao (`sendReplyFlow`), o link e coletado ao abrir o chat e entregue no callback `onItemLink` (L2204-L2210).
+  - depois aguarda resultado de cidade (`const cityOut = await cityCollectionPromise`) em L2237.
+
+1.3 Browser/tab por chat vs fila
+- Nao ha criacao de browser por chat no caminho de envio:
+  - runtime worker usa browser/page ja existentes (`startVirtusDeltaWorkerRuntime`) em `scripts/virtusDelta.js` L1989-L2022.
+  - comandos de envio entram em fila serial com `createSerialQueue`:
+    - definicao em L1821-L1827
+    - uso no runtime em L2000
+    - `enqueueDeltaGreetingFlow` enfileira em L2306-L2317.
+- No modo standalone tambem ha controle para manter janela unica:
+  - fecha paginas extras em `startVirtusDeltaStandaloneRuntime` L1892-L1908.
+
+1.4 Avaliacao de RAM (forense arquitetural, sem benchmark em runtime)
+- Pelo desenho atual nos arquivos auditados:
+  - nao existe explosao de browser por chat no caminho de resposta.
+  - custo principal de RAM vem de browser por perfil + page ativa.
+  - a serializacao (`createSerialQueue`) reduz picos de concorrencia de automacao e tende a estabilizar uso de memoria/CPU.
+- Observacao de engenharia:
+  - existe referencia a coletor dedicado (`getDeltaCityCollector`) em `scripts/virtusDelta.js` L134-L137 e L1805-L1819, indicando externalizacao da raspagem para runtime dedicado.
+
+====================================================================
+2) ESTRUTURA DE DISPARO DA SAUDACAO (atendimentodelta.json)
+====================================================================
+
+2.1 Leitura e composicao
+- Leitura do JSON:
+  - `ATENDIMENTO_DELTA_PATH` em `scripts/virtusDelta.js` L380
+  - cache e parse em `readAtendimentoDeltaConfigSync` L383-L396.
+- Montagem:
+  - `generateDeltaGreeting` em L398-L424.
+  - escolhe bloco 1 por horario (dia/tarde/noite) em L402-L405.
+  - escolhe aleatorio de `bloco2`, `bloco3`, `bloco4` em L407-L409.
+  - junta tudo com `join("\n\n")` em L411-L414 (paragrafo separado por linha em branco).
+
+2.2 Envio unico ou varios baloes
+- O envio da saudacao ocorre em `sendReplyFlow`:
+  - digita o texto completo em `typeHumanized` (L1743).
+  - dispara envio final com `Enter` uma vez (L1765-L1767).
+- Nao ha loop de "envia bloco 1", "envia bloco 2" em chamadas separadas nesse fluxo.
+- Conclusao: mensagem composta unica por disparo.
+
+2.3 Quebra de linha / Shift+Enter
+- `typeHumanized` em `scripts/virtusDelta.js` L1547-L1569:
+  - para cada `\n`, executa:
+    - `keyboard.down("Shift")` L1553
+    - `keyboard.press("Enter")` L1554
+    - `keyboard.up("Shift")` L1555
+  - portanto, paragrafos sao separados no mesmo balao.
+
+2.4 Estado atual do arquivo de dados
+- `dados/atendimentodelta.json` (linhas 1-26 no arquivo atual):
+  - `bloco1_bom_dia`, `bloco1_boa_tarde`, `bloco1_boa_noite`, `bloco2`, `bloco3`, `bloco4`.
+  - modelo alinhado ao envio composto de 4 blocos.
+
+====================================================================
+3) DEPENDENCIA DE RESOLUCAO DE CIDADES COM O CT
+====================================================================
+
+Pergunta forense:
+Existe chamada HTTP ao CT no meio do cronometro (1-2 min) para decidir AB/ABC/pendente antes de responder?
+
+3.1 Resultado da varredura
+- Nao foi encontrado esse padrao nos arquivos auditados.
+- O timer de chat novo esta no worker:
+  - `DELTA_NEW_CHAT_TIMER_MIN_MS/MAX_MS` em `scripts/worker.js` L14616-L14617.
+  - disparo do timer para fluxo das maos em L14822-L14839.
+- Ao estourar, worker chama Maos localmente via IPC/runtime:
+  - `__deltaRunHandsGreetingFlow` L14808-L14821
+  - chamada efetiva em L14857-L14861.
+- Nao ha fetch para CT nesse trecho de decisao da resposta.
+
+3.2 Onde existe HTTP com CT
+- O HTTP para CT aparece no ingest do worker:
+  - URL de ingest em `scripts/worker.js` L15131.
+  - POST efetivo em L15177.
+- Isso ocorre no loop de ingestao, nao como pre-condicao para escolher texto da saudacao.
+
+3.3 index.js (escopo de apoio)
+- `index.js` expoe barramento `/api/infra/command-bus` (L1069+) para comandos internos.
+- Nao foi encontrado em `index.js` rota ou chamada especifica de classificacao AB/ABC via CT no meio da janela do timer.
+
+Conclusao ponto 3:
+- Nao ha ponto de falha sincrono de ida ao CT para classificar cidade antes da saudacao dentro do fluxo mapeado.
+
+====================================================================
+4) ENCAIXE E SINCRONISMO DO PAYLOAD DE INGESTAO
+====================================================================
+
+4.1 Ponto exato do POST final
+- `scripts/worker.js`
+  - funcao `__deltaIngestTick` inicia em L15127.
+  - monta URL ingest CT em L15131 (`.../api/messenger-delta/ingest` default).
+  - executa POST em L15177 via `__deltaPostWebhookJson`.
+
+4.2 Regras de envio da fila
+- Se `dispatch_ct === false`, nao envia ao CT e apenas avanca cursor:
+  - L15149-L15153.
+- Se `dispatch_ct === true`, envia ao CT:
+  - L15177 e tratamento de ACK.
+
+4.3 Fluxo chat novo (ida)
+- Capturas durante buffer:
+  - eventos `lead_capturado_buffer` com `dispatch_ct:false` em `scripts/worker.js` L15385-L15399.
+- Consolidacao pos-maos:
+  - evento `lead_consolidado_pos_hands` com `dispatch_ct:true` em L14925-L14937.
+- Isso caracteriza pacote consolidado no nascimento do card.
+
+4.4 Fluxo chat ativo (tempo real)
+- Para thread em `active`, cada nova mensagem gera evento com `dispatch_ct:true`:
+  - `lead_chat_ativo_realtime` em L15401-L15416.
+- Portanto, no ativo os dados podem ser enviados em pacotes separados por mensagem.
+
+4.5 Se o worker aguarda digitacao e raspagem
+- No fluxo de timer de chat novo:
+  - worker chama `handsOut` (L14857-L14861).
+  - se erro de hands, agenda retry e nao despacha (L14863-L14885).
+  - se cidade ausente no retorno, agenda retry e nao despacha (L14890-L14915).
+  - so depois de sucesso consolidado registra `dispatch_ct:true` (L14925-L14937).
+- Conclusao:
+  - para chat novo, o desenho atual exige conclusao da etapa de maos e cidade antes do pacote final de consolidacao.
+  - para chat ativo, envio e incremental por mensagem.
+
+====================================================================
+ANEXO - INDICIOS IMPORTANTES EM index.js
+====================================================================
+
+- Porta de barramento interno:
+  - `PORT = 8088` em `index.js` L973.
+  - rota `/api/infra/command-bus` em L1069.
+- Comando `delta_reply` e enviado via IPC ao worker:
+  - parse em L1088-L1103
+  - envio IPC em L1257-L1261
+  - execucao paralela por conta com `Promise.all` em L1251-L1253 e L1278.
+
+====================================================================
+VEREDITO FORENSE FINAL
+====================================================================
+
+- O raio-X atual mostra que:
+  1) a saudacao e composta localmente e enviada em balao unico com paragrafos (Shift+Enter);
+  2) nao ha chamada sincrona ao CT para decidir AB/ABC/pendente antes de responder;
+  3) o POST final de ingestao e centralizado no worker (`__deltaIngestTick`);
+  4) no chat novo, a consolidacao e posterior ao fluxo de maos/cidade; no chat ativo, e realtime por mensagem.
+
+- Em arquitetura operacional:
+  - nao ha abertura de browser novo por chat no envio;
+  - ha fila serial por runtime para conter concorrencia;
+  - ha referencia de coletor dedicado para cidade a partir do virtusDelta.
+

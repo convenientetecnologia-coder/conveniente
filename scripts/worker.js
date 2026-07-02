@@ -14887,7 +14887,33 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
-  const city = String((handsOut && handsOut.cidade) || st.city || '').trim() || null;
+  const city = String((handsOut && handsOut.cidade) || '').trim() || null;
+  if (!city) {
+    st.status = 'new_buffering';
+    st.inFlight = false;
+    st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
+    st.updatedAt = Date.now();
+    const retryInMs = __deltaScheduleThreadTimer(st, { retry: true });
+    __deltaAppendPendingJsonlSync({
+      event: 'lead_city_retry_scheduled',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: finalText || preMessages || '',
+      cidade: null,
+      operacao_meta: 'city_retry',
+      dispatch_ct: false,
+      queue_mode: 'capture_only',
+      flow_stage: 'city_retry',
+      hands_error: String(handsOut && handsOut.error || 'city_missing_after_greeting').slice(0, 300),
+      retry_in_ms: retryInMs,
+      hands_failures: st.handsFailures,
+      saudacao_enviada: !!(handsOut && handsOut.greeting_text),
+      saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+    });
+    __deltaSchedulePersistThreadState();
+    return;
+  }
   st.city = city;
   st.status = 'active';
   st.inFlight = false;
@@ -14911,9 +14937,6 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     flow_stage: 'new_chat_buffered_dispatched',
     saudacao_enviada: true,
     saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
-    profile_url: handsOut && handsOut.profile_url ? String(handsOut.profile_url) : null,
-    city_source: handsOut && handsOut.city_source ? String(handsOut.city_source) : null,
-    timer_reason: String(reason || ''),
   });
   __deltaKickIngestLoop();
 
@@ -15095,6 +15118,31 @@ async function __deltaPostWebhookJson(url, payload, { timeoutMs = 4500, headers 
   }
 }
 
+function __deltaBuildCtIngestPayload(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const server_id = String(p.server_id || '').trim() || null;
+  const account_login = String(p.account_login || '').trim() || null;
+  const thread_key = String(p.thread_key || '').trim() || null;
+  if (!server_id || !account_login || !thread_key) return null;
+
+  const mensagensCliente = String(
+    p.mensagens_cliente_concatenadas ||
+    p.texto_limpo ||
+    ''
+  ).trim();
+  const cidade = String(p.cidade || '').trim() || null;
+  const saudacaoTexto = String(p.saudacao_texto || '').trim() || null;
+
+  return {
+    server_id,
+    account_login,
+    thread_key,
+    mensagens_cliente_concatenadas: mensagensCliente,
+    cidade,
+    saudacao_texto: saudacaoTexto,
+  };
+}
+
 let __deltaIngestLoopRunning = false;
 let __deltaIngestBackoffMs = 900;
 let __deltaIngestKickRequested = false;
@@ -15126,6 +15174,12 @@ async function __deltaIngestTick() {
       __deltaIngestBackoffMs = 350;
       return;
     }
+    const ctPayload = __deltaBuildCtIngestPayload(payload);
+    if (!ctPayload) {
+      __deltaWriteCursorOffsetSync(nextOffset);
+      __deltaIngestBackoffMs = 900;
+      return;
+    }
 
     const headers = {};
     if (secret) headers['x-delta-secret'] = secret;
@@ -15133,22 +15187,22 @@ async function __deltaIngestTick() {
 
     try {
       logger.info('[DELTA][INGEST] enviando stateless para CT', {
-        account_login: payload.account_login || null,
-        thread_key: payload.thread_key || null,
+        account_login: ctPayload.account_login || null,
+        thread_key: ctPayload.thread_key || null,
         nextOffset
       });
     } catch {}
     try {
       if (typeof forensicLog === 'function') {
         forensicLog('DELTA', 'ingest_send', {
-          account_login: payload.account_login || null,
-          thread_key: payload.thread_key || null,
+          account_login: ctPayload.account_login || null,
+          thread_key: ctPayload.thread_key || null,
           nextOffset
         });
       }
     } catch {}
 
-    const res = await __deltaPostWebhookJson(ingestUrl, payload, { timeoutMs: 4500, headers });
+    const res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers });
     if (res && res.status === 200) {
       try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
       try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
@@ -15342,7 +15396,6 @@ async function __deltaAttachCdpEar(nome, page) {
         if (!events.length) return;
 
         const serverId = readHostIdSync() || '';
-        const cidade = (robeMeta[nome] && robeMeta[nome].cidade) ? robeMeta[nome].cidade : null;
 
         for (const ev of events) {
           const threadKey = String(ev && ev.thread_key || '').trim();
@@ -15353,7 +15406,6 @@ async function __deltaAttachCdpEar(nome, page) {
           const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
           const nowMs = Date.now();
           const st = __deltaGetOrCreateThreadState(nome, threadKey);
-          if (!st.city && cidade) st.city = String(cidade || '').trim() || null;
           if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
           const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
           const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
@@ -15364,7 +15416,7 @@ async function __deltaAttachCdpEar(nome, page) {
             account_login: String(nome || ''),
             thread_key: threadKey,
             texto_limpo: texto,
-            cidade: st.city || cidade || null,
+            cidade: st.city || null,
             operacao_meta: op,
             mensagem_seq: msgSeq,
             dispatch_ct: false,
@@ -15383,7 +15435,7 @@ async function __deltaAttachCdpEar(nome, page) {
               texto_limpo: texto,
               mensagens_cliente_concatenadas: texto,
               mensagens_cliente_qtd: 1,
-              cidade: st.city || cidade || null,
+              cidade: st.city || null,
               operacao_meta: op || 'message',
               mensagem_seq: msgSeq,
               dispatch_ct: true,

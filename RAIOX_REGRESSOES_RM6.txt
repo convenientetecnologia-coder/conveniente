@@ -1,0 +1,211 @@
+RAIO-X FORENSE DE REGRESSOES RM6
+Data: 2026-07-02
+Modo: Read-only (sem alteracao de codigo produtivo)
+Escopo principal: index.js, scripts/worker.js, utilitarios de controle de processo (scripts/browser.js, scripts/api_perfis.js, scripts/clusterMaster.js, scripts/dashboard.js, scripts/workerClient.js, scripts/api_status.js)
+
+================================================================
+RESUMO EXECUTIVO (SEMPEDADE)
+================================================================
+
+Conclusao forense:
+1) Existe sim um caminho real de regressao onde o sistema responde "ok/fechado" no painel, mas pode deixar Chrome vivo (zumbi) no host.
+2) O problema nao esta em uma unica linha; eh combinacao de:
+   - fechamento logico/declarativo adiantado,
+   - fechamento fisico permissivo em alguns modos (preserveDesired),
+   - status baseado em controllers (estado em memoria) e nao em processo real do SO.
+3) Existem cortes intencionais (legacy extinto / bypass Delta) que nao sao regressao por si, mas reduziram rede de seguranca e aumentam risco quando combinados com falhas de fechamento.
+
+================================================================
+METODOLOGIA E LIMITACAO FORENSE
+================================================================
+
+- Foi feita varredura de leitura estrita.
+- Sem historico git/blame ativo nesta auditoria, nao da para cravar "data da mudanca".
+- Classificacao "regressao real vs corte antigo intencional" foi feita por impacto funcional e fluxo de execucao atual.
+
+================================================================
+PONTO 1 — RASTREIO KILL / TERMINATE (taskkill, process.kill, handlers)
+================================================================
+
+[A] Onde o fechamento forcado existe
+
+1) scripts/worker.js
+   - killProcessTreeByRootPid(): usa taskkill /PID /T /F
+     Evidencia: linhas ~4887-4895
+   - closeProcessTreeByRootPid(): tentativa graciosa sem /F
+     Evidencia: linhas ~4902-4910
+   - hardCloseController(): chama browser.close(), depois taskkill por rootPid e kill por userDataDir
+     Evidencia: linhas ~4933-5044
+   - SIGINT/SIGTERM/disconnect -> gracefulShutdown()
+     Evidencia: linhas ~15908-15910
+
+2) scripts/browser.js
+   - taskkillTreeWin()/taskkillTreeWinGraceful()
+     Evidencia: linhas ~1020-1036
+   - killChromeProfileProcesses(userDataDir)
+     Evidencia: linhas ~1095-1171
+   - closeChromeProfileProcessesGraceful(userDataDir)
+     Evidencia: linhas ~1173-1189
+   - getChromeProfilePidsMeta() preserva erro de WMI/PowerShell (ok=false)
+     Evidencia: linhas ~1212-1234
+
+3) scripts/clusterMaster.js
+   - kill() apenas envia SIGTERM aos workers
+     Evidencia: linhas ~568-575
+
+4) index.js
+   - SIGINT/SIGTERM no master chama clusterClient.kill()
+     Evidencia: linhas ~2006-2015
+
+[B] Onde ha fragilidade estrutural real (regressao funcional)
+
+R1) Fechar via HUD ("Fechar navegador") usa preserveDesired
+   - scripts/worker.js linha ~1422 chama:
+     handlers.deactivate({ reason: 'human_overlay_close', policy: 'preserveDesired' })
+   - Em preserveDesired, o hardClose roda com allowKillUserDataDir: !preserve -> false
+     Evidencia: worker.js linha ~8708
+   - Resultado: evita kill por userDataDir no fechamento humano; se browser.close() e rootPid nao resolverem, pode sobrar orfao.
+
+R2) strictCloseRequired nao cobre close_all/human_overlay_close
+   - strictCloseRequired so ativa para:
+     auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete
+     Evidencia: worker.js linhas ~8537-8539
+   - close_all e human_overlay_close ficam fora da validacao estrita de "chrome realmente morto".
+
+R3) Caso controller ausente pode retornar ok:true sem checagem fisica (modo comum)
+   - worker.js: se !ctrl e strictCloseRequired=false -> retorna ok:true
+     Evidencia: linhas ~8617-8695
+   - Isso explica "painel ok, processo vivo" quando estado em memoria perdeu o controller.
+
+R4) hardCloseController retorna ok:true mesmo com close incompleto
+   - worker.js retorna ok:true no fim do hardCloseController
+     Evidencia: linha ~5044
+   - Falhas intermediarias sao em grande parte swallow/catch best-effort.
+
+[C] Handlers comentados/desativados por flag false?
+
+- Nao foi encontrado handler SIGINT/SIGTERM comentado no worker/master.
+- Nao foi encontrado flag "forcado false" desativando completamente kill path principal.
+- O que existe eh gating por policy/motivo (preserve/strictClose) e varios caminhos best-effort.
+
+================================================================
+PONTO 2 — WATCHDOGS / LOOPS DESATIVADOS AGRESSIVAMENTE
+================================================================
+
+[A] Loops/watchdogs ativos (importante: nao estao mortos)
+
+1) scripts/workerClient.js
+   - Watchdog ativo com setInterval (health do worker + restart por nonresponsive)
+   - Evidencia: linha ~33+
+
+2) scripts/worker.js
+   - nurseTick setInterval ativo
+     Evidencia: ~14586
+   - autoLoginRemediateTick setInterval ativo
+     Evidencia: ~14594
+   - healthTick setInterval ativo
+     Evidencia: ~15746
+   - periodicAboutBlankCleanup setInterval ativo
+     Evidencia: ~15831
+
+[B] Cortes/bypass encontrados (nao necessariamente bug por si)
+
+C1) Bypass do recovery legacy no motor Delta
+   - recoveryStep desativado em Delta
+     Evidencia: worker.js ~15505
+   - healthTick desativado em Delta (retorno curto)
+     Evidencia: worker.js ~15607 e ~15611
+   - reloadManager desativado quando Delta ativo
+     Evidencia: worker.js ~14600-14603
+   -> Classificacao: corte intencional para evitar loop abre/fecha Marketplace.
+
+C2) Polling monitor legacy extinto no master
+   - index.js comentario explicitando extincao
+     Evidencia: ~1953
+   -> Classificacao: corte arquitetural intencional (migracao para command-bus/event-driven).
+
+C3) dashboard monitor loop automatico desativado
+   - scripts/dashboard.js startDashboardMonitor() retorna imediatamente
+     Evidencia: ~4422-4425
+   -> Classificacao: corte intencional (Tacada 1), nao bug isolado.
+
+C4) cluster watcher pode ficar disabled por env
+   - scripts/clusterMaster.js log: watcher disabled (CLUSTER_AUTO_REBALANCE!=1)
+     Evidencia: ~596
+   -> Classificacao: condicional operacional (nao regressao automatica).
+
+C5) killStrayChromes() no-op
+   - scripts/worker.js: "Intencionalmente no-op"
+     Evidencia: ~5047-5050
+   -> Classificacao: corte relevante; sozinho nao quebra, mas remove rede extra anti-zumbi.
+
+================================================================
+PONTO 3 — CONFLITO DE ESTADO (DASHBOARD VS PROCESSO REAL)
+================================================================
+
+DIAGNOSTICO OBJETIVO:
+Sim, existe caminho concreto onde estado visual confirma fechamento sem garantia sincrona de morte do Chrome.
+
+CADEIA CAUSAL:
+
+1) API altera estado declarativo antes do fechamento fisico
+   - scripts/api_perfis.js /api/perfis/:nome/deactivate
+   - default: escreve desired.active=false antes de chamar worker deactivate
+   - Evidencia: linhas ~633-639
+
+2) close-all tambem desliga desired de todos antes de fechar cada browser
+   - scripts/api_perfis.js /api/perfis/close-all
+   - Evidencia: linhas ~1722-1746
+
+3) Worker pode responder ok sem garantir kill fisico em cenarios nao estritos
+   - preserveDesired/human_overlay_close
+   - controller ausente com strictCloseRequired=false
+   - Evidencias: worker.js ~1422, ~8537-8539, ~8617-8695, ~8708
+
+4) Status do painel depende de controllers (memoria), nao do PID do SO
+   - worker get-status define active por controllers.has(nome)
+     Evidencia: worker.js ~11263 e ~11651
+   - api_status baseline inicia active=false e overlay so reflete o que worker reporta
+     Evidencia: api_status.js ~412 e ~441-451
+
+RESULTADO PRATICO:
+- Controller pode sumir/ficar falso.
+- Painel mostra fechado/inativo.
+- Processo Chrome pode continuar vivo no Windows (zumbi), especialmente se fechamento foi parcial.
+
+================================================================
+REGRESSAO REAL VS CORTE ANTIGO (CLASSIFICACAO FINAL)
+================================================================
+
+REGRESSOES REAIS / ALTO RISCO (acao prioritaria):
+
+P0-R1) "Fechar navegador" (HUD preserveDesired) sem kill por userDataDir.
+P0-R2) strictCloseRequired nao cobre close_all e human_overlay_close.
+P0-R3) deactivate pode retornar ok:true com controller ausente sem prova de morte fisica.
+P0-R4) desired desliga antes do fechamento fisico (deactivate e close-all), gerando desvio de verdade operacional.
+P0-R5) status/painel baseado em controller ativo, nao em processo real.
+
+CORTES INTENCIONAIS / LEGADO (monitorar, mas nao tratar como regressao isolada):
+
+L1) monitor legacy extinto no index.
+L2) dashboard polling automatico desativado.
+L3) bypass health/recovery/reloadManager no modo Delta.
+L4) cluster watcher dependente de env.
+
+CORTE COM IMPACTO (zona cinzenta):
+
+Z1) killStrayChromes no-op reduz cobertura anti-zumbi em cenarios de excecao.
+
+================================================================
+RESPONDA AO OPERADOR (GABARITO DIRETO)
+================================================================
+
+Pergunta 1 (kill/terminate): Sim, existem rotinas de kill reais (taskkill/process.kill), mas em caminhos relevantes (preserveDesired/close_all/human_overlay_close) a garantia estrita de morte fisica nao eh universal.
+
+Pergunta 2 (watchdogs/loops desativados): Sim, existem cortes desativados (monitor legacy/dashboard polling e bypass Delta no health/recovery/reloadManager), enquanto watchdogs principais do worker/workerClient continuam ativos.
+
+Pergunta 3 (estado painel vs processo real): A causa raiz eh combinacao de fechamento declarativo antecipado + fechamento fisico permissivo em alguns modos + status baseado em controller, nao em PID real do SO.
+
+================================================================
+FIM DO INVENTARIO FORENSE
+================================================================

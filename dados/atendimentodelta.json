@@ -1,34 +1,90 @@
 {
-  "bloco1_bom_dia": [
-    "Oi, bom dia, sim, está disponível!",
-    "Olá, bom dia! Está disponível sim."
+  "bloco1": [
+    "Olá, [saudacao_horario]! Tudo bem com você?",
+    "Oi, [saudacao_horario]! Tudo bem?",
+    "Oi, [saudacao_horario]! Espero que esteja tudo bem",
+    "Opa, [saudacao_horario]! Tudo certo por aí?",
+    "Olá, [saudacao_horario]! Espero que esteja tendo um ótimo dia",
+    "Opa, [saudacao_horario]! Espero que esteja bem",
+    "Olá, [saudacao_horario]! Tudo certo com você?",
+    "Olá, [saudacao_horario]! Espero que esteja tudo ótimo com você",
+    "Oi, [saudacao_horario]! Tudo bem por aí?",
+    "Olá, [saudacao_horario]! É um prazer ter você por aqui",
+    "Olá, [saudacao_horario]! Que bom receber sua mensagem",
+    "Olá, [saudacao_horario]! Espero que esteja tudo bem com você",
+    "Opa, [saudacao_horario]! Que bom falar com você",
+    "Opa, [saudacao_horario]! Espero que esteja tendo um bom dia",
+    "Olá, [saudacao_horario]! Como posso ajudar você?",
+    "Oi, [saudacao_horario]! Tudo certo?",
+    "Olá, [saudacao_horario]! Espero que esteja bem!",
+    "Opa, [saudacao_horario]! tudo bem?",
+    "Olá, [saudacao_horario]! Posso ajudar?",
+    "Opa, [saudacao_horario]! Como posso ajudar você hoje?"
   ],
-  "bloco1_boa_tarde": [
-    "Opa, boa tarde, sim, está disponível!",
-    "Olá, boa tarde! Está disponível sim."
+  "bloco2": [
+    "Aqui você tem atendimento rápido e valor justo para o seu frete ou mudança",
+    "Aqui você encontra atendimento rápido e o melhor preço para o seu frete ou mudança",
+    "aqui você encontra atendimento rápido e um preço justo para o seu frete ou mudança",
+    "Oferecemos atendimento ágil e o melhor preço para o seu frete ou mudança",
+    "Trabalhamos na sua região com preço justo e serviço de qualidade",
+    "Trabalhamos na sua região com o melhore preço de frete ou mudança",
+    "Aqui você recebe atendimento rápido e encontra os melhores preços do mercado",
+    "Oferecemos atendimento rápido e um excelente custo-benefício para o seu frete ou mudança",
+    "Fazemos seu atendimento com rapidez e oferecemos o melhor preço de frete ou mudança",
+    "Atendimento sem demora e preço justo para o seu frete ou mudança",
+    "Aqui você recebe atendimento ágil e orçamento com valores justos",
+    "Nosso atendimento é rápido e oferecemos o melhor preço em fretes e mudanças",
+    "Atendimento eficiente e valor justo para transportar o que você precisa",
+    "Aqui rapidez no atendimento e preço justo caminham juntos",
+    "Atendimento rápido para você e valor justo no seu frete ou mudança",
+    "Trabalhamos para oferecer atendimento ágil e um preço justo",
+    "Atendimento rápido, orçamento justo e compromisso com você",
+    "Aqui você é atendido com rapidez e paga um valor acessível pelo frete ou mudança",
+    "Rapidez no atendimento e preço justo para o frete ou mudança que você precisa",
+    "Aqui você encontra atendimento de qualidade, rapidez e um preço justo para o seu frete ou mudança"
   ],
-  "bloco1_boa_noite": [
-    "Opa, boa noite, sim, está disponível! Tudo bem?",
-    "Olá, boa noite! Está disponível sim."
+  "bloco3": [
+    "Trabalhamos com veículos de pequeno, médio e grande porte",
+    "Temos veículos de pequeno, médio e grande porte para atender você",
+    "Contamos com veículos de pequeno, médio e grande porte",
+    "Disponibilizamos veículos de pequeno, médio e grande porte",
+    "Nossa frota conta com veículos de pequeno, médio e grande porte",
+    "Temos opções de veículos para cargas de pequeno, médio e grande porte",
+    "Temos veículos ideais para transportar desde pequenos até grandes volumes",
+    "Temos o veículo certo para o que você precisa transportar",
+    "Disponibilizamos veículos adequados para diferentes tipos de transporte",
+    "Nossa equipe trabalha com veículos de vários tamanhos para melhor atender você",
+    "Temos veículos compactos, médios e grandes à sua disposição",
+    "Temos veículos preparados para transportar cargas de diversos tamanhos",
+    "Oferecemos opções de veículos conforme a sua necessidade",
+    "Temos veículos para pequenas, médias e grandes cargas",
+    "Nossa frota está preparada para atender transportes de todos os portes",
+    "Temos o veículo ideal para realizar o transporte que você precisa",
+    "Contamos com o veículo adequado para atender a sua necessidade",
+    "Nossa frota está pronta para atender transportes de diferentes tamanhos",
+    "Temos a opção de veículo ideal para cada tipo de transporte",
+    "Disponibilizamos o veículo mais adequado para o seu transporte"
   ],
-  "bloco2_comercial": [
-    "Temos o melhor preço da nossa região com qualidade.",
-    "Garantimos o frete mais barato para você."
-  ],
-  "bloco3_frota": [
-    "Trabalhamos com carretos de pequeno, médio e grande porte.",
-    "Temos caminhão baú e utilitários abertos ou fechados."
-  ],
-  "bloco4_gatilho_ab": [
-    "Qual o seu WhatsApp com DDD para eu te chamar direto por lá e agilizar?",
-    "Pode me passar o seu Zap com o DDD?"
-  ],
-  "bloco4_gatilho_abc": [
-    "O que você precisa transportar para eu calcular seu orçamento agora?",
-    "Me passa a lista do que você vai mudar para eu ver o preço para você."
-  ],
-  "bloco4_gatilho_pendente": [
-    "Para qual cidade e bairro você precisa do serviço de frete?",
-    "Qual seria a cidade de origem e destino da mudança?"
+  "bloco4": [
+    "Me diga o que você precisa transportar para eu montar seu orçamento",
+    "O que você precisa transportar? Estou disponível para ajudar",
+    "Pode me dizer o que você precisa transportar?",
+    "Me conta o que você precisa transportar e eu já monto seu pedido",
+    "Me fala o que você precisa transportar e eu já te passo valores",
+    "Oque você precisa transportar? já monto seu pedido agora mesmo!",
+    "Pode me informar oque você precisa transportar?",
+    "Quais seriam os itens que você deseja transportar?",
+    "Me manda oque você precisa transportar que eu já monto seu orçamento",
+    "Me informa certinho oque você precisa transportar pra eu montar seu orçamento",
+    "pode me informar oque deseja transportar?",
+    "Me informa oque você precisa transportar por gentileza",
+    "Me fala quais são os itens que vc precisa transportar",
+    "O que você precisa transportar? me informa que já monto teu orçamento",
+    "Pode me passar o que você precisa transportar?",
+    "O que você precisa transportar? Estou disponível para montar seu orçamento",
+    "Me diz o que você precisa transportar que eu preparo seu orçamento",
+    "Me conte quais itens você precisa transportar para eu calcular o valor",
+    "Me informa o que você precisa transportar que eu já preparo seu orçamento",
+    "Me passa os itens que você deseja transportar e eu já te envio o orçamento"
   ]
 }

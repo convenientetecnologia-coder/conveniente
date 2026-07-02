@@ -131,6 +131,10 @@ let killChromeProfileProcesses = null;
 try {
   killChromeProfileProcesses = require("./browser.js").killChromeProfileProcesses;
 } catch (_) {}
+let getDeltaCityCollector = null;
+try {
+  ({ getDeltaCityCollector } = require("./deltaCityCollector.js"));
+} catch (_) {}
 
 const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || "info").trim().toLowerCase();
 
@@ -367,40 +371,17 @@ function shouldEmitLeadText(textoLimpo) {
   return true;
 }
 
-function _normCityKey(s) {
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function _pick(arr) {
   const a = Array.isArray(arr) ? arr : [];
   if (!a.length) return "";
   return String(a[Math.floor(Math.random() * a.length)] || "").trim();
 }
 
-function _parseShortRoutesFromEnv() {
-  const raw = String(process.env.VIRTUS_DELTA_ROTAS_CURTAS || "").trim();
-  if (!raw) return new Set();
-  return new Set(
-    raw
-      .split(/[,;\n]/g)
-      .map((s) => _normCityKey(s))
-      .filter(Boolean)
-  );
-}
-
-const _SHORT_ROUTES = _parseShortRoutesFromEnv();
-
-function _routeKindFromCity(cidade) {
-  const c = String(cidade || "").trim();
-  if (!c) return "pendente";
-  const key = _normCityKey(c);
-  if (_SHORT_ROUTES.size && _SHORT_ROUTES.has(key)) return "curta";
-  return "longa";
+function resolveSaudacaoHorarioToken() {
+  const h = new Date().getHours();
+  if (h >= 6 && h <= 11) return "bom dia";
+  if (h >= 12 && h <= 17) return "boa tarde";
+  return "boa noite";
 }
 
 const ATENDIMENTO_DELTA_PATH = path.join(__dirname, "..", "dados", "atendimentodelta.json");
@@ -421,28 +402,29 @@ function readAtendimentoDeltaConfigSync() {
   }
 }
 
-function generateDeltaGreeting({ cidade } = {}) {
+function generateDeltaGreeting() {
   try {
     const cfg = readAtendimentoDeltaConfigSync() || {};
-    const h = new Date().getHours();
-    const bloco1 =
-      (h >= 6 && h <= 11) ? _pick(cfg.bloco1_bom_dia) :
-      (h >= 12 && h <= 17) ? _pick(cfg.bloco1_boa_tarde) :
-      _pick(cfg.bloco1_boa_noite);
+    const horario = resolveSaudacaoHorarioToken();
+    const bloco1Raw = _pick(cfg.bloco1);
+    const bloco1 = String(bloco1Raw || "").replace(/\[saudacao_horario\]/gi, horario).trim();
 
-    const bloco2 = _pick(cfg.bloco2_comercial);
-    const bloco3 = _pick(cfg.bloco3_frota);
+    const bloco2 = _pick(cfg.bloco2);
+    const bloco3 = _pick(cfg.bloco3);
+    const bloco4 = _pick(cfg.bloco4);
 
-    const rk = _routeKindFromCity(cidade);
-    const bloco4 =
-      (rk === "curta") ? _pick(cfg.bloco4_gatilho_ab) :
-      (rk === "longa") ? _pick(cfg.bloco4_gatilho_abc) :
-      _pick(cfg.bloco4_gatilho_pendente);
-
-    const out = [bloco1, bloco2, bloco3, bloco4].map((s) => String(s || "").trim()).filter(Boolean).join("\n");
+    const out = [bloco1, bloco2, bloco3, bloco4]
+      .map((s) => String(s || "").trim())
+      .filter(Boolean)
+      .join("\n\n");
     return out;
   } catch {
-    return "Olá! Está disponível sim.\nPode me passar seu WhatsApp com DDD para eu te chamar por lá e agilizar?";
+    return [
+      "Olá, [saudacao_horario]! Está disponível sim.".replace(/\[saudacao_horario\]/gi, resolveSaudacaoHorarioToken()),
+      "Temos atendimento rápido e valores competitivos.",
+      "Trabalhamos com fretes de pequeno, médio e grande porte.",
+      "Me conta o que você precisa transportar para eu te ajudar agora.",
+    ].join("\n\n");
   }
 }
 
@@ -1690,7 +1672,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) 
   return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
 }
 
-async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false } = {}) {
+async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
 
@@ -1742,10 +1724,16 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
 
   await humanPause("postThreadOpen", "post_open_read_context");
 
-  // Link do classificado (Coletor 101)
+  // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
+  let itemLink = null;
   try {
-    const itemLink = await extractMarketplaceItemLink(page);
-    if (itemLink) logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+    itemLink = await extractMarketplaceItemLink(page);
+    if (itemLink) {
+      logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+      if (typeof onItemLink === "function") {
+        try { onItemLink(itemLink); } catch (_) {}
+      }
+    }
   } catch (_) {}
 
   await ensureComposerFocused(page);
@@ -1792,7 +1780,47 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
     if (!clicked) return { ok: false, error: "composer_text_not_registered" };
   }
-  return { ok: true };
+  return { ok: true, item_link: itemLink || null };
+}
+
+async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead = true } = {}) {
+  const t = String(threadKey || "").trim();
+  if (!t) return { ok: false, error: "missing_thread_key" };
+  try {
+    if (fromNetworkLead) {
+      await prepareDomForNetworkLead(page, threadKey);
+    }
+  } catch (_) {}
+
+  const open = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
+  if (!open || !open.ok) {
+    return { ok: false, error: String((open && open.error) || "thread_open_failed") };
+  }
+
+  let itemLink = null;
+  try {
+    itemLink = await extractMarketplaceItemLink(page);
+  } catch (_) {}
+  if (!itemLink) {
+    return { ok: false, error: "item_link_missing" };
+  }
+  return { ok: true, item_link: itemLink };
+}
+
+async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey, accountLogin }) {
+  if (typeof getDeltaCityCollector !== "function") {
+    return { ok: false, error: "delta_city_collector_unavailable" };
+  }
+  const collector = await getDeltaCityCollector();
+  if (!collector || typeof collector.collectCityFromItemLink !== "function") {
+    return { ok: false, error: "delta_city_collector_runtime_invalid" };
+  }
+  const out = await collector.collectCityFromItemLink({
+    item_link: itemLink,
+    thread_key: threadKey,
+    account_login: accountLogin,
+  });
+  return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
 }
 
 function createSerialQueue() {
@@ -1978,6 +2006,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
   const autoGreetingSentThreads = new Set(); // threadKey
   const autoGreetingTimers = new Map(); // threadKey -> Timeout
+  const greetingStateByThread = new Map(); // threadKey -> { sentAt, greetingText, itemLink, city, citySource }
   let lastCrossThreadSendAt = 0;
   let lastCrossThreadKey = "";
 
@@ -2149,44 +2178,104 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Mantém o mesmo sentinela global para evitar padrões robóticos.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
 
-    let cityCandidate = null;
-    let citySource = "none";
-    try {
-      const c0 = await extractCityFromMarketplaceDom(page);
-      if (c0) {
-        cityCandidate = String(c0).trim();
-        citySource = "dom_before_send";
+    const prior = greetingStateByThread.get(t) || null;
+    const greetingAlreadySent = !!(prior && prior.sentAt);
+    const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
+
+    let itemLinkResolved = false;
+    let itemLinkResolver = null;
+    const itemLinkPromise = new Promise((resolve) => {
+      itemLinkResolver = resolve;
+    });
+    const resolveItemLink = (link) => {
+      if (itemLinkResolved) return;
+      itemLinkResolved = true;
+      itemLinkResolver(String(link || "").trim() || null);
+    };
+
+    const cityCollectionPromise = (async () => {
+      const preferredLink = String((prior && prior.itemLink) || "").trim() || null;
+      const itemLink = preferredLink || (await itemLinkPromise);
+      if (!itemLink) return { ok: false, error: "item_link_missing" };
+      return await collectCityFromItemLinkUsingGlobalCollector({
+        itemLink,
+        threadKey: t,
+        accountLogin: ACCOUNT_LOGIN,
+      });
+    })();
+
+    let sendOut = null;
+    if (!greetingAlreadySent) {
+      sendOut = await sendReplyFlow({
+        page,
+        threadKey: t,
+        textoResposta: greetingText,
+        fromNetworkLead: true,
+        onItemLink: (link) => resolveItemLink(link),
+      });
+      if (sendOut && sendOut.item_link) {
+        resolveItemLink(sendOut.item_link);
+      } else {
+        resolveItemLink(null);
       }
-    } catch (_) {}
-    if (!cityCandidate && cityCache && cityCache.value) {
-      cityCandidate = String(cityCache.value || "").trim() || null;
-      if (cityCandidate) citySource = "city_cache";
+      if (!sendOut || !sendOut.ok) {
+        return {
+          ok: false,
+          error: String((sendOut && sendOut.error) || "hands_send_failed"),
+        };
+      }
+    } else {
+      // Retry de cidade não reenvia saudação: somente reabre o thread para recuperar link, se necessário.
+      if (!(prior && prior.itemLink)) {
+        const openOut = await openThreadAndExtractItemLink(page, t, { fromNetworkLead: true });
+        if (openOut && openOut.ok && openOut.item_link) {
+          resolveItemLink(openOut.item_link);
+        } else {
+          resolveItemLink(null);
+        }
+      } else {
+        resolveItemLink(prior.itemLink);
+      }
+      sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
     }
 
-    const greetingText = generateDeltaGreeting({ cidade: cityCandidate || "" });
-    const sendOut = await sendReplyFlow({
-      page,
-      threadKey: t,
-      textoResposta: greetingText,
-      fromNetworkLead: true,
-    });
-    if (!sendOut || !sendOut.ok) {
+    const cityOut = await cityCollectionPromise;
+    if (!cityOut || cityOut.ok !== true || !String(cityOut.cidade || "").trim()) {
+      const itemLinkToKeep = String(
+        (sendOut && sendOut.item_link) ||
+        (prior && prior.itemLink) ||
+        ""
+      ).trim() || null;
+      greetingStateByThread.set(t, {
+        sentAt: Number((prior && prior.sentAt) || Date.now()),
+        greetingText,
+        itemLink: itemLinkToKeep,
+        city: null,
+        citySource: null,
+      });
       return {
         ok: false,
-        error: String(sendOut && sendOut.error || "hands_send_failed"),
+        error: String((cityOut && cityOut.error) || "city_collect_failed"),
+        greeting_already_sent: true,
+        greeting_text: greetingText,
       };
     }
 
-    try {
-      const c1 = await extractCityFromMarketplaceDom(page);
-      if (c1) {
-        cityCandidate = String(c1).trim();
-        citySource = "dom_after_send";
-      }
-    } catch (_) {}
-    if (cityCandidate) {
-      cityCache = { at: Date.now(), value: cityCandidate };
-    }
+    const cityCandidate = String(cityOut.cidade || "").trim();
+    const citySource = String(cityOut.city_source || "collector_listing_page").trim();
+    const itemLinkFinal = String(
+      (sendOut && sendOut.item_link) ||
+      (prior && prior.itemLink) ||
+      ""
+    ).trim() || null;
+
+    greetingStateByThread.set(t, {
+      sentAt: Number((prior && prior.sentAt) || Date.now()),
+      greetingText,
+      itemLink: itemLinkFinal,
+      city: cityCandidate,
+      citySource,
+    });
 
     let profileUrl = null;
     try {

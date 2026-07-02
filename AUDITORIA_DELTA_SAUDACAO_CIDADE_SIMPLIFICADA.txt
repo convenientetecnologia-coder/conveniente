@@ -1,0 +1,284 @@
+AUDITORIA FORENSE - FLUXO DELTA (SAUDACAO + CIDADE + INGEST CT)
+Data: 2026-07-02
+Escopo: C:\conveniente\scripts\virtusDelta.js, C:\conveniente\scripts\worker.js, C:\conveniente\dados\atendimentodelta.json, C:\conveniente\dados\atendimento.json
+Modo: Read-only (sem alteracao produtiva)
+
+============================================================
+1) RESUMO EXECUTIVO (PRETO NO BRANCO)
+============================================================
+
+Conclusao objetiva:
+- O fluxo atual NAO atende totalmente o novo contrato definido.
+- O servidor ainda decide texto por cidade (curta/longa/pendente).
+- A coleta de cidade NAO esta paralela real ao envio da saudacao.
+- O envio ao CT pode ocorrer mesmo sem cidade raspada.
+- Nao existe navegador unico global de coleta de cidade para o servidor inteiro.
+
+Impacto:
+- Mantem complexidade desnecessaria no servidor.
+- Mantem acoplamento da saudacao com logica de cidade.
+- Pode gerar card sem cidade (quando extracao falha), contra o contrato novo.
+- Escala de coleta de cidade fica fragmentada por runtime/perfil.
+
+============================================================
+2) COMO O FLUXO FUNCIONA HOJE (ESTADO REAL)
+============================================================
+
+2.1 Escolha da saudacao hoje (ainda baseada em cidade)
+- Arquivo: scripts/virtusDelta.js
+- Funcao: _routeKindFromCity (linhas ~398-404)
+  - cidade vazia => "pendente"
+  - cidade no set de rotas curtas => "curta"
+  - caso contrario => "longa"
+- Funcao: generateDeltaGreeting (linhas ~424-446)
+  - monta 4 blocos
+  - bloco4 depende de rota:
+    - curta => bloco4_gatilho_ab
+    - longa => bloco4_gatilho_abc
+    - pendente => bloco4_gatilho_pendente
+
+2.2 Fonte dos textos hoje
+- Arquivo: dados/atendimentodelta.json
+- Estrutura atual:
+  - bloco1_bom_dia / bloco1_boa_tarde / bloco1_boa_noite
+  - bloco2_comercial
+  - bloco3_frota
+  - bloco4_gatilho_ab
+  - bloco4_gatilho_abc
+  - bloco4_gatilho_pendente
+- Observacao: ja e uma unica mensagem (4 blocos), porem o bloco4 ainda depende da cidade.
+
+2.3 Ordem de execucao atual no disparo de saudacao Delta
+- Arquivo: scripts/virtusDelta.js
+- Funcao: sendDeltaGreetingNow (linhas ~2142-2210)
+Sequencia atual:
+  1) tenta extrair cidade ANTES de enviar (extractCityFromMarketplaceDom)
+  2) gera texto com generateDeltaGreeting(cidade)
+  3) envia saudacao (sendReplyFlow)
+  4) tenta extrair cidade novamente APOS envio
+  5) retorna payload com cidade (ou null)
+
+Diagnostico:
+- Nao e paralelo real.
+- Existe dependencia temporal de extracao antes do envio.
+
+2.4 Ordem de envio para CT hoje
+- Arquivo: scripts/worker.js
+- Funcao: __deltaHandleBufferedThreadTimer (linhas ~14840-14924)
+Sequencia atual:
+  1) chama Maos (enqueueDeltaGreetingFlow)
+  2) se Maos ok => monta evento lead_consolidado_pos_hands
+  3) marca dispatch_ct=true e chama __deltaKickIngestLoop
+  4) envia para CT no loop de ingest
+- Cidade no payload final:
+  - city = handsOut.cidade || st.city || null
+  - ou seja, pode ir null.
+
+2.5 Ingest hoje (filtro de dispatch)
+- Arquivo: scripts/worker.js
+- Funcao: __deltaIngestTick (linhas ~15101+)
+  - Se dispatch_ct===false: nao envia CT (forense local), avanca cursor
+  - Se dispatch_ct===true: envia ao CT
+  - Nao existe trava exigindo cidade obrigatoria no envio.
+
+2.6 Coleta de link do anuncio hoje
+- Arquivo: scripts/virtusDelta.js
+- Funcao: extractMarketplaceItemLink (linhas ~1483-1496)
+- Uso:
+  - Em sendReplyFlow (linhas ~1745-1749), apenas loga [COLETOR_101_LINK]
+- Diagnostico:
+  - Link NAO entra no payload retornado de sendDeltaGreetingNow
+  - Link NAO entra no evento consolidado do worker para CT
+
+2.7 Modelo de navegador/fila hoje
+- Arquivo: scripts/virtusDelta.js
+- Runtime worker:
+  - startVirtusDeltaWorkerRuntime usa 1 page por runtime/perfil
+  - createSerialQueue local por runtime/perfil (linhas ~1798+ e ~1977)
+  - cityCache/cityTimer tambem locais por runtime/perfil (linhas ~2028+)
+- Diagnostico:
+  - Nao existe navegador unico global de coleta para o servidor todo.
+  - Coleta esta acoplada ao navegador de atendimento daquele perfil.
+
+============================================================
+3) MATRIZ DE ADERENCIA AO NOVO CONTRATO
+============================================================
+
+Contrato alvo definido por negocio:
+1) Saudacao sempre generica randomizada (3-4 blocos), sem depender de cidade
+2) Coleta de cidade em paralelo ao envio da saudacao
+3) Enviar ao CT apenas quando pacote estiver completo (mensagens + saudacao + cidade)
+4) CT faz classificacao AB/ABC/nao coberta
+5) Servidor sem dependencia de CT para decidir texto da saudacao
+6) Coleta de cidade com navegador unico dedicado no servidor, com fila global
+
+Status atual:
+1) NAO aderente
+   - bloco4 ainda depende de cidade (AB/ABC/pendente)
+2) Parcial / NAO aderente
+   - coleta antes/depois, mas nao paralela orquestrada com join robusto
+3) NAO aderente
+   - pode despachar sem cidade (null)
+4) Parcial
+   - CT recebe cidade quando existe, mas servidor ainda faz logica de texto por cidade
+5) NAO aderente
+   - servidor ainda calcula rota da cidade para escolher gatilho
+6) NAO aderente
+   - nao existe coletor global unico
+
+============================================================
+4) RISCOS TECNICOS (SEVERIDADE)
+============================================================
+
+P0 - CRITICO
+- R1: Acoplamento de saudacao com cidade no servidor
+  - Pode quebrar estrategia de negocio e obriga manutencao de regras fora do CT.
+
+- R2: Dispatch para CT sem cidade obrigatoria
+  - Pode nascer card sem dado critico para tomada de decisao operacional.
+
+P1 - ALTO
+- R3: Coleta de link apenas em log
+  - Perde valor operacional/forense, nao aproveita para pipeline de coleta.
+
+- R4: Sem coletor global unico
+  - Escala pior sob carga multi-perfil e multiplica pontos de falha.
+
+P2 - MEDIO
+- R5: Sem handshake formal "saudacao enviada" + "cidade pronta" como precondicao unica
+  - Fluxo fica mais sensivel a timing race.
+
+============================================================
+5) ARQUITETURA ALVO RECOMENDADA (MELHOR PRATICA)
+============================================================
+
+5.1 Regra de texto (simples, desacoplada)
+- generateDeltaGreeting deve ignorar cidade.
+- Nova estrutura em atendimentodelta.json:
+  - bloco1, bloco2, bloco3, bloco4 (todos genericos)
+  - OU manter saudacao por periodo (dia/tarde/noite) + blocos 2/3/4 genericos
+- Sem chaves AB/ABC/pendente no servidor.
+
+5.2 Orquestracao paralela com "join"
+- No disparo pos-timer (chat novo):
+  - Tarefa A: enviar saudacao generica no chat
+  - Tarefa B: coletar cidade + link do anuncio
+- Encerrar somente quando A e B concluirem com sucesso.
+- Somente depois: criar evento dispatch_ct=true.
+
+5.3 Regra de despacho para CT
+- Em chat novo (primeira consolidacao):
+  - so enviar CT quando:
+    - saudacao_enviada == true
+    - cidade != null e cidade != ""
+    - mensagens_cliente_concatenadas presentes
+- Se cidade nao vier:
+  - manter thread em estado "hands_in_progress" com retry curto
+  - NUNCA despachar card incompleto no primeiro nascimento.
+
+5.4 Coletor global dedicado (servidor inteiro)
+- Criar modulo singleton de coleta:
+  - Exemplo: scripts/deltaCityCollector.js
+  - 1 browser/page dedicado somente para scraping de cidade/link
+  - 1 fila global FIFO para jobs de coleta
+  - Cada job: {account_login, thread_key, item_link (quando houver), timeout, retries}
+- VirtusDelta (Maos atendimento):
+  - abre chat e envia saudacao no navegador do perfil
+  - extrai itemLink e manda para fila global de coleta
+- Coletor global:
+  - resolve cidade e devolve resultado para o worker
+
+5.5 Protocolo de completude do pacote
+- Pacote final para CT (new chat) deve conter:
+  - server_id
+  - account_login
+  - thread_key
+  - mensagens_cliente_concatenadas
+  - saudacao_texto
+  - cidade
+  - city_source
+  - item_link
+  - profile_url (opcional)
+  - saudacao_enviada=true
+
+============================================================
+6) CENARIO A CENARIO (NOVO FLUXO DESEJADO)
+============================================================
+
+Cenario A - Chat novo, tudo ok
+1) Ouvido captura mensagens e bufferiza 60-120s
+2) Estouro timer => Maos inicia envio de saudacao generica
+3) Em paralelo, coleta de cidade/link na fila global dedicada
+4) Join concluido (saudacao+cidade)
+5) Worker gera evento consolidado dispatch_ct=true
+6) CT cria card e classifica AB/ABC/nao coberta
+
+Cenario B - Saudacao enviada, cidade atrasou
+1) Saudacao enviada com sucesso
+2) Cidade pendente no coletor global
+3) Worker NAO despacha ainda
+4) Retry da coleta (timeout curto + backoff controlado)
+5) Ao obter cidade => despacha CT
+
+Cenario C - Falha temporaria de UI no envio
+1) Tentativa inicial falha
+2) Retries locais rapidos (ja existe no delta_reply; aplicar mesma filosofia para saudacao)
+3) Somente apos envio confirmado seguir para join final
+
+Cenario D - Cidade indisponivel por timeout extremo
+1) Exaure retries de coleta
+2) Thread permanece sem card inicial OU vai para fila de excecao operacional (decisao de negocio)
+3) Nao enviar payload "falso completo" para CT no nascimento do card
+
+Cenario E - Chat ja ativo (apos card criado)
+1) Novas mensagens entram realtime dispatch_ct=true
+2) Sem timer 60-120
+3) Sem depender de nova coleta de cidade para mensagens subsequentes
+
+============================================================
+7) AJUSTE MINIMO NECESSARIO (SEM CODAR AINDA)
+============================================================
+
+Passo 1
+- Remover decisao AB/ABC/pendente da geracao de saudacao em virtusDelta.js
+- Simplificar atendimentodelta.json para blocos genericos randomizados
+
+Passo 2
+- Fazer sendDeltaGreetingNow executar envio e coleta em paralelo (Promise.all com controle)
+- Incluir item_link no retorno estruturado
+
+Passo 3
+- No worker.js, bloquear dispatch_ct no nascimento do card enquanto cidade nao estiver pronta
+- Reagendar retry especifico de coleta/fechamento
+
+Passo 4
+- Implementar coletor global singleton (browser unico + fila global)
+- Desacoplar coleta do runtime de cada perfil
+
+Passo 5
+- Atualizar payload final ao CT com cidade/item_link e metadados de completude
+
+============================================================
+8) CHECKLIST DE HOMOLOGACAO (ACEITE)
+============================================================
+
+[ ] Saudacao do Delta nunca consulta cidade para montar texto
+[ ] Saudacao sempre enviada em mensagem unica com 3-4 blocos
+[ ] Cidade e item_link sempre entram no pacote do primeiro dispatch ao CT
+[ ] Nao nasce card inicial sem cidade (regra nova)
+[ ] Coleta usa 1 navegador global dedicado por servidor
+[ ] Fila global de coleta processa N chats sem abrir browsers extras
+[ ] Logs permitem auditoria de ponta a ponta (thread_key, account_login, idempotency_key)
+
+============================================================
+9) VEREDITO FINAL
+============================================================
+
+Seu raciocinio esta correto: simplificar a decisao de texto no servidor e empurrar a classificacao para o CT e a melhor estrategia para reduzir complexidade e aumentar robustez.
+
+O codigo atual esta proximo em alguns fundamentos (buffer, consolidacao, retries, fila serial por runtime), mas ainda precisa de ajuste estrutural em 4 pontos centrais:
+- desacoplamento total do texto por cidade,
+- paralelismo real de saudacao+coleta com join,
+- bloqueio de dispatch inicial sem cidade,
+- coletor global unico para o servidor.
+

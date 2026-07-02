@@ -1,0 +1,189 @@
+AJUSTE GROSSO - CONTRATO COMPLETO DE CAPTACAO INDUSTRIAL (FLUXO 1 - IDA)
+Data: 2026-07-02
+Escopo aplicado:
+- C:\conveniente\scripts\virtusDelta.js
+- C:\conveniente\scripts\worker.js
+- C:\conveniente\scripts\deltaCityCollector.js
+- C:\conveniente\dados\atendimentodelta.json
+
+====================================================================
+1) O QUE FOI FEITO (IMPLEMENTACAO REAL)
+====================================================================
+
+1.1 Bloco unico dinamico com tag [saudacao_horario]
+- Ajustado em `scripts/virtusDelta.js` na funcao `generateDeltaGreeting`.
+- Removida a dependencia de `bloco1_bom_dia`, `bloco1_boa_tarde`, `bloco1_boa_noite`.
+- Novo comportamento:
+  - le `bloco1` unico do JSON
+  - injeta token `[saudacao_horario]` automaticamente com regra local:
+    - 06:00-11:59 => "bom dia"
+    - 12:00-17:59 => "boa tarde"
+    - demais horarios => "boa noite"
+- Montagem final do texto:
+  - `bloco1 + bloco2 + bloco3 + bloco4`
+  - separacao por `join("\n\n")` (linha em branco entre blocos)
+
+1.2 Envio em balao unico (digitação humanizada)
+- Mantido e validado no motor `typeHumanized`:
+  - `\n` vira `Shift+Enter`
+  - `Enter` final enviado uma unica vez ao concluir o texto completo
+- Resultado prático:
+  - um unico balao composto no chat do cliente.
+
+1.3 Navegador unico de coleta (headless true) + fila serial
+- Coletor global dedicado em `scripts/deltaCityCollector.js`.
+- Regra operacional aplicada:
+  - navegador dedicado do coletor em `headless: true` por padrao
+  - apenas uma fila serial para jobs de coleta (`createSerialQueue`)
+  - reaproveitamento da mesma page
+  - reforco anti-multipla-aba:
+    - limpeza de abas extras (prune)
+    - guarda de `targetcreated` para fechar extras e manter 1 aba ativa
+- Efeito:
+  - multiplos chats novos entram em fila unica de coleta
+  - menor consumo de RAM e menor risco de corrida de automacao.
+
+1.4 Payload limpo para CT (sem link/url pesada) + espelho da saudacao
+- Refatorado em `scripts/worker.js` no fluxo de ingest (`__deltaIngestTick`).
+- Criada whitelist estrita por `__deltaBuildCtIngestPayload`.
+- O CT agora recebe somente:
+  - `server_id`
+  - `account_login`
+  - `thread_key`
+  - `mensagens_cliente_concatenadas`
+  - `cidade`
+  - `saudacao_texto`
+- Removido envio de metadados pesados de URL no payload de ingest.
+- Atende ao requisito de espelho do atendimento:
+  - atendente ve no card o texto que o sistema enviou ao cliente.
+
+1.5 Blindagem de card sem cidade
+- Mantida blindagem no `worker.js`:
+  - se cidade nao vier no retorno das Maos, nao despacha para CT
+  - agenda retry (`lead_city_retry_scheduled`)
+  - so despacha quando a cidade estiver presente.
+
+1.6 Preparacao do modelo `atendimentodelta.json`
+- Arquivo preparado com 4 blocos no formato final:
+  - `bloco1`
+  - `bloco2`
+  - `bloco3`
+  - `bloco4`
+- Atualmente com 1 frase de exemplo por bloco para servir de molde.
+- Pronto para receber seus 50 modelos por bloco.
+
+====================================================================
+2) FORMATO FINAL DO JSON (MODELO DE ENTRADA)
+====================================================================
+
+Estrutura padrao aprovada:
+- bloco1: usa token `[saudacao_horario]`
+- bloco2: bloco comercial/valor
+- bloco3: bloco de capacidade/frota
+- bloco4: bloco de gatilho de continuidade
+
+Exemplo sintetico:
+{
+  "bloco1": ["Olá, [saudacao_horario]! Tudo bem com você?"],
+  "bloco2": ["Aqui você tem atendimento rápido e valor justo para o seu frete."],
+  "bloco3": ["Trabalhamos com fretes de pequeno, médio e grande porte."],
+  "bloco4": ["Me diga o que você precisa transportar para eu te ajudar agora."]
+}
+
+====================================================================
+3) CENARIOS POSSIVEIS COMPLETOS (PONTA A PONTA)
+====================================================================
+
+CENARIO A - CHAT NOVO (SUCESSO TOTAL)
+1) Ouvido captura mensagens e bufferiza 60-120s.
+2) Timer estoura e chama Maos.
+3) Maos abre chat, coleta link do anuncio e inicia saudacao composta.
+4) Em paralelo, coletor global headless raspa cidade pela fila serial.
+5) Saudacao enviada com sucesso em balao unico.
+6) Cidade coletada com sucesso.
+7) Worker consolida pacote limpo (ids + mensagens + cidade + saudacao_texto).
+8) POST para CT e nascimento do card.
+
+CENARIO B - CHAT NOVO COM CIDADE ATRASADA
+1) Saudacao e enviada normalmente.
+2) Coleta da cidade falha temporariamente.
+3) Worker nao envia card sem cidade.
+4) Worker agenda retry de cidade.
+5) Em tentativa posterior, cidade e coletada.
+6) Worker despacha pacote completo ao CT.
+
+CENARIO C - CHAT NOVO COM FALHA DE ENVIO DA SAUDACAO
+1) Maos tenta enviar e falha.
+2) Worker marca falha e reprograma timer de retry.
+3) Nao ha dispatch para CT nessa tentativa.
+4) Nova tentativa executa novamente o fluxo.
+5) Ao sucesso, segue para consolidacao e ingest.
+
+CENARIO D - MULTIPLOS CHATS NOVOS AO MESMO TEMPO
+1) Varios timers estouram em perfis/chats diferentes.
+2) Cada runtime de atendimento enfileira seu envio localmente.
+3) Coleta de cidade entra na fila global unica do coletor headless.
+4) Coletas rodam em serie (uma por vez), sem explosao de abas.
+5) Cada chat so despacha para CT ao ficar completo.
+
+CENARIO E - CHAT JA ATIVO (POS-CARD)
+1) Nova mensagem do cliente chega.
+2) Worker envia evento realtime para CT.
+3) Payload continua limpo e coerente.
+4) Cidade ja persistida no estado da thread.
+
+CENARIO F - COLETOR GLOBAL REINICIADO/FALHA TRANSITORIA
+1) Job de coleta falha por timeout/navegacao.
+2) Retorno de erro controlado para runtime.
+3) Worker agenda retry de cidade sem perder mensagens.
+4) Em retomada, coletor processa fila novamente.
+
+CENARIO G - DADO INCOMPLETO NO PAYLOAD DA FILA
+1) Linha JSON sem campos minimos validos chega ao ingest loop.
+2) Builder de payload para CT recusa envio (safety guard).
+3) Cursor avanca para nao travar fila.
+4) Sistema segue processando proximas linhas.
+
+CENARIO H - RUIDO DE MENSAGENS DURANTE O BUFFER
+1) Cliente envia varias mensagens na janela 60-120s.
+2) Worker concatena e preserva ordem.
+3) Consolidacao final leva compilado de mensagens.
+4) Atendente recebe no card contexto espelhado da ida.
+
+====================================================================
+4) GARANTIAS OPERACIONAIS POS-AJUSTE
+====================================================================
+
+- Saudacao sempre em texto unico composto.
+- Bloco 1 dinamico por horario sem 3 estruturas separadas.
+- Sem dependencia de consulta AB/ABC no servidor para montar saudacao.
+- Coleta de cidade centralizada em coletor headless unico com fila serial.
+- Nao envia URL pesada para CT no payload final.
+- CT recebe tambem `saudacao_texto` para espelhamento operacional.
+- Card de chat novo nao nasce sem cidade.
+
+====================================================================
+5) VALIDACOES EXECUTADAS
+====================================================================
+
+- Sintaxe Node OK:
+  - `scripts/virtusDelta.js`
+  - `scripts/worker.js`
+  - `scripts/deltaCityCollector.js`
+- JSON OK:
+  - `dados/atendimentodelta.json`
+- Linter:
+  - sem erros nos arquivos alterados.
+
+====================================================================
+6) PROXIMO PASSO
+====================================================================
+
+Pronto para receber seus 50 modelos de:
+- bloco1
+- bloco2
+- bloco3
+- bloco4
+
+Assim que voce enviar, o arquivo `atendimentodelta.json` sera preenchido no formato final de producao.
+
