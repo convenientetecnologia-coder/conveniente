@@ -1,0 +1,574 @@
+AJUSTE GROSSO FLUXO 1 - IMPLEMENTACAO REALIZADA
+Data: 2026-07-02
+Projeto: C:\conveniente
+Arquivos alterados:
+- C:\conveniente\scripts\worker.js
+- C:\conveniente\scripts\virtusDelta.js
+
+============================================================
+OBJETIVO EXECUTADO
+============================================================
+Conectar o Ouvido (worker.js) as Maos (virtusDelta.js) para:
+1) Nunca perder mensagem do cliente.
+2) Diferenciar Chat Novo vs Chat Ativo.
+3) Chat Novo: buffer 60-120s com acumulacao.
+4) Estouro do timer: Maos abrem chat, raspam cidade, enviam saudacao humana.
+5) So depois da saudacao: despacho unificado ao CT.
+6) Chat Ativo: envio imediato em tempo real.
+
+============================================================
+O QUE FOI IMPLEMENTADO - WORKER (OUVIDO)
+============================================================
+1) Estado por thread_key com persistencia local:
+- Novo arquivo de controle local: dados/delta_thread_state.json
+- Estrutura em memoria por thread:
+  - status: new_buffering | hands_in_progress | active
+  - mensagens acumuladas
+  - seq da mensagem
+  - cidade conhecida
+  - timer atual e falhas de hands
+- Persistencia debounced para robustez operacional.
+
+2) Bifurcacao de estado no onFrame:
+- Fluxo agora decide por thread:
+  - Chat Ativo: despacho imediato para CT.
+  - Chat Novo: nao despacha na hora, arma timer 60-120s e continua acumulando.
+
+3) Buffer de acumulacao 1-2 minutos:
+- Timer inicial randomico de 60-120s.
+- Mensagens subsequentes durante timer seguem entrando no buffer.
+- Continua acumulando inclusive quando o status esta hands_in_progress.
+
+4) Garantia de registro total de mensagens:
+- Toda mensagem validada e gravada em mensagens_pendentes.jsonl como captura forense:
+  - dispatch_ct=false
+  - queue_mode=capture_only
+  - event=lead_capturado_buffer
+- Isso garante trilha integral de tudo que o cliente digitou.
+
+5) Acionamento automatico das Maos ao estourar timer:
+- Worker chama o runner Delta e dispara:
+  - enqueueDeltaGreetingFlow(thread_key, mensagens_cliente)
+- Se falhar, agenda retry automatico (20-35s), sem perder buffer.
+
+6) Despacho unificado para o CT apos sucesso das Maos:
+- So apos saudacao enviada com sucesso no Facebook:
+  - gera payload consolidado com mensagens concatenadas + cidade
+  - dispatch_ct=true
+  - event=lead_consolidado_pos_hands
+  - kick do ingest loop para envio ao /api/messenger-delta/ingest
+
+7) Chat ativo em tempo real:
+- Depois do ciclo de chat novo concluido, thread vira active.
+- Mensagens novas passam a sair imediatamente para CT:
+  - event=lead_chat_ativo_realtime
+  - dispatch_ct=true
+
+8) Ajuste no ingest:
+- Linhas forenses (dispatch_ct=false) agora:
+  - avancam cursor
+  - NAO fazem POST ao CT
+- Linhas de despacho (dispatch_ct=true) continuam enviando ao CT.
+
+9) Hardening de deduplicacao:
+- Saiu dedupe global permanente por texto.
+- Entrou dedupe curto por janela (3.5s) por thread para bloquear fantasmas sem matar mensagens legitimas repetidas em tempos distintos.
+
+============================================================
+O QUE FOI IMPLEMENTADO - VIRTUSDELTA (MAOS)
+============================================================
+1) Nova rotina de saudacao de chat novo:
+- Funcao nova: sendDeltaGreetingNow({ threadKey, mensagensCliente })
+- Fluxo dessa rotina:
+  - aplica cooldown global anti-robotico
+  - tenta extrair cidade do DOM (antes)
+  - monta saudacao via generateDeltaGreeting(atendimentodelta.json)
+  - executa sendReplyFlow(..., fromNetworkLead: true)
+    - inclui abertura do thread (openThreadByClick)
+    - digitacao humanizada (typeHumanized)
+    - quebra composta com Shift+Enter
+  - tenta extrair cidade novamente (depois)
+  - retorna cidade, origem da cidade, profile_url e texto da saudacao
+
+2) Nova API do runner exposta para o worker:
+- enqueueDeltaGreetingFlow({ thread_key, mensagens_cliente })
+- Mantida serializacao pela fila interna (createSerialQueue) para evitar concorrencia de UI.
+
+============================================================
+CONTRATO SOLICITADO - STATUS
+============================================================
+1) Captura e filtro com bloqueio 32/38:
+- Mantido. Sem regressao.
+
+2) Chat novo com espera 1-2 minutos e acumulacao:
+- Implementado.
+
+3) Estouro do timer aciona Maos + cidade + saudacao humana:
+- Implementado.
+
+4) Despacho unificado ao CT apos Maos:
+- Implementado.
+
+5) Chat ja aberto em tempo real:
+- Implementado.
+
+6) Nao perder mensagem:
+- Implementado em duas camadas:
+  - trilha forense capture_only no JSONL
+  - despacho de negocio conforme estado (novo/ativo)
+
+============================================================
+VALIDACOES EXECUTADAS
+============================================================
+- Leitura de lints nos arquivos alterados: sem erros.
+- Validacao sintatica:
+  - node --check C:\conveniente\scripts\worker.js -> OK
+  - node --check C:\conveniente\scripts\virtusDelta.js -> OK
+
+============================================================
+OBSERVACAO OPERACIONAL IMPORTANTE
+============================================================
+O envio ao CT continua com ACK estrito em status 200 (comportamento ja existente).
+Se o CT responder 201/202 em algum cenario, o cursor nao avancara.
+Nao foi alterado neste ajuste por ser detalhe de politica de ACK (fora do contrato principal pedido agora).
+
+============================================================
+RESUMO FINAL
+============================================================
+O ajuste grosso pedido foi implementado de forma end-to-end no codigo:
+- Ouvido + Maos conectados
+- Buffer 60-120s para chat novo
+- Acumulo continuo sem perder texto
+- Saudacao humanizada no Facebook antes do card
+- Despacho unificado no novo chat
+- Tempo real no chat ativo
+
+============================================================
+CENARIOS PONTA A PONTA (MATRIZ COMPLETA)
+============================================================
+Escopo desta matriz:
+- Cobre os cenarios possiveis com a estrutura atual implementada.
+- Inclui fluxo tecnico, decisao do sistema, saida esperada e acao sugerida do operador.
+- Objetivo: previsibilidade total do que acontece do frame CDP ate o card no CT.
+
+Legenda de eventos no JSONL:
+- lead_capturado_buffer (capture_only / dispatch_ct=false)
+- lead_chat_ativo_realtime (dispatch_ct=true)
+- lead_consolidado_pos_hands (dispatch_ct=true)
+- lead_hands_retry_scheduled (capture_only / dispatch_ct=false)
+
+Legenda de estado por thread:
+- new_buffering
+- hands_in_progress
+- active
+
+------------------------------------------------------------
+BLOCO A - ENTRADA DE MENSAGENS (OUVIDO/CDP)
+------------------------------------------------------------
+Cenario A1 - Frame invalido/corrompido
+Entrada:
+- CDP entrega frame malformado.
+O que o sistema faz:
+- Tenta decode/extract.
+- Se falhar, captura excecao e nao derruba o worker.
+Resultado:
+- Sem crash global.
+Acao operador:
+- Nenhuma imediata; monitorar logs DELTA_CDP_ERROR apenas se recorrente.
+
+Cenario A2 - Mensagem filtro negativo (vazia, mid., token 32/38, ruido numerico longo)
+Entrada:
+- Texto nao elegivel por __deltaShouldEmitLeadText.
+O que o sistema faz:
+- Ignora a mensagem para fluxo de negocio.
+Resultado:
+- Nao entra em buffer e nao vai para CT.
+Acao operador:
+- Nenhuma; comportamento esperado de higiene de ingestao.
+
+Cenario A3 - Mensagem valida entra no ouvido
+Entrada:
+- thread_key valido e texto valido.
+O que o sistema faz:
+- Cria/recupera estado da thread.
+- Aplica dedupe curto (janela 3.5s) anti-fantasma.
+- Sempre grava trilha forense capture_only no JSONL.
+Resultado:
+- Nenhuma mensagem valida fica sem rastreio no arquivo.
+Acao operador:
+- Se auditar, conferir event=lead_capturado_buffer.
+
+Cenario A4 - Mensagem repetida em <= 3.5s (fantasma tecnico)
+Entrada:
+- Mesmo texto/op em janela curtissima.
+O que o sistema faz:
+- Bloqueia por dedupe curto.
+Resultado:
+- Evita duplicacao artificial.
+Acao operador:
+- Nenhuma, a nao ser que ambiente gere spam real.
+
+Cenario A5 - Mensagem repetida apos janela > 3.5s
+Entrada:
+- Cliente realmente repete texto depois.
+O que o sistema faz:
+- Considera legitimo e processa normalmente.
+Resultado:
+- Nao perde repeticoes humanas reais.
+Acao operador:
+- Nenhuma.
+
+------------------------------------------------------------
+BLOCO B - CHAT NOVO (BUFFER 60-120S)
+------------------------------------------------------------
+Cenario B1 - Primeira mensagem de thread desconhecida
+Entrada:
+- Estado inexistente para (nome, thread_key).
+O que o sistema faz:
+- Cria estado new_buffering.
+- Arma timer randomico 60-120s.
+- Continua coletando.
+Resultado:
+- Nao despacha para CT ainda.
+Acao operador:
+- Nenhuma; esperar timer.
+
+Cenario B2 - Varias mensagens durante timer
+Entrada:
+- Cliente manda novos baloes antes do estouro.
+O que o sistema faz:
+- Cada mensagem entra no buffer da thread.
+- Todas ficam registradas no JSONL forense.
+Resultado:
+- Texto consolidado cresce progressivamente.
+Acao operador:
+- Nenhuma.
+
+Cenario B3 - Timer estoura com maos disponiveis
+Entrada:
+- Timer de chat novo chega ao fim.
+O que o sistema faz:
+- Move estado para hands_in_progress.
+- Chama enqueueDeltaGreetingFlow no runner Delta.
+Resultado:
+- Inicia fase visual (abrir chat, coletar cidade, digitar saudacao).
+Acao operador:
+- Nao interromper navegador da conta.
+
+Cenario B4 - Mensagem chega enquanto hands_in_progress
+Entrada:
+- Cliente manda mensagem no exato momento do trabalho das maos.
+O que o sistema faz:
+- Continua acumulando no buffer normalmente.
+- Continua registrando capture_only.
+Resultado:
+- Sem perda de texto durante automacao visual.
+Acao operador:
+- Nenhuma.
+
+Cenario B5 - Maos concluem com sucesso
+Entrada:
+- sendDeltaGreetingNow retorna ok=true.
+O que o sistema faz:
+- Concatena mensagens acumuladas.
+- Enfileira lead_consolidado_pos_hands (dispatch_ct=true).
+- Marca status da thread como active.
+- Limpa historico interno consolidado daquela thread.
+Resultado:
+- CT recebe pacote unificado para criar/abrir card.
+Acao operador:
+- Validar no CT o surgimento do card novo.
+
+Cenario B6 - Maos falham (openThread/cidade/digitacao/envio)
+Entrada:
+- enqueueDeltaGreetingFlow retorna erro.
+O que o sistema faz:
+- Volta estado para new_buffering.
+- Agenda retry automatico (20-35s).
+- Registra lead_hands_retry_scheduled (capture_only).
+Resultado:
+- Fluxo nao morre; entra em reprocesso.
+Acao operador:
+- Se repetitivo, checar UI do Facebook e estabilidade da sessao.
+
+Cenario B7 - Retry posterior das maos funciona
+Entrada:
+- Nova tentativa timer retry.
+O que o sistema faz:
+- Repete fase hands.
+- Em sucesso, despacha consolidado e ativa thread.
+Resultado:
+- Recuperacao automatica sem perda.
+Acao operador:
+- Nenhuma apos normalizacao.
+
+Cenario B8 - Retry falha varias vezes
+Entrada:
+- Ambiente hostil (DOM quebrado, browser instavel, virtus indisponivel).
+O que o sistema faz:
+- Mantem ciclo de retries e acumulacao.
+Resultado:
+- Mensagens continuam registradas; card pode atrasar.
+Acao operador:
+- Intervencao operacional: recuperar sessao/virtus para destravar hands.
+
+------------------------------------------------------------
+BLOCO C - CHAT ATIVO (TEMPO REAL)
+------------------------------------------------------------
+Cenario C1 - Thread ja esta active e chega nova mensagem
+Entrada:
+- Estado active.
+O que o sistema faz:
+- Grava capture_only (forense).
+- Grava e despacha lead_chat_ativo_realtime (dispatch_ct=true).
+Resultado:
+- CT atualiza conversa em tempo real.
+Acao operador:
+- Nenhuma.
+
+Cenario C2 - Sequencia rapida de mensagens em chat ativo
+Entrada:
+- Cliente envia varios baloes em segundos.
+O que o sistema faz:
+- Cada balao vira evento realtime proprio.
+Resultado:
+- Atualizacao granular no CT.
+Acao operador:
+- Nenhuma.
+
+Cenario C3 - Repeticao tecnica curtissima em chat ativo
+Entrada:
+- Mesmo pacote duplicado na janela dedupe.
+O que o sistema faz:
+- Dedupe curto bloqueia duplicata tecnica.
+Resultado:
+- Menos ruino no CT.
+Acao operador:
+- Nenhuma.
+
+------------------------------------------------------------
+BLOCO D - MAOS (VIRTUSDELTA) DETALHE PONTA A PONTA
+------------------------------------------------------------
+Cenario D1 - Execucao normal de sendDeltaGreetingNow
+Passos internos:
+1) Aplica cooldown global anti-robotico.
+2) Tenta cidade no DOM antes de enviar.
+3) Gera saudacao via atendimentodelta.json.
+4) Executa sendReplyFlow(fromNetworkLead=true):
+   - prepara DOM
+   - garante filtro marketplace quando habilitado
+   - openThreadByClick
+   - foco composer
+   - typeHumanized (char a char + Shift+Enter)
+   - Enter final / fallback botao enviar
+5) Tenta cidade novamente apos envio.
+6) Retorna payload de resultado para worker.
+Resultado:
+- Saudacao disparada no Facebook.
+- Worker pronto para despacho unificado ao CT.
+
+Cenario D2 - Cidade nao encontrada no DOM
+Entrada:
+- DOM sem "Anunciado em".
+O que maos fazem:
+- Usa cityCache se houver.
+- Se nao houver, segue com cidade nula.
+Resultado:
+- Fluxo continua; cidade pode vir null.
+Acao operador:
+- Se cidade for critica, revisar seletor DOM em ambiente real.
+
+Cenario D3 - Thread card nao encontrado na lateral
+Entrada:
+- openThreadByClick nao acha card.
+O que maos fazem:
+- Tentam scroll/fallbacks.
+- Se nao abrir, retornam erro.
+Resultado:
+- Worker agenda retry automatico (sem perda de buffer).
+Acao operador:
+- Confirmar se conta esta realmente em /messages e com filtros corretos.
+
+------------------------------------------------------------
+BLOCO E - FILA JSONL, CURSOR E INGEST
+------------------------------------------------------------
+Cenario E1 - Linha capture_only (dispatch_ct=false)
+Entrada:
+- lead_capturado_buffer ou retry_scheduled.
+O que ingest faz:
+- Le a linha.
+- Nao envia ao CT.
+- Avanca cursor.
+Resultado:
+- Forense mantida sem poluir CT.
+
+Cenario E2 - Linha dispatch_ct=true
+Entrada:
+- lead_consolidado_pos_hands ou lead_chat_ativo_realtime.
+O que ingest faz:
+- POST para /api/messenger-delta/ingest.
+- Header x-delta-secret (se configurado).
+- Header x-idempotency-key.
+Resultado:
+- Em 200, avanca cursor.
+
+Cenario E3 - CT retorna 200
+O que acontece:
+- Cursor avanca.
+- Fluxo segue.
+Resultado:
+- Entrega confirmada.
+
+Cenario E4 - CT retorna !=200 ou timeout/rede
+O que acontece:
+- Cursor nao avanca (linha permanece pendente).
+- Backoff aumenta.
+Resultado:
+- Retry automatico posterior de envio.
+Acao operador:
+- Verificar disponibilidade CT/rede/secret.
+
+Cenario E5 - Linha JSON invalida no arquivo
+O que acontece:
+- Sistema descarta essa linha especifica, avanca cursor.
+Resultado:
+- Evita travamento da fila inteira.
+
+Cenario E6 - Arquivo cresce muito
+O que acontece:
+- Compactacao por threshold/lock.
+Resultado:
+- Mantem sustentabilidade do arquivo.
+
+------------------------------------------------------------
+BLOCO F - RESTARTS, QUEDAS E RECUPERACAO
+------------------------------------------------------------
+Cenario F1 - Worker reinicia com threads salvas
+O que acontece:
+- Carrega delta_thread_state.json.
+- Reconstroi estados em memoria.
+Resultado:
+- Continuidade operacional sem perder contexto principal.
+
+Cenario F2 - Reinicio durante hands_in_progress
+O que acontece:
+- Estado persistido hands_in_progress e rebaixado para new_buffering no load.
+Resultado:
+- Sistema evita falso "em voo" e volta para ciclo seguro.
+
+Cenario F3 - Reinicio com thread active
+O que acontece:
+- Thread volta active.
+Resultado:
+- Proximas mensagens seguem realtime normalmente.
+
+Cenario F4 - Virtus indisponivel no estouro do timer
+O que acontece:
+- Erro delta_hands_unavailable.
+- Agenda retry 20-35s.
+Resultado:
+- Nada se perde; apenas atraso.
+Acao operador:
+- Garantir runner virtus ativo para perfil.
+
+------------------------------------------------------------
+BLOCO G - CONCORRENCIA E ESCALA
+------------------------------------------------------------
+Cenario G1 - Multiplas threads no mesmo perfil
+O que acontece:
+- Cada thread tem estado e timer proprios.
+Resultado:
+- Isolamento de ciclo por thread.
+
+Cenario G2 - Muitas mensagens em uma mesma thread
+O que acontece:
+- Buffer interno limitado (DELTA_THREAD_MAX_MESSAGES=600).
+- Historico acima disso e podado do estado em memoria.
+Resultado:
+- Protecao de memoria.
+Observacao:
+- Trilhas de captura continuam no JSONL forense.
+
+Cenario G3 - Mensagens simultaneas em varios perfis
+O que acontece:
+- Cada perfil usa seu proprio runner/controlador.
+Resultado:
+- Fluxos independentes por conta.
+
+------------------------------------------------------------
+BLOCO H - FORMACAO DO CARD NO CT (CONTRATO OPERACIONAL)
+------------------------------------------------------------
+Premissa da integracao:
+- CT usa chave tripla:
+  - server_id
+  - account_login
+  - thread_key
+
+Cenario H1 - Novo chat (primeiro despacho pos-hands)
+Payload esperado no CT:
+- event=lead_consolidado_pos_hands
+- mensagens_cliente_concatenadas
+- cidade
+- saudacao_enviada=true
+Comportamento esperado do CT:
+- Criar card novo da thread.
+- Popular timeline com texto consolidado inicial.
+
+Cenario H2 - Chat ativo (despachos realtime)
+Payload esperado no CT:
+- event=lead_chat_ativo_realtime
+- texto_limpo da mensagem nova
+Comportamento esperado do CT:
+- Anexar novos baloes ao card existente da mesma chave tripla.
+
+Cenario H3 - Reenvio por falha de rede (idempotencia)
+Payload:
+- x-idempotency-key consistente por evento.
+Comportamento esperado do CT:
+- Evitar duplicacao logica se endpoint implementar idempotencia corretamente.
+
+------------------------------------------------------------
+BLOCO I - CENARIOS LIMITE (EDGE CASES)
+------------------------------------------------------------
+Cenario I1 - Thread sem cidade sempre nula
+Resultado:
+- Card sobe sem cidade (null) mas com mensagens.
+Acao:
+- Ajustar seletor DOM se necessario.
+
+Cenario I2 - Cliente manda numeros curtos legitimos (ex: 48)
+Resultado:
+- Passa no filtro e entra no fluxo.
+
+Cenario I3 - Cliente manda numerico longo puro
+Resultado:
+- Pode ser filtrado como ruido (regra atual).
+Acao:
+- Se for requisito de negocio capturar sempre, revisar filtro depois dos testes reais.
+
+Cenario I4 - CT indisponivel por periodo longo
+Resultado:
+- Fila dispatch acumula sem perder ordem por cursor.
+Acao:
+- Monitorar disco e disponibilidade do endpoint.
+
+------------------------------------------------------------
+GUIA RAPIDO - "O QUE VAI ACONTECER" EM 3 LINHAS
+------------------------------------------------------------
+1) Toda mensagem valida e sempre registrada (capture_only).
+2) Chat novo espera 60-120s, acumula, aciona maos, envia saudacao e so depois despacha 1 pacote consolidado ao CT.
+3) Depois disso a thread vira ativa e tudo segue em tempo real para o mesmo card no CT.
+
+============================================================
+CHECKLIST OPERACIONAL DE VALIDACAO (CAMPO)
+============================================================
+1) Enviar 3 mensagens em chat novo em <60s:
+- Esperado: nenhuma ida imediata ao CT de negocio; apenas capture_only.
+2) Esperar estouro do timer:
+- Esperado: maos abrem conversa, enviam saudacao, depois 1 dispatch consolidado.
+3) Enviar nova mensagem apos card criado:
+- Esperado: dispatch realtime imediato.
+4) Forcar falha de maos (ex.: sem thread visivel):
+- Esperado: lead_hands_retry_scheduled e novo retry automatico.
+5) Simular CT fora:
+- Esperado: dispatch pendente com retry e sem perda no cursor.

@@ -1,0 +1,249 @@
+AUDITORIA FORENSE AVANCADA - FLUXO 2 (A VOLTA)
+Data: 2026-07-02
+Projeto: C:\conveniente
+Escopo de leitura estrita:
+- C:\conveniente\index.js
+- C:\conveniente\scripts\virtusDelta.js
+
+============================================================
+OBJETIVO DA AUDITORIA
+============================================================
+Validar ponta a ponta o fluxo de retorno (volta):
+1) Comando delta_reply chega no Maestro.
+2) Maestro despacha IPC para worker dono da conta.
+3) Motor de digitacao (virtusDelta) processa fila, cooldown e envio na tela Meta.
+4) Confirmar isolamento por conta, concorrencia, cooldown entre chats e tratamento de falhas.
+
+============================================================
+VEREDITO EXECUTIVO (PRETO NO BRANCO)
+============================================================
+Status geral Fluxo 2: PARCIALMENTE CONFORME (funcional, mas com riscos de arquitetura).
+
+Resumo por marco:
+1) Isolamento de filas por conta e concorrencia:
+- Fila serial por runtime/perfil: CONFORME.
+- Cooldown por conta (isolado): NAO CONFORME (global compartilhado no processo).
+
+2) Relogio sentinela entre chats diferentes:
+- Delay 5-15s existe e funciona.
+- Leitura por account_login nao existe (nao usa map por conta): NAO CONFORME com contrato solicitado.
+
+3) Cooldown para multiplas mensagens no mesmo chat:
+- Aplica cooldown antes de cada envio: CONFORME.
+- Risco de pulo em falhas/retries sem sucesso previo: EXISTE.
+
+4) Erros e preservacao de fila:
+- Nao ha retry automatico no fluxo de volta nesses arquivos.
+- Falha retorna erro e pipeline segue para proximas ordens: NAO CONFORME com "reter para tentar novamente" no proprio runtime.
+
+============================================================
+MAPA PONTA A PONTA (DO ENTER DA ATENDENTE A TELA DO CLIENTE)
+============================================================
+Premissa externa:
+- CT envia lote para Maestro em /api/infra/command-bus com commands[] contendo type=delta_reply.
+
+Trecho auditado no Maestro (index.js):
+1) Endpoint recebe array:
+- index.js:1069-1073
+2) Filtra comandos e itera:
+- index.js:1079-1087
+3) Para delta_reply, valida campos:
+- index.js:1088-1092
+4) Envia via IPC para worker:
+- index.js:1100-1103
+  clusterClient.sendWorkerCommand('delta-reply-task', { nome, thread_key, texto_resposta }, { timeoutMs: 60000 })
+5) Retorna resultado por comando:
+- index.js:1105-1107, 1262-1267
+
+Trecho auditado no motor de digitacao (virtusDelta.js):
+1) Runtime cria fila serial interna:
+- virtusDelta.js:1798-1803
+- virtusDelta.js:1977
+2) Cada delta_reply entra pela fila:
+- virtusDelta.js:2157-2165
+3) Antes de enviar, aplica cooldown:
+- virtusDelta.js:2044-2068 (enforceGlobalDeltaCooldown)
+- virtusDelta.js:2077 (chamada obrigatoria)
+4) Envia na UI:
+- virtusDelta.js:2079 -> sendReplyFlow(...)
+5) Em sucesso atualiza relogio:
+- virtusDelta.js:2081-2084
+
+============================================================
+MARCO 1 - ISOLAMENTO DE FILAS POR CONTA E CONCORRENCIA
+============================================================
+Evidencias:
+1) Command bus recebe batch e faz IPC por comando:
+- index.js:1069-1073, 1084-1103
+
+2) Fila serial interna no virtus:
+- virtusDelta.js:1798-1803 (createSerialQueue)
+- virtusDelta.js:1977 (instancia enqueue no runtime)
+- virtusDelta.js:2157-2165 (enqueueDeltaReply usa a fila)
+
+Analise:
+- A fila serial de envio existe por instancia de runtime (por perfil/account quando runtime e instanciado por conta).
+- Isso fornece isolamento de execucao de comandos dentro da conta.
+
+Ponto critico de concorrencia (gargalo):
+- O command-bus em index processa delta_reply com await dentro do for:
+  - index.js:1084-1103
+- Em um mesmo request com varias contas, o lote e serializado no Maestro por ordem do array.
+- Resultado: head-of-line blocking no lote (um comando lento atrasa os seguintes no mesmo POST).
+
+Veredito do marco 1:
+- Isolamento da fila de digitacao por conta: SIM (na camada virtus runtime).
+- Isolamento de throughput no barramento do Maestro por conta: NAO (batch serial no for).
+
+============================================================
+MARCO 2 - RELOGIO SENTINELA ENTRE CHATS DIFERENTES
+============================================================
+Pergunta contratual:
+- O relogio e por conta (ex.: global.lastDeltaSendTimestamp[account_login])?
+
+Evidencias:
+- Cooldown com random 5-15s:
+  - virtusDelta.js:2045-2047
+- Fonte de ultimo envio:
+  - virtusDelta.js:2048 -> global.lastDeltaSendTimestamp (escala unica, nao map por conta)
+- Aplicacao do cooldown:
+  - virtusDelta.js:2077 (antes de cada envio)
+- Atualizacao em sucesso:
+  - virtusDelta.js:2081
+
+Analise:
+- O sistema NAO usa chave por account_login.
+- Usa um unico timestamp global no processo.
+- Se o processo hospeda mais de uma conta, cooldown de uma conta pode impactar outra.
+
+Veredito do marco 2:
+- Existe sentinela 5-15s: SIM.
+- Isolada por account_login: NAO.
+- Risco: gargalo artificial cruzado entre perfis no mesmo worker/processo.
+
+============================================================
+MARCO 3 - COOLDOWN PARA MULTIPLAS MSG NO MESMO CHAT
+============================================================
+Evidencias:
+- Cada comando delta_reply passa por enforceGlobalDeltaCooldown:
+  - virtusDelta.js:2157-2165 -> sendDeltaReplyNow
+  - virtusDelta.js:2077 -> await enforceGlobalDeltaCooldown()
+- Envio sempre chama fluxo visual:
+  - virtusDelta.js:2079 -> sendReplyFlow(...)
+- Fluxo visual tenta abrir thread por comando:
+  - virtusDelta.js:1713 (openThreadByClick)
+
+Analise:
+- Mesmo no mesmo thread_key, cada comando entra na fila e aplica cooldown antes de enviar.
+- Nao ha bypass explicito "ja esta aberto, entao pula cooldown".
+- Portanto o comportamento esperado de pausa sequencial e mantido.
+
+Risco identificado:
+- O timestamp global so atualiza em sucesso:
+  - virtusDelta.js:2080-2084
+- Se houver falhas repetidas (sem sucesso), proximo comando pode nao esperar (dependendo do elapsed de ultimo sucesso antigo).
+
+Veredito do marco 3:
+- Cooldown no mesmo chat: SIM, por desenho normal.
+- Risco de pulo em cenarios de erro sucessivo: SIM.
+
+============================================================
+MARCO 4 - ERROS E PRESERVACAO DA FILA
+============================================================
+Evidencias:
+1) Tratamento de erro no command-bus:
+- index.js:1107 (marca comando com ok=false e segue)
+- index.js:1262-1267 (retorna resultados do lote)
+
+2) Fila interna nao bloqueia pipeline:
+- virtusDelta.js:1798-1803 (chain.then(fn).catch(() => {}))
+- virtusDelta.js:2157-2165 (retorna objeto de erro, nao trava fila)
+
+3) Erro no envio visual:
+- virtusDelta.js:2079 (sendReplyFlow)
+- virtusDelta.js:2085 (retorna objeto ok/erro)
+
+Analise:
+- Quando um envio falha, o comando retorna falha para o chamador.
+- A fila segue para os proximos comandos da mesma conta.
+- Nao ha retencao/retry automatico local do comando falho nesses dois arquivos.
+- Nao existe cursor de "ordens da atendente" nesta trilha (diferente do Fluxo 1 com JSONL/cursor).
+
+Veredito do marco 4:
+- Preserva continuidade da fila: SIM (nao trava).
+- Reprocessamento automatico do comando falho antes de avancar: NAO.
+- Dependencia externa: CT/maestro precisam reenfileirar se desejarem retry garantido.
+
+============================================================
+OBSERVACOES FORENSES EXTRA (OLHOS DE DEUS)
+============================================================
+1) Uso de "nome" vs "account_login":
+- Command bus usa campo nome:
+  - index.js:1088
+- Contrato fala account_login; mapeamento deve estar consistente em todo ecossistema para evitar roteamento errado.
+
+2) Timeout IPC unico de 60s:
+- index.js:1103
+- Em UI lenta, comandos podem falhar por timeout e seguir lote, sem retry automatico no mesmo fluxo.
+
+3) Variaveis que sugerem desenho incompleto:
+- virtusDelta.js:1981-1982 (lastCrossThreadSendAt/lastCrossThreadKey)
+- Declaradas e atualizadas, mas sem regra forte de controle cruzado ativa.
+
+4) Serializacao do batch no Maestro:
+- index.js:1084-1103 (await por item)
+- Em cargas maiores, limite de throughput no proprio endpoint.
+
+============================================================
+CENARIOS POSSIVEIS DO FLUXO 2 (COMPORTAMENTO REAL)
+============================================================
+Cenario S1 - 1 comando, 1 conta, 1 chat, sucesso
+- Resultado: executa cooldown, abre chat, envia, responde ok=true.
+
+Cenario S2 - 2 comandos mesmo chat (mesma conta)
+- Resultado: fila serial; comando 2 espera comando 1 terminar + cooldown novamente.
+
+Cenario S3 - 2 comandos chats diferentes (mesma conta)
+- Resultado: fila serial; cooldown tambem aplicado entre comandos.
+
+Cenario S4 - 2 comandos contas diferentes no MESMO batch HTTP
+- Resultado: Maestro processa em serie no for (pode atrasar conta B por conta A).
+
+Cenario S5 - Falha visual no envio de um comando
+- Resultado: comando falha (ok=false), proximo comando segue; sem retry automatico local.
+
+Cenario S6 - Timeout IPC (60s)
+- Resultado: comando falha no Maestro; lote continua; retry depende de camada externa.
+
+Cenario S7 - Multiplas contas no mesmo worker/processo
+- Resultado: cooldown global compartilhado pode gerar atraso cruzado entre contas.
+
+============================================================
+GAP LIST (CONTRA MELHORES PRATICAS DE PRIMEIRO MUNDO)
+============================================================
+GAP-1 (Critico): cooldown global compartilhado
+- Hoje: global.lastDeltaSendTimestamp (unico por processo).
+- Desejado: timestamp por account_login (map isolado por conta).
+
+GAP-2 (Alto): ausencia de retry automatico no Fluxo 2
+- Hoje: falha retorna erro e segue fila.
+- Desejado: politica clara de retry por comando (exponencial, max tentativas, DLQ/parking).
+
+GAP-3 (Alto): head-of-line no command-bus
+- Hoje: processamento serial do array no Maestro.
+- Desejado: paralelismo controlado por conta (sharded), mantendo ordem intra-conta.
+
+GAP-4 (Medio): timeout fixo unico 60s sem perfil dinamico
+- Hoje: timeout fixo pode falhar em picos.
+- Desejado: timeout adaptativo + telemetry de latencia por etapa.
+
+============================================================
+CONCLUSAO FINAL
+============================================================
+O Fluxo 2 esta operacional e funcional no desenho atual, com fila serial e cooldown aplicados.
+Porem, para atingir padrao "ultra perfeito" de engenharia:
+- falta isolamento do cooldown por conta,
+- falta estrategia nativa de retry/reprocessamento no proprio fluxo de volta,
+- e o barramento do Maestro ainda serializa batches inteiros, limitando concorrencia real por conta.
+
+Este e o gabarito forense limpo do estado atual auditado.

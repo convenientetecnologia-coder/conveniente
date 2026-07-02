@@ -1080,6 +1080,7 @@ app.post('/api/infra/command-bus', async (req, res) => {
     const results = new Array(incoming.length);
     const normal = [];
     const normalIdx = [];
+    const deltaByAccount = new Map(); // nome -> [{ idx, cmd, nome, thread_key, texto_resposta }]
 
     for (let i = 0; i < incoming.length; i++) {
       const cmd = incoming[i] && typeof incoming[i] === 'object' ? incoming[i] : {};
@@ -1096,16 +1097,9 @@ app.post('/api/infra/command-bus', async (req, res) => {
           results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'cluster_not_ready' };
           continue;
         }
-        try {
-          const r = await clusterClient.sendWorkerCommand(
-            'delta-reply-task',
-            { nome, thread_key, texto_resposta },
-            { timeoutMs: 60000 }
-          );
-          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: !!(r && r.ok !== false), details: r || null };
-        } catch (e) {
-          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: (e && e.message) ? String(e.message) : String(e) };
-        }
+        const bucket = deltaByAccount.get(nome) || [];
+        bucket.push({ idx: i, cmd, nome, thread_key, texto_resposta });
+        deltaByAccount.set(nome, bucket);
         continue;
       }
 
@@ -1252,6 +1246,36 @@ app.post('/api/infra/command-bus', async (req, res) => {
       normal.push(cmd);
       normalIdx.push(i);
     }
+
+    // Execução sharded por conta:
+    // - contas diferentes em paralelo (Promise.all)
+    // - ordem interna da mesma conta preservada (for/await dentro do bucket)
+    const accountJobs = Array.from(deltaByAccount.entries()).map(async ([nome, bucket]) => {
+      for (const item of bucket) {
+        const { idx, cmd, thread_key, texto_resposta } = item;
+        try {
+          const r = await clusterClient.sendWorkerCommand(
+            'delta-reply-task',
+            { nome, thread_key, texto_resposta },
+            { timeoutMs: 60000 }
+          );
+          results[idx] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'delta_reply',
+            ok: !!(r && r.ok !== false),
+            details: r || null
+          };
+        } catch (e) {
+          results[idx] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'delta_reply',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+      }
+    });
+    await Promise.all(accountJobs);
 
     const out = normal.length ? await applyInfraCommands(normal) : { ok: true, results: [] };
     const outResults = (out && Array.isArray(out.results)) ? out.results : [];

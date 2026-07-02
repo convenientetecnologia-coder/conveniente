@@ -2041,11 +2041,35 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     cityTimer.unref?.();
   } catch {}
 
-  async function enforceGlobalDeltaCooldown() {
+  function deltaCooldownKey(accountLogin) {
+    const key = String(accountLogin || ACCOUNT_LOGIN || nome || "").trim().toLowerCase();
+    return key || "__unknown_account__";
+  }
+  function readLastDeltaSendTimestamp(accountLogin) {
+    try {
+      const bag = global.__deltaLastSendTsByAccount;
+      if (!bag || typeof bag !== "object") return 0;
+      const k = deltaCooldownKey(accountLogin);
+      return Number(bag[k] || 0) || 0;
+    } catch {
+      return 0;
+    }
+  }
+  function writeLastDeltaSendTimestamp(accountLogin, ts) {
+    try {
+      if (!global.__deltaLastSendTsByAccount || typeof global.__deltaLastSendTsByAccount !== "object") {
+        global.__deltaLastSendTsByAccount = Object.create(null);
+      }
+      const k = deltaCooldownKey(accountLogin);
+      global.__deltaLastSendTsByAccount[k] = Number(ts || Date.now()) || Date.now();
+    } catch (_) {}
+  }
+
+  async function enforceGlobalDeltaCooldown(accountLogin = ACCOUNT_LOGIN) {
     const minMs = 5_000;
     const maxMs = 15_000;
     const delayMs = randomBetween(minMs, maxMs);
-    const last = Number(global.lastDeltaSendTimestamp || 0) || 0;
+    const last = readLastDeltaSendTimestamp(accountLogin);
     const now = Date.now();
     const elapsed = now - last;
     if (!last || elapsed >= delayMs) return { waitedMs: 0, delayMs, elapsedMs: elapsed };
@@ -2073,22 +2097,135 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const msg = String(textoResposta || "").replace(/\r/g, "");
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
 
-    // Relógio Sentinela Global (5–15s) — regra de ouro: independe de thread_key.
-    await enforceGlobalDeltaCooldown();
+    // Relógio Sentinela por conta (5–15s), isolado por ACCOUNT_LOGIN.
+    await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
 
-    const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false });
-    if (r && r.ok) {
-      global.lastDeltaSendTimestamp = Date.now();
-      lastCrossThreadKey = String(t);
-      lastCrossThreadSendAt = global.lastDeltaSendTimestamp;
+    const maxRetries = 3; // 3 retries locais rápidos além da tentativa inicial
+    let lastOut = null;
+    let lastErr = "delta_reply_unknown_error";
+
+    for (let attempt = 1; attempt <= (maxRetries + 1); attempt++) {
+      if (attempt > 1) {
+        const retryWaitMs = randomBetween(3_000, 5_000);
+        logInfo(
+          `[virtusDelta][reply] retry_visual attempt=${attempt - 1}/${maxRetries} thread_key=${t} wait_ms=${retryWaitMs}`
+        );
+        await sleep(retryWaitMs);
+      }
+
+      try {
+        const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false });
+        lastOut = r && typeof r === "object" ? r : { ok: true };
+        if (lastOut && lastOut.ok) {
+          const nowTs = Date.now();
+          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+          lastCrossThreadKey = String(t);
+          lastCrossThreadSendAt = nowTs;
+          return lastOut;
+        }
+        lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
+      } catch (e) {
+        lastErr = e && e.message ? String(e.message) : String(e);
+        lastOut = { ok: false, error: lastErr };
+      }
     }
-    return r && typeof r === "object" ? r : { ok: true };
+
+    return {
+      ok: false,
+      error: String(lastErr || "send_reply_failed_after_retries"),
+      retries: maxRetries,
+      attempts: maxRetries + 1,
+      last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
+    };
+  }
+
+  async function sendDeltaGreetingNow({ threadKey, mensagensCliente }) {
+    if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
+    const t = String(threadKey || "").trim();
+    if (!t) return { ok: false, error: "missing_thread_key" };
+
+    const mensagensConcatenadas = String(mensagensCliente || "").replace(/\r/g, "").trim();
+
+    // Mantém o mesmo sentinela global para evitar padrões robóticos.
+    await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
+
+    let cityCandidate = null;
+    let citySource = "none";
+    try {
+      const c0 = await extractCityFromMarketplaceDom(page);
+      if (c0) {
+        cityCandidate = String(c0).trim();
+        citySource = "dom_before_send";
+      }
+    } catch (_) {}
+    if (!cityCandidate && cityCache && cityCache.value) {
+      cityCandidate = String(cityCache.value || "").trim() || null;
+      if (cityCandidate) citySource = "city_cache";
+    }
+
+    const greetingText = generateDeltaGreeting({ cidade: cityCandidate || "" });
+    const sendOut = await sendReplyFlow({
+      page,
+      threadKey: t,
+      textoResposta: greetingText,
+      fromNetworkLead: true,
+    });
+    if (!sendOut || !sendOut.ok) {
+      return {
+        ok: false,
+        error: String(sendOut && sendOut.error || "hands_send_failed"),
+      };
+    }
+
+    try {
+      const c1 = await extractCityFromMarketplaceDom(page);
+      if (c1) {
+        cityCandidate = String(c1).trim();
+        citySource = "dom_after_send";
+      }
+    } catch (_) {}
+    if (cityCandidate) {
+      cityCache = { at: Date.now(), value: cityCandidate };
+    }
+
+    let profileUrl = null;
+    try {
+      const u = String(page && page.url ? page.url() : "").trim();
+      if (u) profileUrl = u;
+    } catch (_) {}
+
+    const nowTs = Date.now();
+    writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+    lastCrossThreadKey = String(t);
+    lastCrossThreadSendAt = nowTs;
+
+    return {
+      ok: true,
+      cidade: cityCandidate || null,
+      city_source: citySource,
+      profile_url: profileUrl,
+      greeting_text: greetingText,
+      mensagens_cliente: mensagensConcatenadas,
+    };
   }
 
   const enqueueDeltaReply = ({ thread_key, texto_resposta }) => {
     return enqueue(async () => {
       try {
         return await sendDeltaReplyNow({ threadKey: thread_key, textoResposta: texto_resposta });
+      } catch (e) {
+        return { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+    });
+  };
+
+  const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
+    return enqueue(async () => {
+      try {
+        return await sendDeltaGreetingNow({
+          threadKey: thread_key,
+          mensagensCliente: mensagens_cliente,
+        });
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }
@@ -2102,6 +2239,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     account_login: ACCOUNT_LOGIN,
     page,
     enqueueDeltaReply,
+    enqueueDeltaGreetingFlow,
     stop: async () => {
       running = false;
       try { marketplaceEnforcer.stop(); } catch (_) {}

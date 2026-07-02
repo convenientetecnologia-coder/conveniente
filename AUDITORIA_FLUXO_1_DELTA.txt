@@ -1,0 +1,167 @@
+AUDITORIA FORENSE AVANCADA - FLUXO 1 (DELTA -> CARD CT)
+Data: 2026-07-02
+Escopo estrito (read-only):
+- C:\conveniente\scripts\worker.js
+- C:\conveniente\scripts\virtusDelta.js
+
+============================================================
+VEREDITO EXECUTIVO
+============================================================
+Status geral do Fluxo 1 (contrato solicitado): PARCIAL / COM LACUNAS CRITICAS
+
+Resumo de conformidade por marco:
+1) Escuta CDP + filtro de ingestao: PARCIALMENTE CONFORME
+2) Buffer 1-2 minutos com concatenacao: NAO CONFORME
+3) Raspagem cidade/perfil + disparo de saudacao apos timer: NAO CONFORME (fluxo atual divergente)
+4) Payload stateless para CT: PARCIALMENTE CONFORME
+
+============================================================
+1) ESCUTA CDP E FILTRO DE INGESTAO (worker.js)
+============================================================
+Evidencias tecnicas:
+- Listener CDP ativo em:
+  - worker.js:15064 -> cdp.on('Network.webSocketFrameReceived', onFrame)
+  - worker.js:15012 -> definicao do onFrame
+- Decodificacao e extracao do frame:
+  - worker.js:15017 -> __deltaDecodeWebSocketPayload(...)
+  - worker.js:15018 -> __deltaExtractInnerPayload(...)
+  - worker.js:15021 -> __deltaExtractWsMessageEvents(...)
+- Limpeza/filtro de texto:
+  - worker.js:14954-14963 -> __deltaShouldEmitLeadText(...)
+  - worker.js:14957 -> bloqueia prefixo "mid."
+  - worker.js:14959 -> bloqueia tokens Meta "32" e "38"
+  - worker.js:14960 -> bloqueia numerico puro com 6+ digitos
+
+Veredito do item:
+- O pipeline de captura e saneamento existe e esta operacional.
+- A blindagem contra "32" e "38" esta implementada.
+- Nao e possivel atestar "110% perfeicao" (absoluto) apenas por inspeção estatica; ha boa cobertura, mas nao prova formal completa.
+
+Ponto contratual critico:
+- "Linha exata onde diferencia Chat Novo vs Chat Ja Aberto":
+  - Nao foi encontrada bifurcacao explicita no ouvido (worker.js) para classificar "novo" vs "ja aberto".
+  - O ouvido captura, filtra e enfileira por thread_key/texto/op, mas nao marca estado de chat novo/aberto.
+  - Conclusao: requisito de diferenciacao explicita NAO identificado no codigo auditado.
+
+============================================================
+2) GERENCIAMENTO DO BUFFER 1-2 MINUTOS
+============================================================
+Evidencias tecnicas:
+- Fila JSONL:
+  - worker.js:14612 -> DELTA_QUEUE_PATH (mensagens_pendentes.jsonl)
+  - worker.js:14652-14663 -> __deltaAppendPendingJsonlSync(...) com fs.appendFileSync
+- Cursor de leitura:
+  - worker.js:14620-14638 -> leitura/escrita de offset
+  - worker.js:14795-14805 -> leitura sequencial por offset no ingest
+- Ingest quase imediato:
+  - worker.js:14856-14867 -> loop de ingest com backoff curto
+  - worker.js:15055 -> __deltaKickIngestLoop() apos append
+
+Analise contratual:
+- Nao existe janela de seguranca de 1-2 minutos no worker para acumular mensagens antes do envio.
+- Nao existe concatenacao multi-baloes em um payload unico no JSONL.
+- O comportamento atual e "1 evento por mensagem", com envio progressivo.
+
+Risco de sobrescrita/perda:
+- Sobrescrita direta: BAIXA no mesmo processo (appendFileSync adiciona linha; nao reescreve arquivo inteiro).
+- Perda por falta de concatenacao contratual: MEDIA/ALTA para o objetivo funcional (as mensagens nao sao consolidadas na janela pedida).
+- Pode haver retransmissao/duplicidade em falhas de ACK (cursor so avanca em HTTP 200).
+
+Achado complementar importante:
+- virtusDelta.js define constantes de janela nova conversa:
+  - virtusDelta.js:255-260 -> NEW_CHAT_WARMUP_DELAY (60_120s)
+  - virtusDelta.js:261-266 -> CROSS_THREAD_SEND_GAP
+  - Porém, nao ha uso efetivo dessas constantes no fluxo auditado atual.
+
+============================================================
+3) RASPAGEM DE CIDADE E DISPARO DE SAUDACAO (virtusDelta.js)
+============================================================
+Evidencias tecnicas (existencia de mecanismos):
+- Raspagem de cidade:
+  - virtusDelta.js:449-496 -> extractCityFromMarketplaceDom(...)
+- Preparacao DOM e abertura da thread:
+  - virtusDelta.js:1178-1203 -> prepareDomForNetworkLead(...)
+  - virtusDelta.js:1621-1691 -> openThreadByClick(...)
+  - virtusDelta.js:1693-1796 -> sendReplyFlow(...)
+- Fatiador humano Shift+Enter:
+  - virtusDelta.js:1570-1592 -> typeHumanized(...)
+  - virtusDelta.js:1576-1578 -> Shift+Enter por quebra de linha
+- Composicao de saudacao por atendimentodelta.json:
+  - virtusDelta.js:424-447 -> generateDeltaGreeting(...)
+
+Lacunas contratuais encontradas:
+1) Fluxo "apos estouro do timer" para novo chat:
+   - Nao foi identificado pipeline ativo no worker/virtus que arme e execute esse timer do Fluxo 1 conforme contrato.
+2) Distincao de origem de envio:
+   - virtusDelta.js:2079 chama sendReplyFlow(..., fromNetworkLead: false) no fluxo de resposta atual.
+   - O ramo fromNetworkLead=true (que faria preparo especifico) existe no codigo, mas nao aparece ligado ao ouvido neste recorte.
+3) Cidade e URL de perfil:
+   - Cidade por DOM existe como funcao, mas no ouvido do worker o payload usa robeMeta[nome].cidade (worker.js:15029), carregada de manifest (worker.js:14995-15000), nao comprovando uso da cidade raspada no Fluxo 1.
+   - Nao foi localizada extracao explicita de URL de perfil do cliente; o que existe e link de item:
+     - virtusDelta.js:1483-1496 -> extractMarketplaceItemLink(...)
+4) Robustez contra render lento:
+   - Ha retries e waits no fluxo de abertura (bom), mas a coleta de cidade em si depende de DOM presente e pode retornar null sem retry interno proprio naquela chamada.
+
+Veredito do item:
+- Existem componentes de "maos" robustos.
+- O encadeamento contratual completo (timer -> clique chat novo -> cidade+perfil -> saudacao automatica composta) nao esta comprovadamente conectado ponta a ponta no estado atual auditado.
+
+============================================================
+4) ENCAIXE DO PAYLOAD STATELESS PARA O CT
+============================================================
+Evidencias tecnicas:
+- Montagem do payload capturado no ouvido:
+  - worker.js:15046-15053
+    {
+      server_id,
+      account_login,
+      thread_key,
+      texto_limpo,
+      cidade,
+      operacao_meta
+    }
+- Enriquecimento antes de gravar fila:
+  - worker.js:14654-14659 -> ts, event, idempotency_key
+- POST para CT:
+  - worker.js:14791 -> endpoint padrao /api/messenger-delta/ingest
+  - worker.js:14831 -> envio do payload via __deltaPostWebhookJson(...)
+
+Estrutura efetiva enviada (observada no codigo):
+{
+  "ts": <number>,
+  "event": "lead_capturado",
+  "idempotency_key": "<sha1>",
+  "server_id": "<string|null>",
+  "account_login": "<string>",
+  "thread_key": "<string>",
+  "texto_limpo": "<string>",
+  "cidade": "<string|null>",
+  "operacao_meta": "<string>"
+}
+
+Veredito do item:
+- Chave tripla unificada existe (server_id, account_login, thread_key): CONFORME.
+- Cidade existe no payload: CONFORME estrutural.
+- "Compilado de mensagens" em um unico payload: NAO CONFORME (modelo atual envia por evento individual, sem agregacao temporal no worker).
+
+============================================================
+ACHADOS FORENSES EXTRA (NAO SOLICITADOS, MAS RELEVANTES)
+============================================================
+1) ACK estrito em 200:
+   - worker.js:14832 valida apenas status === 200 para avancar cursor.
+   - Se CT responder 201/202 (mesmo sucesso semantico), pode haver reenvio/desalinhamento.
+
+2) Variaveis aparentando codigo ocioso para auto-saudacao:
+   - virtusDelta.js:1978-1980 declara autoGreetingEnabled/Set/Map.
+   - Nao foi encontrada logica de uso correspondente no recorte auditado atual.
+
+3) Filtro numerico:
+   - worker.js:14958-14960 pode descartar numeros longos legitimos enviados pelo cliente (trade-off anti-ruido).
+
+============================================================
+CONCLUSAO FORENSE
+============================================================
+O ouvido Delta no worker esta tecnicamente implantado (CDP + parse + dedupe + fila + ingest), mas o contrato do Fluxo 1, do jeito descrito (janela 1-2 min com consolidacao, diferenciacao explicita novo/aberto, e sequencia automatica de maos com cidade/perfil e saudacao composta), NAO esta plenamente materializado ponta a ponta nesses dois arquivos na branch auditada.
+
+Recomendacao operacional:
+- Considerar esta auditoria como "go/no-go parcial": apto para captura/ingest basico, nao apto para declarar conformidade total do Fluxo 1 contratual sem ajustes de orquestracao e agregacao.

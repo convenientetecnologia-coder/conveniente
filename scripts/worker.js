@@ -1,4 +1,4 @@
-﻿// scripts/worker.js
+// scripts/worker.js
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -14612,6 +14612,317 @@ try {
 const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.jsonl');
 const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
+const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
+const DELTA_RETRY_TIMER_MIN_MS = 20_000;
+const DELTA_RETRY_TIMER_MAX_MS = 35_000;
+const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
+const DELTA_THREAD_MAX_MESSAGES = 600;
+const __deltaThreadStateMap = new Map();
+let __deltaThreadStatePersistTimer = null;
+
+function __deltaRandInt(minMs, maxMs) {
+  const min = Math.max(0, Number(minMs || 0) || 0);
+  const max = Math.max(min, Number(maxMs || min) || min);
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function __deltaThreadStateKey(nome, threadKey) {
+  return `${String(nome || '').trim()}|${String(threadKey || '').trim()}`;
+}
+function __deltaCreateThreadState(nome, threadKey) {
+  const now = Date.now();
+  return {
+    nome: String(nome || '').trim(),
+    thread_key: String(threadKey || '').trim(),
+    status: 'new_buffering', // new_buffering | hands_in_progress | active
+    createdAt: now,
+    updatedAt: now,
+    timerDueAt: 0,
+    timerReason: '',
+    timerHandle: null,
+    handsFailures: 0,
+    city: null,
+    seq: 0,
+    messages: [],
+    recentMessageKeys: new Map(), // dedupe curto anti-duplicação fantasma
+    inFlight: false,
+    lastDispatchAt: 0,
+  };
+}
+function __deltaSerializeThreadState(st) {
+  if (!st || typeof st !== 'object') return null;
+  return {
+    nome: String(st.nome || '').trim(),
+    thread_key: String(st.thread_key || '').trim(),
+    status: String(st.status || 'new_buffering'),
+    createdAt: Number(st.createdAt || 0) || 0,
+    updatedAt: Number(st.updatedAt || 0) || Date.now(),
+    timerDueAt: Number(st.timerDueAt || 0) || 0,
+    timerReason: String(st.timerReason || '').slice(0, 32),
+    handsFailures: Number(st.handsFailures || 0) || 0,
+    city: st.city ? String(st.city).slice(0, 120) : null,
+    seq: Number(st.seq || 0) || 0,
+    lastDispatchAt: Number(st.lastDispatchAt || 0) || 0,
+    messages: Array.isArray(st.messages)
+      ? st.messages.slice(-DELTA_THREAD_MAX_MESSAGES).map((m) => ({
+          seq: Number(m && m.seq || 0) || 0,
+          text: String(m && m.text || '').slice(0, 4000),
+          op: String(m && m.op || '').slice(0, 64),
+          at: Number(m && m.at || 0) || 0
+        }))
+      : []
+  };
+}
+function __deltaPersistThreadStateSync() {
+  try {
+    const rows = [];
+    for (const st of __deltaThreadStateMap.values()) {
+      const one = __deltaSerializeThreadState(st);
+      if (!one || !one.nome || !one.thread_key) continue;
+      rows.push(one);
+    }
+    const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
+    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, body, 'utf8');
+    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+  } catch {}
+}
+function __deltaSchedulePersistThreadState() {
+  if (__deltaThreadStatePersistTimer) return;
+  __deltaThreadStatePersistTimer = setTimeout(() => {
+    __deltaThreadStatePersistTimer = null;
+    __deltaPersistThreadStateSync();
+  }, 350);
+  __deltaThreadStatePersistTimer.unref?.();
+}
+function __deltaLoadThreadStateSync() {
+  try {
+    if (!fs.existsSync(DELTA_THREAD_STATE_PATH)) return;
+    const raw = String(fs.readFileSync(DELTA_THREAD_STATE_PATH, 'utf8') || '').trim();
+    const parsed = __deltaSafeJsonParse(raw) || {};
+    const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
+    for (const row of arr) {
+      const nome = String(row && row.nome || '').trim();
+      const threadKey = String(row && row.thread_key || '').trim();
+      if (!nome || !threadKey) continue;
+      const st = __deltaCreateThreadState(nome, threadKey);
+      st.status = String(row && row.status || 'new_buffering');
+      if (st.status !== 'active' && st.status !== 'new_buffering' && st.status !== 'hands_in_progress') st.status = 'new_buffering';
+      if (st.status === 'hands_in_progress') st.status = 'new_buffering'; // pós-restart nunca assume "em voo"
+      st.createdAt = Number(row && row.createdAt || 0) || st.createdAt;
+      st.updatedAt = Number(row && row.updatedAt || 0) || st.updatedAt;
+      st.handsFailures = Number(row && row.handsFailures || 0) || 0;
+      st.city = row && row.city ? String(row.city).trim() : null;
+      st.seq = Number(row && row.seq || 0) || 0;
+      st.lastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
+      st.messages = Array.isArray(row && row.messages)
+        ? row.messages
+            .map((m) => ({
+              seq: Number(m && m.seq || 0) || 0,
+              text: String(m && m.text || ''),
+              op: String(m && m.op || ''),
+              at: Number(m && m.at || 0) || 0
+            }))
+            .filter((m) => m.text)
+            .slice(-DELTA_THREAD_MAX_MESSAGES)
+        : [];
+      __deltaThreadStateMap.set(__deltaThreadStateKey(nome, threadKey), st);
+    }
+  } catch {}
+}
+function __deltaGetThreadState(nome, threadKey) {
+  return __deltaThreadStateMap.get(__deltaThreadStateKey(nome, threadKey)) || null;
+}
+function __deltaGetOrCreateThreadState(nome, threadKey) {
+  const k = __deltaThreadStateKey(nome, threadKey);
+  let st = __deltaThreadStateMap.get(k) || null;
+  if (!st) {
+    st = __deltaCreateThreadState(nome, threadKey);
+    __deltaThreadStateMap.set(k, st);
+    __deltaSchedulePersistThreadState();
+  }
+  return st;
+}
+function __deltaClearThreadTimer(st) {
+  if (!st || !st.timerHandle) return;
+  try { clearTimeout(st.timerHandle); } catch {}
+  st.timerHandle = null;
+  st.timerDueAt = 0;
+  st.timerReason = '';
+}
+function __deltaBuildConcatFromState(st) {
+  const msgs = Array.isArray(st && st.messages) ? st.messages : [];
+  const texts = msgs.map((m) => String(m && m.text || '')).filter(Boolean);
+  const fromSeq = msgs.length ? Number(msgs[0].seq || 0) || 0 : 0;
+  const toSeq = msgs.length ? Number(msgs[msgs.length - 1].seq || 0) || 0 : 0;
+  return { text: texts.join('\n'), count: texts.length, fromSeq, toSeq };
+}
+function __deltaPushMessageToState(st, { text, op, at }) {
+  if (!st || typeof st !== 'object') return null;
+  st.seq = (Number(st.seq || 0) || 0) + 1;
+  const msg = {
+    seq: st.seq,
+    text: String(text || ''),
+    op: String(op || ''),
+    at: Number(at || Date.now()) || Date.now()
+  };
+  st.messages = Array.isArray(st.messages) ? st.messages : [];
+  st.messages.push(msg);
+  if (st.messages.length > DELTA_THREAD_MAX_MESSAGES) {
+    st.messages.splice(0, st.messages.length - DELTA_THREAD_MAX_MESSAGES);
+  }
+  st.updatedAt = Date.now();
+  return msg;
+}
+function __deltaIsRecentDuplicate(st, text, op, nowMs = Date.now()) {
+  if (!st || typeof st !== 'object') return false;
+  st.recentMessageKeys = st.recentMessageKeys instanceof Map ? st.recentMessageKeys : new Map();
+  for (const [k, ts] of st.recentMessageKeys.entries()) {
+    if ((nowMs - (Number(ts || 0) || 0)) > DELTA_RECENT_DEDUP_WINDOW_MS) st.recentMessageKeys.delete(k);
+  }
+  const key = `${String(op || '').trim()}|${String(text || '')}`;
+  const prev = Number(st.recentMessageKeys.get(key) || 0) || 0;
+  if (prev && (nowMs - prev) <= DELTA_RECENT_DEDUP_WINDOW_MS) return true;
+  st.recentMessageKeys.set(key, nowMs);
+  if (st.recentMessageKeys.size > 250) {
+    const first = st.recentMessageKeys.keys().next().value;
+    if (first) st.recentMessageKeys.delete(first);
+  }
+  return false;
+}
+async function __deltaResolveVirtusRunner(nome) {
+  try {
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
+    if (!ctrl.virtus) return null;
+    const runner = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
+      ? await ctrl.virtus.catch(() => null)
+      : ctrl.virtus;
+    return runner || null;
+  } catch {
+    return null;
+  }
+}
+async function __deltaRunHandsGreetingFlow({ nome, threadKey, mensagensCliente }) {
+  const runner = await __deltaResolveVirtusRunner(nome);
+  if (!runner || typeof runner.enqueueDeltaGreetingFlow !== 'function') {
+    return { ok: false, error: 'delta_hands_unavailable' };
+  }
+  try {
+    return await runner.enqueueDeltaGreetingFlow({
+      thread_key: String(threadKey || '').trim(),
+      mensagens_cliente: String(mensagensCliente || '')
+    });
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  }
+}
+function __deltaScheduleThreadTimer(st, { retry = false } = {}) {
+  if (!st || typeof st !== 'object') return 0;
+  __deltaClearThreadTimer(st);
+  const delayMs = retry
+    ? __deltaRandInt(DELTA_RETRY_TIMER_MIN_MS, DELTA_RETRY_TIMER_MAX_MS)
+    : __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
+  st.timerReason = retry ? 'retry' : 'initial';
+  st.timerDueAt = Date.now() + delayMs;
+  const nome = String(st.nome || '');
+  const threadKey = String(st.thread_key || '');
+  st.timerHandle = setTimeout(() => {
+    __deltaHandleBufferedThreadTimer(nome, threadKey, { reason: st.timerReason }).catch(() => {});
+  }, delayMs);
+  st.timerHandle.unref?.();
+  st.updatedAt = Date.now();
+  __deltaSchedulePersistThreadState();
+  return delayMs;
+}
+async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'initial' } = {}) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return;
+  const st = __deltaGetThreadState(n, tk);
+  if (!st) return;
+  if (st.status === 'active') return;
+  if (st.inFlight) return;
+
+  __deltaClearThreadTimer(st);
+  st.status = 'hands_in_progress';
+  st.inFlight = true;
+  st.updatedAt = Date.now();
+  __deltaSchedulePersistThreadState();
+
+  const before = __deltaBuildConcatFromState(st);
+  const preMessages = before.text;
+  const handsOut = await __deltaRunHandsGreetingFlow({
+    nome: n,
+    threadKey: tk,
+    mensagensCliente: preMessages
+  });
+
+  if (!handsOut || handsOut.ok !== true) {
+    st.status = 'new_buffering';
+    st.inFlight = false;
+    st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
+    st.updatedAt = Date.now();
+    const retryInMs = __deltaScheduleThreadTimer(st, { retry: true });
+    __deltaAppendPendingJsonlSync({
+      event: 'lead_hands_retry_scheduled',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: preMessages || '',
+      cidade: st.city || null,
+      operacao_meta: 'hands_retry',
+      dispatch_ct: false,
+      queue_mode: 'capture_only',
+      flow_stage: 'hands_retry',
+      hands_error: String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300),
+      retry_in_ms: retryInMs,
+      hands_failures: st.handsFailures
+    });
+    __deltaSchedulePersistThreadState();
+    return;
+  }
+
+  const after = __deltaBuildConcatFromState(st);
+  const finalText = String(after.text || preMessages || '').trim();
+  const city = String((handsOut && handsOut.cidade) || st.city || '').trim() || null;
+  st.city = city;
+  st.status = 'active';
+  st.inFlight = false;
+  st.handsFailures = 0;
+  st.lastDispatchAt = Date.now();
+  st.updatedAt = Date.now();
+
+  __deltaAppendPendingJsonlSync({
+    event: 'lead_consolidado_pos_hands',
+    server_id: readHostIdSync() || null,
+    account_login: n,
+    thread_key: tk,
+    texto_limpo: finalText,
+    mensagens_cliente_concatenadas: finalText,
+    mensagens_cliente_qtd: Number(after.count || 0) || 0,
+    mensagem_seq: Number(after.toSeq || st.seq || 0) || 0,
+    cidade: city,
+    operacao_meta: 'buffered_concat_after_hands',
+    dispatch_ct: true,
+    queue_mode: 'dispatch_ct',
+    flow_stage: 'new_chat_buffered_dispatched',
+    saudacao_enviada: true,
+    saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+    profile_url: handsOut && handsOut.profile_url ? String(handsOut.profile_url) : null,
+    city_source: handsOut && handsOut.city_source ? String(handsOut.city_source) : null,
+    timer_reason: String(reason || ''),
+  });
+  __deltaKickIngestLoop();
+
+  // Após criação do card, mantemos thread em modo ativo (tempo real),
+  // e limpamos apenas o buffer histórico já consolidado.
+  st.messages = [];
+  __deltaSchedulePersistThreadState();
+}
+__deltaLoadThreadStateSync();
 
 function __deltaSafeJsonParse(str) {
   try { return JSON.parse(String(str || '')); } catch { return null; }
@@ -14645,6 +14956,9 @@ function __deltaComputeIdempotencyKey(payload) {
     String(p.thread_key || ''),
     String(p.texto_limpo || ''),
     String(p.operacao_meta || p.operation || ''),
+    String(p.mensagem_seq || ''),
+    String(p.queue_mode || ''),
+    String(p.flow_stage || ''),
   ].join('|');
   return crypto.createHash('sha1').update(base).digest('hex');
 }
@@ -14806,6 +15120,12 @@ async function __deltaIngestTick() {
 
     const payload = __deltaSafeJsonParse(line);
     if (!payload) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = 1500; return; }
+    if (payload && payload.dispatch_ct === false) {
+      // Captura forense (sem envio ao CT), mas com avanço de cursor para não bloquear a fila.
+      __deltaWriteCursorOffsetSync(nextOffset);
+      __deltaIngestBackoffMs = 350;
+      return;
+    }
 
     const headers = {};
     if (secret) headers['x-delta-secret'] = secret;
@@ -15021,10 +15341,6 @@ async function __deltaAttachCdpEar(nome, page) {
         try { events = __deltaExtractWsMessageEvents(inner) || []; } catch { events = []; }
         if (!events.length) return;
 
-        robeMeta[nome] = robeMeta[nome] || {};
-        const seen = robeMeta[nome].deltaSeenKeys || new Set();
-        robeMeta[nome].deltaSeenKeys = seen;
-
         const serverId = readHostIdSync() || '';
         const cidade = (robeMeta[nome] && robeMeta[nome].cidade) ? robeMeta[nome].cidade : null;
 
@@ -15035,24 +15351,66 @@ async function __deltaAttachCdpEar(nome, page) {
           if (!__deltaShouldEmitLeadText(texto)) continue;
 
           const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-          const key = `${nome}|${threadKey}|${texto}|${op}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (seen.size > 8000) {
-            const first = seen.values().next().value;
-            if (first) seen.delete(first);
-          }
+          const nowMs = Date.now();
+          const st = __deltaGetOrCreateThreadState(nome, threadKey);
+          if (!st.city && cidade) st.city = String(cidade || '').trim() || null;
+          if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
+          const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
+          const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
 
-          const payload = {
+          const capturePayload = {
+            event: 'lead_capturado_buffer',
             server_id: serverId || null,
             account_login: String(nome || ''),
             thread_key: threadKey,
             texto_limpo: texto,
-            cidade,
-            operacao_meta: op
+            cidade: st.city || cidade || null,
+            operacao_meta: op,
+            mensagem_seq: msgSeq,
+            dispatch_ct: false,
+            queue_mode: 'capture_only',
+            flow_stage: String(st.status || 'new_buffering'),
+            message_at: nowMs
           };
-          __deltaAppendPendingJsonlSync(payload);
-          __deltaKickIngestLoop();
+          __deltaAppendPendingJsonlSync(capturePayload);
+
+          if (st.status === 'active') {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_chat_ativo_realtime',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              mensagens_cliente_concatenadas: texto,
+              mensagens_cliente_qtd: 1,
+              cidade: st.city || cidade || null,
+              operacao_meta: op || 'message',
+              mensagem_seq: msgSeq,
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              flow_stage: 'chat_ativo_realtime'
+            });
+            st.lastDispatchAt = nowMs;
+            st.updatedAt = nowMs;
+            __deltaKickIngestLoop();
+            __deltaSchedulePersistThreadState();
+            continue;
+          }
+
+          if (st.status !== 'hands_in_progress' && !st.timerHandle) {
+            const delayMs = __deltaScheduleThreadTimer(st, { retry: false });
+            try {
+              logger.info('[DELTA][BUFFER] novo chat detectado; timer armado', {
+                nome: String(nome || ''),
+                thread_key: threadKey,
+                delayMs,
+                dueAt: st.timerDueAt
+              });
+            } catch {}
+          } else {
+            st.updatedAt = nowMs;
+            __deltaSchedulePersistThreadState();
+          }
         }
       } catch {
         // nunca crashar o worker por frame corrompido

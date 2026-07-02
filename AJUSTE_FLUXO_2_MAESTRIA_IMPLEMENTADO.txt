@@ -1,0 +1,244 @@
+AJUSTE GROSSO FLUXO 2 (A VOLTA) - IMPLEMENTACAO MAESTRIA PARALELA
+Data: 2026-07-02
+Projeto: C:\conveniente
+Arquivos alterados:
+- C:\conveniente\index.js
+- C:\conveniente\scripts\virtusDelta.js
+
+============================================================
+OBJETIVO EXECUTADO
+============================================================
+Eliminar gargalos e elevar confiabilidade do fluxo de volta:
+1) Isolar cooldown por conta (sem atraso cruzado).
+2) Processar delta_reply em paralelo por conta no Maestro.
+3) Adicionar retry local anti-lag visual na automacao das Maos.
+4) Manter ordem interna por conta sem travar contas diferentes.
+
+============================================================
+O QUE FOI ALTERADO - INDEX.JS (MAESTRO 8088)
+============================================================
+1) Remocao do gargalo sequencial global para delta_reply
+Antes:
+- loop unico com await por comando (serializando lote inteiro).
+
+Agora:
+- sharding por conta (nome/account_login operacional):
+  - agrupa delta_reply por conta (Map).
+  - executa contas diferentes em paralelo com Promise.all.
+  - dentro de cada conta, executa em ordem (for/await), preservando sequencia.
+
+Impacto:
+- reduz head-of-line blocking entre contas distintas.
+- conta A lenta nao bloqueia conta B no mesmo batch.
+
+2) Preservacao de compatibilidade do barramento
+- comandos nao-delta_reply continuam pelo fluxo normal (applyInfraCommands).
+- formato de resposta por indice original preservado em results[].
+
+============================================================
+O QUE FOI ALTERADO - VIRTUSDELTA.JS (MAOS)
+============================================================
+1) Cooldown isolado por conta (GAP-1 corrigido)
+Antes:
+- leitura/escrita unica em global.lastDeltaSendTimestamp.
+
+Agora:
+- armazenamento isolado por conta em:
+  global.__deltaLastSendTsByAccount[account_login]
+- funcoes internas:
+  - deltaCooldownKey(...)
+  - readLastDeltaSendTimestamp(...)
+  - writeLastDeltaSendTimestamp(...)
+- enforceGlobalDeltaCooldown(...) passou a ler por conta.
+
+Impacto:
+- elimina atraso cruzado entre perfis diferentes no mesmo processo.
+
+2) Retry local anti-lag visual (GAP-2 corrigido)
+Alteracao em sendDeltaReplyNow:
+- tentativa inicial + 3 retries locais rapidos.
+- intervalo entre retries: random de 3 a 5 segundos.
+- somente apos esgotar retries retorna falha final.
+- cooldown 5-15s por conta mantido antes do ciclo do comando.
+
+Impacto:
+- absorve oscilações curtas de DOM/Meta sem perder mensagem da atendente.
+
+3) Atualizacao de timestamp por conta em sucesso
+- apos envio com sucesso:
+  - atualiza writeLastDeltaSendTimestamp(account_login, now).
+
+============================================================
+VALIDACOES TECNICAS EXECUTADAS
+============================================================
+1) Lint:
+- index.js: sem erros.
+- virtusDelta.js: sem erros.
+
+2) Sintaxe:
+- node --check C:\conveniente\index.js -> OK
+- node --check C:\conveniente\scripts\virtusDelta.js -> OK
+
+============================================================
+CONTRATO OPERACIONAL RESULTANTE (PRETO NO BRANCO)
+============================================================
+Regra ouro atendimento:
+- A atendente digitou e enviou -> sistema assume responsabilidade total de entrega.
+
+Com os ajustes aplicados:
+1) Comandos de contas diferentes nao bloqueiam mais uns aos outros no Maestro.
+2) Dentro da mesma conta, ordem e sequencia continuam preservadas.
+3) Se a Meta oscilar rapidamente, o proprio runtime tenta novamente localmente antes de falhar.
+4) Cooldown agora respeita isolamento por conta.
+
+============================================================
+MATRIZ DE CENARIOS (FLUXO 2 - VOLTA)
+============================================================
+
+----------------------------
+CENARIO V1 - 1 conta, 1 chat, envio normal
+----------------------------
+Entrada:
+- CT envia delta_reply para uma conta.
+Comportamento:
+- Maestro despacha IPC.
+- Runtime aplica cooldown por conta.
+- Maos abrem chat e enviam.
+Saida:
+- ok=true no retorno.
+
+----------------------------
+CENARIO V2 - 1 conta, varios chats em sequencia
+----------------------------
+Entrada:
+- varios delta_reply para mesma conta.
+Comportamento:
+- fila interna serial da conta preserva ordem.
+- cooldown por conta aplicado entre envios.
+Saida:
+- processamento ordenado e sem concorrencia de UI interna.
+
+----------------------------
+CENARIO V3 - varias contas simultaneas no mesmo batch
+----------------------------
+Entrada:
+- lote com comandos de conta A, B, C.
+Comportamento:
+- Maestro separa por conta.
+- A/B/C rodam em paralelo (Promise.all por shard de conta).
+Saida:
+- throughput melhor e menor latencia cruzada.
+
+----------------------------
+CENARIO V4 - Meta lag momentaneo no clique/envio
+----------------------------
+Entrada:
+- sendReplyFlow falha na tentativa inicial.
+Comportamento:
+- retry local automatico ate 3 vezes (3-5s cada).
+Saida:
+- se recuperar em retry, retorna sucesso sem impactar atendente.
+
+----------------------------
+CENARIO V5 - Falha persistente apos retries
+----------------------------
+Entrada:
+- todas tentativas falham.
+Comportamento:
+- retorna erro final estruturado (com tentativas/retries).
+Saida:
+- comando marcado como falho no barramento.
+Observacao:
+- aqui entra politica externa de reenfileiramento/ACK forte.
+
+----------------------------
+CENARIO V6 - Conta A lenta, conta B rapida
+----------------------------
+Entrada:
+- A com DOM ruim e B estavel.
+Comportamento:
+- A pode atrasar no shard dela.
+- B segue no shard dela sem esperar A.
+Saida:
+- isolamento de performance por conta.
+
+----------------------------
+CENARIO V7 - Mesmo texto em chats distintos de contas diferentes
+----------------------------
+Entrada:
+- comandos semelhantes em perfis diferentes.
+Comportamento:
+- cooldown e controle independentes por chave de conta.
+Saida:
+- sem penalizacao cruzada.
+
+----------------------------
+CENARIO V8 - Burst de mensagens da atendente para mesma conta
+----------------------------
+Entrada:
+- atendente dispara varios envios rapidamente.
+Comportamento:
+- runtime serializa por conta.
+- aplica cooldown por conta.
+- retry local protege envio em oscilacao curta.
+Saida:
+- fluxo robusto; sem "disparo desenfreado" na UI.
+
+----------------------------
+CENARIO V9 - command-bus mistura delta_reply + comandos de infra
+----------------------------
+Entrada:
+- lote heterogeneo.
+Comportamento:
+- delta_reply shard paralelo por conta.
+- comandos normais seguem fluxo applyInfraCommands.
+Saida:
+- resultado consolidado em um unico results[].
+
+----------------------------
+CENARIO V10 - cluster indisponivel
+----------------------------
+Entrada:
+- clusterClient indisponivel.
+Comportamento:
+- comando retorna cluster_not_ready.
+Saida:
+- falha explicita para camada superior.
+
+----------------------------
+CENARIO V11 - payload invalido no delta_reply
+----------------------------
+Entrada:
+- falta nome/thread_key/texto_resposta.
+Comportamento:
+- barramento rejeita item com erro de validacao.
+Saida:
+- erro por item sem derrubar lote inteiro.
+
+----------------------------
+CENARIO V12 - thread já aberta na UI
+----------------------------
+Entrada:
+- comando para chat que possivelmente ja esta em foco.
+Comportamento:
+- fluxo atual ainda passa por rotina de abertura (openThreadByClick) e envio.
+- cooldown permanece ativo por conta.
+Saida:
+- sem bypass acidental do sentinela.
+
+============================================================
+RISCOS RESIDUAIS (TRANSPARENCIA TOTAL)
+============================================================
+1) Retry local reduz falhas curtas, mas nao substitui ACK forte de entrega fim-a-fim no CT.
+2) Dentro da mesma conta, alta fila continua serial por desenho (seguro para UI), podendo elevar latencia sob carga extrema.
+3) Timeout IPC do barramento continua fixo (60s). Em cenarios extremos pode exigir tuning posterior.
+
+============================================================
+RESUMO FINAL
+============================================================
+O Fluxo 2 foi reforcado com 3 pilares de engenharia:
+- isolamento de cooldown por conta,
+- paralelismo sharded por conta no Maestro,
+- retries locais anti-lag visual no runtime.
+
+Com isso, o sistema fica significativamente mais resiliente e escalavel para operacao real de atendimento, mantendo ordem interna por conta e reduzindo perdas por oscilacao curta da Meta.
