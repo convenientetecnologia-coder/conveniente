@@ -15565,8 +15565,6 @@ function __deltaScoreWsUrl(url) {
   return score;
 }
 
-const DELTA_WS_BYTES_THRESHOLD = 120;
-
 function __deltaWsUrlSignatures(url) {
   const u = String(url || '').trim().toLowerCase();
   if (!u) return [];
@@ -15598,33 +15596,42 @@ function __deltaDecodeNetworkResponseBody(bodyRes) {
   }
 }
 
-function __deltaShouldIgnoreWsControlFrame({ payloadData, decoded, inner, opcode } = {}) {
-  const selected =
-    (typeof inner === 'string' && inner.trim()) ? inner.trim() :
-    (typeof decoded === 'string' && decoded.trim()) ? decoded.trim() :
-    String(payloadData || '').trim();
-  if (!selected) return true;
-  if (selected === '0AA=' || selected === 'IAIAAA==') return true;
-  if (selected.length <= 12 && /^[A-Za-z0-9+/=]+$/.test(selected)) return true;
-  if (selected.length <= 20 && /^[\x00-\x1F\x7F-\x9F]+$/.test(selected)) return true;
-  if (selected.includes('{') || selected.includes('[')) return false;
-  if (/(thread|message|mensagem|snippet|body|graphql|conversation|marketplace)/i.test(selected)) return false;
-  if (Number(opcode ?? -1) === 2 && selected.length <= 48) return true;
+function __deltaIsPureStaticHeartbeatFrame(frameInfo, wsState, requestId = '') {
+  const fi = frameInfo && typeof frameInfo === 'object' ? frameInfo : {};
+  const state = wsState && typeof wsState === 'object' ? wsState : {};
+  const rid = String(requestId || '').trim();
+  const payloadData = String(fi.payloadData || '').trim();
+  const opcode = Number(fi.opcode ?? -1);
+  if (!payloadData) return false;
+
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(payloadData) && payloadData.length % 4 === 0;
+  let rawBytes = Buffer.alloc(0);
+  try {
+    if (opcode === 2 || looksLikeBase64) rawBytes = Buffer.from(payloadData, 'base64');
+    else rawBytes = Buffer.from(payloadData, 'utf8');
+  } catch {
+    rawBytes = Buffer.from(payloadData, 'utf8');
+  }
+  // Regra operacional: ignorar somente heartbeat estático de 4 bytes.
+  if (rawBytes.length !== 4) return false;
+
+  const sigB64 = rawBytes.toString('base64');
+  state.heartbeatBySocket = state.heartbeatBySocket instanceof Map ? state.heartbeatBySocket : new Map();
+  const st = state.heartbeatBySocket.get(rid) || { firstSig: '', stableHits: 0, lastSig: '' };
+  if (!st.firstSig) st.firstSig = sigB64;
+  if (sigB64 === st.firstSig) st.stableHits = (Number(st.stableHits || 0) || 0) + 1;
+  else st.stableHits = 0;
+  st.lastSig = sigB64;
+  state.heartbeatBySocket.set(rid, st);
+
+  if (st.stableHits < 2) return false;
+  const knownControlSignatures = new Set(['IAIAAA==']);
+  if (knownControlSignatures.has(sigB64)) return true;
   return false;
 }
 
-function __deltaShouldInspectWsFrame(meta, frameInfo, wsState) {
-  const m = meta && typeof meta === 'object' ? meta : {};
-  const state = wsState && typeof wsState === 'object' ? wsState : {};
-  const selectedId = String(state.selectedRichWsId || '').trim();
-  const reqId = String(m.requestId || '').trim();
-  const score = Number(m.richScore || 0) || 0;
-  const payloadBytes = Number(frameInfo && frameInfo.payloadBytes || 0) || 0;
-  if (payloadBytes > DELTA_WS_BYTES_THRESHOLD) return true;
-  if (m.forceDecode === true) return true;
-  if (selectedId && reqId && selectedId === reqId) return true;
-  if (score >= 3) return true;
-  if (__deltaShouldIgnoreWsControlFrame(frameInfo)) return false;
+function __deltaShouldInspectWsFrame(meta, frameInfo, wsState, { requestId = '' } = {}) {
+  if (__deltaIsPureStaticHeartbeatFrame(frameInfo, wsState, requestId)) return false;
   return true;
 }
 
@@ -15641,43 +15648,35 @@ function __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded = '') {
   try { return Buffer.byteLength(raw, 'utf8'); } catch { return raw.length; }
 }
 
-function __deltaHexDumpFromBuffer(buf, maxBytes = 96) {
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ''), 'utf8');
-  const lim = Math.max(0, Math.min(Number(maxBytes || 0) || 0, b.length));
-  if (!lim) return '';
-  const one = b.subarray(0, lim);
-  return Array.from(one).map((x) => x.toString(16).padStart(2, '0')).join(' ');
-}
-
-function __deltaBuildWsSampleDump({ payloadData, opcode, decoded, inner } = {}) {
-  const rawPayload = String(payloadData || '');
-  const op = Number(opcode ?? -1);
-  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(rawPayload) && rawPayload.length % 4 === 0;
-  let rawBytes = Buffer.alloc(0);
-  if (rawPayload) {
-    if (op === 2 || looksLikeBase64) {
-      try { rawBytes = Buffer.from(rawPayload, 'base64'); } catch { rawBytes = Buffer.from(rawPayload, 'utf8'); }
-    } else {
-      rawBytes = Buffer.from(rawPayload, 'utf8');
+function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response } = {}) {
+  const candidates = [];
+  if (inner != null) candidates.push(inner);
+  if (decoded != null && decoded !== inner) candidates.push(decoded);
+  if (response && typeof response === 'object') candidates.push(response);
+  const raw = String(payloadData || '').trim();
+  if (raw) {
+    if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
+      candidates.push(raw);
     }
   }
 
-  const candidateText =
-    (typeof inner === 'string' && inner.trim()) ? inner :
-    (typeof decoded === 'string' && decoded.trim()) ? decoded :
-    rawBytes.toString('utf8');
-  const sanitizedText = __deltaSanitizeFrameSample(candidateText).slice(0, 1200);
-  const sanitizedBuf = Buffer.from(sanitizedText || '', 'utf8');
-  const payloadB64 = sanitizedBuf.length
-    ? sanitizedBuf.toString('base64')
-    : rawBytes.subarray(0, 192).toString('base64');
-  const payloadHex = __deltaHexDumpFromBuffer(sanitizedBuf.length ? sanitizedBuf : rawBytes, 96);
-  return {
-    payload_b64: String(payloadB64 || '').slice(0, 1200),
-    payload_hex: String(payloadHex || '').slice(0, 1200),
-    sanitized_text: String(sanitizedText || '').slice(0, 1200),
-    raw_bytes: rawBytes.length,
-  };
+  const out = [];
+  const seen = new Set();
+  for (const c of candidates) {
+    let arr = [];
+    try { arr = __deltaExtractWsMessageEvents(c) || []; } catch {}
+    for (const ev of arr) {
+      const tk = String(ev && ev.thread_key || '').trim();
+      const tx = String(ev && ev.message_text || '').trim();
+      const op = String(ev && (ev.operation || ev.operacao_meta) || '').trim();
+      if (!tk || tx === '') continue;
+      const k = `${tk}|${tx}|${op}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(ev);
+    }
+  }
+  return out;
 }
 
 function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '') {
@@ -15808,11 +15807,11 @@ async function __deltaAttachCdpEar(nome, page) {
       selectedReason: '',
       selectedAt: 0,
       frameSkips: 0,
+      heartbeatSkips: 0,
       httpFallbackHits: 0,
       confirmedRichWsId: '',
-      bytesThreshold: DELTA_WS_BYTES_THRESHOLD,
-      activatedByBytesCount: 0,
       lastSocketStatsAt: 0,
+      heartbeatBySocket: new Map(),
     };
     ctrl.deltaWsRouteState = wsState;
 
@@ -15833,8 +15832,6 @@ async function __deltaAttachCdpEar(nome, page) {
           framesDecoded: 0,
           bytesTotal: 0,
           maxFrameBytes: 0,
-          forceDecode: false,
-          activatedByBytesAt: 0,
           leads: 0,
         };
         wsState.byId.set(rid, meta);
@@ -15862,7 +15859,6 @@ async function __deltaAttachCdpEar(nome, page) {
           frames: Number(m && m.framesTotal || 0) || 0,
           bytes: Number(m && m.bytesTotal || 0) || 0,
           maxFrameBytes: Number(m && m.maxFrameBytes || 0) || 0,
-          forceDecode: !!(m && m.forceDecode),
           leads: Number(m && m.leads || 0) || 0,
         }))
         .sort((a, b) => (b.bytes - a.bytes) || (b.frames - a.frames))
@@ -15873,8 +15869,8 @@ async function __deltaAttachCdpEar(nome, page) {
         sockets_seen: Number(wsState.byId.size || 0) || 0,
         selected_request_id: String(wsState.selectedRichWsId || '') || null,
         selected_score: Number(wsState.selectedRichScore || 0) || 0,
-        activated_by_bytes_count: Number(wsState.activatedByBytesCount || 0) || 0,
         frame_skips: Number(wsState.frameSkips || 0) || 0,
+        heartbeat_skips: Number(wsState.heartbeatSkips || 0) || 0,
         sockets
       };
       try { logger.info('[DELTA][WS][SOCKET_STATS_1M]', snapshot); } catch {}
@@ -16152,37 +16148,9 @@ async function __deltaAttachCdpEar(nome, page) {
         const inner = __deltaExtractInnerPayload(decoded);
         const frameInfo = { payloadData, decoded, inner, opcode, payloadBytes };
 
-        if (wsMeta && payloadBytes > DELTA_WS_BYTES_THRESHOLD) {
-          const now = Date.now();
-          const firstActivation = wsMeta.forceDecode !== true;
-          wsMeta.forceDecode = true;
-          if (!wsMeta.activatedByBytesAt) wsMeta.activatedByBytesAt = now;
-          if (firstActivation) {
-            wsState.activatedByBytesCount = (Number(wsState.activatedByBytesCount || 0) || 0) + 1;
-            selectRichWs(requestId, 'ws_frame_bytes_threshold');
-          }
-          const lastDumpAt = Number(wsMeta.lastBigDumpAt || 0) || 0;
-          if (!lastDumpAt || (now - lastDumpAt) >= 60_000) {
-            wsMeta.lastBigDumpAt = now;
-            const dump = __deltaBuildWsSampleDump({ payloadData, opcode, decoded, inner });
-            try {
-              if (typeof forensicLog === 'function') {
-                forensicLog('DELTA', 'ws_bytes_threshold_activated', {
-                  nome: String(nome || ''),
-                  requestId: String(requestId || ''),
-                  url: String((wsMeta && wsMeta.url) || '').slice(0, 500),
-                  payload_bytes: payloadBytes,
-                  threshold: DELTA_WS_BYTES_THRESHOLD,
-                  signatures: Array.isArray(wsMeta.signatures) ? wsMeta.signatures.slice(0, 6) : [],
-                  ...dump
-                });
-              }
-            } catch {}
-          }
-        }
-
-        if (!__deltaShouldInspectWsFrame(wsMeta, frameInfo, wsState)) {
+        if (!__deltaShouldInspectWsFrame(wsMeta, frameInfo, wsState, { requestId })) {
           wsState.frameSkips = (Number(wsState.frameSkips || 0) || 0) + 1;
+          wsState.heartbeatSkips = (Number(wsState.heartbeatSkips || 0) || 0) + 1;
           __deltaEmitFrameTelemetryIfDue();
           emitSocketStatsIfDue();
           return;
@@ -16190,7 +16158,7 @@ async function __deltaAttachCdpEar(nome, page) {
 
         let events = [];
         try {
-          events = __deltaExtractWsMessageEvents(inner) || [];
+          events = __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response }) || [];
         } catch {
           __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
           events = [];
