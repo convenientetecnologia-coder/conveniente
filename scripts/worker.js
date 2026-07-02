@@ -7960,7 +7960,16 @@ try {
     await v.stop().catch(()=>{});
   }
 } catch {}
+try {
+  const fv = (ctrl.deltaForcedVirtus && typeof ctrl.deltaForcedVirtus.then === 'function')
+    ? await ctrl.deltaForcedVirtus.catch(() => null)
+    : ctrl.deltaForcedVirtus;
+  if (fv && typeof fv.stop === 'function') {
+    await fv.stop().catch(()=>{});
+  }
+} catch {}
 ctrl.virtus = null;
+ctrl.deltaForcedVirtus = null;
 ctrl.trabalhando = false;
 ctrl.virtusEpoch = (ctrl.virtusEpoch || 0) + 1;
 if (ctrl.browser) {
@@ -14796,11 +14805,63 @@ async function __deltaResolveVirtusRunner(nome) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
-    if (!ctrl.virtus) return null;
-    const runner = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
-      ? await ctrl.virtus.catch(() => null)
-      : ctrl.virtus;
-    return runner || null;
+    const resolveRunner = async (candidate) => {
+      try {
+        return (candidate && typeof candidate.then === 'function')
+          ? await candidate.catch(() => null)
+          : (candidate || null);
+      } catch {
+        return null;
+      }
+    };
+
+    const direct = await resolveRunner(ctrl.virtus);
+    if (direct && typeof direct.enqueueDeltaGreetingFlow === 'function') return direct;
+
+    const forced = await resolveRunner(ctrl.deltaForcedVirtus);
+    if (forced && typeof forced.enqueueDeltaGreetingFlow === 'function') return forced;
+
+    // Imunidade de estado: se já há evidência soberana de tráfego de rede
+    // do Facebook/Messenger, forçamos o runtime Delta mesmo que o painel esteja divergente.
+    const networkEvidenceAt = Number(ctrl.deltaNetworkEvidenceAt || 0) || 0;
+    if (!networkEvidenceAt) return null;
+
+    const pageUrl = (() => {
+      try { return String(ctrl.mainPage && ctrl.mainPage.url ? ctrl.mainPage.url() : '').trim().toLowerCase(); } catch { return ''; }
+    })();
+    if (!/facebook\.com|messenger\.com/.test(pageUrl)) return null;
+
+    if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') {
+      loadDeltaVirtusRuntime();
+    }
+    if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') return null;
+
+    ctrl.deltaForcedVirtus = deltaVirtus.startVirtusDeltaRuntime(ctrl.browser, nome, {
+      epoch: ctrl.virtusEpoch || 0,
+      slowMode: false,
+      governorMode: 'full',
+      restrictTab: 0,
+      bootReason: 'delta_network_sovereign',
+    });
+    const booted = await resolveRunner(ctrl.deltaForcedVirtus);
+    if (booted && typeof booted.enqueueDeltaGreetingFlow === 'function') {
+      try {
+        logger.info('[DELTA][FORCE_BOOT] Runtime Delta forçado por evidência de rede', {
+          nome: String(nome || ''),
+          networkEvidenceAt
+        });
+      } catch {}
+      try {
+        if (typeof forensicLog === 'function') {
+          forensicLog('DELTA', 'force_boot_delta_runtime', {
+            nome: String(nome || ''),
+            networkEvidenceAt
+          });
+        }
+      } catch {}
+      return booted;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -15492,20 +15553,138 @@ function __deltaShouldEmitLeadText(textoLimpo) {
   return true;
 }
 
+function __deltaScoreWsUrl(url) {
+  const u = String(url || '').trim().toLowerCase();
+  if (!u) return -1;
+  let score = 0;
+  if (/facebook\.com|messenger\.com/.test(u)) score += 1;
+  if (/(marketplace|inbox|messaging|thread|conversation|mercury|chat|graphql|pull|channel|sync|delta)/.test(u)) score += 5;
+  if (/(graphql|api\/graphql|api\/v\d+)/.test(u)) score += 2;
+  if (/(presence|typing|heartbeat|keepalive|ping|rtc|webrtc|mqtt|status\/|status\?|subscribe\/presence)/.test(u)) score -= 5;
+  return score;
+}
+
+function __deltaLooksLikeInboxHttpUrl(url) {
+  const u = String(url || '').trim().toLowerCase();
+  if (!u) return false;
+  if (!/facebook\.com|messenger\.com/.test(u)) return false;
+  return /(graphql|api\/graphql|marketplace|inbox|messaging|thread|conversation|mercury|chat)/.test(u);
+}
+
+function __deltaDecodeNetworkResponseBody(bodyRes) {
+  try {
+    const raw = bodyRes && typeof bodyRes.body === 'string' ? bodyRes.body : '';
+    if (!raw) return '';
+    if (bodyRes && bodyRes.base64Encoded) {
+      try { return Buffer.from(raw, 'base64').toString('utf8'); } catch { return ''; }
+    }
+    return raw;
+  } catch {
+    return '';
+  }
+}
+
+function __deltaShouldIgnoreWsControlFrame({ payloadData, decoded, inner, opcode } = {}) {
+  const selected =
+    (typeof inner === 'string' && inner.trim()) ? inner.trim() :
+    (typeof decoded === 'string' && decoded.trim()) ? decoded.trim() :
+    String(payloadData || '').trim();
+  if (!selected) return true;
+  if (selected === '0AA=' || selected === 'IAIAAA==') return true;
+  if (selected.length <= 12 && /^[A-Za-z0-9+/=]+$/.test(selected)) return true;
+  if (selected.length <= 20 && /^[\x00-\x1F\x7F-\x9F]+$/.test(selected)) return true;
+  if (selected.includes('{') || selected.includes('[')) return false;
+  if (/(thread|message|mensagem|snippet|body|graphql|conversation|marketplace)/i.test(selected)) return false;
+  if (Number(opcode ?? -1) === 2 && selected.length <= 48) return true;
+  return false;
+}
+
+function __deltaShouldInspectWsFrame(meta, frameInfo, wsState) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const state = wsState && typeof wsState === 'object' ? wsState : {};
+  const selectedId = String(state.selectedRichWsId || '').trim();
+  const reqId = String(m.requestId || '').trim();
+  const score = Number(m.richScore || 0) || 0;
+  if (selectedId && reqId && selectedId === reqId) return true;
+  if (score >= 3) return true;
+  if (__deltaShouldIgnoreWsControlFrame(frameInfo)) return false;
+  return true;
+}
+
+function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '') {
+  const raw = String(bodyText || '').trim();
+  if (!raw) return [];
+  let parsed = null;
+  if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
+    parsed = __deltaSafeJsonParse(raw);
+  } else {
+    const firstBrace = raw.indexOf('{');
+    if (firstBrace >= 0) {
+      parsed = __deltaSafeJsonParse(raw.slice(firstBrace));
+    }
+  }
+
+  let events = [];
+  if (parsed) {
+    try { events = __deltaExtractWsMessageEvents(parsed) || []; } catch {}
+  }
+  if (!events.length) {
+    try {
+      const one = __deltaExtractThreadAndText(raw);
+      const tk = String(one && one.threadKey || '').trim();
+      const tx = String(one && one.text || '').trim();
+      if (tk && tx) {
+        events = [{
+          operation: 'http_fallback',
+          thread_key: tk,
+          message_text: tx,
+          sender_id: '',
+          account_user_id: '',
+          direction: 'nao_classificado',
+          source_layer: 'delta_http_fallback',
+        }];
+      }
+    } catch {}
+  }
+  if (!events.length) return [];
+  return events.map((ev) => ({
+    ...ev,
+    operation: String(ev && (ev.operation || ev.operacao_meta) || 'http_fallback'),
+    source_layer: 'delta_http_fallback',
+    source_url: String(sourceUrl || '').slice(0, 500),
+  }));
+}
+
 async function __deltaDetachCdpSession(nome) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl) return false;
     const s = ctrl.deltaCdpSession;
-    const fn = ctrl.deltaCdpOnFrame;
-    if (s && fn && typeof s.removeListener === 'function') {
-      try { s.removeListener('Network.webSocketFrameReceived', fn); } catch {}
+    const onFrame = ctrl.deltaCdpOnFrame;
+    const onWsCreated = ctrl.deltaCdpOnWsCreated;
+    const onWsHandshakeReq = ctrl.deltaCdpOnWsHandshakeReq;
+    const onWsHandshakeRes = ctrl.deltaCdpOnWsHandshakeRes;
+    const onWsClosed = ctrl.deltaCdpOnWsClosed;
+    const onResponseReceived = ctrl.deltaCdpOnResponseReceived;
+    if (s && typeof s.removeListener === 'function') {
+      try { if (onFrame) s.removeListener('Network.webSocketFrameReceived', onFrame); } catch {}
+      try { if (onWsCreated) s.removeListener('Network.webSocketCreated', onWsCreated); } catch {}
+      try { if (onWsHandshakeReq) s.removeListener('Network.webSocketWillSendHandshakeRequest', onWsHandshakeReq); } catch {}
+      try { if (onWsHandshakeRes) s.removeListener('Network.webSocketHandshakeResponseReceived', onWsHandshakeRes); } catch {}
+      try { if (onWsClosed) s.removeListener('Network.webSocketClosed', onWsClosed); } catch {}
+      try { if (onResponseReceived) s.removeListener('Network.responseReceived', onResponseReceived); } catch {}
     }
     if (s && typeof s.detach === 'function') {
       try { await s.detach().catch(() => {}); } catch {}
     }
     ctrl.deltaCdpSession = null;
     ctrl.deltaCdpOnFrame = null;
+    ctrl.deltaCdpOnWsCreated = null;
+    ctrl.deltaCdpOnWsHandshakeReq = null;
+    ctrl.deltaCdpOnWsHandshakeRes = null;
+    ctrl.deltaCdpOnWsClosed = null;
+    ctrl.deltaCdpOnResponseReceived = null;
+    ctrl.deltaWsRouteState = null;
     return true;
   } catch {
     return false;
@@ -15513,7 +15692,6 @@ async function __deltaDetachCdpSession(nome) {
 }
 
 async function __deltaAttachCdpEar(nome, page) {
-  if (!isDeltaMotorEnabledRuntime()) return;
   if (!page || !page.target || typeof page.target !== 'function') return;
   try {
     if (page.__deltaCdpEarAttached) return;
@@ -15536,19 +15714,313 @@ async function __deltaAttachCdpEar(nome, page) {
   if (!ctrl) return;
 
   try {
+    const bypassStateGate = !isDeltaMotorEnabledRuntime();
+    if (bypassStateGate) {
+      try {
+        logger.info('[DELTA][EAR] bypass de gate por estado legado (captura soberana por tráfego)', {
+          nome: String(nome || '')
+        });
+      } catch {}
+      try {
+        if (typeof forensicLog === 'function') {
+          forensicLog('DELTA', 'ear_state_gate_bypassed', { nome: String(nome || '') });
+        }
+      } catch {}
+    }
+
     const cdp = await page.target().createCDPSession();
     await cdp.send('Network.enable');
     __deltaEnsureFrameTelemetryState();
 
+    const wsState = {
+      byId: new Map(),
+      selectedRichWsId: '',
+      selectedRichScore: -999,
+      selectedReason: '',
+      selectedAt: 0,
+      frameSkips: 0,
+      httpFallbackHits: 0,
+      confirmedRichWsId: '',
+    };
+    ctrl.deltaWsRouteState = wsState;
+
+    const ensureWsMeta = (requestId, url = '') => {
+      const rid = String(requestId || '').trim();
+      if (!rid) return null;
+      let meta = wsState.byId.get(rid) || null;
+      if (!meta) {
+        meta = {
+          requestId: rid,
+          url: String(url || '').trim(),
+          richScore: __deltaScoreWsUrl(url),
+          createdAt: Date.now(),
+          lastSeenAt: 0,
+          framesTotal: 0,
+          framesDecoded: 0,
+          leads: 0,
+        };
+        wsState.byId.set(rid, meta);
+      } else if (url && !meta.url) {
+        meta.url = String(url || '').trim();
+      }
+      const rescored = __deltaScoreWsUrl(meta.url || url);
+      if (rescored > meta.richScore) meta.richScore = rescored;
+      return meta;
+    };
+
+    const selectRichWs = (requestId, reason = '') => {
+      const rid = String(requestId || '').trim();
+      if (!rid) return;
+      const meta = ensureWsMeta(rid) || null;
+      if (!meta) return;
+      const now = Date.now();
+      const shouldSelect =
+        !wsState.selectedRichWsId ||
+        rid === wsState.selectedRichWsId ||
+        (Number(meta.richScore || 0) > Number(wsState.selectedRichScore || 0));
+      if (!shouldSelect) return;
+      wsState.selectedRichWsId = rid;
+      wsState.selectedRichScore = Number(meta.richScore || 0) || 0;
+      wsState.selectedReason = String(reason || '').slice(0, 120);
+      wsState.selectedAt = now;
+      try {
+        logger.info('[DELTA][WS_ROUTE] canal rico selecionado', {
+          nome: String(nome || ''),
+          requestId: rid,
+          score: wsState.selectedRichScore,
+          reason: wsState.selectedReason,
+          url: String(meta.url || '').slice(0, 500)
+        });
+      } catch {}
+      try {
+        if (typeof forensicLog === 'function') {
+          forensicLog('DELTA', 'ws_rich_channel_selected', {
+            nome: String(nome || ''),
+            requestId: rid,
+            score: wsState.selectedRichScore,
+            reason: wsState.selectedReason,
+            url: String(meta.url || '').slice(0, 500)
+          });
+        }
+      } catch {}
+    };
+
+    const ingestLeadEvents = (events, { transport = 'ws', requestId = '', sourceUrl = '', sourceHint = '' } = {}) => {
+      const arr = Array.isArray(events) ? events : [];
+      if (!arr.length) return false;
+      const serverId = readHostIdSync() || '';
+      let hadLead = false;
+
+      for (const ev of arr) {
+        const threadKey = String(ev && ev.thread_key || '').trim();
+        const texto = __deltaDecodeEscapedText(String(ev && ev.message_text || '')).trim();
+        if (!threadKey) continue;
+        if (!__deltaShouldEmitLeadText(texto)) continue;
+        hadLead = true;
+
+        const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
+        const nowMs = Date.now();
+        const st = __deltaGetOrCreateThreadState(nome, threadKey);
+        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
+        const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
+        const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
+
+        const networkCtx = {
+          network_transport: String(transport || '').trim() || null,
+          network_request_id: String(requestId || '').trim() || null,
+          network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
+          network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
+        };
+
+        __deltaAppendPendingJsonlSync({
+          event: 'lead_capturado_buffer',
+          server_id: serverId || null,
+          account_login: String(nome || ''),
+          thread_key: threadKey,
+          texto_limpo: texto,
+          cidade: st.city || null,
+          operacao_meta: op,
+          mensagem_seq: msgSeq,
+          dispatch_ct: false,
+          queue_mode: 'capture_only',
+          flow_stage: String(st.status || 'new_buffering'),
+          message_at: nowMs,
+          ...networkCtx
+        });
+
+        if (st.status === 'active') {
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_chat_ativo_realtime',
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            mensagens_cliente_concatenadas: texto,
+            mensagens_cliente_qtd: 1,
+            cidade: st.city || null,
+            operacao_meta: op || 'message',
+            mensagem_seq: msgSeq,
+            dispatch_ct: true,
+            queue_mode: 'dispatch_ct',
+            flow_stage: 'chat_ativo_realtime',
+            ...networkCtx
+          });
+          st.lastDispatchAt = nowMs;
+          st.updatedAt = nowMs;
+          __deltaKickIngestLoop();
+          __deltaSchedulePersistThreadState();
+          continue;
+        }
+
+        if (st.status !== 'hands_in_progress' && !st.timerHandle) {
+          const delayMs = __deltaScheduleThreadTimer(st, { retry: false });
+          try {
+            logger.info('[DELTA][BUFFER] novo chat detectado; timer armado', {
+              nome: String(nome || ''),
+              thread_key: threadKey,
+              delayMs,
+              dueAt: st.timerDueAt,
+              transport: String(transport || '')
+            });
+          } catch {}
+        } else {
+          st.updatedAt = nowMs;
+          __deltaSchedulePersistThreadState();
+        }
+      }
+
+      if (hadLead) {
+        const now = Date.now();
+        ctrl.deltaNetworkEvidenceAt = now;
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].deltaNetworkEvidenceAt = now;
+      }
+      return hadLead;
+    };
+
+    const onWsCreated = (event) => {
+      try {
+        const requestId = String(event && event.requestId || '').trim();
+        const url = String(event && event.url || '').trim();
+        if (!requestId) return;
+        const meta = ensureWsMeta(requestId, url);
+        if (!meta) return;
+        const score = Number(meta.richScore || 0) || 0;
+        if (score >= 3) selectRichWs(requestId, 'ws_created_url_score');
+        try {
+          if (typeof forensicLog === 'function') {
+            forensicLog('DELTA', 'ws_created', {
+              nome: String(nome || ''),
+              requestId,
+              url: String(url || '').slice(0, 500),
+              rich_score: score
+            });
+          }
+        } catch {}
+      } catch {}
+    };
+
+    const onWsHandshakeReq = (event) => {
+      try {
+        const requestId = String(event && event.requestId || '').trim();
+        const url = String(event && event.request && event.request.url || '').trim();
+        const meta = ensureWsMeta(requestId, url);
+        if (!meta) return;
+        if ((Number(meta.richScore || 0) || 0) >= 3) selectRichWs(requestId, 'ws_handshake_req');
+      } catch {}
+    };
+
+    const onWsHandshakeRes = (event) => {
+      try {
+        const requestId = String(event && event.requestId || '').trim();
+        const url = String(event && event.response && event.response.url || '').trim();
+        const meta = ensureWsMeta(requestId, url);
+        if (!meta) return;
+        if ((Number(meta.richScore || 0) || 0) >= 3) selectRichWs(requestId, 'ws_handshake_res');
+      } catch {}
+    };
+
+    const onWsClosed = (event) => {
+      try {
+        const requestId = String(event && event.requestId || '').trim();
+        if (!requestId) return;
+        if (wsState.selectedRichWsId === requestId) {
+          wsState.selectedRichWsId = '';
+          wsState.selectedRichScore = -999;
+        }
+      } catch {}
+    };
+
+    const onResponseReceived = async (event) => {
+      try {
+        const requestId = String(event && event.requestId || '').trim();
+        const response = event && event.response ? event.response : {};
+        const url = String(response.url || '').trim();
+        if (!requestId || !url) return;
+        if (!__deltaLooksLikeInboxHttpUrl(url)) return;
+        const status = Number(response.status || 0) || 0;
+        if (status < 200 || status >= 300) return;
+        const mimeType = String(response.mimeType || '').trim().toLowerCase();
+        if (mimeType && !/(json|graphql|javascript|text)/.test(mimeType)) return;
+        const rType = String(event && event.type || '').trim();
+        if (rType && rType !== 'XHR' && rType !== 'Fetch' && !/graphql/i.test(url)) return;
+
+        const bodyRes = await cdp.send('Network.getResponseBody', { requestId }).catch(() => null);
+        const bodyText = __deltaDecodeNetworkResponseBody(bodyRes);
+        if (!bodyText) return;
+
+        const events = __deltaExtractHttpMessageEvents(bodyText, url);
+        if (!events.length) return;
+
+        const hadLead = ingestLeadEvents(events, {
+          transport: 'http_response',
+          requestId,
+          sourceUrl: url,
+          sourceHint: 'Network.responseReceived'
+        });
+        if (hadLead) {
+          wsState.httpFallbackHits = (Number(wsState.httpFallbackHits || 0) || 0) + 1;
+          try {
+            if (typeof forensicLog === 'function') {
+              forensicLog('DELTA', 'http_fallback_lead', {
+                nome: String(nome || ''),
+                requestId,
+                url: String(url || '').slice(0, 500),
+                events: Number(events.length || 0) || 0
+              });
+            }
+          } catch {}
+          __deltaKickIngestLoop();
+        }
+      } catch {
+        __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
+      }
+    };
+
     const onFrame = async (event) => {
       try {
         __deltaIncFrameTelemetry('telemetry_frames_total', 1);
+        ctrl.deltaNetworkEvidenceAt = Date.now();
         const response = event && event.response ? event.response : {};
+        const requestId = String(event && event.requestId || '').trim();
+        const wsMeta = ensureWsMeta(requestId, '');
+        if (wsMeta) {
+          wsMeta.framesTotal = (Number(wsMeta.framesTotal || 0) || 0) + 1;
+          wsMeta.lastSeenAt = Date.now();
+        }
         const opcode = Number(response.opcode ?? -1);
         const payloadData = response.payloadData || '';
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
         __deltaIncFrameTelemetry('telemetry_frames_decoded', 1);
+        if (wsMeta) wsMeta.framesDecoded = (Number(wsMeta.framesDecoded || 0) || 0) + 1;
         const inner = __deltaExtractInnerPayload(decoded);
+        const frameInfo = { payloadData, decoded, inner, opcode };
+
+        if (!__deltaShouldInspectWsFrame(wsMeta, frameInfo, wsState)) {
+          wsState.frameSkips = (Number(wsState.frameSkips || 0) || 0) + 1;
+          __deltaEmitFrameTelemetryIfDue();
+          return;
+        }
 
         let events = [];
         try {
@@ -15563,76 +16035,19 @@ async function __deltaAttachCdpEar(nome, page) {
           return;
         }
 
-        const serverId = readHostIdSync() || '';
-        let frameHadLead = false;
-
-        for (const ev of events) {
-          const threadKey = String(ev && ev.thread_key || '').trim();
-          const texto = __deltaDecodeEscapedText(String(ev && ev.message_text || '')).trim();
-          if (!threadKey) continue;
-          if (!__deltaShouldEmitLeadText(texto)) continue;
-          frameHadLead = true;
-
-          const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-          const nowMs = Date.now();
-          const st = __deltaGetOrCreateThreadState(nome, threadKey);
-          if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
-          const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
-          const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
-
-          const capturePayload = {
-            event: 'lead_capturado_buffer',
-            server_id: serverId || null,
-            account_login: String(nome || ''),
-            thread_key: threadKey,
-            texto_limpo: texto,
-            cidade: st.city || null,
-            operacao_meta: op,
-            mensagem_seq: msgSeq,
-            dispatch_ct: false,
-            queue_mode: 'capture_only',
-            flow_stage: String(st.status || 'new_buffering'),
-            message_at: nowMs
-          };
-          __deltaAppendPendingJsonlSync(capturePayload);
-
-          if (st.status === 'active') {
-            __deltaAppendPendingJsonlSync({
-              event: 'lead_chat_ativo_realtime',
-              server_id: serverId || null,
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              texto_limpo: texto,
-              mensagens_cliente_concatenadas: texto,
-              mensagens_cliente_qtd: 1,
-              cidade: st.city || null,
-              operacao_meta: op || 'message',
-              mensagem_seq: msgSeq,
-              dispatch_ct: true,
-              queue_mode: 'dispatch_ct',
-              flow_stage: 'chat_ativo_realtime'
-            });
-            st.lastDispatchAt = nowMs;
-            st.updatedAt = nowMs;
-            __deltaKickIngestLoop();
-            __deltaSchedulePersistThreadState();
-            continue;
+        const frameHadLead = ingestLeadEvents(events, {
+          transport: 'ws',
+          requestId: requestId || '',
+          sourceUrl: String((wsMeta && wsMeta.url) || '').slice(0, 500),
+          sourceHint: 'Network.webSocketFrameReceived'
+        });
+        if (frameHadLead) {
+          if (wsMeta) {
+            wsMeta.leads = (Number(wsMeta.leads || 0) || 0) + 1;
+            wsMeta.lastLeadAt = Date.now();
           }
-
-          if (st.status !== 'hands_in_progress' && !st.timerHandle) {
-            const delayMs = __deltaScheduleThreadTimer(st, { retry: false });
-            try {
-              logger.info('[DELTA][BUFFER] novo chat detectado; timer armado', {
-                nome: String(nome || ''),
-                thread_key: threadKey,
-                delayMs,
-                dueAt: st.timerDueAt
-              });
-            } catch {}
-          } else {
-            st.updatedAt = nowMs;
-            __deltaSchedulePersistThreadState();
-          }
+          selectRichWs(requestId, 'ws_frame_with_lead');
+          if (!wsState.confirmedRichWsId) wsState.confirmedRichWsId = String(requestId || '');
         }
         if (frameHadLead) __deltaIncFrameTelemetry('telemetry_frames_with_leads', 1);
         __deltaEmitFrameTelemetryIfDue();
@@ -15645,7 +16060,17 @@ async function __deltaAttachCdpEar(nome, page) {
 
     ctrl.deltaCdpSession = cdp;
     ctrl.deltaCdpOnFrame = onFrame;
+    ctrl.deltaCdpOnWsCreated = onWsCreated;
+    ctrl.deltaCdpOnWsHandshakeReq = onWsHandshakeReq;
+    ctrl.deltaCdpOnWsHandshakeRes = onWsHandshakeRes;
+    ctrl.deltaCdpOnWsClosed = onWsClosed;
+    ctrl.deltaCdpOnResponseReceived = onResponseReceived;
+    cdp.on('Network.webSocketCreated', onWsCreated);
+    cdp.on('Network.webSocketWillSendHandshakeRequest', onWsHandshakeReq);
+    cdp.on('Network.webSocketHandshakeResponseReceived', onWsHandshakeRes);
+    cdp.on('Network.webSocketClosed', onWsClosed);
     cdp.on('Network.webSocketFrameReceived', onFrame);
+    cdp.on('Network.responseReceived', onResponseReceived);
     try { logger.info('[DELTA][EAR] CDP ouvido ligado', { nome }); } catch {}
     try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ear_cdp_attached', { nome: String(nome || '') }); } catch {}
   } catch (err) {
