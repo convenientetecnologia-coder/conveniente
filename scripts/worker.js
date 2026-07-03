@@ -16546,7 +16546,7 @@ function __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded = '') {
   try { return Buffer.byteLength(raw, 'utf8'); } catch { return raw.length; }
 }
 
-function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response } = {}) {
+function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response } = {}, accountUserId = '') {
   const candidates = [];
   if (inner != null) candidates.push(inner);
   if (decoded != null && decoded !== inner) candidates.push(decoded);
@@ -16562,7 +16562,7 @@ function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, r
   const seen = new Set();
   for (const c of candidates) {
     let arr = [];
-    try { arr = __deltaExtractWsMessageEvents(c) || []; } catch {}
+    try { arr = __deltaExtractWsMessageEvents(c, accountUserId) || []; } catch {}
     for (const ev of arr) {
       const tk = String(ev && ev.thread_key || '').trim();
       const tx = String(ev && ev.message_text || '').trim();
@@ -16577,7 +16577,7 @@ function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, r
   return out;
 }
 
-function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '') {
+function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '', accountUserId = '') {
   const raw = String(bodyText || '').trim();
   if (!raw) return [];
   let parsed = null;
@@ -16592,7 +16592,7 @@ function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '') {
 
   let events = [];
   if (parsed) {
-    try { events = __deltaExtractWsMessageEvents(parsed) || []; } catch {}
+    try { events = __deltaExtractWsMessageEvents(parsed, accountUserId) || []; } catch {}
   }
   if (!events.length) {
     try {
@@ -16671,6 +16671,15 @@ async function __deltaAttachCdpEar(nome, page) {
     if (man && man.cidade) {
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].cidade = String(man.cidade || '').trim() || null;
+    }
+    // Fonte soberana do "account_user_id" (c_user) para classificar inbound/outbound corretamente.
+    // Isso protege principalmente o "sync inicial" (derramamento de deltas) onde não há prefixo "Você:".
+    const cookies = (man && Array.isArray(man.cookies)) ? man.cookies : [];
+    const cUser = cookies.find((c) => c && String(c.name || '').trim().toLowerCase() === 'c_user');
+    const uid = cUser && (String(cUser.value || '').replace(/\D/g, ''));
+    if (uid && uid.length >= 5) {
+      const ctrl = controllers.get(nome);
+      if (ctrl) ctrl.deltaAccountUserId = String(uid);
     }
   } catch {}
 
@@ -16826,7 +16835,20 @@ async function __deltaAttachCdpEar(nome, page) {
         hadLead = true;
 
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-        const nowMs = Date.now();
+        const nowMs =
+          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
+            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
+            : Date.now();
+
+        // Classificação robusta inbound/outbound:
+        // - Se sender == account_user_id (c_user), é outbound (mensagem nossa) -> não deve virar “mensagem do cliente”.
+        try {
+          const sender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
+          const account = String(ev && ev.account_user_id || '').replace(/\D/g, '');
+          if (sender && account && sender === account) {
+            continue;
+          }
+        } catch {}
         const networkCtx = {
           network_transport: String(transport || '').trim() || null,
           network_request_id: String(requestId || '').trim() || null,
@@ -17057,7 +17079,8 @@ async function __deltaAttachCdpEar(nome, page) {
         const bodyText = __deltaDecodeNetworkResponseBody(bodyRes);
         if (!bodyText) return;
 
-        const events = __deltaExtractHttpMessageEvents(bodyText, url);
+        const accountUserId = String(ctrl && ctrl.deltaAccountUserId || '').trim();
+        const events = __deltaExtractHttpMessageEvents(bodyText, url, accountUserId);
         if (!events.length) return;
 
         const hadLead = ingestLeadEvents(events, {
@@ -17119,7 +17142,8 @@ async function __deltaAttachCdpEar(nome, page) {
 
         let events = [];
         try {
-          events = __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response }) || [];
+          const accountUserId = String(ctrl && ctrl.deltaAccountUserId || '').trim();
+          events = __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response }, accountUserId) || [];
         } catch {
           __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
           events = [];
