@@ -16842,13 +16842,31 @@ async function __deltaAttachCdpEar(nome, page) {
 
         // Classificação robusta inbound/outbound:
         // - Se sender == account_user_id (c_user), é outbound (mensagem nossa) -> não deve virar “mensagem do cliente”.
-        try {
-          const sender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
-          const account = String(ev && ev.account_user_id || '').replace(/\D/g, '');
-          if (sender && account && sender === account) {
-            continue;
-          }
-        } catch {}
+        const sender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
+        const account = String(ev && ev.account_user_id || '').replace(/\D/g, '');
+        // Regra enterprise anti-fantasma:
+        // - Se não conseguimos resolver sender/account, NÃO confiamos neste evento para virar "mensagem do cliente".
+        //   Isso evita poluição por mensagens outbound/sistema quando o parser não conseguiu capturar sender_id.
+        if (!sender || !account) {
+          try {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_skip_sender_missing',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              cidade: null,
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'skip_sender_missing',
+              message_at: nowMs
+            });
+          } catch {}
+          continue;
+        }
+        if (sender === account) continue;
         const networkCtx = {
           network_transport: String(transport || '').trim() || null,
           network_request_id: String(requestId || '').trim() || null,
