@@ -14630,6 +14630,7 @@ const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
 const DELTA_THREAD_MAX_MESSAGES = 600;
 const DELTA_LIGHTSPEED_HEXDUMP_BYTES = Math.max(8, Math.min(96, parseInt(process.env.DELTA_LIGHTSPEED_HEXDUMP_BYTES || '24', 10) || 24));
 const DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS = Math.max(0, parseInt(process.env.DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS || '0', 10) || 0);
+const DELTA_WORKER_CDP_EAR_ENABLED = String(process.env.DELTA_WORKER_CDP_EAR_ENABLED || '0').trim() === '1';
 const __deltaThreadStateMap = new Map();
 let __deltaThreadStatePersistTimer = null;
 
@@ -15945,6 +15946,10 @@ async function __deltaDetachCdpSession(nome) {
 
 async function __deltaAttachCdpEar(nome, page) {
   if (!page || !page.target || typeof page.target !== 'function') return;
+  if (!DELTA_WORKER_CDP_EAR_ENABLED) {
+    try { logger.info('[DELTA][EAR] ouvido do worker desativado (DELTA_WORKER_CDP_EAR_ENABLED!=1)', { nome: String(nome || '') }); } catch {}
+    return;
+  }
   try {
     if (page.__deltaCdpEarAttached) return;
     page.__deltaCdpEarAttached = true;
@@ -16471,8 +16476,12 @@ async function wirePageObservers(nome, page) {
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 
-  // 👂 Ouvido Delta (CDP) — acopla escuta passiva na própria aba do perfil.
-  try { await __deltaAttachCdpEar(nome, page); } catch {}
+  // 👂 Ouvido Delta legado (worker) somente por flag explícita.
+  if (DELTA_WORKER_CDP_EAR_ENABLED) {
+    try { await __deltaAttachCdpEar(nome, page); } catch {}
+  } else {
+    try { await __deltaDetachCdpSession(nome); } catch {}
+  }
 }
 
 async function isPageLikelyAlive(page, nome) {
