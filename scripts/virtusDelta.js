@@ -2187,8 +2187,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     try { fsSync.mkdirSync(DELIVERY_CONFIRM_DIR, { recursive: true }); } catch {}
     try { fsSync.mkdirSync(DELIVERY_CONFIRM_ACK_DIR, { recursive: true }); } catch {}
   }
-  // Boot guarantee: cria a estrutura cedo para evidência e evitar "fila invisível".
-  try { ensureDeliveryConfirmDirsSync(); } catch {}
 
   function readDeliveryConfirmCursorSync() {
     try {
@@ -2307,13 +2305,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         body: JSON.stringify(payload || {}),
         signal: controller.signal
       });
-      const status = Number(res.status || 0) || 0;
-      if (res.ok) return { ok: true, status };
-      // Captura best-effort do corpo para diagnóstico (sem explodir logs).
-      let bodyText = "";
-      try { bodyText = String(await res.text()); } catch { bodyText = ""; }
-      const snippet = bodyText ? bodyText.slice(0, 300) : "";
-      return { ok: false, status, body_snippet: snippet };
+      return { ok: !!res.ok, status: Number(res.status || 0) || 0 };
     } catch (e) {
       return { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
     } finally {
@@ -2419,18 +2411,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
           try {
             logInfo(
-              `[virtusDelta][confirm] FAIL cmd_id=${cmdId} tried=${urlCandidates.length} status=${Number(last && last.status || 0) || 0} url=${String(usedUrl || urlCandidates[0] || "").trim()} err=${String((last && last.error) || "").trim()} body=${String((last && last.body_snippet) || "").replace(/\s+/g, " ").slice(0, 220)}`
+              `[virtusDelta][confirm] FAIL cmd_id=${cmdId} tried=${urlCandidates.length} status=${Number(last && last.status || 0) || 0} err=${String((last && last.error) || "").trim()}`
             );
-          } catch (_) {}
-          // Se for terminal (ticket_not_found), não bloquear a fila inteira.
-          try {
-            const body = String((last && last.body_snippet) || "");
-            if ((Number(last && last.status || 0) || 0) === 404 && body.includes("ticket_not_found")) {
-              writeDeliveryConfirmAckSync(cmdId, { ok: false, terminal: true, status: 404, reason: "ticket_not_found", url: usedUrl || null });
-              writeDeliveryConfirmCursorSync(nextOff);
-              _deliveryConfirmPumpBackoffMs = 450;
-              continue;
-            }
           } catch (_) {}
           _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
           try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
