@@ -14927,10 +14927,24 @@ function __deltaClearThreadTimer(st) {
 }
 function __deltaBuildConcatFromState(st) {
   const msgs = Array.isArray(st && st.messages) ? st.messages : [];
-  const texts = msgs.map((m) => String(m && m.text || '')).filter(Boolean);
-  const fromSeq = msgs.length ? Number(msgs[0].seq || 0) || 0 : 0;
-  const toSeq = msgs.length ? Number(msgs[msgs.length - 1].seq || 0) || 0 : 0;
-  return { text: texts.join('\n'), count: texts.length, fromSeq, toSeq };
+  // Guardrail: o ouvido pode capturar texto outbound com prefixo "Você:"/"You:".
+  // Esse texto NÃO deve compor o histórico inbound do cliente.
+  const filtered = msgs.filter((m) => {
+    const t = String(m && m.text || '').trim();
+    if (!t) return false;
+    if (/^(você|voce|you)\s*:/i.test(t)) return false;
+    return true;
+  });
+  const texts = filtered.map((m) => String(m && m.text || '').trim()).filter(Boolean);
+  const fromSeq = filtered.length ? Number(filtered[0].seq || 0) || 0 : 0;
+  const toSeq = filtered.length ? Number(filtered[filtered.length - 1].seq || 0) || 0 : 0;
+  const minAt = filtered.length
+    ? Math.min(...filtered.map((m) => Number(m && m.at || 0) || 0).filter((v) => v > 0))
+    : 0;
+  const maxAt = filtered.length
+    ? Math.max(...filtered.map((m) => Number(m && m.at || 0) || 0).filter((v) => v > 0))
+    : 0;
+  return { text: texts.join('\n'), count: texts.length, fromSeq, toSeq, minAt, maxAt };
 }
 function __deltaPushMessageToState(st, { text, op, at }) {
   if (!st || typeof st !== 'object') return null;
@@ -15112,6 +15126,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
+  const messageAt = Number(after.minAt || 0) || Date.now();
   const city = String((handsOut && handsOut.cidade) || '').trim() || null;
   const nomeClienteLimpo = String((handsOut && handsOut.nome_cliente_limpo) || '').trim() || null;
   const customerName = String((handsOut && (handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || null;
@@ -15162,6 +15177,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     dispatch_ct: true,
     queue_mode: 'dispatch_ct',
     flow_stage: 'new_chat_buffered_dispatched',
+    message_at: messageAt,
     saudacao_enviada: true,
     saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
     nome_cliente_limpo: nomeClienteLimpo,
@@ -15665,11 +15681,21 @@ function __deltaBuildCtIngestPayload(payload) {
   ).trim();
   const cidade = String(p.cidade || '').trim() || null;
   const saudacaoTexto = String(p.saudacao_texto || '').trim() || null;
+  const ts = Number(
+    p.timestamp_ms ||
+    p.timestampMs ||
+    p.message_at ||
+    p.server_timestamp_ms ||
+    p.ts ||
+    Date.now()
+  ) || Date.now();
 
   return {
     server_id,
     account_login,
     thread_key,
+    timestamp_ms: ts,
+    texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,
     cidade,
     saudacao_texto: saudacaoTexto,
