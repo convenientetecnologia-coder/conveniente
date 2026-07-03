@@ -14622,6 +14622,7 @@ const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendente
 const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
+const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
 const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
 const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
@@ -14630,6 +14631,11 @@ const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
 const DELTA_THREAD_MAX_MESSAGES = 600;
 const __deltaThreadStateMap = new Map();
 let __deltaThreadStatePersistTimer = null;
+const __deltaIngestAuthState = {
+  lastBootstrapAt: 0,
+  lastBootstrapError: '',
+  bootstrapInFlight: null
+};
 
 function __deltaRandInt(minMs, maxMs) {
   const min = Math.max(0, Number(minMs || 0) || 0);
@@ -15112,6 +15118,206 @@ function __deltaTryAcquireCompactLock() {
 }
 function __deltaReleaseCompactLock() { try { fs.unlinkSync(DELTA_COMPACT_LOCK_PATH); } catch {} }
 
+function __deltaReadJsonFileSafe(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = String(fs.readFileSync(filePath, 'utf8') || '').trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function __deltaWriteJsonAtomicSafe(filePath, payload) {
+  try {
+    const tmp = `${filePath}.tmp`;
+    try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, JSON.stringify(payload || {}, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function __deltaEnsureHostIdSync() {
+  try {
+    const existing = readHostIdSync();
+    if (existing) return existing;
+    const hostId = (crypto && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : crypto.randomBytes(16).toString('hex');
+    try { fs.mkdirSync(path.dirname(HOSTID_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(HOSTID_PATH, String(hostId) + '\n', 'utf8');
+    return String(hostId);
+  } catch {
+    try { return crypto.randomBytes(16).toString('hex'); } catch { return String(Date.now()); }
+  }
+}
+function __deltaReadGateBBundleSafe() {
+  const b = __deltaReadJsonFileSafe(DELTA_GATE_B_BUNDLE_PATH);
+  return b && typeof b === 'object' ? b : null;
+}
+function __deltaWriteGateBBundleMergedSafe(nextPatch) {
+  const current = __deltaReadGateBBundleSafe() || {};
+  const merged = {
+    ...current,
+    ...(nextPatch && typeof nextPatch === 'object' ? nextPatch : {}),
+    updatedAt: Date.now()
+  };
+  return __deltaWriteJsonAtomicSafe(DELTA_GATE_B_BUNDLE_PATH, merged);
+}
+function __deltaResolveCtIngestUrlAutonomous() {
+  const envUrl = String(process.env.VIRTUS_DELTA_CT_INGEST_URL || '').trim();
+  if (envUrl) return envUrl;
+
+  try {
+    const cfg = readCtConfig();
+    const base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
+    if (base) return `${base.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
+  } catch {}
+
+  try {
+    const { notifierBaseFromEndpoints } = require('./notifierEndpoints.js');
+    const notifierBase = String(notifierBaseFromEndpoints() || '').trim();
+    if (notifierBase) return `${notifierBase.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
+  } catch {}
+
+  return 'https://painel.convenientetecnologia.com/api/messenger-delta/ingest';
+}
+function __deltaResolveLocalIngestSecrets() {
+  const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
+  const bundle = __deltaReadGateBBundleSafe();
+  const deltaSecret = String(
+    process.env.VIRTUS_DELTA_SECRET ||
+    process.env.VIRTUS_DELTA_X_DELTA_SECRET ||
+    process.env.LOG_INGEST_SECRET ||
+    ((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : '')
+  ).trim();
+  const infraSecret = String(
+    process.env.VIRTUS_DELTA_INFRA_SECRET ||
+    process.env.INFRA_SECRET ||
+    ((bundle && (bundle.infraSecret || bundle.infra_secret || bundle.infraSECRET))
+      ? (bundle.infraSecret || bundle.infra_secret || bundle.infraSECRET)
+      : '')
+  ).trim();
+  return { deltaSecret, infraSecret };
+}
+function __deltaBuildBootstrapUrls() {
+  const out = [];
+  const push = (value) => {
+    const s = String(value || '').trim();
+    if (!s) return;
+    if (out.includes(s)) return;
+    out.push(s);
+  };
+
+  const explicit = String(
+    process.env.CONVENIENTE_CT_BOOTSTRAP_URL ||
+    process.env.CT_BOOTSTRAP_URL ||
+    ''
+  ).trim();
+  if (explicit) push(explicit);
+
+  try {
+    const cfg = readCtConfig();
+    const base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
+    if (base) push(`${base.replace(/\/+$/, '')}/api/edge/bootstrap`);
+  } catch {}
+
+  push('https://api.convenientetecnologia.com/api/edge/bootstrap');
+  return out;
+}
+async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } = {}) {
+  const now = Date.now();
+  const cooldownMs = force ? 5_000 : 45_000;
+  if (__deltaIngestAuthState.bootstrapInFlight) {
+    try { return await __deltaIngestAuthState.bootstrapInFlight; } catch { return null; }
+  }
+  if (__deltaIngestAuthState.lastBootstrapAt && (now - __deltaIngestAuthState.lastBootstrapAt) < cooldownMs) return null;
+
+  __deltaIngestAuthState.lastBootstrapAt = now;
+  __deltaIngestAuthState.bootstrapInFlight = (async () => {
+    const hostId = __deltaEnsureHostIdSync();
+    const urls = __deltaBuildBootstrapUrls();
+    const headers = { 'content-type': 'application/json' };
+    const bootstrapSecret = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
+    if (bootstrapSecret) headers['x-bootstrap-secret'] = bootstrapSecret;
+    const body = {
+      hostId,
+      hostname: os.hostname(),
+      ts: Date.now(),
+      want: 'gate_b_token_v1',
+      reason: String(reason || '').slice(0, 120) || undefined
+    };
+
+    for (const url of urls) {
+      const controller = new AbortController();
+      const to = setTimeout(() => controller.abort(), 6500);
+      try {
+        const res = await fetch(String(url), {
+          method: 'POST',
+          redirect: 'manual',
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        const status = Number(res.status || 0) || 0;
+        if (status >= 300 && status < 400) continue;
+        const raw = await res.text().catch(() => '');
+        if (status !== 200 || !raw) continue;
+        const parsed = __deltaSafeJsonParse(raw);
+        if (!parsed || typeof parsed !== 'object') continue;
+
+        const infraSecret = String(parsed.infraSecret || parsed.infra_secret || parsed.infraSECRET || '').trim();
+        const hostFqdn = String(parsed.hostFqdn || '').trim();
+        const tunnelToken = String(parsed.tunnelToken || '').trim();
+        if (infraSecret || hostFqdn || tunnelToken) {
+          __deltaWriteGateBBundleMergedSafe({
+            hostFqdn: hostFqdn || undefined,
+            tunnelToken: tunnelToken || undefined,
+            infraSecret: infraSecret || undefined,
+            source: 'delta_ingest_bootstrap'
+          });
+        }
+        if (infraSecret) return infraSecret;
+      } catch (_) {
+        // segue próxima URL
+      } finally {
+        clearTimeout(to);
+      }
+    }
+    return null;
+  })();
+
+  try {
+    const secret = await __deltaIngestAuthState.bootstrapInFlight;
+    if (!secret) __deltaIngestAuthState.lastBootstrapError = 'bootstrap_secret_missing';
+    return secret;
+  } catch (e) {
+    __deltaIngestAuthState.lastBootstrapError = (e && e.message) ? String(e.message) : String(e);
+    return null;
+  } finally {
+    __deltaIngestAuthState.bootstrapInFlight = null;
+  }
+}
+async function __deltaResolveCtIngestAuth({ forceBootstrap = false, reason = '' } = {}) {
+  const ingestUrl = __deltaResolveCtIngestUrlAutonomous();
+  let { deltaSecret, infraSecret } = __deltaResolveLocalIngestSecrets();
+  if (forceBootstrap || (!deltaSecret && !infraSecret)) {
+    const refreshed = await __deltaTryBootstrapSecretRefresh({ force: !!forceBootstrap, reason });
+    if (refreshed && !infraSecret) infraSecret = String(refreshed || '').trim();
+    const local = __deltaResolveLocalIngestSecrets();
+    if (!deltaSecret && local.deltaSecret) deltaSecret = local.deltaSecret;
+    if (!infraSecret && local.infraSecret) infraSecret = local.infraSecret;
+  }
+  return {
+    ingestUrl: String(ingestUrl || '').trim(),
+    deltaSecret: String(deltaSecret || '').trim(),
+    infraSecret: String(infraSecret || '').trim()
+  };
+}
+
 function __deltaCompactQueueFileIfNeededSync(currentOffsetBytes) {
   const off = Math.max(0, Number(currentOffsetBytes || 0) || 0);
   const COMPACT_THRESHOLD = 10 * 1024 * 1024; // 10MB
@@ -15161,19 +15367,48 @@ async function __deltaPostWebhookJson(url, payload, { timeoutMs = 4500, headers 
   const body = JSON.stringify(payload || {});
   if (typeof fetch !== 'function') return { ok: false, error: 'fetch_unavailable' };
 
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(u, {
+  const resolveRedirectUrl = (baseUrl, locationValue) => {
+    const loc = String(locationValue || '').trim();
+    if (!loc) return '';
+    try { return new URL(loc, baseUrl).toString(); } catch { return ''; }
+  };
+  const executePost = async (targetUrl) => {
+    const res = await fetch(targetUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers },
       body,
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'manual'
     });
     const text = await res.text().catch(() => '');
-    return { ok: res.ok, status: res.status, body: String(text || '').slice(0, 2000) };
+    return { res, text };
+  };
+
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const first = await executePost(u);
+    const firstLocation = first && first.res && first.res.headers && typeof first.res.headers.get === 'function'
+      ? String(first.res.headers.get('location') || '').trim()
+      : '';
+    const isRedirect = first && first.res && [301, 302, 303, 307, 308].includes(Number(first.res.status || 0));
+    if (isRedirect && firstLocation) {
+      const redirectedUrl = resolveRedirectUrl(u, firstLocation);
+      if (redirectedUrl) {
+        const second = await executePost(redirectedUrl);
+        return {
+          ok: second.res.ok,
+          status: second.res.status,
+          body: String(second.text || '').slice(0, 2000),
+          redirected: true,
+          redirect_from: u,
+          redirect_to: redirectedUrl,
+        };
+      }
+    }
+    return { ok: first.res.ok, status: first.res.status, body: String(first.text || '').slice(0, 2000) };
   } catch (e) {
-    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+    return { ok: false, error: (e && e.message) ? e.message : String(e), target_url: u };
   } finally {
     clearTimeout(to);
   }
@@ -15211,8 +15446,10 @@ async function __deltaIngestTick() {
   if (__deltaIngestLoopRunning) return;
   __deltaIngestLoopRunning = true;
   try {
-    const ingestUrl = String(process.env.VIRTUS_DELTA_CT_INGEST_URL || 'https://convenientetecnologia.com/api/messenger-delta/ingest').trim();
-    const secret = String(process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || '').trim();
+    let auth = await __deltaResolveCtIngestAuth({ forceBootstrap: false, reason: 'ingest_tick' });
+    let ingestUrl = String(auth && auth.ingestUrl || '').trim();
+    let secret = String(auth && auth.deltaSecret || '').trim();
+    let infraSecret = String(auth && auth.infraSecret || '').trim();
     if (!ingestUrl) return;
 
     const offset = __deltaReadCursorOffsetSync();
@@ -15244,6 +15481,8 @@ async function __deltaIngestTick() {
 
     const headers = {};
     if (secret) headers['x-delta-secret'] = secret;
+    if (infraSecret) headers['x-infra-secret'] = infraSecret;
+    if (!secret && infraSecret) headers['x-delta-secret'] = infraSecret;
     if (payload.idempotency_key) headers['x-idempotency-key'] = String(payload.idempotency_key);
 
     try {
@@ -15263,7 +15502,24 @@ async function __deltaIngestTick() {
       }
     } catch {}
 
-    const res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers });
+    let res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers });
+    const statusCode = Number(res && res.status || 0) || 0;
+    if (statusCode === 401 || statusCode === 403) {
+      const previousSecretState = `${secret ? 'd1' : 'd0'}:${infraSecret ? 'i1' : 'i0'}`;
+      auth = await __deltaResolveCtIngestAuth({ forceBootstrap: true, reason: 'ingest_unauthorized' });
+      ingestUrl = String(auth && auth.ingestUrl || ingestUrl || '').trim();
+      secret = String(auth && auth.deltaSecret || '').trim();
+      infraSecret = String(auth && auth.infraSecret || '').trim();
+      const refreshedSecretState = `${secret ? 'd1' : 'd0'}:${infraSecret ? 'i1' : 'i0'}`;
+      if (ingestUrl && (refreshedSecretState !== previousSecretState || (secret || infraSecret))) {
+        const retryHeaders = {};
+        if (secret) retryHeaders['x-delta-secret'] = secret;
+        if (infraSecret) retryHeaders['x-infra-secret'] = infraSecret;
+        if (!secret && infraSecret) retryHeaders['x-delta-secret'] = infraSecret;
+        if (payload.idempotency_key) retryHeaders['x-idempotency-key'] = String(payload.idempotency_key);
+        res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers: retryHeaders });
+      }
+    }
     if (res && res.status === 200) {
       try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
       try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
@@ -15278,9 +15534,21 @@ async function __deltaIngestTick() {
         forensicLog('DELTA', 'ingest_ack_non_200', {
           status: res && res.status ? Number(res.status) : null,
           ok: !!(res && res.ok),
+          body: String(res && res.body || '').slice(0, 400),
+          redirected: !!(res && res.redirected),
+          redirect_to: String(res && res.redirect_to || '').slice(0, 500),
           nextOffset
         });
       }
+    } catch {}
+    try {
+      logger.warn('[DELTA][INGEST] ACK não-200; cursor mantido', {
+        status: res && res.status ? Number(res.status) : null,
+        body: String(res && res.body || '').slice(0, 220),
+        redirected: !!(res && res.redirected),
+        redirect_to: String(res && res.redirect_to || '').slice(0, 500) || null,
+        nextOffset
+      });
     } catch {}
     __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
   } finally {
