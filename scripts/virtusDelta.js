@@ -135,10 +135,6 @@ let getDeltaCityCollector = null;
 try {
   ({ getDeltaCityCollector } = require("./deltaCityCollector.js"));
 } catch (_) {}
-let attachDeltaSnifferToPage = null;
-try {
-  ({ attachDeltaSnifferToPage } = require("./deltaSniffer.js"));
-} catch (_) {}
 
 const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || "info").trim().toLowerCase();
 
@@ -389,7 +385,6 @@ function resolveSaudacaoHorarioToken() {
 }
 
 const ATENDIMENTO_DELTA_PATH = path.join(__dirname, "..", "dados", "atendimentodelta.json");
-const LEADS_BRUTOS_PATH = path.join(__dirname, "..", "dados", "leads_brutos.jsonl");
 let _atDeltaCache = { atMs: 0, parsed: null };
 
 function readAtendimentoDeltaConfigSync() {
@@ -554,51 +549,6 @@ async function postWebhookJson(url, payload, { timeoutMs = 4500, headers = {} } 
   }
 
   return { ok: false, error: "fetch_unavailable" };
-}
-
-function parseJsonLineSafe(line) {
-  const text = String(line || "").trim();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeLeadFromBrutosLine(raw) {
-  const obj = raw && typeof raw === "object" ? raw : null;
-  if (!obj) return null;
-  const threadKey = String(
-    obj.thread_key || obj.threadKey || obj.thread_id || obj.threadId || obj.thread_fbid || ""
-  ).trim();
-  const textoLimpo = String(
-    obj.texto_limpo || obj.texto || obj.message_text || obj.mensagem || obj.text || ""
-  ).trim();
-  if (!threadKey || !textoLimpo) return null;
-  return {
-    thread_key: threadKey,
-    texto_limpo: textoLimpo,
-    account_login: String(obj.account_login || obj.accountLogin || obj.nome || "").trim() || null,
-    ts: Number(obj.ts || obj.timestamp || Date.now()) || Date.now(),
-    source: String(obj.source || "delta_sniffer").trim() || "delta_sniffer",
-  };
-}
-
-function cursorKeyForAccount(accountLogin) {
-  const key = String(accountLogin || "__global__").trim().toLowerCase();
-  return key.replace(/[^a-z0-9_-]+/g, "_");
-}
-
-function buildDeltaLeadIdempotencyKey({ serverId, accountLogin, threadKey, mensagensCliente, cidade }) {
-  const raw = [
-    String(serverId || ""),
-    String(accountLogin || ""),
-    String(threadKey || ""),
-    String(mensagensCliente || ""),
-    String(cidade || ""),
-  ].join("|");
-  return crypto.createHash("sha1").update(raw).digest("hex");
 }
 
 async function killGhostChromeForProfile(profileDir) {
@@ -2048,12 +1998,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   const SERVER_ID = readHostIdSync() || resolveServerId();
   const ACCOUNT_LOGIN = (cfg && cfg.accountLogin) ? String(cfg.accountLogin).trim() : (String(nome || "").trim() || resolveAccountLogin());
-  const CT_INGEST_URL = String(
-    process.env.VIRTUS_DELTA_CT_INGEST_URL || "https://convenientetecnologia.com/api/messenger-delta/ingest"
-  ).trim();
-  const DELTA_SECRET = String(
-    process.env.VIRTUS_DELTA_SECRET || process.env.VIRTUS_DELTA_X_DELTA_SECRET || ""
-  ).trim();
 
   const startUrl = String((cfg && cfg.startUrl) || process.env.VIRTUS_DELTA_START_URL || "https://www.facebook.com/messages").trim();
 
@@ -2065,47 +2009,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const greetingStateByThread = new Map(); // threadKey -> { sentAt, greetingText, itemLink, city, citySource }
   let lastCrossThreadSendAt = 0;
   let lastCrossThreadKey = "";
-  const LEADS_BRUTOS_CONSUMER_ENABLED = String(process.env.VIRTUS_DELTA_BRUTOS_CONSUMER_ENABLED || "1").trim() === "1";
-  const LEADS_BRUTOS_CONSUMER_FILE = path.resolve(String(process.env.VIRTUS_DELTA_BRUTOS_FILE || LEADS_BRUTOS_PATH).trim() || LEADS_BRUTOS_PATH);
-  const LEADS_BRUTOS_CURSOR_FILE = path.join(
-    path.dirname(LEADS_BRUTOS_CONSUMER_FILE),
-    `leads_brutos.cursor.${cursorKeyForAccount(ACCOUNT_LOGIN || nome)}.json`
-  );
-  const LEADS_BRUTOS_POLL_MS = Math.max(350, Number(process.env.VIRTUS_DELTA_BRUTOS_POLL_MS || 900) || 900);
-  const LEADS_BRUTOS_BUFFER_MIN_MS = Math.max(
-    5_000,
-    Number(process.env.VIRTUS_DELTA_BRUTOS_BUFFER_MIN_MS || NEW_CHAT_WARMUP_DELAY.min) || NEW_CHAT_WARMUP_DELAY.min
-  );
-  const LEADS_BRUTOS_BUFFER_MAX_MS = Math.max(
-    LEADS_BRUTOS_BUFFER_MIN_MS,
-    Number(process.env.VIRTUS_DELTA_BRUTOS_BUFFER_MAX_MS || NEW_CHAT_WARMUP_DELAY.max) || NEW_CHAT_WARMUP_DELAY.max
-  );
-  const LEADS_BRUTOS_RETRY_MIN_MS = Math.max(8_000, Number(process.env.VIRTUS_DELTA_BRUTOS_RETRY_MIN_MS || 20_000) || 20_000);
-  const LEADS_BRUTOS_RETRY_MAX_MS = Math.max(
-    LEADS_BRUTOS_RETRY_MIN_MS,
-    Number(process.env.VIRTUS_DELTA_BRUTOS_RETRY_MAX_MS || 35_000) || 35_000
-  );
-  const LEADS_BRUTOS_DEDUPE_WINDOW_MS = Math.max(
-    2_000,
-    Number(process.env.VIRTUS_DELTA_BRUTOS_DEDUPE_WINDOW_MS || 90_000) || 90_000
-  );
-  const DELTA_SNIFFER_ATTACH_ENABLED = String(process.env.VIRTUS_DELTA_SNIFFER_ATTACH_ENABLED || "1").trim() !== "0";
-  const DELTA_SNIFFER_FRAME_DUMP_EVERY_MS = Math.max(
-    0,
-    Number(process.env.DELTA_SNIFFER_FRAME_DUMP_EVERY_MS || 15_000) || 15_000
-  );
-  const DELTA_SNIFFER_DEDUPE_TTL_MS = Math.max(
-    5_000,
-    Number(process.env.DELTA_SNIFFER_DEDUPE_TTL_MS || 90_000) || 90_000
-  );
-  let leadsBrutosPollTimer = null;
-  let leadsBrutosOffset = 0;
-  let leadsBrutosOffsetReady = false;
-  let leadsBrutosCarry = "";
-  let leadsBrutosPolling = false;
-  const leadsBrutosThreads = new Map(); // thread_key -> { messages:string[], timer, inFlight }
-  const leadsBrutosRecentKeys = new Map(); // key -> ts
-  let deltaSnifferAttachmentStop = null;
 
   function epochOk() {
     try {
@@ -2145,37 +2048,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     logInfo("[virtusDelta][boot][worker] marketplace_boot=skipped reason=autofilter_disabled");
   }
 
-  if (DELTA_SNIFFER_ATTACH_ENABLED) {
-    if (typeof attachDeltaSnifferToPage === "function") {
-      try {
-        const attached = await attachDeltaSnifferToPage(page, {
-          nome: String(nome || "").trim() || null,
-          accountLogin: ACCOUNT_LOGIN || null,
-          leadsPath: LEADS_BRUTOS_CONSUMER_FILE,
-          frameDumpEveryMs: DELTA_SNIFFER_FRAME_DUMP_EVERY_MS,
-          dedupeTtlMs: DELTA_SNIFFER_DEDUPE_TTL_MS,
-          tag: `deltaSniffer:${String(nome || ACCOUNT_LOGIN || "worker")}`,
-        });
-        if (attached && typeof attached.stop === "function") {
-          deltaSnifferAttachmentStop = attached.stop;
-          logInfo(`[virtusDelta][sniffer] attached=yes reused=${attached.reused ? "sim" : "nao"} file=${LEADS_BRUTOS_CONSUMER_FILE}`);
-        } else {
-          logInfo("[virtusDelta][sniffer] attached=no reason=missing_stop");
-        }
-      } catch (e) {
-        logInfo(`[virtusDelta][sniffer] attach_fail err=${e && e.message ? e.message : String(e)}`);
-      }
-    } else {
-      logInfo("[virtusDelta][sniffer] attach_skip reason=module_unavailable");
-    }
-  } else {
-    logInfo("[virtusDelta][sniffer] attach=disabled");
-  }
-
   logInfo(`[virtusDelta][boot][worker] nome=${String(nome || "")} engine=delta epoch=${requiredEpoch} slowMode=${slowMode ? "sim" : "nao"} url=${String(page.url ? page.url() : "")}`);
 
-  // Escuta dedicada: o "Ouvido" agora fica em módulo isolado (`deltaSniffer.js`)
-  // acoplado nesta mesma aba/sessão para evitar concorrência com rotinas gerais.
+  // FUSÃO OPERACIONAL (FASE 1):
+  // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
+  // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
@@ -2241,242 +2118,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       await sleep(Math.min(1000, leftMs));
     }
     return { waitedMs: remainMs, delayMs, elapsedMs: elapsed };
-  }
-
-  function readLeadsBrutosCursor() {
-    try {
-      if (!fsSync.existsSync(LEADS_BRUTOS_CURSOR_FILE)) return 0;
-      const raw = String(fsSync.readFileSync(LEADS_BRUTOS_CURSOR_FILE, "utf8") || "").replace(/^\uFEFF/, "");
-      const parsed = JSON.parse(raw);
-      const offset = Number(parsed && parsed.offset);
-      if (!Number.isFinite(offset) || offset < 0) return 0;
-      return offset;
-    } catch {
-      return 0;
-    }
-  }
-
-  function writeLeadsBrutosCursor(offset) {
-    try {
-      const payload = {
-        offset: Math.max(0, Number(offset) || 0),
-        at: Date.now(),
-        account_login: ACCOUNT_LOGIN || null,
-      };
-      fsSync.writeFileSync(LEADS_BRUTOS_CURSOR_FILE, `${JSON.stringify(payload)}\n`, "utf8");
-    } catch (_) {}
-  }
-
-  function pruneLeadsBrutosDedup(nowTs) {
-    if (leadsBrutosRecentKeys.size <= 1200) return;
-    const floor = nowTs - LEADS_BRUTOS_DEDUPE_WINDOW_MS;
-    for (const [k, ts] of leadsBrutosRecentKeys.entries()) {
-      if ((Number(ts) || 0) < floor) leadsBrutosRecentKeys.delete(k);
-    }
-  }
-
-  async function postCtFromLeadResult({ threadKey, mensagensCliente, greetingOut }) {
-    if (!CT_INGEST_URL) return { ok: false, error: "ct_ingest_url_empty" };
-    const cidade = String((greetingOut && greetingOut.cidade) || "").trim() || null;
-    const payload = {
-      server_id: SERVER_ID || null,
-      account_login: ACCOUNT_LOGIN || null,
-      thread_key: String(threadKey || "").trim(),
-      mensagens_cliente_concatenadas: String(mensagensCliente || "").trim(),
-      cidade,
-      city_source: greetingOut && greetingOut.city_source ? String(greetingOut.city_source) : null,
-      profile_url: greetingOut && greetingOut.profile_url ? String(greetingOut.profile_url) : null,
-      saudacao_texto: greetingOut && greetingOut.greeting_text ? String(greetingOut.greeting_text) : null,
-      source_layer: "delta_sniffer_file_queue",
-      operation: "lead_ingest",
-      stateless: true,
-      ts: Date.now(),
-    };
-    const idempotencyKey = buildDeltaLeadIdempotencyKey({
-      serverId: SERVER_ID,
-      accountLogin: ACCOUNT_LOGIN,
-      threadKey: threadKey,
-      mensagensCliente: payload.mensagens_cliente_concatenadas,
-      cidade: cidade || "",
-    });
-    const headers = {
-      "x-idempotency-key": idempotencyKey,
-      "x-source": "virtus-delta-brutos-consumer",
-    };
-    if (DELTA_SECRET) headers["x-delta-secret"] = DELTA_SECRET;
-    return await postWebhookJson(CT_INGEST_URL, payload, { timeoutMs: 6500, headers });
-  }
-
-  function scheduleLeadsBrutosThread(threadKey, delayMs, reason) {
-    const t = String(threadKey || "").trim();
-    if (!t) return;
-    let st = leadsBrutosThreads.get(t);
-    if (!st) {
-      st = { messages: [], timer: null, inFlight: false };
-      leadsBrutosThreads.set(t, st);
-    }
-    if (st.timer) {
-      try { clearTimeout(st.timer); } catch (_) {}
-      st.timer = null;
-    }
-    const ms = Math.max(1000, Number(delayMs) || 1000);
-    st.timer = setTimeout(() => {
-      st.timer = null;
-      enqueue(async () => {
-        if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
-        const curr = leadsBrutosThreads.get(t);
-        if (!curr || curr.inFlight) return { ok: false, error: "thread_busy" };
-        const mensagens = Array.isArray(curr.messages)
-          ? curr.messages.map((v) => String(v || "").trim()).filter(Boolean)
-          : [];
-        if (!mensagens.length) return { ok: false, error: "thread_buffer_empty" };
-        curr.inFlight = true;
-        try {
-          const mensagensConcatenadas = mensagens.join("\n").trim();
-          const out = await sendDeltaGreetingNow({
-            threadKey: t,
-            mensagensCliente: mensagensConcatenadas,
-          });
-          if (!out || out.ok !== true) {
-            const retryMs = randomBetween(LEADS_BRUTOS_RETRY_MIN_MS, LEADS_BRUTOS_RETRY_MAX_MS);
-            logInfo(
-              `[virtusDelta][brutos] greeting_fail thread_key=${t} reason=${String((out && out.error) || "unknown")} retry_ms=${retryMs}`
-            );
-            scheduleLeadsBrutosThread(t, retryMs, "greeting_fail");
-            return out || { ok: false, error: "greeting_fail" };
-          }
-          const ctOut = await postCtFromLeadResult({
-            threadKey: t,
-            mensagensCliente: mensagensConcatenadas,
-            greetingOut: out,
-          });
-          if (!ctOut || ctOut.ok !== true) {
-            const retryMs = randomBetween(LEADS_BRUTOS_RETRY_MIN_MS, LEADS_BRUTOS_RETRY_MAX_MS);
-            logInfo(
-              `[virtusDelta][brutos] ct_fail thread_key=${t} reason=${String((ctOut && (ctOut.error || ctOut.status)) || "unknown")} retry_ms=${retryMs}`
-            );
-            scheduleLeadsBrutosThread(t, retryMs, "ct_fail");
-            return { ok: false, error: "ct_post_failed", ct: ctOut || null };
-          }
-          curr.messages = [];
-          logInfo(`[virtusDelta][brutos] lead_ok thread_key=${t} city=${String(out.cidade || "")}`);
-          return { ok: true, ct: ctOut };
-        } catch (e) {
-          const retryMs = randomBetween(LEADS_BRUTOS_RETRY_MIN_MS, LEADS_BRUTOS_RETRY_MAX_MS);
-          logInfo(
-            `[virtusDelta][brutos] process_fail thread_key=${t} err=${e && e.message ? e.message : String(e)} retry_ms=${retryMs}`
-          );
-          scheduleLeadsBrutosThread(t, retryMs, "exception");
-          return { ok: false, error: e && e.message ? e.message : String(e) };
-        } finally {
-          const latest = leadsBrutosThreads.get(t);
-          if (latest) latest.inFlight = false;
-        }
-      }).catch(() => {});
-    }, ms);
-    st.timer.unref?.();
-    logInfo(`[virtusDelta][brutos] thread_buffer thread_key=${t} delay_ms=${ms} reason=${String(reason || "timer")}`);
-  }
-
-  function ingestLeadFromBrutos(lead) {
-    const threadKey = String(lead && lead.thread_key ? lead.thread_key : "").trim();
-    const texto = String(lead && lead.texto_limpo ? lead.texto_limpo : "").trim();
-    if (!threadKey || !texto) return;
-    if (!shouldEmitLeadText(texto)) return;
-
-    const nowTs = Date.now();
-    pruneLeadsBrutosDedup(nowTs);
-    const dedupeKey = `${threadKey}|${texto}`;
-    const lastSeen = Number(leadsBrutosRecentKeys.get(dedupeKey) || 0);
-    if (lastSeen && (nowTs - lastSeen) < LEADS_BRUTOS_DEDUPE_WINDOW_MS) return;
-    leadsBrutosRecentKeys.set(dedupeKey, nowTs);
-
-    let st = leadsBrutosThreads.get(threadKey);
-    if (!st) {
-      st = { messages: [], timer: null, inFlight: false };
-      leadsBrutosThreads.set(threadKey, st);
-    }
-    if (!st.messages.includes(texto)) st.messages.push(texto);
-    if (st.messages.length > 20) st.messages = st.messages.slice(-20);
-    if (st.timer || st.inFlight) return;
-    const warmupMs = randomBetween(LEADS_BRUTOS_BUFFER_MIN_MS, LEADS_BRUTOS_BUFFER_MAX_MS);
-    scheduleLeadsBrutosThread(threadKey, warmupMs, "new_lead_warmup");
-  }
-
-  function processLeadsBrutosLine(line) {
-    const parsed = parseJsonLineSafe(line);
-    if (!parsed) return;
-    const lead = normalizeLeadFromBrutosLine(parsed);
-    if (!lead) return;
-    if (ACCOUNT_LOGIN && lead.account_login && lead.account_login !== ACCOUNT_LOGIN) return;
-    ingestLeadFromBrutos(lead);
-  }
-
-  async function pollLeadsBrutosFile() {
-    if (!LEADS_BRUTOS_CONSUMER_ENABLED || !running || !epochOk()) return;
-    if (leadsBrutosPolling) return;
-    leadsBrutosPolling = true;
-    try {
-      if (!fsSync.existsSync(LEADS_BRUTOS_CONSUMER_FILE)) return;
-      const st = fsSync.statSync(LEADS_BRUTOS_CONSUMER_FILE);
-      const size = Number(st && st.size) || 0;
-
-      if (!leadsBrutosOffsetReady) {
-        const cursorOffset = readLeadsBrutosCursor();
-        if (cursorOffset > 0 && cursorOffset <= size) {
-          leadsBrutosOffset = cursorOffset;
-        } else {
-          leadsBrutosOffset = size; // tail mode: somente novas linhas
-          writeLeadsBrutosCursor(leadsBrutosOffset);
-        }
-        leadsBrutosOffsetReady = true;
-        return;
-      }
-
-      if (size < leadsBrutosOffset) {
-        leadsBrutosOffset = 0;
-        leadsBrutosCarry = "";
-      }
-      if (size === leadsBrutosOffset) return;
-
-      const chunkBytes = size - leadsBrutosOffset;
-      const fd = fsSync.openSync(LEADS_BRUTOS_CONSUMER_FILE, "r");
-      try {
-        const buf = Buffer.alloc(chunkBytes);
-        fsSync.readSync(fd, buf, 0, chunkBytes, leadsBrutosOffset);
-        leadsBrutosOffset = size;
-        writeLeadsBrutosCursor(leadsBrutosOffset);
-        const merged = `${leadsBrutosCarry}${buf.toString("utf8")}`;
-        const lines = merged.split(/\r?\n/);
-        leadsBrutosCarry = lines.pop() || "";
-        for (const line of lines) processLeadsBrutosLine(line);
-      } finally {
-        fsSync.closeSync(fd);
-      }
-    } catch (e) {
-      logInfo(`[virtusDelta][brutos] poll_fail err=${e && e.message ? e.message : String(e)}`);
-    } finally {
-      leadsBrutosPolling = false;
-    }
-  }
-
-  function startLeadsBrutosConsumer() {
-    if (!LEADS_BRUTOS_CONSUMER_ENABLED) {
-      logInfo("[virtusDelta][brutos] consumer=disabled");
-      return;
-    }
-    try {
-      fsSync.mkdirSync(path.dirname(LEADS_BRUTOS_CONSUMER_FILE), { recursive: true });
-      if (!fsSync.existsSync(LEADS_BRUTOS_CONSUMER_FILE)) fsSync.writeFileSync(LEADS_BRUTOS_CONSUMER_FILE, "", "utf8");
-    } catch (_) {}
-    leadsBrutosPollTimer = setInterval(() => {
-      pollLeadsBrutosFile().catch(() => {});
-    }, LEADS_BRUTOS_POLL_MS);
-    leadsBrutosPollTimer.unref?.();
-    pollLeadsBrutosFile().catch(() => {});
-    logInfo(
-      `[virtusDelta][brutos] consumer=enabled file=${LEADS_BRUTOS_CONSUMER_FILE} poll_ms=${LEADS_BRUTOS_POLL_MS} warmup_ms=${LEADS_BRUTOS_BUFFER_MIN_MS}-${LEADS_BRUTOS_BUFFER_MAX_MS}`
-    );
   }
 
   async function sendDeltaReplyNow({ threadKey, textoResposta }) {
@@ -2680,8 +2321,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     });
   };
 
-  startLeadsBrutosConsumer();
-
   return {
     ok: true,
     engine: "delta",
@@ -2694,21 +2333,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       running = false;
       try { marketplaceEnforcer.stop(); } catch (_) {}
       try { if (cityTimer) clearInterval(cityTimer); } catch (_) {}
-      try { if (leadsBrutosPollTimer) clearInterval(leadsBrutosPollTimer); } catch (_) {}
-      try {
-        if (typeof deltaSnifferAttachmentStop === "function") {
-          await deltaSnifferAttachmentStop();
-        }
-      } catch (_) {}
       try {
         for (const t of autoGreetingTimers.values()) { try { clearTimeout(t); } catch (_) {} }
         autoGreetingTimers.clear();
-      } catch (_) {}
-      try {
-        for (const st of leadsBrutosThreads.values()) {
-          try { if (st && st.timer) clearTimeout(st.timer); } catch (_) {}
-        }
-        leadsBrutosThreads.clear();
       } catch (_) {}
     },
   };
