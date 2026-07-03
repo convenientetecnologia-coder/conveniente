@@ -1002,6 +1002,9 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
     if (stopped || inFlight) return;
     inFlight = true;
     try {
+      if (page && page.__virtusDeltaReplyInFlight) {
+        return;
+      }
       const currentUrl = String(page.url ? page.url() : "").toLowerCase();
       if (!currentUrl.includes("facebook.com")) return;
       const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
@@ -1675,112 +1678,116 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) 
 async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
+  try { if (page) page.__virtusDeltaReplyInFlight = true; } catch (_) {}
+  try {
+    await humanReactionDelay(fromNetworkLead);
 
-  await humanReactionDelay(fromNetworkLead);
-
-  if (fromNetworkLead) {
-    try {
-      await prepareDomForNetworkLead(page, threadKey);
-    } catch (e) {
-      logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
-    }
-  }
-
-  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-    try {
-      await ensureMarketplaceFilterActive(page);
-    } catch (_) {}
-  }
-
-  const open = await openThreadByClick(page, threadKey);
-  if (!open.ok) {
     if (fromNetworkLead) {
       try {
-        logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
-        await forceSidebarRefreshByMessagesRoot(page);
-        await humanPause("domSettle", "open_thread_retry_root");
-        if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-          await ensureMarketplaceFilterActive(page);
-          await humanPause("postMarketplace", "open_thread_retry_marketplace");
-        }
+        await prepareDomForNetworkLead(page, threadKey);
+      } catch (e) {
+        logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
+      }
+    }
+
+    if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+      try {
+        await ensureMarketplaceFilterActive(page);
       } catch (_) {}
-      const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
-      if (open2.ok) {
-        Object.assign(open, open2);
+    }
+
+    const open = await openThreadByClick(page, threadKey);
+    if (!open.ok) {
+      if (fromNetworkLead) {
+        try {
+          logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
+          await forceSidebarRefreshByMessagesRoot(page);
+          await humanPause("domSettle", "open_thread_retry_root");
+          if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+            await ensureMarketplaceFilterActive(page);
+            await humanPause("postMarketplace", "open_thread_retry_marketplace");
+          }
+        } catch (_) {}
+        const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
+        if (open2.ok) {
+          Object.assign(open, open2);
+        }
       }
     }
-  }
 
-  if (!open.ok) {
-    logInfo(`[virtusDelta][reply] openThread FAIL thread_key=${t} error=${open.error}`);
-    if (open.href_preview && open.href_preview.length) {
-      logInfo(`[virtusDelta][reply] href_preview=${JSON.stringify(open.href_preview)}`);
-    }
-    return open;
-  }
-  logInfo(
-    `[virtusDelta][reply] openThread OK thread_key=${t} scrolled=${open.scrolled} selector=${String(open.matched_selector || "")}`
-  );
-
-  await humanPause("postThreadOpen", "post_open_read_context");
-
-  // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
-  let itemLink = null;
-  try {
-    itemLink = await extractMarketplaceItemLink(page);
-    if (itemLink) {
-      logInfo(`[COLETOR_101_LINK] ${itemLink}`);
-      if (typeof onItemLink === "function") {
-        try { onItemLink(itemLink); } catch (_) {}
+    if (!open.ok) {
+      logInfo(`[virtusDelta][reply] openThread FAIL thread_key=${t} error=${open.error}`);
+      if (open.href_preview && open.href_preview.length) {
+        logInfo(`[virtusDelta][reply] href_preview=${JSON.stringify(open.href_preview)}`);
       }
+      return open;
     }
-  } catch (_) {}
+    logInfo(
+      `[virtusDelta][reply] openThread OK thread_key=${t} scrolled=${open.scrolled} selector=${String(open.matched_selector || "")}`
+    );
 
-  await ensureComposerFocused(page);
-  await humanPause("preTyping", "pre_typing");
-  if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
+    await humanPause("postThreadOpen", "post_open_read_context");
+
+    // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
+    let itemLink = null;
     try {
-      const dom = await captureDomForense(page);
-      logInfo(`[virtusDelta][DOM] thread_key=${t} composer_outerHTML=${dom.composer_outerHTML}`);
-      logInfo(`[virtusDelta][DOM] thread_key=${t} send_outerHTML=${dom.send_outerHTML}`);
+      itemLink = await extractMarketplaceItemLink(page);
+      if (itemLink) {
+        logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+        if (typeof onItemLink === "function") {
+          try { onItemLink(itemLink); } catch (_) {}
+        }
+      }
     } catch (_) {}
-  }
-  await typeHumanized(page, textoResposta);
-  let composed = await readComposerText(page);
-  logInfo(`[virtusDelta][composer] after_type chars=${composed.length} preview="${composed.slice(0, 60)}"`);
 
-  if (!composed || composed.length < 3) {
-    logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
-    await humanPause("domSettle", "composer_retry_settle");
     await ensureComposerFocused(page);
-    await humanPause("preTyping", "pre_typing_retry");
-    await typeHumanized(page, textoResposta);
-    composed = await readComposerText(page);
-    logInfo(`[virtusDelta][composer] after_retry chars=${composed.length} preview="${composed.slice(0, 60)}"`);
-  }
-
-  if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
-    try {
-      const dom2 = await captureDomForense(page);
-      logInfo(`[virtusDelta][DOM] thread_key=${t} after_type_send_outerHTML=${dom2.send_outerHTML}`);
-    } catch (_) {}
-  }
-  await humanPause("preSend", "pre_enter_send");
-  if (composed && composed.length >= 3) {
-    await page.keyboard.press("Enter");
-    logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
-    await humanPause("postSend", "post_enter_send");
-    const afterEnter = await readComposerText(page);
-    if (afterEnter && afterEnter.length >= 3) {
-      const clicked = await clickSendButtonIfPresent(page);
-      logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
+    await humanPause("preTyping", "pre_typing");
+    if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
+      try {
+        const dom = await captureDomForense(page);
+        logInfo(`[virtusDelta][DOM] thread_key=${t} composer_outerHTML=${dom.composer_outerHTML}`);
+        logInfo(`[virtusDelta][DOM] thread_key=${t} send_outerHTML=${dom.send_outerHTML}`);
+      } catch (_) {}
     }
-  } else {
-    const clicked = await clickSendButtonIfPresent(page);
-    logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
-    if (!clicked) return { ok: false, error: "composer_text_not_registered" };
+    await typeHumanized(page, textoResposta);
+    let composed = await readComposerText(page);
+    logInfo(`[virtusDelta][composer] after_type chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+
+    if (!composed || composed.length < 3) {
+      logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
+      await humanPause("domSettle", "composer_retry_settle");
+      await ensureComposerFocused(page);
+      await humanPause("preTyping", "pre_typing_retry");
+      await typeHumanized(page, textoResposta);
+      composed = await readComposerText(page);
+      logInfo(`[virtusDelta][composer] after_retry chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+    }
+
+    if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
+      try {
+        const dom2 = await captureDomForense(page);
+        logInfo(`[virtusDelta][DOM] thread_key=${t} after_type_send_outerHTML=${dom2.send_outerHTML}`);
+      } catch (_) {}
+    }
+    await humanPause("preSend", "pre_enter_send");
+    if (composed && composed.length >= 3) {
+      await page.keyboard.press("Enter");
+      logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
+      await humanPause("postSend", "post_enter_send");
+      const afterEnter = await readComposerText(page);
+      if (afterEnter && afterEnter.length >= 3) {
+        const clicked = await clickSendButtonIfPresent(page);
+        logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
+      }
+    } else {
+      const clicked = await clickSendButtonIfPresent(page);
+      logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
+      if (!clicked) return { ok: false, error: "composer_text_not_registered" };
+    }
+    return { ok: true, item_link: itemLink || null };
+  } finally {
+    try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
   }
-  return { ok: true, item_link: itemLink || null };
 }
 
 async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead = true } = {}) {
