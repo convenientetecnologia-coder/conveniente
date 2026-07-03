@@ -1560,6 +1560,13 @@ async function readComposerText(page) {
     await page
       .evaluate(() => {
         const el =
+          // Preferência: Lexical editor do Threads/Messenger (mais específico; evita pegar outros contenteditables).
+          document.querySelector('div[role="textbox"][contenteditable="true"][data-lexical-editor="true"]') ||
+          document.querySelector('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]') ||
+          // Preferência por aria-label típico do composer.
+          document.querySelector('div[role="textbox"][contenteditable="true"][aria-label*="Escrever"]') ||
+          document.querySelector('div[contenteditable="true"][role="textbox"][aria-label*="Escrever"]') ||
+          // Fallback genérico (último recurso).
           document.querySelector('div[role="textbox"][contenteditable="true"]') ||
           document.querySelector('div[contenteditable="true"][role="textbox"]');
         if (!el) return "";
@@ -1571,6 +1578,12 @@ async function readComposerText(page) {
 
 async function clickSendButtonIfPresent(page) {
   const sels = [
+    // Threads/Messenger moderno costuma expor o botão com este aria-label.
+    '[role="button"][aria-label="Pressione Enter para enviar"]',
+    '[role="button"][aria-label*="Enter para enviar"]',
+    '[role="button"][aria-label*="para enviar"]',
+    '[role="button"][aria-label*="Pressione Enter"]',
+    '[role="button"][aria-label*="Press Enter"]',
     '[role="button"][aria-label="Enviar"]',
     '[role="button"][aria-label*="Enviar"]',
     '[role="button"][aria-label="Send"]',
@@ -1589,11 +1602,51 @@ async function clickSendButtonIfPresent(page) {
     await btn.click({ delay: clickDelayMs() }).catch(() => {});
     return true;
   }
+  // Fallback: alguns temas/locais escondem o texto no <title> do SVG.
+  try {
+    const clicked = await page.evaluate(() => {
+      const norm = (s) =>
+        String(s || "")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .trim()
+          .toLowerCase();
+      const btns = Array.from(document.querySelectorAll('[role="button"][aria-label]'));
+      const b = btns.find((el) => {
+        const label = norm(el.getAttribute("aria-label") || "");
+        if (!label) return false;
+        if (label.includes("enviar")) return true;
+        if (label.includes("press enter to send")) return true;
+        if (label.includes("enter para enviar")) return true;
+        return false;
+      });
+      if (b) {
+        try { b.click(); } catch (_) {}
+        return true;
+      }
+      const titles = Array.from(document.querySelectorAll('[role="button"] svg title'));
+      const t = titles.find((n) => {
+        const txt = norm(n.textContent || "");
+        return txt.includes("enter para enviar") || txt.includes("press enter to send") || txt.includes("enviar");
+      });
+      const hostBtn = t ? t.closest('[role="button"]') : null;
+      if (hostBtn) {
+        try { hostBtn.click(); } catch (_) {}
+        return true;
+      }
+      return false;
+    });
+    if (clicked) return true;
+  } catch (_) {}
   return false;
 }
 
 async function ensureComposerFocused(page) {
   const sels = [
+    'div[role="textbox"][contenteditable="true"][data-lexical-editor="true"]',
+    'div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]',
+    'div[role="textbox"][contenteditable="true"][aria-label*="Escrever"]',
+    'div[contenteditable="true"][role="textbox"][aria-label*="Escrever"]',
     'div[role="textbox"][contenteditable="true"]',
     'div[contenteditable="true"][role="textbox"]',
     'div[aria-label="Mensagem"]',
@@ -1828,7 +1881,8 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     let composed = await readComposerText(page);
     logInfo(`[virtusDelta][composer] after_type chars=${composed.length} preview="${composed.slice(0, 60)}"`);
 
-    if (!composed || composed.length < 3) {
+    // IMPORTANT: mensagens curtas ("oi", "ok") são válidas; não podemos tratar <3 como "vazio".
+    if (!composed || composed.length < 1) {
       logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
       await humanPause("domSettle", "composer_retry_settle");
       await ensureComposerFocused(page);
@@ -1845,20 +1899,34 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
     await humanPause("preSend", "pre_enter_send");
-    if (composed && composed.length >= 3) {
-      await page.keyboard.press("Enter");
-      logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
-      await humanPause("postSend", "post_enter_send");
-      const afterEnter = await readComposerText(page);
-      if (afterEnter && afterEnter.length >= 3) {
-        const clicked = await clickSendButtonIfPresent(page);
-        logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
-      }
-    } else {
+    // Estratégia enterprise:
+    // 1) Enter para enviar
+    // 2) Se não limpou o composer, tenta clicar no botão "Pressione Enter para enviar"/Enviar
+    // 3) Só considera OK se o composer ficar vazio (confirmação local mínima).
+    const initial = String(composed || "").trim();
+    if (!initial) {
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
-      if (!clicked) return { ok: false, error: "composer_text_not_registered" };
+      return clicked ? { ok: true, item_link: itemLink || null } : { ok: false, error: "composer_text_not_registered" };
     }
+
+    try { await page.keyboard.press("Enter"); } catch (_) {}
+    logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
+    await humanPause("postSend", "post_enter_send");
+
+    let after = await readComposerText(page);
+    if (after && after.trim()) {
+      const clicked = await clickSendButtonIfPresent(page);
+      logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
+      await humanPause("postSend", "post_send_click_fallback");
+      after = await readComposerText(page);
+    }
+
+    if (after && after.trim()) {
+      // Composer ainda tem texto: não confirmou envio.
+      return { ok: false, error: "send_not_confirmed_composer_not_empty", composer_preview: after.slice(0, 80) };
+    }
+
     return { ok: true, item_link: itemLink || null };
   } finally {
     try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
