@@ -14628,6 +14628,8 @@ const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
 const DELTA_THREAD_MAX_MESSAGES = 600;
+const DELTA_LIGHTSPEED_HEXDUMP_BYTES = Math.max(8, Math.min(96, parseInt(process.env.DELTA_LIGHTSPEED_HEXDUMP_BYTES || '24', 10) || 24));
+const DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS = Math.max(0, parseInt(process.env.DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS || '0', 10) || 0);
 const __deltaThreadStateMap = new Map();
 let __deltaThreadStatePersistTimer = null;
 
@@ -15648,6 +15650,188 @@ function __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded = '') {
   try { return Buffer.byteLength(raw, 'utf8'); } catch { return raw.length; }
 }
 
+function __deltaDecodeWsPayloadBuffer(payloadData, opcode) {
+  const raw = String(payloadData || '');
+  if (!raw) return Buffer.alloc(0);
+  const looksLikeBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length % 4 === 0;
+  if (Number(opcode ?? -1) === 2 || looksLikeBase64) {
+    try { return Buffer.from(raw, 'base64'); } catch {}
+  }
+  try { return Buffer.from(raw, 'utf8'); } catch { return Buffer.alloc(0); }
+}
+
+function __deltaHexdumpPrefix(buf, maxBytes = DELTA_LIGHTSPEED_HEXDUMP_BYTES) {
+  if (!Buffer.isBuffer(buf) || !buf.length) return '';
+  const max = Math.max(1, Number(maxBytes || 0) || 1);
+  const slice = buf.subarray(0, Math.min(max, buf.length));
+  return slice.toString('hex').replace(/(..)/g, '$1 ').trim();
+}
+
+function __deltaNormalizeBinaryText(text) {
+  let s = String(text || '');
+  if (!s) return '';
+  s = s.replace(/\u0000+/g, ' ');
+  s = s.replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]+/g, ' ');
+  s = s.replace(/\s{2,}/g, ' ');
+  return s.trim();
+}
+
+function __deltaCollectThreadCandidatesFromBinaryText(text, intoSet) {
+  const out = intoSet instanceof Set ? intoSet : new Set();
+  const src = __deltaNormalizeBinaryText(text);
+  if (!src) return out;
+
+  const push = (candidate) => {
+    const c = __deltaDecodeEscapedText(String(candidate || '')).trim();
+    if (!c) return;
+    if (!/^[A-Za-z0-9:_\-.]{6,220}$/.test(c)) return;
+    if (!/^\d{8,30}$/.test(c) && c.length < 10) return;
+    out.add(c);
+  };
+
+  const patterns = [
+    /"(?:thread_key|thread_id|thread_fbid|conversation_id|conversationId)"\s*:\s*"((?:\\.|[^"\\]){4,220})"/gi,
+    /(?:thread_key|thread_id|thread_fbid|threadkey|threadid|threadfbid|conversation_id|conversationid)\s*[:=]\s*([A-Za-z0-9:_\-.]{6,220})/gi,
+    /\/messages\/t\/(\d{8,30})/gi,
+    /\/marketplace\/t\/(\d{8,30})/gi
+  ];
+  for (const rgx of patterns) {
+    let m;
+    while ((m = rgx.exec(src)) !== null) {
+      push(m[1]);
+      if (out.size >= 8) return out;
+    }
+  }
+  return out;
+}
+
+function __deltaLooksLikeHumanTextCandidate(text) {
+  const t = __deltaNormalizeBinaryText(text);
+  if (!t) return false;
+  if (t.length < 2 || t.length > 320) return false;
+  if (/^(true|false|null|\d+)$/i.test(t)) return false;
+  if (/^(IAIAAA==|0AA=|Cg==)$/i.test(t)) return false;
+  if (/^https?:\/\//i.test(t)) return false;
+  const alpha = (t.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+  if (alpha < 2) return false;
+  return true;
+}
+
+function __deltaCollectMessageCandidatesFromBinaryText(text, intoArr) {
+  const out = Array.isArray(intoArr) ? intoArr : [];
+  const seen = new Set(out.map((v) => String(v || '').trim()));
+  const src = __deltaNormalizeBinaryText(text);
+  if (!src) return out;
+
+  const push = (candidate) => {
+    const c = __deltaDecodeEscapedText(String(candidate || '')).trim();
+    if (!__deltaLooksLikeHumanTextCandidate(c)) return;
+    if (seen.has(c)) return;
+    seen.add(c);
+    out.push(c);
+  };
+
+  const keyPatterns = [
+    /"(?:message_text|message|text|body|snippet|msg)"\s*:\s*"((?:\\.|[^"\\]){1,320})"/gi,
+    /(?:message_text|message|text|body|snippet|msg)\s*[:=]\s*([^|;]{1,320})/gi
+  ];
+  for (const rgx of keyPatterns) {
+    let m;
+    while ((m = rgx.exec(src)) !== null) {
+      push(String(m[1] || '').replace(/^[\s"'`]+|[\s"'`]+$/g, ''));
+      if (out.length >= 8) return out;
+    }
+  }
+
+  const quotedPattern = /"([^"\\]{2,220})"/g;
+  let qm;
+  while ((qm = quotedPattern.exec(src)) !== null) {
+    push(qm[1]);
+    if (out.length >= 8) return out;
+  }
+  return out;
+}
+
+function __deltaExtractLightspeedBinaryEvents({ payloadData, opcode, decoded, inner, rawBuffer } = {}) {
+  const buf = Buffer.isBuffer(rawBuffer) ? rawBuffer : __deltaDecodeWsPayloadBuffer(payloadData, opcode);
+  if (!Buffer.isBuffer(buf) || !buf.length) return [];
+
+  const candidates = [];
+  if (typeof inner === 'string' && inner.trim()) candidates.push(inner);
+  if (typeof decoded === 'string' && decoded.trim() && decoded !== inner) candidates.push(decoded);
+  try { candidates.push(buf.toString('utf8')); } catch {}
+  try { candidates.push(buf.toString('latin1')); } catch {}
+  try { candidates.push(buf.toString('utf16le')); } catch {}
+
+  const threadCandidates = new Set();
+  const messageCandidates = [];
+
+  for (const c of candidates) {
+    __deltaCollectThreadCandidatesFromBinaryText(c, threadCandidates);
+    __deltaCollectMessageCandidatesFromBinaryText(c, messageCandidates);
+    if (threadCandidates.size >= 3 && messageCandidates.length >= 6) break;
+  }
+
+  const threads = Array.from(threadCandidates).slice(0, 3);
+  const messages = messageCandidates.slice(0, 6);
+  if (!threads.length || !messages.length) return [];
+
+  const out = [];
+  const seen = new Set();
+  for (const tk of threads) {
+    for (const msg of messages) {
+      const key = `${tk}|${msg}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        operation: 'lightspeed_binary',
+        thread_key: tk,
+        message_text: msg,
+        sender_id: '',
+        account_user_id: '',
+        direction: 'nao_classificado',
+        source_layer: 'delta_lightspeed_binary',
+      });
+      if (out.length >= 8) return out;
+    }
+  }
+  return out;
+}
+
+function __deltaMaybeDumpLightspeedFrameSample(nome, wsState, {
+  requestId = '',
+  opcode = -1,
+  payloadData = '',
+  payloadBytes = 0,
+  rawBuffer = null,
+  wsMeta = null
+} = {}) {
+  const rid = String(requestId || '').trim();
+  const buf = Buffer.isBuffer(rawBuffer) ? rawBuffer : __deltaDecodeWsPayloadBuffer(payloadData, opcode);
+  if (!buf.length) return;
+
+  if (DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS > 0) {
+    wsState.lightspeedDumpByRid = wsState.lightspeedDumpByRid instanceof Map ? wsState.lightspeedDumpByRid : new Map();
+    const now = Date.now();
+    const last = Number(wsState.lightspeedDumpByRid.get(rid) || 0) || 0;
+    if (last && (now - last) < DELTA_LIGHTSPEED_FRAME_DUMP_EVERY_MS) return;
+    wsState.lightspeedDumpByRid.set(rid, now);
+  }
+
+  const ctx = {
+    nome: String(nome || '') || null,
+    requestId: rid || null,
+    opcode: Number(opcode ?? -1),
+    payload_len: Math.max(0, Number(payloadBytes || 0) || buf.length),
+    payload_base64_len: String(payloadData || '').length,
+    hexdump: __deltaHexdumpPrefix(buf, DELTA_LIGHTSPEED_HEXDUMP_BYTES),
+    rich_score: Number(wsMeta && wsMeta.richScore || 0) || 0,
+    url: String(wsMeta && wsMeta.url || '').slice(0, 300) || null,
+  };
+  try { logger.info('[DELTA][LIGHTSPEED][FRAME_SAMPLE]', ctx); } catch {}
+  try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'lightspeed_frame_sample', ctx); } catch {}
+}
+
 function __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response } = {}) {
   const candidates = [];
   if (inner != null) candidates.push(inner);
@@ -15812,6 +15996,7 @@ async function __deltaAttachCdpEar(nome, page) {
       confirmedRichWsId: '',
       lastSocketStatsAt: 0,
       heartbeatBySocket: new Map(),
+      lightspeedDumpByRid: new Map(),
     };
     ctrl.deltaWsRouteState = wsState;
 
@@ -15914,7 +16099,7 @@ async function __deltaAttachCdpEar(nome, page) {
       } catch {}
     };
 
-    const ingestLeadEvents = (events, { transport = 'ws', requestId = '', sourceUrl = '', sourceHint = '' } = {}) => {
+    const ingestLeadEvents = (events, { transport = 'ws', requestId = '', sourceUrl = '', sourceHint = '', forceFlow1Pipeline = false } = {}) => {
       const arr = Array.isArray(events) ? events : [];
       if (!arr.length) return false;
       const serverId = readHostIdSync() || '';
@@ -15981,6 +16166,11 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
+        if (forceFlow1Pipeline && st.status !== 'hands_in_progress') {
+          // Fluxo 1 soberano por evidência de rede (ignora status declarativo externo).
+          st.status = 'new_buffering';
+        }
+
         if (st.status !== 'hands_in_progress' && !st.timerHandle) {
           const delayMs = __deltaScheduleThreadTimer(st, { retry: false });
           try {
@@ -15989,7 +16179,8 @@ async function __deltaAttachCdpEar(nome, page) {
               thread_key: threadKey,
               delayMs,
               dueAt: st.timerDueAt,
-              transport: String(transport || '')
+              transport: String(transport || ''),
+              flow1_forced: !!forceFlow1Pipeline
             });
           } catch {}
         } else {
@@ -16139,6 +16330,7 @@ async function __deltaAttachCdpEar(nome, page) {
         const payloadData = response.payloadData || '';
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
         const payloadBytes = __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded);
+        const rawBuffer = __deltaDecodeWsPayloadBuffer(payloadData, opcode);
         __deltaIncFrameTelemetry('telemetry_frames_decoded', 1);
         if (wsMeta) {
           wsMeta.framesDecoded = (Number(wsMeta.framesDecoded || 0) || 0) + 1;
@@ -16147,6 +16339,12 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         const inner = __deltaExtractInnerPayload(decoded);
         const frameInfo = { payloadData, decoded, inner, opcode, payloadBytes };
+        const wsUrl = String((wsMeta && wsMeta.url) || '').trim().toLowerCase();
+        const isLightspeedWs = !!(wsMeta && wsMeta.hasLightspeed) || /\/ws\/lightspeed|lightspeed/.test(wsUrl);
+        const isRichLightspeedFrame = !!(isLightspeedWs && (
+          String(requestId || '') === String(wsState.selectedRichWsId || '') ||
+          (Number(wsMeta && wsMeta.richScore || 0) || 0) >= 7
+        ));
 
         if (!__deltaShouldInspectWsFrame(wsMeta, frameInfo, wsState, { requestId })) {
           wsState.frameSkips = (Number(wsState.frameSkips || 0) || 0) + 1;
@@ -16157,11 +16355,35 @@ async function __deltaAttachCdpEar(nome, page) {
         }
 
         let events = [];
-        try {
-          events = __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response }) || [];
-        } catch {
-          __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
-          events = [];
+        if (isRichLightspeedFrame) {
+          __deltaMaybeDumpLightspeedFrameSample(nome, wsState, {
+            requestId,
+            opcode,
+            payloadData,
+            payloadBytes,
+            rawBuffer,
+            wsMeta
+          });
+          try {
+            events = __deltaExtractLightspeedBinaryEvents({
+              payloadData,
+              opcode,
+              decoded,
+              inner,
+              rawBuffer
+            }) || [];
+          } catch {
+            __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
+            events = [];
+          }
+        }
+        if (!events.length) {
+          try {
+            events = __deltaExtractWsMessageEventsUniversal({ inner, decoded, payloadData, response }) || [];
+          } catch {
+            __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
+            events = [];
+          }
         }
         if (!events.length) {
           __deltaMaybeDumpNoLeadFrameSample(nome, { opcode, payloadData, decoded, inner });
@@ -16174,7 +16396,8 @@ async function __deltaAttachCdpEar(nome, page) {
           transport: 'ws',
           requestId: requestId || '',
           sourceUrl: String((wsMeta && wsMeta.url) || '').slice(0, 500),
-          sourceHint: 'Network.webSocketFrameReceived'
+          sourceHint: isRichLightspeedFrame ? 'Network.webSocketFrameReceived.lightspeed' : 'Network.webSocketFrameReceived',
+          forceFlow1Pipeline: isRichLightspeedFrame
         });
         if (frameHadLead) {
           if (wsMeta) {
