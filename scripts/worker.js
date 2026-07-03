@@ -15506,40 +15506,417 @@ function __deltaExtractThreadAndText(source) {
     text: __deltaDecodeEscapedText(String(rawMessage || '')).trim()
   };
 }
-function __deltaExtractWsMessageEvents(input) {
+function __deltaIsPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+function __deltaCollectIdTokens(node, out) {
+  if (node == null) return;
+  if (Array.isArray(node)) {
+    if (
+      node.length >= 2 &&
+      (node[0] === 19 || node[0] === '19' || node[0] === 18 || node[0] === '18') &&
+      typeof node[1] === 'string' &&
+      /^\d{3,20}$/.test(node[1])
+    ) {
+      out.push(node[1]);
+      return;
+    }
+    for (const item of node) __deltaCollectIdTokens(item, out);
+    return;
+  }
+  if (typeof node === 'string' && /^\d{12,20}$/.test(node)) {
+    out.push(node);
+    return;
+  }
+  if (__deltaIsPlainObject(node)) {
+    for (const key of Object.keys(node)) __deltaCollectIdTokens(node[key], out);
+  }
+}
+function __deltaCollectStringCandidates(node, out) {
+  if (node == null) return;
+  if (typeof node === 'string') {
+    const v = __deltaDecodeEscapedText(node).trim();
+    if (v) out.push(v);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) __deltaCollectStringCandidates(item, out);
+    return;
+  }
+  if (__deltaIsPlainObject(node)) {
+    for (const key of Object.keys(node)) __deltaCollectStringCandidates(node[key], out);
+  }
+}
+function __deltaLooksLikeHumanText(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (!v) return false;
+  if (v.length > 800) return false;
+  if (v.startsWith('mid.')) return false;
+  if (/^\d{12,}$/.test(v)) return false;
+  if (/^(0|1|2|3|4|5|80|95|-12)$/i.test(v)) return false;
+  if (/^(insertMessage|upsertMessage|updateThreadSnippet|deleteThenInsertThread|processDelta|processStoredDeltas)$/i.test(v)) return false;
+  if (v.startsWith('{') || v.startsWith('[') || v.startsWith('{"')) return false;
+  if (/graph\.facebook/i.test(v)) return false;
+  if (/^https?:\/\//i.test(v)) return false;
+  if (/^\/(messaging|api|ajax)\//i.test(v)) return false;
+  if (/^[A-Za-z0-9+/=]{40,}$/.test(v)) return false;
+  if (/^(inbox|pending|other|messaging|payload|request_id|sp|data|viewer)$/i.test(v)) return false;
+  return true;
+}
+function __deltaExtractPreferredTextFromNode(node) {
+  const visit = (n) => {
+    if (n == null) return '';
+    if (Array.isArray(n)) {
+      for (const item of n) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return '';
+    }
+    if (!__deltaIsPlainObject(n)) return '';
+
+    const msgText = n && n.message && n.message.body && n.message.body.text;
+    if (typeof msgText === 'string') {
+      const v = __deltaDecodeEscapedText(msgText).trim();
+      if (__deltaLooksLikeHumanText(v)) return v;
+    }
+    const unbundled = n && n.unbundled_message_text;
+    if (typeof unbundled === 'string') {
+      const v = __deltaDecodeEscapedText(unbundled).trim();
+      if (__deltaLooksLikeHumanText(v)) return v;
+    }
+    const bodyText = n && n.body && n.body.text;
+    if (typeof bodyText === 'string') {
+      const v = __deltaDecodeEscapedText(bodyText).trim();
+      if (__deltaLooksLikeHumanText(v)) return v;
+    }
+
+    for (const key of Object.keys(n)) {
+      const found = visit(n[key]);
+      if (found) return found;
+    }
+    return '';
+  };
+
+  return visit(node);
+}
+function __deltaExtractSenderIdFromNode(node) {
+  const visit = (n) => {
+    if (n == null) return '';
+    if (Array.isArray(n)) {
+      for (const item of n) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return '';
+    }
+    if (!__deltaIsPlainObject(n)) return '';
+
+    const msgSender = n && n.message && n.message.sender_fbid;
+    if (typeof msgSender === 'string' && /^\d{6,20}$/.test(msgSender)) return msgSender;
+    if (typeof msgSender === 'number' && Number.isFinite(msgSender)) return String(msgSender);
+
+    const directPreferred = ['sender_fbid', 'actor_fbid'];
+    for (const k of directPreferred) {
+      if (!Object.prototype.hasOwnProperty.call(n, k)) continue;
+      const v = n[k];
+      if (typeof v === 'string' && /^\d{6,20}$/.test(v)) return v;
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      if (Array.isArray(v)) {
+        const idTokens = [];
+        __deltaCollectIdTokens(v, idTokens);
+        const first = idTokens.find((t) => /^\d{6,20}$/.test(String(t)));
+        if (first) return String(first);
+      }
+    }
+
+    const keys = [
+      'sender_id',
+      'senderId',
+      'actor_id',
+      'actorId',
+      'actor_fbid',
+      'actorFbid',
+      'actorFbId',
+      'message_sender_fbid',
+      'messageSenderFbid',
+      'sender_fbid',
+      'senderFbid',
+    ];
+    for (const k of keys) {
+      if (!Object.prototype.hasOwnProperty.call(n, k)) continue;
+      const v = n[k];
+      if (typeof v === 'string' && /^\d{6,20}$/.test(v)) return v;
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      if (Array.isArray(v)) {
+        const idTokens = [];
+        __deltaCollectIdTokens(v, idTokens);
+        const first = idTokens.find((t) => /^\d{6,20}$/.test(String(t)));
+        if (first) return String(first);
+      }
+    }
+
+    for (const key of Object.keys(n)) {
+      const found = visit(n[key]);
+      if (found) return found;
+    }
+    return '';
+  };
+  return visit(node);
+}
+function __deltaChooseBestThreadKey(idTokens, accountUserId) {
+  const candidates = idTokens
+    .map((v) => String(v))
+    .filter((v) => /^\d{12,20}$/.test(v))
+    .filter((v) => v !== String(accountUserId || ''))
+    .filter((v) => !/^(0|1|2|3|4|5|80)$/.test(v));
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => {
+    const aScore = (a.length === 16 || a.length === 15) ? 100 : a.length;
+    const bScore = (b.length === 16 || b.length === 15) ? 100 : b.length;
+    return bScore - aScore;
+  });
+  return candidates[0];
+}
+function __deltaChooseStrictThreadKey(idTokens, accountUserId) {
+  const account = String(accountUserId || '');
+  const filtered = idTokens
+    .map((v) => String(v))
+    .filter((v) => /^\d{15,16}$/.test(v))
+    .filter((v) => v !== account)
+    .filter((v) => !/^(0|1|2|3|4|5|80)$/.test(v));
+  return filtered[0] || '';
+}
+function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
+  const thread = String(threadKey || '');
+  const account = String(accountUserId || '');
+  const filtered = idTokens
+    .map((v) => String(v))
+    .filter((v) => /^\d{6,20}$/.test(v))
+    .filter((v) => v !== thread)
+    .filter((v) => !/^(0|1|2|3|4|5|80)$/.test(v));
+  if (!filtered.length) return '';
+  const exact = filtered.find((v) => v === account);
+  return exact || filtered[0];
+}
+function __deltaChooseBestMessageText(strings) {
+  const candidates = strings.map((s) => String(s)).filter(__deltaLooksLikeHumanText);
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates[0];
+}
+function __deltaCollectOpArraysFromStep(stepRoot, out) {
+  if (stepRoot == null) return;
+  if (Array.isArray(stepRoot)) {
+    if (
+      stepRoot.length >= 2 &&
+      (typeof stepRoot[0] === 'number' || typeof stepRoot[0] === 'string') &&
+      typeof stepRoot[1] === 'string'
+    ) {
+      out.push(stepRoot);
+    }
+    for (const item of stepRoot) __deltaCollectOpArraysFromStep(item, out);
+    return;
+  }
+  if (__deltaIsPlainObject(stepRoot)) {
+    for (const key of Object.keys(stepRoot)) __deltaCollectOpArraysFromStep(stepRoot[key], out);
+  }
+}
+function __deltaExtractDeltaNewMessageEvents(root, accountUserId) {
+  const out = [];
+  const visit = (node) => {
+    if (node == null) return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (!__deltaIsPlainObject(node)) return;
+    if (node.deltaNewMessage && __deltaIsPlainObject(node.deltaNewMessage)) {
+      const msg = node.deltaNewMessage.message;
+      const text = msg && msg.body && msg.body.text;
+      const threadKey = node.deltaNewMessage.messageMetadata && node.deltaNewMessage.messageMetadata.threadKey
+        ? node.deltaNewMessage.messageMetadata.threadKey
+        : node.deltaNewMessage.threadKey;
+      const senderId =
+        (msg && msg.sender_fbid) ||
+        (node.deltaNewMessage.messageMetadata && (node.deltaNewMessage.messageMetadata.actorFbId || node.deltaNewMessage.messageMetadata.actor_fbid)) ||
+        node.deltaNewMessage.senderId;
+      const messageId = (msg && (msg.message_id || msg.messageId)) || '';
+      const timestampMs =
+        (msg && (msg.timestamp_ms || msg.timestampMs)) ||
+        (node.deltaNewMessage.messageMetadata && node.deltaNewMessage.messageMetadata.timestamp);
+      if (threadKey && typeof text === 'string' && __deltaLooksLikeHumanText(text)) {
+        out.push({
+          operation: 'deltaNewMessage',
+          thread_key: String(threadKey),
+          message_text: String(text),
+          message_id: String(messageId || ''),
+          server_timestamp_ms: Number(timestampMs || 0) || null,
+          actor_id: senderId ? String(senderId) : '',
+          account_user_id: String(accountUserId || ''),
+          direction: 'nao_classificado',
+          operacao_meta: 'processDelta:deltaNewMessage',
+          source_layer: 'delta_internal',
+        });
+      }
+    }
+    for (const key of Object.keys(node)) visit(node[key]);
+  };
+  visit(root);
+  return out;
+}
+function __deltaExtractWsMessageEvents(input, accountUserId = '') {
   const seen = new Set();
   const out = [];
-  const pushEvent = (src, operation = 'message') => {
-    const parsed = __deltaExtractThreadAndText(src);
-    const thread_key = String(parsed.threadKey || '').trim();
-    const message_text = String(parsed.text || '').trim();
-    if (!thread_key || !message_text) return;
+  const pushNormalizedEvent = (event) => {
+    const thread_key = String(event && event.thread_key || '').trim();
+    const message_text = __deltaDecodeEscapedText(String(event && event.message_text || '')).trim();
+    const operation = String(event && (event.operation || event.operacao_meta) || 'message').trim() || 'message';
+    if (!thread_key || !message_text || !__deltaLooksLikeHumanText(message_text)) return;
     const k = `${thread_key}|${message_text}|${operation}`;
     if (seen.has(k)) return;
     seen.add(k);
     out.push({
+      ...event,
       operation,
+      operacao_meta: String(event && event.operacao_meta || operation),
       thread_key,
       message_text,
-      sender_id: '',
-      account_user_id: '',
-      direction: 'nao_classificado',
-      source_layer: 'delta_internal',
+      sender_id: String(event && (event.sender_id || event.actor_id) || ''),
+      account_user_id: String(event && event.account_user_id || accountUserId || ''),
+      direction: String(event && event.direction || 'nao_classificado'),
+      source_layer: String(event && event.source_layer || 'delta_internal'),
     });
   };
 
+  let root = input;
+  if (typeof root === 'string') {
+    const trimmed = root.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      root = __deltaSafeJsonParse(trimmed) || root;
+    }
+  }
+
+  try {
+    const deltaEvents = __deltaExtractDeltaNewMessageEvents(root, accountUserId);
+    for (const ev of deltaEvents) pushNormalizedEvent(ev);
+  } catch {}
+
+  const step = __deltaIsPlainObject(root) && Array.isArray(root.step) ? root.step : null;
+  if (step) {
+    const opArrays = [];
+    __deltaCollectOpArraysFromStep(step, opArrays);
+    const interesting = new Set([
+      'insertMessage',
+      'upsertMessage',
+      'updateThreadSnippet',
+      'deleteThenInsertThread',
+      'processDelta',
+      'processStoredDeltas',
+    ]);
+
+    for (const opArr of opArrays) {
+      const opName = String(opArr && opArr[1] || '');
+      if (!interesting.has(opName)) continue;
+
+      if (opName === 'updateThreadSnippet') {
+        const idTokens = [];
+        __deltaCollectIdTokens(opArr, idTokens);
+        const threadKey = __deltaChooseStrictThreadKey(idTokens, accountUserId) || __deltaChooseBestThreadKey(idTokens, accountUserId) || '';
+        const strings = [];
+        __deltaCollectStringCandidates(opArr, strings);
+        const direct = typeof (opArr && opArr[3]) === 'string' ? __deltaDecodeEscapedText(opArr[3]).trim() : '';
+        const messageText = __deltaLooksLikeHumanText(direct) ? direct : __deltaChooseBestMessageText(strings);
+        const senderId = __deltaChooseBestSenderId(idTokens, threadKey, accountUserId);
+        pushNormalizedEvent({
+          operation: 'updateThreadSnippet',
+          operacao_meta: 'updateThreadSnippet',
+          thread_key: threadKey,
+          message_text: messageText,
+          actor_id: senderId,
+        });
+        continue;
+      }
+
+      if (opName === 'insertMessage' || opName === 'upsertMessage') {
+        const idTokens = [];
+        __deltaCollectIdTokens(opArr, idTokens);
+        const threadKey = __deltaChooseStrictThreadKey(idTokens, accountUserId) || __deltaChooseBestThreadKey(idTokens, accountUserId) || '';
+        const strings = [];
+        __deltaCollectStringCandidates(opArr, strings);
+        const mid = strings.find((s) => typeof s === 'string' && s.startsWith('mid.')) || '';
+        const preferredText = __deltaExtractPreferredTextFromNode(opArr);
+        let messageText = '';
+        if (preferredText) {
+          messageText = preferredText;
+        } else {
+          const slotTextoBruto = opArr && opArr[2];
+          if (typeof slotTextoBruto === 'string') {
+            const textoCandidato = __deltaDecodeEscapedText(slotTextoBruto).trim();
+            if (!/^(0|1|2|3|4|5|32|38|80|95|-12)$/i.test(textoCandidato) && __deltaLooksLikeHumanText(textoCandidato)) {
+              messageText = textoCandidato;
+            }
+          }
+        }
+        const senderPreferred = __deltaExtractSenderIdFromNode(opArr);
+        const senderId = senderPreferred || __deltaChooseBestSenderId(idTokens, threadKey, accountUserId);
+        pushNormalizedEvent({
+          operation: opName,
+          operacao_meta: opName,
+          thread_key: threadKey,
+          message_text: messageText,
+          message_id: mid,
+          actor_id: senderId,
+        });
+        continue;
+      }
+
+      if (opName === 'deleteThenInsertThread') {
+        const idTokens = [];
+        __deltaCollectIdTokens(opArr, idTokens);
+        const threadKey = __deltaChooseStrictThreadKey(idTokens, accountUserId) || __deltaChooseBestThreadKey(idTokens, accountUserId) || '';
+        const strings = [];
+        __deltaCollectStringCandidates(opArr, strings);
+        const messageText = __deltaChooseBestMessageText(strings);
+        pushNormalizedEvent({
+          operation: 'deleteThenInsertThread',
+          operacao_meta: 'deleteThenInsertThread',
+          thread_key: threadKey,
+          message_text: messageText,
+        });
+        continue;
+      }
+
+      if (opName === 'processDelta' || opName === 'processStoredDeltas') {
+        try {
+          const deltaEvents = __deltaExtractDeltaNewMessageEvents(opArr, accountUserId);
+          for (const ev of deltaEvents) pushNormalizedEvent(ev);
+        } catch {}
+      }
+    }
+  }
+
+  // Fallback genérico para manter cobertura de payloads fora do padrão Lightspeed.
+  const pushFallbackEvent = (src, operation = 'message') => {
+    const parsed = __deltaExtractThreadAndText(src);
+    pushNormalizedEvent({
+      operation,
+      thread_key: String(parsed && parsed.threadKey || '').trim(),
+      message_text: String(parsed && parsed.text || '').trim(),
+    });
+  };
   const walk = (node, op = 'message') => {
     if (!node) return;
-    if (typeof node === 'string') { pushEvent(node, op); return; }
+    if (typeof node === 'string') { pushFallbackEvent(node, op); return; }
     if (Array.isArray(node)) { for (const item of node) walk(item, op); return; }
     if (typeof node === 'object') {
-      pushEvent(node, op);
+      pushFallbackEvent(node, op);
       const nextOp = String(node.operation || node.operacao_meta || op || 'message');
       for (const v of Object.values(node)) walk(v, nextOp);
     }
   };
-
-  walk(input, 'message');
+  walk(root, 'message');
   return out;
 }
 function __deltaShouldEmitLeadText(textoLimpo) {
@@ -15547,9 +15924,10 @@ function __deltaShouldEmitLeadText(textoLimpo) {
   if (!t) return false;
   if (t.startsWith('mid.')) return false;
   if (/^\d+$/.test(t)) {
-    if (t === '32' || t === '38') return false;
-    if (t.length >= 6) return false;
+    if (/^(0|1|2|3|4|5|80|95)$/.test(t)) return false;
+    if (t.length >= 12) return false;
   }
+  if (/^(request_id|payload|sp|data|viewer|mailbox|encrypted_backup|extensions|server_metadata|is_final|label|path|nodes)$/i.test(t)) return false;
   return true;
 }
 
