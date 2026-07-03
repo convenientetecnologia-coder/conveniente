@@ -52,7 +52,7 @@ const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
-const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
+const { readCtConfig, writeCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 
 async function _stopVirtusRunnerMaybePromise(v) {
@@ -817,7 +817,7 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
     const resp = await fetch(`${base}/api/stock/uafp_event_secret`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         hostId,
         profileName: String(nome || '').trim(),
@@ -15185,14 +15185,32 @@ function __deltaResolveCtIngestUrlAutonomous() {
 
   return 'https://painel.convenientetecnologia.com/api/messenger-delta/ingest';
 }
+function __deltaExtractBootstrapSecrets(parsed) {
+  const p = parsed && typeof parsed === 'object' ? parsed : {};
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = String((p && p[k]) || '').trim();
+      if (v) return v;
+    }
+    return '';
+  };
+  return {
+    infraSecret: pick('infraSecret', 'infra_secret', 'infraSECRET'),
+    deltaSecret: pick('deltaSecret', 'delta_secret', 'xDeltaSecret', 'x_delta_secret', 'messengerDeltaSecret'),
+    logSecret: pick('logIngestSecret', 'log_ingest_secret', 'logSecret', 'log_secret')
+  };
+}
 function __deltaResolveLocalIngestSecrets() {
   const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
   const bundle = __deltaReadGateBBundleSafe();
+  const logSecret = String(
+    process.env.LOG_INGEST_SECRET ||
+    ((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : '')
+  ).trim();
   const deltaSecret = String(
     process.env.VIRTUS_DELTA_SECRET ||
     process.env.VIRTUS_DELTA_X_DELTA_SECRET ||
-    process.env.LOG_INGEST_SECRET ||
-    ((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : '')
+    logSecret
   ).trim();
   const infraSecret = String(
     process.env.VIRTUS_DELTA_INFRA_SECRET ||
@@ -15201,7 +15219,7 @@ function __deltaResolveLocalIngestSecrets() {
       ? (bundle.infraSecret || bundle.infra_secret || bundle.infraSECRET)
       : '')
   ).trim();
-  return { deltaSecret, infraSecret };
+  return { deltaSecret, infraSecret, logSecret };
 }
 function __deltaBuildBootstrapUrls() {
   const out = [];
@@ -15265,11 +15283,23 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
         const status = Number(res.status || 0) || 0;
         if (status >= 300 && status < 400) continue;
         const raw = await res.text().catch(() => '');
-        if (status !== 200 || !raw) continue;
+        if (status !== 200 || !raw) {
+          try {
+            logger.warn('[DELTA][INGEST][BOOTSTRAP] refresh sem segredo útil', {
+              status,
+              url: String(url || '').slice(0, 220),
+              body: String(raw || '').slice(0, 180) || null
+            });
+          } catch {}
+          continue;
+        }
         const parsed = __deltaSafeJsonParse(raw);
         if (!parsed || typeof parsed !== 'object') continue;
 
-        const infraSecret = String(parsed.infraSecret || parsed.infra_secret || parsed.infraSECRET || '').trim();
+        const resolvedSecrets = __deltaExtractBootstrapSecrets(parsed);
+        const infraSecret = String(resolvedSecrets.infraSecret || '').trim();
+        const deltaSecret = String(resolvedSecrets.deltaSecret || '').trim();
+        const logSecret = String(resolvedSecrets.logSecret || '').trim();
         const hostFqdn = String(parsed.hostFqdn || '').trim();
         const tunnelToken = String(parsed.tunnelToken || '').trim();
         if (infraSecret || hostFqdn || tunnelToken) {
@@ -15280,7 +15310,25 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
             source: 'delta_ingest_bootstrap'
           });
         }
-        if (infraSecret) return infraSecret;
+        if (logSecret) {
+          try {
+            const ctBaseUrlFromBootstrap = (() => {
+              try {
+                const parsedUrl = new URL(String(url));
+                return `${parsedUrl.protocol}//${parsedUrl.host}`;
+              } catch {
+                return '';
+              }
+            })();
+            writeCtConfig({
+              ctBaseUrl: ctBaseUrlFromBootstrap || undefined,
+              logIngestSecret: logSecret
+            });
+          } catch {}
+        }
+        if (infraSecret || deltaSecret || logSecret) {
+          return { infraSecret, deltaSecret, logSecret };
+        }
       } catch (_) {
         // segue próxima URL
       } finally {
@@ -15291,9 +15339,10 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
   })();
 
   try {
-    const secret = await __deltaIngestAuthState.bootstrapInFlight;
-    if (!secret) __deltaIngestAuthState.lastBootstrapError = 'bootstrap_secret_missing';
-    return secret;
+    const result = await __deltaIngestAuthState.bootstrapInFlight;
+    if (!result) __deltaIngestAuthState.lastBootstrapError = 'bootstrap_secret_missing';
+    else __deltaIngestAuthState.lastBootstrapError = '';
+    return result;
   } catch (e) {
     __deltaIngestAuthState.lastBootstrapError = (e && e.message) ? String(e.message) : String(e);
     return null;
@@ -15303,19 +15352,30 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
 }
 async function __deltaResolveCtIngestAuth({ forceBootstrap = false, reason = '' } = {}) {
   const ingestUrl = __deltaResolveCtIngestUrlAutonomous();
-  let { deltaSecret, infraSecret } = __deltaResolveLocalIngestSecrets();
-  if (forceBootstrap || (!deltaSecret && !infraSecret)) {
+  let { deltaSecret, infraSecret, logSecret } = __deltaResolveLocalIngestSecrets();
+  if (forceBootstrap || (!deltaSecret && !infraSecret && !logSecret)) {
     const refreshed = await __deltaTryBootstrapSecretRefresh({ force: !!forceBootstrap, reason });
-    if (refreshed && !infraSecret) infraSecret = String(refreshed || '').trim();
+    if (refreshed && typeof refreshed === 'object') {
+      if (!infraSecret && refreshed.infraSecret) infraSecret = String(refreshed.infraSecret || '').trim();
+      if (!deltaSecret && refreshed.deltaSecret) deltaSecret = String(refreshed.deltaSecret || '').trim();
+      if (!logSecret && refreshed.logSecret) logSecret = String(refreshed.logSecret || '').trim();
+    }
     const local = __deltaResolveLocalIngestSecrets();
     if (!deltaSecret && local.deltaSecret) deltaSecret = local.deltaSecret;
     if (!infraSecret && local.infraSecret) infraSecret = local.infraSecret;
+    if (!logSecret && local.logSecret) logSecret = local.logSecret;
   }
   return {
     ingestUrl: String(ingestUrl || '').trim(),
     deltaSecret: String(deltaSecret || '').trim(),
-    infraSecret: String(infraSecret || '').trim()
+    infraSecret: String(infraSecret || '').trim(),
+    logSecret: String(logSecret || '').trim()
   };
+}
+function __deltaBuildCtIngestHeaders({ idempotencyKey = '' } = {}) {
+  const headers = {};
+  if (idempotencyKey) headers['x-idempotency-key'] = String(idempotencyKey);
+  return headers;
 }
 
 function __deltaCompactQueueFileIfNeededSync(currentOffsetBytes) {
@@ -15448,8 +15508,6 @@ async function __deltaIngestTick() {
   try {
     let auth = await __deltaResolveCtIngestAuth({ forceBootstrap: false, reason: 'ingest_tick' });
     let ingestUrl = String(auth && auth.ingestUrl || '').trim();
-    let secret = String(auth && auth.deltaSecret || '').trim();
-    let infraSecret = String(auth && auth.infraSecret || '').trim();
     if (!ingestUrl) return;
 
     const offset = __deltaReadCursorOffsetSync();
@@ -15479,11 +15537,7 @@ async function __deltaIngestTick() {
       return;
     }
 
-    const headers = {};
-    if (secret) headers['x-delta-secret'] = secret;
-    if (infraSecret) headers['x-infra-secret'] = infraSecret;
-    if (!secret && infraSecret) headers['x-delta-secret'] = infraSecret;
-    if (payload.idempotency_key) headers['x-idempotency-key'] = String(payload.idempotency_key);
+    const headers = __deltaBuildCtIngestHeaders({ idempotencyKey: payload.idempotency_key });
 
     try {
       logger.info('[DELTA][INGEST] enviando stateless para CT', {
@@ -15505,18 +15559,12 @@ async function __deltaIngestTick() {
     let res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers });
     const statusCode = Number(res && res.status || 0) || 0;
     if (statusCode === 401 || statusCode === 403) {
-      const previousSecretState = `${secret ? 'd1' : 'd0'}:${infraSecret ? 'i1' : 'i0'}`;
       auth = await __deltaResolveCtIngestAuth({ forceBootstrap: true, reason: 'ingest_unauthorized' });
       ingestUrl = String(auth && auth.ingestUrl || ingestUrl || '').trim();
-      secret = String(auth && auth.deltaSecret || '').trim();
-      infraSecret = String(auth && auth.infraSecret || '').trim();
-      const refreshedSecretState = `${secret ? 'd1' : 'd0'}:${infraSecret ? 'i1' : 'i0'}`;
-      if (ingestUrl && (refreshedSecretState !== previousSecretState || (secret || infraSecret))) {
-        const retryHeaders = {};
-        if (secret) retryHeaders['x-delta-secret'] = secret;
-        if (infraSecret) retryHeaders['x-infra-secret'] = infraSecret;
-        if (!secret && infraSecret) retryHeaders['x-delta-secret'] = infraSecret;
-        if (payload.idempotency_key) retryHeaders['x-idempotency-key'] = String(payload.idempotency_key);
+      if (ingestUrl) {
+        const retryHeaders = __deltaBuildCtIngestHeaders({
+          idempotencyKey: payload.idempotency_key
+        });
         res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers: retryHeaders });
       }
     }
@@ -15607,6 +15655,7 @@ function __deltaSanitizeFrameSample(raw) {
   s = s.replace(/\s{2,}/g, ' ');
   s = s.replace(/(x-infra-secret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
   s = s.replace(/(x-delta-secret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
+  s = s.replace(/(x-log-secret"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
   s = s.replace(/(authorization"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
   s = s.replace(/c_user=\d+/gi, 'c_user=[REDACTED]');
   s = s.replace(/xs=[^;\s]+/gi, 'xs=[REDACTED]');

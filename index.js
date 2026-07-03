@@ -1062,8 +1062,8 @@ function __infraAuth(req, res, next) {
   return next();
 }
 
-// Protege todos os endpoints de infra (consumidos externamente via Gate B)
-app.use('/api/infra', __infraAuth);
+// Libertação de malha interna: /api/infra/* sem bloqueio por x-infra-secret.
+// Mantemos __infraAuth disponível para eventual rollback controlado.
 
 // Barramento Universal de Comandos (Tacada 1): execução síncrona + resposta 200 (sem ACK separado)
 app.post('/api/infra/command-bus', async (req, res) => {
