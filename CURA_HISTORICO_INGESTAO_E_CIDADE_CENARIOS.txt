@@ -1,0 +1,118 @@
+CURA ENTERPRISE — HISTÓRICO (INGEST) + CIDADE LIMPA (MESSENGER_DELTA)
+Data: 2026-07-03
+
+OBJETIVO (10 mil chats/dia, perfeito)
+  1) Todo Card Azul messenger_delta nasce com:
+     - mensagem(s) inicial(is) do cliente
+     - saudação automática do robô
+     - cidade limpa no padrão "Cidade (UF)"
+  2) Zero duplicidade de histórico mesmo com reenvio/retry do ingest.
+  3) RAM contínua fria: sem mapas globais, sem arrays persistentes; só buffers locais + SQL.
+
+====================================================================
+O QUE FOI CORRIGIDO (PRETO NO BRANCO)
+
+CORREÇÃO A) CT agora grava histórico no ingest (ticket_event_log)
+  Arquivo: C:\sitechatbot\index.js
+  Rota: POST /api/messenger-delta/ingest
+  Antes:
+    - criava/atualizava ticket shadow
+    - apendava apenas "messenger_delta_lead_capturado" (metadados)
+    - ignorava campos de texto: mensagens_cliente_concatenadas e saudacao_texto
+  Depois:
+    - além do shadow ticket, grava:
+      INSERT 1 (cliente/inbound):
+        event_type = messenger_delta_customer_message
+        payload.text = mensagens_cliente_concatenadas
+      INSERT 2 (robô/outbound):
+        event_type = messenger_delta_agent_message_sent
+        payload.text = saudacao_texto
+        payload.auto_greeting = true
+    - Deduplicação:
+      - gera client_message_id determinístico (sha1) por (server_id|account_login|thread_key|tipo|texto)
+      - antes de inserir, checa se já existe no ticket_event_log via json_extract(payload_json,'$.client_message_id')
+
+CORREÇÃO B) Dashboard agora exibe mensagem do cliente e saudação
+  Arquivo: C:\sitechatbot\convenientetecnologia-atendimentos\index.js
+  Antes:
+    - para messenger_delta, listava só:
+      messenger_delta_agent_message_sent
+      messenger_delta_delivery_update
+    - por isso o card “parecia 100% vazio”
+  Depois:
+    - inclui também:
+      messenger_delta_customer_message
+    - inbound aparece como role=client (autor = Cliente)
+    - saudação aparece como role=agent (autor = Robô)
+
+CORREÇÃO C) Cidade limpa (Cidade (UF)) — sem lixo de DOM
+  Arquivo: C:\conveniente\scripts\virtusDelta.js
+  Função: extractCityFromMarketplaceDom()
+  Problema anterior:
+    - regex ganancioso capturava até o ÚLTIMO ", UF" do texto, levando junto:
+      "Message Save Share Details Condition ..."
+  Depois:
+    - regex não-guloso com grupos e limites (até 60 chars de cidade)
+    - normaliza para "Cidade (UF)"
+    - TRAVA FINAL: se não terminar em "(UF)", retorna null (não envia lixo ao CT)
+
+====================================================================
+CENÁRIOS (O QUE ACONTECE AGORA)
+
+1) Fluxo feliz (primeiro lead)
+  - VM -> CT ingest chega com:
+      mensagens_cliente_concatenadas = "..."
+      saudacao_texto = "Olá, boa tarde! ..."
+      cidade = "Petrolina (PE)"
+  - CT cria/atualiza ticket shadow
+  - CT grava 2 eventos no ticket_event_log:
+      a) customer_message (inbound)
+      b) agent_message_sent (greeting/outbound)
+  - Dashboard renderiza o chat completo imediatamente.
+
+2) Ingest repetido (retry/reenvio)
+  - VM pode reenviar o mesmo payload (p.ex. instabilidade)
+  - CT NÃO duplica:
+      client_message_id é determinístico -> checagem impede novo INSERT.
+
+3) VM só tem texto do cliente, mas saudação ainda não enviada
+  - saudacao_texto vazio:
+      CT grava apenas o evento inbound do cliente.
+  - Assim que a saudação ocorrer e vier em um ingest posterior:
+      CT grava o evento outbound (sem duplicar inbound).
+
+4) VM só tem saudação, mas não conseguiu compilar mensagens do cliente
+  - mensagens_cliente_concatenadas vazio:
+      CT grava apenas o evento de saudação.
+
+5) Cidade inválida / poluída
+  - extractCityFromMarketplaceDom retorna null
+  - CT recebe cidade ausente/pendente:
+      ticket pode nascer com cidade PENDENTE (melhor do que lixo).
+  - Importante:
+      - isso NÃO afeta o histórico do chat (mensagens continuam sendo gravadas).
+
+6) Pressão alta (10k chats/dia) e RAM
+  - CT ingest usa:
+      - strings locais (mensagens/saudação)
+      - SQL direto (SELECT 1 / INSERT via appendTicketEvent)
+    Sem manter arrays globais por ticket em memória.
+  - VM cidade:
+      - calcula dentro do evaluate e retorna só 1 string final.
+
+====================================================================
+CHECKLIST OPERACIONAL (SRE)
+
+Se um card nascer sem histórico:
+  1) Verificar no CT (attendance.sqlite) para aquele ticket_id:
+     - existe messenger_delta_customer_message?
+     - existe messenger_delta_agent_message_sent (auto_greeting=true)?
+  2) Verificar se o ingest chegou com campos:
+     - mensagens_cliente_concatenadas
+     - saudacao_texto
+  3) Se o ticket_event_log só tiver messenger_delta_lead_capturado:
+     - ingest está chegando em versão antiga do CT (processo não reiniciado / código não carregado)
+
+====================================================================
+FIM
+

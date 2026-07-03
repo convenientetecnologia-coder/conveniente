@@ -1,0 +1,199 @@
+INFRAESTRUTURA DE 3 ESTADOS (FIM DO 502 + TRILHA DE ACK) — CENÁRIOS (PRETO NO BRANCO)
+Data: 2026-07-03
+
+OBJETIVO
+  Garantir que:
+  - A atendente NUNCA “perde” uma mensagem digitada (persistência no CT).
+  - O envio para a VM (Edge) não estoura timeout/HTTP 502 (ACK ultrarrápido).
+  - O painel mostre exatamente “onde” a mensagem está no fluxo:
+      Carregando -> 1 risquinho -> 2 risquinhos -> Balão Azul
+
+GLOSSÁRIO DE ESTADOS (O QUE CADA UM SIGNIFICA)
+  0) Carregando (UI)
+     - O browser da atendente está fazendo o POST da mensagem para o CT.
+     - Ainda não é garantia de persistência em banco.
+
+  1) 1 risquinho (CT persistiu)
+     - O CT gravou a mensagem no seu histórico (event_log) e colocou na outbox durável do CT.
+     - Garantia: mesmo que a VM esteja offline, o CT vai tentar de novo até conseguir.
+     - Estado exibido: delivery_state="sent"
+
+  2) 2 risquinhos (VM/Edge aceitou na rede)
+     - O CT conseguiu fazer POST na VM e recebeu HTTP 200 do endpoint do Edge:
+         POST /api/infra/command-bus  -> 200 { status:"received_by_edge" }
+     - Significa: “Chegou na VM” (tráfego CT -> Edge OK). Não significa ainda “enviado no Facebook”.
+     - Estado exibido: delivery_state="delivered" (mapeado como “Recebida pelo robô local (VM)”)
+
+  3) Balão Azul (envio real no Facebook confirmado)
+     - O robô (virtusDelta) abriu a conversa, digitou e enviou (Enter/click) no Facebook.
+     - Depois do envio real, a VM manda um callback para o CT:
+         POST /api/attendance/confirm-delivery
+       com status="sent_to_facebook".
+     - Estado exibido: delivery_state="facebook_sent" (bubble azul + ícone azul)
+
+====================================================================================
+ARQUITETURA IMPLEMENTADA (ONDE CADA COISA MORA)
+
+CT (sitechatbot / atendimentos)
+  - Persistência do histórico (mensagens e updates):
+      ticket_event_log:
+        - messenger_delta_agent_message_sent
+        - messenger_delta_delivery_update
+  - Outbox durável (retry automático):
+      Tabela SQLite: messenger_delta_outbox
+      Campos principais:
+        id (= client_message_id), ticket_id, server_id, account_login, thread_key, text,
+        status, attempts, next_attempt_at, last_error, edge_received_at, facebook_sent_at
+  - Loop de retry:
+      convenientetecnologia-atendimentos/index.js
+      mdOutboxTick() rodando continuamente.
+  - Endpoint de confirmação final (balão azul):
+      POST /api/attendance/confirm-delivery
+      Header (opcional, recomendado): x-delivery-secret
+
+EDGE (VM conveniente)
+  - Entrada de comandos:
+      C:\conveniente\index.js
+      POST /api/infra/command-bus
+  - Regra: delta_reply NÃO bloqueia HTTP.
+      - Sempre grava em disco (outbox jsonl) e responde 200 imediatamente.
+  - Outbox durável do Edge (garantia “não perde” mesmo se worker estiver off):
+      dados/edge_delta_reply/outbox.jsonl
+      dados/edge_delta_reply/cursor.json
+      dados/edge_delta_reply/acked/ack_<id>.json
+  - Pump em background:
+      __edgeRunDeltaReplyPump() tenta entregar para o worker via IPC.
+
+WORKER (VM conveniente)
+  - Handler IPC:
+      C:\conveniente\scripts\worker.js  -> delta-reply-task
+  - Regra: ACK do IPC é imediato (status="queued").
+      A digitação real ocorre em background no virtusDelta (fila serial).
+
+VIRTUS DELTA (VM conveniente)
+  - Envio real no Facebook:
+      sendDeltaReplyNow() -> sendReplyFlow()
+  - Confirmação final (durável) pro CT:
+      Outbox local de confirmações:
+        dados/delta_delivery_confirm/outbox.jsonl
+        dados/delta_delivery_confirm/cursor.json
+        dados/delta_delivery_confirm/acked/ack_<id>.json
+      Pump: re-tenta POST /api/attendance/confirm-delivery até confirmar.
+
+====================================================================================
+CONTRATO DE IDENTIDADE (DEDUPE / NÃO DUPLICAR)
+
+client_message_id (ID único da mensagem do atendente)
+  - CT cria/recebe um client_message_id e usa como chave primária na outbox do CT.
+  - CT envia esse ID para a VM no comando delta_reply:
+      cmd.id (e também cmd.client_message_id)
+  - VM usa esse mesmo ID para:
+      - dedupe no Edge (ack_<id>.json)
+      - confirmar “sent_to_facebook” para o CT com client_message_id
+
+Se o CT re-enviar a MESMA mensagem por motivo de retry:
+  - CT: INSERT OR IGNORE na messenger_delta_outbox impede duplicar.
+  - Edge: ack_<id>.json impede reenfileirar/duplicar execução.
+
+====================================================================================
+CENÁRIOS — O QUE ACONTECE (PASSO A PASSO)
+
+1) Cenário FELIZ (tudo online)
+  - Atendente envia.
+  - UI: Carregando.
+  - CT grava evento messenger_delta_agent_message_sent + cria outbox:
+      UI: 1 risquinho (sent).
+  - CT outbox faz dispatch -> /api/messenger-delta/send -> VM /command-bus:
+      VM responde 200 em milissegundos.
+      CT grava delivery_update delivered:
+        UI: 2 risquinhos.
+  - Robô envia no Facebook e confirma:
+      VM POST /api/attendance/confirm-delivery.
+      CT grava delivery_update facebook_sent:
+        UI: balão azul + ícone azul.
+
+2) VM OFFLINE / sem rota (CT não consegue chegar no Edge)
+  - Atendente envia.
+  - CT persiste + outbox:
+      UI: 1 risquinho (sent) fica “parado”.
+  - CT outbox tenta enviar e falha (502 interno do /api/messenger-delta/send).
+  - CT NÃO perde a mensagem:
+      attempts++ e next_attempt_at é agendado (backoff com jitter).
+  - Quando a VM voltar:
+      CT consegue dispatch -> 2 risquinhos -> (depois) balão azul.
+
+3) VM responde 200, mas cluster/worker ainda não pronto (Edge “aceitou”, mas não executou ainda)
+  - CT consegue HTTP 200 do /command-bus:
+      UI: 2 risquinhos.
+  - Edge gravou em disco e fica tentando entregar ao worker em background.
+  - Enquanto não conseguir, não haverá “balão azul”.
+  - Assim que o worker ficar pronto:
+      comando é entregue e o robô envia no Facebook -> balão azul.
+
+4) Worker recebeu o comando, mas o Chrome daquele perfil está desconectado (browser_not_connected)
+  - Edge pump tenta IPC e recebe ok:false.
+  - Edge NÃO avança o cursor do outbox; ele re-tenta com backoff.
+  - CT já pode estar em 2 risquinhos (Edge aceitou na rede), mas sem balão azul.
+  - Quando o Chrome voltar (auto-recovery do ecossistema):
+      o worker passa a aceitar, virtusDelta envia e confirma -> balão azul.
+
+5) Envio real ocorreu, mas o callback final para o CT falhou (CT momentaneamente indisponível)
+  - Robô já enviou no Facebook (real).
+  - VM tenta POST /api/attendance/confirm-delivery e falha.
+  - VM grava confirmação em outbox local (delta_delivery_confirm) e re-tenta em background.
+  - UI fica em 2 risquinhos até o callback conseguir.
+  - Quando o CT voltar:
+      chega a confirmação -> balão azul.
+
+6) Atendente fecha a aba / recarrega a página no meio
+  - Se o POST já chegou no CT:
+      a mensagem está persistida (1 risquinho garantido).
+  - Ao recarregar, o painel re-renderiza via listTicketMessages():
+      vai mostrar a mesma mensagem com o estado mais recente disponível.
+
+7) Duplicidade por “clique duplo” ou retry do navegador
+  - Se o front mandar o mesmo client_message_id:
+      CT não duplica (PK), Edge não duplica (ack por ID).
+  - Se o front mandar IDs diferentes com o mesmo texto:
+      CT entende como mensagens diferentes (comportamento correto).
+
+====================================================================================
+ENDPOINTS / HEADERS / VARIÁVEIS DE AMBIENTE IMPORTANTES
+
+CT (sitechatbot)
+  - /api/messenger-delta/send
+      Header: x-delta-secret (se CT_DELTA_SEND_SECRET estiver setado)
+  - /api/attendance/confirm-delivery
+      Header: x-delivery-secret (se CT_DELTA_DELIVERY_SECRET ou CT_DELTA_INFRA_SECRET estiver setado)
+
+VM (conveniente)
+  - /api/infra/command-bus
+      Header: x-infra-secret (se for reativado o __infraAuth)
+
+VM -> CT (confirm delivery)
+  - VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL (opcional)
+  - VIRTUS_DELTA_DELIVERY_SECRET / CT_DELTA_DELIVERY_SECRET (recomendado)
+
+====================================================================================
+O QUE FOI ALTERADO (REFERÊNCIA RÁPIDA)
+
+VM
+  - C:\conveniente\index.js
+      - delta_reply agora: grava em outbox durável + responde 200 imediato (received_by_edge)
+  - C:\conveniente\scripts\worker.js
+      - delta-reply-task agora: retorna {ok:true,status:"queued"} imediato (não espera digitação)
+  - C:\conveniente\scripts\virtusDelta.js
+      - após envio real: outbox de confirmação + POST /api/attendance/confirm-delivery (com retry)
+
+CT
+  - C:\sitechatbot\convenientetecnologia-atendimentos\index.js
+      - outbox SQLite messenger_delta_outbox + loop mdOutboxTick()
+      - /api/attendance/tickets/:id/messages (messenger_delta) agora persiste e não retorna 502
+      - /api/attendance/confirm-delivery recebe confirmação final (balão azul)
+      - listTicketMessages agora renderiza mensagens messenger_delta via ticket_event_log
+  - C:\sitechatbot\index.js
+      - /api/messenger-delta/send agora repassa client_message_id para a VM (cmd.id)
+
+====================================================================================
+FIM
+

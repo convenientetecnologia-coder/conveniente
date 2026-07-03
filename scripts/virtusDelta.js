@@ -383,6 +383,79 @@ function resolveSaudacaoHorarioToken() {
   if (h >= 12 && h <= 17) return "boa tarde";
   return "boa noite";
 }
+function toTitleCaseCityName(raw) {
+  return String(raw || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+function normalizeCityToUfPattern(raw) {
+  const s0 = String(raw || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[:\-]\s*/, "")
+    .trim()
+    .slice(0, 120);
+  if (!s0) return "";
+  const s = s0
+    .replace(/–/g, "-")
+    .replace(/—/g, "-")
+    .replace(/\s*,\s*/g, ", ")
+    .trim();
+  const m1 = s.match(/^(.+?)\s*\(\s*([A-Za-z]{2})\s*\)$/);
+  if (m1 && m1[1] && m1[2]) {
+    return `${toTitleCaseCityName(m1[1].trim())} (${String(m1[2]).toUpperCase()})`.slice(0, 80);
+  }
+  const m2 = s.match(/^(.+?)\s*[-,\/]\s*([A-Za-z]{2})$/);
+  if (m2 && m2[1] && m2[2]) {
+    return `${toTitleCaseCityName(m2[1].trim())} (${String(m2[2]).toUpperCase()})`.slice(0, 80);
+  }
+  return s.slice(0, 80);
+}
+function sanitizeLeadClientName(rawTitle) {
+  const left = String(rawTitle || "").split(" · ")[0] || "";
+  return left.replace(/\s+/g, " ").replace(/^[:\-]\s*/, "").trim().slice(0, 90);
+}
+const FEED_ACTIVE_LEAD_SELECTOR =
+  "span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft";
+async function extractLeadClientNameFromFeedDom(page) {
+  try {
+    if (!page) return null;
+    const raw = await page.evaluate((selector) => {
+      const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const getVisible = (el) => {
+        try {
+          const st = window.getComputedStyle(el);
+          if (!st) return false;
+          if (st.visibility === "hidden" || st.display === "none") return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 1 && r.height > 1;
+        } catch {
+          return false;
+        }
+      };
+      // Seletor concreto do snippet do operador.
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const el of nodes) {
+        if (!getVisible(el)) continue;
+        const t = clean(el.textContent || "");
+        if (!t) continue;
+        if (t.includes(" · ")) return t;
+      }
+      // Fallback tolerante para variações de DOM da Meta.
+      const fallback = Array.from(document.querySelectorAll("span"))
+        .filter((el) => getVisible(el))
+        .map((el) => clean(el.textContent || ""))
+        .find((t) => t && t.includes(" · "));
+      return fallback || "";
+    }, FEED_ACTIVE_LEAD_SELECTOR);
+    const name = sanitizeLeadClientName(raw);
+    return name || null;
+  } catch {
+    return null;
+  }
+}
 
 const ATENDIMENTO_DELTA_PATH = path.join(__dirname, "..", "dados", "atendimentodelta.json");
 let _atDeltaCache = { atMs: 0, parsed: null };
@@ -433,45 +506,47 @@ async function extractCityFromMarketplaceDom(page) {
     if (!page) return null;
     const res = await page.evaluate(() => {
       const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
-      const norm = (s) =>
-        clean(s)
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLowerCase();
+      // Regex rígida (não-gulosa) para evitar capturar "Message Save Share..."
+      // Formato alvo: "Cidade, UF" ou "Cidade - UF" (retornamos normalizado para "Cidade (UF)").
+      const GEO_RE = /([A-ZÀ-ÿ][A-ZÀ-ÿ\s]{1,60}?)\s*[,\-]\s*([A-Z]{2})\b/i;
+      const out = [];
+      const push = (value, source) => {
+        const v = clean(value);
+        if (!v) return;
+        out.push({ value: v, source });
+      };
 
-      const nodes = Array.from(document.querySelectorAll("span,div,a")).slice(0, 4500);
+      // Varredura nos mesmos blocos de detalhe/links do painel.
+      const nodes = Array.from(document.querySelectorAll("span,div,a")).slice(0, 5500);
       for (const el of nodes) {
         const t = clean(el.textContent || "");
         if (!t) continue;
-        const nt = norm(t);
-        const has = nt.includes("anunciado em") || nt.includes("listed in");
-        if (!has) continue;
-
-        // Caso 1: o próprio texto já contém "Anunciado em X"
-        const m = t.match(/anunciado em\s*(.+)$/i) || t.match(/listed in\s*(.+)$/i);
-        if (m && m[1]) {
-          const v = clean(m[1]).replace(/^[:\-]\s*/, "");
-          if (v) return { ok: true, value: v, source: "inline_text" };
-        }
-
-        // Caso 2: existe um <a> dentro ou próximo do label
-        const cand =
-          (el.querySelector && el.querySelector("a")) ||
-          (el.parentElement && el.parentElement.querySelector && el.parentElement.querySelector("a")) ||
-          (el.nextElementSibling && (el.nextElementSibling.closest ? el.nextElementSibling.closest("a") : null)) ||
-          null;
-
-        if (cand) {
-          const v = clean(cand.textContent || "");
-          if (v) return { ok: true, value: v, source: "near_anchor" };
-        }
+        const m = t.match(GEO_RE);
+        if (!m || !m[1] || !m[2]) continue;
+        const city = clean(m[1]);
+        const uf = String(m[2] || "").trim().toUpperCase();
+        if (!city || !uf) continue;
+        push(`${city} (${uf})`, "dom_geo_regex");
       }
-      return { ok: false, value: null };
+
+      // Fallback no texto total da página para layouts alternativos.
+      const body = clean(document.body && document.body.innerText ? document.body.innerText : "");
+      const bodyMatch = body.match(GEO_RE);
+      if (bodyMatch && bodyMatch[1] && bodyMatch[2]) {
+        const city = clean(bodyMatch[1]);
+        const uf = String(bodyMatch[2] || "").trim().toUpperCase();
+        if (city && uf) push(`${city} (${uf})`, "body_geo_regex");
+      }
+
+      if (!out.length) return { ok: false, value: null, source: null };
+      return { ok: true, value: out[0].value, source: out[0].source };
     });
     const v = res && res.ok ? String(res.value || "").trim() : "";
     if (!v) return null;
-    // Hardening: limite e higienização
-    return v.replace(/\s+/g, " ").trim().slice(0, 80);
+    const normalized = normalizeCityToUfPattern(v);
+    // Trava final: só aceita se terminar em (UF). Caso contrário, considera inválido (evita lixo no CT).
+    if (!/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(String(normalized || "").trim())) return null;
+    return normalized;
   } catch {
     return null;
   }
@@ -2017,6 +2092,207 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   let lastCrossThreadSendAt = 0;
   let lastCrossThreadKey = "";
 
+  // ===================== Delivery Confirm (CT) =====================
+  // Objetivo: após envio real (Enter/click) confirmar de forma durável no CT
+  // para acender o "balão azul" / veredito final no dashboard.
+  const DELIVERY_CONFIRM_DIR = path.join(__dirname, "..", "dados", "delta_delivery_confirm");
+  const DELIVERY_CONFIRM_OUTBOX = path.join(DELIVERY_CONFIRM_DIR, "outbox.jsonl");
+  const DELIVERY_CONFIRM_CURSOR = path.join(DELIVERY_CONFIRM_DIR, "cursor.json");
+  const DELIVERY_CONFIRM_ACK_DIR = path.join(DELIVERY_CONFIRM_DIR, "acked");
+  let _deliveryConfirmPumpInFlight = false;
+  let _deliveryConfirmPumpBackoffMs = 450;
+
+  function ensureDeliveryConfirmDirsSync() {
+    try { fsSync.mkdirSync(DELIVERY_CONFIRM_DIR, { recursive: true }); } catch {}
+    try { fsSync.mkdirSync(DELIVERY_CONFIRM_ACK_DIR, { recursive: true }); } catch {}
+  }
+
+  function readDeliveryConfirmCursorSync() {
+    try {
+      if (!fsSync.existsSync(DELIVERY_CONFIRM_CURSOR)) return { offset: 0 };
+      const raw = String(fsSync.readFileSync(DELIVERY_CONFIRM_CURSOR, "utf8") || "").trim();
+      if (!raw) return { offset: 0 };
+      const j = JSON.parse(raw);
+      return { offset: Math.max(0, Number(j && j.offset || 0) || 0) };
+    } catch {
+      return { offset: 0 };
+    }
+  }
+
+  function writeDeliveryConfirmCursorSync(offset) {
+    try {
+      ensureDeliveryConfirmDirsSync();
+      const tmp = DELIVERY_CONFIRM_CURSOR + ".tmp";
+      fsSync.writeFileSync(tmp, JSON.stringify({ offset: Math.max(0, Number(offset || 0) || 0) }), "utf8");
+      fsSync.renameSync(tmp, DELIVERY_CONFIRM_CURSOR);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function ackFpForDeliveryConfirm(cmdId) {
+    const safe = String(cmdId || "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 180) || "cmd";
+    return path.join(DELIVERY_CONFIRM_ACK_DIR, `ack_${safe}.json`);
+  }
+
+  function hasDeliveryConfirmAckSync(cmdId) {
+    try { return fsSync.existsSync(ackFpForDeliveryConfirm(cmdId)); } catch { return false; }
+  }
+
+  function writeDeliveryConfirmAckSync(cmdId, patch = null) {
+    try {
+      ensureDeliveryConfirmDirsSync();
+      const fp = ackFpForDeliveryConfirm(cmdId);
+      const tmp = fp + ".tmp";
+      fsSync.writeFileSync(tmp, JSON.stringify({
+        ok: true,
+        cmd_id: String(cmdId || "").trim() || null,
+        acked_at: Date.now(),
+        ...(patch && typeof patch === "object" ? patch : {})
+      }), "utf8");
+      fsSync.renameSync(tmp, fp);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function resolveCtDeliveryConfirmUrl() {
+    const envDirect = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || "").trim();
+    if (envDirect) return envDirect;
+    const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
+    if (base) return `${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`;
+    // Fallback do projeto: painel
+    return "https://painel.convenientetecnologia.com/api/attendance/confirm-delivery";
+  }
+
+  function resolveCtDeliveryConfirmSecret() {
+    return String(
+      process.env.VIRTUS_DELTA_DELIVERY_SECRET
+      || process.env.CT_DELTA_DELIVERY_SECRET
+      || ""
+    ).trim();
+  }
+
+  async function postJsonWithTimeout(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
+    const u = String(url || "").trim();
+    if (!u) return { ok: false, status: 0, error: "empty_url" };
+    if (typeof fetch !== "function") return { ok: false, status: 0, error: "fetch_unavailable" };
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs || 4500) || 4500));
+    try {
+      const res = await fetch(u, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify(payload || {}),
+        signal: controller.signal
+      });
+      return { ok: !!res.ok, status: Number(res.status || 0) || 0 };
+    } catch (e) {
+      return { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
+    } finally {
+      clearTimeout(to);
+    }
+  }
+
+  function computeFallbackClientMessageId({ account_login, thread_key, texto_resposta } = {}) {
+    try {
+      const base = JSON.stringify({
+        account_login: String(account_login || "").trim(),
+        thread_key: String(thread_key || "").trim(),
+        texto_resposta: String(texto_resposta || "").replace(/\r/g, "")
+      });
+      return crypto.createHash("sha1").update(base, "utf8").digest("hex");
+    } catch {
+      return crypto.randomBytes(12).toString("hex");
+    }
+  }
+
+  function enqueueDeliveryConfirmToDiskSync({ cmdId, thread_key, status } = {}) {
+    ensureDeliveryConfirmDirsSync();
+    const cid = String(cmdId || "").trim() || crypto.randomBytes(12).toString("hex");
+    const rec = {
+      ts: Date.now(),
+      id: cid,
+      server_id: SERVER_ID,
+      account_login: ACCOUNT_LOGIN,
+      thread_key: String(thread_key || "").trim(),
+      status: String(status || "").trim() || "sent_to_facebook"
+    };
+    try { fsSync.appendFileSync(DELIVERY_CONFIRM_OUTBOX, JSON.stringify(rec) + "\n", "utf8"); } catch {}
+    return cid;
+  }
+
+  function kickDeliveryConfirmPump() {
+    try { setTimeout(() => { runDeliveryConfirmPump().catch(() => {}); }, 0).unref?.(); } catch {}
+  }
+
+  async function runDeliveryConfirmPump() {
+    if (_deliveryConfirmPumpInFlight) return;
+    _deliveryConfirmPumpInFlight = true;
+    try {
+      ensureDeliveryConfirmDirsSync();
+      const url = resolveCtDeliveryConfirmUrl();
+      const sec = resolveCtDeliveryConfirmSecret();
+
+      while (true) {
+        if (!fsSync.existsSync(DELIVERY_CONFIRM_OUTBOX)) break;
+        const cur = readDeliveryConfirmCursorSync();
+        const off = Math.max(0, Number(cur && cur.offset || 0) || 0);
+
+        let fd = null;
+        try {
+          fd = fsSync.openSync(DELIVERY_CONFIRM_OUTBOX, "r");
+          const st = fsSync.fstatSync(fd);
+          const size = Number(st && st.size || 0) || 0;
+          if (off >= size) break;
+          const maxChunk = 64 * 1024;
+          const toRead = Math.min(maxChunk, size - off);
+          const buf = Buffer.allocUnsafe(toRead);
+          const bytes = fsSync.readSync(fd, buf, 0, toRead, off);
+          const txt = buf.slice(0, bytes).toString("utf8");
+          const nl = txt.indexOf("\n");
+          if (nl === -1) break;
+          const line = txt.slice(0, nl).trim();
+          const nextOff = off + Buffer.byteLength(txt.slice(0, nl + 1), "utf8");
+          if (!line) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+
+          let rec = null;
+          try { rec = JSON.parse(line); } catch { rec = null; }
+          if (!rec) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+          const cmdId = String(rec.id || "").trim();
+          if (!cmdId) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+          if (hasDeliveryConfirmAckSync(cmdId)) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+
+          const payload = {
+            server_id: String(rec.server_id || SERVER_ID || "").trim(),
+            account_login: String(rec.account_login || ACCOUNT_LOGIN || "").trim(),
+            thread_key: String(rec.thread_key || "").trim(),
+            status: String(rec.status || "sent_to_facebook").trim(),
+            // Extra para correlação sem ambiguidades (best-effort).
+            client_message_id: cmdId
+          };
+          const headers = sec ? { "x-delivery-secret": sec } : {};
+          const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers });
+          if (r && r.ok) {
+            writeDeliveryConfirmAckSync(cmdId, { status: r.status, url });
+            writeDeliveryConfirmCursorSync(nextOff);
+            _deliveryConfirmPumpBackoffMs = 450;
+            continue;
+          }
+          _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
+          try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
+          break;
+        } finally {
+          try { if (fd) fsSync.closeSync(fd); } catch {}
+        }
+      }
+    } finally {
+      _deliveryConfirmPumpInFlight = false;
+    }
+  }
+
   function epochOk() {
     try {
       if (browser && browser._fenceEpochMap && typeof browser._fenceEpochMap[nome] !== "undefined") {
@@ -2127,10 +2403,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     return { waitedMs: remainMs, delayMs, elapsedMs: elapsed };
   }
 
-  async function sendDeltaReplyNow({ threadKey, textoResposta }) {
+  async function sendDeltaReplyNow({ threadKey, textoResposta, clientMessageId = null }) {
     if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
     const t = String(threadKey || "").trim();
     const msg = String(textoResposta || "").replace(/\r/g, "");
+    const cmid = String(clientMessageId || "").trim() || null;
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
 
     // Relógio Sentinela por conta (5–15s), isolado por ACCOUNT_LOGIN.
@@ -2157,6 +2434,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
           lastCrossThreadKey = String(t);
           lastCrossThreadSendAt = nowTs;
+          // Confirmação durável (best-effort + outbox local): acende veredito final no CT.
+          try {
+            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
+            kickDeliveryConfirmPump();
+          } catch (_) {}
           return lastOut;
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
@@ -2289,6 +2572,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       const u = String(page && page.url ? page.url() : "").trim();
       if (u) profileUrl = u;
     } catch (_) {}
+    let nomeClienteLimpo = null;
+    try {
+      nomeClienteLimpo = await extractLeadClientNameFromFeedDom(page);
+    } catch (_) {}
 
     const nowTs = Date.now();
     writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
@@ -2302,13 +2589,18 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       profile_url: profileUrl,
       greeting_text: greetingText,
       mensagens_cliente: mensagensConcatenadas,
+      nome_cliente_limpo: nomeClienteLimpo,
+      customer_name: nomeClienteLimpo,
     };
   }
 
-  const enqueueDeltaReply = ({ thread_key, texto_resposta }) => {
+  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id } = {}) => {
     return enqueue(async () => {
       try {
-        return await sendDeltaReplyNow({ threadKey: thread_key, textoResposta: texto_resposta });
+        const tk = String(thread_key || "").trim();
+        const tr = String(texto_resposta || "").replace(/\r/g, "");
+        const cmid = String(client_message_id || "").trim() || null;
+        return await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }

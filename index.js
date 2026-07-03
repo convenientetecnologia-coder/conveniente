@@ -1065,7 +1065,214 @@ function __infraAuth(req, res, next) {
 // Libertação de malha interna: /api/infra/* sem bloqueio por x-infra-secret.
 // Mantemos __infraAuth disponível para eventual rollback controlado.
 
-// Barramento Universal de Comandos (Tacada 1): execução síncrona + resposta 200 (sem ACK separado)
+// ===================== Delta Reply Outbox (Edge) =====================
+// Objetivo: aceitar delta_reply em <100ms e NÃO perder comandos
+// mesmo se cluster/worker estiver offline (fila durável em disco).
+const EDGE_DELTA_REPLY_OUTBOX_DIR = path.join(__dirname, 'dados', 'edge_delta_reply');
+const EDGE_DELTA_REPLY_OUTBOX_PATH = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'outbox.jsonl');
+const EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'cursor.json');
+const EDGE_DELTA_REPLY_OUTBOX_ACK_DIR = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'acked');
+
+function __edgeEnsureDeltaReplyOutboxDirsSync() {
+  try { fs.mkdirSync(EDGE_DELTA_REPLY_OUTBOX_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(EDGE_DELTA_REPLY_OUTBOX_ACK_DIR, { recursive: true }); } catch {}
+}
+
+function __edgeReadDeltaReplyCursorSync() {
+  try {
+    if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH)) return { offset: 0 };
+    const raw = String(fs.readFileSync(EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH, 'utf8') || '').trim();
+    if (!raw) return { offset: 0 };
+    const j = JSON.parse(raw);
+    const off = Math.max(0, Number(j && j.offset || 0) || 0);
+    return { offset: off };
+  } catch {
+    return { offset: 0 };
+  }
+}
+
+function __edgeWriteDeltaReplyCursorSync(offset) {
+  try {
+    __edgeEnsureDeltaReplyOutboxDirsSync();
+    const tmp = EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ offset: Math.max(0, Number(offset || 0) || 0) }), 'utf8');
+    try {
+      const fd = fs.openSync(tmp, 'r');
+      try { fs.fsyncSync(fd); } catch {}
+      try { fs.closeSync(fd); } catch {}
+    } catch {}
+    fs.renameSync(tmp, EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __edgeAckFilePathForCmdId(cmdId) {
+  const safe = String(cmdId || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'cmd';
+  return path.join(EDGE_DELTA_REPLY_OUTBOX_ACK_DIR, `ack_${safe}.json`);
+}
+
+function __edgeHasAckSync(cmdId) {
+  try {
+    const fp = __edgeAckFilePathForCmdId(cmdId);
+    return !!(fp && fs.existsSync(fp));
+  } catch {
+    return false;
+  }
+}
+
+function __edgeWriteAckSync(cmdId, patch = null) {
+  try {
+    __edgeEnsureDeltaReplyOutboxDirsSync();
+    const fp = __edgeAckFilePathForCmdId(cmdId);
+    if (!fp) return false;
+    const payload = {
+      ok: true,
+      cmd_id: String(cmdId || '').trim() || null,
+      acked_at: Date.now(),
+      ...(patch && typeof patch === 'object' ? patch : {})
+    };
+    const tmp = fp + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __edgeComputeCmdIdFallback({ nome, thread_key, texto_resposta, client_message_id } = {}) {
+  try {
+    const base = JSON.stringify({
+      nome: String(nome || '').trim(),
+      thread_key: String(thread_key || '').trim(),
+      texto_resposta: String(texto_resposta || '').replace(/\r/g, ''),
+      client_message_id: String(client_message_id || '').trim() || null
+    });
+    return crypto.createHash('sha1').update(base, 'utf8').digest('hex');
+  } catch {
+    return String(Date.now());
+  }
+}
+
+function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id } = {}) {
+  __edgeEnsureDeltaReplyOutboxDirsSync();
+  const cmdId = String(id || '').trim() || __edgeComputeCmdIdFallback({ nome, thread_key, texto_resposta, client_message_id });
+  const rec = {
+    ts: Date.now(),
+    type: 'delta_reply',
+    id: cmdId,
+    nome: String(nome || '').trim(),
+    thread_key: String(thread_key || '').trim(),
+    texto_resposta: String(texto_resposta || '').replace(/\r/g, ''),
+    client_message_id: String(client_message_id || '').trim() || null
+  };
+  try {
+    fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(rec) + '\n', 'utf8');
+  } catch {}
+  return cmdId;
+}
+
+let __edgeDeltaReplyPumpInFlight = false;
+let __edgeDeltaReplyPumpKickRequested = false;
+let __edgeDeltaReplyPumpBackoffMs = 250;
+
+function __edgeKickDeltaReplyPump() {
+  __edgeDeltaReplyPumpKickRequested = true;
+  try { setTimeout(() => { __edgeRunDeltaReplyPump().catch(() => {}); }, 0).unref?.(); } catch {}
+}
+
+async function __edgeRunDeltaReplyPump() {
+  if (__edgeDeltaReplyPumpInFlight) return;
+  __edgeDeltaReplyPumpInFlight = true;
+  try {
+    __edgeEnsureDeltaReplyOutboxDirsSync();
+    while (true) {
+      __edgeDeltaReplyPumpKickRequested = false;
+      if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
+      const cursor = __edgeReadDeltaReplyCursorSync();
+      const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+
+      let fd = null;
+      try {
+        fd = fs.openSync(EDGE_DELTA_REPLY_OUTBOX_PATH, 'r');
+        const stat = fs.fstatSync(fd);
+        const size = Number(stat && stat.size || 0) || 0;
+        if (offset >= size) break;
+
+        // Ler um chunk e capturar a primeira linha completa
+        const maxChunk = 64 * 1024;
+        const toRead = Math.min(maxChunk, size - offset);
+        const buf = Buffer.allocUnsafe(toRead);
+        const bytes = fs.readSync(fd, buf, 0, toRead, offset);
+        const txt = buf.slice(0, bytes).toString('utf8');
+        const nl = txt.indexOf('\n');
+        if (nl === -1) break; // linha incompleta ainda
+        const line = txt.slice(0, nl).trim();
+        const nextOffset = offset + Buffer.byteLength(txt.slice(0, nl + 1), 'utf8');
+        if (!line) { __edgeWriteDeltaReplyCursorSync(nextOffset); continue; }
+
+        let rec = null;
+        try { rec = JSON.parse(line); } catch { rec = null; }
+        if (!rec || String(rec.type || '').trim() !== 'delta_reply') {
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          continue;
+        }
+
+        const cmdId = String(rec.id || '').trim() || __edgeComputeCmdIdFallback(rec);
+        if (__edgeHasAckSync(cmdId)) {
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          continue;
+        }
+
+        // Se cluster ainda não está pronto, aguarde e re-tente depois (sem avançar cursor)
+        if (!clusterClient || typeof clusterClient.sendWorkerCommand !== 'function') {
+          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(500, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.6)));
+          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
+          break;
+        }
+
+        // Entrega por IPC ao worker dono do perfil (retorno rápido; execução real ocorre em background no worker/virtusDelta)
+        try {
+          const r = await clusterClient.sendWorkerCommand(
+            'delta-reply-task',
+            {
+              nome: String(rec.nome || '').trim(),
+              thread_key: String(rec.thread_key || '').trim(),
+              texto_resposta: String(rec.texto_resposta || '').replace(/\r/g, ''),
+              client_message_id: String(rec.client_message_id || rec.id || '').trim() || null
+            },
+            { timeoutMs: 4000 }
+          );
+          const ok = !!(r && r.ok !== false);
+          if (ok) {
+            __edgeWriteAckSync(cmdId, { worker: r || null });
+            __edgeWriteDeltaReplyCursorSync(nextOffset);
+            __edgeDeltaReplyPumpBackoffMs = 250;
+            continue;
+          }
+          // Falha: não avança cursor (retry), com backoff
+          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.7)));
+          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
+          break;
+        } catch (e) {
+          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.8)));
+          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
+          break;
+        }
+      } finally {
+        try { if (fd) fs.closeSync(fd); } catch {}
+      }
+
+      if (!__edgeDeltaReplyPumpKickRequested) break;
+    }
+  } finally {
+    __edgeDeltaReplyPumpInFlight = false;
+  }
+}
+
+// Barramento Universal de Comandos (Tacada 1): execução síncrona + resposta 200
 app.post('/api/infra/command-bus', async (req, res) => {
   try {
     const payload = (req && req.body && typeof req.body === 'object') ? req.body : {};
@@ -1080,7 +1287,8 @@ app.post('/api/infra/command-bus', async (req, res) => {
     const results = new Array(incoming.length);
     const normal = [];
     const normalIdx = [];
-    const deltaByAccount = new Map(); // nome -> [{ idx, cmd, nome, thread_key, texto_resposta }]
+    // OBS: delta_reply agora é aceito de forma ultra-rápida (ack HTTP imediato),
+    // e processado por outbox em background (durável).
 
     for (let i = 0; i < incoming.length; i++) {
       const cmd = incoming[i] && typeof incoming[i] === 'object' ? incoming[i] : {};
@@ -1093,13 +1301,22 @@ app.post('/api/infra/command-bus', async (req, res) => {
           results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
           continue;
         }
-        if (!clusterClient || typeof clusterClient.sendWorkerCommand !== 'function') {
-          results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'cluster_not_ready' };
-          continue;
-        }
-        const bucket = deltaByAccount.get(nome) || [];
-        bucket.push({ idx: i, cmd, nome, thread_key, texto_resposta });
-        deltaByAccount.set(nome, bucket);
+        const clientMessageId = String(cmd.client_message_id || cmd.clientMessageId || cmd.id || '').trim() || null;
+        const cmdId = __edgeEnqueueDeltaReplyToDiskSync({
+          id: String(cmd && cmd.id ? cmd.id : '').trim() || clientMessageId,
+          nome,
+          thread_key,
+          texto_resposta,
+          client_message_id: clientMessageId
+        });
+        try { forensicLog('EDGE_DELTA', 'delta_reply_received_by_edge', { id: cmdId, nome, thread_key, chars: texto_resposta.length }); } catch {}
+        __edgeKickDeltaReplyPump();
+        results[i] = {
+          id: cmdId,
+          type: 'delta_reply',
+          ok: true,
+          status: 'received_by_edge'
+        };
         continue;
       }
 
@@ -1246,36 +1463,6 @@ app.post('/api/infra/command-bus', async (req, res) => {
       normal.push(cmd);
       normalIdx.push(i);
     }
-
-    // Execução sharded por conta:
-    // - contas diferentes em paralelo (Promise.all)
-    // - ordem interna da mesma conta preservada (for/await dentro do bucket)
-    const accountJobs = Array.from(deltaByAccount.entries()).map(async ([nome, bucket]) => {
-      for (const item of bucket) {
-        const { idx, cmd, thread_key, texto_resposta } = item;
-        try {
-          const r = await clusterClient.sendWorkerCommand(
-            'delta-reply-task',
-            { nome, thread_key, texto_resposta },
-            { timeoutMs: 60000 }
-          );
-          results[idx] = {
-            id: cmd && cmd.id ? String(cmd.id) : null,
-            type: 'delta_reply',
-            ok: !!(r && r.ok !== false),
-            details: r || null
-          };
-        } catch (e) {
-          results[idx] = {
-            id: cmd && cmd.id ? String(cmd.id) : null,
-            type: 'delta_reply',
-            ok: false,
-            error: (e && e.message) ? String(e.message) : String(e)
-          };
-        }
-      }
-    });
-    await Promise.all(accountJobs);
 
     const out = normal.length ? await applyInfraCommands(normal) : { ok: true, results: [] };
     const outResults = (out && Array.isArray(out.results)) ? out.results : [];

@@ -47,3 +47,22 @@ _manual_backup_before_rollback/
 
 # Auditorias/artefatos operacionais locais (não versionar)
 dados/_ops_audit/
+
+# Filas/outbox/runtime do Delta (não versionar)
+dados/mensagens_pendentes.jsonl
+dados/mensagens_pendentes.cursor.json
+dados/mensagens_pendentes.compact.lock
+dados/edge_delta_reply/
+dados/delta_delivery_confirm/
+
+# Resíduos e diretórios locais de operação (não versionar)
+_residuos_local_*/
+ops/
+tools/
+
+# Estudos/forense dentro de dados/ (não versionar)
+dados/ESTUDO_*.txt
+dados/FASE*.txt
+dados/GABARITO_*.txt
+dados/RAIOX_*.md
+dados/RELATORIO_*.txt

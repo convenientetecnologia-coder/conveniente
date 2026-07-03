@@ -1,0 +1,37 @@
+AUDITORIA INTEGRIDADE HISTÓRICO (MESSENGER_DELTA) — RESUMO OPERACIONAL
+Data: 2026-07-03
+
+Tickets fornecidos (cards azuis vazios):
+  - #19132
+  - #19129
+  - #19115
+
+VEREDITO:
+  O CT está criando/atualizando o ticket, mas NÃO está persistindo o histórico (mensagens do cliente + saudação).
+  A rota do CT /api/messenger-delta/ingest só grava metadados e apenda o evento messenger_delta_lead_capturado.
+
+PROVA (SQLite attendance.sqlite):
+  - ticket_atendimento.raw_context_json NÃO tem historico, só: server_id, account_login, thread_key, cidade.
+  - ticket_event_log tem apenas messenger_delta_lead_capturado repetido (9–12 vezes por ticket).
+  - Não há eventos com texto de conversa (cliente) nem saudação.
+
+OBSERVAÇÃO EXTRA (por que o chat “parece 100% vazio”):
+  O dashboard, para messenger_delta, hoje lista apenas event_type:
+    - messenger_delta_agent_message_sent
+    - messenger_delta_delivery_update
+  Então messenger_delta_lead_capturado não aparece no chat.
+
+ONDE O TEXTO “MORRE”:
+  - VM/worker.js monta payload com:
+      mensagens_cliente_concatenadas
+      saudacao_texto
+  - CT/index.js (rota /api/messenger-delta/ingest) IGNORA esses campos e não faz INSERT de mensagens.
+
+OBSERVAÇÃO CRÍTICA EXTRA:
+  A “cidade” está sendo persistida com lixo de DOM:
+    "Message Save Share Details Condition ..."
+  Isso aparece em city_uf_normalized dos tickets de teste.
+
+ARQUIVO COMPLETO DO LAUDO (detalhado):
+  C:\conveniente\AUDITORIA_INTEGRIDADE_HISTORICO.md
+

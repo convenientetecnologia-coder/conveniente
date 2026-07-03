@@ -10327,11 +10327,12 @@ const handlers = {
 
   // FUSÃO OPERACIONAL (FASE 2/3):
   // Recebe resposta do Maestro :8088 via IPC e executa pelas MÃOS (virtusDelta) com fila serial.
-  async ['delta-reply-task']({ nome, thread_key, texto_resposta }) {
+  async ['delta-reply-task']({ nome, thread_key, texto_resposta, client_message_id }) {
     return lockProfileAction(nome, async () => {
       const n = String(nome || '').trim();
       const tk = String(thread_key || '').trim();
       const tr = String(texto_resposta || '').replace(/\r/g, '');
+      const cmid = String(client_message_id || '').trim() || null;
       if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
 
       const ctrl = controllers.get(n);
@@ -10349,9 +10350,23 @@ const handlers = {
         return { ok: false, error: 'delta_hands_unavailable' };
       }
 
-      try { logger.info('[DELTA][HANDS] delta-reply-task recebido', { nome: n, thread_key: tk, chars: tr.length }); } catch {}
-      const out = await runner.enqueueDeltaReply({ thread_key: tk, texto_resposta: tr });
-      return out && typeof out === 'object' ? out : { ok: true };
+      // Regra enterprise: ACK do IPC deve ser imediato (não aguardar digitação/DOM).
+      // A execução real ocorre em background no runtime do virtusDelta (fila serial).
+      try { logger.info('[DELTA][HANDS] delta-reply-task enfileirado', { nome: n, thread_key: tk, chars: tr.length, client_message_id: cmid }); } catch {}
+      try {
+        Promise.resolve()
+          .then(() => runner.enqueueDeltaReply({ thread_key: tk, texto_resposta: tr, client_message_id: cmid }))
+          .then((out) => {
+            try {
+              if (out && out.ok === true) logger.info('[DELTA][HANDS] delta-reply-task concluído', { nome: n, thread_key: tk, client_message_id: cmid });
+              else logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, out: out || null });
+            } catch {}
+          })
+          .catch((e) => {
+            try { logger.warn('[DELTA][HANDS] delta-reply-task exception', { nome: n, thread_key: tk, client_message_id: cmid, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+          });
+      } catch {}
+      return { ok: true, status: 'queued', client_message_id: cmid };
     });
   },
 
@@ -14645,12 +14660,47 @@ function __deltaRandInt(minMs, maxMs) {
 function __deltaThreadStateKey(nome, threadKey) {
   return `${String(nome || '').trim()}|${String(threadKey || '').trim()}`;
 }
+function __deltaIsKnownProcessedStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+  return s === 'processed_historical' || s === 'processed';
+}
+function __deltaReadThreadStateFileSync() {
+  try {
+    if (!fs.existsSync(DELTA_THREAD_STATE_PATH)) return { updatedAt: 0, threads: [] };
+    const raw = String(fs.readFileSync(DELTA_THREAD_STATE_PATH, 'utf8') || '').trim();
+    const parsed = __deltaSafeJsonParse(raw) || {};
+    const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
+    return { updatedAt: Number(parsed.updatedAt || 0) || 0, threads: arr };
+  } catch {
+    return { updatedAt: 0, threads: [] };
+  }
+}
+function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return '';
+  try {
+    const parsed = __deltaReadThreadStateFileSync();
+    const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const row = arr[i];
+      if (!row || typeof row !== 'object') continue;
+      const rn = String(row.nome || '').trim();
+      const rt = String(row.thread_key || '').trim();
+      if (rn !== n || rt !== tk) continue;
+      return String(row.status || '').trim();
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
 function __deltaCreateThreadState(nome, threadKey) {
   const now = Date.now();
   return {
     nome: String(nome || '').trim(),
     thread_key: String(threadKey || '').trim(),
-    status: 'new_buffering', // new_buffering | hands_in_progress | active
+    status: 'new_buffering', // new_buffering | hands_in_progress | active | processed | processed_historical
     createdAt: now,
     updatedAt: now,
     timerDueAt: 0,
@@ -14691,12 +14741,22 @@ function __deltaSerializeThreadState(st) {
 }
 function __deltaPersistThreadStateSync() {
   try {
-    const rows = [];
+    const prev = __deltaReadThreadStateFileSync();
+    const rowsByKey = new Map();
+    const prevRows = Array.isArray(prev.threads) ? prev.threads : [];
+    for (const row of prevRows) {
+      const nome = String(row && row.nome || '').trim();
+      const threadKey = String(row && row.thread_key || '').trim();
+      if (!nome || !threadKey) continue;
+      const k = __deltaThreadStateKey(nome, threadKey);
+      rowsByKey.set(k, row);
+    }
     for (const st of __deltaThreadStateMap.values()) {
       const one = __deltaSerializeThreadState(st);
       if (!one || !one.nome || !one.thread_key) continue;
-      rows.push(one);
+      rowsByKey.set(__deltaThreadStateKey(one.nome, one.thread_key), one);
     }
+    const rows = Array.from(rowsByKey.values());
     const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
     const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
     try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
@@ -14714,17 +14774,23 @@ function __deltaSchedulePersistThreadState() {
 }
 function __deltaLoadThreadStateSync() {
   try {
-    if (!fs.existsSync(DELTA_THREAD_STATE_PATH)) return;
-    const raw = String(fs.readFileSync(DELTA_THREAD_STATE_PATH, 'utf8') || '').trim();
-    const parsed = __deltaSafeJsonParse(raw) || {};
+    const parsed = __deltaReadThreadStateFileSync();
     const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
     for (const row of arr) {
       const nome = String(row && row.nome || '').trim();
       const threadKey = String(row && row.thread_key || '').trim();
       if (!nome || !threadKey) continue;
+      const rowStatus = String(row && row.status || 'new_buffering');
+      if (__deltaIsKnownProcessedStatus(rowStatus) || rowStatus === 'active') continue; // preserva em disco, sem ocupar RAM contínua
       const st = __deltaCreateThreadState(nome, threadKey);
-      st.status = String(row && row.status || 'new_buffering');
-      if (st.status !== 'active' && st.status !== 'new_buffering' && st.status !== 'hands_in_progress') st.status = 'new_buffering';
+      st.status = rowStatus;
+      if (
+        st.status !== 'active' &&
+        st.status !== 'new_buffering' &&
+        st.status !== 'hands_in_progress' &&
+        st.status !== 'processed_historical' &&
+        st.status !== 'processed'
+      ) st.status = 'new_buffering';
       if (st.status === 'hands_in_progress') st.status = 'new_buffering'; // pós-restart nunca assume "em voo"
       st.createdAt = Number(row && row.createdAt || 0) || st.createdAt;
       st.updatedAt = Number(row && row.updatedAt || 0) || st.updatedAt;
@@ -14746,6 +14812,98 @@ function __deltaLoadThreadStateSync() {
       __deltaThreadStateMap.set(__deltaThreadStateKey(nome, threadKey), st);
     }
   } catch {}
+}
+function __deltaAssimilateLegacyRespondedHistorySync() {
+  const baseDir = path.join(__dirname, '..', 'dados', 'perfis');
+  const out = {
+    ok: true,
+    baseDir,
+    scannedProfiles: 0,
+    importedThreads: 0,
+    skippedExisting: 0,
+    parseErrors: 0,
+    filesMissing: 0
+  };
+  try {
+    if (!fs.existsSync(baseDir)) {
+      out.ok = true;
+      out.reason = 'legacy_profiles_dir_missing';
+      return out;
+    }
+    let profileDirs = [];
+    try {
+      profileDirs = fs.readdirSync(baseDir, { withFileTypes: true })
+        .filter((d) => d && d.isDirectory && d.isDirectory())
+        .map((d) => String(d.name || '').trim())
+        .filter(Boolean);
+    } catch {
+      profileDirs = [];
+    }
+    const deltaFile = __deltaReadThreadStateFileSync();
+    const rowsByKey = new Map();
+    const existingRows = Array.isArray(deltaFile.threads) ? deltaFile.threads : [];
+    for (const row of existingRows) {
+      const rn = String(row && row.nome || '').trim();
+      const rt = String(row && row.thread_key || '').trim();
+      if (!rn || !rt) continue;
+      rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
+    }
+    for (const nome of profileDirs) {
+      out.scannedProfiles += 1;
+      const fp = path.join(baseDir, nome, 'chats_respondidos.json');
+      if (!fs.existsSync(fp)) {
+        out.filesMissing += 1;
+        continue;
+      }
+      let parsed = null;
+      try {
+        const raw = String(fs.readFileSync(fp, 'utf8') || '').trim();
+        parsed = raw ? JSON.parse(raw) : {};
+      } catch {
+        out.parseErrors += 1;
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      for (const threadKeyRaw of Object.keys(parsed)) {
+        const threadKey = String(threadKeyRaw || '').trim();
+        if (!threadKey) continue;
+        const k = __deltaThreadStateKey(nome, threadKey);
+        if (rowsByKey.has(k)) {
+          out.skippedExisting += 1;
+          continue;
+        }
+        const now = Date.now();
+        rowsByKey.set(k, {
+          nome: String(nome || '').trim(),
+          thread_key: threadKey,
+          status: 'processed_historical',
+          createdAt: now,
+          updatedAt: now,
+          timerDueAt: 0,
+          timerReason: '',
+          handsFailures: 0,
+          city: null,
+          seq: 0,
+          lastDispatchAt: 0,
+          messages: []
+        });
+        out.importedThreads += 1;
+      }
+    }
+    if (out.importedThreads > 0) {
+      const rows = Array.from(rowsByKey.values());
+      const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
+      const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+      try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+      fs.writeFileSync(tmp, body, 'utf8');
+      fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    }
+    return out;
+  } catch (e) {
+    out.ok = false;
+    out.error = (e && e.message) ? e.message : String(e);
+    return out;
+  }
 }
 function __deltaGetThreadState(nome, threadKey) {
   return __deltaThreadStateMap.get(__deltaThreadStateKey(nome, threadKey)) || null;
@@ -14955,6 +15113,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
   const city = String((handsOut && handsOut.cidade) || '').trim() || null;
+  const nomeClienteLimpo = String((handsOut && handsOut.nome_cliente_limpo) || '').trim() || null;
+  const customerName = String((handsOut && (handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || null;
   if (!city) {
     st.status = 'new_buffering';
     st.inFlight = false;
@@ -15004,15 +15164,32 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     flow_stage: 'new_chat_buffered_dispatched',
     saudacao_enviada: true,
     saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+    nome_cliente_limpo: nomeClienteLimpo,
+    customer_name: customerName,
   });
   __deltaKickIngestLoop();
 
   // Após criação do card, mantemos thread em modo ativo (tempo real),
-  // e limpamos apenas o buffer histórico já consolidado.
+  // e removemos do mapa em RAM para economia máxima; estado fica soberano no disco.
   st.messages = [];
-  __deltaSchedulePersistThreadState();
+  st.recentMessageKeys = new Map();
+  __deltaPersistThreadStateSync();
+  try { __deltaThreadStateMap.delete(__deltaThreadStateKey(n, tk)); } catch {}
 }
 __deltaLoadThreadStateSync();
+const __deltaLegacyAssimilationSummary = __deltaAssimilateLegacyRespondedHistorySync();
+try {
+  logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
+    ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
+    scannedProfiles: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.scannedProfiles || 0) || 0,
+    importedThreads: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.importedThreads || 0) || 0,
+    skippedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skippedExisting || 0) || 0,
+    parseErrors: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.parseErrors || 0) || 0,
+    filesMissing: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.filesMissing || 0) || 0,
+    reason: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.reason || ''),
+    error: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.error || '')
+  });
+} catch {}
 
 function __deltaSafeJsonParse(str) {
   try { return JSON.parse(String(str || '')); } catch { return null; }
@@ -16624,17 +16801,80 @@ async function __deltaAttachCdpEar(nome, page) {
 
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
         const nowMs = Date.now();
-        const st = __deltaGetOrCreateThreadState(nome, threadKey);
-        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
-        const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
-        const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
-
         const networkCtx = {
           network_transport: String(transport || '').trim() || null,
           network_request_id: String(requestId || '').trim() || null,
           network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
           network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
         };
+        const diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
+        if (__deltaIsKnownProcessedStatus(diskStatus)) {
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_skip_forense_estado_conhecido',
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            cidade: null,
+            operacao_meta: op || 'message',
+            mensagem_seq: 0,
+            dispatch_ct: false,
+            queue_mode: 'capture_only',
+            flow_stage: 'skip_known_processed_state_disk_lookup',
+            state_status: String(diskStatus || ''),
+            message_at: nowMs,
+            ...networkCtx
+          });
+          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+          continue;
+        }
+        if (String(diskStatus || '').trim().toLowerCase() === 'active') {
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_chat_ativo_realtime',
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            mensagens_cliente_concatenadas: texto,
+            mensagens_cliente_qtd: 1,
+            cidade: null,
+            operacao_meta: op || 'message',
+            mensagem_seq: 0,
+            dispatch_ct: true,
+            queue_mode: 'dispatch_ct',
+            flow_stage: 'chat_ativo_realtime_disk_lookup',
+            state_status: 'active',
+            message_at: nowMs,
+            ...networkCtx
+          });
+          __deltaKickIngestLoop();
+          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+          continue;
+        }
+        const st = __deltaGetOrCreateThreadState(nome, threadKey);
+        if (__deltaIsKnownProcessedStatus(st.status)) {
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_skip_forense_estado_conhecido',
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            cidade: st.city || null,
+            operacao_meta: op || 'message',
+            mensagem_seq: Number(st.seq || 0) || 0,
+            dispatch_ct: false,
+            queue_mode: 'capture_only',
+            flow_stage: 'skip_known_processed_state',
+            state_status: String(st.status || ''),
+            message_at: nowMs,
+            ...networkCtx
+          });
+          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+          continue;
+        }
+        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
+        const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
+        const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
 
         __deltaAppendPendingJsonlSync({
           event: 'lead_capturado_buffer',
