@@ -14743,6 +14743,171 @@ const DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS = Math.max(
   10,
   Math.min(300, Number(process.env.DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS || 80) || 80)
 );
+
+// =========================
+// DELTA: Arquitetura 2 camadas (REPRESA vs DISPARO)
+// - REPRESA: new leads timer queue (1–2min), serial POR CONTA, fora do Puppeteer.
+// - DISPARO: ctrl.virtus (Promise chain) executa DOM + cooldown 5–15s.
+// Objetivo: eliminar bursts de timers simultâneos que geram head-of-line blocking.
+// =========================
+const DELTA_NEW_LEADS_TIMER_QUEUE_DIR = path.join(__dirname, '..', 'dados', 'delta_new_leads_timer_queue');
+function __deltaNewLeadsQueueDirForAccount(nome) {
+  return path.join(DELTA_NEW_LEADS_TIMER_QUEUE_DIR, safeFilePart(nome));
+}
+function __deltaNewLeadsOutboxPath(nome) {
+  return path.join(__deltaNewLeadsQueueDirForAccount(nome), 'outbox.jsonl');
+}
+function __deltaNewLeadsCursorPath(nome) {
+  return path.join(__deltaNewLeadsQueueDirForAccount(nome), 'cursor.json');
+}
+function __deltaEnsureNewLeadsQueueDirsSync(nome) {
+  try { ensureDirSync(__deltaNewLeadsQueueDirForAccount(nome)); } catch {}
+}
+function __deltaReadNewLeadsCursorSync(nome) {
+  try {
+    const fp = __deltaNewLeadsCursorPath(nome);
+    if (!fs.existsSync(fp)) return { offset: 0 };
+    const raw = String(fs.readFileSync(fp, 'utf8') || '').trim();
+    if (!raw) return { offset: 0 };
+    const j = JSON.parse(raw);
+    const off = Math.max(0, Number(j && j.offset || 0) || 0);
+    return { offset: off };
+  } catch {
+    return { offset: 0 };
+  }
+}
+function __deltaWriteNewLeadsCursorSync(nome, offset) {
+  try {
+    __deltaEnsureNewLeadsQueueDirsSync(nome);
+    const fp = __deltaNewLeadsCursorPath(nome);
+    const tmp = fp + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ offset: Math.max(0, Number(offset || 0) || 0) }), 'utf8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs } = {}) {
+  try {
+    const n = String(nome || '').trim();
+    const tk = String(thread_key || '').trim();
+    if (!n || !tk) return false;
+    __deltaEnsureNewLeadsQueueDirsSync(n);
+    const rec = {
+      ts: Date.now(),
+      type: 'new_lead_timer',
+      nome: n,
+      thread_key: tk,
+      delayMs: Math.max(0, Number(delayMs || 0) || 0),
+      dueAt: Math.max(0, Number(dueAt || 0) || 0),
+    };
+    fs.appendFileSync(__deltaNewLeadsOutboxPath(n), JSON.stringify(rec) + '\n', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const __deltaNewLeadsTimerInFlight = new Map(); // nome -> Timeout
+function __deltaKickNewLeadsTimerPump(nome) {
+  try {
+    const n = String(nome || '').trim();
+    if (!n) return;
+    setTimeout(() => { __deltaRunNewLeadsTimerPump(n).catch(() => {}); }, 0).unref?.();
+  } catch {}
+}
+async function __deltaRunNewLeadsTimerPump(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return;
+  if (__deltaNewLeadsTimerInFlight.has(n)) return; // 1 timer por vez POR CONTA
+  try {
+    const outbox = __deltaNewLeadsOutboxPath(n);
+    if (!fs.existsSync(outbox)) return;
+    const cursor = __deltaReadNewLeadsCursorSync(n);
+    const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+
+    let fd = null;
+    try {
+      fd = fs.openSync(outbox, 'r');
+      const st = fs.fstatSync(fd);
+      const size = Number(st && st.size || 0) || 0;
+      if (offset >= size) return;
+
+      const maxChunk = 64 * 1024;
+      const toRead = Math.min(maxChunk, size - offset);
+      const buf = Buffer.allocUnsafe(toRead);
+      const bytes = fs.readSync(fd, buf, 0, toRead, offset);
+      const txt = buf.slice(0, bytes).toString('utf8');
+      const nl = txt.indexOf('\n');
+      if (nl === -1) return; // linha incompleta
+      const line = txt.slice(0, nl).trim();
+      const nextOffset = offset + Buffer.byteLength(txt.slice(0, nl + 1), 'utf8');
+      if (!line) { __deltaWriteNewLeadsCursorSync(n, nextOffset); __deltaKickNewLeadsTimerPump(n); return; }
+      let rec = null;
+      try { rec = JSON.parse(line); } catch { rec = null; }
+      if (!rec || String(rec.type || '').trim() !== 'new_lead_timer') {
+        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        __deltaKickNewLeadsTimerPump(n);
+        return;
+      }
+      const tk = String(rec.thread_key || '').trim();
+      if (!tk) {
+        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        __deltaKickNewLeadsTimerPump(n);
+        return;
+      }
+
+      // Se o thread já ficou ativo (ou em voo), não faz sentido segurar represa: consome e segue.
+      const stThread = __deltaGetThreadState(n, tk);
+      if (stThread && (stThread.status === 'active' || stThread.status === 'hands_in_progress' || stThread.inFlight)) {
+        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        __deltaKickNewLeadsTimerPump(n);
+        return;
+      }
+
+      const dueAt = Math.max(0, Number(rec.dueAt || 0) || 0);
+      const remainMs = Math.max(0, dueAt ? (dueAt - Date.now()) : (Math.max(0, Number(rec.delayMs || 0) || 0)));
+      try {
+        console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
+          event: 'new_lead_reservoir_timer_begin',
+          scheduled_at: Date.now(),
+          account_login: n,
+          thread_key: tk,
+          remain_ms: remainMs,
+          dueAt: dueAt || null,
+        }));
+      } catch {}
+
+      const handle = setTimeout(() => {
+        __deltaNewLeadsTimerInFlight.delete(n);
+        // Consome da represa PRIMEIRO (para liberar próximo timer).
+        try { __deltaWriteNewLeadsCursorSync(n, nextOffset); } catch {}
+        try {
+          console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
+            event: 'new_lead_reservoir_timer_fired',
+            fired_at: Date.now(),
+            account_login: n,
+            thread_key: tk,
+            dueAt: dueAt || null,
+          }));
+        } catch {}
+        // Downstream: dispara a ação no pipeline soberano (ctrl.virtus) em background.
+        try {
+          Promise.resolve()
+            .then(() => __deltaHandleBufferedThreadTimer(n, tk, { reason: 'initial' }))
+            .catch(() => {});
+        } catch {}
+        // Ativa o próximo lead novo da represa imediatamente.
+        try { __deltaKickNewLeadsTimerPump(n); } catch {}
+      }, Math.max(0, remainMs));
+      handle.unref?.();
+      __deltaNewLeadsTimerInFlight.set(n, handle);
+    } finally {
+      try { if (fd) fs.closeSync(fd); } catch {}
+    }
+  } catch {}
+}
 const __deltaThreadStateMap = new Map();
 // Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
 const __deltaActiveUpsertBuffer = new Map();
@@ -15313,8 +15478,8 @@ function __deltaGetOrCreateThreadState(nome, threadKey) {
   return st;
 }
 function __deltaClearThreadTimer(st) {
-  if (!st || !st.timerHandle) return;
-  try { clearTimeout(st.timerHandle); } catch {}
+  if (!st || typeof st !== 'object') return;
+  try { if (st.timerHandle) clearTimeout(st.timerHandle); } catch {}
   st.timerHandle = null;
   st.timerDueAt = 0;
   st.timerReason = '';
@@ -17920,8 +18085,16 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
-        if (st.status !== 'hands_in_progress' && !st.timerHandle) {
-          const delayMs = __deltaScheduleThreadTimer(st, { retry: false });
+        // Arquitetura 2 camadas (Gemini): novo lead NÃO arma timer em paralelo por thread.
+        // Enfileira na REPRESA (1 timer por vez por conta) e só depois dispara para ctrl.virtus.
+        if (st.status !== 'hands_in_progress' && !st.timerHandle && !(Number(st.timerDueAt || 0) > 0)) {
+          const delayMs = __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
+          st.timerReason = 'initial';
+          st.timerDueAt = Date.now() + delayMs;
+          st.updatedAt = nowMs;
+          __deltaSchedulePersistThreadState();
+          __deltaEnqueueNewLeadTimerToDiskSync({ nome: String(nome || ''), thread_key: threadKey, delayMs, dueAt: st.timerDueAt });
+          __deltaKickNewLeadsTimerPump(String(nome || ''));
           try {
             logger.info('[DELTA][BUFFER] novo chat detectado; timer armado', {
               nome: String(nome || ''),
