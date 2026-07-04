@@ -14701,19 +14701,6 @@ const DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS = Math.max(
   10,
   Math.min(300, Number(process.env.DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS || 80) || 80)
 );
-// Segunda camada de dedupe (anti “replay fantasma”): texto igual nos últimos N ms já despachado via insertMessage.
-// Deve ler em disco (tail do JSONL), sem cache de strings em RAM global.
-const DELTA_ACTIVE_UPSERT_TEXT_DEDUP_WINDOW_MS = Math.max(
-  30_000,
-  Math.min(30 * 60_000, Number(process.env.DELTA_ACTIVE_UPSERT_TEXT_DEDUP_WINDOW_MS || 300_000) || 300_000)
-);
-const DELTA_ACTIVE_UPSERT_TEXT_DEDUP_TAIL_BYTES = Math.max(
-  128 * 1024,
-  Math.min(
-    8 * 1024 * 1024,
-    Number(process.env.DELTA_ACTIVE_UPSERT_TEXT_DEDUP_TAIL_BYTES || (1024 * 1024)) || (1024 * 1024)
-  )
-);
 const __deltaThreadStateMap = new Map();
 // Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
 const __deltaActiveUpsertBuffer = new Map();
@@ -14822,7 +14809,7 @@ function __deltaExtractMetaMessageIds(ev) {
     e.meta_message_id ||
     ''
   ).trim() || null;
-  const offlineId = String(
+  const offlineThreadingId = String(
     e.offline_threading_id ||
     e.offlineThreadingId ||
     e.offline_threadingId ||
@@ -14830,7 +14817,18 @@ function __deltaExtractMetaMessageIds(ev) {
     e.meta_offline_threading_id ||
     ''
   ).trim() || null;
-  return { msgId, offlineId, dedupId: msgId || offlineId || null };
+  const clientMessageId = String(
+    e.client_message_id ||
+    e.clientMessageId ||
+    e.client_msg_id ||
+    e.clientMsgId ||
+    ''
+  ).trim() || null;
+  // ID canônico de transação do cliente (imutável na origem).
+  const txId = offlineThreadingId || clientMessageId || null;
+  // Dedup em disco deve preferir txId (offline/client) e só cair para msgId se não existir.
+  const dedupId = txId || msgId || null;
+  return { msgId, offlineId: txId, txId, dedupId };
 }
 
 function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
@@ -14858,75 +14856,6 @@ function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
     if (hay.includes(`\"meta_message_id\":${q}`)) return true;
     if (hay.includes(`\"meta_offline_threading_id\":${q}`)) return true;
     if (hay.includes(`\"dedup_meta_id\":${q}`)) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-function __deltaCheckTextDuplicationInTimeWindow(threadKey, texto) {
-  try {
-    const tk = String(threadKey || '').trim();
-    const tx = String(texto || '').trim();
-    if (!tk || !tx) return false;
-    if (!fs.existsSync(DELTA_QUEUE_PATH)) return false;
-    const st = fs.statSync(DELTA_QUEUE_PATH);
-    const size = Number(st && st.size || 0) || 0;
-    if (!size) return false;
-
-    const now = Date.now();
-    const cutoff = now - (Number(DELTA_ACTIVE_UPSERT_TEXT_DEDUP_WINDOW_MS || 0) || 0);
-    if (!Number.isFinite(cutoff) || cutoff <= 0) return false;
-
-    const tailBytes = Math.min(size, Math.max(1, DELTA_ACTIVE_UPSERT_TEXT_DEDUP_TAIL_BYTES));
-    const start = Math.max(0, size - tailBytes);
-    const toRead = Math.max(0, size - start);
-    if (!toRead) return false;
-
-    const buf = Buffer.allocUnsafe(toRead);
-    let fd = null;
-    try {
-      fd = fs.openSync(DELTA_QUEUE_PATH, 'r');
-      fs.readSync(fd, buf, 0, toRead, start);
-    } finally {
-      try { if (fd) fs.closeSync(fd); } catch {}
-    }
-
-    const hay = buf.toString('utf8');
-    // Varredura reversa por linha (evita split gigantesco).
-    let i = hay.length;
-    let linesSeen = 0;
-    const maxLines = 8000; // guardrail local (RAM transitória)
-    while (i > 0 && linesSeen < maxLines) {
-      const prevNl = hay.lastIndexOf('\n', i - 1);
-      const line = hay.slice(prevNl + 1, i).trim();
-      i = prevNl >= 0 ? prevNl : 0;
-      if (!line) continue;
-      linesSeen += 1;
-
-      let obj = null;
-      try { obj = JSON.parse(line); } catch { obj = null; }
-      if (!obj || typeof obj !== 'object') continue;
-
-      // Filtro mínimo por thread + texto.
-      if (String(obj.thread_key || '').trim() !== tk) continue;
-      if (String(obj.texto_limpo || '').trim() !== tx) continue;
-
-      // Só considera duplicidade se esse texto já foi despachado via insertMessage.
-      const op = String(obj.operacao_meta || obj.operation || '').trim();
-      const dispatched = !!obj.dispatch_ct || String(obj.queue_mode || '').trim() === 'dispatch_ct';
-      if (!dispatched) continue;
-      if (op !== 'insertMessage') continue;
-
-      const at =
-        (Number(obj.message_at || 0) || 0) ||
-        (Number(obj.server_timestamp_ms || obj.server_timestampMs || 0) || 0) ||
-        (Number(obj.ts || 0) || 0);
-      if (!at || !Number.isFinite(at)) continue;
-      if (at < cutoff) continue;
-
-      return true;
-    }
     return false;
   } catch {
     return false;
@@ -17511,7 +17440,7 @@ async function __deltaAttachCdpEar(nome, page) {
           }
           if (op === 'upsertMessage') {
             // upsertMessage em thread active:
-            // - só é elegível se houver ID Meta (msg_id ou offline_threading_id)
+            // - só é elegível se houver ID canônico de transação do cliente (offline_threading_id / client_message_id)
             // - e se esse ID não existir no disco (dedupe em mensagens_pendentes.jsonl tail)
             // - e se a idade não for absurda (guardrail).
             if (!dedupMetaId) {
@@ -17521,7 +17450,7 @@ async function __deltaAttachCdpEar(nome, page) {
                   thread_key: threadKey,
                   flow_stage: 'discard_filter_triggered',
                   details: {
-                    reason: 'active_upsert_missing_meta_id',
+                    reason: 'active_upsert_missing_client_tx_id',
                     op,
                     transport: String(transport || ''),
                     requestId: String(requestId || ''),
@@ -17545,7 +17474,7 @@ async function __deltaAttachCdpEar(nome, page) {
                   mensagem_seq: 0,
                   dispatch_ct: false,
                   queue_mode: 'capture_only',
-                  flow_stage: 'active_upsert_missing_meta_id_sync_only',
+                  flow_stage: 'active_upsert_missing_client_tx_id_sync_only',
                   message_at: nowMs,
                   ...networkCtx
                 });
@@ -17597,49 +17526,6 @@ async function __deltaAttachCdpEar(nome, page) {
                 continue;
               }
             } catch {}
-
-            // Segunda trava: se o mesmo texto já foi despachado via insertMessage nos últimos N ms,
-            // classifica como replay fantasma (Meta pode re-entregar com outro meta_message_id).
-            if (__deltaCheckTextDuplicationInTimeWindow(threadKey, texto)) {
-              try {
-                __forensicEdgeEmit({
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  flow_stage: 'discard_filter_triggered',
-                  details: {
-                    reason: 'active_upsert_text_duplicate_recent_insert',
-                    op,
-                    window_ms: DELTA_ACTIVE_UPSERT_TEXT_DEDUP_WINDOW_MS,
-                    dedup_meta_id: dedupMetaId || null,
-                    message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                    offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                    text_preview: String(texto || '').slice(0, 220)
-                  }
-                });
-              } catch {}
-              try {
-                __deltaAppendPendingJsonlSync({
-                  event: 'lead_sync_only_active_non_insert',
-                  server_id: serverId || null,
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  texto_limpo: texto,
-                  dedup_meta_id: dedupMetaId,
-                  meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                  meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                  cidade: null,
-                  operacao_meta: op || 'upsertMessage',
-                  mensagem_seq: 0,
-                  dispatch_ct: false,
-                  queue_mode: 'capture_only',
-                  flow_stage: 'active_upsert_text_duplicate_recent_insert_sync_only',
-                  message_at: nowMs,
-                  ...networkCtx
-                });
-              } catch {}
-              try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-              continue;
-            }
 
             // Passou guardrails: aceitar como mensagem offline legítima.
             // Micro-buffer cronológico: acumula por 1s e flush ordenado por meta timestamp.
