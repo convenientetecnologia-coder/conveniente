@@ -14817,6 +14817,44 @@ function __deltaKickNewLeadsTimerPump(nome) {
     setTimeout(() => { __deltaRunNewLeadsTimerPump(n).catch(() => {}); }, 0).unref?.();
   } catch {}
 }
+async function __deltaBootstrapNewLeadsTimerPumps() {
+  try {
+    ensureDirSync(DELTA_NEW_LEADS_TIMER_QUEUE_DIR);
+    const entries = fs.readdirSync(DELTA_NEW_LEADS_TIMER_QUEUE_DIR, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent || !ent.isDirectory?.()) continue;
+      const outbox = path.join(DELTA_NEW_LEADS_TIMER_QUEUE_DIR, ent.name, 'outbox.jsonl');
+      if (!fs.existsSync(outbox)) continue;
+      let fd = null;
+      try {
+        fd = fs.openSync(outbox, 'r');
+        const st = fs.fstatSync(fd);
+        const size = Number(st && st.size || 0) || 0;
+        if (size <= 0) continue;
+        const buf = Buffer.allocUnsafe(Math.min(8 * 1024, size));
+        const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
+        const txt = buf.slice(0, bytes).toString('utf8');
+        const nl = txt.indexOf('\n');
+        if (nl === -1) continue;
+        const line = txt.slice(0, nl).trim();
+        if (!line) continue;
+        let rec = null;
+        try { rec = JSON.parse(line); } catch { rec = null; }
+        const n = String(rec && rec.nome || '').trim();
+        if (!n) continue;
+        const cursor = __deltaReadNewLeadsCursorSync(n);
+        const off = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+        if (off >= size) continue;
+        __deltaKickNewLeadsTimerPump(n);
+      } catch {} finally {
+        try { if (fd) fs.closeSync(fd); } catch {}
+      }
+    }
+  } catch {}
+}
+// Pós-boot: reativa timers pendentes persistidos na REPRESA em disco.
+setTimeout(() => { __deltaBootstrapNewLeadsTimerPumps().catch(() => {}); }, 8000).unref?.();
+setInterval(() => { __deltaBootstrapNewLeadsTimerPumps().catch(() => {}); }, 90_000).unref?.();
 async function __deltaRunNewLeadsTimerPump(nome) {
   const n = String(nome || '').trim();
   if (!n) return;
