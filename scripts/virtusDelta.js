@@ -1654,15 +1654,8 @@ async function readComposerText(page) {
     await page
       .evaluate(() => {
         const el =
-          // Preferência: Lexical editor do Threads/Messenger (mais específico; evita pegar outros contenteditables).
-          document.querySelector('div[role="textbox"][contenteditable="true"][data-lexical-editor="true"]') ||
-          document.querySelector('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]') ||
-          // Preferência por aria-label típico do composer.
-          document.querySelector('div[role="textbox"][contenteditable="true"][aria-label*="Escrever"]') ||
-          document.querySelector('div[contenteditable="true"][role="textbox"][aria-label*="Escrever"]') ||
-          // Fallback genérico (último recurso).
-          document.querySelector('div[role="textbox"][contenteditable="true"]') ||
-          document.querySelector('div[contenteditable="true"][role="textbox"]');
+          // Regra rígida (Gemini): foco/leitura EXCLUSIVOS do Lexical real.
+          document.querySelector('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]');
         if (!el) return "";
         return String(el.innerText || el.textContent || "").trim();
       })
@@ -1671,6 +1664,20 @@ async function readComposerText(page) {
 }
 
 async function clickSendButtonIfPresent(page) {
+  // Regra rígida (Gemini): redundância de envio deve caçar o botão real por acessibilidade (case-insensitive).
+  try {
+    const clickedStrict = await page.evaluate(() => {
+      const target = 'pressione enter para enviar';
+      const norm = (s) => String(s || '').trim().toLowerCase();
+      const els = Array.from(document.querySelectorAll('div[role="button"][aria-label]'));
+      const hit = els.find((el) => norm(el.getAttribute('aria-label')) === target);
+      if (!hit) return false;
+      try { hit.click(); } catch (_) {}
+      return true;
+    }).catch(() => false);
+    if (clickedStrict) return true;
+  } catch (_) {}
+
   const sels = [
     // Threads/Messenger moderno costuma expor o botão com este aria-label.
     '[role="button"][aria-label="Pressione Enter para enviar"]',
@@ -1740,15 +1747,8 @@ async function ensureComposerFocused(page, ctx = {}) {
   const forensicThreadKey = (ctx && ctx.thread_key != null) ? String(ctx.thread_key || "").trim() : null;
   const startedAt = Date.now();
   const sels = [
-    'div[role="textbox"][contenteditable="true"][data-lexical-editor="true"]',
+    // Regra rígida (Gemini): foco EXCLUSIVO no Lexical real.
     'div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]',
-    'div[role="textbox"][contenteditable="true"][aria-label*="Escrever"]',
-    'div[contenteditable="true"][role="textbox"][aria-label*="Escrever"]',
-    'div[role="textbox"][contenteditable="true"]',
-    'div[contenteditable="true"][role="textbox"]',
-    'div[aria-label="Mensagem"]',
-    'div[aria-label*="mensagem"]',
-    'div[role="textbox"][contenteditable="true"]',
   ];
 
   let handle = null;
@@ -1919,6 +1919,38 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     for (const sel of selectors) {
       const a = await page.$(sel).catch(() => null);
       if (a) {
+        // Trava de segurança (Gemini): não clicar se o card já está ativo (aria-current="page").
+        try {
+          const isCurrentPage = await a
+            .evaluate((el) => {
+              if (!el) return false;
+              if (el.getAttribute("aria-current") === "page") return true;
+              return Boolean(el.closest('[aria-current="page"]'));
+            })
+            .catch(() => false);
+          if (isCurrentPage) {
+            try {
+              const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
+              __forensicEdgeEmit({
+                account_login: forensicAccountLogin,
+                thread_key: t,
+                flow_stage: "browser_window_state_check",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  selector: sel,
+                  scrolled: i,
+                  is_already_open: true,
+                  aria_current_page: true,
+                  skipped_click: true,
+                  current_path: currentPath ? String(currentPath) : null,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+            return { ok: true, scrolled: i, matched_selector: sel, already_open: true, skipped_click: true };
+          }
+        } catch (_) {}
+
         await humanPause("preThreadClick", "pre_thread_card_click");
         try {
           const st = await page

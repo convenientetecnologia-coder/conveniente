@@ -10404,13 +10404,7 @@ const handlers = {
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         return { ok: false, error: 'browser_not_connected' };
       }
-      if (!ctrl.virtus) {
-        return { ok: false, error: 'virtus_not_running' };
-      }
-
-      const runner = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
-        ? await ctrl.virtus.catch(() => null)
-        : ctrl.virtus;
+      const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
       if (!runner || typeof runner.enqueueDeltaReply !== 'function') {
         return { ok: false, error: 'delta_hands_unavailable' };
       }
@@ -15379,10 +15373,11 @@ function __deltaIsRecentDuplicate(st, text, op, nowMs = Date.now()) {
   }
   return false;
 }
-async function __deltaResolveVirtusRunner(nome) {
+async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
+    const requiredFn = (String(need || '').trim().toLowerCase() === 'reply') ? 'enqueueDeltaReply' : 'enqueueDeltaGreetingFlow';
     const resolveRunner = async (candidate) => {
       try {
         return (candidate && typeof candidate.then === 'function')
@@ -15394,13 +15389,10 @@ async function __deltaResolveVirtusRunner(nome) {
     };
 
     const direct = await resolveRunner(ctrl.virtus);
-    if (direct && typeof direct.enqueueDeltaGreetingFlow === 'function') return direct;
-
-    const forced = await resolveRunner(ctrl.deltaForcedVirtus);
-    if (forced && typeof forced.enqueueDeltaGreetingFlow === 'function') return forced;
+    if (direct && typeof direct[requiredFn] === 'function') return direct;
 
     // Imunidade de estado: se já há evidência soberana de tráfego de rede
-    // do Facebook/Messenger, forçamos o runtime Delta mesmo que o painel esteja divergente.
+    // do Facebook/Messenger, unificamos o runtime Delta em ctrl.virtus (PROIBIDO split-brain).
     const networkEvidenceAt = Number(ctrl.deltaNetworkEvidenceAt || 0) || 0;
     if (!networkEvidenceAt) return null;
 
@@ -15414,24 +15406,25 @@ async function __deltaResolveVirtusRunner(nome) {
     }
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') return null;
 
-    ctrl.deltaForcedVirtus = deltaVirtus.startVirtusDeltaRuntime(ctrl.browser, nome, {
+    // Regra rígida (Gemini): Fluxo 1 e Fluxo 2 DEVEM usar a mesma fila serial em ctrl.virtus.
+    ctrl.virtus = deltaVirtus.startVirtusDeltaRuntime(ctrl.browser, nome, {
       epoch: ctrl.virtusEpoch || 0,
       slowMode: false,
       governorMode: 'full',
       restrictTab: 0,
-      bootReason: 'delta_network_sovereign',
+      bootReason: 'delta_unified_runtime',
     });
-    const booted = await resolveRunner(ctrl.deltaForcedVirtus);
-    if (booted && typeof booted.enqueueDeltaGreetingFlow === 'function') {
+    const booted = await resolveRunner(ctrl.virtus);
+    if (booted && typeof booted[requiredFn] === 'function') {
       try {
-        logger.info('[DELTA][FORCE_BOOT] Runtime Delta forçado por evidência de rede', {
+        logger.info('[DELTA][UNIFIED_BOOT] Runtime Delta unificado em ctrl.virtus por evidência de rede', {
           nome: String(nome || ''),
           networkEvidenceAt
         });
       } catch {}
       try {
         if (typeof forensicLog === 'function') {
-          forensicLog('DELTA', 'force_boot_delta_runtime', {
+          forensicLog('DELTA', 'unified_boot_delta_runtime', {
             nome: String(nome || ''),
             networkEvidenceAt
           });
@@ -15445,7 +15438,7 @@ async function __deltaResolveVirtusRunner(nome) {
   }
 }
 async function __deltaRunHandsGreetingFlow({ nome, threadKey, mensagensCliente }) {
-  const runner = await __deltaResolveVirtusRunner(nome);
+  const runner = await __deltaResolveVirtusRunner(nome, { need: 'greeting' });
   if (!runner || typeof runner.enqueueDeltaGreetingFlow !== 'function') {
     return { ok: false, error: 'delta_hands_unavailable' };
   }
