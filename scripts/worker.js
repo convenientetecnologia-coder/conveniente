@@ -16632,7 +16632,6 @@ function __deltaShouldEmitLeadText(textoLimpo) {
   if (!t) return false;
   if (t.startsWith('mid.')) return false;
   if (/^\d+$/.test(t)) {
-    if (/^(0|1|2|3|4|5|80|95)$/.test(t)) return false;
     if (t.length >= 12) return false;
   }
   if (/^(request_id|payload|sp|data|viewer|mailbox|encrypted_backup|extensions|server_metadata|is_final|label|path|nodes)$/i.test(t)) return false;
