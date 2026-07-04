@@ -17217,42 +17217,46 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
-          // Opção canônica A (anti-duplicidade):
-          // Em threads ativas, updateThreadSnippet é apenas hidratação silenciosa (não pode gerar dispatch realtime).
-          if (op === 'updateThreadSnippet') {
+          // Contrato rígido: em thread ativa, realtime é EXCLUSIVO de insertMessage.
+          // updateThreadSnippet e upsertMessage podem ser observados/registrados, mas nunca despachados ao CT.
+          if (op !== 'insertMessage') {
             try {
               __forensicEdgeEmit({
                 account_login: String(nome || ''),
                 thread_key: threadKey,
                 flow_stage: 'discard_filter_triggered',
                 details: {
-                  reason: 'active_thread_snippet_blocked_realtime',
+                  reason: 'active_thread_non_insert_blocked_realtime',
                   op,
                   transport: String(transport || ''),
                   requestId: String(requestId || ''),
                   sourceHint: String(sourceHint || ''),
+                  dedup_meta_id: dedupMetaId || null,
+                  message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                  offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
                   text_preview: String(texto || '').slice(0, 220)
                 }
               });
             } catch {}
-            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-            continue;
-          }
-          // Em threads ativas, só aceitamos realtime se houver ID canônico (message_id/offline_threading_id).
-          if (op === 'upsertMessage' && !dedupMetaId) {
+            // Hidratação silenciosa em disco (sem CT): registrar na fila durável como capture_only
             try {
-              __forensicEdgeEmit({
+              __deltaAppendPendingJsonlSync({
+                event: 'lead_sync_only_active_non_insert',
+                server_id: serverId || null,
                 account_login: String(nome || ''),
                 thread_key: threadKey,
-                flow_stage: 'discard_filter_triggered',
-                details: {
-                  reason: 'active_thread_upsert_missing_meta_id',
-                  op,
-                  transport: String(transport || ''),
-                  requestId: String(requestId || ''),
-                  sourceHint: String(sourceHint || ''),
-                  text_preview: String(texto || '').slice(0, 220)
-                }
+                texto_limpo: texto,
+                dedup_meta_id: dedupMetaId || null,
+                meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                cidade: null,
+                operacao_meta: op || 'message',
+                mensagem_seq: 0,
+                dispatch_ct: false,
+                queue_mode: 'capture_only',
+                flow_stage: 'active_non_insert_sync_only',
+                message_at: nowMs,
+                ...networkCtx
               });
             } catch {}
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
@@ -17286,7 +17290,9 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (op === 'upsertMessage') {
-          // Fora de threads ativas, upsertMessage é sync/histórico: não pode alimentar CT nem timers.
+          // Fora de threads ativas, upsertMessage é sync/histórico:
+          // - nunca pode alimentar CT/timers
+          // - mas deve ser registrado em disco (hidratação silenciosa) para auditoria.
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
@@ -17300,6 +17306,26 @@ async function __deltaAttachCdpEar(nome, page) {
                 sourceHint: String(sourceHint || ''),
                 text_preview: String(texto || '').slice(0, 220)
               }
+            });
+          } catch {}
+          try {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_sync_only_upsert',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              cidade: null,
+              operacao_meta: op || 'upsertMessage',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'upsert_sync_only',
+              message_at: nowMs,
+              ...networkCtx
             });
           } catch {}
           continue;
