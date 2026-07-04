@@ -14733,14 +14733,12 @@ function __deltaFlushActiveUpsertBuffer(threadKey, { reason = 'timer' } = {}) {
       }
     } catch {}
 
-    let maxTs = 0;
     for (const it of buf.items) {
       if (!it || typeof it !== 'object') continue;
       const account_login = String(it.account_login || '').trim();
       const thread_key = String(it.thread_key || '').trim();
       if (!account_login || !thread_key) continue;
       const messageAt = Number(it.meta_ts || 0) || Date.now();
-      if (messageAt > maxTs) maxTs = messageAt;
       __deltaAppendPendingJsonlSync({
         event: 'lead_chat_ativo_realtime',
         server_id: it.server_id || null,
@@ -14764,10 +14762,6 @@ function __deltaFlushActiveUpsertBuffer(threadKey, { reason = 'timer' } = {}) {
         ...((it.networkCtx && typeof it.networkCtx === 'object') ? it.networkCtx : {})
       });
     }
-    // Linha de corte temporal (high-watermark): persiste o maior timestamp já despachado.
-    try {
-      if (maxTs > 0) __deltaUpdateThreadHighWatermarkOnDiskSync(String(buf.items[0] && buf.items[0].account_login || ''), tk, maxTs);
-    } catch {}
     __deltaKickIngestLoop();
   } catch {
     // fallback: garante limpeza de RAM mesmo se der erro
@@ -14815,7 +14809,9 @@ function __deltaExtractMetaMessageIds(ev) {
     e.meta_message_id ||
     ''
   ).trim() || null;
-  const offlineThreadingId = String(
+  // Contrato canônico: deduplicação por ID de servidor da Meta (mid/message_id).
+  // offline_threading_id/client_message_id podem existir, mas NÃO são usados como chave de dedupe.
+  const offlineId = String(
     e.offline_threading_id ||
     e.offlineThreadingId ||
     e.offline_threadingId ||
@@ -14823,18 +14819,7 @@ function __deltaExtractMetaMessageIds(ev) {
     e.meta_offline_threading_id ||
     ''
   ).trim() || null;
-  const clientMessageId = String(
-    e.client_message_id ||
-    e.clientMessageId ||
-    e.client_msg_id ||
-    e.clientMsgId ||
-    ''
-  ).trim() || null;
-  // ID canônico de transação do cliente (imutável na origem).
-  const txId = offlineThreadingId || clientMessageId || null;
-  // Dedup em disco deve preferir txId (offline/client) e só cair para msgId se não existir.
-  const dedupId = txId || msgId || null;
-  return { msgId, offlineId: txId, txId, dedupId };
+  return { msgId, offlineId, txId: null, dedupId: msgId || null };
 }
 
 function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
@@ -14891,10 +14876,10 @@ function __deltaReadThreadStateFileSync() {
     return { updatedAt: 0, threads: [] };
   }
 }
-function __deltaReadKnownThreadRowFromDiskSync(nome, threadKey) {
+function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
   const n = String(nome || '').trim();
   const tk = String(threadKey || '').trim();
-  if (!n || !tk) return { status: '', high_watermark: 0 };
+  if (!n || !tk) return '';
   try {
     const parsed = __deltaReadThreadStateFileSync();
     const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
@@ -14904,19 +14889,12 @@ function __deltaReadKnownThreadRowFromDiskSync(nome, threadKey) {
       const rn = String(row.nome || '').trim();
       const rt = String(row.thread_key || '').trim();
       if (rn !== n || rt !== tk) continue;
-      return {
-        status: String(row.status || '').trim(),
-        high_watermark: Number(row.high_watermark || row.highWatermark || 0) || 0
-      };
+      return String(row.status || '').trim();
     }
-    return { status: '', high_watermark: 0 };
+    return '';
   } catch {
-    return { status: '', high_watermark: 0 };
+    return '';
   }
-}
-function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
-  const row = __deltaReadKnownThreadRowFromDiskSync(nome, threadKey);
-  return String(row && row.status || '').trim();
 }
 
 function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
@@ -14948,49 +14926,6 @@ function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
       handsFailures: 0,
       messages: [],
     });
-    const rows = Array.from(rowsByKey.values());
-    const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, nextTsMs) {
-  try {
-    const n = String(nome || '').trim();
-    const tk = String(threadKey || '').trim();
-    const ts = Number(nextTsMs || 0) || 0;
-    if (!n || !tk || !ts) return false;
-
-    const parsed = __deltaReadThreadStateFileSync();
-    const prev = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
-    const k = __deltaThreadStateKey(n, tk);
-    const rowsByKey = new Map();
-    for (const row of prev) {
-      const rn = String(row && row.nome || '').trim();
-      const rt = String(row && row.thread_key || '').trim();
-      if (!rn || !rt) continue;
-      rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
-    }
-
-    const now = Date.now();
-    const base = rowsByKey.get(k) || {};
-    const prevHw = Number((base && (base.high_watermark || base.highWatermark)) || 0) || 0;
-    const hw = Math.max(prevHw, ts);
-    rowsByKey.set(k, {
-      ...(base && typeof base === 'object' ? base : {}),
-      nome: n,
-      thread_key: tk,
-      high_watermark: hw,
-      updatedAt: now,
-      lastDispatchAt: now,
-    });
-
     const rows = Array.from(rowsByKey.values());
     const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
     const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
@@ -17334,6 +17269,49 @@ async function __deltaAttachCdpEar(nome, page) {
 
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const dedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
+
+        // Deduplicação canônica por ID de servidor (Meta): insert/upsert DEVEM ter meta_message_id (mid/message_id).
+        if ((op === 'insertMessage' || op === 'upsertMessage') && !dedupMetaId) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'missing_meta_message_id',
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          try {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_sync_only_active_non_insert',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              dedup_meta_id: null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              cidade: null,
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'missing_meta_message_id_sync_only',
+              message_at: nowMs,
+              network_transport: String(transport || '').trim() || null,
+              network_request_id: String(requestId || '').trim() || null,
+              network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
+              network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
+            });
+          } catch {}
+          continue;
+        }
         if (dedupMetaId && __deltaIsMetaIdAlreadyOnDisk(dedupMetaId)) {
           try {
             __forensicEdgeEmit({
@@ -17412,9 +17390,7 @@ async function __deltaAttachCdpEar(nome, page) {
           network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
           network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
         };
-        const diskRow = __deltaReadKnownThreadRowFromDiskSync(nome, threadKey);
-        const diskStatus = String(diskRow && diskRow.status || '').trim();
-        const diskHighWatermark = Number(diskRow && diskRow.high_watermark || 0) || 0;
+        const diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(diskStatus)) {
           try {
             __forensicEdgeEmit({
@@ -17497,55 +17473,9 @@ async function __deltaAttachCdpEar(nome, page) {
             continue;
           }
 
-          // Barreira temporal high-watermark (linha de corte em disco):
-          // Se o timestamp interno do frame for <= ao high_watermark, é replay redundante -> skip instantâneo.
-          try {
-            const hw = Number(diskHighWatermark || 0) || 0;
-            const ts = Number(nowMs || 0) || 0;
-            if (hw > 0 && ts > 0 && ts <= hw) {
-              try {
-                __forensicEdgeEmit({
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  flow_stage: 'discard_filter_triggered',
-                  details: {
-                    reason: 'active_replay_high_watermark',
-                    op,
-                    frame_ts: ts,
-                    high_watermark: hw,
-                    text_preview: String(texto || '').slice(0, 220)
-                  }
-                });
-              } catch {}
-              try {
-                __deltaAppendPendingJsonlSync({
-                  event: 'lead_sync_only_active_non_insert',
-                  server_id: serverId || null,
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  texto_limpo: texto,
-                  dedup_meta_id: dedupMetaId || null,
-                  meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                  meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                  cidade: null,
-                  operacao_meta: op || 'message',
-                  mensagem_seq: 0,
-                  dispatch_ct: false,
-                  queue_mode: 'capture_only',
-                  flow_stage: 'active_replay_high_watermark_sync_only',
-                  message_at: nowMs,
-                  high_watermark: hw,
-                  ...networkCtx
-                });
-              } catch {}
-              try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-              continue;
-            }
-          } catch {}
-
           if (op === 'upsertMessage') {
             // upsertMessage em thread active:
-            // Passou barreira temporal: aceitar como mensagem offline legítima.
+            // Dedupe canônico por meta_message_id já ocorreu antes; aqui apenas ordena e despacha.
             // Micro-buffer cronológico: acumula por 1s e flush ordenado por meta timestamp.
             const buffered = __deltaBufferActiveUpsertEvent(threadKey, {
               server_id: serverId || null,
@@ -17599,7 +17529,6 @@ async function __deltaAttachCdpEar(nome, page) {
             message_at: nowMs,
             ...networkCtx
           });
-          try { __deltaUpdateThreadHighWatermarkOnDiskSync(String(nome || ''), String(threadKey || ''), nowMs); } catch {}
           __deltaKickIngestLoop();
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
