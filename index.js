@@ -1035,6 +1035,32 @@ const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, 'dados', 'leads_brutos.json
 const MENSAGENS_PENDENTES_JSONL_PATH = path.join(__dirname, 'dados', 'mensagens_pendentes.jsonl');
 const MENSAGENS_PENDENTES_CURSOR_PATH = path.join(__dirname, 'dados', 'mensagens_pendentes.cursor.json');
 
+const FORENSIC_EDGE_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (RAM constante)
+function __rotateForensicFileIfNeededSync(fp) {
+  try {
+    const p = String(fp || '').trim();
+    if (!p) return false;
+    if (!fs.existsSync(p)) return false;
+    const st = fs.statSync(p);
+    const size = Number(st && st.size || 0) || 0;
+    if (size < FORENSIC_EDGE_ROTATE_MAX_BYTES) return false;
+
+    const keep = 3;
+    for (let i = keep; i >= 1; i--) {
+      const src = `${p}.${i}`;
+      const dst = `${p}.${i + 1}`;
+      try {
+        if (!fs.existsSync(src)) continue;
+        if (i === keep) { try { fs.unlinkSync(src); } catch {} continue; }
+        try { fs.renameSync(src, dst); } catch {}
+      } catch {}
+    }
+    try { fs.renameSync(p, `${p}.1`); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
@@ -1044,6 +1070,7 @@ function __forensicEmitSync(filePath, obj) {
       const fp = String(filePath || '').trim();
       if (fp) {
         try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
+        try { __rotateForensicFileIfNeededSync(fp); } catch {}
         fs.appendFileSync(fp, line + '\n', 'utf8');
       }
     } catch {}

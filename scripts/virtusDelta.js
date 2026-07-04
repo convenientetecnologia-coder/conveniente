@@ -8,6 +8,37 @@ const crypto = require("crypto");
 // console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_edge.log");
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, "..", "dados", "leads_brutos.jsonl");
+
+const FORENSIC_EDGE_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (RAM constante)
+function __rotateForensicFileIfNeededSync(fp) {
+  try {
+    const p = String(fp || "").trim();
+    if (!p) return false;
+    if (!fsSync.existsSync(p)) return false;
+    const st = fsSync.statSync(p);
+    const size = Number(st && st.size || 0) || 0;
+    if (size < FORENSIC_EDGE_ROTATE_MAX_BYTES) return false;
+
+    // Rotação simples: mantém até 3 backups .1 .2 .3 (constante, sem RAM).
+    const keep = 3;
+    for (let i = keep; i >= 1; i--) {
+      const src = `${p}.${i}`;
+      const dst = `${p}.${i + 1}`;
+      try {
+        if (!fsSync.existsSync(src)) continue;
+        if (i === keep) {
+          try { fsSync.unlinkSync(src); } catch (_) {}
+          continue;
+        }
+        try { fsSync.renameSync(src, dst); } catch (_) {}
+      } catch (_) {}
+    }
+    try { fsSync.renameSync(p, `${p}.1`); } catch (_) {}
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
@@ -16,6 +47,7 @@ function __forensicEmitSync(filePath, obj) {
       const fp = String(filePath || "").trim();
       if (fp) {
         try { fsSync.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
+        try { __rotateForensicFileIfNeededSync(fp); } catch (_) {}
         fsSync.appendFileSync(fp, line + "\n", "utf8");
       }
     } catch (_) {}
@@ -1703,7 +1735,10 @@ async function clickSendButtonIfPresent(page) {
   return false;
 }
 
-async function ensureComposerFocused(page) {
+async function ensureComposerFocused(page, ctx = {}) {
+  const forensicAccountLogin = (ctx && ctx.account_login != null) ? String(ctx.account_login || "").trim() : null;
+  const forensicThreadKey = (ctx && ctx.thread_key != null) ? String(ctx.thread_key || "").trim() : null;
+  const startedAt = Date.now();
   const sels = [
     'div[role="textbox"][contenteditable="true"][data-lexical-editor="true"]',
     'div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]',
@@ -1717,16 +1752,71 @@ async function ensureComposerFocused(page) {
   ];
 
   let handle = null;
+  let matched = null;
   for (const sel of sels) {
     handle = await page.$(sel).catch(() => null);
-    if (handle) break;
+    if (handle) { matched = sel; break; }
   }
-  if (!handle) throw new Error("composer_missing");
+  if (!handle) {
+    try {
+      const current = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
+      __forensicEdgeEmit({
+        account_login: forensicAccountLogin,
+        thread_key: forensicThreadKey,
+        flow_stage: "composer_focus_lifecycle",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          phase: "missing",
+          thread_key: forensicThreadKey,
+          selectors_tried: sels.slice(0, 10),
+          current_path: current ? String(current) : null,
+          ts_ms: Date.now(),
+          elapsed_ms: Date.now() - startedAt,
+        }
+      });
+    } catch (_) {}
+    throw new Error("composer_missing");
+  }
+
+  try {
+    const current = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
+    __forensicEdgeEmit({
+      account_login: forensicAccountLogin,
+      thread_key: forensicThreadKey,
+      flow_stage: "composer_focus_lifecycle",
+      details: {
+        tag: "FORENSIC_DOM_REVERSE",
+        phase: "found",
+        thread_key: forensicThreadKey,
+        matched_selector: matched,
+        current_path: current ? String(current) : null,
+        ts_ms: Date.now(),
+        elapsed_ms: Date.now() - startedAt,
+      }
+    });
+  } catch (_) {}
 
   await handle.click({ delay: clickDelayMs() }).catch(() => {});
   await humanPause("preComposer", "composer_focus");
 
   const existing = await readComposerText(page);
+  try {
+    __forensicEdgeEmit({
+      account_login: forensicAccountLogin,
+      thread_key: forensicThreadKey,
+      flow_stage: "composer_focus_lifecycle",
+      details: {
+        tag: "FORENSIC_DOM_REVERSE",
+        phase: "after_click",
+        thread_key: forensicThreadKey,
+        matched_selector: matched,
+        existing_chars: existing ? String(existing).length : 0,
+        had_existing_text: !!(existing && String(existing).trim()),
+        ts_ms: Date.now(),
+        elapsed_ms: Date.now() - startedAt,
+      }
+    });
+  } catch (_) {}
   if (!existing) return handle;
 
   const ctrlKey = process.platform === "darwin" ? "Meta" : "Control";
@@ -1767,7 +1857,7 @@ async function typeHumanized(page, textoResposta) {
 }
 
 async function scrollSidebarShort(page) {
-  await page.evaluate(() => {
+  return await page.evaluate(() => {
     const candidates = [];
     const nav = document.querySelector('div[role="navigation"]');
     if (nav) candidates.push(nav);
@@ -1788,8 +1878,13 @@ async function scrollSidebarShort(page) {
     }
     const target = uniq[0] || document.scrollingElement || document.body;
     try {
+      const before = Number(target && target.scrollTop || 0) || 0;
       target.scrollBy(0, 520);
+      const after = Number(target && target.scrollTop || 0) || 0;
+      const delta = after - before;
+      return Number.isFinite(delta) ? delta : 520;
     } catch (_) {}
+    return 0;
   });
 }
 
@@ -1826,6 +1921,30 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
       if (a) {
         await humanPause("preThreadClick", "pre_thread_card_click");
         try {
+          const st = await page
+            .evaluate((threadId) => {
+              const p = String(location.pathname || "").trim();
+              const is =
+                (p.includes("/messages") && p.includes(`/t/${threadId}`)) ||
+                (p.includes("/messages") && p.includes(threadId));
+              return { current_path: p, is_already_open: !!is };
+            }, t)
+            .catch(() => ({ current_path: null, is_already_open: false }));
+          __forensicEdgeEmit({
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            flow_stage: "browser_window_state_check",
+            details: {
+              tag: "FORENSIC_DOM_REVERSE",
+              selector: sel,
+              scrolled: i,
+              is_already_open: !!(st && st.is_already_open),
+              current_path: st && st.current_path ? String(st.current_path) : null,
+              ts_ms: Date.now(),
+            }
+          });
+        } catch (_) {}
+        try {
           __forensicEdgeEmit({
             account_login: forensicAccountLogin,
             thread_key: t,
@@ -1838,7 +1957,21 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
         return { ok: true, scrolled: i, matched_selector: sel };
       }
     }
-    await scrollSidebarShort(page).catch(() => {});
+    const delta = await scrollSidebarShort(page).catch(() => 0);
+    try {
+      __forensicEdgeEmit({
+        account_login: forensicAccountLogin,
+        thread_key: t,
+        flow_stage: "sidebar_scroll_action",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          attempt: i + 1,
+          max_attempts: maxScrollSteps,
+          scrolled_pixels: Number(delta || 0) || 0,
+          ts_ms: Date.now(),
+        }
+      });
+    } catch (_) {}
     await humanPause("scroll", "sidebar_scroll");
   }
 
@@ -1863,6 +1996,23 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
       const a2 = await page.$(fallbackSel).catch(() => null);
       if (a2) {
         await humanPause("preThreadClick", "pre_thread_fallback_click");
+        try {
+          const isAlreadyOpen = current.includes(t);
+          __forensicEdgeEmit({
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            flow_stage: "browser_window_state_check",
+            details: {
+              tag: "FORENSIC_DOM_REVERSE",
+              selector: fallbackSel,
+              scrolled: maxScrollSteps,
+              is_already_open: !!isAlreadyOpen,
+              current_path: current,
+              ts_ms: Date.now(),
+              fallback: true,
+            }
+          });
+        } catch (_) {}
         try {
           __forensicEdgeEmit({
             account_login: forensicAccountLogin,
@@ -1946,7 +2096,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       }
     } catch (_) {}
 
-    await ensureComposerFocused(page);
+    await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
     await humanPause("preTyping", "pre_typing");
     if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
       try {
@@ -1963,7 +2113,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     if (!composed || composed.length < 1) {
       logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
       await humanPause("domSettle", "composer_retry_settle");
-      await ensureComposerFocused(page);
+      await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
       await humanPause("preTyping", "pre_typing_retry");
       await typeHumanized(page, textoResposta);
       composed = await readComposerText(page);
@@ -2053,10 +2203,34 @@ async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey
 
 function createSerialQueue() {
   let chain = Promise.resolve();
-  return (fn) => {
-    chain = chain.then(fn).catch(() => {});
+  let depth = 0;
+  let maxDepth = 0;
+  let lastEnqueueAt = 0;
+  let lastDequeueAt = 0;
+  let lastDoneAt = 0;
+
+  const enqueue = (fn) => {
+    const enqueuedAt = Date.now();
+    depth = Math.max(0, depth + 1);
+    maxDepth = Math.max(maxDepth, depth);
+    lastEnqueueAt = enqueuedAt;
+    chain = chain
+      .then(async () => {
+        lastDequeueAt = Date.now();
+        try {
+          return await fn();
+        } finally {
+          depth = Math.max(0, depth - 1);
+          lastDoneAt = Date.now();
+        }
+      })
+      .catch(() => {});
     return chain;
   };
+  enqueue.getDepth = () => depth;
+  enqueue.getMaxDepth = () => maxDepth;
+  enqueue.getMeta = () => ({ depth, maxDepth, lastEnqueueAt, lastDequeueAt, lastDoneAt });
+  return enqueue;
 }
 
 async function loadCookies(filePath) {
@@ -2542,6 +2716,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
     const remainMs = Math.max(0, delayMs - elapsed);
     const endAt = now + remainMs;
+    try {
+      __forensicEdgeEmit({
+        account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
+        thread_key: null,
+        flow_stage: "cooldown_execution_wait",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          phase: "begin",
+          account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
+          min_ms: minMs,
+          max_ms: maxMs,
+          delay_ms: delayMs,
+          last_send_ts: last || 0,
+          enter_ts: now,
+          elapsed_ms: elapsed,
+          remain_ms: remainMs,
+          end_at_ts: endAt,
+        }
+      });
+    } catch (_) {}
 
     let lastLoggedSec = null;
     while (true) {
@@ -2554,6 +2748,23 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
       await sleep(Math.min(1000, leftMs));
     }
+    try {
+      __forensicEdgeEmit({
+        account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
+        thread_key: null,
+        flow_stage: "cooldown_execution_wait",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          phase: "end",
+          account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
+          delay_ms: delayMs,
+          last_send_ts: last || 0,
+          enter_ts: now,
+          exit_ts: Date.now(),
+          waited_ms: remainMs,
+        }
+      });
+    } catch (_) {}
     return { waitedMs: remainMs, delayMs, elapsedMs: elapsed };
   }
 
@@ -2804,6 +3015,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     server_id: SERVER_ID,
     account_login: ACCOUNT_LOGIN,
     page,
+    getQueueDepth: () => {
+      try { return (typeof enqueue.getDepth === "function") ? enqueue.getDepth() : null; } catch (_) { return null; }
+    },
+    getQueueMaxDepth: () => {
+      try { return (typeof enqueue.getMaxDepth === "function") ? enqueue.getMaxDepth() : null; } catch (_) { return null; }
+    },
     enqueueDeltaReply,
     enqueueDeltaGreetingFlow,
     stop: async () => {

@@ -14,6 +14,32 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_edge.log');
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, '..', 'dados', 'leads_brutos.jsonl');
 
+const FORENSIC_EDGE_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (RAM constante)
+function __rotateForensicFileIfNeededSync(fp) {
+  try {
+    const p = String(fp || '').trim();
+    if (!p) return false;
+    if (!fs.existsSync(p)) return false;
+    const st = fs.statSync(p);
+    const size = Number(st && st.size || 0) || 0;
+    if (size < FORENSIC_EDGE_ROTATE_MAX_BYTES) return false;
+
+    const keep = 3;
+    for (let i = keep; i >= 1; i--) {
+      const src = `${p}.${i}`;
+      const dst = `${p}.${i + 1}`;
+      try {
+        if (!fs.existsSync(src)) continue;
+        if (i === keep) { try { fs.unlinkSync(src); } catch {} continue; }
+        try { fs.renameSync(src, dst); } catch {}
+      } catch {}
+    }
+    try { fs.renameSync(p, `${p}.1`); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
@@ -22,6 +48,7 @@ function __forensicEmitSync(filePath, obj) {
       const fp = String(filePath || '').trim();
       if (fp) {
         try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
+        try { __rotateForensicFileIfNeededSync(fp); } catch {}
         fs.appendFileSync(fp, line + '\n', 'utf8');
       }
     } catch {}
@@ -10388,6 +10415,27 @@ const handlers = {
         return { ok: false, error: 'delta_hands_unavailable' };
       }
 
+      try {
+        const qDepth = (runner && typeof runner.getQueueDepth === 'function') ? runner.getQueueDepth() : null;
+        const qMax = (runner && typeof runner.getQueueMaxDepth === 'function') ? runner.getQueueMaxDepth() : null;
+        __forensicEdgeEmit({
+          account_login: n,
+          thread_key: tk,
+          flow_stage: 'queue_task_received',
+          details: {
+            tag: 'FORENSIC_DOM_REVERSE',
+            origin: 'agent_dashboard',
+            command: 'delta_reply',
+            thread_key: tk,
+            client_message_id: cmid,
+            chars: tr.length,
+            queue_depth: (qDepth == null ? null : Number(qDepth)),
+            queue_max_depth: (qMax == null ? null : Number(qMax)),
+            ts_ms: Date.now(),
+          }
+        });
+      } catch {}
+
       // Regra enterprise: ACK do IPC deve ser imediato (não aguardar digitação/DOM).
       // A execução real ocorre em background no runtime do virtusDelta (fila serial).
       try { logger.info('[DELTA][HANDS] delta-reply-task enfileirado', { nome: n, thread_key: tk, chars: tr.length, client_message_id: cmid }); } catch {}
@@ -15402,6 +15450,28 @@ async function __deltaRunHandsGreetingFlow({ nome, threadKey, mensagensCliente }
     return { ok: false, error: 'delta_hands_unavailable' };
   }
   try {
+    try {
+      const n = String(nome || '').trim() || null;
+      const tk = String(threadKey || '').trim() || null;
+      const mc = String(mensagensCliente || '');
+      const qDepth = (runner && typeof runner.getQueueDepth === 'function') ? runner.getQueueDepth() : null;
+      const qMax = (runner && typeof runner.getQueueMaxDepth === 'function') ? runner.getQueueMaxDepth() : null;
+      __forensicEdgeEmit({
+        account_login: n,
+        thread_key: tk,
+        flow_stage: 'queue_task_received',
+        details: {
+          tag: 'FORENSIC_DOM_REVERSE',
+          origin: 'bot_auto_greeting',
+          command: 'delta_greeting',
+          thread_key: tk,
+          chars: mc.length,
+          queue_depth: (qDepth == null ? null : Number(qDepth)),
+          queue_max_depth: (qMax == null ? null : Number(qMax)),
+          ts_ms: Date.now(),
+        }
+      });
+    } catch {}
     return await runner.enqueueDeltaGreetingFlow({
       thread_key: String(threadKey || '').trim(),
       mensagens_cliente: String(mensagensCliente || '')
