@@ -17110,27 +17110,7 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
-        if (op === 'upsertMessage') {
-          // Vedação de replay: hidrata estado local (para observabilidade/drive), mas bloqueia ingest CT e timers.
-          try {
-            __forensicEdgeEmit({
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
-              details: {
-                reason: 'upsert_message_sync_only',
-                op,
-                transport: String(transport || ''),
-                requestId: String(requestId || ''),
-                sourceHint: String(sourceHint || ''),
-                text_preview: String(texto || '').slice(0, 220)
-              }
-            });
-          } catch {}
-          continue;
-        }
-
-        if (op !== 'insertMessage' && op !== 'updateThreadSnippet') {
+        if (op !== 'insertMessage' && op !== 'updateThreadSnippet' && op !== 'upsertMessage') {
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
@@ -17221,6 +17201,47 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
+          // Opção canônica A (anti-duplicidade):
+          // Em threads ativas, updateThreadSnippet é apenas hidratação silenciosa (não pode gerar dispatch realtime).
+          if (op === 'updateThreadSnippet') {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'active_thread_snippet_blocked_realtime',
+                  op,
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
+          // Em threads ativas, só aceitamos realtime se houver ID canônico (message_id/offline_threading_id).
+          if (op === 'upsertMessage' && !dedupMetaId) {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'active_thread_upsert_missing_meta_id',
+                  op,
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
           // Trava de ciclo de vida: "active" em disco nunca pode rearmar timer/hands.
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
           __deltaAppendPendingJsonlSync({
@@ -17246,6 +17267,25 @@ async function __deltaAttachCdpEar(nome, page) {
           });
           __deltaKickIngestLoop();
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+          continue;
+        }
+        if (op === 'upsertMessage') {
+          // Fora de threads ativas, upsertMessage é sync/histórico: não pode alimentar CT nem timers.
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'upsert_message_sync_only',
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
           continue;
         }
         const st = __deltaGetOrCreateThreadState(nome, threadKey);
@@ -17322,6 +17362,29 @@ async function __deltaAttachCdpEar(nome, page) {
 
         if (st.status === 'active') {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+          // Opção canônica A (anti-duplicidade):
+          // Em thread ativa, updateThreadSnippet não pode gerar dispatch realtime.
+          if (op === 'updateThreadSnippet') {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'active_thread_snippet_blocked_realtime',
+                  op,
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            st.lastDispatchAt = Number(st.lastDispatchAt || 0) || 0;
+            st.updatedAt = nowMs;
+            __deltaSchedulePersistThreadState();
+            continue;
+          }
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
