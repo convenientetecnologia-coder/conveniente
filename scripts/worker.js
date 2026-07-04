@@ -16900,9 +16900,52 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (!__deltaShouldEmitLeadText(texto)) continue;
-        hadLead = true;
 
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
+        // ===================== PURIFICAÇÃO LIGHTSPEED (CANÔNICO) =====================
+        // Regra rígida de borda:
+        // - updateThreadSnippet é ruído de controle (duplica texto) -> descarta e não alimenta CT/leads.
+        // - Apenas insertMessage e upsertMessage alimentam a esteira (buffers + ingest CT).
+        if (op === 'updateThreadSnippet') {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'update_thread_snippet_noise',
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          continue;
+        }
+        if (op !== 'insertMessage' && op !== 'upsertMessage') {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'non_canonical_operation',
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          continue;
+        }
+        // ===================== Fim purificação canônica =====================
+
+        hadLead = true;
+
         const nowMs =
           (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
             ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
