@@ -14789,6 +14789,47 @@ function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
     return '';
   }
 }
+
+function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
+  try {
+    const n = String(nome || '').trim();
+    const tk = String(threadKey || '').trim();
+    if (!n || !tk) return false;
+    const parsed = __deltaReadThreadStateFileSync();
+    const prev = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    const k = __deltaThreadStateKey(n, tk);
+    const rowsByKey = new Map();
+    for (const row of prev) {
+      const rn = String(row && row.nome || '').trim();
+      const rt = String(row && row.thread_key || '').trim();
+      if (!rn || !rt) continue;
+      rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
+    }
+    const now = Date.now();
+    const base = rowsByKey.get(k) || {};
+    rowsByKey.set(k, {
+      ...(base && typeof base === 'object' ? base : {}),
+      nome: n,
+      thread_key: tk,
+      status: 'active',
+      updatedAt: now,
+      lastDispatchAt: now,
+      timerDueAt: 0,
+      timerReason: '',
+      handsFailures: 0,
+      messages: [],
+    });
+    const rows = Array.from(rowsByKey.values());
+    const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
+    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, body, 'utf8');
+    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function __deltaCreateThreadState(nome, threadKey) {
   const now = Date.now();
   return {
@@ -17022,6 +17063,29 @@ async function __deltaAttachCdpEar(nome, page) {
             ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
             : Date.now();
 
+        // Filtro de caducidade: frames com idade > 180s não devem reativar atendimento.
+        try {
+          const ageMs = Date.now() - nowMs;
+          if (Number.isFinite(ageMs) && ageMs > 180_000) {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'expired_historical_frame',
+                op,
+                age_ms: ageMs,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                message_at: nowMs,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+            continue;
+          }
+        } catch {}
+
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const dedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
         if (dedupMetaId && __deltaIsMetaIdAlreadyOnDisk(dedupMetaId)) {
@@ -17062,14 +17126,6 @@ async function __deltaAttachCdpEar(nome, page) {
                 text_preview: String(texto || '').slice(0, 220)
               }
             });
-          } catch {}
-          try {
-            const stSync = __deltaGetOrCreateThreadState(nome, threadKey);
-            if (!__deltaIsRecentDuplicate(stSync, texto, op, nowMs)) {
-              __deltaPushMessageToState(stSync, { text: texto, op, at: nowMs });
-              stSync.updatedAt = nowMs;
-              __deltaSchedulePersistThreadState();
-            }
           } catch {}
           continue;
         }
@@ -17119,7 +17175,7 @@ async function __deltaAttachCdpEar(nome, page) {
         // - Se sender == account_user_id (c_user), é outbound (mensagem nossa) -> não deve virar “mensagem do cliente”.
         try {
           const sender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
-          const account = String(ev && ev.account_user_id || '').replace(/\D/g, '');
+          const account = String(ev && (ev.account_user_id || ev.accountUserId) || ctrl.deltaAccountUserId || '').replace(/\D/g, '');
           if (sender && account && sender === account) {
             continue;
           }
@@ -17165,6 +17221,8 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
+          // Trava de ciclo de vida: "active" em disco nunca pode rearmar timer/hands.
+          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
@@ -17263,6 +17321,7 @@ async function __deltaAttachCdpEar(nome, page) {
         });
 
         if (st.status === 'active') {
+          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
