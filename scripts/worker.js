@@ -14682,6 +14682,10 @@ const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
 const DELTA_THREAD_MAX_MESSAGES = 600;
+const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
+  256 * 1024,
+  Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
+);
 const __deltaThreadStateMap = new Map();
 let __deltaThreadStatePersistTimer = null;
 const __deltaIngestAuthState = {
@@ -14689,6 +14693,58 @@ const __deltaIngestAuthState = {
   lastBootstrapError: '',
   bootstrapInFlight: null
 };
+
+function __deltaExtractMetaMessageIds(ev) {
+  const e = ev && typeof ev === 'object' ? ev : {};
+  const msgId = String(
+    e.message_id ||
+    e.messageId ||
+    e.msg_id ||
+    e.msgId ||
+    e.meta_message_id ||
+    ''
+  ).trim() || null;
+  const offlineId = String(
+    e.offline_threading_id ||
+    e.offlineThreadingId ||
+    e.offline_threadingId ||
+    e.offline_thread_id ||
+    e.meta_offline_threading_id ||
+    ''
+  ).trim() || null;
+  return { msgId, offlineId, dedupId: msgId || offlineId || null };
+}
+
+function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
+  try {
+    const id = String(dedupId || '').trim();
+    if (!id) return false;
+    if (!fs.existsSync(DELTA_QUEUE_PATH)) return false;
+    const st = fs.statSync(DELTA_QUEUE_PATH);
+    const size = Number(st && st.size || 0) || 0;
+    if (!size) return false;
+    const tailBytes = Math.min(size, DELTA_DISK_DEDUP_TAIL_BYTES);
+    const start = Math.max(0, size - tailBytes);
+    const toRead = Math.max(0, size - start);
+    const buf = Buffer.allocUnsafe(toRead);
+    let fd = null;
+    try {
+      fd = fs.openSync(DELTA_QUEUE_PATH, 'r');
+      fs.readSync(fd, buf, 0, toRead, start);
+    } finally {
+      try { if (fd) fs.closeSync(fd); } catch {}
+    }
+    const hay = buf.toString('utf8');
+    const q = JSON.stringify(id); // inclui aspas e escapes
+    // Procurar por campos explicitamente gravados no JSONL (evita falsos positivos).
+    if (hay.includes(`\"meta_message_id\":${q}`)) return true;
+    if (hay.includes(`\"meta_offline_threading_id\":${q}`)) return true;
+    if (hay.includes(`\"dedup_meta_id\":${q}`)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 function __deltaRandInt(minMs, maxMs) {
   const min = Math.max(0, Number(minMs || 0) || 0);
@@ -16955,34 +17011,40 @@ async function __deltaAttachCdpEar(nome, page) {
         if (!__deltaShouldEmitLeadText(texto)) continue;
 
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-        // ===================== VEDAÇÃO DE REPLAY (CANÔNICO) =====================
+        // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================
         // Regra rígida de borda:
-        // - updateThreadSnippet: ruído de controle -> descarta.
+        // - insertMessage e updateThreadSnippet: devem ser processados textualmente (mata apagão).
         // - upsertMessage: sincronismo/histórico (replay pós-restart) -> NÃO pode alimentar CT nem timers (capture_only local).
-        // - insertMessage: única operação permitida para "mensagem nova" (alimenta buffers + ingest CT).
-        if (op === 'updateThreadSnippet') {
+        // - dedupe: proibido cache de IDs em RAM; checar duplicidade consultando SSD (mensagens_pendentes.jsonl tail).
+
+        const nowMs =
+          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
+            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
+            : Date.now();
+
+        const metaIds = __deltaExtractMetaMessageIds(ev);
+        const dedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
+        if (dedupMetaId && __deltaIsMetaIdAlreadyOnDisk(dedupMetaId)) {
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
               thread_key: threadKey,
               flow_stage: 'discard_filter_triggered',
               details: {
-                reason: 'update_thread_snippet_noise',
+                reason: 'meta_message_id_duplicate_on_disk',
                 op,
                 transport: String(transport || ''),
                 requestId: String(requestId || ''),
                 sourceHint: String(sourceHint || ''),
+                dedup_meta_id: dedupMetaId,
+                message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
                 text_preview: String(texto || '').slice(0, 220)
               }
             });
           } catch {}
           continue;
         }
-
-        const nowMs =
-          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
-            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
-            : Date.now();
 
         if (op === 'upsertMessage') {
           // Vedação de replay: hidrata estado local (para observabilidade/drive), mas bloqueia ingest CT e timers.
@@ -17012,7 +17074,7 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
-        if (op !== 'insertMessage') {
+        if (op !== 'insertMessage' && op !== 'updateThreadSnippet') {
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
@@ -17045,6 +17107,9 @@ async function __deltaAttachCdpEar(nome, page) {
               sourceHint: String(sourceHint || ''),
               op: op || null,
               message_at: nowMs,
+              dedup_meta_id: dedupMetaId || null,
+              message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
               text_preview: String(texto || '').slice(0, 240)
             }
           });
@@ -17108,6 +17173,9 @@ async function __deltaAttachCdpEar(nome, page) {
             texto_limpo: texto,
             mensagens_cliente_concatenadas: texto,
             mensagens_cliente_qtd: 1,
+            dedup_meta_id: dedupMetaId || null,
+            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
             cidade: null,
             operacao_meta: op || 'message',
             mensagem_seq: 0,
@@ -17156,7 +17224,7 @@ async function __deltaAttachCdpEar(nome, page) {
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
         }
-        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) {
+        if (!dedupMetaId && __deltaIsRecentDuplicate(st, texto, op, nowMs)) {
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
@@ -17181,6 +17249,9 @@ async function __deltaAttachCdpEar(nome, page) {
           account_login: String(nome || ''),
           thread_key: threadKey,
           texto_limpo: texto,
+          dedup_meta_id: dedupMetaId || null,
+          meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+          meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
           cidade: st.city || null,
           operacao_meta: op,
           mensagem_seq: msgSeq,
@@ -17200,6 +17271,9 @@ async function __deltaAttachCdpEar(nome, page) {
             texto_limpo: texto,
             mensagens_cliente_concatenadas: texto,
             mensagens_cliente_qtd: 1,
+            dedup_meta_id: dedupMetaId || null,
+            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
             cidade: st.city || null,
             operacao_meta: op || 'message',
             mensagem_seq: msgSeq,
