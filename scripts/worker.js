@@ -16902,10 +16902,11 @@ async function __deltaAttachCdpEar(nome, page) {
         if (!__deltaShouldEmitLeadText(texto)) continue;
 
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-        // ===================== PURIFICAÇÃO LIGHTSPEED (CANÔNICO) =====================
+        // ===================== VEDAÇÃO DE REPLAY (CANÔNICO) =====================
         // Regra rígida de borda:
-        // - updateThreadSnippet é ruído de controle (duplica texto) -> descarta e não alimenta CT/leads.
-        // - Apenas insertMessage e upsertMessage alimentam a esteira (buffers + ingest CT).
+        // - updateThreadSnippet: ruído de controle -> descarta.
+        // - upsertMessage: sincronismo/histórico (replay pós-restart) -> NÃO pode alimentar CT nem timers (capture_only local).
+        // - insertMessage: única operação permitida para "mensagem nova" (alimenta buffers + ingest CT).
         if (op === 'updateThreadSnippet') {
           try {
             __forensicEdgeEmit({
@@ -16924,7 +16925,41 @@ async function __deltaAttachCdpEar(nome, page) {
           } catch {}
           continue;
         }
-        if (op !== 'insertMessage' && op !== 'upsertMessage') {
+
+        const nowMs =
+          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
+            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
+            : Date.now();
+
+        if (op === 'upsertMessage') {
+          // Vedação de replay: hidrata estado local (para observabilidade/drive), mas bloqueia ingest CT e timers.
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'upsert_message_sync_only',
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          try {
+            const stSync = __deltaGetOrCreateThreadState(nome, threadKey);
+            if (!__deltaIsRecentDuplicate(stSync, texto, op, nowMs)) {
+              __deltaPushMessageToState(stSync, { text: texto, op, at: nowMs });
+              stSync.updatedAt = nowMs;
+              __deltaSchedulePersistThreadState();
+            }
+          } catch {}
+          continue;
+        }
+
+        if (op !== 'insertMessage') {
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
@@ -16942,14 +16977,9 @@ async function __deltaAttachCdpEar(nome, page) {
           } catch {}
           continue;
         }
-        // ===================== Fim purificação canônica =====================
+        // ===================== Fim vedação canônica =====================
 
         hadLead = true;
-
-        const nowMs =
-          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
-            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
-            : Date.now();
         try {
           __forensicLeadsEmit({
             account_login: String(nome || ''),
