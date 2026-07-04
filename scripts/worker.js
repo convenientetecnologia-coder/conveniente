@@ -14686,6 +14686,13 @@ const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
   256 * 1024,
   Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
 );
+// Captura offline em thread ativa:
+// - upsertMessage pode representar mensagem válida durante período offline.
+// - Guardrail: aceitar somente se ID Meta for inédito no disco e idade não for absurda.
+const DELTA_ACTIVE_UPSERT_MAX_AGE_MS = Math.max(
+  60_000,
+  Math.min(24 * 60 * 60 * 1000, Number(process.env.DELTA_ACTIVE_UPSERT_MAX_AGE_MS || (60 * 60 * 1000)) || (60 * 60 * 1000))
+);
 const __deltaThreadStateMap = new Map();
 let __deltaThreadStatePersistTimer = null;
 const __deltaIngestAuthState = {
@@ -17080,25 +17087,32 @@ async function __deltaAttachCdpEar(nome, page) {
             : Date.now();
 
         // Filtro de caducidade: frames com idade > 180s não devem reativar atendimento.
+        // Exceção controlada: upsertMessage pode carregar mensagem offline; a decisão final ocorre na rota `active` com dedupe em disco.
+        let __deltaAgeMs = 0;
+        let __deltaExpiredHistoricalFrame = false;
         try {
           const ageMs = Date.now() - nowMs;
+          __deltaAgeMs = Number(ageMs || 0) || 0;
           if (Number.isFinite(ageMs) && ageMs > 180_000) {
-            __forensicEdgeEmit({
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
-              details: {
-                reason: 'expired_historical_frame',
-                op,
-                age_ms: ageMs,
-                transport: String(transport || ''),
-                requestId: String(requestId || ''),
-                sourceHint: String(sourceHint || ''),
-                message_at: nowMs,
-                text_preview: String(texto || '').slice(0, 220)
-              }
-            });
-            continue;
+            if (op !== 'upsertMessage') {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'expired_historical_frame',
+                  op,
+                  age_ms: ageMs,
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  message_at: nowMs,
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+              continue;
+            }
+            __deltaExpiredHistoricalFrame = true;
           }
         } catch {}
 
@@ -17217,9 +17231,11 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
-          // Contrato rígido: em thread ativa, realtime é EXCLUSIVO de insertMessage.
-          // updateThreadSnippet e upsertMessage podem ser observados/registrados, mas nunca despachados ao CT.
-          if (op !== 'insertMessage') {
+          // Contrato de borda (thread active):
+          // - insertMessage: realtime imediato (digitação ao vivo).
+          // - updateThreadSnippet: nunca despacha ao CT (ruído de layout/hidratação).
+          // - upsertMessage: pode ser mensagem offline; despacha SOMENTE se ID Meta for inédito no disco.
+          if (op !== 'insertMessage' && op !== 'upsertMessage') {
             try {
               __forensicEdgeEmit({
                 account_login: String(nome || ''),
@@ -17259,6 +17275,122 @@ async function __deltaAttachCdpEar(nome, page) {
                 ...networkCtx
               });
             } catch {}
+            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
+          if (op === 'upsertMessage') {
+            // upsertMessage em thread active:
+            // - só é elegível se houver ID Meta (msg_id ou offline_threading_id)
+            // - e se esse ID não existir no disco (dedupe em mensagens_pendentes.jsonl tail)
+            // - e se a idade não for absurda (guardrail).
+            if (!dedupMetaId) {
+              try {
+                __forensicEdgeEmit({
+                  account_login: String(nome || ''),
+                  thread_key: threadKey,
+                  flow_stage: 'discard_filter_triggered',
+                  details: {
+                    reason: 'active_upsert_missing_meta_id',
+                    op,
+                    transport: String(transport || ''),
+                    requestId: String(requestId || ''),
+                    sourceHint: String(sourceHint || ''),
+                    text_preview: String(texto || '').slice(0, 220)
+                  }
+                });
+              } catch {}
+              try {
+                __deltaAppendPendingJsonlSync({
+                  event: 'lead_sync_only_active_non_insert',
+                  server_id: serverId || null,
+                  account_login: String(nome || ''),
+                  thread_key: threadKey,
+                  texto_limpo: texto,
+                  dedup_meta_id: null,
+                  meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                  meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                  cidade: null,
+                  operacao_meta: op || 'upsertMessage',
+                  mensagem_seq: 0,
+                  dispatch_ct: false,
+                  queue_mode: 'capture_only',
+                  flow_stage: 'active_upsert_missing_meta_id_sync_only',
+                  message_at: nowMs,
+                  ...networkCtx
+                });
+              } catch {}
+              try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+              continue;
+            }
+
+            // Guardrail de idade: evita replays muito antigos (mesmo que o ID seja inédito no tail atual).
+            try {
+              const ageMs = Number(__deltaAgeMs || 0) || 0;
+              if (__deltaExpiredHistoricalFrame && Number.isFinite(ageMs) && ageMs > DELTA_ACTIVE_UPSERT_MAX_AGE_MS) {
+                try {
+                  __forensicEdgeEmit({
+                    account_login: String(nome || ''),
+                    thread_key: threadKey,
+                    flow_stage: 'discard_filter_triggered',
+                    details: {
+                      reason: 'active_upsert_too_old',
+                      op,
+                      age_ms: ageMs,
+                      max_age_ms: DELTA_ACTIVE_UPSERT_MAX_AGE_MS,
+                      dedup_meta_id: dedupMetaId,
+                      text_preview: String(texto || '').slice(0, 220)
+                    }
+                  });
+                } catch {}
+                try {
+                  __deltaAppendPendingJsonlSync({
+                    event: 'lead_sync_only_active_non_insert',
+                    server_id: serverId || null,
+                    account_login: String(nome || ''),
+                    thread_key: threadKey,
+                    texto_limpo: texto,
+                    dedup_meta_id: dedupMetaId,
+                    meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                    meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                    cidade: null,
+                    operacao_meta: op || 'upsertMessage',
+                    mensagem_seq: 0,
+                    dispatch_ct: false,
+                    queue_mode: 'capture_only',
+                    flow_stage: 'active_upsert_too_old_sync_only',
+                    message_at: nowMs,
+                    ...networkCtx
+                  });
+                } catch {}
+                try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+                continue;
+              }
+            } catch {}
+
+            // Passou guardrails: aceitar como mensagem offline legítima e despachar pro CT.
+            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_chat_ativo_realtime',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              mensagens_cliente_concatenadas: texto,
+              mensagens_cliente_qtd: 1,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              cidade: null,
+              operacao_meta: op || 'upsertMessage',
+              mensagem_seq: 0,
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              flow_stage: 'chat_ativo_realtime_offline_upsert_disk_dedupe',
+              state_status: 'active',
+              message_at: nowMs,
+              ...networkCtx
+            });
+            __deltaKickIngestLoop();
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
             continue;
           }
