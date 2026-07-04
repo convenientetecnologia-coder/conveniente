@@ -14686,6 +14686,12 @@ const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
   256 * 1024,
   Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
 );
+// Segunda camada de dedupe em disco (por texto) para bloquear replays "upsertMessage" que duplicam inserts já enviados.
+// Não mantém cache residente: lê apenas o tail do JSONL no HD.
+const DELTA_DISK_TEXT_DEDUP_TAIL_BYTES = Math.max(
+  256 * 1024,
+  Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_TEXT_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
+);
 // Captura offline em thread ativa:
 // - upsertMessage pode representar mensagem válida durante período offline.
 // - Guardrail: aceitar somente se ID Meta for inédito no disco e idade não for absurda.
@@ -14847,6 +14853,58 @@ function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
     if (hay.includes(`\"meta_message_id\":${q}`)) return true;
     if (hay.includes(`\"meta_offline_threading_id\":${q}`)) return true;
     if (hay.includes(`\"dedup_meta_id\":${q}`)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function __deltaCheckTextDuplicationInDisk(threadKey, texto) {
+  try {
+    const tk = String(threadKey || '').trim();
+    const text = String(texto || '').trim();
+    if (!tk || !text) return false;
+    if (!fs.existsSync(DELTA_QUEUE_PATH)) return false;
+    const st = fs.statSync(DELTA_QUEUE_PATH);
+    const size = Number(st && st.size || 0) || 0;
+    if (!size) return false;
+    const tailBytes = Math.min(size, DELTA_DISK_TEXT_DEDUP_TAIL_BYTES);
+    const start = Math.max(0, size - tailBytes);
+    const toRead = Math.max(0, size - start);
+    const buf = Buffer.allocUnsafe(toRead);
+    let fd = null;
+    try {
+      fd = fs.openSync(DELTA_QUEUE_PATH, 'r');
+      fs.readSync(fd, buf, 0, toRead, start);
+    } finally {
+      try { if (fd) fs.closeSync(fd); } catch {}
+    }
+    const hay = buf.toString('utf8');
+    const qTk = JSON.stringify(tk);
+    const qText = JSON.stringify(text);
+    const needleText = `\"texto_limpo\":${qText}`;
+    const needleThread = `\"thread_key\":${qTk}`;
+    const needleOp = `\"operacao_meta\":\"insertMessage\"`;
+    const needleDispatch = `\"dispatch_ct\":true`;
+    const needleEvent = `\"event\":\"lead_chat_ativo_realtime\"`;
+
+    let from = 0;
+    while (true) {
+      const idx = hay.indexOf(needleText, from);
+      if (idx < 0) break;
+      const lineStart = hay.lastIndexOf('\n', idx);
+      const lineEnd = hay.indexOf('\n', idx);
+      const line = hay.slice(lineStart >= 0 ? lineStart + 1 : 0, lineEnd >= 0 ? lineEnd : hay.length);
+      if (
+        line.includes(needleThread) &&
+        line.includes(needleOp) &&
+        line.includes(needleDispatch) &&
+        line.includes(needleEvent)
+      ) {
+        return true;
+      }
+      from = idx + needleText.length;
+    }
     return false;
   } catch {
     return false;
@@ -17475,7 +17533,51 @@ async function __deltaAttachCdpEar(nome, page) {
 
           if (op === 'upsertMessage') {
             // upsertMessage em thread active:
-            // Dedupe canônico por meta_message_id já ocorreu antes; aqui apenas ordena e despacha.
+            // Dedupe canônico por meta_message_id já ocorreu antes.
+            // Segunda camada (texto em disco): bloquear replays "upsert" que duplicam inserts já enviados nessa thread.
+            if (__deltaCheckTextDuplicationInDisk(threadKey, texto)) {
+              try {
+                __forensicEdgeEmit({
+                  account_login: String(nome || ''),
+                  thread_key: threadKey,
+                  flow_stage: 'discard_filter_triggered',
+                  details: {
+                    reason: 'active_upsert_text_duplicate_on_disk',
+                    op,
+                    transport: String(transport || ''),
+                    requestId: String(requestId || ''),
+                    sourceHint: String(sourceHint || ''),
+                    dedup_meta_id: dedupMetaId || null,
+                    message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                    offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                    text_preview: String(texto || '').slice(0, 220)
+                  }
+                });
+              } catch {}
+              try {
+                __deltaAppendPendingJsonlSync({
+                  event: 'lead_sync_only_active_upsert_text_duplicate',
+                  server_id: serverId || null,
+                  account_login: String(nome || ''),
+                  thread_key: threadKey,
+                  texto_limpo: texto,
+                  dedup_meta_id: dedupMetaId || null,
+                  meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                  meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                  cidade: null,
+                  operacao_meta: op || 'upsertMessage',
+                  mensagem_seq: 0,
+                  dispatch_ct: false,
+                  queue_mode: 'capture_only',
+                  flow_stage: 'active_upsert_text_duplicate_skip',
+                  message_at: nowMs,
+                  ...networkCtx
+                });
+              } catch {}
+              try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+              continue;
+            }
+
             // Micro-buffer cronológico: acumula por 1s e flush ordenado por meta timestamp.
             const buffered = __deltaBufferActiveUpsertEvent(threadKey, {
               server_id: serverId || null,
