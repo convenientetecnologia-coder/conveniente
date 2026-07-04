@@ -14693,13 +14693,111 @@ const DELTA_ACTIVE_UPSERT_MAX_AGE_MS = Math.max(
   60_000,
   Math.min(24 * 60 * 60 * 1000, Number(process.env.DELTA_ACTIVE_UPSERT_MAX_AGE_MS || (60 * 60 * 1000)) || (60 * 60 * 1000))
 );
+const DELTA_ACTIVE_UPSERT_BUFFER_MS = Math.max(
+  100,
+  Math.min(5000, Number(process.env.DELTA_ACTIVE_UPSERT_BUFFER_MS || 1000) || 1000)
+);
+const DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS = Math.max(
+  10,
+  Math.min(300, Number(process.env.DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS || 80) || 80)
+);
 const __deltaThreadStateMap = new Map();
+// Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
+const __deltaActiveUpsertBuffer = new Map();
 let __deltaThreadStatePersistTimer = null;
 const __deltaIngestAuthState = {
   lastBootstrapAt: 0,
   lastBootstrapError: '',
   bootstrapInFlight: null
 };
+
+function __deltaFlushActiveUpsertBuffer(threadKey, { reason = 'timer' } = {}) {
+  try {
+    const tk = String(threadKey || '').trim();
+    if (!tk) return;
+    const buf = __deltaActiveUpsertBuffer.get(tk);
+    if (!buf || !Array.isArray(buf.items) || buf.items.length === 0) {
+      __deltaActiveUpsertBuffer.delete(tk);
+      return;
+    }
+    try { if (buf.timer) clearTimeout(buf.timer); } catch {}
+
+    // Ordenação ascendente por timestamp meta (humano: passado -> presente).
+    buf.items.sort((a, b) => (Number(a.meta_ts || 0) || 0) - (Number(b.meta_ts || 0) || 0));
+
+    // Marca thread como active em disco (guardrail de ciclo de vida) antes do flush.
+    try {
+      const first = buf.items[0];
+      if (first && first.account_login && first.thread_key) {
+        __deltaMarkThreadActiveOnDiskSync(String(first.account_login), String(first.thread_key));
+      }
+    } catch {}
+
+    for (const it of buf.items) {
+      if (!it || typeof it !== 'object') continue;
+      const account_login = String(it.account_login || '').trim();
+      const thread_key = String(it.thread_key || '').trim();
+      if (!account_login || !thread_key) continue;
+      const messageAt = Number(it.meta_ts || 0) || Date.now();
+      __deltaAppendPendingJsonlSync({
+        event: 'lead_chat_ativo_realtime',
+        server_id: it.server_id || null,
+        account_login,
+        thread_key,
+        texto_limpo: String(it.texto_limpo || '').trim(),
+        mensagens_cliente_concatenadas: String(it.texto_limpo || '').trim(),
+        mensagens_cliente_qtd: 1,
+        dedup_meta_id: it.dedup_meta_id || null,
+        meta_message_id: it.meta_message_id || null,
+        meta_offline_threading_id: it.meta_offline_threading_id || null,
+        cidade: null,
+        operacao_meta: 'upsertMessage',
+        mensagem_seq: 0,
+        dispatch_ct: true,
+        queue_mode: 'dispatch_ct',
+        flow_stage: 'chat_ativo_realtime_offline_upsert_buffer_flush',
+        state_status: 'active',
+        message_at: messageAt,
+        buffer_reason: String(reason || ''),
+        ...((it.networkCtx && typeof it.networkCtx === 'object') ? it.networkCtx : {})
+      });
+    }
+    __deltaKickIngestLoop();
+  } catch {
+    // fallback: garante limpeza de RAM mesmo se der erro
+  } finally {
+    try { __deltaActiveUpsertBuffer.delete(String(threadKey || '').trim()); } catch {}
+  }
+}
+
+function __deltaBufferActiveUpsertEvent(threadKey, item) {
+  const tk = String(threadKey || '').trim();
+  if (!tk || !item || typeof item !== 'object') return false;
+  const dedupId = String(item.dedup_meta_id || '').trim();
+  const now = Date.now();
+  let buf = __deltaActiveUpsertBuffer.get(tk);
+  if (!buf) {
+    buf = { items: [], seen: new Set(), timer: null, startedAt: now };
+    __deltaActiveUpsertBuffer.set(tk, buf);
+    try {
+      buf.timer = setTimeout(() => {
+        __deltaFlushActiveUpsertBuffer(tk, { reason: 'timer' });
+      }, DELTA_ACTIVE_UPSERT_BUFFER_MS);
+      buf.timer.unref?.();
+    } catch {}
+  }
+  // Dedupe intra-buffer (o ID pode ainda não ter sido escrito no disco).
+  if (dedupId) {
+    if (buf.seen.has(dedupId)) return false;
+    buf.seen.add(dedupId);
+  }
+  buf.items.push(item);
+  // Se explodir a janela por volume, flush imediato (evita RAM crescer).
+  if (buf.items.length >= DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS) {
+    __deltaFlushActiveUpsertBuffer(tk, { reason: 'max_items' });
+  }
+  return true;
+}
 
 function __deltaExtractMetaMessageIds(ev) {
   const e = ev && typeof ev === 'object' ? ev : {};
@@ -16437,6 +16535,55 @@ function __deltaCollectOpArraysFromStep(stepRoot, out) {
     for (const key of Object.keys(stepRoot)) __deltaCollectOpArraysFromStep(stepRoot[key], out);
   }
 }
+
+function __deltaCollectNumberCandidates(root, out) {
+  if (root == null) return;
+  if (typeof root === 'number' && Number.isFinite(root)) { out.push(root); return; }
+  if (typeof root === 'string') {
+    const s = root.trim();
+    if (/^\d{10,17}$/.test(s)) {
+      const n = Number(s);
+      if (Number.isFinite(n)) out.push(n);
+    }
+    return;
+  }
+  if (Array.isArray(root)) {
+    for (const item of root) __deltaCollectNumberCandidates(item, out);
+    return;
+  }
+  if (__deltaIsPlainObject(root)) {
+    for (const k of Object.keys(root)) __deltaCollectNumberCandidates(root[k], out);
+  }
+}
+
+function __deltaExtractBestTimestampMsFromNode(node) {
+  // Heurística:
+  // - timestamps em ms tipicamente ficam na faixa ~1e12..2e12
+  // - IDs (thread/message) tendem a ser 15-16 dígitos (>> 1e12)
+  try {
+    const nums = [];
+    __deltaCollectNumberCandidates(node, nums);
+    if (!nums.length) return 0;
+    const now = Date.now();
+    // faixa ampla, mas segura p/ evitar IDs enormes
+    const MIN = 1_400_000_000_000; // ~2014
+    const MAX = 2_600_000_000_000; // ~2052
+    const filtered = nums
+      .map((n) => Number(n))
+      .filter((n) => Number.isFinite(n) && n >= MIN && n <= MAX);
+    if (!filtered.length) return 0;
+    // Preferir o timestamp mais antigo (ordem humana) quando vierem lotes reversos no sync.
+    // Para casos em que só existe 1 candidato, isso é neutro.
+    filtered.sort((a, b) => a - b);
+    // Se houver candidato absurdamente futuro, ignora; senão, pega o menor (mais antigo).
+    const pick = filtered[0];
+    if (!Number.isFinite(pick)) return 0;
+    if (pick > (now + 10 * 60_000)) return 0;
+    return Math.round(pick);
+  } catch {
+    return 0;
+  }
+}
 function __deltaExtractDeltaNewMessageEvents(root, accountUserId) {
   const out = [];
   const visit = (node) => {
@@ -16575,12 +16722,14 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
         }
         const senderPreferred = __deltaExtractSenderIdFromNode(opArr);
         const senderId = senderPreferred || __deltaChooseBestSenderId(idTokens, threadKey, accountUserId);
+        const tsMs = __deltaExtractBestTimestampMsFromNode(opArr);
         pushNormalizedEvent({
           operation: opName,
           operacao_meta: opName,
           thread_key: threadKey,
           message_text: messageText,
           message_id: mid,
+          server_timestamp_ms: tsMs || null,
           actor_id: senderId,
         });
         continue;
@@ -17367,30 +17516,34 @@ async function __deltaAttachCdpEar(nome, page) {
               }
             } catch {}
 
-            // Passou guardrails: aceitar como mensagem offline legítima e despachar pro CT.
-            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
-            __deltaAppendPendingJsonlSync({
-              event: 'lead_chat_ativo_realtime',
+            // Passou guardrails: aceitar como mensagem offline legítima.
+            // Micro-buffer cronológico: acumula por 1s e flush ordenado por meta timestamp.
+            const buffered = __deltaBufferActiveUpsertEvent(threadKey, {
               server_id: serverId || null,
               account_login: String(nome || ''),
               thread_key: threadKey,
               texto_limpo: texto,
-              mensagens_cliente_concatenadas: texto,
-              mensagens_cliente_qtd: 1,
               dedup_meta_id: dedupMetaId || null,
               meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
               meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-              cidade: null,
-              operacao_meta: op || 'upsertMessage',
-              mensagem_seq: 0,
-              dispatch_ct: true,
-              queue_mode: 'dispatch_ct',
-              flow_stage: 'chat_ativo_realtime_offline_upsert_disk_dedupe',
-              state_status: 'active',
-              message_at: nowMs,
-              ...networkCtx
+              meta_ts: nowMs,
+              networkCtx
             });
-            __deltaKickIngestLoop();
+            if (!buffered) {
+              try {
+                __forensicEdgeEmit({
+                  account_login: String(nome || ''),
+                  thread_key: threadKey,
+                  flow_stage: 'discard_filter_triggered',
+                  details: {
+                    reason: 'active_upsert_duplicate_in_buffer',
+                    op,
+                    dedup_meta_id: dedupMetaId || null,
+                    text_preview: String(texto || '').slice(0, 220)
+                  }
+                });
+              } catch {}
+            }
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
             continue;
           }
