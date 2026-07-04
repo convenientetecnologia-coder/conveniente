@@ -16262,7 +16262,6 @@ function __deltaLooksLikeHumanText(value) {
   if (v.length > 800) return false;
   if (v.startsWith('mid.')) return false;
   if (/^\d{12,}$/.test(v)) return false;
-  if (/^(0|1|2|3|4|5|80|95|-12)$/i.test(v)) return false;
   if (/^(insertMessage|upsertMessage|updateThreadSnippet|deleteThenInsertThread|processDelta|processStoredDeltas)$/i.test(v)) return false;
   if (v.startsWith('{') || v.startsWith('[') || v.startsWith('{"')) return false;
   if (/graph\.facebook/i.test(v)) return false;
@@ -16562,7 +16561,7 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
           const slotTextoBruto = opArr && opArr[2];
           if (typeof slotTextoBruto === 'string') {
             const textoCandidato = __deltaDecodeEscapedText(slotTextoBruto).trim();
-            if (!/^(0|1|2|3|4|5|32|38|80|95|-12)$/i.test(textoCandidato) && __deltaLooksLikeHumanText(textoCandidato)) {
+            if (__deltaLooksLikeHumanText(textoCandidato)) {
               messageText = textoCandidato;
             }
           }
@@ -17016,10 +17015,20 @@ async function __deltaAttachCdpEar(nome, page) {
 
       for (const ev of arr) {
         const threadKey = String(ev && ev.thread_key || '').trim();
-        const texto = __deltaDecodeEscapedText(String(ev && ev.message_text || '')).trim();
+        const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
+        const texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
         if (!threadKey) {
           // Mensagem válida sem identificador (causa: missing_identifiers).
           try {
+            try {
+              console.log('[FORENSIC_RAW_PARSE] ' + JSON.stringify({
+                timestamp: Date.now(),
+                flow_stage: 'raw_frame_parsed',
+                text_value: texto,
+                text_type: typeof texto,
+                operation: op
+              }));
+            } catch {}
             if (__deltaShouldEmitLeadText(texto)) {
               __forensicEdgeEmit({
                 account_login: String(nome || ''),
@@ -17048,9 +17057,17 @@ async function __deltaAttachCdpEar(nome, page) {
           } catch {}
           continue;
         }
+        try {
+          console.log('[FORENSIC_RAW_PARSE] ' + JSON.stringify({
+            timestamp: Date.now(),
+            flow_stage: 'raw_frame_parsed',
+            text_value: texto,
+            text_type: typeof texto,
+            operation: op
+          }));
+        } catch {}
         if (!__deltaShouldEmitLeadText(texto)) continue;
 
-        const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
         // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================
         // Regra rígida de borda:
         // - insertMessage e updateThreadSnippet: devem ser processados textualmente (mata apagão).
