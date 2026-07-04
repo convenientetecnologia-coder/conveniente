@@ -15106,6 +15106,28 @@ function __deltaScheduleThreadTimer(st, { retry = false } = {}) {
   st.timerDueAt = Date.now() + delayMs;
   const nome = String(st.nome || '');
   const threadKey = String(st.thread_key || '');
+  // Sensor forense: ciclo de vida do buffer (timer armado)
+  try {
+    const msgs = Array.isArray(st.messages) ? st.messages : [];
+    const opCounts = {};
+    for (const m of msgs) {
+      const op = String(m && m.op || '').trim() || '(vazio)';
+      opCounts[op] = (Number(opCounts[op] || 0) || 0) + 1;
+    }
+    console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
+      event: 'timer_scheduled',
+      fired_at: null,
+      scheduled_at: Date.now(),
+      account_login: String(nome || '').trim() || null,
+      thread_key: String(threadKey || '').trim() || null,
+      reason: String(st.timerReason || '').trim() || null,
+      status: String(st.status || '').trim() || null,
+      delayMs,
+      dueAt: Number(st.timerDueAt || 0) || 0,
+      messages_len: msgs.length,
+      op_counts: opCounts,
+    }));
+  } catch {}
   st.timerHandle = setTimeout(() => {
     __deltaHandleBufferedThreadTimer(nome, threadKey, { reason: st.timerReason }).catch(() => {});
   }, delayMs);
@@ -15122,6 +15144,37 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   if (!st) return;
   if (st.status === 'active') return;
   if (st.inFlight) return;
+
+  // Sensor forense: ciclo de vida do buffer (timer estourou)
+  try {
+    const firedAt = Date.now();
+    const dueAt = Number(st.timerDueAt || 0) || 0;
+    const msgs = Array.isArray(st.messages) ? st.messages : [];
+    const opCounts = {};
+    for (const m of msgs) {
+      const op = String(m && m.op || '').trim() || '(vazio)';
+      opCounts[op] = (Number(opCounts[op] || 0) || 0) + 1;
+    }
+    const concat = __deltaBuildConcatFromState(st);
+    const concatText = String(concat && concat.text || '');
+    const approxLines = concatText ? (concatText.split('\n').length) : 0;
+    console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
+      event: 'timer_fired',
+      fired_at: firedAt,
+      scheduled_at: null,
+      account_login: n || null,
+      thread_key: tk || null,
+      reason: String(reason || '').trim() || null,
+      status: String(st.status || '').trim() || null,
+      dueAt,
+      due_in_ms: dueAt ? (dueAt - firedAt) : null,
+      messages_len: msgs.length,
+      op_counts: opCounts,
+      concat_message_count: Number(concat && concat.count || 0) || 0,
+      concat_lines_approx: approxLines,
+      text_preview: concatText.slice(0, 320),
+    }));
+  } catch {}
 
   __deltaClearThreadTimer(st);
   st.status = 'hands_in_progress';

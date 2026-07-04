@@ -1032,6 +1032,8 @@ app.use(express.urlencoded({ extended: true }));
 // Diretriz: instrumentação imutável, sem alterar lógicas de motor.
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, 'dados', 'forensic_edge.log');
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, 'dados', 'leads_brutos.jsonl');
+const MENSAGENS_PENDENTES_JSONL_PATH = path.join(__dirname, 'dados', 'mensagens_pendentes.jsonl');
+const MENSAGENS_PENDENTES_CURSOR_PATH = path.join(__dirname, 'dados', 'mensagens_pendentes.cursor.json');
 
 function __forensicEmitSync(filePath, obj) {
   try {
@@ -1115,6 +1117,16 @@ function __filterForensicRecords(records, { type = '', account = '' } = {}) {
   });
 }
 
+function __filterQueueRecords(records, { account = '' } = {}) {
+  const a = String(account || '').trim();
+  const arr = Array.isArray(records) ? records : [];
+  return arr.filter((r) => {
+    if (!r || typeof r !== 'object') return false;
+    if (a && String(r.account_login || '').trim() !== a) return false;
+    return true;
+  });
+}
+
 // Endpoint de extração forense (porta 8088)
 app.get('/api/infra/forensic-logs', (req, res) => {
   try {
@@ -1122,8 +1134,11 @@ app.get('/api/infra/forensic-logs', (req, res) => {
     const account = String(req && req.query && req.query.account || '').trim();
     const edge = __tailJsonlSync(FORENSIC_EDGE_LOG_PATH, { maxLines: 200 });
     const leads = __tailJsonlSync(LEADS_BRUTOS_JSONL_PATH, { maxLines: 200 });
+    const pendentes = __tailJsonlSync(MENSAGENS_PENDENTES_JSONL_PATH, { maxLines: 100, maxBytes: 512 * 1024 });
+    const cursorJson = __readJsonFileSafe(MENSAGENS_PENDENTES_CURSOR_PATH);
     const edgeFiltered = __filterForensicRecords(edge.records, { type, account });
     const leadsFiltered = __filterForensicRecords(leads.records, { type, account });
+    const pendentesFiltered = __filterQueueRecords(pendentes.records, { account });
     return res.status(200).json({
       ok: true,
       now: Date.now(),
@@ -1140,6 +1155,17 @@ app.get('/api/infra/forensic-logs', (req, res) => {
           lines: leads.lines,
           bytes_read: leads.bytes_read,
           records: leadsFiltered
+        },
+        mensagens_pendentes: {
+          path: pendentes.path,
+          lines: pendentes.lines,
+          bytes_read: pendentes.bytes_read,
+          records: pendentesFiltered
+        },
+        mensagens_pendentes_cursor: {
+          path: MENSAGENS_PENDENTES_CURSOR_PATH,
+          ok: cursorJson != null,
+          json: cursorJson
         }
       }
     });
