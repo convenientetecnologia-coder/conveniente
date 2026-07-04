@@ -1818,26 +1818,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       }
     }
 
-    // Otimização operacional:
-    // - Outbound do atendente (from_network=nao) não deve depender do filtro Marketplace,
-    //   pois isso introduz latência alta (30-90s) em algumas contas.
-    // - Tentamos abrir o thread direto; Marketplace vira fallback apenas se não achar.
-    let open = null;
-    if (!fromNetworkLead) {
+    if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
       try {
-        open = await openThreadByClick(page, threadKey);
-      } catch (_) {
-        open = null;
-      }
+        await ensureMarketplaceFilterActive(page);
+      } catch (_) {}
     }
-    if (!open || !open.ok) {
-      if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-        try {
-          await ensureMarketplaceFilterActive(page);
-        } catch (_) {}
-      }
-      open = await openThreadByClick(page, threadKey);
-    }
+
+    const open = await openThreadByClick(page, threadKey);
     if (!open.ok) {
       if (fromNetworkLead) {
         try {
@@ -2244,44 +2231,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (envDirect) return envDirect;
     const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
     if (base) return `${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`;
-    // Fallback local (stack Gate B / indexct). Último recurso real do projeto fica nos candidates.
-    return "http://127.0.0.1:3002/api/attendance/confirm-delivery";
-  }
-
-  function resolveCtDeliveryConfirmUrlCandidates() {
-    const out = [];
-    const push = (u) => {
-      const url = String(u || "").trim();
-      if (!url) return;
-      if (out.includes(url)) return;
-      out.push(url);
-    };
-
-    // 1) Override explícito (melhor prática).
-    push(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL);
-
-    // 2) Base do CT (quando o domínio/host já roteia para o attendance).
-    const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
-    if (base) {
-      push(`${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`);
-      // Heurística local: muitos ambientes rodam core em :3000 e attendance em :3002.
-      try {
-        const u = new URL(base);
-        const host = String(u.hostname || "").toLowerCase();
-        const port = String(u.port || "");
-        if ((host === "127.0.0.1" || host === "localhost") && (port === "3000" || port === "")) {
-          const alt = `${u.protocol}//${u.hostname}:3002${u.pathname || ""}`.replace(/\/+$/, "");
-          push(`${alt}/api/attendance/confirm-delivery`);
-        }
-      } catch (_) {}
-    }
-
-    // 3) Fallback local (stack Gate B / indexct).
-    push("http://127.0.0.1:3002/api/attendance/confirm-delivery");
-
-    // 4) Fallback do projeto (último recurso).
-    push("https://painel.convenientetecnologia.com/api/attendance/confirm-delivery");
-    return out;
+    // Fallback do projeto: painel
+    return "https://painel.convenientetecnologia.com/api/attendance/confirm-delivery";
   }
 
   function resolveCtDeliveryConfirmSecret() {
@@ -2350,7 +2301,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     _deliveryConfirmPumpInFlight = true;
     try {
       ensureDeliveryConfirmDirsSync();
-      const urlCandidates = resolveCtDeliveryConfirmUrlCandidates();
+      const url = resolveCtDeliveryConfirmUrl();
       const sec = resolveCtDeliveryConfirmSecret();
 
       while (true) {
@@ -2391,29 +2342,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             client_message_id: cmdId
           };
           const headers = sec ? { "x-delivery-secret": sec } : {};
-          let ok = false;
-          let usedUrl = "";
-          let last = null;
-          for (const u of urlCandidates) {
-            const r = await postJsonWithTimeout(u, payload, { timeoutMs: 4500, headers });
-            last = r;
-            if (r && r.ok) {
-              ok = true;
-              usedUrl = String(u || "").trim();
-              break;
-            }
-          }
-          if (ok) {
-            writeDeliveryConfirmAckSync(cmdId, { status: Number(last && last.status || 0) || 200, url: usedUrl || null });
+          const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers });
+          if (r && r.ok) {
+            writeDeliveryConfirmAckSync(cmdId, { status: r.status, url });
             writeDeliveryConfirmCursorSync(nextOff);
             _deliveryConfirmPumpBackoffMs = 450;
             continue;
           }
-          try {
-            logInfo(
-              `[virtusDelta][confirm] FAIL cmd_id=${cmdId} tried=${urlCandidates.length} status=${Number(last && last.status || 0) || 0} err=${String((last && last.error) || "").trim()}`
-            );
-          } catch (_) {}
           _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
           try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
           break;
