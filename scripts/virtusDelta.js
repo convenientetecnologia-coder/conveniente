@@ -2515,14 +2515,21 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (envDirect) return envDirect;
     const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
     if (base) return `${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`;
-    // Fallback do projeto: painel
-    return "https://painel.convenientetecnologia.com/api/attendance/confirm-delivery";
+    // Regra rígida: sem fallback para produção pública.
+    // Se não houver URL explícita de ambiente, falha de forma visível (log forense),
+    // mantendo o envio no Facebook desacoplado (fire-and-forget).
+    return "";
   }
 
   function resolveCtDeliveryConfirmSecret() {
+    // Header obrigatório: x-delivery-secret.
+    // Preferir variáveis explícitas de delivery; permitir fallback para infra secret do CT/Edge
+    // (o CT aceita CT_DELTA_DELIVERY_SECRET ou CT_DELTA_INFRA_SECRET).
     return String(
       process.env.VIRTUS_DELTA_DELIVERY_SECRET
       || process.env.CT_DELTA_DELIVERY_SECRET
+      || process.env.CT_DELTA_INFRA_SECRET
+      || process.env.VIRTUS_DELTA_INFRA_SECRET
       || ""
     ).trim();
   }
@@ -2540,7 +2547,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         body: JSON.stringify(payload || {}),
         signal: controller.signal
       });
-      return { ok: !!res.ok, status: Number(res.status || 0) || 0 };
+      const st = Number(res.status || 0) || 0;
+      if (res.ok) return { ok: true, status: st };
+      return { ok: false, status: st, error: `http_${st || 0}` };
     } catch (e) {
       return { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
     } finally {
@@ -2596,6 +2605,48 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       const url = resolveCtDeliveryConfirmUrl();
       const sec = resolveCtDeliveryConfirmSecret();
 
+      // Pré-condições (fail-fast, sem falha muda)
+      if (!url) {
+        try {
+          __forensicEdgeEmit({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: null,
+            flow_stage: "confirm_delivery_fail",
+            details: {
+              tag: "FORENSIC_DOM_REVERSE",
+              message: "[FORENSIC_CONFIRM_FAIL] url: (empty) status: 0 error: confirm_url_missing",
+              url: "",
+              status: 0,
+              error: "confirm_url_missing",
+              ts_ms: Date.now(),
+            }
+          });
+        } catch (_) {}
+        _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
+        try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
+        return;
+      }
+      if (!sec) {
+        try {
+          __forensicEdgeEmit({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: null,
+            flow_stage: "confirm_delivery_fail",
+            details: {
+              tag: "FORENSIC_DOM_REVERSE",
+              message: `[FORENSIC_CONFIRM_FAIL] url: ${url} status: 0 error: delivery_secret_missing`,
+              url,
+              status: 0,
+              error: "delivery_secret_missing",
+              ts_ms: Date.now(),
+            }
+          });
+        } catch (_) {}
+        _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
+        try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
+        return;
+      }
+
       while (true) {
         if (!fsSync.existsSync(DELIVERY_CONFIRM_OUTBOX)) break;
         const cur = readDeliveryConfirmCursorSync();
@@ -2634,13 +2685,70 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             client_message_id: cmdId
           };
           const headers = sec ? { "x-delivery-secret": sec } : {};
-          const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers });
+          try {
+            try {
+              __forensicEdgeEmit({
+                account_login: payload.account_login || ACCOUNT_LOGIN || null,
+                thread_key: payload.thread_key || null,
+                flow_stage: "confirm_delivery_post_attempt",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  url,
+                  status: payload.status,
+                  client_message_id: cmdId,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+          } catch (_) {}
+
+          let r = null;
+          try {
+            r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers });
+          } catch (e) {
+            r = { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
+          }
+
           if (r && r.ok) {
             writeDeliveryConfirmAckSync(cmdId, { status: r.status, url });
             writeDeliveryConfirmCursorSync(nextOff);
             _deliveryConfirmPumpBackoffMs = 450;
+            try {
+              __forensicEdgeEmit({
+                account_login: payload.account_login || ACCOUNT_LOGIN || null,
+                thread_key: payload.thread_key || null,
+                flow_stage: "confirm_delivery_post_ok",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  url,
+                  http_status: Number(r.status || 0) || 0,
+                  client_message_id: cmdId,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
             continue;
           }
+
+          try {
+            const st0 = Number(r && r.status || 0) || 0;
+            const err0 = String((r && r.error) || "confirm_delivery_failed");
+            __forensicEdgeEmit({
+              account_login: payload.account_login || ACCOUNT_LOGIN || null,
+              thread_key: payload.thread_key || null,
+              flow_stage: "confirm_delivery_fail",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                message: `[FORENSIC_CONFIRM_FAIL] url: ${url} status: ${st0} error: ${err0}`,
+                url,
+                status: st0,
+                error: err0,
+                client_message_id: cmdId,
+                ts_ms: Date.now(),
+              }
+            });
+          } catch (_) {}
+
           _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
           try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
           break;
