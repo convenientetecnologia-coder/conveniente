@@ -3,6 +3,43 @@ const fsSync = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
+// ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
+// Regra rígida: console + arquivo físico, JSON string única:
+// console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
+const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_edge.log");
+const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, "..", "dados", "leads_brutos.jsonl");
+function __forensicEmitSync(filePath, obj) {
+  try {
+    const line = JSON.stringify(obj);
+    try { console.log(line); } catch (_) {}
+    try {
+      const fp = String(filePath || "").trim();
+      if (fp) {
+        try { fsSync.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
+        fsSync.appendFileSync(fp, line + "\n", "utf8");
+      }
+    } catch (_) {}
+  } catch (_) {}
+}
+function __forensicEdgeEmit({ account_login = null, thread_key = null, flow_stage = "", details = null } = {}) {
+  __forensicEmitSync(FORENSIC_EDGE_LOG_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || "").trim(),
+    thread_key: thread_key == null ? null : String(thread_key || "").trim(),
+    flow_stage: String(flow_stage || "").trim(),
+    details: details
+  });
+}
+function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_stage = "", details = null } = {}) {
+  __forensicEmitSync(LEADS_BRUTOS_JSONL_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || "").trim(),
+    thread_key: thread_key == null ? null : String(thread_key || "").trim(),
+    flow_stage: String(flow_stage || "").trim(),
+    details: details
+  });
+}
+
 let puppeteer = null;
 try {
   const pExtra = require("puppeteer-extra");
@@ -451,6 +488,18 @@ async function extractLeadClientNameFromFeedDom(page) {
       return fallback || "";
     }, FEED_ACTIVE_LEAD_SELECTOR);
     const name = sanitizeLeadClientName(raw);
+    try {
+      __forensicEdgeEmit({
+        account_login: null,
+        thread_key: null,
+        flow_stage: "dom_automation_tracking",
+        details: {
+          action: "lead_name_split",
+          name_raw: String(raw || "").slice(0, 180),
+          name_clean: String(name || "").slice(0, 120)
+        }
+      });
+    } catch (_) {}
     return name || null;
   } catch {
     return null;
@@ -544,6 +593,19 @@ async function extractCityFromMarketplaceDom(page) {
     const v = res && res.ok ? String(res.value || "").trim() : "";
     if (!v) return null;
     const normalized = normalizeCityToUfPattern(v);
+    try {
+      __forensicEdgeEmit({
+        account_login: null,
+        thread_key: null,
+        flow_stage: "dom_automation_tracking",
+        details: {
+          action: "city_extract_dom",
+          city_raw: String(v || "").slice(0, 120),
+          city_clean: String(normalized || "").slice(0, 120),
+          source: String(res && res.source || "").slice(0, 60) || null
+        }
+      });
+    } catch (_) {}
     // Trava final: só aceita se terminar em (UF). Caso contrário, considera inválido (evita lixo no CT).
     if (!/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(String(normalized || "").trim())) return null;
     return normalized;
@@ -1731,7 +1793,7 @@ async function scrollSidebarShort(page) {
   });
 }
 
-async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) {
+async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
 
@@ -1763,6 +1825,14 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) 
       const a = await page.$(sel).catch(() => null);
       if (a) {
         await humanPause("preThreadClick", "pre_thread_card_click");
+        try {
+          __forensicEdgeEmit({
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            flow_stage: "dom_automation_tracking",
+            details: { action: "open_thread_click", selector: sel, scrolled: i }
+          });
+        } catch (_) {}
         await a.click({ delay: clickDelayMs() }).catch(() => {});
         await humanPause("postThreadOpen", "post_thread_card_click");
         return { ok: true, scrolled: i, matched_selector: sel };
@@ -1793,6 +1863,14 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) 
       const a2 = await page.$(fallbackSel).catch(() => null);
       if (a2) {
         await humanPause("preThreadClick", "pre_thread_fallback_click");
+        try {
+          __forensicEdgeEmit({
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            flow_stage: "dom_automation_tracking",
+            details: { action: "open_thread_click_fallback", selector: fallbackSel, current_path: current }
+          });
+        } catch (_) {}
         await a2.click({ delay: clickDelayMs() }).catch(() => {});
         await humanPause("postThreadOpen", "post_thread_fallback_click");
         return { ok: true, scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current };
@@ -1803,7 +1881,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16 } = {}) 
   return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
 }
 
-async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null } = {}) {
+async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
   try { if (page) page.__virtusDeltaReplyInFlight = true; } catch (_) {}
@@ -1824,7 +1902,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    const open = await openThreadByClick(page, threadKey);
+    const open = await openThreadByClick(page, threadKey, { forensicAccountLogin });
     if (!open.ok) {
       if (fromNetworkLead) {
         try {
@@ -1836,7 +1914,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
             await humanPause("postMarketplace", "open_thread_retry_marketplace");
           }
         } catch (_) {}
-        const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
+        const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
         if (open2.ok) {
           Object.assign(open, open2);
         }
@@ -1942,7 +2020,7 @@ async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead =
     }
   } catch (_) {}
 
-  const open = await openThreadByClick(page, threadKey, { maxScrollSteps: 20 });
+  const open = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin: null });
   if (!open || !open.ok) {
     return { ok: false, error: String((open && open.error) || "thread_open_failed") };
   }
@@ -2289,6 +2367,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       status: String(status || "").trim() || "sent_to_facebook"
     };
     try { fsSync.appendFileSync(DELIVERY_CONFIRM_OUTBOX, JSON.stringify(rec) + "\n", "utf8"); } catch {}
+    try {
+      __forensicEdgeEmit({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: String(thread_key || "").trim() || null,
+        flow_stage: "reverse_command_bus",
+        details: { stage: "delivery_confirm_enqueued", client_message_id: cid, status: rec.status }
+      });
+    } catch (_) {}
     return cid;
   }
 
@@ -2495,7 +2581,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
 
       try {
-        const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false });
+        const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false, forensicAccountLogin: ACCOUNT_LOGIN });
         lastOut = r && typeof r === "object" ? r : { ok: true };
         if (lastOut && lastOut.ok) {
           const nowTs = Date.now();
@@ -2634,6 +2720,19 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       city: cityCandidate,
       citySource,
     });
+    try {
+      __forensicEdgeEmit({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        flow_stage: "dom_automation_tracking",
+        details: {
+          action: "city_collected",
+          city_clean: cityCandidate,
+          city_source: citySource,
+          item_link: itemLinkFinal
+        }
+      });
+    } catch (_) {}
 
     let profileUrl = null;
     try {
@@ -2643,6 +2742,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     let nomeClienteLimpo = null;
     try {
       nomeClienteLimpo = await extractLeadClientNameFromFeedDom(page);
+    } catch (_) {}
+    try {
+      __forensicEdgeEmit({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        flow_stage: "dom_automation_tracking",
+        details: {
+          action: "lead_name_extracted",
+          name_clean: nomeClienteLimpo || null
+        }
+      });
     } catch (_) {}
 
     const nowTs = Date.now();

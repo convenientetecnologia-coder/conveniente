@@ -7,6 +7,44 @@ const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+
+// ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
+// Regra rígida: console + arquivo físico, JSON string única:
+// console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
+const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_edge.log');
+const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, '..', 'dados', 'leads_brutos.jsonl');
+
+function __forensicEmitSync(filePath, obj) {
+  try {
+    const line = JSON.stringify(obj);
+    try { console.log(line); } catch {}
+    try {
+      const fp = String(filePath || '').trim();
+      if (fp) {
+        try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
+        fs.appendFileSync(fp, line + '\n', 'utf8');
+      }
+    } catch {}
+  } catch {}
+}
+function __forensicEdgeEmit({ account_login = null, thread_key = null, flow_stage = '', details = null } = {}) {
+  __forensicEmitSync(FORENSIC_EDGE_LOG_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || '').trim(),
+    thread_key: thread_key == null ? null : String(thread_key || '').trim(),
+    flow_stage: String(flow_stage || '').trim(),
+    details: details
+  });
+}
+function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_stage = '', details = null } = {}) {
+  __forensicEmitSync(LEADS_BRUTOS_JSONL_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || '').trim(),
+    thread_key: thread_key == null ? null : String(thread_key || '').trim(),
+    flow_stage: String(flow_stage || '').trim(),
+    details: details
+  });
+}
 let forensicLog = null;
 let rotateForensicLogs24h = null;
 try {
@@ -16830,7 +16868,37 @@ async function __deltaAttachCdpEar(nome, page) {
       for (const ev of arr) {
         const threadKey = String(ev && ev.thread_key || '').trim();
         const texto = __deltaDecodeEscapedText(String(ev && ev.message_text || '')).trim();
-        if (!threadKey) continue;
+        if (!threadKey) {
+          // Mensagem válida sem identificador (causa: missing_identifiers).
+          try {
+            if (__deltaShouldEmitLeadText(texto)) {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: null,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'missing_identifiers',
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+              __forensicLeadsEmit({
+                account_login: String(nome || ''),
+                thread_key: null,
+                flow_stage: 'lead_bruto_seen',
+                details: {
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            }
+          } catch {}
+          continue;
+        }
         if (!__deltaShouldEmitLeadText(texto)) continue;
         hadLead = true;
 
@@ -16839,6 +16907,22 @@ async function __deltaAttachCdpEar(nome, page) {
           (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
             ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
             : Date.now();
+        try {
+          __forensicLeadsEmit({
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            flow_stage: 'lead_bruto_seen',
+            details: {
+              transport: String(transport || ''),
+              requestId: String(requestId || ''),
+              sourceUrl: String(sourceUrl || '').slice(0, 220),
+              sourceHint: String(sourceHint || ''),
+              op: op || null,
+              message_at: nowMs,
+              text_preview: String(texto || '').slice(0, 240)
+            }
+          });
+        } catch {}
 
         // Classificação robusta inbound/outbound:
         // - Se sender == account_user_id (c_user), é outbound (mensagem nossa) -> não deve virar “mensagem do cliente”.
@@ -16857,6 +16941,19 @@ async function __deltaAttachCdpEar(nome, page) {
         };
         const diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(diskStatus)) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'legacy_historical',
+                state_status: String(diskStatus || ''),
+                op: op || null,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
           __deltaAppendPendingJsonlSync({
             event: 'lead_skip_forense_estado_conhecido',
             server_id: serverId || null,
@@ -16901,6 +16998,19 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         const st = __deltaGetOrCreateThreadState(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(st.status)) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'legacy_historical',
+                state_status: String(st.status || ''),
+                op: op || null,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
           __deltaAppendPendingJsonlSync({
             event: 'lead_skip_forense_estado_conhecido',
             server_id: serverId || null,
@@ -16920,7 +17030,22 @@ async function __deltaAttachCdpEar(nome, page) {
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
         }
-        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) continue;
+        if (__deltaIsRecentDuplicate(st, texto, op, nowMs)) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'sha1_text_collision',
+                op: op || null,
+                window_ms: Number(DELTA_RECENT_DEDUP_WINDOW_MS || 0) || 0,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          continue;
+        }
         const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
         const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
 
@@ -17123,6 +17248,23 @@ async function __deltaAttachCdpEar(nome, page) {
         const payloadData = response.payloadData || '';
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
         const payloadBytes = __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded);
+        // Sensor A: cdp_frame_received (Lightspeed / canal rico)
+        try {
+          const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
+          if (isLightspeed) {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: null,
+              flow_stage: 'cdp_frame_received',
+              details: {
+                requestId: requestId || null,
+                payload_bytes: Number(payloadBytes || 0) || 0,
+                opcode: Number(opcode ?? -1),
+                hasLightspeed: !!(wsMeta && wsMeta.hasLightspeed)
+              }
+            });
+          }
+        } catch {}
         __deltaIncFrameTelemetry('telemetry_frames_decoded', 1);
         if (wsMeta) {
           wsMeta.framesDecoded = (Number(wsMeta.framesDecoded || 0) || 0) + 1;

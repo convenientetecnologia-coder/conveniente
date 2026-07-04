@@ -1028,6 +1028,127 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 // ===================== Fim Body Parsers =====================
 
+// ===================== Forensic Logs (Caixa-preta Universal) =====================
+// Diretriz: instrumentação imutável, sem alterar lógicas de motor.
+const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, 'dados', 'forensic_edge.log');
+const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, 'dados', 'leads_brutos.jsonl');
+
+function __forensicEmitSync(filePath, obj) {
+  try {
+    const line = JSON.stringify(obj);
+    // Regra: sempre no console e no arquivo físico.
+    try { console.log(line); } catch {}
+    try {
+      const fp = String(filePath || '').trim();
+      if (fp) {
+        try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
+        fs.appendFileSync(fp, line + '\n', 'utf8');
+      }
+    } catch {}
+  } catch {}
+}
+
+function __forensicEdgeEmit({ account_login = null, thread_key = null, flow_stage = '', details = null } = {}) {
+  __forensicEmitSync(FORENSIC_EDGE_LOG_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || '').trim(),
+    thread_key: thread_key == null ? null : String(thread_key || '').trim(),
+    flow_stage: String(flow_stage || '').trim(),
+    details: (details && typeof details === 'object') ? details : details
+  });
+}
+
+function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_stage = '', details = null } = {}) {
+  __forensicEmitSync(LEADS_BRUTOS_JSONL_PATH, {
+    timestamp: Date.now(),
+    account_login: account_login == null ? null : String(account_login || '').trim(),
+    thread_key: thread_key == null ? null : String(thread_key || '').trim(),
+    flow_stage: String(flow_stage || '').trim(),
+    details: (details && typeof details === 'object') ? details : details
+  });
+}
+
+function __tailJsonlSync(filePath, { maxLines = 200, maxBytes = 512 * 1024 } = {}) {
+  try {
+    const fp = String(filePath || '').trim();
+    if (!fp) return { ok: true, path: fp, records: [], lines: 0, bytes_read: 0 };
+    if (!fs.existsSync(fp)) return { ok: true, path: fp, records: [], lines: 0, bytes_read: 0 };
+    const st = fs.statSync(fp);
+    const size = Number(st && st.size || 0) || 0;
+    if (!size) return { ok: true, path: fp, records: [], lines: 0, bytes_read: 0 };
+
+    const capBytes = Math.max(8 * 1024, Number(maxBytes || 0) || 0);
+    const start = Math.max(0, size - capBytes);
+    const toRead = Math.max(0, size - start);
+    const buf = Buffer.allocUnsafe(toRead);
+    let bytesRead = 0;
+    let fd = null;
+    try {
+      fd = fs.openSync(fp, 'r');
+      bytesRead = fs.readSync(fd, buf, 0, toRead, start);
+    } finally {
+      try { if (fd) fs.closeSync(fd); } catch {}
+    }
+    const raw = buf.slice(0, bytesRead).toString('utf8');
+    let lines = raw.split(/\r?\n/);
+    // Se começamos no meio do arquivo, a 1ª linha pode estar truncada.
+    if (start > 0 && lines.length) lines = lines.slice(1);
+    const tail = lines.map((s) => String(s || '').trim()).filter(Boolean).slice(-Math.max(1, Number(maxLines || 200) || 200));
+    const records = tail.map((ln) => {
+      try { return JSON.parse(ln); } catch { return { raw_line: ln }; }
+    });
+    return { ok: true, path: fp, records, lines: tail.length, bytes_read: bytesRead };
+  } catch (e) {
+    return { ok: false, path: String(filePath || ''), error: 'tail_failed', message: (e && e.message) || String(e), records: [], lines: 0, bytes_read: 0 };
+  }
+}
+
+function __filterForensicRecords(records, { type = '', account = '' } = {}) {
+  const t = String(type || '').trim().toLowerCase();
+  const a = String(account || '').trim();
+  const arr = Array.isArray(records) ? records : [];
+  return arr.filter((r) => {
+    if (!r || typeof r !== 'object') return false;
+    if (a && String(r.account_login || '').trim() !== a) return false;
+    if (t === 'discard') return String(r.flow_stage || '').trim() === 'discard_filter_triggered';
+    return true;
+  });
+}
+
+// Endpoint de extração forense (porta 8088)
+app.get('/api/infra/forensic-logs', (req, res) => {
+  try {
+    const type = String(req && req.query && req.query.type || '').trim();
+    const account = String(req && req.query && req.query.account || '').trim();
+    const edge = __tailJsonlSync(FORENSIC_EDGE_LOG_PATH, { maxLines: 200 });
+    const leads = __tailJsonlSync(LEADS_BRUTOS_JSONL_PATH, { maxLines: 200 });
+    const edgeFiltered = __filterForensicRecords(edge.records, { type, account });
+    const leadsFiltered = __filterForensicRecords(leads.records, { type, account });
+    return res.status(200).json({
+      ok: true,
+      now: Date.now(),
+      query: { type: type || null, account: account || null },
+      files: {
+        forensic_edge: {
+          path: edge.path,
+          lines: edge.lines,
+          bytes_read: edge.bytes_read,
+          records: edgeFiltered
+        },
+        leads_brutos: {
+          path: leads.path,
+          lines: leads.lines,
+          bytes_read: leads.bytes_read,
+          records: leadsFiltered
+        }
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'forensic_logs_failed', message: (e && e.message) || String(e) });
+  }
+});
+// ===================== Fim Forensic Logs =====================
+
 // ===================== Infra Auth (Gate B) =====================
 function __readJsonFileSafe(p) {
   try {
@@ -1235,6 +1356,16 @@ async function __edgeRunDeltaReplyPump() {
 
         // Entrega por IPC ao worker dono do perfil (retorno rápido; execução real ocorre em background no worker/virtusDelta)
         try {
+          __forensicEdgeEmit({
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'ipc_dispatch_attempt',
+              cmd_id: cmdId,
+              chars: String(rec.texto_resposta || '').length
+            }
+          });
           const r = await clusterClient.sendWorkerCommand(
             'delta-reply-task',
             {
@@ -1250,14 +1381,32 @@ async function __edgeRunDeltaReplyPump() {
             __edgeWriteAckSync(cmdId, { worker: r || null });
             __edgeWriteDeltaReplyCursorSync(nextOffset);
             __edgeDeltaReplyPumpBackoffMs = 250;
+            __forensicEdgeEmit({
+              account_login: String(rec.nome || '').trim() || null,
+              thread_key: String(rec.thread_key || '').trim() || null,
+              flow_stage: 'reverse_command_bus',
+              details: { stage: 'ipc_dispatch_ok', cmd_id: cmdId }
+            });
             continue;
           }
           // Falha: não avança cursor (retry), com backoff
           __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.7)));
+          __forensicEdgeEmit({
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'ipc_dispatch_fail', cmd_id: cmdId, error: (r && r.error) ? String(r.error) : 'ipc_not_ok' }
+          });
           try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
           break;
         } catch (e) {
           __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.8)));
+          __forensicEdgeEmit({
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'ipc_dispatch_error', cmd_id: cmdId, error: e && e.message ? String(e.message) : String(e) }
+          });
           try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
           break;
         }
@@ -1298,10 +1447,22 @@ app.post('/api/infra/command-bus', async (req, res) => {
         const thread_key = String(cmd.thread_key || '').trim();
         const texto_resposta = String(cmd.texto_resposta || '').replace(/\r/g, '');
         if (!nome || !thread_key || !texto_resposta) {
+          __forensicEdgeEmit({
+            account_login: nome || null,
+            thread_key: thread_key || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'delta_reply_rejected', reason: 'missing_fields', has_nome: !!nome, has_thread_key: !!thread_key, chars: texto_resposta.length }
+          });
           results[i] = { id: cmd && cmd.id ? String(cmd.id) : null, type: 'delta_reply', ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
           continue;
         }
         const clientMessageId = String(cmd.client_message_id || cmd.clientMessageId || cmd.id || '').trim() || null;
+        __forensicEdgeEmit({
+          account_login: nome,
+          thread_key,
+          flow_stage: 'reverse_command_bus',
+          details: { stage: 'delta_reply_received', cmd_id: String(cmd && cmd.id || clientMessageId || '') || null, chars: texto_resposta.length }
+        });
         const cmdId = __edgeEnqueueDeltaReplyToDiskSync({
           id: String(cmd && cmd.id ? cmd.id : '').trim() || clientMessageId,
           nome,
@@ -1310,6 +1471,12 @@ app.post('/api/infra/command-bus', async (req, res) => {
           client_message_id: clientMessageId
         });
         try { forensicLog('EDGE_DELTA', 'delta_reply_received_by_edge', { id: cmdId, nome, thread_key, chars: texto_resposta.length }); } catch {}
+        __forensicEdgeEmit({
+          account_login: nome,
+          thread_key,
+          flow_stage: 'reverse_command_bus',
+          details: { stage: 'delta_reply_enqueued', cmd_id: cmdId, client_message_id: clientMessageId }
+        });
         __edgeKickDeltaReplyPump();
         results[i] = {
           id: cmdId,
