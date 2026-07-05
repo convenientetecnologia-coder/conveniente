@@ -17655,8 +17655,8 @@ async function __deltaAttachCdpEar(nome, page) {
 
         // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================
         // Regra rígida de borda:
-        // - insertMessage e updateThreadSnippet: devem ser processados textualmente (mata apagão).
-        // - upsertMessage: sincronismo/histórico (replay pós-restart) -> NÃO pode alimentar CT nem timers (capture_only local).
+        // - insertMessage e upsertMessage: roteamento por ID Meta inédito no disco.
+        // - updateThreadSnippet: fluxo textual controlado, sem dispatch realtime em thread ativa.
         // - dedupe: proibido cache de IDs em RAM; checar duplicidade consultando SSD (mensagens_pendentes.jsonl tail).
 
         const nowMs =
@@ -17759,6 +17759,29 @@ async function __deltaAttachCdpEar(nome, page) {
               }
             });
           } catch {}
+          try {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_sync_only_duplicate_meta_id',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              cidade: null,
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'duplicate_meta_id_sync_only',
+              message_at: metaTsMs,
+              network_transport: String(transport || '').trim() || null,
+              network_request_id: String(requestId || '').trim() || null,
+              network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
+              network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
+            });
+          } catch {}
           continue;
         }
 
@@ -17854,9 +17877,8 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
           // Contrato de borda (thread active):
-          // - insertMessage: realtime imediato (digitação ao vivo).
+          // - insertMessage/upsertMessage: realtime imediato (ID Meta inédito já validado antes).
           // - updateThreadSnippet: nunca despacha ao CT (ruído de layout/hidratação).
-          // - upsertMessage: pode ser mensagem offline; despacha SOMENTE se ID Meta for inédito no disco.
           if (op !== 'insertMessage' && op !== 'upsertMessage') {
             try {
               __forensicEdgeEmit({
@@ -17900,88 +17922,6 @@ async function __deltaAttachCdpEar(nome, page) {
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
             continue;
           }
-
-          if (op === 'upsertMessage') {
-            // upsertMessage em thread active:
-            // Dedupe canônico por meta_message_id já ocorreu antes.
-            // Retificação por High-Watermark (disco): bloquear replays redundantes da Meta no boot/reabertura.
-            const hw = __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey);
-            if (hw > 0 && metaTsMs <= hw) {
-              try {
-                __forensicEdgeEmit({
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  flow_stage: 'discard_filter_triggered',
-                  details: {
-                    reason: 'active_upsert_high_watermark_replay',
-                    op,
-                    transport: String(transport || ''),
-                    requestId: String(requestId || ''),
-                    sourceHint: String(sourceHint || ''),
-                    dedup_meta_id: dedupMetaId || null,
-                    message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                    offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                    frame_ts: metaTsMs,
-                    high_watermark: hw,
-                    text_preview: String(texto || '').slice(0, 220)
-                  }
-                });
-              } catch {}
-              try {
-                __deltaAppendPendingJsonlSync({
-                  event: 'lead_sync_only_active_upsert_high_watermark',
-                  server_id: serverId || null,
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  texto_limpo: texto,
-                  dedup_meta_id: dedupMetaId || null,
-                  meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                  meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                  cidade: null,
-                  operacao_meta: op || 'upsertMessage',
-                  mensagem_seq: 0,
-                  dispatch_ct: false,
-                  queue_mode: 'capture_only',
-                  flow_stage: 'active_upsert_high_watermark_skip',
-                  message_at: metaTsMs,
-                  high_watermark: hw,
-                  ...networkCtx
-                });
-              } catch {}
-              try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-              continue;
-            }
-
-            // Micro-buffer cronológico: acumula por 1s e flush ordenado por meta timestamp.
-            const buffered = __deltaBufferActiveUpsertEvent(threadKey, {
-              server_id: serverId || null,
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              texto_limpo: texto,
-              dedup_meta_id: dedupMetaId || null,
-              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-              meta_ts: metaTsMs,
-              networkCtx
-            });
-            if (!buffered) {
-              try {
-                __forensicEdgeEmit({
-                  account_login: String(nome || ''),
-                  thread_key: threadKey,
-                  flow_stage: 'discard_filter_triggered',
-                  details: {
-                    reason: 'active_upsert_duplicate_in_buffer',
-                    op,
-                    dedup_meta_id: dedupMetaId || null,
-                    text_preview: String(texto || '').slice(0, 220)
-                  }
-                });
-              } catch {}
-            }
-            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-            continue;
-          }
           // Trava de ciclo de vida: "active" em disco nunca pode rearmar timer/hands.
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
           __deltaAppendPendingJsonlSync({
@@ -18008,47 +17948,6 @@ async function __deltaAttachCdpEar(nome, page) {
           try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
           __deltaKickIngestLoop();
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-          continue;
-        }
-        if (op === 'upsertMessage') {
-          // Fora de threads ativas, upsertMessage é sync/histórico:
-          // - nunca pode alimentar CT/timers
-          // - mas deve ser registrado em disco (hidratação silenciosa) para auditoria.
-          try {
-            __forensicEdgeEmit({
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
-              details: {
-                reason: 'upsert_message_sync_only',
-                op,
-                transport: String(transport || ''),
-                requestId: String(requestId || ''),
-                sourceHint: String(sourceHint || ''),
-                text_preview: String(texto || '').slice(0, 220)
-              }
-            });
-          } catch {}
-          try {
-            __deltaAppendPendingJsonlSync({
-              event: 'lead_sync_only_upsert',
-              server_id: serverId || null,
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              texto_limpo: texto,
-              dedup_meta_id: dedupMetaId || null,
-              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-              cidade: null,
-              operacao_meta: op || 'upsertMessage',
-              mensagem_seq: 0,
-              dispatch_ct: false,
-              queue_mode: 'capture_only',
-              flow_stage: 'upsert_sync_only',
-              message_at: nowMs,
-              ...networkCtx
-            });
-          } catch {}
           continue;
         }
         const st = __deltaGetOrCreateThreadState(nome, threadKey);
