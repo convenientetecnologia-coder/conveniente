@@ -3474,13 +3474,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Relógio Sentinela por conta (5–15s), isolado por ACCOUNT_LOGIN.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
 
-    const maxRetries = 3; // 3 retries locais rápidos além da tentativa inicial
+    // Anti-HOL: retries inline longos seguram a fila inteira.
+    // Estratégia nova: tentativa única no slot atual + requeue assíncrono no enqueueDeltaReply.
+    const maxRetries = Math.max(0, Number(process.env.VIRTUS_DELTA_REPLY_INLINE_RETRIES || 0) || 0);
     let lastOut = null;
     let lastErr = "delta_reply_unknown_error";
 
     for (let attempt = 1; attempt <= (maxRetries + 1); attempt++) {
       if (attempt > 1) {
-        const retryWaitMs = randomBetween(3_000, 5_000);
+        const retryWaitMs = randomBetween(1_200, 2_400);
         logInfo(
           `[virtusDelta][reply] retry_visual attempt=${attempt - 1}/${maxRetries} thread_key=${t} wait_ms=${retryWaitMs}`
         );
@@ -3695,6 +3697,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           const isSelectorLike =
             err === "composer_missing" ||
             err === "thread_card_not_found" ||
+            err === "thread_open_hydration_timeout" ||
             err === "send_not_confirmed_composer_not_empty" ||
             err === "composer_text_not_registered";
           const tries = Math.max(0, Number(_requeue_count || 0) || 0);
@@ -3733,6 +3736,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             const isSelectorLike =
               err === "composer_missing" ||
               err === "thread_card_not_found" ||
+              err === "thread_open_hydration_timeout" ||
               err === "send_not_confirmed_composer_not_empty" ||
               err === "composer_text_not_registered";
             const tries = Math.max(0, Number(_requeue_count || 0) || 0);
