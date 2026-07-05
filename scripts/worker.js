@@ -14849,8 +14849,8 @@ const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendent
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
-const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
-const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
@@ -14877,8 +14877,8 @@ const DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS = Math.max(
 
 // =========================
 // DELTA: Arquitetura 2 camadas (REPRESA vs DISPARO)
-// - REPRESA: new leads timer queue (1–2min), serial POR CONTA, fora do Puppeteer.
-// - DISPARO: ctrl.virtus (Promise chain) executa DOM + cooldown 5–15s.
+// - REPRESA: new leads timer queue (30–90s), serial POR CONTA, fora do Puppeteer.
+// - DISPARO: ctrl.virtus (Promise chain) executa DOM + cooldown 3–12s.
 // Objetivo: eliminar bursts de timers simultâneos que geram head-of-line blocking.
 // =========================
 const DELTA_NEW_LEADS_TIMER_QUEUE_DIR = path.join(__dirname, '..', 'dados', 'delta_new_leads_timer_queue');

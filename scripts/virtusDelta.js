@@ -476,14 +476,14 @@ const HUMAN_TIMINGS = {
 const NEW_CHAT_WARMUP_DELAY = envMs(
   "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MIN",
   "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MAX",
-  60_000,
-  120_000
+  30_000,
+  90_000
 );
 const CROSS_THREAD_SEND_GAP = envMs(
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MIN",
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MAX",
-  5_000,
-  15_000
+  3_000,
+  12_000
 );
 
 const MARKETPLACE_STABILITY_ROUNDS = Math.max(
@@ -3615,8 +3615,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   }
 
   async function enforceGlobalDeltaCooldown(accountLogin = ACCOUNT_LOGIN) {
-    const minMs = 5_000;
-    const maxMs = 15_000;
+    const minMs = Math.max(0, Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.min || 3_000) || 3_000);
+    const maxMs = Math.max(minMs, Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.max || 12_000) || 12_000);
     const delayMs = randomBetween(minMs, maxMs);
     const last = readLastDeltaSendTimestamp(accountLogin);
     const now = Date.now();
@@ -3700,7 +3700,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const cmid = String(clientMessageId || "").trim() || null;
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
 
-    // Relógio Sentinela por conta (5–15s), isolado por ACCOUNT_LOGIN.
+    // Relógio Sentinela por conta (3–12s), isolado por ACCOUNT_LOGIN.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
 
     // Anti-HOL: retries inline longos seguram a fila inteira.
