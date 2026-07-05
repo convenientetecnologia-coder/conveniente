@@ -2620,26 +2620,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   function resolveCtDeliveryConfirmUrl() {
     const envDirect = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || "").trim();
-    if (envDirect) return envDirect;
+    if (envDirect) {
+      const normalized = envDirect.replace(/\/+$/, "");
+      if (/\/api\/attendance\/confirm-delivery$/i.test(normalized)) return normalized;
+      return `${normalized}/api/attendance/confirm-delivery`;
+    }
     const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
     if (base) return `${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`;
     // Regra rígida: sem fallback para produção pública.
     // Se não houver URL explícita de ambiente, falha de forma visível (log forense),
     // mantendo o envio no Facebook desacoplado (fire-and-forget).
     return "";
-  }
-
-  function resolveCtDeliveryConfirmSecret() {
-    // Header obrigatório: x-delivery-secret.
-    // Preferir variáveis explícitas de delivery; permitir fallback para infra secret do CT/Edge
-    // (o CT aceita CT_DELTA_DELIVERY_SECRET ou CT_DELTA_INFRA_SECRET).
-    return String(
-      process.env.VIRTUS_DELTA_DELIVERY_SECRET
-      || process.env.CT_DELTA_DELIVERY_SECRET
-      || process.env.CT_DELTA_INFRA_SECRET
-      || process.env.VIRTUS_DELTA_INFRA_SECRET
-      || ""
-    ).trim();
   }
 
   async function postJsonWithTimeout(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
@@ -2703,8 +2694,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       const cid = String(client_message_id || "").trim();
       if (!cid) return;
       const url = resolveCtReverseDeliveryStatusUrl();
-      const sec = resolveCtDeliveryConfirmSecret();
-      if (!url || !sec) return;
+      if (!url) return;
       const payload = {
         server_id: SERVER_ID,
         account_login: ACCOUNT_LOGIN,
@@ -2713,7 +2703,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         status: String(status || "error_failed_to_send").trim() || "error_failed_to_send",
         error: String(error || "").slice(0, 500) || null,
       };
-      const headers = { "x-delivery-secret": sec };
       try {
         setTimeout(() => {
           (async () => {
@@ -2731,7 +2720,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 }
               });
             } catch (_) {}
-            const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers }).catch((e) => ({
+            const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500 }).catch((e) => ({
               ok: false,
               status: 0,
               error: (e && e.message) ? String(e.message) : String(e),
@@ -2808,7 +2797,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     try {
       ensureDeliveryConfirmDirsSync();
       let url = resolveCtDeliveryConfirmUrl();
-      const sec = resolveCtDeliveryConfirmSecret();
 
       // Pré-condições (fail-fast, sem falha muda)
       if (!url) {
@@ -2823,26 +2811,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               url: "",
               status: 0,
               error: "confirm_url_missing",
-              ts_ms: Date.now(),
-            }
-          });
-        } catch (_) {}
-        _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
-        try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
-        return;
-      }
-      if (!sec) {
-        try {
-          __forensicEdgeEmit({
-            account_login: ACCOUNT_LOGIN,
-            thread_key: null,
-            flow_stage: "confirm_delivery_fail",
-            details: {
-              tag: "FORENSIC_DOM_REVERSE",
-              message: `[FORENSIC_CONFIRM_FAIL] url: ${url} status: 0 error: delivery_secret_missing`,
-              url,
-              status: 0,
-              error: "delivery_secret_missing",
               ts_ms: Date.now(),
             }
           });
@@ -2910,7 +2878,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             // Extra para correlação sem ambiguidades (best-effort).
             client_message_id: cmdId
           };
-          const headers = sec ? { "x-delivery-secret": sec } : {};
           try {
             try {
               __forensicEdgeEmit({
@@ -2930,7 +2897,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
           let r = null;
           try {
-            r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers });
+            r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500 });
           } catch (e) {
             r = { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
           }
@@ -2980,7 +2947,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                     }
                   });
                 } catch (_) {}
-                const r2 = await postJsonWithTimeout(alt, payload, { timeoutMs: 4500, headers }).catch((e) => ({
+                const r2 = await postJsonWithTimeout(alt, payload, { timeoutMs: 4500 }).catch((e) => ({
                   ok: false,
                   status: 0,
                   error: (e && e.message) ? String(e.message) : String(e),

@@ -698,6 +698,30 @@ async function lockProfileAction(nome, fn) {
   }
 }
 
+// Guarda dedupe de entrada de comandos reply por conta (anti-triplicação em falso-timeout IPC).
+const __deltaReplyIngressIdsByAccount = new Map(); // nome -> Set(client_message_id)
+function __deltaReplyIngressSetForAccount(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return null;
+  let set = __deltaReplyIngressIdsByAccount.get(n);
+  if (!set) {
+    set = new Set();
+    __deltaReplyIngressIdsByAccount.set(n, set);
+  }
+  return set;
+}
+function __deltaReplyIngressRelease(nome, clientMessageId) {
+  try {
+    const n = String(nome || '').trim();
+    const cmid = String(clientMessageId || '').trim();
+    if (!n || !cmid) return;
+    const set = __deltaReplyIngressIdsByAccount.get(n);
+    if (!set) return;
+    set.delete(cmid);
+    if (set.size <= 0) __deltaReplyIngressIdsByAccount.delete(n);
+  } catch {}
+}
+
 async function readAccountFlags(nome) {
   try {
     const m = await manifestStore.read(nome).catch(()=>null);
@@ -10399,13 +10423,36 @@ const handlers = {
       const tr = String(texto_resposta || '').replace(/\r/g, '');
       const cmid = String(client_message_id || '').trim() || null;
       if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
+      if (cmid) {
+        const ingress = __deltaReplyIngressSetForAccount(n);
+        if (ingress && ingress.has(cmid)) {
+          try { logger.warn('[DELTA][HANDS] delta-reply-task dedupe_skip', { nome: n, thread_key: tk, client_message_id: cmid }); } catch {}
+          try {
+            __forensicEdgeEmit({
+              account_login: n,
+              thread_key: tk,
+              flow_stage: 'queue_task_dedupe_skip',
+              details: {
+                tag: 'FORENSIC_DOM_REVERSE',
+                reason: 'client_message_id_already_queued',
+                client_message_id: cmid,
+                ts_ms: Date.now()
+              }
+            });
+          } catch {}
+          return { ok: true, status: 'duplicate_skipped', client_message_id: cmid };
+        }
+        try { ingress && ingress.add(cmid); } catch {}
+      }
 
       const ctrl = controllers.get(n);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        if (cmid) __deltaReplyIngressRelease(n, cmid);
         return { ok: false, error: 'browser_not_connected' };
       }
       const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
       if (!runner || typeof runner.enqueueDeltaReply !== 'function') {
+        if (cmid) __deltaReplyIngressRelease(n, cmid);
         return { ok: false, error: 'delta_hands_unavailable' };
       }
 
@@ -10441,11 +10488,15 @@ const handlers = {
               if (out && out.ok === true) logger.info('[DELTA][HANDS] delta-reply-task concluído', { nome: n, thread_key: tk, client_message_id: cmid });
               else logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, out: out || null });
             } catch {}
+            if (cmid) __deltaReplyIngressRelease(n, cmid);
           })
           .catch((e) => {
             try { logger.warn('[DELTA][HANDS] delta-reply-task exception', { nome: n, thread_key: tk, client_message_id: cmid, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+            if (cmid) __deltaReplyIngressRelease(n, cmid);
           });
-      } catch {}
+      } catch {
+        if (cmid) __deltaReplyIngressRelease(n, cmid);
+      }
       return { ok: true, status: 'queued', client_message_id: cmid };
     });
   },

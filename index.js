@@ -1427,7 +1427,7 @@ async function __edgeRunDeltaReplyPump() {
               texto_resposta: String(rec.texto_resposta || '').replace(/\r/g, ''),
               client_message_id: String(rec.client_message_id || rec.id || '').trim() || null
             },
-            { timeoutMs: 4000 }
+            { timeoutMs: 30000 }
           );
           const ok = !!(r && r.ok !== false);
           if (ok) {
@@ -2269,22 +2269,12 @@ function __deltaProvisionDeliveryConfirmEnv() {
     // 1) URL canônica e rígida do confirm-delivery (balão azul)
     // Regra soberana: não derivar de envs genéricas nem hosts de VM/api.*
     const CT_CANONICAL_BASE = 'https://convenientetecnologia.com';
-    process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = `${CT_CANONICAL_BASE}/api/attendance/confirm-delivery`;
-
-    // 2) Secret obrigatório do header x-delivery-secret (deve bater no CT)
-    // Preferência: VIRTUS_DELTA_DELIVERY_SECRET, senão infra secret local.
-    const deliverySecret = String(process.env.VIRTUS_DELTA_DELIVERY_SECRET || '').trim();
-    const infra = String(__resolveInfraSecret() || '').trim();
-    if (!deliverySecret && infra) process.env.VIRTUS_DELTA_DELIVERY_SECRET = infra;
-
-    // 3) Infra secret disponível para outros caminhos (best-effort)
-    const infraEnv = String(process.env.VIRTUS_DELTA_INFRA_SECRET || '').trim();
-    if (!infraEnv && infra) process.env.VIRTUS_DELTA_INFRA_SECRET = infra;
+    process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = CT_CANONICAL_BASE;
 
     try {
       logger.info('[DELTA][CONFIRM][ENV] provisionado', {
         url: String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').slice(0, 180) || null,
-        has_delivery_secret: !!String(process.env.VIRTUS_DELTA_DELIVERY_SECRET || '').trim(),
+        has_delivery_secret: false,
         has_infra_secret: !!String(process.env.VIRTUS_DELTA_INFRA_SECRET || '').trim()
       });
     } catch {}
