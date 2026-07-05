@@ -2027,9 +2027,32 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             details: { action: "open_thread_click", selector: sel, scrolled: i }
           });
         } catch (_) {}
-        await a.click({ delay: clickDelayMs() }).catch(() => {});
+        await page.click(sel, { delay: clickDelayMs() }).catch(() => {});
         await humanPause("postThreadOpen", "post_thread_card_click");
-        return { ok: true, scrolled: i, matched_selector: sel };
+        try {
+          // Regra rígida: após clicar no card (chat fechado), aguardar hidratação do composer Lexical.
+          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+        } catch (_) {
+          try {
+            const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
+            __forensicEdgeEmit({
+              account_login: forensicAccountLogin,
+              thread_key: t,
+              flow_stage: "thread_open_hydration_timeout",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                selector: sel,
+                scrolled: i,
+                current_path: currentPath ? String(currentPath) : null,
+                waited_selector: 'div[data-lexical-editor="true"]',
+                timeout_ms: 5000,
+                ts_ms: Date.now()
+              }
+            });
+          } catch (_) {}
+          return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: sel };
+        }
+        return { ok: true, scrolled: i, matched_selector: sel, hydrated: true };
       }
     }
     const delta = await scrollSidebarShort(page).catch(() => 0);
@@ -2096,9 +2119,32 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             details: { action: "open_thread_click_fallback", selector: fallbackSel, current_path: current }
           });
         } catch (_) {}
-        await a2.click({ delay: clickDelayMs() }).catch(() => {});
+        await page.click(fallbackSel, { delay: clickDelayMs() }).catch(() => {});
         await humanPause("postThreadOpen", "post_thread_fallback_click");
-        return { ok: true, scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current };
+        try {
+          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+        } catch (_) {
+          try {
+            const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
+            __forensicEdgeEmit({
+              account_login: forensicAccountLogin,
+              thread_key: t,
+              flow_stage: "thread_open_hydration_timeout",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                selector: fallbackSel,
+                scrolled: maxScrollSteps,
+                current_path: currentPath ? String(currentPath) : null,
+                waited_selector: 'div[data-lexical-editor="true"]',
+                timeout_ms: 5000,
+                ts_ms: Date.now(),
+                fallback: true
+              }
+            });
+          } catch (_) {}
+          return { ok: false, error: "thread_open_hydration_timeout", scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current };
+        }
+        return { ok: true, scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current, hydrated: true };
       }
     }
   } catch (_) {}
