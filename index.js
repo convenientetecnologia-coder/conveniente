@@ -2266,53 +2266,10 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 let clusterClient = null;
 function __deltaProvisionDeliveryConfirmEnv() {
   try {
-    function __deltaNormalizeConfirmBaseToUrl(baseOrUrl) {
-      try {
-        let s = String(baseOrUrl || "").trim();
-        if (!s) return "";
-        s = s.replace(/\/+$/, "");
-        // Se já vier como URL completa do endpoint, respeita.
-        if (/\/api\/attendance\/confirm-delivery\/?$/i.test(s)) {
-          return s.replace(/\/+$/, "");
-        }
-        // Se vier sem scheme, infere de forma segura para homolog/local.
-        if (!/^https?:\/\//i.test(s)) {
-          const host = String(s.split("/")[0] || "").trim().toLowerCase();
-          const looksLocal =
-            host === "localhost" ||
-            host.startsWith("127.") ||
-            host.startsWith("10.") ||
-            host.startsWith("192.168.") ||
-            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-            /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host);
-          s = (looksLocal ? "http://" : "https://") + s;
-        }
-        s = s.replace(/\/+$/, "");
-        return `${s}/api/attendance/confirm-delivery`;
-      } catch {
-        return "";
-      }
-    }
-
-    // 1) URL do confirm-delivery (balão azul)
-    const explicit = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').trim();
-    let confirmUrl = "";
-    if (explicit) {
-      confirmUrl = __deltaNormalizeConfirmBaseToUrl(explicit);
-    } else {
-      let ctBaseUrl = '';
-      try {
-        const cfg = readCtConfig();
-        ctBaseUrl = String((cfg && (cfg.ctBaseUrl || cfg.ct_base_url)) || '').trim();
-      } catch {}
-      // Respeitar base de ambiente/homologação se fornecida.
-      if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_ATTENDANCE_BASE_URL || process.env.CT_ATTENDANCE_URL || '').trim();
-      if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
-      confirmUrl = __deltaNormalizeConfirmBaseToUrl(ctBaseUrl);
-    }
-    if (confirmUrl) {
-      process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = confirmUrl;
-    }
+    // 1) URL canônica e rígida do confirm-delivery (balão azul)
+    // Regra soberana: não derivar de envs genéricas nem hosts de VM/api.*
+    const CT_CANONICAL_BASE = 'https://convenientetecnologia.com';
+    process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = `${CT_CANONICAL_BASE}/api/attendance/confirm-delivery`;
 
     // 2) Secret obrigatório do header x-delivery-secret (deve bater no CT)
     // Preferência: VIRTUS_DELTA_DELIVERY_SECRET, senão infra secret local.
