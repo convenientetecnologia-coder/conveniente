@@ -206,6 +206,58 @@ function shouldBypassNurseZombie(nome, source = 'nurse') {
   return true;
 }
 
+const __deltaBootEarStateByAccount = new Map();
+function __deltaGetBootEarState(nome) {
+  const key = String(nome || '').trim();
+  if (!key) return null;
+  let st = __deltaBootEarStateByAccount.get(key) || null;
+  if (!st) {
+    st = {
+      earAttached: false,
+      earAttachedAt: 0,
+      wsCreatedAt: 0,
+      wsRichSelectedAt: 0,
+      bootInterlockStartAt: 0,
+      lastUpdateAt: 0,
+      lastError: null
+    };
+    __deltaBootEarStateByAccount.set(key, st);
+  }
+  return st;
+}
+function __deltaMarkBootEarState(nome, patch = {}) {
+  const st = __deltaGetBootEarState(nome);
+  if (!st) return null;
+  try {
+    if (Object.prototype.hasOwnProperty.call(patch, 'earAttached')) st.earAttached = !!patch.earAttached;
+    if (Object.prototype.hasOwnProperty.call(patch, 'earAttachedAt')) st.earAttachedAt = Number(patch.earAttachedAt || 0) || st.earAttachedAt;
+    if (Object.prototype.hasOwnProperty.call(patch, 'wsCreatedAt')) st.wsCreatedAt = Number(patch.wsCreatedAt || 0) || st.wsCreatedAt;
+    if (Object.prototype.hasOwnProperty.call(patch, 'wsRichSelectedAt')) st.wsRichSelectedAt = Number(patch.wsRichSelectedAt || 0) || st.wsRichSelectedAt;
+    if (Object.prototype.hasOwnProperty.call(patch, 'bootInterlockStartAt')) st.bootInterlockStartAt = Number(patch.bootInterlockStartAt || 0) || st.bootInterlockStartAt;
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastError')) st.lastError = patch.lastError ? String(patch.lastError) : null;
+    st.lastUpdateAt = Date.now();
+  } catch {}
+  return st;
+}
+function __deltaIsBootEarReady(nome) {
+  const st = __deltaGetBootEarState(nome);
+  if (!st) return false;
+  if (!st.earAttached || !(Number(st.earAttachedAt || 0) > 0)) return false;
+  if ((Number(st.wsCreatedAt || 0) > 0) || (Number(st.wsRichSelectedAt || 0) > 0)) return true;
+  return false;
+}
+async function __deltaPrepareBootInterlockEar(nome, page) {
+  try {
+    __deltaMarkBootEarState(nome, { bootInterlockStartAt: Date.now() });
+    if (page) await __deltaAttachCdpEar(nome, page);
+    const st = __deltaGetBootEarState(nome);
+    return !!(st && st.earAttached);
+  } catch (e) {
+    __deltaMarkBootEarState(nome, { lastError: (e && e.message) ? String(e.message) : String(e) });
+    return false;
+  }
+}
+
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
   // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
@@ -227,7 +279,11 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     restrictTab: 0,
     epoch: cfg.epoch || 0,
     slowMode: (autoMode && autoMode.mode !== 'full'),
-    governorMode: (autoMode && autoMode.mode) || 'full'
+    governorMode: (autoMode && autoMode.mode) || 'full',
+    bootInterlockEnabled: String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0',
+    bootInterlockHoldMs: Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000),
+    bootInterlockBeforeNavigate: ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
+    bootInterlockIsEarReady: () => __deltaIsBootEarReady(nome),
   };
   if (eng === 'delta') {
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') {
@@ -15667,6 +15723,10 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
       governorMode: 'full',
       restrictTab: 0,
       bootReason: 'delta_unified_runtime',
+      bootInterlockEnabled: String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0',
+      bootInterlockHoldMs: Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000),
+      bootInterlockBeforeNavigate: ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
+      bootInterlockIsEarReady: () => __deltaIsBootEarReady(nome),
     });
     const booted = await resolveRunner(ctrl.virtus);
     if (booted && typeof booted[requiredFn] === 'function') {
@@ -17430,10 +17490,15 @@ async function __deltaDetachCdpSession(nome) {
 
 async function __deltaAttachCdpEar(nome, page) {
   if (!page || !page.target || typeof page.target !== 'function') return;
+  const earAttachTs = Date.now();
   try {
-    if (page.__deltaCdpEarAttached) return;
+    if (page.__deltaCdpEarAttached) {
+      __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs });
+      return;
+    }
     page.__deltaCdpEarAttached = true;
   } catch {}
+  __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs, lastError: null });
 
   __deltaStartIngestLoopOnce();
 
@@ -17570,6 +17635,7 @@ async function __deltaAttachCdpEar(nome, page) {
       wsState.selectedRichScore = Number(meta.richScore || 0) || 0;
       wsState.selectedReason = String(reason || '').slice(0, 120);
       wsState.selectedAt = now;
+      __deltaMarkBootEarState(nome, { wsRichSelectedAt: now });
       try {
         logger.info('[DELTA][WS_ROUTE] canal rico selecionado', {
           nome: String(nome || ''),
@@ -18101,6 +18167,7 @@ async function __deltaAttachCdpEar(nome, page) {
         const requestId = String(event && event.requestId || '').trim();
         const url = String(event && event.url || '').trim();
         if (!requestId) return;
+        __deltaMarkBootEarState(nome, { wsCreatedAt: Date.now() });
         const meta = ensureWsMeta(requestId, url);
         if (!meta) return;
         const score = Number(meta.richScore || 0) || 0;
@@ -18318,8 +18385,10 @@ async function __deltaAttachCdpEar(nome, page) {
     cdp.on('Network.responseReceived', onResponseReceived);
     try { logger.info('[DELTA][EAR] CDP ouvido ligado', { nome }); } catch {}
     try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ear_cdp_attached', { nome: String(nome || '') }); } catch {}
+    __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: Date.now(), lastError: null });
   } catch (err) {
     try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
+    __deltaMarkBootEarState(nome, { earAttached: false, lastError: err && err.message ? String(err.message) : String(err) });
     try {
       if (typeof forensicLog === 'function') {
         forensicLog('DELTA', 'ear_cdp_attach_failed', { nome: String(nome || ''), error: err && err.message ? String(err.message) : String(err) });

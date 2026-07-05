@@ -258,6 +258,56 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
           return;
         }
         const url = String(request && typeof request.url === "function" ? request.url() : "");
+        const bootInterlock = page && page.__deltaBootInterlock && typeof page.__deltaBootInterlock === "object"
+          ? page.__deltaBootInterlock
+          : null;
+        if (
+          bootInterlock &&
+          bootInterlock.active === true &&
+          bootInterlock.released !== true &&
+          typeof bootInterlock.matches === "function" &&
+          bootInterlock.matches(url)
+        ) {
+          if (bootInterlock.requestHeld) return;
+          bootInterlock.requestHeld = true;
+          const holdMs = Math.max(3000, Number(bootInterlock.holdMs || 3000) || 3000);
+          const earReadyFn = (typeof bootInterlock.isEarReady === "function") ? bootInterlock.isEarReady : null;
+          const startedAt = Date.now();
+          (async () => {
+            let earReady = false;
+            try {
+              while ((Date.now() - startedAt) < holdMs) {
+                if (earReadyFn) {
+                  try {
+                    const probe = await Promise.resolve(earReadyFn());
+                    if (probe === true) { earReady = true; break; }
+                  } catch (_) {}
+                }
+                const remaining = Math.max(0, holdMs - (Date.now() - startedAt));
+                if (remaining <= 0) break;
+                await sleep(Math.min(120, remaining));
+              }
+              if (!earReady && earReadyFn) {
+                try { earReady = !!(await Promise.resolve(earReadyFn())); } catch (_) {}
+              }
+            } catch (_) {}
+            try { request.continue().catch(() => {}); } catch (_) {}
+            bootInterlock.released = true;
+            bootInterlock.active = false;
+            bootInterlock.releasedAt = Date.now();
+            bootInterlock.earReadyAtRelease = !!earReady;
+            try {
+              logInfo(
+                `[DELTA_BOOT_INTERLOCK] release profile=${String(profileName || "").trim() || "unknown"} hold_ms=${Math.max(0, Date.now() - startedAt)} ear_ready=${earReady ? "sim" : "nao"}`
+              );
+            } catch (_) {}
+            if (bootInterlock.disableInterceptionAfterRelease !== false) {
+              try { await page.setRequestInterception(false); } catch (_) {}
+            }
+            try { delete page.__deltaBootInterlock; } catch (_) {}
+          })().catch(() => {});
+          return;
+        }
         if (!isAllowedNavUrl(url)) {
           logInfo(
             `[DELTA_GUARD] navigation_blocked profile=${String(profileName || "").trim() || "unknown"} url=${url}`
@@ -275,6 +325,87 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function __isLikelyMessagesBootUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ""));
+    const host = String(u.hostname || "").toLowerCase();
+    const path = String(u.pathname || "").toLowerCase();
+    if (!(host === "www.facebook.com" || host === "facebook.com" || host === "www.messenger.com" || host === "messenger.com")) return false;
+    if (path.startsWith("/messages")) return true;
+    if (host.includes("messenger.com")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function __gotoWithBootInterlock(page, targetUrl, {
+  timeoutMs = 45000,
+  profileName = "",
+  bootInterlockEnabled = true,
+  bootInterlockHoldMs = 3000,
+  bootInterlockBeforeNavigate = null,
+  bootInterlockIsEarReady = null,
+} = {}) {
+  const url = String(targetUrl || "").trim();
+  if (!url) throw new Error("boot_interlock_empty_url");
+  const enabled = !!bootInterlockEnabled && __isLikelyMessagesBootUrl(url);
+  if (!enabled) {
+    return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+  }
+  const holdMs = Math.max(3000, Number(bootInterlockHoldMs || 3000) || 3000);
+  try {
+    if (typeof bootInterlockBeforeNavigate === "function") {
+      await Promise.resolve(bootInterlockBeforeNavigate({ page, targetUrl: url, holdMs, profileName }));
+    }
+  } catch (_) {}
+  try {
+    page.__deltaBootInterlock = {
+      active: true,
+      released: false,
+      requestHeld: false,
+      holdMs,
+      isEarReady: (typeof bootInterlockIsEarReady === "function") ? bootInterlockIsEarReady : null,
+      disableInterceptionAfterRelease: true,
+      matches: (requestUrl) => {
+        try {
+          if (!__isLikelyMessagesBootUrl(requestUrl)) return false;
+          const ru = new URL(String(requestUrl || ""));
+          const tu = new URL(url);
+          const reqHost = String(ru.hostname || "").toLowerCase();
+          const tgtHost = String(tu.hostname || "").toLowerCase();
+          if (reqHost !== tgtHost) {
+            if (!reqHost.endsWith("facebook.com") || !tgtHost.endsWith("facebook.com")) return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    };
+    await page.setRequestInterception(true).catch(() => {});
+    logInfo(
+      `[DELTA_BOOT_INTERLOCK] armed profile=${String(profileName || "").trim() || "unknown"} hold_ms=${holdMs} url=${url}`
+    );
+  } catch (_) {}
+  try {
+    return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+  } finally {
+    try {
+      const state = page && page.__deltaBootInterlock ? page.__deltaBootInterlock : null;
+      if (state && state.active === true && state.released !== true) {
+        state.active = false;
+        state.released = true;
+        state.releasedAt = Date.now();
+        if (state.requestHeld !== true) {
+          try { await page.setRequestInterception(false); } catch (_) {}
+          try { delete page.__deltaBootInterlock; } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
 }
 
 // NOTE (FUSÃO OPERACIONAL):
@@ -2728,7 +2859,12 @@ async function startVirtusDeltaStandaloneRuntime({
     }
   } catch (_) {}
 
-  await page.goto(urlInicial, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await __gotoWithBootInterlock(page, urlInicial, {
+    timeoutMs: 45000,
+    profileName: ACCOUNT_LOGIN,
+    bootInterlockEnabled: true,
+    bootInterlockHoldMs: 3000,
+  });
   try {
     await waitForMessagesBootStable(page, "messages_ready_standalone");
   } catch (_) {}
@@ -3368,7 +3504,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   try {
     const u0 = String(page.url ? page.url() : "");
     if (!/facebook\.com\/messages/i.test(u0)) {
-      await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await __gotoWithBootInterlock(page, startUrl, {
+        timeoutMs: 45000,
+        profileName: ACCOUNT_LOGIN || nome,
+        bootInterlockEnabled: (cfg && Object.prototype.hasOwnProperty.call(cfg, "bootInterlockEnabled")) ? !!cfg.bootInterlockEnabled : true,
+        bootInterlockHoldMs: Number(cfg && cfg.bootInterlockHoldMs || 3000) || 3000,
+        bootInterlockBeforeNavigate: (cfg && typeof cfg.bootInterlockBeforeNavigate === "function") ? cfg.bootInterlockBeforeNavigate : null,
+        bootInterlockIsEarReady: (cfg && typeof cfg.bootInterlockIsEarReady === "function") ? cfg.bootInterlockIsEarReady : null,
+      });
     }
   } catch (_) {}
   try {
