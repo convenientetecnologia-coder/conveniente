@@ -1950,7 +1950,11 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     );
   } catch (_) {}
 
-  const selectors = [
+  const cardSelectors = [
+    `div[role="row"] a[href*="/messages/t/${t}"]`,
+    `div[role="row"] a[href="/messages/t/${t}/"]`,
+    `div[role="row"] a[href="/messages/t/${t}"]`,
+    `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
     `a[href="/messages/t/${t}/"]`,
     `a[href="/messages/t/${t}"]`,
     `a[href*="/messages/e2ee/t/${t}"]`,
@@ -1959,12 +1963,12 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
   ];
 
   for (let i = 0; i < maxScrollSteps; i++) {
-    for (const sel of selectors) {
-      const a = await page.$(sel).catch(() => null);
-      if (a) {
+    for (const cardSelector of cardSelectors) {
+      const cardElement = await page.$(cardSelector).catch(() => null);
+      if (cardElement) {
         // Trava de segurança (Gemini): não clicar se o card já está ativo (aria-current="page").
         try {
-          const isCurrentPage = await a
+          const isCurrentPage = await cardElement
             .evaluate((el) => {
               if (!el) return false;
               if (el.getAttribute("aria-current") === "page") return true;
@@ -1980,7 +1984,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
                 flow_stage: "browser_window_state_check",
                 details: {
                   tag: "FORENSIC_DOM_REVERSE",
-                  selector: sel,
+                  selector: cardSelector,
                   scrolled: i,
                   is_already_open: true,
                   aria_current_page: true,
@@ -1990,7 +1994,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
                 }
               });
             } catch (_) {}
-            return { ok: true, scrolled: i, matched_selector: sel, already_open: true, skipped_click: true };
+            return { ok: true, scrolled: i, matched_selector: cardSelector, already_open: true, skipped_click: true };
           }
         } catch (_) {}
 
@@ -2011,7 +2015,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             flow_stage: "browser_window_state_check",
             details: {
               tag: "FORENSIC_DOM_REVERSE",
-              selector: sel,
+              selector: cardSelector,
               scrolled: i,
               is_already_open: !!(st && st.is_already_open),
               current_path: st && st.current_path ? String(st.current_path) : null,
@@ -2024,10 +2028,11 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             account_login: forensicAccountLogin,
             thread_key: t,
             flow_stage: "dom_automation_tracking",
-            details: { action: "open_thread_click", selector: sel, scrolled: i }
+            details: { action: "open_thread_click", selector: cardSelector, scrolled: i }
           });
         } catch (_) {}
-        await page.click(sel, { delay: clickDelayMs() }).catch(() => {});
+        try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
+        await cardElement.click({ delay: 120 }).catch(() => {});
         await humanPause("postThreadOpen", "post_thread_card_click");
         try {
           // Regra rígida: após clicar no card (chat fechado), aguardar hidratação do composer Lexical.
@@ -2041,7 +2046,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
               flow_stage: "thread_open_hydration_timeout",
               details: {
                 tag: "FORENSIC_DOM_REVERSE",
-                selector: sel,
+                selector: cardSelector,
                 scrolled: i,
                 current_path: currentPath ? String(currentPath) : null,
                 waited_selector: 'div[data-lexical-editor="true"]',
@@ -2050,9 +2055,9 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
               }
             });
           } catch (_) {}
-          return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: sel };
+          return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: cardSelector };
         }
-        return { ok: true, scrolled: i, matched_selector: sel, hydrated: true };
+        return { ok: true, scrolled: i, matched_selector: cardSelector, hydrated: true };
       }
     }
     const delta = await scrollSidebarShort(page).catch(() => 0);
@@ -2717,19 +2722,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   function resolveCtReverseDeliveryStatusUrl() {
     try {
-      const confirmUrl = String(resolveCtDeliveryConfirmUrl() || "").trim();
-      if (!confirmUrl) return "";
-      // Troca apenas o sufixo do endpoint.
-      if (/\/api\/attendance\/confirm-delivery\/?$/i.test(confirmUrl)) {
-        return confirmUrl.replace(/\/api\/attendance\/confirm-delivery\/?$/i, "/api/attendance/reverse-delivery-status");
-      }
-      // Fallback seguro: mesma base + endpoint.
-      try {
-        const u = new URL(confirmUrl);
-        return `${u.protocol}//${u.host}/api/attendance/reverse-delivery-status`;
-      } catch {
-        return "";
-      }
+      const reverseUrl = "https://convenientetecnologia.com";
+      return `${reverseUrl}/api/attendance/reverse-delivery-status`;
     } catch {
       return "";
     }
