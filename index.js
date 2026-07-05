@@ -2266,48 +2266,52 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 let clusterClient = null;
 function __deltaProvisionDeliveryConfirmEnv() {
   try {
+    function __deltaNormalizeConfirmBaseToUrl(baseOrUrl) {
+      try {
+        let s = String(baseOrUrl || "").trim();
+        if (!s) return "";
+        s = s.replace(/\/+$/, "");
+        // Se já vier como URL completa do endpoint, respeita.
+        if (/\/api\/attendance\/confirm-delivery\/?$/i.test(s)) {
+          return s.replace(/\/+$/, "");
+        }
+        // Se vier sem scheme, infere de forma segura para homolog/local.
+        if (!/^https?:\/\//i.test(s)) {
+          const host = String(s.split("/")[0] || "").trim().toLowerCase();
+          const looksLocal =
+            host === "localhost" ||
+            host.startsWith("127.") ||
+            host.startsWith("10.") ||
+            host.startsWith("192.168.") ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+            /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host);
+          s = (looksLocal ? "http://" : "https://") + s;
+        }
+        s = s.replace(/\/+$/, "");
+        return `${s}/api/attendance/confirm-delivery`;
+      } catch {
+        return "";
+      }
+    }
+
     // 1) URL do confirm-delivery (balão azul)
     const explicit = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').trim();
-    if (!explicit) {
-      // Host canônico do CT (Atendimentos) onde a rota existe (laudo parte 13).
-      const CANONICAL_CT_ATTENDANCE_BASE = 'https://atendimentos.convenientetecnologia.com';
+    let confirmUrl = "";
+    if (explicit) {
+      confirmUrl = __deltaNormalizeConfirmBaseToUrl(explicit);
+    } else {
       let ctBaseUrl = '';
       try {
         const cfg = readCtConfig();
         ctBaseUrl = String((cfg && (cfg.ctBaseUrl || cfg.ct_base_url)) || '').trim();
       } catch {}
-      // Preferir URL específica de attendance (se o operador setar), senão tenta CT_BASE_URL.
+      // Respeitar base de ambiente/homologação se fornecida.
       if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_ATTENDANCE_BASE_URL || process.env.CT_ATTENDANCE_URL || '').trim();
       if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
-
-      const baseNorm = String(ctBaseUrl || '').trim().replace(/\/+$/, '');
-      const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?$/i.test(baseNorm);
-      let looksLikeVmHost = false;
-      try {
-        const u = new URL(baseNorm);
-        const sub = String(u.hostname || '').split('.')[0] || '';
-        looksLikeVmHost =
-          /\.convenientetecnologia\.com$/i.test(baseNorm)
-          && /^[a-f0-9-]{30,}$/i.test(String(sub || ''));
-      } catch {
-        looksLikeVmHost = false;
-      }
-
-      // Guardrails:
-      // - api.convenientetecnologia.com NÃO tem /api/attendance/confirm-delivery (404)
-      // - host da própria VM (uuid.convenientetecnologia.com) também NÃO é CT de atendimentos (404)
-      // Se cair nesses casos, forçamos o destino canônico do CT.
-      let shouldForceCanonical = false;
-      try { if (!baseNorm || looksLikeApi || looksLikeVmHost) shouldForceCanonical = true; } catch { shouldForceCanonical = true; }
-      if (shouldForceCanonical) ctBaseUrl = CANONICAL_CT_ATTENDANCE_BASE;
-      if (ctBaseUrl && !/^https?:\/\//i.test(String(ctBaseUrl || '').trim())) {
-        ctBaseUrl = `https://${String(ctBaseUrl || '').trim()}`;
-      }
-
-      if (ctBaseUrl) {
-        const base = String(ctBaseUrl || '').replace(/\/+$/, '');
-        process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = `${base}/api/attendance/confirm-delivery`;
-      }
+      confirmUrl = __deltaNormalizeConfirmBaseToUrl(ctBaseUrl);
+    }
+    if (confirmUrl) {
+      process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = confirmUrl;
     }
 
     // 2) Secret obrigatório do header x-delivery-secret (deve bater no CT)

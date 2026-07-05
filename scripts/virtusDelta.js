@@ -971,6 +971,49 @@ async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
   return false;
 }
 
+async function __injectAntiSelectionCss(page, { profileName = null, reason = "" } = {}) {
+  try {
+    if (!page) return false;
+    const ok = await page
+      .evaluate(() => {
+        try {
+          const id = "virtus_antiselect_style_v1";
+          if (document.getElementById(id)) return true;
+          const style = document.createElement("style");
+          style.id = id;
+          style.innerHTML =
+            "* { user-select: none !important; -webkit-user-select: none !important; -moz-user-select: none !important; -ms-user-select: none !important; }";
+          const head = document.head || document.querySelector("head");
+          if (head) {
+            head.appendChild(style);
+            return true;
+          }
+          (document.documentElement || document.body || document).appendChild(style);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .catch(() => false);
+    try {
+      __forensicEdgeEmit({
+        account_login: (profileName != null) ? String(profileName || "").trim() || null : null,
+        thread_key: null,
+        flow_stage: "selection_css_injected",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          ok: !!ok,
+          reason: String(reason || "").slice(0, 80) || null,
+          ts_ms: Date.now(),
+        },
+      });
+    } catch (_) {}
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
 async function waitMarketplaceActiveStable(page, { timeoutMs = 35000, rounds = 2 } = {}) {
   const start = Date.now();
   let okRounds = 0;
@@ -3054,6 +3097,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   } catch (_) {}
   try {
     await waitForMessagesBootStable(page, "messages_ready_worker");
+  } catch (_) {}
+  try {
+    // Cura vitalícia do freeze por seleção: injeta CSS global anti-seleção logo após o boot.
+    await __injectAntiSelectionCss(page, { profileName: ACCOUNT_LOGIN || nome, reason: "boot_worker" });
   } catch (_) {}
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
     try {
