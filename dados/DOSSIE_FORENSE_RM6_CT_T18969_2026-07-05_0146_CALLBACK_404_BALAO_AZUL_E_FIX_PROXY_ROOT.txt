@@ -1,0 +1,154 @@
+DOSSIE FORENSE - RM6 / Messenger Delta - Ticket #18969
+Data da auditoria: 05/07/2026 01:46-01:55 (UTC-3)
+Conta: Fernando Lourenco
+account_login: cuiaba-1782677786967
+thread_key: 3079175002273787
+server_id: aba80611-8b8a-46ed-a852-f5f0d573c03b
+
+============================================================
+1) RESUMO EXECUTIVO
+============================================================
+
+Diagnostico fechado:
+- O CT recebeu e persistiu as 3 mensagens no md_outbox (status=received_by_edge).
+- O Edge recebeu via command bus, enfileirou no worker e enviou no Facebook.
+- O gargalo final esta no callback de confirmacao (balão azul): POST para
+  https://convenientetecnologia.com/api/attendance/confirm-delivery
+  retornou HTTP 404 em todas as 3 mensagens.
+
+Impacto direto:
+- Mensagens ficam com "received_by_edge" e nao sobem para "sent_to_facebook"/azul no dashboard.
+- Nao houve evidência de travamento global de fila neste lote; houve processamento serial normal.
+
+============================================================
+2) EVIDENCIA SQL (CT - attendance.sqlite)
+============================================================
+
+Tabela: messenger_delta_outbox (ticket_id=18969, janela do teste)
+
+1) id=local:18969:1783226512928
+   text="sim tste"
+   status=received_by_edge
+   created_at=1783226514398 (05/07/2026 01:41:54.398)
+   updated_at=1783226514927 (05/07/2026 01:41:54.927)
+   edge_received_at=1783226514927
+   facebook_sent_at=null
+   last_error=null
+
+2) id=local:18969:1783226514230
+   text="ve se foi"
+   status=received_by_edge
+   created_at=1783226515829 (05/07/2026 01:41:55.829)
+   updated_at=1783226516390 (05/07/2026 01:41:56.390)
+   edge_received_at=1783226516390
+   facebook_sent_at=null
+   last_error=null
+
+3) id=local:18969:1783226515278
+   text="ou nao"
+   status=received_by_edge
+   created_at=1783226517296 (05/07/2026 01:41:57.296)
+   updated_at=1783226517861 (05/07/2026 01:41:57.861)
+   edge_received_at=1783226517861
+   facebook_sent_at=null
+   last_error=null
+
+Ticket events (ticket_event_log):
+- messenger_delta_delivery_update / actor_ref=md_outbox
+  payload status=received_by_edge para os 3 client_message_id acima.
+
+Conclusao SQL:
+- Banco confirma recepcao pelo servidor (2 risquinhos), mas sem confirmacao final facebook_sent_at.
+
+============================================================
+3) EVIDENCIA FORENSE EDGE (API /api/infra/forensic-logs)
+============================================================
+
+Fonte:
+- GET /api/infra/forensic-logs?account=cuiaba-1782677786967
+
+Pipeline IPC + fila serial:
+- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226512928
+- reverse_command_bus ipc_dispatch_attempt cmd_id=local:18969:1783226512928
+- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226512928
+- queue_task_received client_message_id=local:18969:1783226512928 queue_depth=0
+
+- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226514230
+- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226514230
+- queue_task_received client_message_id=local:18969:1783226514230 queue_depth=1
+
+- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226515278
+- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226515278
+- queue_task_received client_message_id=local:18969:1783226515278 queue_depth=2
+
+Sinais de envio no Facebook (sem erro de composer no lote):
+- marketplace_filter_bypass reason=thread_already_open_url
+- browser_window_state_check ... is_already_open=true ... skipped_click=true
+- composer_focus_lifecycle phase=found/after_click (3 ciclos)
+
+Falha final do callback (causa-raiz):
+- confirm_delivery_post_attempt url=https://convenientetecnologia.com/api/attendance/confirm-delivery
+- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226512928
+- confirm_delivery_dead_letter http_status=404 client_message_id=local:18969:1783226512928
+- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226514230
+- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226515278
+
+Conclusao forense:
+- A trilha confirma que a mensagem sai da fila e chega ate etapa de callback.
+- O endpoint de callback no dominio raiz responde 404 e impede o "balão azul".
+
+============================================================
+4) ALTERACOES APLICADAS NESTA INTERVENCAO
+============================================================
+
+A) C:\conveniente\scripts\virtusDelta.js
+- Refatorado openThreadByClick(thread_key):
+  - Seletor estrutural principal fixo:
+    div[role="row"] a[href*="/messages/t/<thread_key>"]
+  - Busca com waitForSelector (timeout controlado) no seletor principal.
+  - Clique humano por coordenada central da bounding box (page.mouse.click).
+  - Fallback para element.click apenas quando nao houver bounding box.
+  - Mantida guarda de hidratacao do composer lexical.
+
+B) C:\sitechatbot\index.js
+- Expostos no dominio raiz e encaminhados por offload interno:
+  - POST /api/attendance/confirm-delivery
+  - POST /api/attendance/reverse-delivery-status
+- Objetivo: eliminar 404 no callback quando Edge aponta para
+  https://convenientetecnologia.com/api/attendance/...
+
+C) C:\conveniente\scripts\virtusDelta.js (hardening de callback)
+- Mantida URL principal rigida do callback no dominio raiz.
+- Adicionado reroute automatico somente quando houver HTTP 404:
+  - confirm-delivery: fallback para
+    https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery
+  - reverse-delivery-status: fallback para
+    https://atendimentos.convenientetecnologia.com/api/attendance/reverse-delivery-status
+- Objetivo: evitar dead-letter por erro de roteamento externo sem travar fila.
+
+Validacoes locais:
+- node --check C:\conveniente\scripts\virtusDelta.js OK
+- node --check C:\sitechatbot\index.js OK
+- ReadLints sem erros nos arquivos alterados
+
+============================================================
+5) CONCLUSAO OPERACIONAL
+============================================================
+
+Estado fechado desta janela (antes do patch entrar em execucao):
+1. "1 risquinho" (persistencia CT) = OK
+2. "2 risquinhos" (received_by_edge) = OK
+3. "azul" (confirm-delivery) = QUEBRADO por HTTP 404 no dominio raiz
+
+Risco residual:
+- Ate reiniciar/recarregar os processos com codigo novo (Edge e CT raiz),
+  o callback pode continuar batendo em 404.
+
+Acao recomendada imediata:
+- Reiniciar C:\sitechatbot\index.js para publicar as duas rotas no dominio raiz.
+- Reiniciar os workers/servico do Edge (C:\conveniente) para ativar o fallback
+  automatico para atendimentos.convenientetecnologia.com em caso de 404.
+
+============================================================
+FIM DO DOSSIE
+============================================================

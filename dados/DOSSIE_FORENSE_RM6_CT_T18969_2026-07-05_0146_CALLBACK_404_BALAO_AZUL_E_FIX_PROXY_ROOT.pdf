@@ -1,0 +1,377 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 4 0 R 5 0 R 6 0 R ] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+7 0 obj
+<< /Length 2422 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(DOSSIE FORENSE - RM6 / Messenger Delta - Ticket #18969) Tj
+T*
+(Data da auditoria: 05/07/2026 01:46-01:55 \(UTC-3\)) Tj
+T*
+(Conta: Fernando Lourenco) Tj
+T*
+(account_login: cuiaba-1782677786967) Tj
+T*
+(thread_key: 3079175002273787) Tj
+T*
+(server_id: aba80611-8b8a-46ed-a852-f5f0d573c03b) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(1\) RESUMO EXECUTIVO) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+(Diagnostico fechado:) Tj
+T*
+(- O CT recebeu e persistiu as 3 mensagens no md_outbox \(status=received_by_edge\).) Tj
+T*
+(- O Edge recebeu via command bus, enfileirou no worker e enviou no Facebook.) Tj
+T*
+(- O gargalo final esta no callback de confirmacao \(bal„o azul\): POST para) Tj
+T*
+(  https://convenientetecnologia.com/api/attendance/confirm-delivery) Tj
+T*
+(  retornou HTTP 404 em todas as 3 mensagens.) Tj
+T*
+() Tj
+T*
+(Impacto direto:) Tj
+T*
+(- Mensagens ficam com "received_by_edge" e nao sobem para "sent_to_facebook"/azul no dashboard.) Tj
+T*
+(- Nao houve evidÍncia de travamento global de fila neste lote; houve processamento serial normal.) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(2\) EVIDENCIA SQL \(CT - attendance.sqlite\)) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+(Tabela: messenger_delta_outbox \(ticket_id=18969, janela do teste\)) Tj
+T*
+() Tj
+T*
+(1\) id=local:18969:1783226512928) Tj
+T*
+(   text="sim tste") Tj
+T*
+(   status=received_by_edge) Tj
+T*
+(   created_at=1783226514398 \(05/07/2026 01:41:54.398\)) Tj
+T*
+(   updated_at=1783226514927 \(05/07/2026 01:41:54.927\)) Tj
+T*
+(   edge_received_at=1783226514927) Tj
+T*
+(   facebook_sent_at=null) Tj
+T*
+(   last_error=null) Tj
+T*
+() Tj
+T*
+(2\) id=local:18969:1783226514230) Tj
+T*
+(   text="ve se foi") Tj
+T*
+(   status=received_by_edge) Tj
+T*
+(   created_at=1783226515829 \(05/07/2026 01:41:55.829\)) Tj
+T*
+(   updated_at=1783226516390 \(05/07/2026 01:41:56.390\)) Tj
+T*
+(   edge_received_at=1783226516390) Tj
+T*
+(   facebook_sent_at=null) Tj
+T*
+(   last_error=null) Tj
+T*
+() Tj
+T*
+(3\) id=local:18969:1783226515278) Tj
+T*
+(   text="ou nao") Tj
+T*
+(   status=received_by_edge) Tj
+T*
+(   created_at=1783226517296 \(05/07/2026 01:41:57.296\)) Tj
+T*
+(   updated_at=1783226517861 \(05/07/2026 01:41:57.861\)) Tj
+T*
+(   edge_received_at=1783226517861) Tj
+T*
+ET
+endstream
+endobj
+8 0 obj
+<< /Length 2979 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(   facebook_sent_at=null) Tj
+T*
+(   last_error=null) Tj
+T*
+() Tj
+T*
+(Ticket events \(ticket_event_log\):) Tj
+T*
+(- messenger_delta_delivery_update / actor_ref=md_outbox) Tj
+T*
+(  payload status=received_by_edge para os 3 client_message_id acima.) Tj
+T*
+() Tj
+T*
+(Conclusao SQL:) Tj
+T*
+(- Banco confirma recepcao pelo servidor \(2 risquinhos\), mas sem confirmacao final facebook_sent_at.) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(3\) EVIDENCIA FORENSE EDGE \(API /api/infra/forensic-logs\)) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+(Fonte:) Tj
+T*
+(- GET /api/infra/forensic-logs?account=cuiaba-1782677786967) Tj
+T*
+() Tj
+T*
+(Pipeline IPC + fila serial:) Tj
+T*
+(- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226512928) Tj
+T*
+(- reverse_command_bus ipc_dispatch_attempt cmd_id=local:18969:1783226512928) Tj
+T*
+(- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226512928) Tj
+T*
+(- queue_task_received client_message_id=local:18969:1783226512928 queue_depth=0) Tj
+T*
+() Tj
+T*
+(- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226514230) Tj
+T*
+(- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226514230) Tj
+T*
+(- queue_task_received client_message_id=local:18969:1783226514230 queue_depth=1) Tj
+T*
+() Tj
+T*
+(- reverse_command_bus delta_reply_received cmd_id=local:18969:1783226515278) Tj
+T*
+(- reverse_command_bus ipc_dispatch_ok cmd_id=local:18969:1783226515278) Tj
+T*
+(- queue_task_received client_message_id=local:18969:1783226515278 queue_depth=2) Tj
+T*
+() Tj
+T*
+(Sinais de envio no Facebook \(sem erro de composer no lote\):) Tj
+T*
+(- marketplace_filter_bypass reason=thread_already_open_url) Tj
+T*
+(- browser_window_state_check ... is_already_open=true ... skipped_click=true) Tj
+T*
+(- composer_focus_lifecycle phase=found/after_click \(3 ciclos\)) Tj
+T*
+() Tj
+T*
+(Falha final do callback \(causa-raiz\):) Tj
+T*
+(- confirm_delivery_post_attempt url=https://convenientetecnologia.com/api/attendance/confirm-delivery) Tj
+T*
+(- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226512928) Tj
+T*
+(- confirm_delivery_dead_letter http_status=404 client_message_id=local:18969:1783226512928) Tj
+T*
+(- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226514230) Tj
+T*
+(- confirm_delivery_fail status=404 error=http_404 client_message_id=local:18969:1783226515278) Tj
+T*
+() Tj
+T*
+(Conclusao forense:) Tj
+T*
+(- A trilha confirma que a mensagem sai da fila e chega ate etapa de callback.) Tj
+T*
+(- O endpoint de callback no dominio raiz responde 404 e impede o "bal„o azul".) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(4\) ALTERACOES APLICADAS NESTA INTERVENCAO) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+(A\) C:\\conveniente\\scripts\\virtusDelta.js) Tj
+T*
+ET
+endstream
+endobj
+9 0 obj
+<< /Length 2771 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(- Refatorado openThreadByClick\(thread_key\):) Tj
+T*
+(  - Seletor estrutural principal fixo:) Tj
+T*
+(    div[role="row"] a[href*="/messages/t/<thread_key>"]) Tj
+T*
+(  - Busca com waitForSelector \(timeout controlado\) no seletor principal.) Tj
+T*
+(  - Clique humano por coordenada central da bounding box \(page.mouse.click\).) Tj
+T*
+(  - Fallback para element.click apenas quando nao houver bounding box.) Tj
+T*
+(  - Mantida guarda de hidratacao do composer lexical.) Tj
+T*
+() Tj
+T*
+(B\) C:\\sitechatbot\\index.js) Tj
+T*
+(- Expostos no dominio raiz e encaminhados por offload interno:) Tj
+T*
+(  - POST /api/attendance/confirm-delivery) Tj
+T*
+(  - POST /api/attendance/reverse-delivery-status) Tj
+T*
+(- Objetivo: eliminar 404 no callback quando Edge aponta para) Tj
+T*
+(  https://convenientetecnologia.com/api/attendance/...) Tj
+T*
+() Tj
+T*
+(C\) C:\\conveniente\\scripts\\virtusDelta.js \(hardening de callback\)) Tj
+T*
+(- Mantida URL principal rigida do callback no dominio raiz.) Tj
+T*
+(- Adicionado reroute automatico somente quando houver HTTP 404:) Tj
+T*
+(  - confirm-delivery: fallback para) Tj
+T*
+(    https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery) Tj
+T*
+(  - reverse-delivery-status: fallback para) Tj
+T*
+(    https://atendimentos.convenientetecnologia.com/api/attendance/reverse-delivery-status) Tj
+T*
+(- Objetivo: evitar dead-letter por erro de roteamento externo sem travar fila.) Tj
+T*
+() Tj
+T*
+(Validacoes locais:) Tj
+T*
+(- node --check C:\\conveniente\\scripts\\virtusDelta.js OK) Tj
+T*
+(- node --check C:\\sitechatbot\\index.js OK) Tj
+T*
+(- ReadLints sem erros nos arquivos alterados) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(5\) CONCLUSAO OPERACIONAL) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+(Estado fechado desta janela \(antes do patch entrar em execucao\):) Tj
+T*
+(1. "1 risquinho" \(persistencia CT\) = OK) Tj
+T*
+(2. "2 risquinhos" \(received_by_edge\) = OK) Tj
+T*
+(3. "azul" \(confirm-delivery\) = QUEBRADO por HTTP 404 no dominio raiz) Tj
+T*
+() Tj
+T*
+(Risco residual:) Tj
+T*
+(- Ate reiniciar/recarregar os processos com codigo novo \(Edge e CT raiz\),) Tj
+T*
+(  o callback pode continuar batendo em 404.) Tj
+T*
+() Tj
+T*
+(Acao recomendada imediata:) Tj
+T*
+(- Reiniciar C:\\sitechatbot\\index.js para publicar as duas rotas no dominio raiz.) Tj
+T*
+(- Reiniciar os workers/servico do Edge \(C:\\conveniente\) para ativar o fallback) Tj
+T*
+(  automatico para atendimentos.convenientetecnologia.com em caso de 404.) Tj
+T*
+() Tj
+T*
+(============================================================) Tj
+T*
+(FIM DO DOSSIE) Tj
+T*
+(============================================================) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000030 00000 n 
+0000000079 00000 n 
+0000000150 00000 n 
+0000000247 00000 n 
+0000000373 00000 n 
+0000000499 00000 n 
+0000000625 00000 n 
+0000003098 00000 n 
+0000006128 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+8950
+%%EOF

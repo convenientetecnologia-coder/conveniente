@@ -1950,8 +1950,9 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     );
   } catch (_) {}
 
+  const primaryCardSelector = `div[role="row"] a[href*="/messages/t/${t}"]`;
   const cardSelectors = [
-    `div[role="row"] a[href*="/messages/t/${t}"]`,
+    primaryCardSelector,
     `div[role="row"] a[href="/messages/t/${t}/"]`,
     `div[role="row"] a[href="/messages/t/${t}"]`,
     `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
@@ -1964,7 +1965,9 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
 
   for (let i = 0; i < maxScrollSteps; i++) {
     for (const cardSelector of cardSelectors) {
-      const cardElement = await page.$(cardSelector).catch(() => null);
+      const cardElement = cardSelector === primaryCardSelector
+        ? await page.waitForSelector(cardSelector, { timeout: i === 0 ? 5000 : 1200 }).catch(() => null)
+        : await page.$(cardSelector).catch(() => null);
       if (cardElement) {
         // Trava de segurança (Gemini): não clicar se o card já está ativo (aria-current="page").
         try {
@@ -2032,7 +2035,33 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
           });
         } catch (_) {}
         try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
-        await cardElement.click({ delay: 120 }).catch(() => {});
+        let clickedByCoordinates = false;
+        try {
+          const box = await cardElement.boundingBox();
+          if (box && Number.isFinite(box.x) && Number.isFinite(box.y)) {
+            const centerX = box.x + (box.width / 2);
+            const centerY = box.y + (box.height / 2);
+            await page.mouse.click(centerX, centerY, { delay: 100 });
+            clickedByCoordinates = true;
+            try {
+              __forensicEdgeEmit({
+                account_login: forensicAccountLogin,
+                thread_key: t,
+                flow_stage: "dom_automation_tracking",
+                details: {
+                  action: "open_thread_mouse_click",
+                  selector: cardSelector,
+                  scrolled: i,
+                  center_x: Number(centerX.toFixed(2)),
+                  center_y: Number(centerY.toFixed(2))
+                }
+              });
+            } catch (_) {}
+          }
+        } catch (_) {}
+        if (!clickedByCoordinates) {
+          await cardElement.click({ delay: 120 }).catch(() => {});
+        }
         await humanPause("postThreadOpen", "post_thread_card_click");
         try {
           // Regra rígida: após clicar no card (chat fechado), aguardar hidratação do composer Lexical.
@@ -2729,11 +2758,19 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
   }
 
+  function resolveCtReverseDeliveryStatusFallbackUrl() {
+    try {
+      return "https://atendimentos.convenientetecnologia.com/api/attendance/reverse-delivery-status";
+    } catch {
+      return "";
+    }
+  }
+
   function kickReverseDeliveryStatus({ client_message_id, thread_key, status, error } = {}) {
     try {
       const cid = String(client_message_id || "").trim();
       if (!cid) return;
-      const url = resolveCtReverseDeliveryStatusUrl();
+      let url = resolveCtReverseDeliveryStatusUrl();
       if (!url) return;
       const payload = {
         server_id: SERVER_ID,
@@ -2760,11 +2797,41 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 }
               });
             } catch (_) {}
-            const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500 }).catch((e) => ({
+            let r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500 }).catch((e) => ({
               ok: false,
               status: 0,
               error: (e && e.message) ? String(e.message) : String(e),
             }));
+            if (!(r && r.ok) && (Number(r && r.status || 0) || 0) === 404) {
+              const fallbackUrl = resolveCtReverseDeliveryStatusFallbackUrl();
+              if (fallbackUrl && fallbackUrl !== url) {
+                try {
+                  __forensicEdgeEmit({
+                    account_login: ACCOUNT_LOGIN,
+                    thread_key: payload.thread_key,
+                    flow_stage: "reverse_delivery_reroute_attempt",
+                    details: {
+                      tag: "FORENSIC_DOM_REVERSE",
+                      from_url: url,
+                      to_url: fallbackUrl,
+                      client_message_id: cid,
+                      ts_ms: Date.now(),
+                    }
+                  });
+                } catch (_) {}
+                const r2 = await postJsonWithTimeout(fallbackUrl, payload, { timeoutMs: 4500 }).catch((e) => ({
+                  ok: false,
+                  status: 0,
+                  error: (e && e.message) ? String(e.message) : String(e),
+                }));
+                if (r2 && r2.ok) {
+                  r = r2;
+                  url = fallbackUrl;
+                } else if (!(r && r.ok)) {
+                  r = r2 || r;
+                }
+              }
+            }
             if (r && r.ok) {
               try {
                 __forensicEdgeEmit({
@@ -2871,6 +2938,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           return "";
         }
       }
+      function __deriveCtConfirmCanonicalFallbackUrl() {
+        try {
+          return "https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery";
+        } catch {
+          return "";
+        }
+      }
       function __isPermanentConfirmError(r) {
         try {
           const st = Number(r && r.status || 0) || 0;
@@ -2963,15 +3037,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             continue;
           }
 
-          // Auto-cura de roteamento (caso clássico: url aponta para api.* e retorna 404)
-          // Tenta uma única vez o endpoint do CT local (subdomínio do server_id) antes de dead-letter.
+          // Auto-cura de roteamento (404): tenta fallback canônico de atendimentos
+          // e depois endpoint por server_id antes de dead-letter.
           try {
             const stTry = Number(r && r.status || 0) || 0;
             const is404 = stTry === 404 || String(r && r.error || "").includes("http_404");
-            const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?/i.test(String(url || ""));
-            if (is404 && looksLikeApi) {
-              const alt = __deriveCtConfirmUrlFromServerId(payload && payload.server_id);
-              if (alt && alt !== url) {
+            const looksLikeCtDomain = /:\/\/([A-Za-z0-9.-]+\.)?convenientetecnologia\.com\/?/i.test(String(url || ""));
+            if (is404 && looksLikeCtDomain) {
+              let reroutedSuccess = false;
+              const rerouteCandidates = [
+                __deriveCtConfirmCanonicalFallbackUrl(),
+                __deriveCtConfirmUrlFromServerId(payload && payload.server_id),
+              ].filter((v, idx, arr) => !!v && arr.indexOf(v) === idx && v !== url);
+
+              for (const alt of rerouteCandidates) {
                 const prevUrl = String(url || "");
                 try {
                   __forensicEdgeEmit({
@@ -3012,8 +3091,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                       }
                     });
                   } catch (_) {}
-                  continue;
+                  reroutedSuccess = true;
+                  break;
                 }
+                if (!(r && r.ok)) r = r2 || r;
+              }
+              if (reroutedSuccess) {
+                continue;
               }
             }
           } catch (_) {}
