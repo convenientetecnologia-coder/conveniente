@@ -14861,11 +14861,7 @@ const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
 );
 // Captura offline em thread ativa:
 // - upsertMessage pode representar mensagem válida durante período offline.
-// - Guardrail: aceitar somente se ID Meta for inédito no disco e idade não for absurda.
-const DELTA_ACTIVE_UPSERT_MAX_AGE_MS = Math.max(
-  60_000,
-  Math.min(24 * 60 * 60 * 1000, Number(process.env.DELTA_ACTIVE_UPSERT_MAX_AGE_MS || (60 * 60 * 1000)) || (60 * 60 * 1000))
-);
+// - Guardrail canônico: aceitar somente se ID Meta for inédito no disco.
 const DELTA_ACTIVE_UPSERT_BUFFER_MS = Math.max(
   100,
   Math.min(5000, Number(process.env.DELTA_ACTIVE_UPSERT_BUFFER_MS || 1000) || 1000)
@@ -15225,6 +15221,7 @@ async function __deltaRunNewLeadsTimerPump(nome) {
   } catch {}
 }
 const __deltaThreadStateMap = new Map();
+const __deltaLegacyRespondedThreadsByAccount = new Map(); // nome -> Set(thread_key) legado (chats_respondidos.json)
 // Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
 const __deltaActiveUpsertBuffer = new Map();
 let __deltaThreadStatePersistTimer = null;
@@ -15452,6 +15449,39 @@ function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
     return '';
   } catch {
     return '';
+  }
+}
+
+function __deltaHasLegacyRespondedThreadSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return false;
+  try {
+    const set = __deltaLegacyRespondedThreadsByAccount.get(n);
+    if (!(set instanceof Set)) return false;
+    return set.has(tk);
+  } catch {
+    return false;
+  }
+}
+
+function __deltaIsHistoricallyResolvedThreadOnDiskSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) {
+    return { resolved: false, source: null, status: '' };
+  }
+  try {
+    const status = __deltaReadKnownThreadStatusFromDiskSync(n, tk);
+    if (__deltaIsKnownProcessedStatus(status)) {
+      return { resolved: true, source: 'delta_thread_state', status: String(status || '') };
+    }
+    if (__deltaHasLegacyRespondedThreadSync(n, tk)) {
+      return { resolved: true, source: 'legacy_chats_respondidos', status: 'processed_historical' };
+    }
+    return { resolved: false, source: null, status: String(status || '') };
+  } catch {
+    return { resolved: false, source: null, status: '' };
   }
 }
 
@@ -15700,6 +15730,7 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
     filesMissing: 0
   };
   try {
+    try { __deltaLegacyRespondedThreadsByAccount.clear(); } catch {}
     if (!fs.existsSync(baseDir)) {
       out.ok = true;
       out.reason = 'legacy_profiles_dir_missing';
@@ -15739,7 +15770,15 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
         continue;
       }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-      for (const threadKeyRaw of Object.keys(parsed)) {
+      const respondedSet = new Set(
+        Object.keys(parsed)
+          .map((k) => String(k || '').trim())
+          .filter(Boolean)
+      );
+      if (respondedSet.size > 0) {
+        __deltaLegacyRespondedThreadsByAccount.set(String(nome || '').trim(), respondedSet);
+      }
+      for (const threadKeyRaw of respondedSet) {
         const threadKey = String(threadKeyRaw || '').trim();
         if (!threadKey) continue;
         const k = __deltaThreadStateKey(nome, threadKey);
@@ -17910,36 +17949,51 @@ async function __deltaAttachCdpEar(nome, page) {
           (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
             ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
             : Date.now();
-
-        // Filtro de caducidade: frames com idade > 180s não devem reativar atendimento.
-        // Exceção controlada: upsertMessage pode carregar mensagem offline; a decisão final ocorre na rota `active` com dedupe em disco.
-        let __deltaAgeMs = 0;
-        let __deltaExpiredHistoricalFrame = false;
-        try {
-          const ageMs = Date.now() - nowMs;
-          __deltaAgeMs = Number(ageMs || 0) || 0;
-          if (Number.isFinite(ageMs) && ageMs > 180_000) {
-            if (op !== 'upsertMessage') {
-              __forensicEdgeEmit({
-                account_login: String(nome || ''),
-                thread_key: threadKey,
-                flow_stage: 'discard_filter_triggered',
-                details: {
-                  reason: 'expired_historical_frame',
-                  op,
-                  age_ms: ageMs,
-                  transport: String(transport || ''),
-                  requestId: String(requestId || ''),
-                  sourceHint: String(sourceHint || ''),
-                  message_at: nowMs,
-                  text_preview: String(texto || '').slice(0, 220)
-                }
-              });
-              continue;
-            }
-            __deltaExpiredHistoricalFrame = true;
-          }
-        } catch {}
+        const resolvedGate = __deltaIsHistoricallyResolvedThreadOnDiskSync(nome, threadKey);
+        if (resolvedGate && resolvedGate.resolved === true) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'resolved_thread_key_vitalicio',
+                resolved_source: String(resolvedGate.source || ''),
+                state_status: String(resolvedGate.status || ''),
+                op,
+                transport: String(transport || ''),
+                requestId: String(requestId || ''),
+                sourceHint: String(sourceHint || ''),
+                message_at: nowMs,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          try {
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_skip_resolved_thread_key_vitalicio',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              cidade: null,
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'skip_resolved_thread_key_vitalicio',
+              state_status: String(resolvedGate.status || ''),
+              resolved_source: String(resolvedGate.source || ''),
+              message_at: nowMs,
+              network_transport: String(transport || '').trim() || null,
+              network_request_id: String(requestId || '').trim() || null,
+              network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
+              network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
+            });
+          } catch {}
+          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+          continue;
+        }
 
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const metaDedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
