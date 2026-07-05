@@ -15849,7 +15849,27 @@ function __deltaBuildConcatFromState(st) {
     if (/^(você|voce|you)\s*:/i.test(t)) return false;
     return true;
   });
-  const texts = filtered.map((m) => String(m && m.text || '').trim()).filter(Boolean);
+  const textsRaw = filtered.map((m) => String(m && m.text || '').trim()).filter(Boolean);
+  const texts = (() => {
+    if (textsRaw.length < 4 || (textsRaw.length % 2) !== 0) return textsRaw;
+    const pairCount = Math.floor(textsRaw.length / 2);
+    let mirroredPairs = 0;
+    for (let i = 0; i < pairCount; i += 1) {
+      const a = String(textsRaw[i * 2] || '');
+      const b = String(textsRaw[(i * 2) + 1] || '');
+      if (a && a === b) mirroredPairs += 1;
+    }
+    // Colapso inteligente: padrão típico de espelhamento 2x (A,A,B,B,C,C...).
+    // Só colapsa quando o padrão é majoritário para evitar perda de repetições legítimas.
+    const mirrorRatio = pairCount > 0 ? (mirroredPairs / pairCount) : 0;
+    if (!(mirroredPairs >= 2 && mirrorRatio >= 0.8)) return textsRaw;
+    const collapsed = [];
+    for (let i = 0; i < pairCount; i += 1) {
+      const value = String(textsRaw[i * 2] || '').trim();
+      if (value) collapsed.push(value);
+    }
+    return collapsed.length ? collapsed : textsRaw;
+  })();
   const fromSeq = filtered.length ? Number(filtered[0].seq || 0) || 0 : 0;
   const toSeq = filtered.length ? Number(filtered[filtered.length - 1].seq || 0) || 0 : 0;
   const minAt = filtered.length
@@ -15890,6 +15910,35 @@ function __deltaIsRecentDuplicate(st, text, op, nowMs = Date.now()) {
   if (st.recentMessageKeys.size > 250) {
     const first = st.recentMessageKeys.keys().next().value;
     if (first) st.recentMessageKeys.delete(first);
+  }
+  return false;
+}
+function __deltaIsRecentInsertUpsertMirrorDuplicate(st, text, op, nowMs = Date.now()) {
+  if (!st || typeof st !== 'object') return false;
+  const opNorm = String(op || '').trim();
+  const isMirrorEligible = opNorm === 'insertMessage' || opNorm === 'upsertMessage';
+  if (!isMirrorEligible) return false;
+  st.recentInsertUpsertMirrorKeys = st.recentInsertUpsertMirrorKeys instanceof Map
+    ? st.recentInsertUpsertMirrorKeys
+    : new Map();
+  const ttl = Math.max(4_000, Number(DELTA_RECENT_DEDUP_WINDOW_MS || 0) || 0);
+  for (const [k, rec] of st.recentInsertUpsertMirrorKeys.entries()) {
+    const ts = Number(rec && rec.ts || 0) || 0;
+    if ((nowMs - ts) > ttl) st.recentInsertUpsertMirrorKeys.delete(k);
+  }
+  const key = String(text || '');
+  const prev = st.recentInsertUpsertMirrorKeys.get(key) || null;
+  if (prev) {
+    const prevOp = String(prev.op || '').trim();
+    const prevTs = Number(prev.ts || 0) || 0;
+    if (prevOp && prevOp !== opNorm && prevTs > 0 && (nowMs - prevTs) <= ttl) {
+      return true;
+    }
+  }
+  st.recentInsertUpsertMirrorKeys.set(key, { op: opNorm, ts: nowMs });
+  if (st.recentInsertUpsertMirrorKeys.size > 400) {
+    const first = st.recentInsertUpsertMirrorKeys.keys().next().value;
+    if (first) st.recentInsertUpsertMirrorKeys.delete(first);
   }
   return false;
 }
@@ -18286,6 +18335,21 @@ async function __deltaAttachCdpEar(nome, page) {
                 reason: 'sha1_text_collision',
                 op: op || null,
                 window_ms: Number(DELTA_RECENT_DEDUP_WINDOW_MS || 0) || 0,
+                text_preview: String(texto || '').slice(0, 220)
+              }
+            });
+          } catch {}
+          continue;
+        }
+        if (__deltaIsRecentInsertUpsertMirrorDuplicate(st, texto, op, nowMs)) {
+          try {
+            __forensicEdgeEmit({
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              flow_stage: 'discard_filter_triggered',
+              details: {
+                reason: 'insert_upsert_mirror_duplicate',
+                op: op || null,
                 text_preview: String(texto || '').slice(0, 220)
               }
             });
