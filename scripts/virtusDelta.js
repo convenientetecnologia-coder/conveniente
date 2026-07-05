@@ -2159,6 +2159,85 @@ async function computeVisibleThreadCardClickPlan(cardElement) {
   }).catch(() => ({ ok: false, reason: 'evaluate_failed' }));
 }
 
+async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = null, stage = "post_click", requireComposer = true } = {}) {
+  const t = String(threadKey || "").trim();
+  const expectedTarget = `/messages/t/${t}`;
+  const currentUrl = String(page && page.url ? page.url() : "").trim();
+  const urlMatches = !!(currentUrl && currentUrl.includes(expectedTarget));
+
+  let composerCheck = { ok: true, composer_count: null, active_sidebar_href: null };
+  if (requireComposer) {
+    composerCheck = await page.evaluate((threadId) => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return r && r.width > 1 && r.height > 1;
+      };
+
+      const composers = Array.from(document.querySelectorAll('div[data-lexical-editor="true"]')).filter(isVisible);
+      const active = document.querySelector('a[aria-current="page"][href], [aria-current="page"] a[href]');
+      const activeHref = String((active && active.getAttribute("href")) || "").trim();
+      const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
+      const sidebarMatchesThread = !!(activeHref && expectedRe.test(activeHref));
+      return {
+        ok: composers.length === 1 && sidebarMatchesThread,
+        composer_count: composers.length,
+        active_sidebar_href: activeHref || null
+      };
+    }, t).catch(() => ({ ok: false, composer_count: null, active_sidebar_href: null }));
+  }
+
+  if (urlMatches && composerCheck && composerCheck.ok) {
+    return {
+      ok: true,
+      current_url: currentUrl,
+      expected_target: expectedTarget,
+      composer_count: composerCheck.composer_count
+    };
+  }
+
+  const reason = !urlMatches
+    ? "URL_mismatch_preventing_cross_routing"
+    : "composer_signature_mismatch";
+  try {
+    console.log(JSON.stringify({
+      timestamp: Date.now(),
+      flow_stage: "wrong_thread_guard_blocked",
+      thread_key: t,
+      current_url: currentUrl,
+      expected_target: expectedTarget,
+      stage,
+      reason,
+      composer_count: composerCheck && composerCheck.composer_count,
+      active_sidebar_href: composerCheck && composerCheck.active_sidebar_href
+    }));
+  } catch (_) {}
+  try {
+    __forensicEdgeEmit({
+      account_login: forensicAccountLogin,
+      thread_key: t,
+      flow_stage: "wrong_thread_guard_blocked",
+      details: {
+        tag: "FORENSIC_DOM_REVERSE",
+        stage,
+        reason,
+        current_url: currentUrl || null,
+        expected_target: expectedTarget,
+        composer_count: Number(composerCheck && composerCheck.composer_count || 0) || 0,
+        active_sidebar_href: composerCheck && composerCheck.active_sidebar_href ? String(composerCheck.active_sidebar_href) : null,
+        ts_ms: Date.now()
+      }
+    });
+  } catch (_) {}
+  return {
+    ok: false,
+    error: "wrong_thread_guard_blocked",
+    reason,
+    current_url: currentUrl,
+    expected_target: expectedTarget
+  };
+}
+
 async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
@@ -2201,11 +2280,6 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     `div[role="row"] a[href="/messages/t/${t}/"]`,
     `div[role="row"] a[href="/messages/t/${t}"]`,
     `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
-    `a[href="/messages/t/${t}/"]`,
-    `a[href="/messages/t/${t}"]`,
-    `a[href*="/messages/e2ee/t/${t}"]`,
-    `a[href*="/messages/t/${t}"]`,
-    `a[href*="${t}"]`,
   ];
 
   for (let i = 0; i < maxScrollSteps; i++) {
@@ -2224,25 +2298,13 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             })
             .catch(() => false);
           if (isCurrentPage) {
-            try {
-              const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
-              __forensicEdgeEmit({
-                account_login: forensicAccountLogin,
-                thread_key: t,
-                flow_stage: "browser_window_state_check",
-                details: {
-                  tag: "FORENSIC_DOM_REVERSE",
-                  selector: cardSelector,
-                  scrolled: i,
-                  is_already_open: true,
-                  aria_current_page: true,
-                  skipped_click: true,
-                  current_path: currentPath ? String(currentPath) : null,
-                  ts_ms: Date.now(),
-                }
-              });
-            } catch (_) {}
-            return { ok: true, scrolled: i, matched_selector: cardSelector, already_open: true, skipped_click: true };
+            const guard = await runWrongThreadGuard(page, t, {
+              forensicAccountLogin,
+              stage: "already_open_prevent_cross_routing",
+              requireComposer: true
+            });
+            if (!guard.ok) return guard;
+            return { ok: true, scrolled: i, matched_selector: cardSelector, already_open: true, skipped_click: true, hydrated: true };
           }
         } catch (_) {}
 
@@ -2400,6 +2462,12 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
           } catch (_) {}
           return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: cardSelector };
         }
+        const guard = await runWrongThreadGuard(page, t, {
+          forensicAccountLogin,
+          stage: "post_click_route_validation",
+          requireComposer: true
+        });
+        if (!guard.ok) return guard;
         return { ok: true, scrolled: i, matched_selector: cardSelector, hydrated: true };
       }
     }
@@ -2430,71 +2498,6 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
         .filter((h) => h.includes("/messages"))
         .slice(0, 25)
     );
-  } catch (_) {}
-
-  // Fallback de homologação (sem goto/reload): clicar no chat atualmente aberto.
-  // Isso valida o pipeline de acessibilidade mesmo quando o thread_key do barramento
-  // não corresponde ao ID que aparece no href do card lateral.
-  try {
-    const current = String(await page.evaluate(() => location.pathname || "")).trim();
-    if (current.includes("/messages/") && current.includes("/t/")) {
-      const fallbackSel = `a[href*="${current}"]`;
-      const a2 = await page.$(fallbackSel).catch(() => null);
-      if (a2) {
-        await humanPause("preThreadClick", "pre_thread_fallback_click");
-        try {
-          const isAlreadyOpen = current.includes(t);
-          __forensicEdgeEmit({
-            account_login: forensicAccountLogin,
-            thread_key: t,
-            flow_stage: "browser_window_state_check",
-            details: {
-              tag: "FORENSIC_DOM_REVERSE",
-              selector: fallbackSel,
-              scrolled: maxScrollSteps,
-              is_already_open: !!isAlreadyOpen,
-              current_path: current,
-              ts_ms: Date.now(),
-              fallback: true,
-            }
-          });
-        } catch (_) {}
-        try {
-          __forensicEdgeEmit({
-            account_login: forensicAccountLogin,
-            thread_key: t,
-            flow_stage: "dom_automation_tracking",
-            details: { action: "open_thread_click_fallback", selector: fallbackSel, current_path: current }
-          });
-        } catch (_) {}
-        await page.click(fallbackSel, { delay: clickDelayMs() }).catch(() => {});
-        await humanPause("postThreadOpen", "post_thread_fallback_click");
-        try {
-          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
-        } catch (_) {
-          try {
-            const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
-            __forensicEdgeEmit({
-              account_login: forensicAccountLogin,
-              thread_key: t,
-              flow_stage: "thread_open_hydration_timeout",
-              details: {
-                tag: "FORENSIC_DOM_REVERSE",
-                selector: fallbackSel,
-                scrolled: maxScrollSteps,
-                current_path: currentPath ? String(currentPath) : null,
-                waited_selector: 'div[data-lexical-editor="true"]',
-                timeout_ms: 5000,
-                ts_ms: Date.now(),
-                fallback: true
-              }
-            });
-          } catch (_) {}
-          return { ok: false, error: "thread_open_hydration_timeout", scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current };
-        }
-        return { ok: true, scrolled: maxScrollSteps, fallback_current_thread: true, current_path: current, hydrated: true };
-      }
-    }
   } catch (_) {}
 
   return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
@@ -2667,6 +2670,12 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     } catch (_) {}
 
     await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+    const typingGuard = await runWrongThreadGuard(page, t, {
+      forensicAccountLogin,
+      stage: "pre_typing_composer_signature",
+      requireComposer: true
+    });
+    if (!typingGuard.ok) return typingGuard;
     await humanPause("preTyping", "pre_typing");
     if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
       try {
