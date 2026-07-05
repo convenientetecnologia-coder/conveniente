@@ -15049,12 +15049,12 @@ function __deltaScrubNewLeadTimersOutboxSync(nome, { consumeUntilOffset = 0, dro
     return { ok: false, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
   }
 }
-function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs } = {}) {
+function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs, forceEnqueue = false, queueLane = 'primary', retryReason = null } = {}) {
   try {
     const n = String(nome || '').trim();
     const tk = String(thread_key || '').trim();
     if (!n || !tk) return false;
-    if (!__deltaCanEnqueueNewLeadTimerFromDiskSync(n, tk)) return false;
+    if (!forceEnqueue && !__deltaCanEnqueueNewLeadTimerFromDiskSync(n, tk)) return false;
     if (__deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) return false;
     __deltaEnsureNewLeadsQueueDirsSync(n);
     const rec = {
@@ -15064,6 +15064,8 @@ function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs
       thread_key: tk,
       delayMs: Math.max(0, Number(delayMs || 0) || 0),
       dueAt: Math.max(0, Number(dueAt || 0) || 0),
+      queue_lane: String(queueLane || 'primary').trim() || 'primary',
+      retry_reason: String(retryReason || '').trim() || null,
     };
     fs.appendFileSync(__deltaNewLeadsOutboxPath(n), JSON.stringify(rec) + '\n', 'utf8');
     return true;
@@ -15839,16 +15841,75 @@ function __deltaClearThreadTimer(st) {
   st.timerDueAt = 0;
   st.timerReason = '';
 }
+function __deltaNormalizeMirrorComparableText(value) {
+  return String(value || '')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => String(line || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+    .toLowerCase();
+}
+function __deltaCollapseSnippetMirrorMessages(messages, { windowMs = 20_000 } = {}) {
+  const src = Array.isArray(messages) ? messages : [];
+  const merged = [];
+  const snippetIndexesByText = new Map();
+  for (const raw of src) {
+    if (!raw || typeof raw !== 'object') continue;
+    const text = String(raw.text || '').trim();
+    if (!text) continue;
+    const op = String(raw.op || '').trim();
+    const at = Number(raw.at || 0) || 0;
+    const norm = __deltaNormalizeMirrorComparableText(text);
+    const rec = { ...raw, text, op, at, __mirror_norm: norm };
+    if (op === 'updateThreadSnippet' && norm) {
+      merged.push(rec);
+      const idx = merged.length - 1;
+      const arr = snippetIndexesByText.get(norm) || [];
+      arr.push(idx);
+      snippetIndexesByText.set(norm, arr);
+      continue;
+    }
+    const isCanonicalOp = op === 'insertMessage' || op === 'upsertMessage';
+    if (isCanonicalOp && norm) {
+      const candidates = snippetIndexesByText.get(norm) || [];
+      if (candidates.length) {
+        for (let i = candidates.length - 1; i >= 0; i -= 1) {
+          const candidateIdx = Number(candidates[i] || -1);
+          const candidate = candidateIdx >= 0 ? merged[candidateIdx] : null;
+          if (!candidate) {
+            candidates.splice(i, 1);
+            continue;
+          }
+          const candidateAt = Number(candidate.at || 0) || 0;
+          const withinWindow =
+            !(windowMs > 0 && candidateAt > 0 && at > 0) ||
+            Math.abs(at - candidateAt) <= windowMs;
+          if (!withinWindow) continue;
+          merged[candidateIdx] = null;
+          candidates.splice(i, 1);
+          break;
+        }
+      }
+      if (candidates.length) snippetIndexesByText.set(norm, candidates);
+      else snippetIndexesByText.delete(norm);
+    }
+    merged.push(rec);
+  }
+  return merged.filter(Boolean);
+}
 function __deltaBuildConcatFromState(st) {
   const msgs = Array.isArray(st && st.messages) ? st.messages : [];
   // Guardrail: o ouvido pode capturar texto outbound com prefixo "Você:"/"You:".
   // Esse texto NÃO deve compor o histórico inbound do cliente.
-  const filtered = msgs.filter((m) => {
+  const filteredBase = msgs.filter((m) => {
     const t = String(m && m.text || '').trim();
     if (!t) return false;
     if (/^(você|voce|you)\s*:/i.test(t)) return false;
     return true;
   });
+  const filtered = __deltaCollapseSnippetMirrorMessages(filteredBase, { windowMs: 20_000 });
   const textsRaw = filtered.map((m) => String(m && m.text || '').trim()).filter(Boolean);
   const texts = (() => {
     if (textsRaw.length < 4 || (textsRaw.length % 2) !== 0) return textsRaw;
@@ -16096,6 +16157,32 @@ function __deltaScheduleThreadTimer(st, { retry = false } = {}) {
   __deltaSchedulePersistThreadState();
   return delayMs;
 }
+function __deltaQueueThreadRetryOnDiskSecondary(st, { nome, threadKey, retryReason = 'hands_retry' } = {}) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!st || typeof st !== 'object' || !n || !tk) return { queued: false, retryInMs: 0, queueMode: 'invalid' };
+  const retryInMs = __deltaRandInt(DELTA_RETRY_TIMER_MIN_MS, DELTA_RETRY_TIMER_MAX_MS);
+  const dueAt = Date.now() + retryInMs;
+  const queued = __deltaEnqueueNewLeadTimerToDiskSync({
+    nome: n,
+    thread_key: tk,
+    delayMs: retryInMs,
+    dueAt,
+    forceEnqueue: true,
+    queueLane: 'hands_retry_secondary',
+    retryReason,
+  });
+  if (queued) {
+    st.timerHandle = null;
+    st.timerReason = 'retry_disk_secondary';
+    st.timerDueAt = dueAt;
+    st.updatedAt = Date.now();
+    try { __deltaKickNewLeadsTimerPump(n); } catch {}
+    return { queued: true, retryInMs, queueMode: 'disk_secondary', dueAt };
+  }
+  const fallbackInMs = __deltaScheduleThreadTimer(st, { retry: true });
+  return { queued: false, retryInMs: fallbackInMs, queueMode: 'memory_fallback', dueAt: Number(st.timerDueAt || 0) || 0 };
+}
 async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'initial' } = {}) {
   const n = String(nome || '').trim();
   const tk = String(threadKey || '').trim();
@@ -16155,7 +16242,28 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     st.inFlight = false;
     st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
     st.updatedAt = Date.now();
-    const retryInMs = __deltaScheduleThreadTimer(st, { retry: true });
+    const handsError = String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300);
+    const isThreadCardNotFound = handsError === 'thread_card_not_found';
+    const retryCtl = isThreadCardNotFound
+      ? __deltaQueueThreadRetryOnDiskSecondary(st, { nome: n, threadKey: tk, retryReason: 'thread_card_not_found' })
+      : { queued: false, retryInMs: __deltaScheduleThreadTimer(st, { retry: true }), queueMode: 'memory' };
+    const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
+    const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
+    if (isThreadCardNotFound) {
+      try {
+        __forensicEdgeEmit({
+          account_login: n,
+          thread_key: tk,
+          flow_stage: 'hands_thread_card_not_found_escaped',
+          details: {
+            retry_queue_mode: retryQueueMode,
+            retry_in_ms: retryInMs,
+            hands_failures: st.handsFailures,
+            queue_advanced: true
+          }
+        });
+      } catch {}
+    }
     __deltaAppendPendingJsonlSync({
       event: 'lead_hands_retry_scheduled',
       server_id: readHostIdSync() || null,
@@ -16167,9 +16275,11 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       dispatch_ct: false,
       queue_mode: 'capture_only',
       flow_stage: 'hands_retry',
-      hands_error: String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300),
+      hands_error: handsError,
       retry_in_ms: retryInMs,
-      hands_failures: st.handsFailures
+      hands_failures: st.handsFailures,
+      retry_queue_mode: retryQueueMode,
+      queue_advanced: isThreadCardNotFound ? true : undefined
     });
     __deltaSchedulePersistThreadState();
     return;

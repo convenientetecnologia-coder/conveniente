@@ -2538,7 +2538,45 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
   return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
 }
 
-async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null } = {}) {
+async function probeOpenLineContinuity(page, threadKey) {
+  const t = String(threadKey || "").trim();
+  if (!page || !t) return { is_open_line_ready: false, reason: "missing_page_or_thread" };
+  try {
+    const out = await page.evaluate((threadId) => {
+      const normHref = (href) => String(href || "").trim();
+      const path = String(location.pathname || "").trim();
+      const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
+      const urlMatchesThread = expectedRe.test(path);
+      const active = document.querySelector('a[aria-current="page"][href], [aria-current="page"] a[href]');
+      const activeHref = normHref(active && active.getAttribute("href"));
+      const sidebarMatchesThread = !!(activeHref && expectedRe.test(activeHref));
+      const composers = Array.from(document.querySelectorAll('div[data-lexical-editor="true"]')).filter((el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return !!(r && r.width > 1 && r.height > 1);
+      });
+      return {
+        current_path: path || null,
+        active_sidebar_href: activeHref || null,
+        url_matches_thread: !!urlMatchesThread,
+        aria_current_page: !!sidebarMatchesThread,
+        composer_ready: composers.length >= 1,
+      };
+    }, t);
+    const ready = !!(out && out.url_matches_thread && out.aria_current_page && out.composer_ready);
+    return {
+      ...out,
+      thread_key: t,
+      is_open_line_ready: ready,
+      reason: ready ? "open_line_ready" : "not_open_line_ready",
+      probed_at: Date.now(),
+    };
+  } catch {
+    return { thread_key: t, is_open_line_ready: false, reason: "probe_evaluate_failed", probed_at: Date.now() };
+  }
+}
+
+async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null, continuityProbe = null } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
   try { if (page) page.__virtusDeltaReplyInFlight = true; } catch (_) {}
@@ -2574,7 +2612,45 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       }
     }
 
-    if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+    const providedContinuity = (() => {
+      if (!continuityProbe || typeof continuityProbe !== "object") return null;
+      if (String(continuityProbe.thread_key || "").trim() !== t) return null;
+      const ageMs = Date.now() - (Number(continuityProbe.probed_at || 0) || 0);
+      if (ageMs > 2500) return null;
+      return continuityProbe;
+    })();
+    const continuity = providedContinuity || await probeOpenLineContinuity(page, t);
+    const canUseOpenLineFastPath = !!(continuity && continuity.is_open_line_ready === true);
+    let open = null;
+    if (canUseOpenLineFastPath) {
+      try {
+        __forensicEdgeEmit({
+          account_login: forensicAccountLogin,
+          thread_key: t,
+          flow_stage: "open_line_fast_path",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            reason: "same_thread_already_open_selected",
+            is_already_open: true,
+            aria_current_page: !!(continuity && continuity.aria_current_page),
+            current_path: continuity && continuity.current_path ? String(continuity.current_path) : null,
+            active_sidebar_href: continuity && continuity.active_sidebar_href ? String(continuity.active_sidebar_href) : null,
+            ts_ms: Date.now(),
+          }
+        });
+      } catch (_) {}
+      open = {
+        ok: true,
+        scrolled: 0,
+        matched_selector: "open_line_fast_path",
+        already_open: true,
+        skipped_click: true,
+        hydrated: true,
+        continuity_fast_path: true
+      };
+    }
+
+    if (!canUseOpenLineFastPath && DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
       try {
         const st = __isAlreadyOpenByUrl();
         const threadCardVisible = await page.evaluate((threadId) => {
@@ -2624,71 +2700,79 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    const open = await openThreadByClick(page, threadKey, { forensicAccountLogin });
-    if (!open.ok) {
-      if (fromNetworkLead) {
-        try {
-          logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
-          await forceSidebarRefreshByMessagesRoot(page);
-          await humanPause("domSettle", "open_thread_retry_root");
-          if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-            try {
-              const st2 = __isAlreadyOpenByUrl();
-              if (st2 && st2.ok === true) {
-                try {
-                  __forensicEdgeEmit({
-                    account_login: forensicAccountLogin,
-                    thread_key: t,
-                    flow_stage: "marketplace_filter_bypass",
-                    details: {
-                      tag: "FORENSIC_DOM_REVERSE",
-                      reason: "thread_already_open_url_retry",
-                      is_already_open: true,
-                      current_path: st2.current_path || null,
-                      url: st2.url ? String(st2.url).slice(0, 300) : null,
-                      ts_ms: Date.now(),
-                    }
-                  });
-                } catch (_) {}
-              } else {
-                await ensureMarketplaceFilterActive(page);
-              }
-            } catch (_) {
-              try { await ensureMarketplaceFilterActive(page); } catch (_) {}
-            }
-            await humanPause("postMarketplace", "open_thread_retry_marketplace");
-          }
-        } catch (_) {}
-        const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
-        if (open2.ok) {
-          Object.assign(open, open2);
-        }
-      } else {
-        // Dashboard/API reply: só tenta correção de filtro quando realmente não achou card.
-        // Isso evita HOL desnecessário quando o card já está no feed.
-        if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && String(open.error || "") === "thread_card_not_found") {
+    if (!canUseOpenLineFastPath) {
+      open = await openThreadByClick(page, threadKey, { forensicAccountLogin });
+      if (!open.ok) {
+        if (fromNetworkLead) {
           try {
-            await ensureMarketplaceFilterActive(page);
-            await humanPause("postMarketplace", "open_thread_retry_marketplace_api");
+            logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
+            await forceSidebarRefreshByMessagesRoot(page);
+            await humanPause("domSettle", "open_thread_retry_root");
+            if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+              try {
+                const st2 = __isAlreadyOpenByUrl();
+                if (st2 && st2.ok === true) {
+                  try {
+                    __forensicEdgeEmit({
+                      account_login: forensicAccountLogin,
+                      thread_key: t,
+                      flow_stage: "marketplace_filter_bypass",
+                      details: {
+                        tag: "FORENSIC_DOM_REVERSE",
+                        reason: "thread_already_open_url_retry",
+                        is_already_open: true,
+                        current_path: st2.current_path || null,
+                        url: st2.url ? String(st2.url).slice(0, 300) : null,
+                        ts_ms: Date.now(),
+                      }
+                    });
+                  } catch (_) {}
+                } else {
+                  await ensureMarketplaceFilterActive(page);
+                }
+              } catch (_) {
+                try { await ensureMarketplaceFilterActive(page); } catch (_) {}
+              }
+              await humanPause("postMarketplace", "open_thread_retry_marketplace");
+            }
           } catch (_) {}
           const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
           if (open2.ok) {
             Object.assign(open, open2);
           }
+        } else {
+          // Dashboard/API reply: só tenta correção de filtro quando realmente não achou card.
+          // Isso evita HOL desnecessário quando o card já está no feed.
+          if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && String(open.error || "") === "thread_card_not_found") {
+            try {
+              await ensureMarketplaceFilterActive(page);
+              await humanPause("postMarketplace", "open_thread_retry_marketplace_api");
+            } catch (_) {}
+            const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
+            if (open2.ok) {
+              Object.assign(open, open2);
+            }
+          }
         }
       }
     }
 
-    if (!open.ok) {
-      logInfo(`[virtusDelta][reply] openThread FAIL thread_key=${t} error=${open.error}`);
-      if (open.href_preview && open.href_preview.length) {
+    if (!open || !open.ok) {
+      logInfo(`[virtusDelta][reply] openThread FAIL thread_key=${t} error=${open && open.error ? open.error : "open_unknown_error"}`);
+      if (open && open.href_preview && open.href_preview.length) {
         logInfo(`[virtusDelta][reply] href_preview=${JSON.stringify(open.href_preview)}`);
       }
-      return open;
+      return open || { ok: false, error: "thread_open_failed" };
     }
     logInfo(
       `[virtusDelta][reply] openThread OK thread_key=${t} scrolled=${open.scrolled} selector=${String(open.matched_selector || "")}`
     );
+
+    if (canUseOpenLineFastPath) {
+      try {
+        logInfo(`[virtusDelta][reply] open_line_fast_path thread_key=${t} skip_marketplace_and_reopen=sim`);
+      } catch (_) {}
+    }
 
     await humanPause("postThreadOpen", "post_open_read_context");
 
@@ -2699,7 +2783,9 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       if (itemLink) {
         logInfo(`[COLETOR_101_LINK] ${itemLink}`);
         if (typeof onItemLink === "function") {
-          try { onItemLink(itemLink); } catch (_) {}
+          try {
+            onItemLink(itemLink);
+          } catch (_) {}
         }
       }
     } catch (_) {}
@@ -3658,9 +3744,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch (_) {}
   }
 
-  async function enforceGlobalDeltaCooldown(accountLogin = ACCOUNT_LOGIN) {
-    const minMs = Math.max(0, Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.min || 3_000) || 3_000);
-    const maxMs = Math.max(minMs, Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.max || 12_000) || 12_000);
+  async function enforceGlobalDeltaCooldown(accountLogin = ACCOUNT_LOGIN, policy = null) {
+    const custom = (policy && typeof policy === "object") ? policy : null;
+    const minBase = Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.min || 3_000) || 3_000;
+    const maxBase = Number(CROSS_THREAD_SEND_GAP && CROSS_THREAD_SEND_GAP.max || 12_000) || 12_000;
+    const minMs = Math.max(0, Number(custom && custom.minMs != null ? custom.minMs : minBase) || minBase);
+    const maxMs = Math.max(minMs, Number(custom && custom.maxMs != null ? custom.maxMs : maxBase) || maxBase);
+    const policyReason = String(custom && custom.reason || "default").trim() || "default";
     const delayMs = randomBetween(minMs, maxMs);
     const last = readLastDeltaSendTimestamp(accountLogin);
     const now = Date.now();
@@ -3693,6 +3783,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         details: {
           tag: "FORENSIC_DOM_REVERSE",
           phase: "begin",
+          policy_reason: policyReason,
           account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
           min_ms: minMs,
           max_ms: maxMs,
@@ -3725,6 +3816,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         details: {
           tag: "FORENSIC_DOM_REVERSE",
           phase: "end",
+          policy_reason: policyReason,
           account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
           delay_ms: delayMs,
           last_send_ts: last || 0,
@@ -3744,8 +3836,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const cmid = String(clientMessageId || "").trim() || null;
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
 
-    // Relógio Sentinela por conta (3–12s), isolado por ACCOUNT_LOGIN.
-    await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
+    // Drenagem rápida de linha aberta:
+    // se a thread já está aberta/selecionada, mantém o canal e só aplica cooldown biológico 5–15s.
+    const continuityProbe = await probeOpenLineContinuity(page, t).catch(() => ({ is_open_line_ready: false }));
+    const openLineReady = !!(continuityProbe && continuityProbe.is_open_line_ready === true);
+    const cooldownPolicy = openLineReady
+      ? { minMs: 5_000, maxMs: 15_000, reason: "open_line_fast_lane" }
+      : null;
+
+    // Relógio sentinela por conta; em linha aberta usa faixa 5–15s.
+    await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN, cooldownPolicy);
 
     // Anti-HOL: retries inline longos seguram a fila inteira.
     // Estratégia nova: tentativa única no slot atual + requeue assíncrono no enqueueDeltaReply.
@@ -3763,7 +3863,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
 
       try {
-        const r = await sendReplyFlow({ page, threadKey: t, textoResposta: msg, fromNetworkLead: false, forensicAccountLogin: ACCOUNT_LOGIN });
+        const r = await sendReplyFlow({
+          page,
+          threadKey: t,
+          textoResposta: msg,
+          fromNetworkLead: false,
+          forensicAccountLogin: ACCOUNT_LOGIN,
+          continuityProbe
+        });
         lastOut = r && typeof r === "object" ? r : { ok: true };
         if (lastOut && lastOut.ok) {
           const nowTs = Date.now();
