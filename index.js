@@ -2269,6 +2269,8 @@ function __deltaProvisionDeliveryConfirmEnv() {
     // 1) URL do confirm-delivery (balão azul)
     const explicit = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').trim();
     if (!explicit) {
+      // Host canônico do CT (Atendimentos) onde a rota existe (laudo parte 13).
+      const CANONICAL_CT_ATTENDANCE_BASE = 'https://atendimentos.convenientetecnologia.com';
       let ctBaseUrl = '';
       try {
         const cfg = readCtConfig();
@@ -2278,12 +2280,28 @@ function __deltaProvisionDeliveryConfirmEnv() {
       if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_ATTENDANCE_BASE_URL || process.env.CT_ATTENDANCE_URL || '').trim();
       if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
 
-      const hostId = String(__readOrCreateServerEventHostId() || '').trim();
-      const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?$/i.test(String(ctBaseUrl || '').replace(/\/+$/,''));
-      // Guardrail: api.convenientetecnologia.com não hospeda /api/attendance/confirm-delivery (retorna 404).
-      // Em ambiente RM6, o CT do servidor é acessível via subdomínio do hostId.
-      if ((!ctBaseUrl || looksLikeApi) && hostId) {
-        ctBaseUrl = `https://${hostId}.convenientetecnologia.com`;
+      const baseNorm = String(ctBaseUrl || '').trim().replace(/\/+$/, '');
+      const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?$/i.test(baseNorm);
+      let looksLikeVmHost = false;
+      try {
+        const u = new URL(baseNorm);
+        const sub = String(u.hostname || '').split('.')[0] || '';
+        looksLikeVmHost =
+          /\.convenientetecnologia\.com$/i.test(baseNorm)
+          && /^[a-f0-9-]{30,}$/i.test(String(sub || ''));
+      } catch {
+        looksLikeVmHost = false;
+      }
+
+      // Guardrails:
+      // - api.convenientetecnologia.com NÃO tem /api/attendance/confirm-delivery (404)
+      // - host da própria VM (uuid.convenientetecnologia.com) também NÃO é CT de atendimentos (404)
+      // Se cair nesses casos, forçamos o destino canônico do CT.
+      let shouldForceCanonical = false;
+      try { if (!baseNorm || looksLikeApi || looksLikeVmHost) shouldForceCanonical = true; } catch { shouldForceCanonical = true; }
+      if (shouldForceCanonical) ctBaseUrl = CANONICAL_CT_ATTENDANCE_BASE;
+      if (ctBaseUrl && !/^https?:\/\//i.test(String(ctBaseUrl || '').trim())) {
+        ctBaseUrl = `https://${String(ctBaseUrl || '').trim()}`;
       }
 
       if (ctBaseUrl) {

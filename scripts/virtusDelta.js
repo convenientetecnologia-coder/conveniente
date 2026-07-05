@@ -2070,6 +2070,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
   try {
     await humanReactionDelay(fromNetworkLead);
 
+    // Proteção anti-freeze: expurga seleção residual do mouse antes de qualquer automação.
+    try {
+      await page.evaluate(() => {
+        try { window.getSelection?.()?.removeAllRanges?.(); } catch {}
+      });
+    } catch (_) {}
+
     const __isAlreadyOpenByUrl = () => {
       try {
         const rawUrl = String(page && page.url ? page.url() : "");
@@ -2626,6 +2633,103 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch {
       return crypto.randomBytes(12).toString("hex");
     }
+  }
+
+  function resolveCtReverseDeliveryStatusUrl() {
+    try {
+      const confirmUrl = String(resolveCtDeliveryConfirmUrl() || "").trim();
+      if (!confirmUrl) return "";
+      // Troca apenas o sufixo do endpoint.
+      if (/\/api\/attendance\/confirm-delivery\/?$/i.test(confirmUrl)) {
+        return confirmUrl.replace(/\/api\/attendance\/confirm-delivery\/?$/i, "/api/attendance/reverse-delivery-status");
+      }
+      // Fallback seguro: mesma base + endpoint.
+      try {
+        const u = new URL(confirmUrl);
+        return `${u.protocol}//${u.host}/api/attendance/reverse-delivery-status`;
+      } catch {
+        return "";
+      }
+    } catch {
+      return "";
+    }
+  }
+
+  function kickReverseDeliveryStatus({ client_message_id, thread_key, status, error } = {}) {
+    try {
+      const cid = String(client_message_id || "").trim();
+      if (!cid) return;
+      const url = resolveCtReverseDeliveryStatusUrl();
+      const sec = resolveCtDeliveryConfirmSecret();
+      if (!url || !sec) return;
+      const payload = {
+        server_id: SERVER_ID,
+        account_login: ACCOUNT_LOGIN,
+        thread_key: String(thread_key || "").trim() || null,
+        client_message_id: cid,
+        status: String(status || "error_failed_to_send").trim() || "error_failed_to_send",
+        error: String(error || "").slice(0, 500) || null,
+      };
+      const headers = { "x-delivery-secret": sec };
+      try {
+        setTimeout(() => {
+          (async () => {
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: payload.thread_key,
+                flow_stage: "reverse_delivery_post_attempt",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  url,
+                  client_message_id: cid,
+                  status: payload.status,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+            const r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, headers }).catch((e) => ({
+              ok: false,
+              status: 0,
+              error: (e && e.message) ? String(e.message) : String(e),
+            }));
+            if (r && r.ok) {
+              try {
+                __forensicEdgeEmit({
+                  account_login: ACCOUNT_LOGIN,
+                  thread_key: payload.thread_key,
+                  flow_stage: "reverse_delivery_post_ok",
+                  details: {
+                    tag: "FORENSIC_DOM_REVERSE",
+                    url,
+                    http_status: Number(r.status || 0) || 0,
+                    client_message_id: cid,
+                    ts_ms: Date.now(),
+                  }
+                });
+              } catch (_) {}
+              return;
+            }
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: payload.thread_key,
+                flow_stage: "reverse_delivery_fail",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  message: `[FORENSIC_REVERSE_FAIL] url: ${url} status: ${Number(r && r.status || 0) || 0} error: ${String((r && r.error) || "reverse_failed")}`,
+                  url,
+                  status: Number(r && r.status || 0) || 0,
+                  error: String((r && r.error) || "reverse_failed"),
+                  client_message_id: cid,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+          })().catch(() => {});
+        }, 0).unref?.();
+      } catch (_) {}
+    } catch (_) {}
   }
 
   function enqueueDeliveryConfirmToDiskSync({ cmdId, thread_key, status } = {}) {
@@ -3331,6 +3435,25 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                   .catch(() => {});
               }, delayMs).unref?.();
             } catch (_) {}
+          }
+        } catch (_) {}
+
+        // Protocolo de reversão de ACK: após exaurir tentativas locais, marca falha no CT (visível na tela).
+        try {
+          const ok = !!(out && out.ok);
+          if (!ok) {
+            const err = String(out && out.error || "").trim() || "send_failed";
+            const isSelectorLike =
+              err === "composer_missing" ||
+              err === "thread_card_not_found" ||
+              err === "send_not_confirmed_composer_not_empty" ||
+              err === "composer_text_not_registered";
+            const tries = Math.max(0, Number(_requeue_count || 0) || 0);
+            const exhausted = isSelectorLike ? (tries >= 2) : true;
+            if (exhausted) {
+              const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
+              kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
+            }
           }
         } catch (_) {}
 
