@@ -10416,6 +10416,22 @@ const handlers = {
 
   // FUSÃO OPERACIONAL (FASE 2/3):
   // Recebe resposta do Maestro :8088 via IPC e executa pelas MÃOS (virtusDelta) com fila serial.
+  async ['delta-hands-health']({ nome }) {
+    try {
+      const n = String(nome || '').trim();
+      if (!n) return { ok: false, error: 'missing_nome' };
+      const ctrl = controllers.get(n);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'browser_not_connected' };
+      const connected = !!ctrl.browser.isConnected();
+      if (!connected) return { ok: false, error: 'browser_not_connected' };
+      if (ctrl.humanControl === true || ctrl.configurando === true) {
+        return { ok: false, error: 'browser_busy_or_unavailable' };
+      }
+      return { ok: true, browser_connected: true };
+    } catch (e) {
+      return { ok: false, error: 'health_check_failed', message: (e && e.message) ? String(e.message) : String(e) };
+    }
+  },
   async ['delta-reply-task']({ nome, thread_key, texto_resposta, client_message_id }) {
     return lockProfileAction(nome, async () => {
       const n = String(nome || '').trim();

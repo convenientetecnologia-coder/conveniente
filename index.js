@@ -1510,6 +1510,55 @@ app.post('/api/infra/command-bus', async (req, res) => {
           continue;
         }
         const clientMessageId = String(cmd.client_message_id || cmd.clientMessageId || cmd.id || '').trim() || null;
+
+        // Regra rígida (Passo 1): só ACK/200 se o worker+Chrome da conta estiverem realmente ativos.
+        // Se estiver offline, NÃO enfileira em disco (evita "received_by_edge" preso).
+        try {
+          const canCheck = !!(clusterClient && typeof clusterClient.sendWorkerCommand === 'function');
+          if (!canCheck) {
+            __forensicEdgeEmit({
+              account_login: nome,
+              thread_key,
+              flow_stage: 'reverse_command_bus',
+              details: { stage: 'delta_reply_rejected', reason: 'cluster_unavailable', cmd_id: String(cmd && cmd.id || clientMessageId || '') || null }
+            });
+            return res.status(503).json({ ok: false, error: 'browser_offline_machinery_unavailable' });
+          }
+          const health = await clusterClient.sendWorkerCommand(
+            'delta-hands-health',
+            { nome },
+            { timeoutMs: 2500 }
+          );
+          const healthy = !!(health && health.ok === true && health.browser_connected === true);
+          if (!healthy) {
+            __forensicEdgeEmit({
+              account_login: nome,
+              thread_key,
+              flow_stage: 'reverse_command_bus',
+              details: {
+                stage: 'delta_reply_rejected',
+                reason: 'browser_offline_machinery_unavailable',
+                cmd_id: String(cmd && cmd.id || clientMessageId || '') || null,
+                health: health || null
+              }
+            });
+            return res.status(503).json({ ok: false, error: 'browser_offline_machinery_unavailable' });
+          }
+        } catch (e) {
+          __forensicEdgeEmit({
+            account_login: nome,
+            thread_key,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'delta_reply_rejected',
+              reason: 'health_check_failed',
+              cmd_id: String(cmd && cmd.id || clientMessageId || '') || null,
+              error: (e && e.message) ? String(e.message) : String(e)
+            }
+          });
+          return res.status(503).json({ ok: false, error: 'browser_offline_machinery_unavailable' });
+        }
+
         __forensicEdgeEmit({
           account_login: nome,
           thread_key,
