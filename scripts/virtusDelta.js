@@ -2660,7 +2660,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     _deliveryConfirmPumpInFlight = true;
     try {
       ensureDeliveryConfirmDirsSync();
-      const url = resolveCtDeliveryConfirmUrl();
+      let url = resolveCtDeliveryConfirmUrl();
       const sec = resolveCtDeliveryConfirmSecret();
 
       // Pré-condições (fail-fast, sem falha muda)
@@ -2703,6 +2703,27 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
         try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
         return;
+      }
+
+      function __deriveCtConfirmUrlFromServerId(serverId) {
+        try {
+          const sid = String(serverId || "").trim();
+          if (!sid) return "";
+          // Heurística segura: em RM6, server_id é o subdomínio do ambiente ativo.
+          // Ex.: https://<server_id>.convenientetecnologia.com
+          return `https://${sid}.convenientetecnologia.com/api/attendance/confirm-delivery`;
+        } catch {
+          return "";
+        }
+      }
+      function __isPermanentConfirmError(r) {
+        try {
+          const st = Number(r && r.status || 0) || 0;
+          if (st === 400 || st === 401 || st === 403 || st === 404) return true;
+          return false;
+        } catch {
+          return false;
+        }
       }
 
       while (true) {
@@ -2788,6 +2809,61 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             continue;
           }
 
+          // Auto-cura de roteamento (caso clássico: url aponta para api.* e retorna 404)
+          // Tenta uma única vez o endpoint do CT local (subdomínio do server_id) antes de dead-letter.
+          try {
+            const stTry = Number(r && r.status || 0) || 0;
+            const is404 = stTry === 404 || String(r && r.error || "").includes("http_404");
+            const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?/i.test(String(url || ""));
+            if (is404 && looksLikeApi) {
+              const alt = __deriveCtConfirmUrlFromServerId(payload && payload.server_id);
+              if (alt && alt !== url) {
+                const prevUrl = String(url || "");
+                try {
+                  __forensicEdgeEmit({
+                    account_login: payload.account_login || ACCOUNT_LOGIN || null,
+                    thread_key: payload.thread_key || null,
+                    flow_stage: "confirm_delivery_reroute_attempt",
+                    details: {
+                      tag: "FORENSIC_DOM_REVERSE",
+                      from_url: prevUrl,
+                      to_url: alt,
+                      client_message_id: cmdId,
+                      ts_ms: Date.now(),
+                    }
+                  });
+                } catch (_) {}
+                const r2 = await postJsonWithTimeout(alt, payload, { timeoutMs: 4500, headers }).catch((e) => ({
+                  ok: false,
+                  status: 0,
+                  error: (e && e.message) ? String(e.message) : String(e),
+                }));
+                if (r2 && r2.ok) {
+                  url = alt; // fixa para o restante do pump
+                  writeDeliveryConfirmAckSync(cmdId, { status: r2.status, url: alt, rerouted_from: prevUrl });
+                  writeDeliveryConfirmCursorSync(nextOff);
+                  _deliveryConfirmPumpBackoffMs = 450;
+                  try {
+                    __forensicEdgeEmit({
+                      account_login: payload.account_login || ACCOUNT_LOGIN || null,
+                      thread_key: payload.thread_key || null,
+                      flow_stage: "confirm_delivery_post_ok",
+                      details: {
+                        tag: "FORENSIC_DOM_REVERSE",
+                        url: alt,
+                        http_status: Number(r2.status || 0) || 0,
+                        client_message_id: cmdId,
+                        ts_ms: Date.now(),
+                        rerouted: true,
+                      }
+                    });
+                  } catch (_) {}
+                  continue;
+                }
+              }
+            }
+          } catch (_) {}
+
           try {
             const st0 = Number(r && r.status || 0) || 0;
             const err0 = String((r && r.error) || "confirm_delivery_failed");
@@ -2806,6 +2882,37 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               }
             });
           } catch (_) {}
+
+          // Dead-letter guard (sem piedade): erros permanentes não podem congelar a fila.
+          // Avança cursor imediatamente e segue para o próximo registro.
+          if (__isPermanentConfirmError(r)) {
+            try {
+              writeDeliveryConfirmAckSync(cmdId, {
+                dead_letter: true,
+                url,
+                http_status: Number(r && r.status || 0) || 0,
+                error: String((r && r.error) || "permanent_error"),
+              });
+            } catch (_) {}
+            try {
+              __forensicEdgeEmit({
+                account_login: payload.account_login || ACCOUNT_LOGIN || null,
+                thread_key: payload.thread_key || null,
+                flow_stage: "confirm_delivery_dead_letter",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  url,
+                  http_status: Number(r && r.status || 0) || 0,
+                  error: String((r && r.error) || "permanent_error"),
+                  client_message_id: cmdId,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+            writeDeliveryConfirmCursorSync(nextOff);
+            _deliveryConfirmPumpBackoffMs = 450;
+            continue;
+          }
 
           _deliveryConfirmPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(_deliveryConfirmPumpBackoffMs * 1.7)));
           try { setTimeout(() => kickDeliveryConfirmPump(), _deliveryConfirmPumpBackoffMs).unref?.(); } catch {}
@@ -3181,13 +3288,53 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
   }
 
-  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id } = {}) => {
+  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id, _requeue_count = 0 } = {}) => {
     return enqueue(async () => {
       try {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
-        return await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
+        const out = await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
+
+        // Estratégia "fila sem travar": se for erro típico de seletor/DOM, re-enfileira no fim
+        // (sem dormir aqui), para não segurar a fila em retries longos.
+        try {
+          const ok = !!(out && out.ok);
+          const err = String(out && out.error || "").trim();
+          const isSelectorLike =
+            err === "composer_missing" ||
+            err === "thread_card_not_found" ||
+            err === "send_not_confirmed_composer_not_empty" ||
+            err === "composer_text_not_registered";
+          const tries = Math.max(0, Number(_requeue_count || 0) || 0);
+          if (!ok && isSelectorLike && tries < 2) {
+            const nextCount = tries + 1;
+            const delayMs = randomBetween(1200, 2400);
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: tk || null,
+                flow_stage: "delta_reply_selector_requeued",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  error: err,
+                  requeue_in_ms: delayMs,
+                  requeue_attempt: nextCount,
+                  client_message_id: cmid,
+                  ts_ms: Date.now(),
+                }
+              });
+            } catch (_) {}
+            try {
+              setTimeout(() => {
+                enqueueDeltaReply({ thread_key: tk, texto_resposta: tr, client_message_id: cmid, _requeue_count: nextCount })
+                  .catch(() => {});
+              }, delayMs).unref?.();
+            } catch (_) {}
+          }
+        } catch (_) {}
+
+        return out;
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }

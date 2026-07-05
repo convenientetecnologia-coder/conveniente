@@ -2274,9 +2274,20 @@ function __deltaProvisionDeliveryConfirmEnv() {
         const cfg = readCtConfig();
         ctBaseUrl = String((cfg && (cfg.ctBaseUrl || cfg.ct_base_url)) || '').trim();
       } catch {}
+      // Preferir URL específica de attendance (se o operador setar), senão tenta CT_BASE_URL.
+      if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_ATTENDANCE_BASE_URL || process.env.CT_ATTENDANCE_URL || '').trim();
       if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+
+      const hostId = String(__readOrCreateServerEventHostId() || '').trim();
+      const looksLikeApi = /:\/\/api\.convenientetecnologia\.com\/?$/i.test(String(ctBaseUrl || '').replace(/\/+$/,''));
+      // Guardrail: api.convenientetecnologia.com não hospeda /api/attendance/confirm-delivery (retorna 404).
+      // Em ambiente RM6, o CT do servidor é acessível via subdomínio do hostId.
+      if ((!ctBaseUrl || looksLikeApi) && hostId) {
+        ctBaseUrl = `https://${hostId}.convenientetecnologia.com`;
+      }
+
       if (ctBaseUrl) {
-        const base = ctBaseUrl.replace(/\/+$/, '');
+        const base = String(ctBaseUrl || '').replace(/\/+$/, '');
         process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = `${base}/api/attendance/confirm-delivery`;
       }
     }
