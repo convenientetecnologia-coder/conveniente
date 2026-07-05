@@ -274,8 +274,9 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
           const earReadyFn = (typeof bootInterlock.isEarReady === "function") ? bootInterlock.isEarReady : null;
           const startedAt = Date.now();
           (async () => {
-            let earReady = false;
+            let earReady = !earReadyFn;
             try {
+              // Retenção mínima obrigatória do boot.
               while ((Date.now() - startedAt) < holdMs) {
                 if (earReadyFn) {
                   try {
@@ -287,10 +288,26 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
                 if (remaining <= 0) break;
                 await sleep(Math.min(120, remaining));
               }
-              if (!earReady && earReadyFn) {
-                try { earReady = !!(await Promise.resolve(earReadyFn())); } catch (_) {}
+              // Regra rígida: só libera quando ouvido de borda estiver autenticamente pronto.
+              if (earReadyFn && !earReady) {
+                let lastWaitLogAt = 0;
+                while (!earReady) {
+                  try { earReady = !!(await Promise.resolve(earReadyFn())); } catch (_) { earReady = false; }
+                  if (earReady) break;
+                  const now = Date.now();
+                  if (!lastWaitLogAt || (now - lastWaitLogAt) >= 5000) {
+                    lastWaitLogAt = now;
+                    try {
+                      logInfo(
+                        `[DELTA_BOOT_INTERLOCK] waiting_ear_ready profile=${String(profileName || "").trim() || "unknown"} waited_ms=${Math.max(0, now - startedAt)}`
+                      );
+                    } catch (_) {}
+                  }
+                  await sleep(120);
+                }
               }
             } catch (_) {}
+            if (!earReady) return;
             try { request.continue().catch(() => {}); } catch (_) {}
             bootInterlock.released = true;
             bootInterlock.active = false;

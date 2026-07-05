@@ -217,6 +217,7 @@ function __deltaGetBootEarState(nome) {
       earAttachedAt: 0,
       wsCreatedAt: 0,
       wsRichSelectedAt: 0,
+      wsSignatureCandidateAt: 0,
       bootInterlockStartAt: 0,
       lastUpdateAt: 0,
       lastError: null
@@ -233,6 +234,7 @@ function __deltaMarkBootEarState(nome, patch = {}) {
     if (Object.prototype.hasOwnProperty.call(patch, 'earAttachedAt')) st.earAttachedAt = Number(patch.earAttachedAt || 0) || st.earAttachedAt;
     if (Object.prototype.hasOwnProperty.call(patch, 'wsCreatedAt')) st.wsCreatedAt = Number(patch.wsCreatedAt || 0) || st.wsCreatedAt;
     if (Object.prototype.hasOwnProperty.call(patch, 'wsRichSelectedAt')) st.wsRichSelectedAt = Number(patch.wsRichSelectedAt || 0) || st.wsRichSelectedAt;
+    if (Object.prototype.hasOwnProperty.call(patch, 'wsSignatureCandidateAt')) st.wsSignatureCandidateAt = Number(patch.wsSignatureCandidateAt || 0) || st.wsSignatureCandidateAt;
     if (Object.prototype.hasOwnProperty.call(patch, 'bootInterlockStartAt')) st.bootInterlockStartAt = Number(patch.bootInterlockStartAt || 0) || st.bootInterlockStartAt;
     if (Object.prototype.hasOwnProperty.call(patch, 'lastError')) st.lastError = patch.lastError ? String(patch.lastError) : null;
     st.lastUpdateAt = Date.now();
@@ -243,13 +245,35 @@ function __deltaIsBootEarReady(nome) {
   const st = __deltaGetBootEarState(nome);
   if (!st) return false;
   if (!st.earAttached || !(Number(st.earAttachedAt || 0) > 0)) return false;
-  if ((Number(st.wsCreatedAt || 0) > 0) || (Number(st.wsRichSelectedAt || 0) > 0)) return true;
+  if (Number(st.wsSignatureCandidateAt || 0) > 0) return true;
   return false;
 }
 async function __deltaPrepareBootInterlockEar(nome, page) {
   try {
-    __deltaMarkBootEarState(nome, { bootInterlockStartAt: Date.now() });
+    __deltaMarkBootEarState(nome, {
+      bootInterlockStartAt: Date.now(),
+      wsCreatedAt: 0,
+      wsRichSelectedAt: 0,
+      wsSignatureCandidateAt: 0,
+      lastError: null,
+    });
     if (page) await __deltaAttachCdpEar(nome, page);
+    try {
+      const ctrl = controllers.get(nome);
+      const wsState = ctrl && ctrl.deltaWsRouteState ? ctrl.deltaWsRouteState : null;
+      const byId = wsState && wsState.byId instanceof Map ? wsState.byId : null;
+      let hasSignature = false;
+      if (byId && byId.size > 0) {
+        for (const meta of byId.values()) {
+          const sig = Array.isArray(meta && meta.signatures) ? meta.signatures : [];
+          if (sig.includes('lightspeed') || sig.includes('chat_like')) {
+            hasSignature = true;
+            break;
+          }
+        }
+      }
+      if (hasSignature) __deltaMarkBootEarState(nome, { wsSignatureCandidateAt: Date.now() });
+    } catch {}
     const st = __deltaGetBootEarState(nome);
     return !!(st && st.earAttached);
   } catch (e) {
@@ -18188,6 +18212,7 @@ async function __deltaAttachCdpEar(nome, page) {
           }
         } catch {}
         if (hasLightspeed || signatures.includes('chat_like')) {
+          __deltaMarkBootEarState(nome, { wsSignatureCandidateAt: Date.now() });
           try {
             if (typeof forensicLog === 'function') {
               forensicLog('DELTA', 'ws_signature_candidate', {
@@ -18209,6 +18234,12 @@ async function __deltaAttachCdpEar(nome, page) {
         const url = String(event && event.request && event.request.url || '').trim();
         const meta = ensureWsMeta(requestId, url);
         if (!meta) return;
+        try {
+          const sig = Array.isArray(meta && meta.signatures) ? meta.signatures : [];
+          if (sig.includes('lightspeed') || sig.includes('chat_like')) {
+            __deltaMarkBootEarState(nome, { wsSignatureCandidateAt: Date.now() });
+          }
+        } catch {}
         if ((Number(meta.richScore || 0) || 0) >= 3) selectRichWs(requestId, 'ws_handshake_req');
       } catch {}
     };
@@ -18219,6 +18250,12 @@ async function __deltaAttachCdpEar(nome, page) {
         const url = String(event && event.response && event.response.url || '').trim();
         const meta = ensureWsMeta(requestId, url);
         if (!meta) return;
+        try {
+          const sig = Array.isArray(meta && meta.signatures) ? meta.signatures : [];
+          if (sig.includes('lightspeed') || sig.includes('chat_like')) {
+            __deltaMarkBootEarState(nome, { wsSignatureCandidateAt: Date.now() });
+          }
+        } catch {}
         if ((Number(meta.richScore || 0) || 0) >= 3) selectRichWs(requestId, 'ws_handshake_res');
       } catch {}
     };
