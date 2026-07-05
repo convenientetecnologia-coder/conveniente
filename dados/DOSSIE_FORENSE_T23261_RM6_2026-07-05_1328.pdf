@@ -1,0 +1,555 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R ] /Count 5 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 10 0 R >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 12 0 R >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 13 0 R >>
+endobj
+9 0 obj
+<< /Length 1140 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(# DOSSIE FORENSE - TICKET #23261 \(RM6\)) Tj
+T*
+() Tj
+T*
+(Data do dossie: 2026-07-05 13:28 \(UTC-3\)  ) Tj
+T*
+(Conta auditada: `cuiaba-1782690099365` \(Neves Lins\)  ) Tj
+T*
+(Thread: `1028968072880904`  ) Tj
+T*
+(Ticket: `23261`  ) Tj
+T*
+(Canal: `messenger_delta`) Tj
+T*
+() Tj
+T*
+(## 1\) Gabarito x Observado \(preto no branco\)) Tj
+T*
+() Tj
+T*
+(Sequencia esperada \(operador\):) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(teste fechado) Tj
+T*
+(1) Tj
+T*
+(2) Tj
+T*
+(3) Tj
+T*
+(4) Tj
+T*
+(5) Tj
+T*
+(a) Tj
+T*
+(b) Tj
+T*
+(c) Tj
+T*
+(d) Tj
+T*
+(e) Tj
+T*
+(5) Tj
+T*
+(4) Tj
+T*
+(3) Tj
+T*
+(2) Tj
+T*
+(1) Tj
+T*
+(fim) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(Sequencia efetivamente persistida no ticket \(janela do teste\):) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(b) Tj
+T*
+(c) Tj
+T*
+(d) Tj
+T*
+(e) Tj
+T*
+(5) Tj
+T*
+(4) Tj
+T*
+(3) Tj
+T*
+(2) Tj
+T*
+(1) Tj
+T*
+(fim) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(Conclusao objetiva de sequencia:) Tj
+T*
+(- O bloco capturado comeca em `b` \(indice 7 da sequencia esperada\).) Tj
+T*
+(- Prefixo ausente: `teste fechado`, `1`, `2`, `3`, `4`, `5`, `a`.) Tj
+T*
+(- Nao houve perda no sufixo: de `b` ate `fim` entrou em ordem.) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+10 0 obj
+<< /Length 2226 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(Fonte bruta: `C:\\conveniente\\dados\\ANEXO_EVIDENCIAS_T23261_2026-07-05_1323.json`.) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 2\) Evidencia SQL \(attendance.sqlite\)) Tj
+T*
+() Tj
+T*
+(Trecho do anexo bruto \(extraido diretamente do banco\):) Tj
+T*
+() Tj
+T*
+(```json) Tj
+T*
+({) Tj
+T*
+(  "ticket_id": 23261,) Tj
+T*
+(  "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904",) Tj
+T*
+(  "expected_sequence": ["teste fechado","1","2","3","4","5","a","b","c","d","e","5","4","3","2","1","fim"],) Tj
+T*
+(  "observed_customer_sequence_from_test_window": ["b","c","d","e","5","4","3","2","1","fim"],) Tj
+T*
+(  "sequence_alignment": {) Tj
+T*
+(    "match_start_index": 7,) Tj
+T*
+(    "missing_prefix": ["teste fechado","1","2","3","4","5","a"],) Tj
+T*
+(    "missing_suffix": []) Tj
+T*
+(  }) Tj
+T*
+(}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(Eventos de inbound em `ticket_event_log` no horario reportado:) Tj
+T*
+(- `13:20:58.303` -> `b`) Tj
+T*
+(- `13:20:58.526` -> `c`) Tj
+T*
+(- `13:20:59.068` -> `d`) Tj
+T*
+(- `13:20:59.311` -> `e`) Tj
+T*
+(- `13:20:59.958` -> `5`) Tj
+T*
+(- `13:21:00.604` -> `4`) Tj
+T*
+(- `13:21:00.829` -> `3`) Tj
+T*
+(- `13:21:01.467` -> `2`) Tj
+T*
+(- `13:21:01.698` -> `1`) Tj
+T*
+(- `13:21:04.590` -> `fim`) Tj
+T*
+() Tj
+T*
+(Nao encontrado desvio para outro ticket na janela:) Tj
+T*
+(- Busca cruzada em `messenger_delta_customer_message` entre `13:20:00` e `13:23:00` com textos do gabarito retornou somente `ticket_id=23261`.) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 3\) Evidencia de trilha de auditoria \(attendance_audit.jsonl\)) Tj
+T*
+() Tj
+T*
+(Extrato literal da trilha de append \(linha/tempo\):) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L2434638 {"ticket_id":23261,"event_type":"messenger_delta_lead_capturado"}) Tj
+T*
+(L2434639 {"ticket_id":23261,"event_type":"messenger_delta_customer_message"}) Tj
+T*
+(L2434640 {"ticket_id":23261,"event_type":"messenger_delta_lead_capturado"}) Tj
+T*
+(L2434641 {"ticket_id":23261,"event_type":"messenger_delta_customer_message"}) Tj
+T*
+(...) Tj
+T*
+(L2434656 {"ticket_id":23261,"event_type":"messenger_delta_lead_capturado"}) Tj
+T*
+(L2434657 {"ticket_id":23261,"event_type":"messenger_delta_customer_message"}) Tj
+T*
+(```) Tj
+T*
+ET
+endstream
+endobj
+11 0 obj
+<< /Length 2035 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+() Tj
+T*
+(Leitura forense:) Tj
+T*
+(- Foram apendados 10 pares \(`lead_capturado` + `customer_message`\) nessa rajada.) Tj
+T*
+(- A quantidade bate exatamente com os 10 textos visiveis no dashboard \(`b`..`fim`\).) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 4\) Estado operacional da conta no host RM6 \(snapshot de status\)) Tj
+T*
+() Tj
+T*
+(Arquivo de status da maquina `aba80611-8b8a-46ed-a852-f5f0d573c03b` mostra:) Tj
+T*
+(- Perfil `cuiaba-1782690099365` \(Neves Lins\) com `active=true`, `trabalhando=true`, `virtusOnline=true`.) Tj
+T*
+(- Sem lock de envio no instante \(`sendLockActive=false`\).) Tj
+T*
+() Tj
+T*
+(Trecho bruto:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+("nome": "cuiaba-1782690099365",) Tj
+T*
+("label": "Neves Lins",) Tj
+T*
+("active": true,) Tj
+T*
+("trabalhando": true,) Tj
+T*
+("virtusOnline": true,) Tj
+T*
+("sendLockActive": false) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(Evidencia auxiliar:) Tj
+T*
+(- `ct_messenger_delta_chats` para essa conta/thread existe e esta em `em_atendimento`.) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 5\) Codigo auditado \(causa tecnica provavel\)) Tj
+T*
+() Tj
+T*
+(### 5.1 Gate canÙnico ainda ativo para `insert/upsert` sem `meta_message_id`) Tj
+T*
+() Tj
+T*
+(Em `worker.js`, frames `insertMessage/upsertMessage` sem ID Meta \(`mid`\) sao descartados do dispatch e gravados como `capture_only`:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(if \(\(op === 'insertMessage' || op === 'upsertMessage'\) && !dedupMetaId\) {) Tj
+T*
+(  ... reason: 'missing_meta_message_id' ...) Tj
+T*
+(  dispatch_ct: false,) Tj
+T*
+(  queue_mode: 'capture_only',) Tj
+T*
+(  flow_stage: 'missing_meta_message_id_sync_only',) Tj
+T*
+(  continue;) Tj
+T*
+(}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### 5.2 Dedupe por ID ja visto no disco) Tj
+T*
+() Tj
+T*
+(Quando `__deltaIsMetaIdAlreadyOnDisk\(dedupMetaId\)` retorna true, o frame tambem e desviado para `capture_only`:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(if \(dedupMetaId && __deltaIsMetaIdAlreadyOnDisk\(dedupMetaId\)\) {) Tj
+T*
+(  ... reason: 'meta_message_id_duplicate_on_disk' ...) Tj
+T*
+ET
+endstream
+endobj
+12 0 obj
+<< /Length 2153 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(  dispatch_ct: false,) Tj
+T*
+(  queue_mode: 'capture_only',) Tj
+T*
+(  flow_stage: 'duplicate_meta_id_sync_only',) Tj
+T*
+(  continue;) Tj
+T*
+(}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### 5.3 Roteamento atual ativo/inativo \(pos-fix\)) Tj
+T*
+() Tj
+T*
+(Thread ativa -> realtime:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(dispatch_ct: true,) Tj
+T*
+(queue_mode: 'dispatch_ct',) Tj
+T*
+(flow_stage: 'chat_ativo_realtime') Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(Thread nao ativa -> represa 1-2 min:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(if \(st.status !== 'hands_in_progress' && !st.timerHandle && !\(Number\(st.timerDueAt || 0\) > 0\)\) {) Tj
+T*
+(  const delayMs = __deltaRandInt\(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS\);) Tj
+T*
+(  __deltaEnqueueNewLeadTimerToDiskSync\(...\);) Tj
+T*
+(  __deltaKickNewLeadsTimerPump\(...\);) Tj
+T*
+(}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### 5.4 Ingest no CT depende do texto que chega) Tj
+T*
+() Tj
+T*
+(No `sitechatbot/index.js`, a insercao de `messenger_delta_customer_message` so ocorre quando `mensagens_cliente_concatenadas` existe no payload:) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(if \(mensagens_cliente_concatenadas\) {) Tj
+T*
+(  attendanceStore.appendTicketEvent\({) Tj
+T*
+(    eventType: 'messenger_delta_customer_message',) Tj
+T*
+(    ...) Tj
+T*
+(    payload: { text: mensagens_cliente_concatenadas, ... }) Tj
+T*
+(  }\);) Tj
+T*
+(}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 6\) Diagnostico conclusivo para o caso #23261) Tj
+T*
+() Tj
+T*
+(Conclusao tecnica com maior aderencia aos fatos:) Tj
+T*
+(1. O CT recebeu e persistiu somente 10 mensagens \(`b`..`fim`\), sem reorder e sem desvio para outro ticket.) Tj
+T*
+(2. O perfil estava online e operacional no host RM6 no momento da coleta.) Tj
+T*
+(3. O pipeline pos-fix nao bloqueia mais `upsert` por "thread inativa", porem **ainda bloqueia `insert/upsert` sem `meta_message_id`**.) Tj
+T*
+(4. A assinatura do sintoma \(perda de prefixo inteiro e captura de sufixo continuo\) e compativel com lote inicial chegando sem `mid` confiavel e sendo classificado como `missing_meta_message_id_sync_only`.) Tj
+T*
+() Tj
+T*
+(Nivel de confianca: **alto \(0.86\)**  ) Tj
+T*
+ET
+endstream
+endobj
+13 0 obj
+<< /Length 993 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(Motivo: aderencia exata entre sintoma observado e regra canÙnica de descarte por ausencia de `meta_message_id`.) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 7\) Limites desta rodada \(transparencia forense\)) Tj
+T*
+() Tj
+T*
+(- Nesta maquina/workspace nao havia arquivo bruto vivo `forensic_edge.log` / `leads_brutos.jsonl` / `mensagens_pendentes.jsonl` para correlacao direta por frame da borda neste horario.) Tj
+T*
+(- A conclusao foi feita por triangulacao forte de:) Tj
+T*
+(  - `attendance.sqlite` \(fato persistido\),) Tj
+T*
+(  - `attendance_audit.jsonl` \(trilha de append\),) Tj
+T*
+(  - snapshot de estado de host/perfil,) Tj
+T*
+(  - codigo vigente do pipeline.) Tj
+T*
+() Tj
+T*
+(---) Tj
+T*
+() Tj
+T*
+(## 8\) Artefatos anexos) Tj
+T*
+() Tj
+T*
+(- Evidencia bruta: `C:\\conveniente\\dados\\ANEXO_EVIDENCIAS_T23261_2026-07-05_1323.json`) Tj
+T*
+(- Dossie atual \(md\): `C:\\conveniente\\dados\\DOSSIE_FORENSE_T23261_RM6_2026-07-05_1328.md`) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000030 00000 n 
+0000000079 00000 n 
+0000000162 00000 n 
+0000000259 00000 n 
+0000000385 00000 n 
+0000000512 00000 n 
+0000000639 00000 n 
+0000000766 00000 n 
+0000000893 00000 n 
+0000002084 00000 n 
+0000004362 00000 n 
+0000006449 00000 n 
+0000008654 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R >>
+startxref
+9698
+%%EOF

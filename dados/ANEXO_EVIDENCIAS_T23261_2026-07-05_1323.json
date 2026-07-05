@@ -1,0 +1,533 @@
+{
+  "generated_at": 1783268905967,
+  "generated_at_h": "2026-07-05 13:28:25.967",
+  "scope": {
+    "ticket_id": 23261,
+    "account_login": "cuiaba-1782690099365",
+    "thread_key": "1028968072880904"
+  },
+  "ticket": {
+    "id": 23261,
+    "channel_source": "messenger_delta",
+    "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904",
+    "customer_name": null,
+    "status_fila": "em_atendimento",
+    "last_customer_message_at": 1783268458303,
+    "last_agent_message_at": 1783268394837,
+    "last_event_at": 1783268458303,
+    "created_at": 1783268162470,
+    "updated_at": 1783268458303,
+    "raw_context_json": "{\"server_id\":\"aba80611-8b8a-46ed-a852-f5f0d573c03b\",\"account_login\":\"cuiaba-1782690099365\",\"thread_key\":\"1028968072880904\",\"cidade\":null}",
+    "created_at_h": "2026-07-05 13:16:02.470",
+    "updated_at_h": "2026-07-05 13:20:58.303",
+    "last_customer_message_at_h": "2026-07-05 13:20:58.303",
+    "last_agent_message_at_h": "2026-07-05 13:19:54.837",
+    "last_event_at_h": "2026-07-05 13:20:58.303"
+  },
+  "expected_sequence": [
+    "teste fechado",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "5",
+    "4",
+    "3",
+    "2",
+    "1",
+    "fim"
+  ],
+  "observed_customer_sequence_from_test_window": [
+    "b",
+    "c",
+    "d",
+    "e",
+    "5",
+    "4",
+    "3",
+    "2",
+    "1",
+    "fim"
+  ],
+  "sequence_alignment": {
+    "match_start_index": 7,
+    "missing_prefix": [
+      "teste fechado",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "a"
+    ],
+    "matched_segment": [
+      "b",
+      "c",
+      "d",
+      "e",
+      "5",
+      "4",
+      "3",
+      "2",
+      "1",
+      "fim"
+    ],
+    "missing_suffix": []
+  },
+  "events": [
+    {
+      "id": 46085055,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268162470,
+      "created_at_h": "2026-07-05 13:16:02.470"
+    },
+    {
+      "id": 46085056,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "Conveniente iniciou esta conversa.\nConveniente iniciou esta conversa.\nOi, esse item está disponível?\nOi, esse item está disponível?",
+      "created_at": 1783268162470,
+      "created_at_h": "2026-07-05 13:16:02.470"
+    },
+    {
+      "id": 46085057,
+      "event_type": "messenger_delta_agent_message_sent",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": "Olá, boa tarde! Espero que esteja bem!\n\nAtendimento rápido para você e valor justo no seu frete ou mudança\n\nTrabalhamos com veículos de pequeno, médio e grande porte\n\nMe diz o que você precisa transportar que eu preparo seu orçamento",
+      "created_at": 1783268162470,
+      "created_at_h": "2026-07-05 13:16:02.470"
+    },
+    {
+      "id": 46085060,
+      "event_type": "ticket_claimed",
+      "actor_type": "agent",
+      "actor_ref": "teste",
+      "text": null,
+      "created_at": 1783268368530,
+      "created_at_h": "2026-07-05 13:19:28.530"
+    },
+    {
+      "id": 46085061,
+      "event_type": "messenger_delta_agent_message_sent",
+      "actor_type": "agent",
+      "actor_ref": "teste",
+      "text": "oi boa tarde tudo bem",
+      "created_at": 1783268378665,
+      "created_at_h": "2026-07-05 13:19:38.665"
+    },
+    {
+      "id": 46085062,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "md_outbox",
+      "text": "oi boa tarde tudo bem",
+      "created_at": 1783268379168,
+      "created_at_h": "2026-07-05 13:19:39.168"
+    },
+    {
+      "id": 46085064,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "edge_confirm",
+      "text": "oi boa tarde tudo bem",
+      "created_at": 1783268387947,
+      "created_at_h": "2026-07-05 13:19:47.947"
+    },
+    {
+      "id": 46085065,
+      "event_type": "messenger_delta_agent_message_sent",
+      "actor_type": "agent",
+      "actor_ref": "teste",
+      "text": "como esta",
+      "created_at": 1783268393573,
+      "created_at_h": "2026-07-05 13:19:53.573"
+    },
+    {
+      "id": 46085066,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "md_outbox",
+      "text": "como esta",
+      "created_at": 1783268394075,
+      "created_at_h": "2026-07-05 13:19:54.075"
+    },
+    {
+      "id": 46085067,
+      "event_type": "messenger_delta_agent_message_sent",
+      "actor_type": "agent",
+      "actor_ref": "teste",
+      "text": "faço sim",
+      "created_at": 1783268394837,
+      "created_at_h": "2026-07-05 13:19:54.837"
+    },
+    {
+      "id": 46085068,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "md_outbox",
+      "text": "faço sim",
+      "created_at": 1783268395392,
+      "created_at_h": "2026-07-05 13:19:55.392"
+    },
+    {
+      "id": 46085069,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "edge_confirm",
+      "text": "como esta",
+      "created_at": 1783268404940,
+      "created_at_h": "2026-07-05 13:20:04.940"
+    },
+    {
+      "id": 46085443,
+      "event_type": "messenger_delta_delivery_update",
+      "actor_type": "system",
+      "actor_ref": "edge_confirm",
+      "text": "faço sim",
+      "created_at": 1783268425829,
+      "created_at_h": "2026-07-05 13:20:25.829"
+    },
+    {
+      "id": 46085832,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268458303,
+      "created_at_h": "2026-07-05 13:20:58.303"
+    },
+    {
+      "id": 46085833,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "b",
+      "created_at": 1783268458303,
+      "created_at_h": "2026-07-05 13:20:58.303"
+    },
+    {
+      "id": 46085830,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268458526,
+      "created_at_h": "2026-07-05 13:20:58.526"
+    },
+    {
+      "id": 46085831,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "c",
+      "created_at": 1783268458526,
+      "created_at_h": "2026-07-05 13:20:58.526"
+    },
+    {
+      "id": 46085828,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268459068,
+      "created_at_h": "2026-07-05 13:20:59.068"
+    },
+    {
+      "id": 46085829,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "d",
+      "created_at": 1783268459068,
+      "created_at_h": "2026-07-05 13:20:59.068"
+    },
+    {
+      "id": 46085826,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268459311,
+      "created_at_h": "2026-07-05 13:20:59.311"
+    },
+    {
+      "id": 46085827,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "e",
+      "created_at": 1783268459311,
+      "created_at_h": "2026-07-05 13:20:59.311"
+    },
+    {
+      "id": 46085824,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268459958,
+      "created_at_h": "2026-07-05 13:20:59.958"
+    },
+    {
+      "id": 46085825,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "5",
+      "created_at": 1783268459958,
+      "created_at_h": "2026-07-05 13:20:59.958"
+    },
+    {
+      "id": 46085822,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268460604,
+      "created_at_h": "2026-07-05 13:21:00.604"
+    },
+    {
+      "id": 46085823,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "4",
+      "created_at": 1783268460604,
+      "created_at_h": "2026-07-05 13:21:00.604"
+    },
+    {
+      "id": 46085820,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268460829,
+      "created_at_h": "2026-07-05 13:21:00.829"
+    },
+    {
+      "id": 46085821,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "3",
+      "created_at": 1783268460829,
+      "created_at_h": "2026-07-05 13:21:00.829"
+    },
+    {
+      "id": 46085818,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268461467,
+      "created_at_h": "2026-07-05 13:21:01.467"
+    },
+    {
+      "id": 46085819,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "2",
+      "created_at": 1783268461467,
+      "created_at_h": "2026-07-05 13:21:01.467"
+    },
+    {
+      "id": 46085816,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268461698,
+      "created_at_h": "2026-07-05 13:21:01.698"
+    },
+    {
+      "id": 46085817,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "1",
+      "created_at": 1783268461698,
+      "created_at_h": "2026-07-05 13:21:01.698"
+    },
+    {
+      "id": 46085814,
+      "event_type": "messenger_delta_lead_capturado",
+      "actor_type": "system",
+      "actor_ref": "messenger_delta",
+      "text": null,
+      "created_at": 1783268464590,
+      "created_at_h": "2026-07-05 13:21:04.590"
+    },
+    {
+      "id": 46085815,
+      "event_type": "messenger_delta_customer_message",
+      "actor_type": "customer",
+      "actor_ref": "messenger_delta",
+      "text": "fim",
+      "created_at": 1783268464590,
+      "created_at_h": "2026-07-05 13:21:04.590"
+    }
+  ],
+  "outbox": [
+    {
+      "id": "local:23261:1783268376116",
+      "ticket_id": 23261,
+      "server_id": "aba80611-8b8a-46ed-a852-f5f0d573c03b",
+      "account_login": "cuiaba-1782690099365",
+      "thread_key": "1028968072880904",
+      "text": "oi boa tarde tudo bem",
+      "status": "sent_to_facebook",
+      "attempts": 0,
+      "next_attempt_at": 1783268378665,
+      "last_error": null,
+      "created_at": 1783268378665,
+      "updated_at": 1783268387946,
+      "edge_received_at": 1783268379168,
+      "facebook_sent_at": 1783268387946,
+      "created_at_h": "2026-07-05 13:19:38.665",
+      "updated_at_h": "2026-07-05 13:19:47.946",
+      "next_attempt_at_h": "2026-07-05 13:19:38.665",
+      "edge_received_at_h": "2026-07-05 13:19:39.168",
+      "facebook_sent_at_h": "2026-07-05 13:19:47.946"
+    },
+    {
+      "id": "local:23261:1783268391027",
+      "ticket_id": 23261,
+      "server_id": "aba80611-8b8a-46ed-a852-f5f0d573c03b",
+      "account_login": "cuiaba-1782690099365",
+      "thread_key": "1028968072880904",
+      "text": "como esta",
+      "status": "sent_to_facebook",
+      "attempts": 0,
+      "next_attempt_at": 1783268393573,
+      "last_error": null,
+      "created_at": 1783268393573,
+      "updated_at": 1783268404940,
+      "edge_received_at": 1783268394075,
+      "facebook_sent_at": 1783268404940,
+      "created_at_h": "2026-07-05 13:19:53.573",
+      "updated_at_h": "2026-07-05 13:20:04.940",
+      "next_attempt_at_h": "2026-07-05 13:19:53.573",
+      "edge_received_at_h": "2026-07-05 13:19:54.075",
+      "facebook_sent_at_h": "2026-07-05 13:20:04.940"
+    },
+    {
+      "id": "local:23261:1783268392139",
+      "ticket_id": 23261,
+      "server_id": "aba80611-8b8a-46ed-a852-f5f0d573c03b",
+      "account_login": "cuiaba-1782690099365",
+      "thread_key": "1028968072880904",
+      "text": "faço sim",
+      "status": "sent_to_facebook",
+      "attempts": 0,
+      "next_attempt_at": 1783268394837,
+      "last_error": null,
+      "created_at": 1783268394837,
+      "updated_at": 1783268425828,
+      "edge_received_at": 1783268395392,
+      "facebook_sent_at": 1783268425828,
+      "created_at_h": "2026-07-05 13:19:54.837",
+      "updated_at_h": "2026-07-05 13:20:25.828",
+      "next_attempt_at_h": "2026-07-05 13:19:54.837",
+      "edge_received_at_h": "2026-07-05 13:19:55.392",
+      "facebook_sent_at_h": "2026-07-05 13:20:25.828"
+    }
+  ],
+  "nearby_ticket_check": [
+    {
+      "ticket_id": 23261,
+      "text": "b",
+      "created_at": 1783268458303,
+      "created_at_h": "2026-07-05 13:20:58.303",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "c",
+      "created_at": 1783268458526,
+      "created_at_h": "2026-07-05 13:20:58.526",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "d",
+      "created_at": 1783268459068,
+      "created_at_h": "2026-07-05 13:20:59.068",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "e",
+      "created_at": 1783268459311,
+      "created_at_h": "2026-07-05 13:20:59.311",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "5",
+      "created_at": 1783268459958,
+      "created_at_h": "2026-07-05 13:20:59.958",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "4",
+      "created_at": 1783268460604,
+      "created_at_h": "2026-07-05 13:21:00.604",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "3",
+      "created_at": 1783268460829,
+      "created_at_h": "2026-07-05 13:21:00.829",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "2",
+      "created_at": 1783268461467,
+      "created_at_h": "2026-07-05 13:21:01.467",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "1",
+      "created_at": 1783268461698,
+      "created_at_h": "2026-07-05 13:21:01.698",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    },
+    {
+      "ticket_id": 23261,
+      "text": "fim",
+      "created_at": 1783268464590,
+      "created_at_h": "2026-07-05 13:21:04.590",
+      "source_ref": "md:aba80611-8b8a-46ed-a852-f5f0d573c03b:cuiaba-1782690099365:1028968072880904"
+    }
+  ],
+  "core_ct_chat_mirror": {
+    "server_id": "aba80611-8b8a-46ed-a852-f5f0d573c03b",
+    "account_login": "cuiaba-1782690099365",
+    "thread_key": "1028968072880904",
+    "customer_name": null,
+    "cidade": "PENDENTE",
+    "telefone": "PENDENTE",
+    "last_message": "b",
+    "status_fila": "em_atendimento",
+    "created_at": 1783268162470,
+    "updated_at": 1783268458303,
+    "created_at_h": "2026-07-05 13:16:02.470",
+    "updated_at_h": "2026-07-05 13:20:58.303"
+  }
+}
