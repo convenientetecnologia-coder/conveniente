@@ -2374,8 +2374,19 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
       try {
         const st = __isAlreadyOpenByUrl();
-        // Regra rígida de velocidade:
-        // Se a conversa já está aberta/selecionada, NÃO rodar ensureMarketplaceFilterActive (custa caro e gera HOL).
+        const threadCardVisible = await page.evaluate((threadId) => {
+          const selectors = [
+            `div[role="row"] a[href*="/messages/t/${threadId}"]`,
+            `a[href*="/messages/t/${threadId}"]`,
+          ];
+          for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r && r.width > 1 && r.height > 1) return true;
+          }
+          return false;
+        }, t).catch(() => false);
         if (st && st.ok === true) {
           try {
             __forensicEdgeEmit({
@@ -2392,8 +2403,20 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
               }
             });
           } catch (_) {}
-        } else {
-          await ensureMarketplaceFilterActive(page);
+        } else if (threadCardVisible) {
+          try {
+            __forensicEdgeEmit({
+              account_login: forensicAccountLogin,
+              thread_key: t,
+              flow_stage: "marketplace_filter_bypass",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                reason: "thread_card_visible_sidebar",
+                is_already_open: false,
+                ts_ms: Date.now(),
+              }
+            });
+          } catch (_) {}
         }
       } catch (_) {}
     }
@@ -2436,6 +2459,19 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
         if (open2.ok) {
           Object.assign(open, open2);
+        }
+      } else {
+        // Dashboard/API reply: só tenta correção de filtro quando realmente não achou card.
+        // Isso evita HOL desnecessário quando o card já está no feed.
+        if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && String(open.error || "") === "thread_card_not_found") {
+          try {
+            await ensureMarketplaceFilterActive(page);
+            await humanPause("postMarketplace", "open_thread_retry_marketplace_api");
+          } catch (_) {}
+          const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
+          if (open2.ok) {
+            Object.assign(open, open2);
+          }
         }
       }
     }
