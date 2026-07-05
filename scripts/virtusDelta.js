@@ -1931,6 +1931,86 @@ async function scrollSidebarShort(page) {
   });
 }
 
+async function computeVisibleThreadCardClickPlan(cardElement) {
+  return await cardElement.evaluate((el) => {
+    function uniq(nodes) {
+      const out = [];
+      const seen = new Set();
+      for (const n of nodes) {
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        out.push(n);
+      }
+      return out;
+    }
+    function intersect(rect, vw, vh) {
+      const left = Math.max(0, Number(rect.left || 0));
+      const top = Math.max(0, Number(rect.top || 0));
+      const right = Math.min(Number(vw || 0), Number(rect.right || 0));
+      const bottom = Math.min(Number(vh || 0), Number(rect.bottom || 0));
+      const width = right - left;
+      const height = bottom - top;
+      if (!(width > 1 && height > 1)) return null;
+      return { left, top, right, bottom, width, height, area: width * height };
+    }
+
+    const vw = Math.max(0, Number(window.innerWidth || 0));
+    const vh = Math.max(0, Number(window.innerHeight || 0));
+    const row = el.closest('div[role="row"]') || el.closest('[role="row"]');
+    const rowParent = row && row.parentElement ? row.parentElement : null;
+    const targets = uniq([el, row, rowParent, el.parentElement]);
+
+    let best = null;
+    for (const target of targets) {
+      try {
+        const rect = target.getBoundingClientRect();
+        const vis = intersect(rect, vw, vh);
+        if (!vis) continue;
+        if (!best || vis.area > best.visible.area) {
+          best = {
+            tag: String((target.tagName || '')).toLowerCase(),
+            role: String(target.getAttribute('role') || ''),
+            class_name: String(target.className || '').slice(0, 240),
+            rect: {
+              left: Number(rect.left || 0),
+              top: Number(rect.top || 0),
+              right: Number(rect.right || 0),
+              bottom: Number(rect.bottom || 0),
+              width: Number(rect.width || 0),
+              height: Number(rect.height || 0),
+            },
+            visible: vis,
+          };
+        }
+      } catch (_) {}
+    }
+
+    if (!best) {
+      return {
+        ok: false,
+        reason: 'no_visible_intersection',
+        viewport_w: vw,
+        viewport_h: vh,
+      };
+    }
+
+    const cx = best.visible.left + (best.visible.width * 0.5);
+    const cy = best.visible.top + (best.visible.height * 0.5);
+    const lx = best.visible.left + Math.max(10, Math.min(42, best.visible.width * 0.35));
+    const ly = cy;
+    return {
+      ok: true,
+      viewport_w: vw,
+      viewport_h: vh,
+      target: best,
+      points: [
+        { kind: 'center', x: Number(cx.toFixed(2)), y: Number(cy.toFixed(2)) },
+        { kind: 'left_bias', x: Number(lx.toFixed(2)), y: Number(ly.toFixed(2)) },
+      ],
+    };
+  }).catch(() => ({ ok: false, reason: 'evaluate_failed' }));
+}
+
 async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
@@ -2034,77 +2114,102 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
             details: { action: "open_thread_click", selector: cardSelector, scrolled: i }
           });
         } catch (_) {}
-        try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
-        let clickedByCoordinates = false;
         try {
-          const box = await cardElement.boundingBox();
-          const vp = (typeof page.viewport === "function" ? page.viewport() : null) || null;
-          const viewportWidth = Number(vp && vp.width || 0) || 0;
-          const viewportHeight = Number(vp && vp.height || 0) || 0;
-          if (
-            box &&
-            Number.isFinite(box.x) &&
-            Number.isFinite(box.y) &&
-            Number.isFinite(box.width) &&
-            Number.isFinite(box.height) &&
-            box.width > 0 &&
-            box.height > 0
-          ) {
-            const centerX = box.x + (box.width / 2);
-            const centerY = box.y + (box.height / 2);
-            const insideViewport = (
-              centerX >= 0 &&
-              centerY >= 0 &&
-              (
-                (viewportWidth > 0 && centerX <= viewportWidth) ||
-                viewportWidth <= 0
-              ) &&
-              (
-                (viewportHeight > 0 && centerY <= viewportHeight) ||
-                viewportHeight <= 0
-              )
-            );
-            if (insideViewport) {
-              await page.mouse.click(centerX, centerY, { delay: 100 });
-              clickedByCoordinates = true;
-              try {
-                __forensicEdgeEmit({
-                  account_login: forensicAccountLogin,
-                  thread_key: t,
-                  flow_stage: "dom_automation_tracking",
-                  details: {
-                    action: "open_thread_mouse_click",
-                    selector: cardSelector,
-                    scrolled: i,
-                    center_x: Number(centerX.toFixed(2)),
-                    center_y: Number(centerY.toFixed(2)),
-                    viewport_w: viewportWidth || null,
-                    viewport_h: viewportHeight || null,
-                  }
-                });
-              } catch (_) {}
-            } else {
-              try {
-                __forensicEdgeEmit({
-                  account_login: forensicAccountLogin,
-                  thread_key: t,
-                  flow_stage: "dom_automation_tracking",
-                  details: {
-                    action: "open_thread_mouse_click_skipped_outside_viewport",
-                    selector: cardSelector,
-                    scrolled: i,
-                    center_x: Number(centerX.toFixed(2)),
-                    center_y: Number(centerY.toFixed(2)),
-                    viewport_w: viewportWidth || null,
-                    viewport_h: viewportHeight || null,
-                  }
-                });
-              } catch (_) {}
+          await cardElement.evaluate((el) => {
+            try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
+          });
+        } catch (_) {
+          try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
+        }
+        let openedByNavigation = false;
+        let clickPlan = null;
+        try { clickPlan = await computeVisibleThreadCardClickPlan(cardElement); } catch (_) {}
+        try {
+          __forensicEdgeEmit({
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            flow_stage: "dom_automation_tracking",
+            details: {
+              action: "open_thread_click_plan",
+              selector: cardSelector,
+              scrolled: i,
+              plan_ok: !!(clickPlan && clickPlan.ok),
+              plan_reason: clickPlan && clickPlan.reason ? String(clickPlan.reason) : null,
+              viewport_w: Number(clickPlan && clickPlan.viewport_w || 0) || null,
+              viewport_h: Number(clickPlan && clickPlan.viewport_h || 0) || null,
             }
-          }
+          });
         } catch (_) {}
-        if (!clickedByCoordinates) {
-          await cardElement.click({ delay: 120 }).catch(() => {});
+
+        const points = (clickPlan && clickPlan.ok && Array.isArray(clickPlan.points)) ? clickPlan.points : [];
+        for (const p of points.slice(0, 2)) {
+          const px = Number(p && p.x);
+          const py = Number(p && p.y);
+          if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+          try {
+            await page.mouse.move(px, py, { steps: 6 });
+            await page.mouse.click(px, py, { delay: 100 });
+            try {
+              __forensicEdgeEmit({
+                account_login: forensicAccountLogin,
+                thread_key: t,
+                flow_stage: "dom_automation_tracking",
+                details: {
+                  action: "open_thread_mouse_click",
+                  selector: cardSelector,
+                  scrolled: i,
+                  point_kind: String(p.kind || ''),
+                  x: Number(px.toFixed(2)),
+                  y: Number(py.toFixed(2)),
+                }
+              });
+            } catch (_) {}
+          } catch (_) {
+            continue;
+          }
+          try {
+            await page.waitForFunction(
+              (threadId) => {
+                const path = String(location.pathname || "");
+                return path.includes("/messages") && path.includes(`/t/${threadId}`);
+              },
+              { timeout: 1800 },
+              t
+            );
+            openedByNavigation = true;
+            break;
+          } catch (_) {}
+        }
+        if (!openedByNavigation) {
+          try {
+            await cardElement.focus().catch(() => {});
+            await page.keyboard.press("Enter").catch(() => {});
+            await page.waitForFunction(
+              (threadId) => {
+                const path = String(location.pathname || "");
+                return path.includes("/messages") && path.includes(`/t/${threadId}`);
+              },
+              { timeout: 1500 },
+              t
+            ).catch(() => {});
+            openedByNavigation = await page.evaluate((threadId) => {
+              const p = String(location.pathname || "");
+              return p.includes("/messages") && p.includes(`/t/${threadId}`);
+            }, t).catch(() => false);
+            try {
+              __forensicEdgeEmit({
+                account_login: forensicAccountLogin,
+                thread_key: t,
+                flow_stage: "dom_automation_tracking",
+                details: {
+                  action: "open_thread_keyboard_enter",
+                  selector: cardSelector,
+                  scrolled: i,
+                  opened_by_navigation: !!openedByNavigation,
+                }
+              });
+            } catch (_) {}
+          } catch (_) {}
         }
         await humanPause("postThreadOpen", "post_thread_card_click");
         try {
