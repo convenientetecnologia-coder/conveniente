@@ -2163,6 +2163,23 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
 
+  const isStable = await waitForMessagesBootStable(page, "agent_outbox_hydration_check").catch(() => false);
+  if (!isStable) {
+    try {
+      __forensicEdgeEmit({
+        account_login: forensicAccountLogin,
+        thread_key: t,
+        flow_stage: "messages_boot_not_stable",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          reason: "agent_outbox_hydration_check_failed",
+          ts_ms: Date.now(),
+        }
+      });
+    } catch (_) {}
+    return { ok: false, error: "messages_boot_not_stable" };
+  }
+
   // Espera curta e segura pelo carregamento do sidebar (sem polling agressivo).
   // Objetivo: evitar tentar clicar antes dos cards existirem no DOM.
   try {

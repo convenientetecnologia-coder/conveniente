@@ -14919,11 +14919,147 @@ function __deltaWriteNewLeadsCursorSync(nome, offset) {
     return false;
   }
 }
+function __deltaReadThreadStateRowFromDiskSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return null;
+  try {
+    const parsed = __deltaReadThreadStateFileSync();
+    const arr = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const row = arr[i];
+      if (!row || typeof row !== 'object') continue;
+      const rn = String(row.nome || '').trim();
+      const rt = String(row.thread_key || '').trim();
+      if (rn === n && rt === tk) return row;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function __deltaCanEnqueueNewLeadTimerFromDiskSync(nome, threadKey) {
+  try {
+    const row = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
+    if (!row || typeof row !== 'object') return true;
+    const status = String(row.status || '').trim().toLowerCase();
+    if (status === 'active' || status === 'hands_in_progress') return false;
+    if ((Number(row.timerDueAt || 0) || 0) > 0) return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
+function __deltaHasPendingNewLeadTimerOnDiskSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return false;
+  let fd = null;
+  try {
+    const outbox = __deltaNewLeadsOutboxPath(n);
+    if (!fs.existsSync(outbox)) return false;
+    const cursor = __deltaReadNewLeadsCursorSync(n);
+    const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+    fd = fs.openSync(outbox, 'r');
+    const st = fs.fstatSync(fd);
+    const size = Number(st && st.size || 0) || 0;
+    if (offset >= size) return false;
+    const toRead = Math.max(0, size - offset);
+    if (toRead <= 0) return false;
+    const buf = Buffer.allocUnsafe(toRead);
+    const bytes = fs.readSync(fd, buf, 0, toRead, offset);
+    if (bytes <= 0) return false;
+    const txt = buf.slice(0, bytes).toString('utf8');
+    const lines = txt.split('\n');
+    for (const rawLine of lines) {
+      const line = String(rawLine || '').trim();
+      if (!line) continue;
+      let rec = null;
+      try { rec = JSON.parse(line); } catch { rec = null; }
+      if (!rec || String(rec.type || '').trim() !== 'new_lead_timer') continue;
+      if (String(rec.thread_key || '').trim() === tk) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    try { if (fd) fs.closeSync(fd); } catch {}
+  }
+}
+function __deltaScrubNewLeadTimersOutboxSync(nome, { consumeUntilOffset = 0, dropThreadKey = '' } = {}) {
+  const n = String(nome || '').trim();
+  if (!n) {
+    return { ok: false, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
+  }
+  try {
+    const outbox = __deltaNewLeadsOutboxPath(n);
+    const cutoff = Math.max(0, Number(consumeUntilOffset || 0) || 0);
+    const dropTk = String(dropThreadKey || '').trim();
+    if (!fs.existsSync(outbox)) {
+      __deltaWriteNewLeadsCursorSync(n, 0);
+      return { ok: true, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
+    }
+
+    const raw = String(fs.readFileSync(outbox, 'utf8') || '');
+    if (!raw) {
+      fs.writeFileSync(outbox, '', 'utf8');
+      __deltaWriteNewLeadsCursorSync(n, 0);
+      return { ok: true, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
+    }
+
+    const srcLines = raw.split('\n');
+    const keptLines = [];
+    let pos = 0;
+    let removedConsumed = 0;
+    let removedThread = 0;
+
+    for (let i = 0; i < srcLines.length; i++) {
+      const rawLine = String(srcLines[i] || '');
+      const hasNl = i < (srcLines.length - 1);
+      const span = hasNl ? `${rawLine}\n` : rawLine;
+      const endPos = pos + Buffer.byteLength(span, 'utf8');
+      const line = rawLine.trim();
+
+      let drop = false;
+      if (endPos <= cutoff) {
+        drop = true;
+        removedConsumed += 1;
+      }
+
+      if (!drop && dropTk && line) {
+        let rec = null;
+        try { rec = JSON.parse(line); } catch { rec = null; }
+        if (rec && String(rec.type || '').trim() === 'new_lead_timer' && String(rec.thread_key || '').trim() === dropTk) {
+          drop = true;
+          removedThread += 1;
+        }
+      }
+
+      if (!drop && line) keptLines.push(line);
+      pos = endPos;
+    }
+
+    const body = keptLines.length ? `${keptLines.join('\n')}\n` : '';
+    fs.writeFileSync(outbox, body, 'utf8');
+    __deltaWriteNewLeadsCursorSync(n, 0);
+    return {
+      ok: true,
+      removed_total: removedConsumed + removedThread,
+      removed_consumed: removedConsumed,
+      removed_thread: removedThread,
+      kept: keptLines.length
+    };
+  } catch {
+    return { ok: false, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
+  }
+}
 function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs } = {}) {
   try {
     const n = String(nome || '').trim();
     const tk = String(thread_key || '').trim();
     if (!n || !tk) return false;
+    if (!__deltaCanEnqueueNewLeadTimerFromDiskSync(n, tk)) return false;
+    if (__deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) return false;
     __deltaEnsureNewLeadsQueueDirsSync(n);
     const rec = {
       ts: Date.now(),
@@ -15012,17 +15148,21 @@ async function __deltaRunNewLeadsTimerPump(nome) {
       if (nl === -1) return; // linha incompleta
       const line = txt.slice(0, nl).trim();
       const nextOffset = offset + Buffer.byteLength(txt.slice(0, nl + 1), 'utf8');
-      if (!line) { __deltaWriteNewLeadsCursorSync(n, nextOffset); __deltaKickNewLeadsTimerPump(n); return; }
+      if (!line) {
+        try { __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset }); } catch { __deltaWriteNewLeadsCursorSync(n, nextOffset); }
+        __deltaKickNewLeadsTimerPump(n);
+        return;
+      }
       let rec = null;
       try { rec = JSON.parse(line); } catch { rec = null; }
       if (!rec || String(rec.type || '').trim() !== 'new_lead_timer') {
-        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        try { __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset }); } catch { __deltaWriteNewLeadsCursorSync(n, nextOffset); }
         __deltaKickNewLeadsTimerPump(n);
         return;
       }
       const tk = String(rec.thread_key || '').trim();
       if (!tk) {
-        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        try { __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset }); } catch { __deltaWriteNewLeadsCursorSync(n, nextOffset); }
         __deltaKickNewLeadsTimerPump(n);
         return;
       }
@@ -15030,7 +15170,7 @@ async function __deltaRunNewLeadsTimerPump(nome) {
       // Se o thread já ficou ativo (ou em voo), não faz sentido segurar represa: consome e segue.
       const stThread = __deltaGetThreadState(n, tk);
       if (stThread && (stThread.status === 'active' || stThread.status === 'hands_in_progress' || stThread.inFlight)) {
-        __deltaWriteNewLeadsCursorSync(n, nextOffset);
+        try { __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset }); } catch { __deltaWriteNewLeadsCursorSync(n, nextOffset); }
         __deltaKickNewLeadsTimerPump(n);
         return;
       }
@@ -15051,7 +15191,11 @@ async function __deltaRunNewLeadsTimerPump(nome) {
       const handle = setTimeout(() => {
         __deltaNewLeadsTimerInFlight.delete(n);
         // Consome da represa PRIMEIRO (para liberar próximo timer).
-        try { __deltaWriteNewLeadsCursorSync(n, nextOffset); } catch {}
+        let scrubStats = null;
+        try { scrubStats = __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset, dropThreadKey: tk }); } catch { scrubStats = null; }
+        if (!scrubStats || scrubStats.ok !== true) {
+          try { __deltaWriteNewLeadsCursorSync(n, nextOffset); } catch {}
+        }
         try {
           console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
             event: 'new_lead_reservoir_timer_fired',
@@ -15059,6 +15203,9 @@ async function __deltaRunNewLeadsTimerPump(nome) {
             account_login: n,
             thread_key: tk,
             dueAt: dueAt || null,
+            scrub_removed_total: Number(scrubStats && scrubStats.removed_total || 0) || 0,
+            scrub_removed_thread: Number(scrubStats && scrubStats.removed_thread || 0) || 0,
+            scrub_kept: Number(scrubStats && scrubStats.kept || 0) || 0,
           }));
         } catch {}
         // Downstream: dispara a ação no pipeline soberano (ctrl.virtus) em background.
@@ -15711,7 +15858,9 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
-    const requiredFn = (String(need || '').trim().toLowerCase() === 'reply') ? 'enqueueDeltaReply' : 'enqueueDeltaGreetingFlow';
+    const needMode = String(need || '').trim().toLowerCase();
+    const isReplyNeed = needMode === 'reply';
+    const requiredFn = isReplyNeed ? 'enqueueDeltaReply' : 'enqueueDeltaGreetingFlow';
     const resolveRunner = async (candidate) => {
       try {
         return (candidate && typeof candidate.then === 'function')
@@ -15728,17 +15877,21 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     // Imunidade de estado: se já há evidência soberana de tráfego de rede
     // do Facebook/Messenger, unificamos o runtime Delta em ctrl.virtus (PROIBIDO split-brain).
     const networkEvidenceAt = Number(ctrl.deltaNetworkEvidenceAt || 0) || 0;
-    if (!networkEvidenceAt) return null;
+    if (!isReplyNeed && !networkEvidenceAt) return null;
 
     const pageUrl = (() => {
       try { return String(ctrl.mainPage && ctrl.mainPage.url ? ctrl.mainPage.url() : '').trim().toLowerCase(); } catch { return ''; }
     })();
-    if (!/facebook\.com|messenger\.com/.test(pageUrl)) return null;
+    if (pageUrl && !/facebook\.com|messenger\.com/.test(pageUrl)) return null;
 
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') {
       loadDeltaVirtusRuntime();
     }
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') return null;
+
+    const bypassInterlockForReply = !!isReplyNeed;
+    const bootInterlockEnabled = String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0';
+    const bootInterlockHoldMs = Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000);
 
     // Regra rígida (Gemini): Fluxo 1 e Fluxo 2 DEVEM usar a mesma fila serial em ctrl.virtus.
     ctrl.virtus = deltaVirtus.startVirtusDeltaRuntime(ctrl.browser, nome, {
@@ -15747,24 +15900,28 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
       governorMode: 'full',
       restrictTab: 0,
       bootReason: 'delta_unified_runtime',
-      bootInterlockEnabled: String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0',
-      bootInterlockHoldMs: Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000),
-      bootInterlockBeforeNavigate: ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
-      bootInterlockIsEarReady: () => __deltaIsBootEarReady(nome),
+      bootInterlockEnabled: bypassInterlockForReply ? false : bootInterlockEnabled,
+      bootInterlockHoldMs: bypassInterlockForReply ? 0 : bootInterlockHoldMs,
+      bootInterlockBeforeNavigate: bypassInterlockForReply ? null : ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
+      bootInterlockIsEarReady: bypassInterlockForReply ? null : () => __deltaIsBootEarReady(nome),
     });
     const booted = await resolveRunner(ctrl.virtus);
     if (booted && typeof booted[requiredFn] === 'function') {
       try {
         logger.info('[DELTA][UNIFIED_BOOT] Runtime Delta unificado em ctrl.virtus por evidência de rede', {
           nome: String(nome || ''),
-          networkEvidenceAt
+          networkEvidenceAt,
+          need: requiredFn,
+          boot_interlock_bypass_reply: bypassInterlockForReply,
         });
       } catch {}
       try {
         if (typeof forensicLog === 'function') {
           forensicLog('DELTA', 'unified_boot_delta_runtime', {
             nome: String(nome || ''),
-            networkEvidenceAt
+            networkEvidenceAt,
+            need: requiredFn,
+            boot_interlock_bypass_reply: bypassInterlockForReply,
           });
         }
       } catch {}
