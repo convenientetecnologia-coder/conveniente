@@ -2070,6 +2070,20 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
   try {
     await humanReactionDelay(fromNetworkLead);
 
+    const __isAlreadyOpenByUrl = () => {
+      try {
+        const rawUrl = String(page && page.url ? page.url() : "");
+        const m = rawUrl.match(/\/messages\/t\/(\d+)\//i);
+        const currentThread = m && m[1] ? String(m[1]) : "";
+        if (currentThread && currentThread === String(t)) {
+          return { ok: true, current_thread: currentThread, current_path: `/messages/t/${currentThread}/`, url: rawUrl };
+        }
+        return { ok: false, current_thread: currentThread || null, current_path: m && m[1] ? `/messages/t/${currentThread}/` : null, url: rawUrl };
+      } catch {
+        return { ok: false, current_thread: null, current_path: null, url: "" };
+      }
+    };
+
     if (fromNetworkLead) {
       try {
         await prepareDomForNetworkLead(page, threadKey);
@@ -2080,7 +2094,28 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
 
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
       try {
-        await ensureMarketplaceFilterActive(page);
+        const st = __isAlreadyOpenByUrl();
+        // Regra rígida de velocidade:
+        // Se a conversa já está aberta/selecionada, NÃO rodar ensureMarketplaceFilterActive (custa caro e gera HOL).
+        if (st && st.ok === true) {
+          try {
+            __forensicEdgeEmit({
+              account_login: forensicAccountLogin,
+              thread_key: t,
+              flow_stage: "marketplace_filter_bypass",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                reason: "thread_already_open_url",
+                is_already_open: true,
+                current_path: st.current_path || null,
+                url: st.url ? String(st.url).slice(0, 300) : null,
+                ts_ms: Date.now(),
+              }
+            });
+          } catch (_) {}
+        } else {
+          await ensureMarketplaceFilterActive(page);
+        }
       } catch (_) {}
     }
 
@@ -2092,7 +2127,30 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
           await forceSidebarRefreshByMessagesRoot(page);
           await humanPause("domSettle", "open_thread_retry_root");
           if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-            await ensureMarketplaceFilterActive(page);
+            try {
+              const st2 = __isAlreadyOpenByUrl();
+              if (st2 && st2.ok === true) {
+                try {
+                  __forensicEdgeEmit({
+                    account_login: forensicAccountLogin,
+                    thread_key: t,
+                    flow_stage: "marketplace_filter_bypass",
+                    details: {
+                      tag: "FORENSIC_DOM_REVERSE",
+                      reason: "thread_already_open_url_retry",
+                      is_already_open: true,
+                      current_path: st2.current_path || null,
+                      url: st2.url ? String(st2.url).slice(0, 300) : null,
+                      ts_ms: Date.now(),
+                    }
+                  });
+                } catch (_) {}
+              } else {
+                await ensureMarketplaceFilterActive(page);
+              }
+            } catch (_) {
+              try { await ensureMarketplaceFilterActive(page); } catch (_) {}
+            }
             await humanPause("postMarketplace", "open_thread_retry_marketplace");
           }
         } catch (_) {}

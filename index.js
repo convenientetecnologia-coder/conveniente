@@ -2264,6 +2264,42 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 
 // ===================== CLUSTER MULTI-NODE =====================
 let clusterClient = null;
+function __deltaProvisionDeliveryConfirmEnv() {
+  try {
+    // 1) URL do confirm-delivery (balão azul)
+    const explicit = String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').trim();
+    if (!explicit) {
+      let ctBaseUrl = '';
+      try {
+        const cfg = readCtConfig();
+        ctBaseUrl = String((cfg && (cfg.ctBaseUrl || cfg.ct_base_url)) || '').trim();
+      } catch {}
+      if (!ctBaseUrl) ctBaseUrl = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+      if (ctBaseUrl) {
+        const base = ctBaseUrl.replace(/\/+$/, '');
+        process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = `${base}/api/attendance/confirm-delivery`;
+      }
+    }
+
+    // 2) Secret obrigatório do header x-delivery-secret (deve bater no CT)
+    // Preferência: VIRTUS_DELTA_DELIVERY_SECRET, senão infra secret local.
+    const deliverySecret = String(process.env.VIRTUS_DELTA_DELIVERY_SECRET || '').trim();
+    const infra = String(__resolveInfraSecret() || '').trim();
+    if (!deliverySecret && infra) process.env.VIRTUS_DELTA_DELIVERY_SECRET = infra;
+
+    // 3) Infra secret disponível para outros caminhos (best-effort)
+    const infraEnv = String(process.env.VIRTUS_DELTA_INFRA_SECRET || '').trim();
+    if (!infraEnv && infra) process.env.VIRTUS_DELTA_INFRA_SECRET = infra;
+
+    try {
+      logger.info('[DELTA][CONFIRM][ENV] provisionado', {
+        url: String(process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL || '').slice(0, 180) || null,
+        has_delivery_secret: !!String(process.env.VIRTUS_DELTA_DELIVERY_SECRET || '').trim(),
+        has_infra_secret: !!String(process.env.VIRTUS_DELTA_INFRA_SECRET || '').trim()
+      });
+    } catch {}
+  } catch {}
+}
 async function bootCluster() {
   try { rotateForensicLogs24h(); } catch {}
   const { createCluster } = require('./scripts/clusterMaster.js');
@@ -2343,6 +2379,8 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   } catch (e) {
     logger.warn('[BOOT] start-closed exceção (best-effort)', { error: (e && e.message) || String(e) });
   }
+  // Delta: coordenar endpoints (confirm-delivery) e secrets ANTES de criar workers.
+  try { __deltaProvisionDeliveryConfirmEnv(); } catch {}
   await bootCluster();
 
   // Start server — faça o binding em 127.0.0.1
