@@ -2038,25 +2038,69 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
         let clickedByCoordinates = false;
         try {
           const box = await cardElement.boundingBox();
-          if (box && Number.isFinite(box.x) && Number.isFinite(box.y)) {
+          const vp = (typeof page.viewport === "function" ? page.viewport() : null) || null;
+          const viewportWidth = Number(vp && vp.width || 0) || 0;
+          const viewportHeight = Number(vp && vp.height || 0) || 0;
+          if (
+            box &&
+            Number.isFinite(box.x) &&
+            Number.isFinite(box.y) &&
+            Number.isFinite(box.width) &&
+            Number.isFinite(box.height) &&
+            box.width > 0 &&
+            box.height > 0
+          ) {
             const centerX = box.x + (box.width / 2);
             const centerY = box.y + (box.height / 2);
-            await page.mouse.click(centerX, centerY, { delay: 100 });
-            clickedByCoordinates = true;
-            try {
-              __forensicEdgeEmit({
-                account_login: forensicAccountLogin,
-                thread_key: t,
-                flow_stage: "dom_automation_tracking",
-                details: {
-                  action: "open_thread_mouse_click",
-                  selector: cardSelector,
-                  scrolled: i,
-                  center_x: Number(centerX.toFixed(2)),
-                  center_y: Number(centerY.toFixed(2))
-                }
-              });
-            } catch (_) {}
+            const insideViewport = (
+              centerX >= 0 &&
+              centerY >= 0 &&
+              (
+                (viewportWidth > 0 && centerX <= viewportWidth) ||
+                viewportWidth <= 0
+              ) &&
+              (
+                (viewportHeight > 0 && centerY <= viewportHeight) ||
+                viewportHeight <= 0
+              )
+            );
+            if (insideViewport) {
+              await page.mouse.click(centerX, centerY, { delay: 100 });
+              clickedByCoordinates = true;
+              try {
+                __forensicEdgeEmit({
+                  account_login: forensicAccountLogin,
+                  thread_key: t,
+                  flow_stage: "dom_automation_tracking",
+                  details: {
+                    action: "open_thread_mouse_click",
+                    selector: cardSelector,
+                    scrolled: i,
+                    center_x: Number(centerX.toFixed(2)),
+                    center_y: Number(centerY.toFixed(2)),
+                    viewport_w: viewportWidth || null,
+                    viewport_h: viewportHeight || null,
+                  }
+                });
+              } catch (_) {}
+            } else {
+              try {
+                __forensicEdgeEmit({
+                  account_login: forensicAccountLogin,
+                  thread_key: t,
+                  flow_stage: "dom_automation_tracking",
+                  details: {
+                    action: "open_thread_mouse_click_skipped_outside_viewport",
+                    selector: cardSelector,
+                    scrolled: i,
+                    center_x: Number(centerX.toFixed(2)),
+                    center_y: Number(centerY.toFixed(2)),
+                    viewport_w: viewportWidth || null,
+                    viewport_h: viewportHeight || null,
+                  }
+                });
+              } catch (_) {}
+            }
           }
         } catch (_) {}
         if (!clickedByCoordinates) {
