@@ -1349,11 +1349,9 @@ function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_respost
 }
 
 let __edgeDeltaReplyPumpInFlight = false;
-let __edgeDeltaReplyPumpKickRequested = false;
 let __edgeDeltaReplyPumpBackoffMs = 250;
 
 function __edgeKickDeltaReplyPump() {
-  __edgeDeltaReplyPumpKickRequested = true;
   try { setTimeout(() => { __edgeRunDeltaReplyPump().catch(() => {}); }, 0).unref?.(); } catch {}
 }
 
@@ -1363,7 +1361,6 @@ async function __edgeRunDeltaReplyPump() {
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
     while (true) {
-      __edgeDeltaReplyPumpKickRequested = false;
       if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
       const cursor = __edgeReadDeltaReplyCursorSync();
       const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
@@ -1466,8 +1463,6 @@ async function __edgeRunDeltaReplyPump() {
       } finally {
         try { if (fd) fs.closeSync(fd); } catch {}
       }
-
-      if (!__edgeDeltaReplyPumpKickRequested) break;
     }
   } finally {
     __edgeDeltaReplyPumpInFlight = false;

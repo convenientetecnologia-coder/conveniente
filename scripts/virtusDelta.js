@@ -3443,10 +3443,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const delayMs = randomBetween(minMs, maxMs);
     const last = readLastDeltaSendTimestamp(accountLogin);
     const now = Date.now();
-    const elapsed = now - last;
+    const elapsed = Math.max(0, now - last);
+    if (last > now + 1500) {
+      try {
+        __forensicEdgeEmit({
+          account_login: String(accountLogin || ACCOUNT_LOGIN || "").trim() || null,
+          thread_key: null,
+          flow_stage: "cooldown_clock_skew_guard",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            now_ts: now,
+            last_send_ts: last,
+            skew_ms: last - now,
+            action: "elapsed_clamped_to_zero",
+          }
+        });
+      } catch (_) {}
+    }
     if (!last || elapsed >= delayMs) return { waitedMs: 0, delayMs, elapsedMs: elapsed };
 
-    const remainMs = Math.max(0, delayMs - elapsed);
+    const remainMs = Math.max(0, Math.min(maxMs, delayMs - elapsed));
     const endAt = now + remainMs;
     try {
       __forensicEdgeEmit({
@@ -3591,7 +3607,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         threadKey: t,
         accountLogin: ACCOUNT_LOGIN,
       });
-    })();
+    })().catch((e) => ({
+      ok: false,
+      error: (e && e.message) ? String(e.message) : "city_collect_exception",
+    }));
 
     let sendOut = null;
     if (!greetingAlreadySent) {
@@ -3628,7 +3647,31 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
     }
 
-    const cityOut = await cityCollectionPromise;
+    const cityCollectMaxWaitMs = Math.max(
+      4_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 8_000) || 8_000
+    );
+    const cityOut = await Promise.race([
+      cityCollectionPromise,
+      sleep(cityCollectMaxWaitMs).then(() => ({
+        ok: false,
+        error: "city_collect_timeout",
+        timeout_ms: cityCollectMaxWaitMs,
+      })),
+    ]);
+    if (cityOut && cityOut.error === "city_collect_timeout") {
+      try {
+        __forensicEdgeEmit({
+          account_login: ACCOUNT_LOGIN,
+          thread_key: t,
+          flow_stage: "city_collect_timeout",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            timeout_ms: cityCollectMaxWaitMs,
+          }
+        });
+      } catch (_) {}
+    }
     if (!cityOut || cityOut.ok !== true || !String(cityOut.cidade || "").trim()) {
       const itemLinkToKeep = String(
         (sendOut && sendOut.item_link) ||
