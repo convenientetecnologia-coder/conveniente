@@ -17655,7 +17655,7 @@ async function __deltaAttachCdpEar(nome, page) {
 
         // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================
         // Regra rígida de borda:
-        // - insertMessage e upsertMessage: roteamento por ID Meta inédito no disco.
+        // - insertMessage e upsertMessage: roteamento por ID inédito no disco (Meta ou sintético de contingência).
         // - updateThreadSnippet: fluxo textual controlado, sem dispatch realtime em thread ativa.
         // - dedupe: proibido cache de IDs em RAM; checar duplicidade consultando SSD (mensagens_pendentes.jsonl tail).
 
@@ -17695,19 +17695,30 @@ async function __deltaAttachCdpEar(nome, page) {
         } catch {}
 
         const metaIds = __deltaExtractMetaMessageIds(ev);
-        const dedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
+        const metaDedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
         const metaTsMs = __deltaExtractMetaTimestampMs(ev, nowMs);
-
-        // Deduplicação canônica por ID de servidor (Meta): insert/upsert DEVEM ter meta_message_id (mid/message_id).
+        let dedupMetaId = metaDedupMetaId;
+        let dedupMetaIdSynthetic = false;
+        // Contingência canônica: quando a Meta omite mid/message_id nos primeiros frames de boot,
+        // geramos ID sintético estável por thread+texto+timestamp para evitar descarte cego.
         if ((op === 'insertMessage' || op === 'upsertMessage') && !dedupMetaId) {
+          try {
+            const synthSeed = `${String(threadKey || '').trim()}|${String(texto || '')}|${Number(metaTsMs || nowMs || Date.now()) || Date.now()}`;
+            dedupMetaId = `synth_${crypto.createHash('sha1').update(synthSeed).digest('hex')}`;
+            dedupMetaIdSynthetic = true;
+          } catch {
+            dedupMetaId = `synth_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+            dedupMetaIdSynthetic = true;
+          }
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
               thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
+              flow_stage: 'synthetic_meta_id_created',
               details: {
-                reason: 'missing_meta_message_id',
+                reason: 'missing_meta_message_id_contingency',
                 op,
+                dedup_meta_id: dedupMetaId,
                 transport: String(transport || ''),
                 requestId: String(requestId || ''),
                 sourceHint: String(sourceHint || ''),
@@ -17715,30 +17726,6 @@ async function __deltaAttachCdpEar(nome, page) {
               }
             });
           } catch {}
-          try {
-            __deltaAppendPendingJsonlSync({
-              event: 'lead_sync_only_active_non_insert',
-              server_id: serverId || null,
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              texto_limpo: texto,
-              dedup_meta_id: null,
-              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-              cidade: null,
-              operacao_meta: op || 'message',
-              mensagem_seq: 0,
-              dispatch_ct: false,
-              queue_mode: 'capture_only',
-              flow_stage: 'missing_meta_message_id_sync_only',
-              message_at: nowMs,
-              network_transport: String(transport || '').trim() || null,
-              network_request_id: String(requestId || '').trim() || null,
-              network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
-              network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
-            });
-          } catch {}
-          continue;
         }
         if (dedupMetaId && __deltaIsMetaIdAlreadyOnDisk(dedupMetaId)) {
           try {
@@ -17753,6 +17740,7 @@ async function __deltaAttachCdpEar(nome, page) {
                 requestId: String(requestId || ''),
                 sourceHint: String(sourceHint || ''),
                 dedup_meta_id: dedupMetaId,
+                dedup_meta_id_synthetic: dedupMetaIdSynthetic,
                 message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
                 offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
                 text_preview: String(texto || '').slice(0, 220)
@@ -17767,6 +17755,7 @@ async function __deltaAttachCdpEar(nome, page) {
               thread_key: threadKey,
               texto_limpo: texto,
               dedup_meta_id: dedupMetaId || null,
+              dedup_meta_id_synthetic: dedupMetaIdSynthetic,
               meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
               meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
               cidade: null,
