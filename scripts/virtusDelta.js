@@ -2604,14 +2604,6 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       }
     };
 
-    if (fromNetworkLead) {
-      try {
-        await prepareDomForNetworkLead(page, threadKey);
-      } catch (e) {
-        logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
-      }
-    }
-
     const providedContinuity = (() => {
       if (!continuityProbe || typeof continuityProbe !== "object") return null;
       if (String(continuityProbe.thread_key || "").trim() !== t) return null;
@@ -2621,6 +2613,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     })();
     const continuity = providedContinuity || await probeOpenLineContinuity(page, t);
     const canUseOpenLineFastPath = !!(continuity && continuity.is_open_line_ready === true);
+    if (fromNetworkLead && !canUseOpenLineFastPath) {
+      try {
+        await prepareDomForNetworkLead(page, threadKey);
+      } catch (e) {
+        logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
+      }
+    }
     let open = null;
     if (canUseOpenLineFastPath) {
       try {
@@ -2774,21 +2773,25 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    await humanPause("postThreadOpen", "post_open_read_context");
+    if (!canUseOpenLineFastPath) {
+      await humanPause("postThreadOpen", "post_open_read_context");
+    }
 
     // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
     let itemLink = null;
-    try {
-      itemLink = await extractMarketplaceItemLink(page);
-      if (itemLink) {
-        logInfo(`[COLETOR_101_LINK] ${itemLink}`);
-        if (typeof onItemLink === "function") {
-          try {
-            onItemLink(itemLink);
-          } catch (_) {}
+    if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
+      try {
+        itemLink = await extractMarketplaceItemLink(page);
+        if (itemLink) {
+          logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+          if (typeof onItemLink === "function") {
+            try {
+              onItemLink(itemLink);
+            } catch (_) {}
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
     const typingGuard = await runWrongThreadGuard(page, t, {
@@ -3850,6 +3853,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Anti-HOL: retries inline longos seguram a fila inteira.
     // Estratégia nova: tentativa única no slot atual + requeue assíncrono no enqueueDeltaReply.
     const maxRetries = Math.max(0, Number(process.env.VIRTUS_DELTA_REPLY_INLINE_RETRIES || 0) || 0);
+    const isSelectorLikeError = (err) => {
+      const e = String(err || "").trim();
+      return (
+        e === "composer_missing" ||
+        e === "thread_card_not_found" ||
+        e === "thread_open_hydration_timeout" ||
+        e === "send_not_confirmed_composer_not_empty" ||
+        e === "composer_text_not_registered"
+      );
+    };
     let lastOut = null;
     let lastErr = "delta_reply_unknown_error";
 
@@ -3886,9 +3899,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           return lastOut;
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
+        if (isSelectorLikeError(lastErr)) break;
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
+        if (isSelectorLikeError(lastErr)) break;
       }
     }
 
@@ -4098,6 +4113,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
         // Estratégia "fila sem travar": se for erro típico de seletor/DOM, re-enfileira no fim
         // (sem dormir aqui), para não segurar a fila em retries longos.
+        let requeueScheduled = false;
         try {
           const ok = !!(out && out.ok);
           const err = String(out && out.error || "").trim();
@@ -4131,9 +4147,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 enqueueDeltaReply({ thread_key: tk, texto_resposta: tr, client_message_id: cmid, _requeue_count: nextCount })
                   .catch(() => {});
               }, delayMs).unref?.();
+              requeueScheduled = true;
             } catch (_) {}
           }
         } catch (_) {}
+        if (requeueScheduled) return out;
 
         // Protocolo de reversão de ACK: após exaurir tentativas locais, marca falha no CT (visível na tela).
         try {
