@@ -16701,6 +16701,8 @@ function __deltaBuildCtIngestPayload(payload) {
     mensagens_cliente_concatenadas: mensagensCliente,
     cidade,
     saudacao_texto: saudacaoTexto,
+    customer_name: String(p.customer_name || p.nome_cliente_limpo || '').trim() || undefined,
+    nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || '').trim() || undefined,
   };
 }
 

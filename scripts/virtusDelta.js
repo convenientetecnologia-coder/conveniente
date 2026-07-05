@@ -632,7 +632,12 @@ function normalizeCityToUfPattern(raw) {
 }
 function sanitizeLeadClientName(rawTitle) {
   const left = String(rawTitle || "").split(" · ")[0] || "";
-  return left.replace(/\s+/g, " ").replace(/^[:\-]\s*/, "").trim().slice(0, 90);
+  const cleaned = left
+    .replace(/^conversa intitulada\s+/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[:\-]\s*/, "")
+    .trim();
+  return cleaned.slice(0, 90);
 }
 const FEED_ACTIVE_LEAD_SELECTOR =
   "span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft";
@@ -652,19 +657,49 @@ async function extractLeadClientNameFromFeedDom(page) {
           return false;
         }
       };
-      // Seletor concreto do snippet do operador.
-      const nodes = Array.from(document.querySelectorAll(selector));
-      for (const el of nodes) {
+      const pickBestConversationTitle = (list) => {
+        for (const raw of list) {
+          const t = clean(raw || "");
+          if (!t) continue;
+          if (!t.includes(" · ")) continue;
+          if (t.length < 3) continue;
+          return t;
+        }
+        return "";
+      };
+
+      // 1) Fonte soberana: aria-label da conversa ativa (mais estável que classes ofuscadas).
+      const ariaCandidates = [];
+      const titledButtons = Array.from(document.querySelectorAll('[aria-label^="Conversa intitulada "], [aria-label^="Conversation titled "]'));
+      for (const el of titledButtons) {
         if (!getVisible(el)) continue;
-        const t = clean(el.textContent || "");
-        if (!t) continue;
-        if (t.includes(" · ")) return t;
+        const aria = clean(el.getAttribute("aria-label") || "");
+        if (!aria) continue;
+        ariaCandidates.push(aria.replace(/^Conversa intitulada\s+/i, "").replace(/^Conversation titled\s+/i, ""));
       }
-      // Fallback tolerante para variações de DOM da Meta.
-      const fallback = Array.from(document.querySelectorAll("span"))
+      const fromAria = pickBestConversationTitle(ariaCandidates);
+      if (fromAria) return fromAria;
+
+      // 2) Título semântico na área de cabeçalho da conversa.
+      const headingCandidates = Array.from(document.querySelectorAll('h1 span, h2 span, h3 span, [role="heading"] span'))
         .filter((el) => getVisible(el))
-        .map((el) => clean(el.textContent || ""))
-        .find((t) => t && t.includes(" · "));
+        .map((el) => clean(el.textContent || ""));
+      const fromHeading = pickBestConversationTitle(headingCandidates);
+      if (fromHeading) return fromHeading;
+
+      // 3) Seletor concreto legado do snippet.
+      const nodes = Array.from(document.querySelectorAll(selector));
+      const fromLegacySelector = pickBestConversationTitle(
+        nodes.filter((el) => getVisible(el)).map((el) => clean(el.textContent || ""))
+      );
+      if (fromLegacySelector) return fromLegacySelector;
+
+      // 4) Fallback controlado (ainda exige padrão "Nome · Título").
+      const fallback = pickBestConversationTitle(
+        Array.from(document.querySelectorAll("span"))
+          .filter((el) => getVisible(el))
+          .map((el) => clean(el.textContent || ""))
+      );
       return fallback || "";
     }, FEED_ACTIVE_LEAD_SELECTOR);
     const name = sanitizeLeadClientName(raw);

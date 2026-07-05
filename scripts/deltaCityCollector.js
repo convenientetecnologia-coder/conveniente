@@ -49,6 +49,39 @@ function sanitizeCity(value) {
     .slice(0, 80);
 }
 
+function toTitleCaseCityName(value) {
+  return String(value || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => {
+      const low = part.toLowerCase();
+      if (["de", "da", "do", "das", "dos", "e"].includes(low)) return low;
+      return low.charAt(0).toUpperCase() + low.slice(1);
+    })
+    .join(" ")
+    .trim();
+}
+
+function normalizeCityUfLabel(raw) {
+  const s0 = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s0) return "";
+  let s = s0
+    .replace(/^anunciado\s+em\s+/i, "")
+    .replace(/^listed\s+in\s+/i, "")
+    .replace(/\s*·\s*a localiza[çc][aã]o é aproximada.*$/i, "")
+    .replace(/\s*·\s*approximate location.*$/i, "")
+    .trim();
+  if (!s) return "";
+  const parts = s.split(/\s*·\s*/).map((p) => String(p || "").trim()).filter(Boolean);
+  if (parts.length) s = parts[0];
+  const m = s.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/);
+  if (!m) return "";
+  const city = toTitleCaseCityName(String(m[1] || "").trim());
+  const uf = String(m[2] || "").trim().toUpperCase();
+  if (!city || !uf) return "";
+  return `${city} (${uf})`.slice(0, 80);
+}
+
 async function extractCityFromListingPage(page) {
   if (!page) return null;
   const out = await page.evaluate(() => {
@@ -89,14 +122,25 @@ async function extractCityFromListingPage(page) {
       }
     }
 
+    // Fonte semântica: links de localização da própria página do item.
+    const locationLinks = Array.from(document.querySelectorAll('a[href*="/marketplace/"] span, a[href*="/marketplace/"]'))
+      .map((el) => clean(el.textContent || ""))
+      .filter(Boolean);
+    for (const value of locationLinks) push(value, "marketplace_location_link");
+
+    // Selo "Cidade, UF · A localização é aproximada".
+    const approxSpans = Array.from(document.querySelectorAll("span"))
+      .map((el) => clean(el.textContent || ""))
+      .filter((t) => /localiza[çc][aã]o é aproximada|approximate location/i.test(t));
+    for (const value of approxSpans) push(value, "approx_location_badge");
+
     return candidates;
   }).catch(() => []);
 
   const candidates = Array.isArray(out) ? out : [];
   for (const cand of candidates) {
-    const v = sanitizeCity(cand && cand.value);
+    const v = normalizeCityUfLabel(cand && cand.value);
     if (!v) continue;
-    if (v.length < 2) continue;
     return {
       cidade: v,
       city_source: String((cand && cand.source) || "collector_unknown"),
