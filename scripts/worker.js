@@ -13,6 +13,7 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 // console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_edge.log');
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, '..', 'dados', 'leads_brutos.jsonl');
+const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_triagem.log');
 
 const FORENSIC_EDGE_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (RAM constante)
 function __rotateForensicFileIfNeededSync(fp) {
@@ -71,6 +72,61 @@ function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_sta
     flow_stage: String(flow_stage || '').trim(),
     details: details
   });
+}
+const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (circular)
+function __triagemCircularAppendSync(signature, details = null) {
+  try {
+    const sig = String(signature || '').trim();
+    if (!sig) return false;
+    const fp = String(FORENSIC_TRIAGEM_LOG_PATH || '').trim();
+    if (!fp) return false;
+    const payload = (details && typeof details === 'object')
+      ? { ...details }
+      : { message: String(details || '') };
+    const line = `[${sig}] ${JSON.stringify({ timestamp: Date.now(), ...payload })}\n`;
+    const lineBytes = Buffer.byteLength(line, 'utf8');
+    try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
+
+    let currentSize = 0;
+    try {
+      if (fs.existsSync(fp)) {
+        const st = fs.statSync(fp);
+        currentSize = Number(st && st.size || 0) || 0;
+      }
+    } catch {}
+
+    if ((currentSize + lineBytes) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES) {
+      const keepBytes = Math.max(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes);
+      let tail = '';
+      if (keepBytes > 0 && currentSize > 0) {
+        let fd = null;
+        try {
+          fd = fs.openSync(fp, 'r');
+          const start = Math.max(0, currentSize - keepBytes);
+          const toRead = Math.max(0, currentSize - start);
+          if (toRead > 0) {
+            const buf = Buffer.allocUnsafe(toRead);
+            const got = fs.readSync(fd, buf, 0, toRead, start);
+            tail = buf.slice(0, Math.max(0, got)).toString('utf8');
+          }
+        } catch {
+          tail = '';
+        } finally {
+          try { if (fd) fs.closeSync(fd); } catch {}
+        }
+      }
+      fs.writeFileSync(fp, tail + line, 'utf8');
+      return true;
+    }
+
+    fs.appendFileSync(fp, line, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+function __deltaLogTriagemWorker(details = null) {
+  return __triagemCircularAppendSync('FORENSIC_TRIAGEM_WORKER', details);
 }
 let forensicLog = null;
 let rotateForensicLogs24h = null;
@@ -15068,6 +15124,15 @@ function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs
       retry_reason: String(retryReason || '').trim() || null,
     };
     fs.appendFileSync(__deltaNewLeadsOutboxPath(n), JSON.stringify(rec) + '\n', 'utf8');
+    try {
+      __deltaLogTriagemWorker({
+        event: 'timer_enqueued_in_reservoir',
+        account_login: n,
+        thread_key: tk,
+        due_at: Number(rec && rec.dueAt || 0) || 0,
+        queue_lane: String(rec && rec.queue_lane || ''),
+      });
+    } catch {}
     return true;
   } catch {
     return false;
@@ -15188,6 +15253,14 @@ async function __deltaRunNewLeadsTimerPump(nome) {
 
       const handle = setTimeout(() => {
         __deltaNewLeadsTimerInFlight.delete(n);
+        try {
+          __deltaLogTriagemWorker({
+            event: 'timer_expired_dispatching_downstream',
+            account_login: n,
+            thread_key: tk,
+            due_at: dueAt || null,
+          });
+        } catch {}
         // Consome da represa PRIMEIRO (para liberar próximo timer).
         let scrubStats = null;
         try { scrubStats = __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset, dropThreadKey: tk }); } catch { scrubStats = null; }
@@ -15210,10 +15283,13 @@ async function __deltaRunNewLeadsTimerPump(nome) {
         try {
           Promise.resolve()
             .then(() => __deltaHandleBufferedThreadTimer(n, tk, { reason: 'initial' }))
-            .catch(() => {});
-        } catch {}
-        // Ativa o próximo lead novo da represa imediatamente.
-        try { __deltaKickNewLeadsTimerPump(n); } catch {}
+            .catch(() => {})
+            .finally(() => {
+              try { __deltaKickNewLeadsTimerPump(n); } catch {}
+            });
+        } catch {
+          try { __deltaKickNewLeadsTimerPump(n); } catch {}
+        }
       }, Math.max(0, remainMs));
       handle.unref?.();
       __deltaNewLeadsTimerInFlight.set(n, handle);

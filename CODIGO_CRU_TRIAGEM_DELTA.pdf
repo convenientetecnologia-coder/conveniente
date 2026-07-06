@@ -1,0 +1,2521 @@
+%PDF-1.4
+%âãÏÓ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R 21 0 R 22 0 R 23 0 R 24 0 R ] /Count 21 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 25 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 26 0 R >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 27 0 R >>
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 28 0 R >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 29 0 R >>
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 30 0 R >>
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 31 0 R >>
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 32 0 R >>
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 33 0 R >>
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 34 0 R >>
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 35 0 R >>
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 36 0 R >>
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 37 0 R >>
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 38 0 R >>
+endobj
+18 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 39 0 R >>
+endobj
+19 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 40 0 R >>
+endobj
+20 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 41 0 R >>
+endobj
+21 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 42 0 R >>
+endobj
+22 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 43 0 R >>
+endobj
+23 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 44 0 R >>
+endobj
+24 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 45 0 R >>
+endobj
+25 0 obj
+<< /Length 2822 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(# CODIGO_CRU_TRIAGEM_DELTA) Tj
+T*
+() Tj
+T*
+(## PILAR 1 - Escopo do Loop de Processamento do `new_buffering` \(`worker.js`\)) Tj
+T*
+() Tj
+T*
+(### `__deltaEnqueueNewLeadTimerToDiskSync` + `__deltaRunNewLeadsTimerPump`) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L15052:function __deltaEnqueueNewLeadTimerToDiskSync\({ nome, thread_key, dueAt, delayMs, forceEnqueue = false, queueLane = 'primary', retryReason = null } = {}\) {) Tj
+T*
+(L15053:  try {) Tj
+T*
+(L15054:    const n = String\(nome || ''\).trim\(\);) Tj
+T*
+(L15055:    const tk = String\(thread_key || ''\).trim\(\);) Tj
+T*
+(L15056:    if \(!n || !tk\) return false;) Tj
+T*
+(L15057:    if \(!forceEnqueue && !__deltaCanEnqueueNewLeadTimerFromDiskSync\(n, tk\)\) return false;) Tj
+T*
+(L15058:    if \(__deltaHasPendingNewLeadTimerOnDiskSync\(n, tk\)\) return false;) Tj
+T*
+(L15059:    __deltaEnsureNewLeadsQueueDirsSync\(n\);) Tj
+T*
+(L15060:    const rec = {) Tj
+T*
+(L15061:      ts: Date.now\(\),) Tj
+T*
+(L15062:      type: 'new_lead_timer',) Tj
+T*
+(L15063:      nome: n,) Tj
+T*
+(L15064:      thread_key: tk,) Tj
+T*
+(L15065:      delayMs: Math.max\(0, Number\(delayMs || 0\) || 0\),) Tj
+T*
+(L15066:      dueAt: Math.max\(0, Number\(dueAt || 0\) || 0\),) Tj
+T*
+(L15067:      queue_lane: String\(queueLane || 'primary'\).trim\(\) || 'primary',) Tj
+T*
+(L15068:      retry_reason: String\(retryReason || ''\).trim\(\) || null,) Tj
+T*
+(L15069:    };) Tj
+T*
+(L15070:    fs.appendFileSync\(__deltaNewLeadsOutboxPath\(n\), JSON.stringify\(rec\) + '\\n', 'utf8'\);) Tj
+T*
+(L15071:    return true;) Tj
+T*
+(L15072:  } catch {) Tj
+T*
+(L15073:    return false;) Tj
+T*
+(L15074:  }) Tj
+T*
+(L15075:}) Tj
+T*
+(L15123:async function __deltaRunNewLeadsTimerPump\(nome\) {) Tj
+T*
+(L15124:  const n = String\(nome || ''\).trim\(\);) Tj
+T*
+(L15125:  if \(!n\) return;) Tj
+T*
+(L15126:  if \(__deltaNewLeadsTimerInFlight.has\(n\)\) return; // 1 timer por vez POR CONTA) Tj
+T*
+(L15127:  try {) Tj
+T*
+(L15128:    const outbox = __deltaNewLeadsOutboxPath\(n\);) Tj
+T*
+(L15129:    if \(!fs.existsSync\(outbox\)\) return;) Tj
+T*
+(L15130:    const cursor = __deltaReadNewLeadsCursorSync\(n\);) Tj
+T*
+(L15131:    const offset = Math.max\(0, Number\(cursor && cursor.offset || 0\) || 0\);) Tj
+T*
+(L15132:) Tj
+T*
+(L15133:    let fd = null;) Tj
+T*
+(L15134:    try {) Tj
+T*
+(L15135:      fd = fs.openSync\(outbox, 'r'\);) Tj
+T*
+(L15136:      const st = fs.fstatSync\(fd\);) Tj
+T*
+(L15137:      const size = Number\(st && st.size || 0\) || 0;) Tj
+T*
+(L15138:      if \(offset >= size\) return;) Tj
+T*
+(L15139:) Tj
+T*
+(L15140:      const maxChunk = 64 * 1024;) Tj
+T*
+(L15141:      const toRead = Math.min\(maxChunk, size - offset\);) Tj
+T*
+(L15142:      const buf = Buffer.allocUnsafe\(toRead\);) Tj
+T*
+(L15143:      const bytes = fs.readSync\(fd, buf, 0, toRead, offset\);) Tj
+T*
+ET
+endstream
+endobj
+26 0 obj
+<< /Length 3504 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L15144:      const txt = buf.slice\(0, bytes\).toString\('utf8'\);) Tj
+T*
+(L15145:      const nl = txt.indexOf\('\\n'\);) Tj
+T*
+(L15146:      if \(nl === -1\) return; // linha incompleta) Tj
+T*
+(L15147:      const line = txt.slice\(0, nl\).trim\(\);) Tj
+T*
+(L15148:      const nextOffset = offset + Buffer.byteLength\(txt.slice\(0, nl + 1\), 'utf8'\);) Tj
+T*
+(L15149:      if \(!line\) {) Tj
+T*
+(L15150:        try { __deltaScrubNewLeadTimersOutboxSync\(n, { consumeUntilOffset: nextOffset }\); } catch { __deltaWriteNewLeadsCursorSync\(n, nextOffset\); }) Tj
+T*
+(L15151:        __deltaKickNewLeadsTimerPump\(n\);) Tj
+T*
+(L15152:        return;) Tj
+T*
+(L15153:      }) Tj
+T*
+(L15154:      let rec = null;) Tj
+T*
+(L15155:      try { rec = JSON.parse\(line\); } catch { rec = null; }) Tj
+T*
+(L15156:      if \(!rec || String\(rec.type || ''\).trim\(\) !== 'new_lead_timer'\) {) Tj
+T*
+(L15157:        try { __deltaScrubNewLeadTimersOutboxSync\(n, { consumeUntilOffset: nextOffset }\); } catch { __deltaWriteNewLeadsCursorSync\(n, nextOffset\); }) Tj
+T*
+(L15158:        __deltaKickNewLeadsTimerPump\(n\);) Tj
+T*
+(L15159:        return;) Tj
+T*
+(L15160:      }) Tj
+T*
+(L15161:      const tk = String\(rec.thread_key || ''\).trim\(\);) Tj
+T*
+(L15162:      if \(!tk\) {) Tj
+T*
+(L15163:        try { __deltaScrubNewLeadTimersOutboxSync\(n, { consumeUntilOffset: nextOffset }\); } catch { __deltaWriteNewLeadsCursorSync\(n, nextOffset\); }) Tj
+T*
+(L15164:        __deltaKickNewLeadsTimerPump\(n\);) Tj
+T*
+(L15165:        return;) Tj
+T*
+(L15166:      }) Tj
+T*
+(L15167:) Tj
+T*
+(L15168:      // Se o thread já ficou ativo \(ou em voo\), não faz sentido segurar represa: consome e segue.) Tj
+T*
+(L15169:      const stThread = __deltaGetThreadState\(n, tk\);) Tj
+T*
+(L15170:      if \(stThread && \(stThread.status === 'active' || stThread.status === 'hands_in_progress' || stThread.inFlight\)\) {) Tj
+T*
+(L15171:        try { __deltaScrubNewLeadTimersOutboxSync\(n, { consumeUntilOffset: nextOffset }\); } catch { __deltaWriteNewLeadsCursorSync\(n, nextOffset\); }) Tj
+T*
+(L15172:        __deltaKickNewLeadsTimerPump\(n\);) Tj
+T*
+(L15173:        return;) Tj
+T*
+(L15174:      }) Tj
+T*
+(L15175:) Tj
+T*
+(L15176:      const dueAt = Math.max\(0, Number\(rec.dueAt || 0\) || 0\);) Tj
+T*
+(L15177:      const remainMs = Math.max\(0, dueAt ? \(dueAt - Date.now\(\)\) : \(Math.max\(0, Number\(rec.delayMs || 0\) || 0\)\)\);) Tj
+T*
+(L15178:      try {) Tj
+T*
+(L15179:        console.log\('[FORENSIC_BUFFER] ' + JSON.stringify\({) Tj
+T*
+(L15180:          event: 'new_lead_reservoir_timer_begin',) Tj
+T*
+(L15181:          scheduled_at: Date.now\(\),) Tj
+T*
+(L15182:          account_login: n,) Tj
+T*
+(L15183:          thread_key: tk,) Tj
+T*
+(L15184:          remain_ms: remainMs,) Tj
+T*
+(L15185:          dueAt: dueAt || null,) Tj
+T*
+(L15186:        }\)\);) Tj
+T*
+(L15187:      } catch {}) Tj
+T*
+(L15188:) Tj
+T*
+(L15189:      const handle = setTimeout\(\(\) => {) Tj
+T*
+(L15190:        __deltaNewLeadsTimerInFlight.delete\(n\);) Tj
+T*
+(L15191:        // Consome da represa PRIMEIRO \(para liberar próximo timer\).) Tj
+T*
+(L15192:        let scrubStats = null;) Tj
+T*
+(L15193:        try { scrubStats = __deltaScrubNewLeadTimersOutboxSync\(n, { consumeUntilOffset: nextOffset, dropThreadKey: tk }\); } catch { scrubStats = null; }) Tj
+T*
+(L15194:        if \(!scrubStats || scrubStats.ok !== true\) {) Tj
+T*
+(L15195:          try { __deltaWriteNewLeadsCursorSync\(n, nextOffset\); } catch {}) Tj
+T*
+ET
+endstream
+endobj
+27 0 obj
+<< /Length 2783 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L15196:        }) Tj
+T*
+(L15197:        try {) Tj
+T*
+(L15198:          console.log\('[FORENSIC_BUFFER] ' + JSON.stringify\({) Tj
+T*
+(L15199:            event: 'new_lead_reservoir_timer_fired',) Tj
+T*
+(L15200:            fired_at: Date.now\(\),) Tj
+T*
+(L15201:            account_login: n,) Tj
+T*
+(L15202:            thread_key: tk,) Tj
+T*
+(L15203:            dueAt: dueAt || null,) Tj
+T*
+(L15204:            scrub_removed_total: Number\(scrubStats && scrubStats.removed_total || 0\) || 0,) Tj
+T*
+(L15205:            scrub_removed_thread: Number\(scrubStats && scrubStats.removed_thread || 0\) || 0,) Tj
+T*
+(L15206:            scrub_kept: Number\(scrubStats && scrubStats.kept || 0\) || 0,) Tj
+T*
+(L15207:          }\)\);) Tj
+T*
+(L15208:        } catch {}) Tj
+T*
+(L15209:        // Downstream: dispara a ação no pipeline soberano \(ctrl.virtus\) em background.) Tj
+T*
+(L15210:        try {) Tj
+T*
+(L15211:          Promise.resolve\(\)) Tj
+T*
+(L15212:            .then\(\(\) => __deltaHandleBufferedThreadTimer\(n, tk, { reason: 'initial' }\)\)) Tj
+T*
+(L15213:            .catch\(\(\) => {}\);) Tj
+T*
+(L15214:        } catch {}) Tj
+T*
+(L15215:        // Ativa o próximo lead novo da represa imediatamente.) Tj
+T*
+(L15216:        try { __deltaKickNewLeadsTimerPump\(n\); } catch {}) Tj
+T*
+(L15217:      }, Math.max\(0, remainMs\)\);) Tj
+T*
+(L15218:      handle.unref?.\(\);) Tj
+T*
+(L15219:      __deltaNewLeadsTimerInFlight.set\(n, handle\);) Tj
+T*
+(L15220:    } finally {) Tj
+T*
+(L15221:      try { if \(fd\) fs.closeSync\(fd\); } catch {}) Tj
+T*
+(L15222:    }) Tj
+T*
+(L15223:  } catch {}) Tj
+T*
+(L15224:}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### `ingestLeadEvents` \(`new_buffering` capture -> payload -> represa\)) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L18404:        const st = __deltaGetOrCreateThreadState\(nome, threadKey\);) Tj
+T*
+(L18405:        if \(__deltaIsKnownProcessedStatus\(st.status\)\) {) Tj
+T*
+(L18406:          try {) Tj
+T*
+(L18407:            __forensicEdgeEmit\({) Tj
+T*
+(L18408:              account_login: String\(nome || ''\),) Tj
+T*
+(L18409:              thread_key: threadKey,) Tj
+T*
+(L18410:              flow_stage: 'discard_filter_triggered',) Tj
+T*
+(L18411:              details: {) Tj
+T*
+(L18412:                reason: 'legacy_historical',) Tj
+T*
+(L18413:                state_status: String\(st.status || ''\),) Tj
+T*
+(L18414:                op: op || null,) Tj
+T*
+(L18415:                text_preview: String\(texto || ''\).slice\(0, 220\)) Tj
+T*
+(L18416:              }) Tj
+T*
+(L18417:            }\);) Tj
+T*
+(L18418:          } catch {}) Tj
+T*
+(L18419:          __deltaAppendPendingJsonlSync\({) Tj
+T*
+(L18420:            event: 'lead_skip_forense_estado_conhecido',) Tj
+T*
+(L18421:            server_id: serverId || null,) Tj
+T*
+ET
+endstream
+endobj
+28 0 obj
+<< /Length 2833 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L18422:            account_login: String\(nome || ''\),) Tj
+T*
+(L18423:            thread_key: threadKey,) Tj
+T*
+(L18424:            texto_limpo: texto,) Tj
+T*
+(L18425:            cidade: st.city || null,) Tj
+T*
+(L18426:            operacao_meta: op || 'message',) Tj
+T*
+(L18427:            mensagem_seq: Number\(st.seq || 0\) || 0,) Tj
+T*
+(L18428:            dispatch_ct: false,) Tj
+T*
+(L18429:            queue_mode: 'capture_only',) Tj
+T*
+(L18430:            flow_stage: 'skip_known_processed_state',) Tj
+T*
+(L18431:            state_status: String\(st.status || ''\),) Tj
+T*
+(L18432:            message_at: nowMs,) Tj
+T*
+(L18433:            ...networkCtx) Tj
+T*
+(L18434:          }\);) Tj
+T*
+(L18435:          try { __deltaThreadStateMap.delete\(__deltaThreadStateKey\(nome, threadKey\)\); } catch {}) Tj
+T*
+(L18436:          continue;) Tj
+T*
+(L18437:        }) Tj
+T*
+(L18438:        if \(!dedupMetaId && __deltaIsRecentDuplicate\(st, texto, op, nowMs\)\) {) Tj
+T*
+(L18439:          try {) Tj
+T*
+(L18440:            __forensicEdgeEmit\({) Tj
+T*
+(L18441:              account_login: String\(nome || ''\),) Tj
+T*
+(L18442:              thread_key: threadKey,) Tj
+T*
+(L18443:              flow_stage: 'discard_filter_triggered',) Tj
+T*
+(L18444:              details: {) Tj
+T*
+(L18445:                reason: 'sha1_text_collision',) Tj
+T*
+(L18446:                op: op || null,) Tj
+T*
+(L18447:                window_ms: Number\(DELTA_RECENT_DEDUP_WINDOW_MS || 0\) || 0,) Tj
+T*
+(L18448:                text_preview: String\(texto || ''\).slice\(0, 220\)) Tj
+T*
+(L18449:              }) Tj
+T*
+(L18450:            }\);) Tj
+T*
+(L18451:          } catch {}) Tj
+T*
+(L18452:          continue;) Tj
+T*
+(L18453:        }) Tj
+T*
+(L18454:        if \(__deltaIsRecentInsertUpsertMirrorDuplicate\(st, texto, op, nowMs\)\) {) Tj
+T*
+(L18455:          try {) Tj
+T*
+(L18456:            __forensicEdgeEmit\({) Tj
+T*
+(L18457:              account_login: String\(nome || ''\),) Tj
+T*
+(L18458:              thread_key: threadKey,) Tj
+T*
+(L18459:              flow_stage: 'discard_filter_triggered',) Tj
+T*
+(L18460:              details: {) Tj
+T*
+(L18461:                reason: 'insert_upsert_mirror_duplicate',) Tj
+T*
+(L18462:                op: op || null,) Tj
+T*
+(L18463:                text_preview: String\(texto || ''\).slice\(0, 220\)) Tj
+T*
+(L18464:              }) Tj
+T*
+(L18465:            }\);) Tj
+T*
+(L18466:          } catch {}) Tj
+T*
+(L18467:          continue;) Tj
+T*
+(L18468:        }) Tj
+T*
+(L18469:        const msg = __deltaPushMessageToState\(st, { text: texto, op, at: nowMs }\);) Tj
+T*
+(L18470:        const msgSeq = Number\(msg && msg.seq || st.seq || 0\) || 0;) Tj
+T*
+(L18471:) Tj
+T*
+(L18472:        __deltaAppendPendingJsonlSync\({) Tj
+T*
+(L18473:          event: 'lead_capturado_buffer',) Tj
+T*
+ET
+endstream
+endobj
+29 0 obj
+<< /Length 3176 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L18474:          server_id: serverId || null,) Tj
+T*
+(L18475:          account_login: String\(nome || ''\),) Tj
+T*
+(L18476:          thread_key: threadKey,) Tj
+T*
+(L18477:          texto_limpo: texto,) Tj
+T*
+(L18478:          dedup_meta_id: dedupMetaId || null,) Tj
+T*
+(L18479:          meta_message_id: metaIds && metaIds.msgId ? String\(metaIds.msgId\) : null,) Tj
+T*
+(L18480:          meta_offline_threading_id: metaIds && metaIds.offlineId ? String\(metaIds.offlineId\) : null,) Tj
+T*
+(L18481:          cidade: st.city || null,) Tj
+T*
+(L18482:          operacao_meta: op,) Tj
+T*
+(L18483:          mensagem_seq: msgSeq,) Tj
+T*
+(L18484:          dispatch_ct: false,) Tj
+T*
+(L18485:          queue_mode: 'capture_only',) Tj
+T*
+(L18486:          flow_stage: String\(st.status || 'new_buffering'\),) Tj
+T*
+(L18487:          message_at: nowMs,) Tj
+T*
+(L18488:          ...networkCtx) Tj
+T*
+(L18489:        }\);) Tj
+T*
+(L18490:) Tj
+T*
+(L18542:        // Arquitetura 2 camadas \(Gemini\): novo lead NÃO arma timer em paralelo por thread.) Tj
+T*
+(L18543:        // Enfileira na REPRESA \(1 timer por vez por conta\) e só depois dispara para ctrl.virtus.) Tj
+T*
+(L18544:        if \(st.status !== 'hands_in_progress' && !st.timerHandle && !\(Number\(st.timerDueAt || 0\) > 0\)\) {) Tj
+T*
+(L18545:          const delayMs = __deltaRandInt\(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS\);) Tj
+T*
+(L18546:          st.timerReason = 'initial';) Tj
+T*
+(L18547:          st.timerDueAt = Date.now\(\) + delayMs;) Tj
+T*
+(L18548:          st.updatedAt = nowMs;) Tj
+T*
+(L18549:          __deltaSchedulePersistThreadState\(\);) Tj
+T*
+(L18550:          __deltaEnqueueNewLeadTimerToDiskSync\({ nome: String\(nome || ''\), thread_key: threadKey, delayMs, dueAt: st.timerDueAt }\);) Tj
+T*
+(L18551:          __deltaKickNewLeadsTimerPump\(String\(nome || ''\)\);) Tj
+T*
+(L18552:          try {) Tj
+T*
+(L18553:            logger.info\('[DELTA][BUFFER] novo chat detectado; timer armado', {) Tj
+T*
+(L18554:              nome: String\(nome || ''\),) Tj
+T*
+(L18555:              thread_key: threadKey,) Tj
+T*
+(L18556:              delayMs,) Tj
+T*
+(L18557:              dueAt: st.timerDueAt,) Tj
+T*
+(L18558:              transport: String\(transport || ''\)) Tj
+T*
+(L18559:            }\);) Tj
+T*
+(L18560:          } catch {}) Tj
+T*
+(L18561:        } else {) Tj
+T*
+(L18562:          st.updatedAt = nowMs;) Tj
+T*
+(L18563:          __deltaSchedulePersistThreadState\(\);) Tj
+T*
+(L18564:        }) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(## PILAR 2 - Método de Ativação Física e Abertura do Hands \(`virtusDelta.js`\)) Tj
+T*
+() Tj
+T*
+(### `runWrongThreadGuard` + `openThreadByClick`) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L2197:async function runWrongThreadGuard\(page, threadKey, { forensicAccountLogin = null, stage = "post_click", requireComposer = true } = {}\) {) Tj
+T*
+(L2198:  const t = String\(threadKey || ""\).trim\(\);) Tj
+T*
+(L2199:  const expectedTarget = `/messages/t/${t}`;) Tj
+T*
+(L2200:  const currentUrl = String\(page && page.url ? page.url\(\) : ""\).trim\(\);) Tj
+T*
+(L2201:  const urlMatches = !!\(currentUrl && currentUrl.includes\(expectedTarget\)\);) Tj
+T*
+ET
+endstream
+endobj
+30 0 obj
+<< /Length 2794 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2202:) Tj
+T*
+(L2203:  let composerCheck = { ok: true, composer_count: null, active_sidebar_href: null };) Tj
+T*
+(L2204:  if \(requireComposer\) {) Tj
+T*
+(L2205:    composerCheck = await page.evaluate\(\(threadId\) => {) Tj
+T*
+(L2206:      const isVisible = \(el\) => {) Tj
+T*
+(L2207:        if \(!el\) return false;) Tj
+T*
+(L2208:        const r = el.getBoundingClientRect\(\);) Tj
+T*
+(L2209:        return r && r.width > 1 && r.height > 1;) Tj
+T*
+(L2210:      };) Tj
+T*
+(L2211:) Tj
+T*
+(L2212:      const composers = Array.from\(document.querySelectorAll\('div[data-lexical-editor="true"]'\)\).filter\(isVisible\);) Tj
+T*
+(L2213:      const active = document.querySelector\('a[aria-current="page"][href], [aria-current="page"] a[href]'\);) Tj
+T*
+(L2214:      const activeHref = String\(\(active && active.getAttribute\("href"\)\) || ""\).trim\(\);) Tj
+T*
+(L2215:      const expectedRe = new RegExp\(`/messages/\(?:e2ee/\)?t/${String\(threadId\).replace\(/[.*+?^${}\(\)|[\\]\\\\]/g, "\\\\$&"\)}\(?:/|$\)`, "i"\);) Tj
+T*
+(L2216:      const sidebarMatchesThread = !!\(activeHref && expectedRe.test\(activeHref\)\);) Tj
+T*
+(L2217:      return {) Tj
+T*
+(L2218:        ok: composers.length === 1 && sidebarMatchesThread,) Tj
+T*
+(L2219:        composer_count: composers.length,) Tj
+T*
+(L2220:        active_sidebar_href: activeHref || null) Tj
+T*
+(L2221:      };) Tj
+T*
+(L2222:    }, t\).catch\(\(\) => \({ ok: false, composer_count: null, active_sidebar_href: null }\)\);) Tj
+T*
+(L2223:  }) Tj
+T*
+(L2224:) Tj
+T*
+(L2225:  if \(urlMatches && composerCheck && composerCheck.ok\) {) Tj
+T*
+(L2226:    return {) Tj
+T*
+(L2227:      ok: true,) Tj
+T*
+(L2228:      current_url: currentUrl,) Tj
+T*
+(L2229:      expected_target: expectedTarget,) Tj
+T*
+(L2230:      composer_count: composerCheck.composer_count) Tj
+T*
+(L2231:    };) Tj
+T*
+(L2232:  }) Tj
+T*
+(L2233:) Tj
+T*
+(L2234:  const reason = !urlMatches) Tj
+T*
+(L2235:    ? "URL_mismatch_preventing_cross_routing") Tj
+T*
+(L2236:    : "composer_signature_mismatch";) Tj
+T*
+(L2237:  try {) Tj
+T*
+(L2238:    console.log\(JSON.stringify\({) Tj
+T*
+(L2239:      timestamp: Date.now\(\),) Tj
+T*
+(L2240:      flow_stage: "wrong_thread_guard_blocked",) Tj
+T*
+(L2241:      thread_key: t,) Tj
+T*
+(L2242:      current_url: currentUrl,) Tj
+T*
+(L2243:      expected_target: expectedTarget,) Tj
+T*
+(L2244:      stage,) Tj
+T*
+(L2245:      reason,) Tj
+T*
+(L2246:      composer_count: composerCheck && composerCheck.composer_count,) Tj
+T*
+(L2247:      active_sidebar_href: composerCheck && composerCheck.active_sidebar_href) Tj
+T*
+(L2248:    }\)\);) Tj
+T*
+(L2249:  } catch \(_\) {}) Tj
+T*
+(L2250:  try {) Tj
+T*
+(L2251:    __forensicEdgeEmit\({) Tj
+T*
+(L2252:      account_login: forensicAccountLogin,) Tj
+T*
+(L2253:      thread_key: t,) Tj
+T*
+ET
+endstream
+endobj
+31 0 obj
+<< /Length 2563 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2254:      flow_stage: "wrong_thread_guard_blocked",) Tj
+T*
+(L2255:      details: {) Tj
+T*
+(L2256:        tag: "FORENSIC_DOM_REVERSE",) Tj
+T*
+(L2257:        stage,) Tj
+T*
+(L2258:        reason,) Tj
+T*
+(L2259:        current_url: currentUrl || null,) Tj
+T*
+(L2260:        expected_target: expectedTarget,) Tj
+T*
+(L2261:        composer_count: Number\(composerCheck && composerCheck.composer_count || 0\) || 0,) Tj
+T*
+(L2262:        active_sidebar_href: composerCheck && composerCheck.active_sidebar_href ? String\(composerCheck.active_sidebar_href\) : null,) Tj
+T*
+(L2263:        ts_ms: Date.now\(\)) Tj
+T*
+(L2264:      }) Tj
+T*
+(L2265:    }\);) Tj
+T*
+(L2266:  } catch \(_\) {}) Tj
+T*
+(L2267:  return {) Tj
+T*
+(L2268:    ok: false,) Tj
+T*
+(L2269:    error: "wrong_thread_guard_blocked",) Tj
+T*
+(L2270:    reason,) Tj
+T*
+(L2271:    current_url: currentUrl,) Tj
+T*
+(L2272:    expected_target: expectedTarget) Tj
+T*
+(L2273:  };) Tj
+T*
+(L2274:}) Tj
+T*
+(L2276:async function openThreadByClick\(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}\) {) Tj
+T*
+(L2277:  const t = String\(threadKey || ""\).trim\(\);) Tj
+T*
+(L2278:  if \(!t\) throw new Error\("thread_key_empty"\);) Tj
+T*
+(L2279:) Tj
+T*
+(L2280:  const isStable = await waitForMessagesBootStable\(page, "agent_outbox_hydration_check"\).catch\(\(\) => false\);) Tj
+T*
+(L2281:  if \(!isStable\) {) Tj
+T*
+(L2282:    try {) Tj
+T*
+(L2283:      __forensicEdgeEmit\({) Tj
+T*
+(L2284:        account_login: forensicAccountLogin,) Tj
+T*
+(L2285:        thread_key: t,) Tj
+T*
+(L2286:        flow_stage: "messages_boot_not_stable",) Tj
+T*
+(L2287:        details: {) Tj
+T*
+(L2288:          tag: "FORENSIC_DOM_REVERSE",) Tj
+T*
+(L2289:          reason: "agent_outbox_hydration_check_failed",) Tj
+T*
+(L2290:          ts_ms: Date.now\(\),) Tj
+T*
+(L2291:        }) Tj
+T*
+(L2292:      }\);) Tj
+T*
+(L2293:    } catch \(_\) {}) Tj
+T*
+(L2294:    return { ok: false, error: "messages_boot_not_stable" };) Tj
+T*
+(L2295:  }) Tj
+T*
+(L2296:) Tj
+T*
+(L2297:  try {) Tj
+T*
+(L2298:    await page.waitForFunction\() Tj
+T*
+(L2299:      \(\) => {) Tj
+T*
+(L2300:        const hrefs = Array.from\(document.querySelectorAll\('a[href*="/messages"]'\)\)) Tj
+T*
+(L2301:          .map\(\(a\) => String\(a.getAttribute\("href"\) || ""\)\)) Tj
+T*
+(L2302:          .filter\(Boolean\);) Tj
+T*
+(L2303:        const nonNew = hrefs.filter\(\(h\) => !h.includes\("/messages/new"\)\);) Tj
+T*
+(L2304:        return nonNew.length >= 1;) Tj
+T*
+(L2305:      },) Tj
+T*
+(L2306:      { timeout: 8000 }) Tj
+T*
+ET
+endstream
+endobj
+32 0 obj
+<< /Length 3287 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2307:    \);) Tj
+T*
+(L2308:  } catch \(_\) {}) Tj
+T*
+(L2309:) Tj
+T*
+(L2310:  const primaryCardSelector = `div[role="row"] a[href*="/messages/t/${t}"]`;) Tj
+T*
+(L2311:  const cardSelectors = [) Tj
+T*
+(L2312:    primaryCardSelector,) Tj
+T*
+(L2313:    `div[role="row"] a[href="/messages/t/${t}/"]`,) Tj
+T*
+(L2314:    `div[role="row"] a[href="/messages/t/${t}"]`,) Tj
+T*
+(L2315:    `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,) Tj
+T*
+(L2316:  ];) Tj
+T*
+(L2317:) Tj
+T*
+(L2318:  for \(let i = 0; i < maxScrollSteps; i++\) {) Tj
+T*
+(L2319:    for \(const cardSelector of cardSelectors\) {) Tj
+T*
+(L2320:      const cardElement = cardSelector === primaryCardSelector) Tj
+T*
+(L2321:        ? await page.waitForSelector\(cardSelector, { timeout: i === 0 ? 5000 : 1200 }\).catch\(\(\) => null\)) Tj
+T*
+(L2322:        : await page.$\(cardSelector\).catch\(\(\) => null\);) Tj
+T*
+(L2323:      if \(cardElement\) {) Tj
+T*
+(L2324:        try {) Tj
+T*
+(L2325:          const isCurrentPage = await cardElement) Tj
+T*
+(L2326:            .evaluate\(\(el\) => {) Tj
+T*
+(L2327:              if \(!el\) return false;) Tj
+T*
+(L2328:              if \(el.getAttribute\("aria-current"\) === "page"\) return true;) Tj
+T*
+(L2329:              return Boolean\(el.closest\('[aria-current="page"]'\)\);) Tj
+T*
+(L2330:            }\)) Tj
+T*
+(L2331:            .catch\(\(\) => false\);) Tj
+T*
+(L2332:          if \(isCurrentPage\) {) Tj
+T*
+(L2333:            const guard = await runWrongThreadGuard\(page, t, {) Tj
+T*
+(L2334:              forensicAccountLogin,) Tj
+T*
+(L2335:              stage: "already_open_prevent_cross_routing",) Tj
+T*
+(L2336:              requireComposer: true) Tj
+T*
+(L2337:            }\);) Tj
+T*
+(L2338:            if \(!guard.ok\) return guard;) Tj
+T*
+(L2339:            return { ok: true, scrolled: i, matched_selector: cardSelector, already_open: true, skipped_click: true, hydrated: true };) Tj
+T*
+(L2340:          }) Tj
+T*
+(L2341:        } catch \(_\) {}) Tj
+T*
+(L2342:) Tj
+T*
+(L2343:        await humanPause\("preThreadClick", "pre_thread_card_click"\);) Tj
+T*
+(L2344:        try { await cardElement.evaluate\(\(el\) => { try { el.scrollIntoView\({ block: 'center', inline: 'nearest', behavior: 'instant' }\); } catch \(_\) {} }\); } catch \(_\) { try { await cardElement.scrollIntoViewIfNeeded\(\); } catch \(_\) {} }) Tj
+T*
+(L2345:        let openedByNavigation = false;) Tj
+T*
+(L2346:        let clickPlan = null;) Tj
+T*
+(L2347:        try { clickPlan = await computeVisibleThreadCardClickPlan\(cardElement\); } catch \(_\) {}) Tj
+T*
+(L2348:        const points = \(clickPlan && clickPlan.ok && Array.isArray\(clickPlan.points\)\) ? clickPlan.points : [];) Tj
+T*
+(L2349:        for \(const p of points.slice\(0, 2\)\) {) Tj
+T*
+(L2350:          const px = Number\(p && p.x\);) Tj
+T*
+(L2351:          const py = Number\(p && p.y\);) Tj
+T*
+(L2352:          if \(!Number.isFinite\(px\) || !Number.isFinite\(py\)\) continue;) Tj
+T*
+(L2353:          try {) Tj
+T*
+(L2354:            await page.mouse.move\(px, py, { steps: 6 }\);) Tj
+T*
+(L2355:            await page.mouse.click\(px, py, { delay: 100 }\);) Tj
+T*
+(L2356:          } catch \(_\) { continue; }) Tj
+T*
+(L2357:          try {) Tj
+T*
+(L2358:            await page.waitForFunction\() Tj
+T*
+ET
+endstream
+endobj
+33 0 obj
+<< /Length 2961 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2359:              \(threadId\) => {) Tj
+T*
+(L2360:                const path = String\(location.pathname || ""\);) Tj
+T*
+(L2361:                return path.includes\("/messages"\) && path.includes\(`/t/${threadId}`\);) Tj
+T*
+(L2362:              },) Tj
+T*
+(L2363:              { timeout: 1800 },) Tj
+T*
+(L2364:              t) Tj
+T*
+(L2365:            \);) Tj
+T*
+(L2366:            openedByNavigation = true;) Tj
+T*
+(L2367:            break;) Tj
+T*
+(L2368:          } catch \(_\) {}) Tj
+T*
+(L2369:        }) Tj
+T*
+(L2370:        if \(!openedByNavigation\) {) Tj
+T*
+(L2371:          try {) Tj
+T*
+(L2372:            await cardElement.focus\(\).catch\(\(\) => {}\);) Tj
+T*
+(L2373:            await page.keyboard.press\("Enter"\).catch\(\(\) => {}\);) Tj
+T*
+(L2374:            await page.waitForFunction\() Tj
+T*
+(L2375:              \(threadId\) => {) Tj
+T*
+(L2376:                const path = String\(location.pathname || ""\);) Tj
+T*
+(L2377:                return path.includes\("/messages"\) && path.includes\(`/t/${threadId}`\);) Tj
+T*
+(L2378:              },) Tj
+T*
+(L2379:              { timeout: 1500 },) Tj
+T*
+(L2380:              t) Tj
+T*
+(L2381:            \).catch\(\(\) => {}\);) Tj
+T*
+(L2382:            openedByNavigation = await page.evaluate\(\(threadId\) => {) Tj
+T*
+(L2383:              const p = String\(location.pathname || ""\);) Tj
+T*
+(L2384:              return p.includes\("/messages"\) && p.includes\(`/t/${threadId}`\);) Tj
+T*
+(L2385:            }, t\).catch\(\(\) => false\);) Tj
+T*
+(L2386:          } catch \(_\) {}) Tj
+T*
+(L2387:        }) Tj
+T*
+(L2388:        await humanPause\("postThreadOpen", "post_thread_card_click"\);) Tj
+T*
+(L2389:        try {) Tj
+T*
+(L2390:          await page.waitForSelector\('div[data-lexical-editor="true"]', { timeout: 5000 }\);) Tj
+T*
+(L2391:        } catch \(_\) {) Tj
+T*
+(L2392:          return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: cardSelector };) Tj
+T*
+(L2393:        }) Tj
+T*
+(L2394:        const guard = await runWrongThreadGuard\(page, t, {) Tj
+T*
+(L2395:          forensicAccountLogin,) Tj
+T*
+(L2396:          stage: "post_click_route_validation",) Tj
+T*
+(L2397:          requireComposer: true) Tj
+T*
+(L2398:        }\);) Tj
+T*
+(L2399:        if \(!guard.ok\) return guard;) Tj
+T*
+(L2400:        return { ok: true, scrolled: i, matched_selector: cardSelector, hydrated: true };) Tj
+T*
+(L2401:      }) Tj
+T*
+(L2402:    }) Tj
+T*
+(L2403:    const delta = await scrollSidebarShort\(page\).catch\(\(\) => 0\);) Tj
+T*
+(L2404:    await humanPause\("scroll", "sidebar_scroll"\);) Tj
+T*
+(L2405:  }) Tj
+T*
+(L2406:) Tj
+T*
+(L2407:  let hrefPreview = [];) Tj
+T*
+(L2408:  try {) Tj
+T*
+(L2409:    hrefPreview = await page.$$eval\("a[href]", \(els\) =>) Tj
+T*
+(L2410:      els.map\(\(e\) => String\(e.getAttribute\("href"\) || ""\).trim\(\)\).filter\(Boolean\).filter\(\(h\) => h.includes\("/messages"\)\).slice\(0, 25\)) Tj
+T*
+ET
+endstream
+endobj
+34 0 obj
+<< /Length 2657 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2411:    \);) Tj
+T*
+(L2412:  } catch \(_\) {}) Tj
+T*
+(L2413:) Tj
+T*
+(L2414:  return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };) Tj
+T*
+(L2415:}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(## PILAR 3 - Rotina de Raspagem DOM e Envio de Saudação \(`virtusDelta.js`\)) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L742:function generateDeltaGreeting\(\) {) Tj
+T*
+(L743:  try {) Tj
+T*
+(L744:    const cfg = readAtendimentoDeltaConfigSync\(\) || {};) Tj
+T*
+(L745:    const horario = resolveSaudacaoHorarioToken\(\);) Tj
+T*
+(L746:    const bloco1Raw = _pick\(cfg.bloco1\);) Tj
+T*
+(L747:    const bloco1 = String\(bloco1Raw || ""\).replace\(/\\[saudacao_horario\\]/gi, horario\).trim\(\);) Tj
+T*
+(L748:) Tj
+T*
+(L749:    const bloco2 = _pick\(cfg.bloco2\);) Tj
+T*
+(L750:    const bloco3 = _pick\(cfg.bloco3\);) Tj
+T*
+(L751:    const bloco4 = _pick\(cfg.bloco4\);) Tj
+T*
+(L752:) Tj
+T*
+(L753:    const out = [bloco1, bloco2, bloco3, bloco4]) Tj
+T*
+(L754:      .map\(\(s\) => String\(s || ""\).trim\(\)\)) Tj
+T*
+(L755:      .filter\(Boolean\)) Tj
+T*
+(L756:      .join\("\\n\\n"\);) Tj
+T*
+(L757:    return out;) Tj
+T*
+(L758:  } catch {) Tj
+T*
+(L759:    return [) Tj
+T*
+(L760:      "Olá, [saudacao_horario]! Está disponível sim.".replace\(/\\[saudacao_horario\\]/gi, resolveSaudacaoHorarioToken\(\)\),) Tj
+T*
+(L761:      "Temos atendimento rápido e valores competitivos.",) Tj
+T*
+(L762:      "Trabalhamos com fretes de pequeno, médio e grande porte.",) Tj
+T*
+(L763:      "Me conta o que você precisa transportar para eu te ajudar agora.",) Tj
+T*
+(L764:    ].join\("\\n\\n"\);) Tj
+T*
+(L765:  }) Tj
+T*
+(L766:}) Tj
+T*
+(L1863:async function extractMarketplaceItemLink\(page\) {) Tj
+T*
+(L1864:  const href = await page.evaluate\(\(\) => {) Tj
+T*
+(L1865:    const host = location.origin || '';) Tj
+T*
+(L1866:    const a =) Tj
+T*
+(L1867:      document.querySelector\('div[class*="x1a8lsjc"] a[href*="/marketplace/item/"]'\) ||) Tj
+T*
+(L1868:      document.querySelector\('a[href*="/marketplace/item/"]'\);) Tj
+T*
+(L1869:    if \(!a\) return '';) Tj
+T*
+(L1870:    const h = String\(a.getAttribute\('href'\) || ''\).trim\(\);) Tj
+T*
+(L1871:    if \(!h\) return '';) Tj
+T*
+(L1872:    if \(h.startsWith\('http'\)\) return h;) Tj
+T*
+(L1873:    return host + h;) Tj
+T*
+(L1874:  }\).catch\(\(\) => ""\);) Tj
+T*
+(L1875:  return String\(href || ""\).trim\(\);) Tj
+T*
+(L1876:}) Tj
+T*
+(L2891:async function collectCityFromItemLinkUsingGlobalCollector\({ itemLink, threadKey, accountLogin }\) {) Tj
+T*
+(L2892:  if \(typeof getDeltaCityCollector !== "function"\) {) Tj
+T*
+(L2893:    return { ok: false, error: "delta_city_collector_unavailable" };) Tj
+T*
+ET
+endstream
+endobj
+35 0 obj
+<< /Length 2958 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2894:  }) Tj
+T*
+(L2895:  const collector = await getDeltaCityCollector\(\);) Tj
+T*
+(L2896:  if \(!collector || typeof collector.collectCityFromItemLink !== "function"\) {) Tj
+T*
+(L2897:    return { ok: false, error: "delta_city_collector_runtime_invalid" };) Tj
+T*
+(L2898:  }) Tj
+T*
+(L2899:  const out = await collector.collectCityFromItemLink\({) Tj
+T*
+(L2900:    item_link: itemLink,) Tj
+T*
+(L2901:    thread_key: threadKey,) Tj
+T*
+(L2902:    account_login: accountLogin,) Tj
+T*
+(L2903:  }\);) Tj
+T*
+(L2904:  return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };) Tj
+T*
+(L2905:}) Tj
+T*
+(L3919:  async function sendDeltaGreetingNow\({ threadKey, mensagensCliente }\) {) Tj
+T*
+(L3920:    if \(!running || !epochOk\(\)\) return { ok: false, error: "delta_runtime_not_ready" };) Tj
+T*
+(L3921:    const t = String\(threadKey || ""\).trim\(\);) Tj
+T*
+(L3922:    if \(!t\) return { ok: false, error: "missing_thread_key" };) Tj
+T*
+(L3923:) Tj
+T*
+(L3924:    const mensagensConcatenadas = String\(mensagensCliente || ""\).replace\(/\\r/g, ""\).trim\(\);) Tj
+T*
+(L3925:    await enforceGlobalDeltaCooldown\(ACCOUNT_LOGIN\);) Tj
+T*
+(L3926:) Tj
+T*
+(L3927:    const prior = greetingStateByThread.get\(t\) || null;) Tj
+T*
+(L3928:    const greetingAlreadySent = !!\(prior && prior.sentAt\);) Tj
+T*
+(L3929:    const greetingText = String\(\(prior && prior.greetingText\) || generateDeltaGreeting\(\) || ""\).trim\(\);) Tj
+T*
+(L3930:) Tj
+T*
+(L3931:    let itemLinkResolved = false;) Tj
+T*
+(L3932:    let itemLinkResolver = null;) Tj
+T*
+(L3933:    const itemLinkPromise = new Promise\(\(resolve\) => { itemLinkResolver = resolve; }\);) Tj
+T*
+(L3934:    const resolveItemLink = \(link\) => {) Tj
+T*
+(L3935:      if \(itemLinkResolved\) return;) Tj
+T*
+(L3936:      itemLinkResolved = true;) Tj
+T*
+(L3937:      itemLinkResolver\(String\(link || ""\).trim\(\) || null\);) Tj
+T*
+(L3938:    };) Tj
+T*
+(L3939:) Tj
+T*
+(L3940:    const cityCollectionPromise = \(async \(\) => {) Tj
+T*
+(L3941:      const preferredLink = String\(\(prior && prior.itemLink\) || ""\).trim\(\) || null;) Tj
+T*
+(L3942:      const itemLink = preferredLink || \(await itemLinkPromise\);) Tj
+T*
+(L3943:      if \(!itemLink\) return { ok: false, error: "item_link_missing" };) Tj
+T*
+(L3944:      return await collectCityFromItemLinkUsingGlobalCollector\({) Tj
+T*
+(L3945:        itemLink,) Tj
+T*
+(L3946:        threadKey: t,) Tj
+T*
+(L3947:        accountLogin: ACCOUNT_LOGIN,) Tj
+T*
+(L3948:      }\);) Tj
+T*
+(L3949:    }\)\(\).catch\(\(e\) => \({) Tj
+T*
+(L3950:      ok: false,) Tj
+T*
+(L3951:      error: \(e && e.message\) ? String\(e.message\) : "city_collect_exception",) Tj
+T*
+(L3952:    }\)\);) Tj
+T*
+(L3953:) Tj
+T*
+(L3954:    let sendOut = null;) Tj
+T*
+(L3955:    if \(!greetingAlreadySent\) {) Tj
+T*
+(L3956:      sendOut = await sendReplyFlow\({) Tj
+T*
+(L3957:        page,) Tj
+T*
+(L3958:        threadKey: t,) Tj
+T*
+ET
+endstream
+endobj
+36 0 obj
+<< /Length 3051 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L3959:        textoResposta: greetingText,) Tj
+T*
+(L3960:        fromNetworkLead: true,) Tj
+T*
+(L3961:        onItemLink: \(link\) => resolveItemLink\(link\),) Tj
+T*
+(L3962:      }\);) Tj
+T*
+(L3963:      if \(sendOut && sendOut.item_link\) resolveItemLink\(sendOut.item_link\);) Tj
+T*
+(L3964:      else resolveItemLink\(null\);) Tj
+T*
+(L3965:      if \(!sendOut || !sendOut.ok\) {) Tj
+T*
+(L3966:        return { ok: false, error: String\(\(sendOut && sendOut.error\) || "hands_send_failed"\) };) Tj
+T*
+(L3967:      }) Tj
+T*
+(L3968:    } else {) Tj
+T*
+(L3969:      if \(!\(prior && prior.itemLink\)\) {) Tj
+T*
+(L3970:        const openOut = await openThreadAndExtractItemLink\(page, t, { fromNetworkLead: true }\);) Tj
+T*
+(L3971:        if \(openOut && openOut.ok && openOut.item_link\) resolveItemLink\(openOut.item_link\);) Tj
+T*
+(L3972:        else resolveItemLink\(null\);) Tj
+T*
+(L3973:      } else {) Tj
+T*
+(L3974:        resolveItemLink\(prior.itemLink\);) Tj
+T*
+(L3975:      }) Tj
+T*
+(L3976:      sendOut = { ok: true, item_link: \(prior && prior.itemLink\) || null };) Tj
+T*
+(L3977:    }) Tj
+T*
+(L3978:) Tj
+T*
+(L3979:    const cityCollectMaxWaitMs = Math.max\(4_000, Number\(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 8_000\) || 8_000\);) Tj
+T*
+(L3980:    const cityOut = await Promise.race\([) Tj
+T*
+(L3981:      cityCollectionPromise,) Tj
+T*
+(L3982:      sleep\(cityCollectMaxWaitMs\).then\(\(\) => \({ ok: false, error: "city_collect_timeout", timeout_ms: cityCollectMaxWaitMs }\)\),) Tj
+T*
+(L3983:    ]\);) Tj
+T*
+(L3984:) Tj
+T*
+(L3985:    if \(!cityOut || cityOut.ok !== true || !String\(cityOut.cidade || ""\).trim\(\)\) {) Tj
+T*
+(L3986:      const itemLinkToKeep = String\(\(sendOut && sendOut.item_link\) || \(prior && prior.itemLink\) || ""\).trim\(\) || null;) Tj
+T*
+(L3987:      greetingStateByThread.set\(t, {) Tj
+T*
+(L3988:        sentAt: Number\(\(prior && prior.sentAt\) || Date.now\(\)\),) Tj
+T*
+(L3989:        greetingText,) Tj
+T*
+(L3990:        itemLink: itemLinkToKeep,) Tj
+T*
+(L3991:        city: null,) Tj
+T*
+(L3992:        citySource: null,) Tj
+T*
+(L3993:      }\);) Tj
+T*
+(L3994:      return {) Tj
+T*
+(L3995:        ok: false,) Tj
+T*
+(L3996:        error: String\(\(cityOut && cityOut.error\) || "city_collect_failed"\),) Tj
+T*
+(L3997:        greeting_already_sent: true,) Tj
+T*
+(L3998:        greeting_text: greetingText,) Tj
+T*
+(L3999:      };) Tj
+T*
+(L4000:    }) Tj
+T*
+(L4001:) Tj
+T*
+(L4002:    const cityCandidate = String\(cityOut.cidade || ""\).trim\(\);) Tj
+T*
+(L4003:    const citySource = String\(cityOut.city_source || "collector_listing_page"\).trim\(\);) Tj
+T*
+(L4004:    const itemLinkFinal = String\(\(sendOut && sendOut.item_link\) || \(prior && prior.itemLink\) || ""\).trim\(\) || null;) Tj
+T*
+(L4005:) Tj
+T*
+(L4006:    greetingStateByThread.set\(t, {) Tj
+T*
+(L4007:      sentAt: Number\(\(prior && prior.sentAt\) || Date.now\(\)\),) Tj
+T*
+(L4008:      greetingText,) Tj
+T*
+(L4009:      itemLink: itemLinkFinal,) Tj
+T*
+(L4010:      city: cityCandidate,) Tj
+T*
+ET
+endstream
+endobj
+37 0 obj
+<< /Length 2451 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L4011:      citySource,) Tj
+T*
+(L4012:    }\);) Tj
+T*
+(L4013:) Tj
+T*
+(L4014:    let profileUrl = null;) Tj
+T*
+(L4015:    try {) Tj
+T*
+(L4016:      const u = String\(page && page.url ? page.url\(\) : ""\).trim\(\);) Tj
+T*
+(L4017:      if \(u\) profileUrl = u;) Tj
+T*
+(L4018:    } catch \(_\) {}) Tj
+T*
+(L4019:    let nomeClienteLimpo = null;) Tj
+T*
+(L4020:    try { nomeClienteLimpo = await extractLeadClientNameFromFeedDom\(page\); } catch \(_\) {}) Tj
+T*
+(L4021:) Tj
+T*
+(L4022:    const nowTs = Date.now\(\);) Tj
+T*
+(L4023:    writeLastDeltaSendTimestamp\(ACCOUNT_LOGIN, nowTs\);) Tj
+T*
+(L4024:    lastCrossThreadKey = String\(t\);) Tj
+T*
+(L4025:    lastCrossThreadSendAt = nowTs;) Tj
+T*
+(L4026:) Tj
+T*
+(L4027:    return {) Tj
+T*
+(L4028:      ok: true,) Tj
+T*
+(L4029:      cidade: cityCandidate || null,) Tj
+T*
+(L4030:      city_source: citySource,) Tj
+T*
+(L4031:      profile_url: profileUrl,) Tj
+T*
+(L4032:      greeting_text: greetingText,) Tj
+T*
+(L4033:      mensagens_cliente: mensagensConcatenadas,) Tj
+T*
+(L4034:      nome_cliente_limpo: nomeClienteLimpo,) Tj
+T*
+(L4035:      customer_name: nomeClienteLimpo,) Tj
+T*
+(L4036:    };) Tj
+T*
+(L4037:  }) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(## PILAR 4 - Acoplamento de Filas e Proteção Anti-Bloqueio \(`ctrl.virtus`\)) Tj
+T*
+() Tj
+T*
+(### `worker.js` \(`__deltaResolveVirtusRunner`, `__deltaRunHandsGreetingFlow`, dispatch reply IPC\)) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L16006:async function __deltaResolveVirtusRunner\(nome, { need = 'greeting' } = {}\) {) Tj
+T*
+(L16007:  try {) Tj
+T*
+(L16008:    const ctrl = controllers.get\(nome\);) Tj
+T*
+(L16009:    if \(!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.\(\)\) return null;) Tj
+T*
+(L16010:    const needMode = String\(need || ''\).trim\(\).toLowerCase\(\);) Tj
+T*
+(L16011:    const isReplyNeed = needMode === 'reply';) Tj
+T*
+(L16012:    const requiredFn = isReplyNeed ? 'enqueueDeltaReply' : 'enqueueDeltaGreetingFlow';) Tj
+T*
+(L16013:    const resolveRunner = async \(candidate\) => {) Tj
+T*
+(L16014:      try {) Tj
+T*
+(L16015:        return \(candidate && typeof candidate.then === 'function'\)) Tj
+T*
+(L16016:          ? await candidate.catch\(\(\) => null\)) Tj
+T*
+(L16017:          : \(candidate || null\);) Tj
+T*
+(L16018:      } catch {) Tj
+T*
+(L16019:        return null;) Tj
+T*
+(L16020:      }) Tj
+T*
+(L16021:    };) Tj
+T*
+(L16022:) Tj
+T*
+(L16023:    const direct = await resolveRunner\(ctrl.virtus\);) Tj
+T*
+ET
+endstream
+endobj
+38 0 obj
+<< /Length 3256 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L16024:    if \(direct && typeof direct[requiredFn] === 'function'\) return direct;) Tj
+T*
+(L16025:) Tj
+T*
+(L16026:    const networkEvidenceAt = Number\(ctrl.deltaNetworkEvidenceAt || 0\) || 0;) Tj
+T*
+(L16027:    if \(!isReplyNeed && !networkEvidenceAt\) return null;) Tj
+T*
+(L16028:) Tj
+T*
+(L16029:    const pageUrl = \(\(\) => {) Tj
+T*
+(L16030:      try { return String\(ctrl.mainPage && ctrl.mainPage.url ? ctrl.mainPage.url\(\) : ''\).trim\(\).toLowerCase\(\); } catch { return ''; }) Tj
+T*
+(L16031:    }\)\(\);) Tj
+T*
+(L16032:    if \(pageUrl && !/facebook\\.com|messenger\\.com/.test\(pageUrl\)\) return null;) Tj
+T*
+(L16033:) Tj
+T*
+(L16034:    if \(!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function'\) {) Tj
+T*
+(L16035:      loadDeltaVirtusRuntime\(\);) Tj
+T*
+(L16036:    }) Tj
+T*
+(L16037:    if \(!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function'\) return null;) Tj
+T*
+(L16038:) Tj
+T*
+(L16039:    const bypassInterlockForReply = !!isReplyNeed;) Tj
+T*
+(L16040:    const bootInterlockEnabled = String\(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1'\).trim\(\) !== '0';) Tj
+T*
+(L16041:    const bootInterlockHoldMs = Math.max\(3000, Number\(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000\) || 3000\);) Tj
+T*
+(L16042:) Tj
+T*
+(L16043:    ctrl.virtus = deltaVirtus.startVirtusDeltaRuntime\(ctrl.browser, nome, {) Tj
+T*
+(L16044:      epoch: ctrl.virtusEpoch || 0,) Tj
+T*
+(L16045:      slowMode: false,) Tj
+T*
+(L16046:      governorMode: 'full',) Tj
+T*
+(L16047:      restrictTab: 0,) Tj
+T*
+(L16048:      bootReason: 'delta_unified_runtime',) Tj
+T*
+(L16049:      bootInterlockEnabled: bypassInterlockForReply ? false : bootInterlockEnabled,) Tj
+T*
+(L16050:      bootInterlockHoldMs: bypassInterlockForReply ? 0 : bootInterlockHoldMs,) Tj
+T*
+(L16051:      bootInterlockBeforeNavigate: bypassInterlockForReply ? null : \({ page }\) => __deltaPrepareBootInterlockEar\(nome, page\),) Tj
+T*
+(L16052:      bootInterlockIsEarReady: bypassInterlockForReply ? null : \(\) => __deltaIsBootEarReady\(nome\),) Tj
+T*
+(L16053:    }\);) Tj
+T*
+(L16054:    const booted = await resolveRunner\(ctrl.virtus\);) Tj
+T*
+(L16055:    if \(booted && typeof booted[requiredFn] === 'function'\) return booted;) Tj
+T*
+(L16056:    return null;) Tj
+T*
+(L16057:  } catch {) Tj
+T*
+(L16058:    return null;) Tj
+T*
+(L16059:  }) Tj
+T*
+(L16060:}) Tj
+T*
+(L16084:async function __deltaRunHandsGreetingFlow\({ nome, threadKey, mensagensCliente }\) {) Tj
+T*
+(L16085:  const runner = await __deltaResolveVirtusRunner\(nome, { need: 'greeting' }\);) Tj
+T*
+(L16086:  if \(!runner || typeof runner.enqueueDeltaGreetingFlow !== 'function'\) {) Tj
+T*
+(L16087:    return { ok: false, error: 'delta_hands_unavailable' };) Tj
+T*
+(L16088:  }) Tj
+T*
+(L16089:  try {) Tj
+T*
+(L16090:    return await runner.enqueueDeltaGreetingFlow\({) Tj
+T*
+(L16091:      thread_key: String\(threadKey || ''\).trim\(\),) Tj
+T*
+(L16092:      mensagens_cliente: String\(mensagensCliente || ''\)) Tj
+T*
+(L16093:    }\);) Tj
+T*
+(L16094:  } catch \(e\) {) Tj
+T*
+(L16095:    return { ok: false, error: \(e && e.message\) ? e.message : String\(e\) };) Tj
+T*
+(L16096:  }) Tj
+T*
+(L16097:}) Tj
+T*
+(L10528:      const ctrl = controllers.get\(n\);) Tj
+T*
+ET
+endstream
+endobj
+39 0 obj
+<< /Length 2547 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L10529:      if \(!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.\(\)\) {) Tj
+T*
+(L10530:        if \(cmid\) __deltaReplyIngressRelease\(n, cmid\);) Tj
+T*
+(L10531:        return { ok: false, error: 'browser_not_connected' };) Tj
+T*
+(L10532:      }) Tj
+T*
+(L10533:      const runner = await __deltaResolveVirtusRunner\(n, { need: 'reply' }\);) Tj
+T*
+(L10534:      if \(!runner || typeof runner.enqueueDeltaReply !== 'function'\) {) Tj
+T*
+(L10535:        if \(cmid\) __deltaReplyIngressRelease\(n, cmid\);) Tj
+T*
+(L10536:        return { ok: false, error: 'delta_hands_unavailable' };) Tj
+T*
+(L10537:      }) Tj
+T*
+(L10538:      try {) Tj
+T*
+(L10539:        Promise.resolve\(\)) Tj
+T*
+(L10540:          .then\(\(\) => runner.enqueueDeltaReply\({ thread_key: tk, texto_resposta: tr, client_message_id: cmid }\)\)) Tj
+T*
+(L10541:          .then\(\(out\) => {) Tj
+T*
+(L10542:            if \(cmid\) __deltaReplyIngressRelease\(n, cmid\);) Tj
+T*
+(L10543:          }\)) Tj
+T*
+(L10544:          .catch\(\(e\) => {) Tj
+T*
+(L10545:            if \(cmid\) __deltaReplyIngressRelease\(n, cmid\);) Tj
+T*
+(L10546:          }\);) Tj
+T*
+(L10547:      } catch {) Tj
+T*
+(L10548:        if \(cmid\) __deltaReplyIngressRelease\(n, cmid\);) Tj
+T*
+(L10549:      }) Tj
+T*
+(L10550:      return { ok: true, status: 'queued', client_message_id: cmid };) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### `virtusDelta.js` \(`createSerialQueue`, runtime queue única, `enqueueDeltaReply`, `enqueueDeltaGreetingFlow`\)) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L2907:function createSerialQueue\(\) {) Tj
+T*
+(L2908:  let chain = Promise.resolve\(\);) Tj
+T*
+(L2909:  let depth = 0;) Tj
+T*
+(L2910:  let maxDepth = 0;) Tj
+T*
+(L2911:  let lastEnqueueAt = 0;) Tj
+T*
+(L2912:  let lastDequeueAt = 0;) Tj
+T*
+(L2913:  let lastDoneAt = 0;) Tj
+T*
+(L2914:) Tj
+T*
+(L2915:  const enqueue = \(fn\) => {) Tj
+T*
+(L2916:    const enqueuedAt = Date.now\(\);) Tj
+T*
+(L2917:    depth = Math.max\(0, depth + 1\);) Tj
+T*
+(L2918:    maxDepth = Math.max\(maxDepth, depth\);) Tj
+T*
+(L2919:    lastEnqueueAt = enqueuedAt;) Tj
+T*
+(L2920:    chain = chain) Tj
+T*
+(L2921:      .then\(async \(\) => {) Tj
+T*
+(L2922:        lastDequeueAt = Date.now\(\);) Tj
+T*
+(L2923:        try {) Tj
+T*
+(L2924:          return await fn\(\);) Tj
+T*
+(L2925:        } finally {) Tj
+T*
+(L2926:          depth = Math.max\(0, depth - 1\);) Tj
+T*
+(L2927:          lastDoneAt = Date.now\(\);) Tj
+T*
+(L2928:        }) Tj
+T*
+(L2929:      }\)) Tj
+T*
+(L2930:      .catch\(\(\) => {}\);) Tj
+T*
+(L2931:    return chain;) Tj
+T*
+ET
+endstream
+endobj
+40 0 obj
+<< /Length 3216 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2932:  };) Tj
+T*
+(L2933:  enqueue.getDepth = \(\) => depth;) Tj
+T*
+(L2934:  enqueue.getMaxDepth = \(\) => maxDepth;) Tj
+T*
+(L2935:  enqueue.getMeta = \(\) => \({ depth, maxDepth, lastEnqueueAt, lastDequeueAt, lastDoneAt }\);) Tj
+T*
+(L2936:  return enqueue;) Tj
+T*
+(L2937:}) Tj
+T*
+(L3115:  const enqueue = createSerialQueue\(\);) Tj
+T*
+(L3116:  const autoGreetingEnabled = String\(process.env.VIRTUS_DELTA_AUTO_GREETING || "1"\).trim\(\) === "1";) Tj
+T*
+(L3117:  const autoGreetingSentThreads = new Set\(\); // threadKey) Tj
+T*
+(L3118:  const autoGreetingTimers = new Map\(\); // threadKey -> Timeout) Tj
+T*
+(L3119:  const greetingStateByThread = new Map\(\); // threadKey -> { sentAt, greetingText, itemLink, city, citySource }) Tj
+T*
+(L4106:  const enqueueDeltaReply = \({ thread_key, texto_resposta, client_message_id, _requeue_count = 0 } = {}\) => {) Tj
+T*
+(L4107:    return enqueue\(async \(\) => {) Tj
+T*
+(L4108:      try {) Tj
+T*
+(L4109:        const tk = String\(thread_key || ""\).trim\(\);) Tj
+T*
+(L4110:        const tr = String\(texto_resposta || ""\).replace\(/\\r/g, ""\);) Tj
+T*
+(L4111:        const cmid = String\(client_message_id || ""\).trim\(\) || null;) Tj
+T*
+(L4112:        const out = await sendDeltaReplyNow\({ threadKey: tk, textoResposta: tr, clientMessageId: cmid }\);) Tj
+T*
+(L4113:        let requeueScheduled = false;) Tj
+T*
+(L4114:        try {) Tj
+T*
+(L4115:          const ok = !!\(out && out.ok\);) Tj
+T*
+(L4116:          const err = String\(out && out.error || ""\).trim\(\);) Tj
+T*
+(L4117:          const isSelectorLike =) Tj
+T*
+(L4118:            err === "composer_missing" ||) Tj
+T*
+(L4119:            err === "thread_card_not_found" ||) Tj
+T*
+(L4120:            err === "thread_open_hydration_timeout" ||) Tj
+T*
+(L4121:            err === "send_not_confirmed_composer_not_empty" ||) Tj
+T*
+(L4122:            err === "composer_text_not_registered";) Tj
+T*
+(L4123:          const tries = Math.max\(0, Number\(_requeue_count || 0\) || 0\);) Tj
+T*
+(L4124:          if \(!ok && isSelectorLike && tries < 2\) {) Tj
+T*
+(L4125:            const nextCount = tries + 1;) Tj
+T*
+(L4126:            const delayMs = randomBetween\(1200, 2400\);) Tj
+T*
+(L4127:            try {) Tj
+T*
+(L4128:              setTimeout\(\(\) => {) Tj
+T*
+(L4129:                enqueueDeltaReply\({ thread_key: tk, texto_resposta: tr, client_message_id: cmid, _requeue_count: nextCount }\)) Tj
+T*
+(L4130:                  .catch\(\(\) => {}\);) Tj
+T*
+(L4131:              }, delayMs\).unref?.\(\);) Tj
+T*
+(L4132:              requeueScheduled = true;) Tj
+T*
+(L4133:            } catch \(_\) {}) Tj
+T*
+(L4134:          }) Tj
+T*
+(L4135:        } catch \(_\) {}) Tj
+T*
+(L4136:        if \(requeueScheduled\) return out;) Tj
+T*
+(L4137:        return out;) Tj
+T*
+(L4138:      } catch \(e\) {) Tj
+T*
+(L4139:        return { ok: false, error: e && e.message ? e.message : String\(e\) };) Tj
+T*
+(L4140:      }) Tj
+T*
+(L4141:    }\);) Tj
+T*
+(L4142:  };) Tj
+T*
+(L4183:  const enqueueDeltaGreetingFlow = \({ thread_key, mensagens_cliente }\) => {) Tj
+T*
+(L4184:    return enqueue\(async \(\) => {) Tj
+T*
+(L4185:      try {) Tj
+T*
+(L4186:        return await sendDeltaGreetingNow\({) Tj
+T*
+ET
+endstream
+endobj
+41 0 obj
+<< /Length 2666 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L4187:          threadKey: thread_key,) Tj
+T*
+(L4188:          mensagensCliente: mensagens_cliente,) Tj
+T*
+(L4189:        }\);) Tj
+T*
+(L4190:      } catch \(e\) {) Tj
+T*
+(L4191:        return { ok: false, error: e && e.message ? e.message : String\(e\) };) Tj
+T*
+(L4192:      }) Tj
+T*
+(L4193:    }\);) Tj
+T*
+(L4194:  };) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(## BLOCO CRU POS-REPARO - Instrumentacao e Interlock) Tj
+T*
+() Tj
+T*
+(### `worker.js` - barramento isolado + enqueue/pump sequencial) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L16:const FORENSIC_TRIAGEM_LOG_PATH = path.join\(__dirname, '..', 'dados', 'forensic_triagem.log'\);) Tj
+T*
+(L76:const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling \(circular\)) Tj
+T*
+(L77:function __triagemCircularAppendSync\(signature, details = null\) {) Tj
+T*
+(L78:  try {) Tj
+T*
+(L79:    const sig = String\(signature || ''\).trim\(\);) Tj
+T*
+(L80:    if \(!sig\) return false;) Tj
+T*
+(L81:    const fp = String\(FORENSIC_TRIAGEM_LOG_PATH || ''\).trim\(\);) Tj
+T*
+(L82:    if \(!fp\) return false;) Tj
+T*
+(L83:    const payload = \(details && typeof details === 'object'\)) Tj
+T*
+(L84:      ? { ...details }) Tj
+T*
+(L85:      : { message: String\(details || ''\) };) Tj
+T*
+(L86:    const line = `[${sig}] ${JSON.stringify\({ timestamp: Date.now\(\), ...payload }\)}\\n`;) Tj
+T*
+(L87:    const lineBytes = Buffer.byteLength\(line, 'utf8'\);) Tj
+T*
+(L88:    try { fs.mkdirSync\(path.dirname\(fp\), { recursive: true }\); } catch {}) Tj
+T*
+(L89:) Tj
+T*
+(L90:    let currentSize = 0;) Tj
+T*
+(L91:    try {) Tj
+T*
+(L92:      if \(fs.existsSync\(fp\)\) {) Tj
+T*
+(L93:        const st = fs.statSync\(fp\);) Tj
+T*
+(L94:        currentSize = Number\(st && st.size || 0\) || 0;) Tj
+T*
+(L95:      }) Tj
+T*
+(L96:    } catch {}) Tj
+T*
+(L97:) Tj
+T*
+(L98:    if \(\(currentSize + lineBytes\) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES\) {) Tj
+T*
+(L99:      const keepBytes = Math.max\(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes\);) Tj
+T*
+(L100:      let tail = '';) Tj
+T*
+(L101:      if \(keepBytes > 0 && currentSize > 0\) {) Tj
+T*
+(L102:        let fd = null;) Tj
+T*
+(L103:        try {) Tj
+T*
+(L104:          fd = fs.openSync\(fp, 'r'\);) Tj
+T*
+(L105:          const start = Math.max\(0, currentSize - keepBytes\);) Tj
+T*
+(L106:          const toRead = Math.max\(0, currentSize - start\);) Tj
+T*
+(L107:          if \(toRead > 0\) {) Tj
+T*
+(L108:            const buf = Buffer.allocUnsafe\(toRead\);) Tj
+T*
+(L109:            const got = fs.readSync\(fd, buf, 0, toRead, start\);) Tj
+T*
+(L110:            tail = buf.slice\(0, Math.max\(0, got\)\).toString\('utf8'\);) Tj
+T*
+(L111:          }) Tj
+T*
+ET
+endstream
+endobj
+42 0 obj
+<< /Length 2520 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L112:        } catch {) Tj
+T*
+(L113:          tail = '';) Tj
+T*
+(L114:        } finally {) Tj
+T*
+(L115:          try { if \(fd\) fs.closeSync\(fd\); } catch {}) Tj
+T*
+(L116:        }) Tj
+T*
+(L117:      }) Tj
+T*
+(L118:      fs.writeFileSync\(fp, tail + line, 'utf8'\);) Tj
+T*
+(L119:      return true;) Tj
+T*
+(L120:    }) Tj
+T*
+(L121:) Tj
+T*
+(L122:    fs.appendFileSync\(fp, line, 'utf8'\);) Tj
+T*
+(L123:    return true;) Tj
+T*
+(L124:  } catch {) Tj
+T*
+(L125:    return false;) Tj
+T*
+(L126:  }) Tj
+T*
+(L127:}) Tj
+T*
+(L128:function __deltaLogTriagemWorker\(details = null\) {) Tj
+T*
+(L129:  return __triagemCircularAppendSync\('FORENSIC_TRIAGEM_WORKER', details\);) Tj
+T*
+(L130:}) Tj
+T*
+(L15108:function __deltaEnqueueNewLeadTimerToDiskSync\({ nome, thread_key, dueAt, delayMs, forceEnqueue = false, queueLane = 'primary', retryReason = null } = {}\) {) Tj
+T*
+(L15109:  try {) Tj
+T*
+(L15110:    const n = String\(nome || ''\).trim\(\);) Tj
+T*
+(L15111:    const tk = String\(thread_key || ''\).trim\(\);) Tj
+T*
+(L15112:    if \(!n || !tk\) return false;) Tj
+T*
+(L15113:    if \(!forceEnqueue && !__deltaCanEnqueueNewLeadTimerFromDiskSync\(n, tk\)\) return false;) Tj
+T*
+(L15114:    if \(__deltaHasPendingNewLeadTimerOnDiskSync\(n, tk\)\) return false;) Tj
+T*
+(L15115:    __deltaEnsureNewLeadsQueueDirsSync\(n\);) Tj
+T*
+(L15116:    const rec = {) Tj
+T*
+(L15117:      ts: Date.now\(\),) Tj
+T*
+(L15118:      type: 'new_lead_timer',) Tj
+T*
+(L15119:      nome: n,) Tj
+T*
+(L15120:      thread_key: tk,) Tj
+T*
+(L15121:      delayMs: Math.max\(0, Number\(delayMs || 0\) || 0\),) Tj
+T*
+(L15122:      dueAt: Math.max\(0, Number\(dueAt || 0\) || 0\),) Tj
+T*
+(L15123:      queue_lane: String\(queueLane || 'primary'\).trim\(\) || 'primary',) Tj
+T*
+(L15124:      retry_reason: String\(retryReason || ''\).trim\(\) || null,) Tj
+T*
+(L15125:    };) Tj
+T*
+(L15126:    fs.appendFileSync\(__deltaNewLeadsOutboxPath\(n\), JSON.stringify\(rec\) + '\\n', 'utf8'\);) Tj
+T*
+(L15127:    try {) Tj
+T*
+(L15128:      __deltaLogTriagemWorker\({) Tj
+T*
+(L15129:        event: 'timer_enqueued_in_reservoir',) Tj
+T*
+(L15130:        account_login: n,) Tj
+T*
+(L15131:        thread_key: tk,) Tj
+T*
+(L15132:        due_at: Number\(rec && rec.dueAt || 0\) || 0,) Tj
+T*
+(L15133:        queue_lane: String\(rec && rec.queue_lane || ''\),) Tj
+T*
+(L15134:      }\);) Tj
+T*
+(L15135:    } catch {}) Tj
+T*
+(L15136:    return true;) Tj
+T*
+(L15137:  } catch {) Tj
+T*
+(L15138:    return false;) Tj
+T*
+(L15139:  }) Tj
+T*
+(L15140:}) Tj
+T*
+ET
+endstream
+endobj
+43 0 obj
+<< /Length 2954 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L15188:async function __deltaRunNewLeadsTimerPump\(nome\) {) Tj
+T*
+(L15189:  const n = String\(nome || ''\).trim\(\);) Tj
+T*
+(L15190:  if \(!n\) return;) Tj
+T*
+(L15191:  if \(__deltaNewLeadsTimerInFlight.has\(n\)\) return; // 1 timer por vez POR CONTA) Tj
+T*
+(L15192:  try {) Tj
+T*
+(L15193:    const outbox = __deltaNewLeadsOutboxPath\(n\);) Tj
+T*
+(L15194:    if \(!fs.existsSync\(outbox\)\) return;) Tj
+T*
+(L15195:    const cursor = __deltaReadNewLeadsCursorSync\(n\);) Tj
+T*
+(L15196:    const offset = Math.max\(0, Number\(cursor && cursor.offset || 0\) || 0\);) Tj
+T*
+(L15254:      const handle = setTimeout\(\(\) => {) Tj
+T*
+(L15255:        __deltaNewLeadsTimerInFlight.delete\(n\);) Tj
+T*
+(L15256:        try {) Tj
+T*
+(L15257:          __deltaLogTriagemWorker\({) Tj
+T*
+(L15258:            event: 'timer_expired_dispatching_downstream',) Tj
+T*
+(L15259:            account_login: n,) Tj
+T*
+(L15260:            thread_key: tk,) Tj
+T*
+(L15261:            due_at: dueAt || null,) Tj
+T*
+(L15262:          }\);) Tj
+T*
+(L15263:        } catch {}) Tj
+T*
+(L15282:        // Downstream: dispara a ação no pipeline soberano \(ctrl.virtus\) em background.) Tj
+T*
+(L15283:        try {) Tj
+T*
+(L15284:          Promise.resolve\(\)) Tj
+T*
+(L15285:            .then\(\(\) => __deltaHandleBufferedThreadTimer\(n, tk, { reason: 'initial' }\)\)) Tj
+T*
+(L15286:            .catch\(\(\) => {}\)) Tj
+T*
+(L15287:            .finally\(\(\) => {) Tj
+T*
+(L15288:              try { __deltaKickNewLeadsTimerPump\(n\); } catch {}) Tj
+T*
+(L15289:            }\);) Tj
+T*
+(L15290:        } catch {) Tj
+T*
+(L15291:          try { __deltaKickNewLeadsTimerPump\(n\); } catch {}) Tj
+T*
+(L15292:        }) Tj
+T*
+(L15293:      }, Math.max\(0, remainMs\)\);) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+(### `virtusDelta.js` - barramento DOM + corte de fallback por teclado em `openThreadByClick`) Tj
+T*
+() Tj
+T*
+(```txt) Tj
+T*
+(L11:const FORENSIC_TRIAGEM_LOG_PATH = path.join\(__dirname, "..", "dados", "forensic_triagem.log"\);) Tj
+T*
+(L75:const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling \(circular\)) Tj
+T*
+(L76:function __triagemCircularAppendSync\(signature, details = null\) {) Tj
+T*
+(L77:  try {) Tj
+T*
+(L78:    const sig = String\(signature || ""\).trim\(\);) Tj
+T*
+(L79:    if \(!sig\) return false;) Tj
+T*
+(L80:    const fp = String\(FORENSIC_TRIAGEM_LOG_PATH || ""\).trim\(\);) Tj
+T*
+(L81:    if \(!fp\) return false;) Tj
+T*
+(L82:    const payload = \(details && typeof details === "object"\)) Tj
+T*
+(L83:      ? { ...details }) Tj
+T*
+(L84:      : { message: String\(details || ""\) };) Tj
+T*
+(L85:    const line = `[${sig}] ${JSON.stringify\({ timestamp: Date.now\(\), ...payload }\)}\\n`;) Tj
+T*
+(L86:    const lineBytes = Buffer.byteLength\(line, "utf8"\);) Tj
+T*
+(L87:    try { fsSync.mkdirSync\(path.dirname\(fp\), { recursive: true }\); } catch \(_\) {}) Tj
+T*
+(L88:    let currentSize = 0;) Tj
+T*
+(L89:    try {) Tj
+T*
+ET
+endstream
+endobj
+44 0 obj
+<< /Length 2714 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L90:      if \(fsSync.existsSync\(fp\)\) {) Tj
+T*
+(L91:        const st = fsSync.statSync\(fp\);) Tj
+T*
+(L92:        currentSize = Number\(st && st.size || 0\) || 0;) Tj
+T*
+(L93:      }) Tj
+T*
+(L94:    } catch \(_\) {}) Tj
+T*
+(L95:    if \(\(currentSize + lineBytes\) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES\) {) Tj
+T*
+(L96:      const keepBytes = Math.max\(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes\);) Tj
+T*
+(L97:      let tail = "";) Tj
+T*
+(L98:      if \(keepBytes > 0 && currentSize > 0\) {) Tj
+T*
+(L99:        let fd = null;) Tj
+T*
+(L100:        try {) Tj
+T*
+(L101:          fd = fsSync.openSync\(fp, "r"\);) Tj
+T*
+(L102:          const start = Math.max\(0, currentSize - keepBytes\);) Tj
+T*
+(L103:          const toRead = Math.max\(0, currentSize - start\);) Tj
+T*
+(L104:          if \(toRead > 0\) {) Tj
+T*
+(L105:            const buf = Buffer.allocUnsafe\(toRead\);) Tj
+T*
+(L106:            const got = fsSync.readSync\(fd, buf, 0, toRead, start\);) Tj
+T*
+(L107:            tail = buf.slice\(0, Math.max\(0, got\)\).toString\("utf8"\);) Tj
+T*
+(L108:          }) Tj
+T*
+(L109:        } catch \(_\) {) Tj
+T*
+(L110:          tail = "";) Tj
+T*
+(L111:        } finally {) Tj
+T*
+(L112:          try { if \(fd\) fsSync.closeSync\(fd\); } catch \(_\) {}) Tj
+T*
+(L113:        }) Tj
+T*
+(L114:      }) Tj
+T*
+(L115:      fsSync.writeFileSync\(fp, tail + line, "utf8"\);) Tj
+T*
+(L116:      return true;) Tj
+T*
+(L117:    }) Tj
+T*
+(L118:    fsSync.appendFileSync\(fp, line, "utf8"\);) Tj
+T*
+(L119:    return true;) Tj
+T*
+(L120:  } catch \(_\) {) Tj
+T*
+(L121:    return false;) Tj
+T*
+(L122:  }) Tj
+T*
+(L123:}) Tj
+T*
+(L127:function __deltaLogTriagemDom\(details = null\) {) Tj
+T*
+(L128:  return __triagemCircularAppendSync\("FORENSIC_TRIAGEM_DOM", details\);) Tj
+T*
+(L129:}) Tj
+T*
+(L2332:async function openThreadByClick\(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}\) {) Tj
+T*
+(L2333:  const t = String\(threadKey || ""\).trim\(\);) Tj
+T*
+(L2334:  if \(!t\) throw new Error\("thread_key_empty"\);) Tj
+T*
+(L2335:  try {) Tj
+T*
+(L2336:    const urlInicial = String\(page && page.url ? page.url\(\) : ""\).trim\(\) || null;) Tj
+T*
+(L2337:    __deltaLogTriagemDom\({) Tj
+T*
+(L2338:      stage: "automation_start",) Tj
+T*
+(L2339:      thread_key: t,) Tj
+T*
+(L2340:      url_inicial: urlInicial,) Tj
+T*
+(L2341:    }\);) Tj
+T*
+(L2342:  } catch \(_\) {}) Tj
+T*
+(L2470:        const points = \(clickPlan && clickPlan.ok && Array.isArray\(clickPlan.points\)\) ? clickPlan.points : [];) Tj
+T*
+(L2471:        for \(const p of points.slice\(0, 2\)\) {) Tj
+T*
+(L2472:          const px = Number\(p && p.x\);) Tj
+T*
+(L2473:          const py = Number\(p && p.y\);) Tj
+T*
+ET
+endstream
+endobj
+45 0 obj
+<< /Length 2574 >>
+stream
+BT
+/F1 10 Tf
+50 770 Td
+13 TL
+(L2474:          if \(!Number.isFinite\(px\) || !Number.isFinite\(py\)\) continue;) Tj
+T*
+(L2475:          try {) Tj
+T*
+(L2476:            await page.mouse.move\(px, py, { steps: 6 }\);) Tj
+T*
+(L2477:            await page.mouse.click\(px, py, { delay: 100 }\);) Tj
+T*
+(L2478:          } catch \(_\) {) Tj
+T*
+(L2479:            continue;) Tj
+T*
+(L2480:          }) Tj
+T*
+(L2496:          try {) Tj
+T*
+(L2497:            await page.waitForFunction\() Tj
+T*
+(L2498:              \(threadId\) => {) Tj
+T*
+(L2499:                const path = String\(location.pathname || ""\);) Tj
+T*
+(L2500:                return path.includes\("/messages"\) && path.includes\(`/t/${threadId}`\);) Tj
+T*
+(L2501:              },) Tj
+T*
+(L2502:              { timeout: 1800 },) Tj
+T*
+(L2503:              t) Tj
+T*
+(L2504:            \);) Tj
+T*
+(L2505:            openedByNavigation = true;) Tj
+T*
+(L2506:            break;) Tj
+T*
+(L2507:          } catch \(_\) {}) Tj
+T*
+(L2508:        }) Tj
+T*
+(L2509:        if \(!openedByNavigation\) {) Tj
+T*
+(L2510:          try {) Tj
+T*
+(L2511:            __deltaLogTriagemDom\({) Tj
+T*
+(L2512:              stage: "bounding_click_failed_abort",) Tj
+T*
+(L2513:              thread_key: t,) Tj
+T*
+(L2514:              selector: cardSelector,) Tj
+T*
+(L2515:              scrolled: i,) Tj
+T*
+(L2516:              retry_queue_hint: "async_disk_retry",) Tj
+T*
+(L2517:            }\);) Tj
+T*
+(L2518:          } catch \(_\) {}) Tj
+T*
+(L2519:          return {) Tj
+T*
+(L2520:            ok: false,) Tj
+T*
+(L2521:            error: "thread_card_not_found",) Tj
+T*
+(L2522:            scrolled: i,) Tj
+T*
+(L2523:            matched_selector: cardSelector,) Tj
+T*
+(L2524:            retry_queue_hint: "async_disk_retry") Tj
+T*
+(L2525:          };) Tj
+T*
+(L2526:        }) Tj
+T*
+(L2529:          // Regra rígida: após clicar no card \(chat fechado\), aguardar hidratação do composer Lexical.) Tj
+T*
+(L2530:          await page.waitForSelector\('div[data-lexical-editor="true"]', { timeout: 5000 }\);) Tj
+T*
+(L2531:          try {) Tj
+T*
+(L2532:            const urlFinal = String\(page && page.url ? page.url\(\) : ""\).trim\(\) || null;) Tj
+T*
+(L2533:            __deltaLogTriagemDom\({) Tj
+T*
+(L2534:              stage: "composer_hydration_success",) Tj
+T*
+(L2535:              thread_key: t,) Tj
+T*
+(L2536:              selector: cardSelector,) Tj
+T*
+(L2537:              scrolled: i,) Tj
+T*
+(L2538:              url_final: urlFinal,) Tj
+T*
+(L2539:            }\);) Tj
+T*
+(L2540:          } catch \(_\) {}) Tj
+T*
+(```) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+xref
+0 46
+0000000000 65535 f 
+0000000030 00000 n 
+0000000079 00000 n 
+0000000274 00000 n 
+0000000371 00000 n 
+0000000498 00000 n 
+0000000625 00000 n 
+0000000752 00000 n 
+0000000879 00000 n 
+0000001006 00000 n 
+0000001133 00000 n 
+0000001261 00000 n 
+0000001389 00000 n 
+0000001517 00000 n 
+0000001645 00000 n 
+0000001773 00000 n 
+0000001901 00000 n 
+0000002029 00000 n 
+0000002157 00000 n 
+0000002285 00000 n 
+0000002413 00000 n 
+0000002541 00000 n 
+0000002669 00000 n 
+0000002797 00000 n 
+0000002925 00000 n 
+0000003053 00000 n 
+0000005927 00000 n 
+0000009483 00000 n 
+0000012318 00000 n 
+0000015203 00000 n 
+0000018431 00000 n 
+0000021277 00000 n 
+0000023892 00000 n 
+0000027231 00000 n 
+0000030244 00000 n 
+0000032953 00000 n 
+0000035963 00000 n 
+0000039066 00000 n 
+0000041569 00000 n 
+0000044877 00000 n 
+0000047476 00000 n 
+0000050744 00000 n 
+0000053462 00000 n 
+0000056034 00000 n 
+0000059040 00000 n 
+0000061806 00000 n 
+trailer
+<< /Size 46 /Root 1 0 R >>
+startxref
+64432
+%%EOF

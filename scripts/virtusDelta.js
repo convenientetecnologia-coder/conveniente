@@ -8,6 +8,7 @@ const crypto = require("crypto");
 // console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_edge.log");
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, "..", "dados", "leads_brutos.jsonl");
+const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_triagem.log");
 
 const FORENSIC_EDGE_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (RAM constante)
 function __rotateForensicFileIfNeededSync(fp) {
@@ -70,6 +71,61 @@ function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_sta
     flow_stage: String(flow_stage || "").trim(),
     details: details
   });
+}
+const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (circular)
+function __triagemCircularAppendSync(signature, details = null) {
+  try {
+    const sig = String(signature || "").trim();
+    if (!sig) return false;
+    const fp = String(FORENSIC_TRIAGEM_LOG_PATH || "").trim();
+    if (!fp) return false;
+    const payload = (details && typeof details === "object")
+      ? { ...details }
+      : { message: String(details || "") };
+    const line = `[${sig}] ${JSON.stringify({ timestamp: Date.now(), ...payload })}\n`;
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    try { fsSync.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
+
+    let currentSize = 0;
+    try {
+      if (fsSync.existsSync(fp)) {
+        const st = fsSync.statSync(fp);
+        currentSize = Number(st && st.size || 0) || 0;
+      }
+    } catch (_) {}
+
+    if ((currentSize + lineBytes) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES) {
+      const keepBytes = Math.max(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes);
+      let tail = "";
+      if (keepBytes > 0 && currentSize > 0) {
+        let fd = null;
+        try {
+          fd = fsSync.openSync(fp, "r");
+          const start = Math.max(0, currentSize - keepBytes);
+          const toRead = Math.max(0, currentSize - start);
+          if (toRead > 0) {
+            const buf = Buffer.allocUnsafe(toRead);
+            const got = fsSync.readSync(fd, buf, 0, toRead, start);
+            tail = buf.slice(0, Math.max(0, got)).toString("utf8");
+          }
+        } catch (_) {
+          tail = "";
+        } finally {
+          try { if (fd) fsSync.closeSync(fd); } catch (_) {}
+        }
+      }
+      fsSync.writeFileSync(fp, tail + line, "utf8");
+      return true;
+    }
+
+    fsSync.appendFileSync(fp, line, "utf8");
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function __deltaLogTriagemDom(details = null) {
+  return __triagemCircularAppendSync("FORENSIC_TRIAGEM_DOM", details);
 }
 
 let puppeteer = null;
@@ -2276,6 +2332,14 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
 async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
+  try {
+    const urlInicial = String(page && page.url ? page.url() : "").trim() || null;
+    __deltaLogTriagemDom({
+      stage: "automation_start",
+      thread_key: t,
+      url_inicial: urlInicial,
+    });
+  } catch (_) {}
 
   const isStable = await waitForMessagesBootStable(page, "agent_outbox_hydration_check").catch(() => false);
   if (!isStable) {
@@ -2444,39 +2508,36 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
         }
         if (!openedByNavigation) {
           try {
-            await cardElement.focus().catch(() => {});
-            await page.keyboard.press("Enter").catch(() => {});
-            await page.waitForFunction(
-              (threadId) => {
-                const path = String(location.pathname || "");
-                return path.includes("/messages") && path.includes(`/t/${threadId}`);
-              },
-              { timeout: 1500 },
-              t
-            ).catch(() => {});
-            openedByNavigation = await page.evaluate((threadId) => {
-              const p = String(location.pathname || "");
-              return p.includes("/messages") && p.includes(`/t/${threadId}`);
-            }, t).catch(() => false);
-            try {
-              __forensicEdgeEmit({
-                account_login: forensicAccountLogin,
-                thread_key: t,
-                flow_stage: "dom_automation_tracking",
-                details: {
-                  action: "open_thread_keyboard_enter",
-                  selector: cardSelector,
-                  scrolled: i,
-                  opened_by_navigation: !!openedByNavigation,
-                }
-              });
-            } catch (_) {}
+            __deltaLogTriagemDom({
+              stage: "bounding_click_failed_abort",
+              thread_key: t,
+              selector: cardSelector,
+              scrolled: i,
+              retry_queue_hint: "async_disk_retry",
+            });
           } catch (_) {}
+          return {
+            ok: false,
+            error: "thread_card_not_found",
+            scrolled: i,
+            matched_selector: cardSelector,
+            retry_queue_hint: "async_disk_retry"
+          };
         }
         await humanPause("postThreadOpen", "post_thread_card_click");
         try {
           // Regra rígida: após clicar no card (chat fechado), aguardar hidratação do composer Lexical.
           await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+          try {
+            const urlFinal = String(page && page.url ? page.url() : "").trim() || null;
+            __deltaLogTriagemDom({
+              stage: "composer_hydration_success",
+              thread_key: t,
+              selector: cardSelector,
+              scrolled: i,
+              url_final: urlFinal,
+            });
+          } catch (_) {}
         } catch (_) {
           try {
             const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
@@ -2493,6 +2554,14 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
                 timeout_ms: 5000,
                 ts_ms: Date.now()
               }
+            });
+          } catch (_) {}
+          try {
+            __deltaLogTriagemDom({
+              stage: "composer_hydration_timeout",
+              thread_key: t,
+              selector: cardSelector,
+              scrolled: i,
             });
           } catch (_) {}
           return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: cardSelector };
