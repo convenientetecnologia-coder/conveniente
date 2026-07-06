@@ -2472,26 +2472,155 @@ async function __deltaEnforceSidebarResetToTop(page, { threadKey = null, forensi
   if (!page) return { ok: false, error: "missing_page" };
   const t = String(threadKey || "").trim() || null;
   const out = await page.evaluate(() => {
-    const grids = Array.from(document.querySelectorAll('div[role="grid"]'));
-    if (!grids.length) return { ok: false, reason: "grid_not_found", grid_count: 0 };
-    const target = grids.find((el) => {
-      try {
-        const r = el.getBoundingClientRect();
-        return !!(r && r.width > 4 && r.height > 4);
-      } catch (_) {
-        return false;
-      }
-    }) || grids[0];
-    try {
-      target.scrollTop = 0;
-      target.dispatchEvent(new Event("scroll", { bubbles: false }));
-    } catch (_) {}
-    return {
-      ok: true,
-      grid_count: grids.length,
-      scroll_top: Number(target && target.scrollTop || 0) || 0
+    const THREAD_LINK_SELECTOR = 'a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"]';
+    const gridCount = document.querySelectorAll('div[role="grid"]').length;
+    const anchorCount = document.querySelectorAll(THREAD_LINK_SELECTOR).length;
+
+    const isScrollable = (el) => {
+      if (!el || el === document.body || el === document.documentElement) return false;
+      const style = window.getComputedStyle(el);
+      const overflowY = String((style && (style.overflowY || style.overflow)) || "");
+      if (!/(auto|scroll|overlay)/i.test(overflowY)) return false;
+      const ch = Number(el.clientHeight || 0) || 0;
+      const sh = Number(el.scrollHeight || 0) || 0;
+      if (ch < 80) return false;
+      if (sh <= ch + 10) return false;
+      return true;
     };
-  }).catch(() => ({ ok: false, reason: "evaluate_failed", grid_count: 0 }));
+
+    const scoreCandidate = (el) => {
+      let score = 0;
+      let threadCount = 0;
+      let virtualizedDescCount = 0;
+      let directVirtualizedChildren = 0;
+      try { threadCount = el.querySelectorAll(THREAD_LINK_SELECTOR).length; } catch (_) {}
+      try { virtualizedDescCount = el.querySelectorAll("[data-virtualized]").length; } catch (_) {}
+      try { directVirtualizedChildren = el.querySelectorAll(':scope > div[data-virtualized]').length; } catch (_) {}
+      if (threadCount < 2) return null;
+      score += Math.min(40, threadCount);
+      score += Math.min(30, virtualizedDescCount * 6);
+      score += Math.min(30, directVirtualizedChildren * 15);
+      if (el.querySelector('div[role="row"]')) score += 20;
+      if (el.querySelector('a[aria-current="page"]')) score += 15;
+      score += Math.min(40, Math.round((Number(el.scrollHeight || 0) - Number(el.clientHeight || 0)) / 120));
+      return {
+        score,
+        thread_count: threadCount,
+        virtualized_desc_count: virtualizedDescCount,
+        direct_virtualized_children: directVirtualizedChildren
+      };
+    };
+
+    const candidates = [];
+    const seen = new Set();
+    const pushCandidate = (el, via) => {
+      if (!isScrollable(el)) return;
+      if (seen.has(el)) return;
+      const scored = scoreCandidate(el);
+      if (!scored) return;
+      seen.add(el);
+      const tag = String((el && el.tagName) || "div").toLowerCase();
+      const classNameRaw = String((el && el.className) || "").trim();
+      const className = classNameRaw ? classNameRaw.split(/\s+/).slice(0, 6).join(".") : "";
+      candidates.push({
+        el,
+        via,
+        score: Number(scored.score || 0) || 0,
+        thread_count: Number(scored.thread_count || 0) || 0,
+        virtualized_desc_count: Number(scored.virtualized_desc_count || 0) || 0,
+        direct_virtualized_children: Number(scored.direct_virtualized_children || 0) || 0,
+        target_signature: className ? `${tag}.${className}` : tag
+      });
+    };
+
+    const anchors = Array.from(document.querySelectorAll(THREAD_LINK_SELECTOR));
+    for (const anchor of anchors.slice(0, 80)) {
+      let node = anchor;
+      let hops = 0;
+      while (node && node !== document.body && hops < 16) {
+        node = node.parentElement;
+        if (!node) break;
+        pushCandidate(node, "anchor_ancestor");
+        hops += 1;
+      }
+    }
+
+    const virtualizedNodes = Array.from(document.querySelectorAll("[data-virtualized], div[role='row']"));
+    for (const base of virtualizedNodes.slice(0, 160)) {
+      let node = base;
+      let hops = 0;
+      while (node && node !== document.body && hops < 10) {
+        node = node.parentElement;
+        if (!node) break;
+        pushCandidate(node, "virtualized_ancestor");
+        hops += 1;
+      }
+    }
+
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.direct_virtualized_children !== a.direct_virtualized_children) {
+        return b.direct_virtualized_children - a.direct_virtualized_children;
+      }
+      return b.thread_count - a.thread_count;
+    });
+
+    const target = candidates.length ? candidates[0] : null;
+    const tryResetTop = (el) => {
+      if (!el || !isScrollable(el)) return { applied: false, before: 0, after: 0 };
+      const before = Number(el.scrollTop || 0) || 0;
+      try { el.scrollTop = 0; } catch (_) {}
+      try {
+        if (typeof el.scrollTo === "function") {
+          el.scrollTo({ top: 0, left: 0, behavior: "instant" });
+        }
+      } catch (_) {
+        try { el.scrollTo(0, 0); } catch (_) {}
+      }
+      try { el.dispatchEvent(new Event("scroll", { bubbles: true })); } catch (_) {}
+      const after = Number(el.scrollTop || 0) || 0;
+      return {
+        applied: after === 0 || before !== after,
+        before,
+        after
+      };
+    };
+
+    const chain = [];
+    if (target && target.el) {
+      chain.push(target.el);
+      let node = target.el.parentElement;
+      let hops = 0;
+      while (node && node !== document.body && hops < 3) {
+        chain.push(node);
+        node = node.parentElement;
+        hops += 1;
+      }
+    }
+    const outcomes = chain.map((el) => tryResetTop(el));
+    const applied = outcomes.find((x) => x && x.applied && x.after === 0) || outcomes.find((x) => x && x.applied) || null;
+    if (!target) {
+      return {
+        ok: false,
+        reason: "scroll_container_not_found",
+        grid_count: gridCount,
+        anchor_count: anchorCount,
+        candidate_count: 0
+      };
+    }
+    return {
+      ok: !!applied,
+      reason: applied ? "scroll_reset_applied" : "scroll_reset_not_applied",
+      grid_count: gridCount,
+      anchor_count: anchorCount,
+      candidate_count: candidates.length,
+      selected_via: String(target.via || "unknown"),
+      selected_signature: String(target.target_signature || "unknown"),
+      selected_score: Number(target.score || 0) || 0,
+      scroll_top: Number(applied && applied.after || 0) || 0,
+      scroll_top_before: Number(applied && applied.before || 0) || 0
+    };
+  }).catch(() => ({ ok: false, reason: "evaluate_failed", grid_count: 0, anchor_count: 0, candidate_count: 0 }));
   try {
     __deltaLogTriagemDom({
       stage: "sidebar_reset_to_top",
@@ -2499,6 +2628,11 @@ async function __deltaEnforceSidebarResetToTop(page, { threadKey = null, forensi
       reason: String(reason || "task_success"),
       ok: !!(out && out.ok),
       grid_count: Number(out && out.grid_count || 0) || 0,
+      anchor_count: Number(out && out.anchor_count || 0) || 0,
+      candidate_count: Number(out && out.candidate_count || 0) || 0,
+      selected_via: String(out && out.selected_via || "n/a"),
+      selected_signature: String(out && out.selected_signature || "n/a"),
+      dom_reason: String(out && out.reason || "unknown"),
     });
   } catch (_) {}
   try {
@@ -2511,6 +2645,11 @@ async function __deltaEnforceSidebarResetToTop(page, { threadKey = null, forensi
         reason: String(reason || "task_success"),
         ok: !!(out && out.ok),
         grid_count: Number(out && out.grid_count || 0) || 0,
+        anchor_count: Number(out && out.anchor_count || 0) || 0,
+        candidate_count: Number(out && out.candidate_count || 0) || 0,
+        selected_via: String(out && out.selected_via || "n/a"),
+        selected_signature: String(out && out.selected_signature || "n/a"),
+        dom_reason: String(out && out.reason || "unknown"),
         ts_ms: Date.now()
       }
     });
