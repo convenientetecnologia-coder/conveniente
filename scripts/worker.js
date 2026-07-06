@@ -14985,8 +14985,8 @@ const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensag
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
-const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
-const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
@@ -15360,13 +15360,14 @@ async function __deltaRunNewLeadsTimerPump(nome) {
           }));
         } catch {}
         // Downstream: dispara a ação no pipeline soberano (ctrl.virtus) em background.
+        // Regra enterprise: desacoplar totalmente a fila de espera (1–2 min)
+        // da fila de ação das mãos. O próximo timer deve começar IMEDIATAMENTE
+        // após consumir este item da represa, sem aguardar execução de DOM.
         try {
           Promise.resolve()
             .then(() => __deltaHandleBufferedThreadTimer(n, tk, { reason: 'initial' }))
-            .catch(() => {})
-            .finally(() => {
-              try { __deltaKickNewLeadsTimerPump(n); } catch {}
-            });
+            .catch(() => {});
+          try { __deltaKickNewLeadsTimerPump(n); } catch {}
         } catch {
           try { __deltaKickNewLeadsTimerPump(n); } catch {}
         }

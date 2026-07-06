@@ -500,6 +500,8 @@ function envMs(minKey, maxKey, defMin, defMax) {
 const HUMAN_TIMINGS = {
   /** Pausa perceptiva pós-lead (Fabiana): padrão 3–7s */
   reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
+  /** Fila de ação das mãos (dashboard + chat novo): padrão 5–15s */
+  actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 5000, 15000),
   /** Antes de clicar no filtro Marketplace */
   preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 2200, 4200),
   /** Após ativar Marketplace — DOM lateral estabilizar */
@@ -592,8 +594,7 @@ async function humanPause(bucket, label) {
 }
 
 async function humanReactionDelay(fromNetworkLead) {
-  const bucket = fromNetworkLead ? "reaction" : "preThreadClick";
-  const ms = await humanPause(bucket, fromNetworkLead ? "reaction_post_lead" : "reaction_api_reply");
+  const ms = await humanPause("actionDispatch", fromNetworkLead ? "action_dispatch_new_lead" : "action_dispatch_dashboard");
   if (fromNetworkLead) {
     logDelta("QUEUE", `⏳ Movido para a fila humana. Aguardando delay de segurança...`, { ms });
   }
@@ -2387,39 +2388,107 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
 
 async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
   const t = String(threadKey || "").trim();
-  const gotoUrl = `https://facebook.com/messages/t/${t}/`;
+  const gotoCandidates = [
+    `https://www.facebook.com/messages/t/${t}/`,
+    `https://www.facebook.com/messages/t/${t}`,
+    `https://facebook.com/messages/t/${t}/`,
+  ];
   try {
     __deltaLogTriagemDom({
       stage: "fallback_goto_start",
       thread_key: t,
       step_a_error: stepAError || null,
-      goto_url: gotoUrl,
+      goto_url: gotoCandidates[0],
     });
   } catch (_) {}
-  try {
-    await page.goto(gotoUrl, { waitUntil: "networkidle2", timeout: 15000 });
-  } catch (e) {
-    const navErr = e && e.message ? String(e.message) : "thread_open_goto_failed";
+  let lastNavErr = "";
+  let hydrationReady = false;
+  for (let i = 0; i < gotoCandidates.length; i += 1) {
+    const gotoUrl = String(gotoCandidates[i] || "").trim();
+    if (!gotoUrl) continue;
     try {
       __deltaLogTriagemDom({
-        stage: "fallback_goto_navigation_error",
+        stage: "fallback_goto_attempt",
         thread_key: t,
         step_a_error: stepAError || null,
-        error: navErr,
+        goto_url: gotoUrl,
+        attempt: i + 1,
       });
     } catch (_) {}
+
+    try {
+      await page.goto(gotoUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    } catch (e) {
+      lastNavErr = e && e.message ? String(e.message) : "thread_open_goto_failed";
+      try {
+        __deltaLogTriagemDom({
+          stage: "fallback_goto_navigation_error",
+          thread_key: t,
+          step_a_error: stepAError || null,
+          goto_url: gotoUrl,
+          attempt: i + 1,
+          error: lastNavErr,
+        });
+      } catch (_) {}
+      continue;
+    }
+
+    const contentUnavailable = await page.evaluate(() => {
+      try {
+        const txt = String(document.body && document.body.innerText || "").toLowerCase();
+        return (
+          txt.includes("este conteúdo não está disponível") ||
+          txt.includes("este conteudo nao esta disponivel") ||
+          txt.includes("this content isn't available right now")
+        );
+      } catch {
+        return false;
+      }
+    }).catch(() => false);
+    if (contentUnavailable) {
+      try {
+        __deltaLogTriagemDom({
+          stage: "fallback_goto_content_unavailable",
+          thread_key: t,
+          step_a_error: stepAError || null,
+          goto_url: gotoUrl,
+          attempt: i + 1,
+        });
+      } catch (_) {}
+      try {
+        await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+      } catch (_) {}
+      try { await humanPause("domSettle", "fallback_goto_messages_bootstrap"); } catch (_) {}
+      continue;
+    }
+
+    for (let h = 0; h < 3; h += 1) {
+      try {
+        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 7000 });
+        hydrationReady = true;
+        break;
+      } catch (_) {
+        if (h < 2) {
+          try { await humanPause("domSettle", "fallback_goto_hydration_retry"); } catch (_) {}
+          if (h === 0) {
+            try { await page.reload({ waitUntil: "domcontentloaded", timeout: 35000 }); } catch (_) {}
+          }
+        }
+      }
+    }
+    if (hydrationReady) break;
+  }
+
+  if (!hydrationReady && lastNavErr) {
     return {
       ok: false,
       error: "thread_open_goto_failed",
-      error_message: navErr,
+      error_message: lastNavErr,
       opened_via: "direct_goto",
       step_a_error: stepAError || null
     };
   }
-
-  try {
-    await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
-  } catch (_) {
+  if (!hydrationReady) {
     try {
       __deltaLogTriagemDom({
         stage: "fallback_goto_hydration_timeout",
@@ -2898,7 +2967,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     const __isAlreadyOpenByUrl = () => {
       try {
         const rawUrl = String(page && page.url ? page.url() : "");
-        const m = rawUrl.match(/\/messages\/t\/(\d+)\//i);
+        const m = rawUrl.match(/\/messages\/(?:e2ee\/)?t\/(\d+)(?:\/|$)/i);
         const currentThread = m && m[1] ? String(m[1]) : "";
         if (currentThread && currentThread === String(t)) {
           return { ok: true, current_thread: currentThread, current_path: `/messages/t/${currentThread}/`, url: rawUrl };
@@ -3166,30 +3235,59 @@ async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey
 }
 
 function createSerialQueue() {
-  let chain = Promise.resolve();
+  const highPriorityQueue = [];
+  const normalPriorityQueue = [];
+  let running = false;
   let depth = 0;
   let maxDepth = 0;
   let lastEnqueueAt = 0;
   let lastDequeueAt = 0;
   let lastDoneAt = 0;
 
-  const enqueue = (fn) => {
+  const pickNext = () => {
+    if (highPriorityQueue.length > 0) return highPriorityQueue.shift();
+    if (normalPriorityQueue.length > 0) return normalPriorityQueue.shift();
+    return null;
+  };
+
+  const drain = () => {
+    if (running) return;
+    const item = pickNext();
+    if (!item) return;
+    running = true;
+    lastDequeueAt = Date.now();
+
+    Promise.resolve()
+      .then(async () => {
+        try {
+          return await item.fn();
+        } catch {
+          return undefined;
+        }
+      })
+      .then((out) => {
+        try { item.resolve(out); } catch {}
+      })
+      .finally(() => {
+        depth = Math.max(0, depth - 1);
+        lastDoneAt = Date.now();
+        running = false;
+        drain();
+      });
+  };
+
+  const enqueue = (fn, { priority = "normal" } = {}) => {
     const enqueuedAt = Date.now();
     depth = Math.max(0, depth + 1);
     maxDepth = Math.max(maxDepth, depth);
     lastEnqueueAt = enqueuedAt;
-    chain = chain
-      .then(async () => {
-        lastDequeueAt = Date.now();
-        try {
-          return await fn();
-        } finally {
-          depth = Math.max(0, depth - 1);
-          lastDoneAt = Date.now();
-        }
-      })
-      .catch(() => {});
-    return chain;
+    return new Promise((resolve) => {
+      const lane = String(priority || "").trim().toLowerCase() === "high"
+        ? highPriorityQueue
+        : normalPriorityQueue;
+      lane.push({ fn, resolve });
+      drain();
+    });
   };
   enqueue.getDepth = () => depth;
   enqueue.getMaxDepth = () => maxDepth;
@@ -4400,7 +4498,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         } catch (_) {}
         return { ok: false, error: err };
       }
-    });
+    }, { priority: "high" });
   };
 
   const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
@@ -4423,7 +4521,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }
-    });
+    }, { priority: "normal" });
   };
 
   return {
