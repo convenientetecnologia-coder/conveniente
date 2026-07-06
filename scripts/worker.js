@@ -224,6 +224,23 @@ function isDeltaEngineActiveStrict() {
   return false;
 }
 
+// ===== Delta x Robe Feature Flags (Convivencia Sequencial) =====
+// Rollout imediato (default "1"), com rollback instantaneo via env=0 sem alterar codigo.
+try {
+  process.env.DELTA_ALLOW_ROBE = String(process.env.DELTA_ALLOW_ROBE || '1').trim() === '1' ? '1' : '0';
+  process.env.DELTA_ALLOW_ROBE_MANUAL_PLAY = String(process.env.DELTA_ALLOW_ROBE_MANUAL_PLAY || '1').trim() === '1' ? '1' : '0';
+  process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK = String(process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK || '1').trim() === '1' ? '1' : '0';
+} catch {}
+function isDeltaRobeAllowed() {
+  try { return String(process.env.DELTA_ALLOW_ROBE || '0').trim() === '1'; } catch { return false; }
+}
+function isDeltaRobeManualPlayAllowed() {
+  try { return String(process.env.DELTA_ALLOW_ROBE_MANUAL_PLAY || '0').trim() === '1'; } catch { return false; }
+}
+function isDeltaRobeGlobalTickAllowed() {
+  try { return String(process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK || '0').trim() === '1'; } catch { return false; }
+}
+
 function shouldBypassNurseZombie(nome, source = 'nurse') {
   if (!isDeltaEngineActiveStrict()) return false;
   try {
@@ -7819,7 +7836,7 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
   // #endregion
-  if (isDeltaEngineActiveStrict()) {
+  if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
     try { logger.info('[DELTA_ROBE_BLOCK] Módulo Robe suspenso para preservar o isolamento da escuta passiva.', { nome }); } catch {}
     try { provisionAudit.append({ ts: Date.now(), event: 'delta_robe_block', nome: String(nome || ''), source: 'startRobeDynamic' }); } catch {}
     try { await reportAction(nome, 'mil_action', 'delta_robe_block: modulo robe suspenso no motor delta'); } catch {}
@@ -7832,6 +7849,14 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
       robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
     } catch {}
     return { ok: true, skipped: true, reason: 'delta_robe_block' };
+  }
+  if (isDeltaEngineActiveStrict() && isDeltaRobeAllowed()) {
+    try {
+      logger.info('[DELTA_ROBE_SEMAPHORE] startRobeDynamic liberado por feature flag.', {
+        nome,
+        allowRobe: process.env.DELTA_ALLOW_ROBE
+      });
+    } catch {}
   }
   let manifest = null;
   try { manifest = await manifestStore.read(nome); } catch{}
@@ -7880,7 +7905,7 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
 }
 
 async function robeTickGlobal() {
-  // Delta opera escuta/passivo em messages + marketplace UI; Robe não deve ciclar nesse modo.
+  // Delta opera escuta/passivo em messages + marketplace UI; Robe so cicla com feature flags de convivencia.
   const deltaModeActive = (() => {
     try {
       if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
@@ -7890,7 +7915,9 @@ async function robeTickGlobal() {
     } catch {}
     return false;
   })();
-  if (deltaModeActive) {
+  const deltaAllowRobe = isDeltaRobeAllowed();
+  const deltaAllowGlobalTick = isDeltaRobeGlobalTickAllowed();
+  if (deltaModeActive && (!deltaAllowRobe || !deltaAllowGlobalTick)) {
     try {
       robeTickGlobal._lastDeltaSkipLogAt = robeTickGlobal._lastDeltaSkipLogAt || 0;
       const now = Date.now();
@@ -7898,11 +7925,28 @@ async function robeTickGlobal() {
       if (!last || (now - last) > 30000) {
         robeTickGlobal._lastDeltaSkipLogAt = now;
         logger.info('[DELTA_ROBE_BLOCK] robeTickGlobal ignorado: Delta ativo, evitando restart concorrente.', {
-          source: 'robeTickGlobal'
+          source: 'robeTickGlobal',
+          allowRobe: deltaAllowRobe ? 1 : 0,
+          allowGlobalTick: deltaAllowGlobalTick ? 1 : 0
         });
       }
     } catch {}
     return;
+  }
+  if (deltaModeActive && deltaAllowRobe && deltaAllowGlobalTick) {
+    try {
+      robeTickGlobal._lastDeltaAllowLogAt = robeTickGlobal._lastDeltaAllowLogAt || 0;
+      const now = Date.now();
+      const last = Number(robeTickGlobal._lastDeltaAllowLogAt || 0) || 0;
+      if (!last || (now - last) > 30000) {
+        robeTickGlobal._lastDeltaAllowLogAt = now;
+        logger.info('[DELTA_ROBE_SEMAPHORE] robeTickGlobal habilitado por feature flags.', {
+          source: 'robeTickGlobal',
+          allowRobe: 1,
+          allowGlobalTick: 1
+        });
+      }
+    } catch {}
   }
 
   // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
@@ -7998,6 +8042,7 @@ async function robeTickGlobal() {
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
       let virtusWasRunning = false;
+      let deltaSequentialResumeRequired = false;
       const ctrl = controllers.get(nome);
       const workingNow = getWorkingProfileNames();
       if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
@@ -8024,6 +8069,10 @@ async function robeTickGlobal() {
           } catch {}
         }
         mainPage = ctrl.mainPage;
+        deltaSequentialResumeRequired = !!(isDeltaEngineActiveStrict() && isDeltaRobeAllowed());
+        if (deltaSequentialResumeRequired) {
+          try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step1_pause_runtime'); } catch {}
+        }
 
         if (ctrl && ctrl.virtus) {
           const stopped = await _stopVirtusRunnerMaybePromise(ctrl.virtus);
@@ -8099,8 +8148,11 @@ async function robeTickGlobal() {
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
           robeUpdateMeta(nome, { emExecucao: false });
-          if (virtusWasRunning && automationAllowed(ctrl)) {
+          if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
             try {
+              if (deltaSequentialResumeRequired) {
+                try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_after_limit'); } catch {}
+              }
               ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
@@ -8116,9 +8168,12 @@ async function robeTickGlobal() {
 
         robeUpdateMeta(nome, { emExecucao: false });
 
-        if (virtusWasRunning) {
+        if (virtusWasRunning || deltaSequentialResumeRequired) {
           if (automationAllowed(ctrl)) {
             try {
+              if (deltaSequentialResumeRequired) {
+                try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime'); } catch {}
+              }
               ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
             } catch (e) {
@@ -11106,6 +11161,16 @@ const handlers = {
         return { ok: false, error: 'account_frozen' }
       }
       if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
+      if (isDeltaEngineActiveStrict() && (!isDeltaRobeAllowed() || !isDeltaRobeManualPlayAllowed())) {
+        try {
+          await reportAction(
+            nome,
+            'mil_action',
+            `delta_robe_play_block allowRobe=${isDeltaRobeAllowed() ? 1 : 0} allowManual=${isDeltaRobeManualPlayAllowed() ? 1 : 0}`
+          );
+        } catch {}
+        return { ok: false, error: 'delta_robe_play_blocked_by_feature_flags' };
+      }
 
       try {
         await manifestStore.update(nome, (m) => {
@@ -11131,6 +11196,7 @@ const handlers = {
           robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
           let virtusWasRunning = false;
+          let deltaSequentialResumeRequired = false;
           const ctrl = controllers.get(nome);
           const workingNow = getWorkingProfileNames();
           if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
@@ -11160,6 +11226,10 @@ const handlers = {
               } catch {}
             }
             mainPage = ctrl.mainPage;
+            deltaSequentialResumeRequired = !!(isDeltaEngineActiveStrict() && isDeltaRobeAllowed());
+            if (deltaSequentialResumeRequired) {
+              try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step1_pause_runtime_manual_play'); } catch {}
+            }
 
             if (ctrl && ctrl.virtus) {
               const stopped = await _stopVirtusRunnerMaybePromise(ctrl.virtus);
@@ -11259,8 +11329,11 @@ const handlers = {
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
               robeUpdateMeta(nome, { emExecucao: false });
-              if (virtusWasRunning && automationAllowed(ctrl)) {
+              if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
                 try {
+                  if (deltaSequentialResumeRequired) {
+                    try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_manual_play_after_limit'); } catch {}
+                  }
                   ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
@@ -11276,9 +11349,12 @@ const handlers = {
 
             robeUpdateMeta(nome, { emExecucao: false });
 
-            if (virtusWasRunning) {
+            if (virtusWasRunning || deltaSequentialResumeRequired) {
               if (automationAllowed(ctrl)) {
                 try {
+                  if (deltaSequentialResumeRequired) {
+                    try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_manual_play'); } catch {}
+                  }
                   ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                 } catch (e) {
