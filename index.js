@@ -1349,7 +1349,36 @@ function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_respost
 }
 
 let __edgeDeltaReplyPumpInFlight = false;
-let __edgeDeltaReplyPumpBackoffMs = 250;
+let __edgeDeltaReplyPumpBackoffMs = 500;
+
+function __edgeScheduleDeltaReplyPumpRetry() {
+  const delay = Math.min(500, Math.max(50, Number(__edgeDeltaReplyPumpBackoffMs || 500) || 500));
+  try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, delay).unref?.(); } catch {}
+}
+
+function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error } = {}) {
+  try {
+    __edgeEnsureDeltaReplyOutboxDirsSync();
+    const base = (rec && typeof rec === 'object') ? rec : {};
+    const out = {
+      ...base,
+      ts: Date.now(),
+      type: 'delta_reply',
+      id: String(cmdId || base.id || '').trim() || __edgeComputeCmdIdFallback(base),
+      nome: String(base.nome || '').trim(),
+      thread_key: String(base.thread_key || '').trim(),
+      texto_resposta: String(base.texto_resposta || '').replace(/\r/g, ''),
+      client_message_id: String(base.client_message_id || base.id || '').trim() || null,
+      retry_count: Math.max(0, Number(base.retry_count || 0) || 0) + 1,
+      last_retry_reason: String(reason || '').trim() || null,
+      last_retry_error: String(error || '').trim() || null
+    };
+    fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(out) + '\n', 'utf8');
+    return out;
+  } catch {
+    return null;
+  }
+}
 
 function __edgeKickDeltaReplyPump() {
   try { setTimeout(() => { __edgeRunDeltaReplyPump().catch(() => {}); }, 0).unref?.(); } catch {}
@@ -1360,6 +1389,7 @@ async function __edgeRunDeltaReplyPump() {
   __edgeDeltaReplyPumpInFlight = true;
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
+    const __edgeDeferredOnceInRun = new Set();
     while (true) {
       if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
       const cursor = __edgeReadDeltaReplyCursorSync();
@@ -1397,11 +1427,20 @@ async function __edgeRunDeltaReplyPump() {
           continue;
         }
 
-        // Se cluster ainda não está pronto, aguarde e re-tente depois (sem avançar cursor)
+        // Se cluster ainda não está pronto, re-enfileira no final, avança cursor e segue a esteira.
         if (!clusterClient || typeof clusterClient.sendWorkerCommand !== 'function') {
-          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(500, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.6)));
-          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
-          break;
+          __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason: 'cluster_unavailable' });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          __forensicEdgeEmit({
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'cluster_unavailable' }
+          });
+          __edgeScheduleDeltaReplyPumpRetry();
+          if (__edgeDeferredOnceInRun.has(cmdId)) break;
+          __edgeDeferredOnceInRun.add(cmdId);
+          continue;
         }
 
         // Entrega por IPC ao worker dono do perfil (retorno rápido; execução real ocorre em background no worker/virtusDelta)
@@ -1430,7 +1469,6 @@ async function __edgeRunDeltaReplyPump() {
           if (ok) {
             __edgeWriteAckSync(cmdId, { worker: r || null });
             __edgeWriteDeltaReplyCursorSync(nextOffset);
-            __edgeDeltaReplyPumpBackoffMs = 250;
             __forensicEdgeEmit({
               account_login: String(rec.nome || '').trim() || null,
               thread_key: String(rec.thread_key || '').trim() || null,
@@ -1439,26 +1477,40 @@ async function __edgeRunDeltaReplyPump() {
             });
             continue;
           }
-          // Falha: não avança cursor (retry), com backoff
-          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.7)));
+          // Falha de IPC: re-enfileira no final, avança cursor e segue.
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'ipc_not_ok',
+            error: (r && r.error) ? String(r.error) : 'ipc_not_ok'
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
           __forensicEdgeEmit({
             account_login: String(rec.nome || '').trim() || null,
             thread_key: String(rec.thread_key || '').trim() || null,
             flow_stage: 'reverse_command_bus',
-            details: { stage: 'ipc_dispatch_fail', cmd_id: cmdId, error: (r && r.error) ? String(r.error) : 'ipc_not_ok' }
+            details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'ipc_not_ok', error: (r && r.error) ? String(r.error) : 'ipc_not_ok' }
           });
-          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
-          break;
+          __edgeScheduleDeltaReplyPumpRetry();
+          if (__edgeDeferredOnceInRun.has(cmdId)) break;
+          __edgeDeferredOnceInRun.add(cmdId);
+          continue;
         } catch (e) {
-          __edgeDeltaReplyPumpBackoffMs = Math.min(60_000, Math.max(800, Math.floor(__edgeDeltaReplyPumpBackoffMs * 1.8)));
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'ipc_error',
+            error: e && e.message ? String(e.message) : String(e)
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
           __forensicEdgeEmit({
             account_login: String(rec.nome || '').trim() || null,
             thread_key: String(rec.thread_key || '').trim() || null,
             flow_stage: 'reverse_command_bus',
-            details: { stage: 'ipc_dispatch_error', cmd_id: cmdId, error: e && e.message ? String(e.message) : String(e) }
+            details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'ipc_error', error: e && e.message ? String(e.message) : String(e) }
           });
-          try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, __edgeDeltaReplyPumpBackoffMs).unref?.(); } catch {}
-          break;
+          __edgeScheduleDeltaReplyPumpRetry();
+          if (__edgeDeferredOnceInRun.has(cmdId)) break;
+          __edgeDeferredOnceInRun.add(cmdId);
+          continue;
         }
       } finally {
         try { if (fd) fs.closeSync(fd); } catch {}
