@@ -515,7 +515,7 @@ const HUMAN_TIMINGS = {
   /** Entre foco e primeira tecla */
   preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 500, 1100),
   /** Por caractere */
-  char: envMs("VIRTUS_DELTA_HUMAN_CHAR_MS_MIN", "VIRTUS_DELTA_HUMAN_CHAR_MS_MAX", 55, 120),
+  char: envMs("VIRTUS_DELTA_HUMAN_CHAR_MS_MIN", "VIRTUS_DELTA_HUMAN_CHAR_MS_MAX", 80, 130),
   /** Após Shift+Enter */
   lineBreak: envMs("VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MIN", "VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MAX", 45, 110),
   /** Antes do Enter final */
@@ -1945,6 +1945,52 @@ async function readComposerText(page) {
   ).trim();
 }
 
+async function waitLexicalComposerEmpty(page, { timeoutMs = 500, pollMs = 50 } = {}) {
+  const timeout = Math.max(80, Number(timeoutMs || 0) || 500);
+  const poll = Math.max(20, Number(pollMs || 0) || 50);
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) <= timeout) {
+    const probe = await page.evaluate(() => {
+      const el = document.querySelector('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]');
+      if (!el) return { ready: false, empty: false, text: "" };
+      const text = String(el.innerText || el.textContent || "").trim();
+      return { ready: true, empty: text.length === 0, text: text.slice(0, 160) };
+    }).catch(() => ({ ready: false, empty: false, text: "" }));
+    if (probe && probe.ready && probe.empty) {
+      return {
+        ok: true,
+        waited_ms: Date.now() - startedAt,
+        text_preview: "",
+      };
+    }
+    const elapsed = Date.now() - startedAt;
+    const left = timeout - elapsed;
+    if (left <= 0) break;
+    await sleep(Math.min(poll, left));
+  }
+  const after = await readComposerText(page).catch(() => "");
+  return {
+    ok: !(after && after.trim()),
+    waited_ms: Date.now() - startedAt,
+    text_preview: String(after || "").slice(0, 160),
+  };
+}
+
+async function clickStrictPhysicalSendButton(page) {
+  const strictSelector = 'div[role="button"][aria-label="Pressione Enter para enviar"]';
+  const strictBtn = await page.$(strictSelector).catch(() => null);
+  if (!strictBtn) return false;
+  const visible = await strictBtn
+    .evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return !!(r && r.width > 0 && r.height > 0);
+    })
+    .catch(() => false);
+  if (!visible) return false;
+  await strictBtn.click({ delay: clickDelayMs() }).catch(() => {});
+  return true;
+}
+
 async function clickSendButtonIfPresent(page) {
   // Regra rígida (Gemini): redundância de envio deve caçar o botão real por acessibilidade (case-insensitive).
   try {
@@ -2127,14 +2173,15 @@ async function typeHumanized(page, textoResposta) {
       await humanPause("lineBreak", "shift_enter");
       continue;
     }
+    const keyDelayMs = randomBetween(80, 130);
     try {
-      await page.keyboard.sendCharacter(ch);
+      await page.keyboard.type(ch, { delay: keyDelayMs });
     } catch (_) {
       try {
-        await page.keyboard.type(ch, { delay: 0 });
+        await page.keyboard.sendCharacter(ch);
       } catch (_) {}
+      await sleep(keyDelayMs);
     }
-    await humanPause("char", null);
   }
 }
 
@@ -2896,6 +2943,11 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         logInfo(`[virtusDelta][DOM] thread_key=${t} after_type_send_outerHTML=${dom2.send_outerHTML}`);
       } catch (_) {}
     }
+
+    // Typing Flush Guard: garante que o buffer Lexical finalize sílabas finais antes do envio.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    logInfo(`[virtusDelta][typing_flush_guard] thread_key=${t} wait_ms=300`);
+
     await humanPause("preSend", "pre_enter_send");
     // Estratégia enterprise:
     // 1) Enter para enviar
@@ -2910,15 +2962,18 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
 
     try { await page.keyboard.press("Enter"); } catch (_) {}
     logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
-    await humanPause("postSend", "post_enter_send");
-
-    let after = await readComposerText(page);
-    if (after && after.trim()) {
-      const clicked = await clickSendButtonIfPresent(page);
-      logInfo(`[virtusDelta][reply] send_button_fallback thread_key=${t} clicked=${clicked ? "sim" : "nao"}`);
-      await humanPause("postSend", "post_send_click_fallback");
-      after = await readComposerText(page);
+    const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 500, pollMs: 50 });
+    let after = String(emptyAfterEnter && emptyAfterEnter.text_preview || "").trim();
+    if (!(emptyAfterEnter && emptyAfterEnter.ok)) {
+      const clickedStrict = await clickStrictPhysicalSendButton(page);
+      const clickedFallback = clickedStrict ? true : await clickSendButtonIfPresent(page);
+      logInfo(
+        `[virtusDelta][reply] send_button_fallback thread_key=${t} strict=${clickedStrict ? "sim" : "nao"} clicked=${clickedFallback ? "sim" : "nao"}`
+      );
+      const emptyAfterFallback = await waitLexicalComposerEmpty(page, { timeoutMs: 500, pollMs: 50 });
+      after = String(emptyAfterFallback && emptyAfterFallback.text_preview || "").trim();
     }
+    await humanPause("postSend", "post_enter_send");
 
     if (after && after.trim()) {
       // Composer ainda tem texto: não confirmou envio.
