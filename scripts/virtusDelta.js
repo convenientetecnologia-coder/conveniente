@@ -2252,9 +2252,18 @@ async function computeVisibleThreadCardClickPlan(cardElement) {
 
 async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = null, stage = "post_click", requireComposer = true } = {}) {
   const t = String(threadKey || "").trim();
-  const expectedTarget = `/messages/t/${t}`;
+  const expectedTarget = `/messages/(?:e2ee/)?t/${t}`;
   const currentUrl = String(page && page.url ? page.url() : "").trim();
-  const urlMatches = !!(currentUrl && currentUrl.includes(expectedTarget));
+  const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
+  let urlMatches = false;
+  if (currentUrl) {
+    try {
+      const parsed = new URL(currentUrl);
+      urlMatches = expectedRe.test(String(parsed.pathname || ""));
+    } catch (_) {
+      urlMatches = expectedRe.test(currentUrl);
+    }
+  }
 
   let composerCheck = { ok: true, composer_count: null, active_sidebar_href: null };
   if (requireComposer) {
@@ -2268,8 +2277,8 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
       const composers = Array.from(document.querySelectorAll('div[data-lexical-editor="true"]')).filter(isVisible);
       const active = document.querySelector('a[aria-current="page"][href], [aria-current="page"] a[href]');
       const activeHref = String((active && active.getAttribute("href")) || "").trim();
-      const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
-      const sidebarMatchesThread = !!(activeHref && expectedRe.test(activeHref));
+      const expectedHrefRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
+      const sidebarMatchesThread = !!(activeHref && expectedHrefRe.test(activeHref));
       return {
         ok: composers.length === 1 && sidebarMatchesThread,
         composer_count: composers.length,
@@ -2329,7 +2338,140 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
   };
 }
 
-async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
+async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
+  const t = String(threadKey || "").trim();
+  const gotoUrl = `https://facebook.com/messages/t/${t}/`;
+  try {
+    __deltaLogTriagemDom({
+      stage: "fallback_goto_start",
+      thread_key: t,
+      step_a_error: stepAError || null,
+      goto_url: gotoUrl,
+    });
+  } catch (_) {}
+  try {
+    await page.goto(gotoUrl, { waitUntil: "networkidle2", timeout: 15000 });
+  } catch (e) {
+    const navErr = e && e.message ? String(e.message) : "thread_open_goto_failed";
+    try {
+      __deltaLogTriagemDom({
+        stage: "fallback_goto_navigation_error",
+        thread_key: t,
+        step_a_error: stepAError || null,
+        error: navErr,
+      });
+    } catch (_) {}
+    return {
+      ok: false,
+      error: "thread_open_goto_failed",
+      error_message: navErr,
+      opened_via: "direct_goto",
+      step_a_error: stepAError || null
+    };
+  }
+
+  try {
+    await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+  } catch (_) {
+    try {
+      __deltaLogTriagemDom({
+        stage: "fallback_goto_hydration_timeout",
+        thread_key: t,
+        step_a_error: stepAError || null,
+      });
+    } catch (_) {}
+    return {
+      ok: false,
+      error: "thread_open_hydration_timeout",
+      opened_via: "direct_goto",
+      step_a_error: stepAError || null
+    };
+  }
+
+  const guard = await runWrongThreadGuard(page, t, {
+    forensicAccountLogin,
+    stage: "post_goto_route_validation",
+    requireComposer: true
+  });
+  if (!guard.ok) {
+    return {
+      ...guard,
+      opened_via: "direct_goto",
+      step_a_error: stepAError || null
+    };
+  }
+
+  try {
+    const urlFinal = String(page && page.url ? page.url() : "").trim() || null;
+    __deltaLogTriagemDom({
+      stage: "composer_hydration_success",
+      thread_key: t,
+      selector: "direct_goto",
+      url_final: urlFinal,
+      step_a_error: stepAError || null,
+    });
+  } catch (_) {}
+  return {
+    ok: true,
+    matched_selector: "direct_goto",
+    hydrated: true,
+    opened_via: "direct_goto",
+    fallback_used: true,
+    step_a_error: stepAError || null
+  };
+}
+
+async function __deltaEnforceSidebarResetToTop(page, { threadKey = null, forensicAccountLogin = null, reason = "task_success" } = {}) {
+  if (!page) return { ok: false, error: "missing_page" };
+  const t = String(threadKey || "").trim() || null;
+  const out = await page.evaluate(() => {
+    const grids = Array.from(document.querySelectorAll('div[role="grid"]'));
+    if (!grids.length) return { ok: false, reason: "grid_not_found", grid_count: 0 };
+    const target = grids.find((el) => {
+      try {
+        const r = el.getBoundingClientRect();
+        return !!(r && r.width > 4 && r.height > 4);
+      } catch (_) {
+        return false;
+      }
+    }) || grids[0];
+    try {
+      target.scrollTop = 0;
+      target.dispatchEvent(new Event("scroll", { bubbles: false }));
+    } catch (_) {}
+    return {
+      ok: true,
+      grid_count: grids.length,
+      scroll_top: Number(target && target.scrollTop || 0) || 0
+    };
+  }).catch(() => ({ ok: false, reason: "evaluate_failed", grid_count: 0 }));
+  try {
+    __deltaLogTriagemDom({
+      stage: "sidebar_reset_to_top",
+      thread_key: t,
+      reason: String(reason || "task_success"),
+      ok: !!(out && out.ok),
+      grid_count: Number(out && out.grid_count || 0) || 0,
+    });
+  } catch (_) {}
+  try {
+    __forensicEdgeEmit({
+      account_login: forensicAccountLogin,
+      thread_key: t,
+      flow_stage: "sidebar_reset_to_top",
+      details: {
+        tag: "FORENSIC_DOM_REVERSE",
+        reason: String(reason || "task_success"),
+        ok: !!(out && out.ok),
+        grid_count: Number(out && out.grid_count || 0) || 0,
+        ts_ms: Date.now()
+      }
+    });
+  } catch (_) {}
+  return out;
+}
+
+async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
   try {
@@ -2358,8 +2500,6 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     return { ok: false, error: "messages_boot_not_stable" };
   }
 
-  // Espera curta e segura pelo carregamento do sidebar (sem polling agressivo).
-  // Objetivo: evitar tentar clicar antes dos cards existirem no DOM.
   try {
     await page.waitForFunction(
       () => {
@@ -2369,7 +2509,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
         const nonNew = hrefs.filter((h) => !h.includes("/messages/new"));
         return nonNew.length >= 1;
       },
-      { timeout: 8000 }
+      { timeout: 5000 }
     );
   } catch (_) {}
 
@@ -2381,230 +2521,140 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps = 16, forensi
     `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
   ];
 
-  for (let i = 0; i < maxScrollSteps; i++) {
-    for (const cardSelector of cardSelectors) {
-      const cardElement = cardSelector === primaryCardSelector
-        ? await page.waitForSelector(cardSelector, { timeout: i === 0 ? 5000 : 1200 }).catch(() => null)
-        : await page.$(cardSelector).catch(() => null);
-      if (cardElement) {
-        // Trava de segurança (Gemini): não clicar se o card já está ativo (aria-current="page").
-        try {
-          const isCurrentPage = await cardElement
-            .evaluate((el) => {
-              if (!el) return false;
-              if (el.getAttribute("aria-current") === "page") return true;
-              return Boolean(el.closest('[aria-current="page"]'));
-            })
-            .catch(() => false);
-          if (isCurrentPage) {
-            const guard = await runWrongThreadGuard(page, t, {
-              forensicAccountLogin,
-              stage: "already_open_prevent_cross_routing",
-              requireComposer: true
-            });
-            if (!guard.ok) return guard;
-            return { ok: true, scrolled: i, matched_selector: cardSelector, already_open: true, skipped_click: true, hydrated: true };
-          }
-        } catch (_) {}
+  let stepAError = "thread_card_not_found";
+  let stepASelector = null;
+  for (const cardSelector of cardSelectors) {
+    const cardElement = cardSelector === primaryCardSelector
+      ? await page.waitForSelector(cardSelector, { timeout: 3000 }).catch(() => null)
+      : await page.$(cardSelector).catch(() => null);
+    if (!cardElement) continue;
 
-        await humanPause("preThreadClick", "pre_thread_card_click");
-        try {
-          const st = await page
-            .evaluate((threadId) => {
-              const p = String(location.pathname || "").trim();
-              const is =
-                (p.includes("/messages") && p.includes(`/t/${threadId}`)) ||
-                (p.includes("/messages") && p.includes(threadId));
-              return { current_path: p, is_already_open: !!is };
-            }, t)
-            .catch(() => ({ current_path: null, is_already_open: false }));
-          __forensicEdgeEmit({
-            account_login: forensicAccountLogin,
-            thread_key: t,
-            flow_stage: "browser_window_state_check",
-            details: {
-              tag: "FORENSIC_DOM_REVERSE",
-              selector: cardSelector,
-              scrolled: i,
-              is_already_open: !!(st && st.is_already_open),
-              current_path: st && st.current_path ? String(st.current_path) : null,
-              ts_ms: Date.now(),
-            }
-          });
-        } catch (_) {}
-        try {
-          __forensicEdgeEmit({
-            account_login: forensicAccountLogin,
-            thread_key: t,
-            flow_stage: "dom_automation_tracking",
-            details: { action: "open_thread_click", selector: cardSelector, scrolled: i }
-          });
-        } catch (_) {}
-        try {
-          await cardElement.evaluate((el) => {
-            try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
-          });
-        } catch (_) {
-          try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
-        }
-        let openedByNavigation = false;
-        let clickPlan = null;
-        try { clickPlan = await computeVisibleThreadCardClickPlan(cardElement); } catch (_) {}
-        try {
-          __forensicEdgeEmit({
-            account_login: forensicAccountLogin,
-            thread_key: t,
-            flow_stage: "dom_automation_tracking",
-            details: {
-              action: "open_thread_click_plan",
-              selector: cardSelector,
-              scrolled: i,
-              plan_ok: !!(clickPlan && clickPlan.ok),
-              plan_reason: clickPlan && clickPlan.reason ? String(clickPlan.reason) : null,
-              viewport_w: Number(clickPlan && clickPlan.viewport_w || 0) || null,
-              viewport_h: Number(clickPlan && clickPlan.viewport_h || 0) || null,
-            }
-          });
-        } catch (_) {}
-
-        const points = (clickPlan && clickPlan.ok && Array.isArray(clickPlan.points)) ? clickPlan.points : [];
-        for (const p of points.slice(0, 2)) {
-          const px = Number(p && p.x);
-          const py = Number(p && p.y);
-          if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
-          try {
-            await page.mouse.move(px, py, { steps: 6 });
-            await page.mouse.click(px, py, { delay: 100 });
-            try {
-              __forensicEdgeEmit({
-                account_login: forensicAccountLogin,
-                thread_key: t,
-                flow_stage: "dom_automation_tracking",
-                details: {
-                  action: "open_thread_mouse_click",
-                  selector: cardSelector,
-                  scrolled: i,
-                  point_kind: String(p.kind || ''),
-                  x: Number(px.toFixed(2)),
-                  y: Number(py.toFixed(2)),
-                }
-              });
-            } catch (_) {}
-          } catch (_) {
-            continue;
-          }
-          try {
-            await page.waitForFunction(
-              (threadId) => {
-                const path = String(location.pathname || "");
-                return path.includes("/messages") && path.includes(`/t/${threadId}`);
-              },
-              { timeout: 1800 },
-              t
-            );
-            openedByNavigation = true;
-            break;
-          } catch (_) {}
-        }
-        if (!openedByNavigation) {
-          try {
-            __deltaLogTriagemDom({
-              stage: "bounding_click_failed_abort",
-              thread_key: t,
-              selector: cardSelector,
-              scrolled: i,
-              retry_queue_hint: "async_disk_retry",
-            });
-          } catch (_) {}
-          return {
-            ok: false,
-            error: "thread_card_not_found",
-            scrolled: i,
-            matched_selector: cardSelector,
-            retry_queue_hint: "async_disk_retry"
-          };
-        }
-        await humanPause("postThreadOpen", "post_thread_card_click");
-        try {
-          // Regra rígida: após clicar no card (chat fechado), aguardar hidratação do composer Lexical.
-          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
-          try {
-            const urlFinal = String(page && page.url ? page.url() : "").trim() || null;
-            __deltaLogTriagemDom({
-              stage: "composer_hydration_success",
-              thread_key: t,
-              selector: cardSelector,
-              scrolled: i,
-              url_final: urlFinal,
-            });
-          } catch (_) {}
-        } catch (_) {
-          try {
-            const currentPath = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
-            __forensicEdgeEmit({
-              account_login: forensicAccountLogin,
-              thread_key: t,
-              flow_stage: "thread_open_hydration_timeout",
-              details: {
-                tag: "FORENSIC_DOM_REVERSE",
-                selector: cardSelector,
-                scrolled: i,
-                current_path: currentPath ? String(currentPath) : null,
-                waited_selector: 'div[data-lexical-editor="true"]',
-                timeout_ms: 5000,
-                ts_ms: Date.now()
-              }
-            });
-          } catch (_) {}
-          try {
-            __deltaLogTriagemDom({
-              stage: "composer_hydration_timeout",
-              thread_key: t,
-              selector: cardSelector,
-              scrolled: i,
-            });
-          } catch (_) {}
-          return { ok: false, error: "thread_open_hydration_timeout", scrolled: i, matched_selector: cardSelector };
-        }
+    stepASelector = cardSelector;
+    try {
+      const isCurrentPage = await cardElement
+        .evaluate((el) => {
+          if (!el) return false;
+          if (el.getAttribute("aria-current") === "page") return true;
+          return Boolean(el.closest('[aria-current="page"]'));
+        })
+        .catch(() => false);
+      if (isCurrentPage) {
         const guard = await runWrongThreadGuard(page, t, {
           forensicAccountLogin,
-          stage: "post_click_route_validation",
+          stage: "already_open_prevent_cross_routing",
           requireComposer: true
         });
-        if (!guard.ok) return guard;
-        return { ok: true, scrolled: i, matched_selector: cardSelector, hydrated: true };
-      }
-    }
-    const delta = await scrollSidebarShort(page).catch(() => 0);
-    try {
-      __forensicEdgeEmit({
-        account_login: forensicAccountLogin,
-        thread_key: t,
-        flow_stage: "sidebar_scroll_action",
-        details: {
-          tag: "FORENSIC_DOM_REVERSE",
-          attempt: i + 1,
-          max_attempts: maxScrollSteps,
-          scrolled_pixels: Number(delta || 0) || 0,
-          ts_ms: Date.now(),
+        if (guard.ok) {
+          return {
+            ok: true,
+            scrolled: 0,
+            matched_selector: cardSelector,
+            already_open: true,
+            skipped_click: true,
+            hydrated: true
+          };
         }
+        stepAError = String(guard.error || "wrong_thread_guard_blocked");
+        break;
+      }
+    } catch (_) {}
+
+    await humanPause("preThreadClick", "pre_thread_card_click");
+    try {
+      await cardElement.evaluate((el) => {
+        try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }); } catch (_) {}
+      });
+    } catch (_) {
+      try { await cardElement.scrollIntoViewIfNeeded(); } catch (_) {}
+    }
+
+    let clickPlan = null;
+    try { clickPlan = await computeVisibleThreadCardClickPlan(cardElement); } catch (_) {}
+    const points = (clickPlan && clickPlan.ok && Array.isArray(clickPlan.points)) ? clickPlan.points : [];
+    let openedByNavigation = false;
+    for (const p of points.slice(0, 2)) {
+      const px = Number(p && p.x);
+      const py = Number(p && p.y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      try {
+        await page.mouse.move(px, py, { steps: 6 });
+        await page.mouse.click(px, py, { delay: 100 });
+      } catch (_) {
+        continue;
+      }
+      try {
+        await page.waitForFunction(
+          (threadId) => {
+            const path = String(location.pathname || "");
+            return path.includes("/messages") && path.includes(`/t/${threadId}`);
+          },
+          { timeout: 1800 },
+          t
+        );
+        openedByNavigation = true;
+        break;
+      } catch (_) {}
+    }
+
+    if (!openedByNavigation) {
+      stepAError = "thread_card_not_found";
+      continue;
+    }
+
+    await humanPause("postThreadOpen", "post_thread_card_click");
+    try {
+      await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+    } catch (_) {
+      stepAError = "thread_open_hydration_timeout";
+      break;
+    }
+
+    try {
+      const urlFinal = String(page && page.url ? page.url() : "").trim() || null;
+      __deltaLogTriagemDom({
+        stage: "composer_hydration_success",
+        thread_key: t,
+        selector: cardSelector,
+        scrolled: 0,
+        url_final: urlFinal,
       });
     } catch (_) {}
-    await humanPause("scroll", "sidebar_scroll");
+
+    const guard = await runWrongThreadGuard(page, t, {
+      forensicAccountLogin,
+      stage: "post_click_route_validation",
+      requireComposer: true
+    });
+    if (guard.ok) {
+      return { ok: true, scrolled: 0, matched_selector: cardSelector, hydrated: true };
+    }
+    stepAError = String(guard.error || "wrong_thread_guard_blocked");
+    break;
   }
 
-  let hrefPreview = [];
   try {
-    hrefPreview = await page.$$eval("a[href]", (els) =>
-      els
-        .map((e) => String(e.getAttribute("href") || "").trim())
-        .filter(Boolean)
-        .filter((h) => h.includes("/messages"))
-        .slice(0, 25)
-    );
+    __deltaLogTriagemDom({
+      stage: "step_a_failed_fallback_goto",
+      thread_key: t,
+      selector: stepASelector,
+      step_a_error: stepAError,
+    });
   } catch (_) {}
-
-  return { ok: false, error: "thread_card_not_found", href_preview: hrefPreview };
+  const fallback = await __deltaTryOpenThreadByDirectGoto(page, t, {
+    forensicAccountLogin,
+    stepAError
+  });
+  if (fallback && fallback.ok) return fallback;
+  try {
+    __deltaLogTriagemDom({
+      stage: "hard_fail_after_fallback",
+      thread_key: t,
+      selector: stepASelector,
+      step_a_error: stepAError,
+      final_error: String(fallback && fallback.error || "thread_open_failed"),
+    });
+  } catch (_) {}
+  return fallback || { ok: false, error: "thread_open_failed", step_a_error: stepAError };
 }
 
 async function probeOpenLineContinuity(page, threadKey) {
@@ -2770,59 +2820,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
 
     if (!canUseOpenLineFastPath) {
       open = await openThreadByClick(page, threadKey, { forensicAccountLogin });
-      if (!open.ok) {
-        if (fromNetworkLead) {
-          try {
-            logInfo(`[virtusDelta][reply] openThread retry after dom_force thread_key=${t}`);
-            await forceSidebarRefreshByMessagesRoot(page);
-            await humanPause("domSettle", "open_thread_retry_root");
-            if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
-              try {
-                const st2 = __isAlreadyOpenByUrl();
-                if (st2 && st2.ok === true) {
-                  try {
-                    __forensicEdgeEmit({
-                      account_login: forensicAccountLogin,
-                      thread_key: t,
-                      flow_stage: "marketplace_filter_bypass",
-                      details: {
-                        tag: "FORENSIC_DOM_REVERSE",
-                        reason: "thread_already_open_url_retry",
-                        is_already_open: true,
-                        current_path: st2.current_path || null,
-                        url: st2.url ? String(st2.url).slice(0, 300) : null,
-                        ts_ms: Date.now(),
-                      }
-                    });
-                  } catch (_) {}
-                } else {
-                  await ensureMarketplaceFilterActive(page);
-                }
-              } catch (_) {
-                try { await ensureMarketplaceFilterActive(page); } catch (_) {}
-              }
-              await humanPause("postMarketplace", "open_thread_retry_marketplace");
-            }
-          } catch (_) {}
-          const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
-          if (open2.ok) {
-            Object.assign(open, open2);
-          }
-        } else {
-          // Dashboard/API reply: só tenta correção de filtro quando realmente não achou card.
-          // Isso evita HOL desnecessário quando o card já está no feed.
-          if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && String(open.error || "") === "thread_card_not_found") {
-            try {
-              await ensureMarketplaceFilterActive(page);
-              await humanPause("postMarketplace", "open_thread_retry_marketplace_api");
-            } catch (_) {}
-            const open2 = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin });
-            if (open2.ok) {
-              Object.assign(open, open2);
-            }
-          }
-        }
-      }
+      if (!open.ok) return open;
     }
 
     if (!open || !open.ok) {
@@ -3919,9 +3917,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Relógio sentinela por conta; em linha aberta usa faixa 5–15s.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN, cooldownPolicy);
 
-    // Anti-HOL: retries inline longos seguram a fila inteira.
-    // Estratégia nova: tentativa única no slot atual + requeue assíncrono no enqueueDeltaReply.
-    const maxRetries = Math.max(0, Number(process.env.VIRTUS_DELTA_REPLY_INLINE_RETRIES || 0) || 0);
+    // Regra rígida do tiro certeiro: um único ciclo síncrono por tarefa (A -> B -> hard-fail).
+    // O fallback de abertura acontece dentro de openThreadByClick; sem retries extras aqui.
+    const maxRetries = 0;
     const isSelectorLikeError = (err) => {
       const e = String(err || "").trim();
       return (
@@ -4172,76 +4170,30 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
   }
 
-  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id, _requeue_count = 0 } = {}) => {
+  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id } = {}) => {
     return enqueue(async () => {
       try {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
         const out = await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
+        if (out && out.ok) {
+          try {
+            await __deltaEnforceSidebarResetToTop(page, {
+              threadKey: tk,
+              forensicAccountLogin: ACCOUNT_LOGIN,
+              reason: "reply_sent_success"
+            });
+          } catch (_) {}
+          return out;
+        }
 
-        // Estratégia "fila sem travar": se for erro típico de seletor/DOM, re-enfileira no fim
-        // (sem dormir aqui), para não segurar a fila em retries longos.
-        let requeueScheduled = false;
+        // Sem requeue em background: falhou no ciclo síncrono (A->B), reverte status no CT e encerra.
         try {
-          const ok = !!(out && out.ok);
-          const err = String(out && out.error || "").trim();
-          const isSelectorLike =
-            err === "composer_missing" ||
-            err === "thread_card_not_found" ||
-            err === "thread_open_hydration_timeout" ||
-            err === "send_not_confirmed_composer_not_empty" ||
-            err === "composer_text_not_registered";
-          const tries = Math.max(0, Number(_requeue_count || 0) || 0);
-          if (!ok && isSelectorLike && tries < 2) {
-            const nextCount = tries + 1;
-            const delayMs = randomBetween(1200, 2400);
-            try {
-              __forensicEdgeEmit({
-                account_login: ACCOUNT_LOGIN,
-                thread_key: tk || null,
-                flow_stage: "delta_reply_selector_requeued",
-                details: {
-                  tag: "FORENSIC_DOM_REVERSE",
-                  error: err,
-                  requeue_in_ms: delayMs,
-                  requeue_attempt: nextCount,
-                  client_message_id: cmid,
-                  ts_ms: Date.now(),
-                }
-              });
-            } catch (_) {}
-            try {
-              setTimeout(() => {
-                enqueueDeltaReply({ thread_key: tk, texto_resposta: tr, client_message_id: cmid, _requeue_count: nextCount })
-                  .catch(() => {});
-              }, delayMs).unref?.();
-              requeueScheduled = true;
-            } catch (_) {}
-          }
+          const err = String(out && out.error || "").trim() || "send_failed";
+          const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
+          kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
         } catch (_) {}
-        if (requeueScheduled) return out;
-
-        // Protocolo de reversão de ACK: após exaurir tentativas locais, marca falha no CT (visível na tela).
-        try {
-          const ok = !!(out && out.ok);
-          if (!ok) {
-            const err = String(out && out.error || "").trim() || "send_failed";
-            const isSelectorLike =
-              err === "composer_missing" ||
-              err === "thread_card_not_found" ||
-              err === "thread_open_hydration_timeout" ||
-              err === "send_not_confirmed_composer_not_empty" ||
-              err === "composer_text_not_registered";
-            const tries = Math.max(0, Number(_requeue_count || 0) || 0);
-            const exhausted = isSelectorLike ? (tries >= 2) : true;
-            if (exhausted) {
-              const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
-              kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
-            }
-          }
-        } catch (_) {}
-
         return out;
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
@@ -4252,10 +4204,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
     return enqueue(async () => {
       try {
-        return await sendDeltaGreetingNow({
+        const out = await sendDeltaGreetingNow({
           threadKey: thread_key,
           mensagensCliente: mensagens_cliente,
         });
+        if (out && out.ok) {
+          try {
+            await __deltaEnforceSidebarResetToTop(page, {
+              threadKey: String(thread_key || "").trim(),
+              forensicAccountLogin: ACCOUNT_LOGIN,
+              reason: "greeting_flow_success"
+            });
+          } catch (_) {}
+        }
+        return out;
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }
