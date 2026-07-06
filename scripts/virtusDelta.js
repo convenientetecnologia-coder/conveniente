@@ -4196,7 +4196,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         } catch (_) {}
         return out;
       } catch (e) {
-        return { ok: false, error: e && e.message ? e.message : String(e) };
+        const tk = String(thread_key || "").trim();
+        const tr = String(texto_resposta || "").replace(/\r/g, "");
+        const cmid = String(client_message_id || "").trim() || null;
+        const err = e && e.message ? String(e.message) : String(e);
+        try {
+          const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
+          kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err || "send_failed_exception" });
+        } catch (_) {}
+        return { ok: false, error: err };
       }
     });
   };
