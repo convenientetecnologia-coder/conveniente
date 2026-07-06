@@ -3235,8 +3235,11 @@ async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey
 }
 
 function createSerialQueue() {
-  const highPriorityQueue = [];
-  const normalPriorityQueue = [];
+  // Fila de ação canônica (MÃOS):
+  // - FIFO estrita por ordem de chegada
+  // - sem preferências entre dashboard e chat novo
+  // - execução 1 por vez para evitar atropelo de DOM
+  const fifoQueue = [];
   let running = false;
   let depth = 0;
   let maxDepth = 0;
@@ -3244,15 +3247,9 @@ function createSerialQueue() {
   let lastDequeueAt = 0;
   let lastDoneAt = 0;
 
-  const pickNext = () => {
-    if (highPriorityQueue.length > 0) return highPriorityQueue.shift();
-    if (normalPriorityQueue.length > 0) return normalPriorityQueue.shift();
-    return null;
-  };
-
   const drain = () => {
     if (running) return;
-    const item = pickNext();
+    const item = fifoQueue.shift();
     if (!item) return;
     running = true;
     lastDequeueAt = Date.now();
@@ -3276,16 +3273,13 @@ function createSerialQueue() {
       });
   };
 
-  const enqueue = (fn, { priority = "normal" } = {}) => {
+  const enqueue = (fn) => {
     const enqueuedAt = Date.now();
     depth = Math.max(0, depth + 1);
     maxDepth = Math.max(maxDepth, depth);
     lastEnqueueAt = enqueuedAt;
     return new Promise((resolve) => {
-      const lane = String(priority || "").trim().toLowerCase() === "high"
-        ? highPriorityQueue
-        : normalPriorityQueue;
-      lane.push({ fn, resolve });
+      fifoQueue.push({ fn, resolve });
       drain();
     });
   };
@@ -4498,7 +4492,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         } catch (_) {}
         return { ok: false, error: err };
       }
-    }, { priority: "high" });
+    });
   };
 
   const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
@@ -4521,7 +4515,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       }
-    }, { priority: "normal" });
+    });
   };
 
   return {
