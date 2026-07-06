@@ -14981,6 +14981,10 @@ const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendent
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
+const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.jsonl');
+const DELTA_FALLBACK_CITY = 'Cidade Pendente';
+const DELTA_FALLBACK_LINK = 'Link Não Coletado';
+const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
 const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
 const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
@@ -16383,92 +16387,145 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const before = __deltaBuildConcatFromState(st);
   const preMessages = before.text;
-  const handsOut = await __deltaRunHandsGreetingFlow({
+  let handsOut = await __deltaRunHandsGreetingFlow({
     nome: n,
     threadKey: tk,
     mensagensCliente: preMessages
   });
 
+  const handsErrorRaw = String(handsOut && handsOut.error || '').trim();
+  const handsErrorNorm = handsErrorRaw.toLowerCase();
+  const handsMetadataFailure =
+    (
+      handsErrorNorm.includes('city_') ||
+      handsErrorNorm.includes('cidade') ||
+      handsErrorNorm.includes('item_link') ||
+      handsErrorNorm.includes('link') ||
+      handsErrorNorm.includes('metadata')
+    ) ||
+    !!(handsOut && handsOut.greeting_already_sent === true);
+
   if (!handsOut || handsOut.ok !== true) {
-    st.status = 'new_buffering';
-    st.inFlight = false;
-    st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
-    st.updatedAt = Date.now();
-    const handsError = String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300);
-    const isThreadCardNotFound = handsError === 'thread_card_not_found';
-    const retryCtl = isThreadCardNotFound
-      ? __deltaQueueThreadRetryOnDiskSecondary(st, { nome: n, threadKey: tk, retryReason: 'thread_card_not_found' })
-      : { queued: false, retryInMs: __deltaScheduleThreadTimer(st, { retry: true }), queueMode: 'memory' };
-    const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
-    const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
-    if (isThreadCardNotFound) {
+    if (handsMetadataFailure) {
+      const fallbackClientName = String(
+        (handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) ||
+        DELTA_FALLBACK_CLIENT_NAME
+      ).trim() || DELTA_FALLBACK_CLIENT_NAME;
+      const fallbackLink = String(
+        (handsOut && (handsOut.link_anuncio || handsOut.profile_url)) ||
+        DELTA_FALLBACK_LINK
+      ).trim() || DELTA_FALLBACK_LINK;
+      const fallbackCity = String(st.city || DELTA_FALLBACK_CITY).trim() || DELTA_FALLBACK_CITY;
+      handsOut = {
+        ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
+        ok: true,
+        cidade: fallbackCity,
+        link_anuncio: fallbackLink,
+        profile_url: fallbackLink,
+        client_name: fallbackClientName,
+        customer_name: fallbackClientName,
+        nome_cliente_limpo: fallbackClientName,
+        metadata_contingency_applied: true,
+        metadata_error: handsErrorRaw || null,
+      };
       try {
-        __forensicEdgeEmit({
+        __deltaAppendPendingJsonlSync({
+          event: 'lead_hands_metadata_contingency_applied',
+          server_id: readHostIdSync() || null,
           account_login: n,
           thread_key: tk,
-          flow_stage: 'hands_thread_card_not_found_escaped',
-          details: {
-            retry_queue_mode: retryQueueMode,
-            retry_in_ms: retryInMs,
-            hands_failures: st.handsFailures,
-            queue_advanced: true
-          }
+          texto_limpo: preMessages || '',
+          cidade: fallbackCity,
+          link_anuncio: fallbackLink,
+          client_name: fallbackClientName,
+          operacao_meta: 'hands_metadata_contingency',
+          dispatch_ct: false,
+          queue_mode: 'capture_only',
+          flow_stage: 'hands_metadata_contingency_applied',
+          hands_error: handsErrorRaw || null,
+          hands_failures: Number(st.handsFailures || 0) || 0,
         });
       } catch {}
+    } else {
+      st.status = 'new_buffering';
+      st.inFlight = false;
+      st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
+      st.updatedAt = Date.now();
+      const handsError = String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300);
+      const isThreadCardNotFound = handsError === 'thread_card_not_found';
+      const retryCtl = isThreadCardNotFound
+        ? __deltaQueueThreadRetryOnDiskSecondary(st, { nome: n, threadKey: tk, retryReason: 'thread_card_not_found' })
+        : { queued: false, retryInMs: __deltaScheduleThreadTimer(st, { retry: true }), queueMode: 'memory' };
+      const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
+      const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
+      if (isThreadCardNotFound) {
+        try {
+          __forensicEdgeEmit({
+            account_login: n,
+            thread_key: tk,
+            flow_stage: 'hands_thread_card_not_found_escaped',
+            details: {
+              retry_queue_mode: retryQueueMode,
+              retry_in_ms: retryInMs,
+              hands_failures: st.handsFailures,
+              queue_advanced: true
+            }
+          });
+        } catch {}
+      }
+      __deltaAppendPendingJsonlSync({
+        event: 'lead_hands_retry_scheduled',
+        server_id: readHostIdSync() || null,
+        account_login: n,
+        thread_key: tk,
+        texto_limpo: preMessages || '',
+        cidade: st.city || null,
+        operacao_meta: 'hands_retry',
+        dispatch_ct: false,
+        queue_mode: 'capture_only',
+        flow_stage: 'hands_retry',
+        hands_error: handsError,
+        retry_in_ms: retryInMs,
+        hands_failures: st.handsFailures,
+        retry_queue_mode: retryQueueMode,
+        queue_advanced: isThreadCardNotFound ? true : undefined
+      });
+      __deltaSchedulePersistThreadState();
+      return;
     }
-    __deltaAppendPendingJsonlSync({
-      event: 'lead_hands_retry_scheduled',
-      server_id: readHostIdSync() || null,
-      account_login: n,
-      thread_key: tk,
-      texto_limpo: preMessages || '',
-      cidade: st.city || null,
-      operacao_meta: 'hands_retry',
-      dispatch_ct: false,
-      queue_mode: 'capture_only',
-      flow_stage: 'hands_retry',
-      hands_error: handsError,
-      retry_in_ms: retryInMs,
-      hands_failures: st.handsFailures,
-      retry_queue_mode: retryQueueMode,
-      queue_advanced: isThreadCardNotFound ? true : undefined
-    });
-    __deltaSchedulePersistThreadState();
-    return;
   }
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
   const messageAt = Number(after.minAt || 0) || Date.now();
-  const city = String((handsOut && handsOut.cidade) || '').trim() || null;
-  const nomeClienteLimpo = String((handsOut && handsOut.nome_cliente_limpo) || '').trim() || null;
-  const customerName = String((handsOut && (handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || null;
-  if (!city) {
-    st.status = 'new_buffering';
-    st.inFlight = false;
-    st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
-    st.updatedAt = Date.now();
-    const retryInMs = __deltaScheduleThreadTimer(st, { retry: true });
-    __deltaAppendPendingJsonlSync({
-      event: 'lead_city_retry_scheduled',
-      server_id: readHostIdSync() || null,
-      account_login: n,
-      thread_key: tk,
-      texto_limpo: finalText || preMessages || '',
-      cidade: null,
-      operacao_meta: 'city_retry',
-      dispatch_ct: false,
-      queue_mode: 'capture_only',
-      flow_stage: 'city_retry',
-      hands_error: String(handsOut && handsOut.error || 'city_missing_after_greeting').slice(0, 300),
-      retry_in_ms: retryInMs,
-      hands_failures: st.handsFailures,
-      saudacao_enviada: !!(handsOut && handsOut.greeting_text),
-      saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
-    });
-    __deltaSchedulePersistThreadState();
-    return;
+  const city = String((handsOut && handsOut.cidade) || '').trim() || DELTA_FALLBACK_CITY;
+  const linkAnuncio = String((handsOut && (handsOut.link_anuncio || handsOut.profile_url)) || '').trim() || DELTA_FALLBACK_LINK;
+  const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+  const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+  const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+
+  if (!String((handsOut && handsOut.cidade) || '').trim()) {
+    try {
+      __deltaAppendPendingJsonlSync({
+        event: 'lead_city_contingency_applied',
+        server_id: readHostIdSync() || null,
+        account_login: n,
+        thread_key: tk,
+        texto_limpo: finalText || preMessages || '',
+        cidade: city,
+        link_anuncio: linkAnuncio,
+        client_name: clientName,
+        operacao_meta: 'city_contingency',
+        dispatch_ct: false,
+        queue_mode: 'capture_only',
+        flow_stage: 'city_contingency_applied',
+        hands_error: String(handsOut && handsOut.error || '').slice(0, 300) || null,
+        saudacao_enviada: !!(handsOut && handsOut.greeting_text),
+        saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+      });
+    } catch {}
   }
+
   st.city = city;
   st.status = 'active';
   st.inFlight = false;
@@ -16486,6 +16543,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     mensagens_cliente_qtd: Number(after.count || 0) || 0,
     mensagem_seq: Number(after.toSeq || st.seq || 0) || 0,
     cidade: city,
+    link_anuncio: linkAnuncio,
+    client_name: clientName,
     operacao_meta: 'buffered_concat_after_hands',
     dispatch_ct: true,
     queue_mode: 'dispatch_ct',
@@ -16570,6 +16629,28 @@ function __deltaAppendPendingJsonlSync(payload) {
   try { fs.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true }); } catch {}
   fs.appendFileSync(DELTA_QUEUE_PATH, line + '\n', 'utf8');
   try { if (typeof global.gc === 'function') global.gc(); } catch {}
+}
+
+function __deltaAppendIngestDeadLetterSync({ payload = null, response = null, nextOffset = 0, ingest_url = '' } = {}) {
+  try {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const r = response && typeof response === 'object' ? response : {};
+    const rec = {
+      ts: Date.now(),
+      event: 'lead_ingest_dead_letter',
+      ingest_url: String(ingest_url || '').trim() || null,
+      next_offset: Math.max(0, Number(nextOffset || 0) || 0),
+      account_login: String(p.account_login || '').trim() || null,
+      thread_key: String(p.thread_key || '').trim() || null,
+      status: Number(r.status || 0) || 0,
+      ok: !!(r && r.ok),
+      error: String(r.error || '').slice(0, 400) || null,
+      body: String(r.body || '').slice(0, 1200) || null,
+      payload: p
+    };
+    try { fs.mkdirSync(path.dirname(DELTA_INGEST_DEADLETTER_PATH), { recursive: true }); } catch {}
+    fs.appendFileSync(DELTA_INGEST_DEADLETTER_PATH, JSON.stringify(rec) + '\n', 'utf8');
+  } catch {}
 }
 
 function __deltaReadNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkBytes = 64 * 1024, maxLineBytes = 2 * 1024 * 1024 } = {}) {
@@ -16992,7 +17073,14 @@ function __deltaBuildCtIngestPayload(payload) {
     p.texto_limpo ||
     ''
   ).trim();
-  const cidade = String(p.cidade || '').trim() || null;
+  const cidade = String(p.cidade || '').trim() || DELTA_FALLBACK_CITY;
+  const linkAnuncio = String(p.link_anuncio || p.profile_url || '').trim() || DELTA_FALLBACK_LINK;
+  const clientName = String(
+    p.client_name ||
+    p.customer_name ||
+    p.nome_cliente_limpo ||
+    ''
+  ).trim() || DELTA_FALLBACK_CLIENT_NAME;
   const saudacaoTexto = String(p.saudacao_texto || '').trim() || null;
   const ts = Number(
     p.timestamp_ms ||
@@ -17011,9 +17099,11 @@ function __deltaBuildCtIngestPayload(payload) {
     texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,
     cidade,
+    link_anuncio: linkAnuncio,
+    client_name: clientName,
     saudacao_texto: saudacaoTexto,
-    customer_name: String(p.customer_name || p.nome_cliente_limpo || '').trim() || undefined,
-    nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || '').trim() || undefined,
+    customer_name: String(p.customer_name || p.nome_cliente_limpo || clientName).trim() || clientName,
+    nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || clientName).trim() || clientName,
   };
 }
 
@@ -17108,7 +17198,7 @@ async function __deltaIngestTick() {
       }
     } catch {}
     try {
-      logger.warn('[DELTA][INGEST] ACK não-200; cursor mantido', {
+      logger.warn('[DELTA][INGEST] ACK não-200; cursor avançado com dead-letter', {
         status: res && res.status ? Number(res.status) : null,
         body: String(res && res.body || '').slice(0, 220),
         redirected: !!(res && res.redirected),
@@ -17116,7 +17206,18 @@ async function __deltaIngestTick() {
         nextOffset
       });
     } catch {}
-    __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.7)));
+    try {
+      __deltaAppendIngestDeadLetterSync({
+        payload: ctPayload,
+        response: res,
+        nextOffset,
+        ingest_url: ingestUrl
+      });
+    } catch {}
+    __deltaWriteCursorOffsetSync(nextOffset);
+    try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
+    __deltaIngestBackoffMs = 650;
+    return;
   } finally {
     __deltaIngestLoopRunning = false;
   }
