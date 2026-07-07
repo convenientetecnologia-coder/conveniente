@@ -3170,15 +3170,20 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
 
     try { await page.keyboard.press("Enter"); } catch (_) {}
     logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
-    const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 500, pollMs: 50 });
+    const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 2200, pollMs: 80 });
     let after = String(emptyAfterEnter && emptyAfterEnter.text_preview || "").trim();
     if (!(emptyAfterEnter && emptyAfterEnter.ok)) {
+      // Mensagens humanas (dashboard) usam estratégia single-shot para evitar duplicidade.
+      // Se o Enter não confirmar, devolve erro e deixa retry explícito para o operador.
+      if (!fromNetworkLead) {
+        return { ok: false, error: "send_not_confirmed_after_enter_only", composer_preview: after.slice(0, 80) };
+      }
       const clickedStrict = await clickStrictPhysicalSendButton(page);
       const clickedFallback = clickedStrict ? true : await clickSendButtonIfPresent(page);
       logInfo(
         `[virtusDelta][reply] send_button_fallback thread_key=${t} strict=${clickedStrict ? "sim" : "nao"} clicked=${clickedFallback ? "sim" : "nao"}`
       );
-      const emptyAfterFallback = await waitLexicalComposerEmpty(page, { timeoutMs: 500, pollMs: 50 });
+      const emptyAfterFallback = await waitLexicalComposerEmpty(page, { timeoutMs: 1800, pollMs: 80 });
       after = String(emptyAfterFallback && emptyAfterFallback.text_preview || "").trim();
     }
     await humanPause("postSend", "post_enter_send");
@@ -3466,6 +3471,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   let running = true;
   const enqueue = createSerialQueue();
+  const replyDispatchStateByClientId = new Map(); // client_message_id -> { state, at, thread_key }
+  const REPLY_DISPATCH_ID_TTL_MS = Math.max(
+    60_000,
+    Number(process.env.VIRTUS_DELTA_REPLY_DISPATCH_ID_TTL_MS || (6 * 60 * 60 * 1000)) || (6 * 60 * 60 * 1000)
+  );
+  const REPLY_DISPATCH_ID_MAX = Math.max(
+    500,
+    Number(process.env.VIRTUS_DELTA_REPLY_DISPATCH_ID_MAX || 12_000) || 12_000
+  );
   const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
   const autoGreetingSentThreads = new Set(); // threadKey
   const autoGreetingTimers = new Map(); // threadKey -> Timeout
@@ -3588,6 +3602,51 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch {
       return crypto.randomBytes(12).toString("hex");
     }
+  }
+
+  function pruneReplyDispatchState() {
+    try {
+      const now = Date.now();
+      for (const [cid, info] of replyDispatchStateByClientId.entries()) {
+        const at = Number(info && info.at || 0) || 0;
+        if (!at || (now - at) > REPLY_DISPATCH_ID_TTL_MS) {
+          replyDispatchStateByClientId.delete(cid);
+        }
+      }
+      if (replyDispatchStateByClientId.size <= REPLY_DISPATCH_ID_MAX) return;
+      const ranked = Array.from(replyDispatchStateByClientId.entries())
+        .map(([cid, info]) => ({ cid, at: Number(info && info.at || 0) || 0 }))
+        .sort((a, b) => a.at - b.at);
+      const overflow = replyDispatchStateByClientId.size - REPLY_DISPATCH_ID_MAX;
+      for (let i = 0; i < overflow; i++) {
+        const cid = ranked[i] && ranked[i].cid;
+        if (cid) replyDispatchStateByClientId.delete(cid);
+      }
+    } catch (_) {}
+  }
+
+  function getReplyDispatchState(clientMessageId) {
+    const cid = String(clientMessageId || "").trim();
+    if (!cid) return null;
+    pruneReplyDispatchState();
+    return replyDispatchStateByClientId.get(cid) || null;
+  }
+
+  function setReplyDispatchState(clientMessageId, state, threadKey = null) {
+    const cid = String(clientMessageId || "").trim();
+    if (!cid) return;
+    pruneReplyDispatchState();
+    replyDispatchStateByClientId.set(cid, {
+      state: String(state || "").trim() || "inflight",
+      at: Date.now(),
+      thread_key: String(threadKey || "").trim() || null
+    });
+  }
+
+  function clearReplyDispatchState(clientMessageId) {
+    const cid = String(clientMessageId || "").trim();
+    if (!cid) return;
+    try { replyDispatchStateByClientId.delete(cid); } catch (_) {}
   }
 
   function resolveCtReverseDeliveryStatusUrl() {
@@ -4462,8 +4521,21 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
+        if (cmid) {
+          const prior = getReplyDispatchState(cmid);
+          if (prior && prior.state === "done") {
+            try { logInfo(`[virtusDelta][reply] duplicate_done_skip thread_key=${tk} client_message_id=${cmid}`); } catch (_) {}
+            return { ok: true, status: "duplicate_done_skip", client_message_id: cmid };
+          }
+          if (prior && prior.state === "inflight") {
+            try { logInfo(`[virtusDelta][reply] duplicate_inflight_skip thread_key=${tk} client_message_id=${cmid}`); } catch (_) {}
+            return { ok: true, status: "duplicate_inflight_skip", client_message_id: cmid };
+          }
+          setReplyDispatchState(cmid, "inflight", tk);
+        }
         const out = await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
         if (out && out.ok) {
+          if (cmid) setReplyDispatchState(cmid, "done", tk);
           try {
             await __deltaEnforceSidebarResetToTop(page, {
               threadKey: tk,
@@ -4480,6 +4552,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
           kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
         } catch (_) {}
+        if (cmid) clearReplyDispatchState(cmid);
         return out;
       } catch (e) {
         const tk = String(thread_key || "").trim();
@@ -4490,6 +4563,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
           kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err || "send_failed_exception" });
         } catch (_) {}
+        if (cmid) clearReplyDispatchState(cmid);
         return { ok: false, error: err };
       }
     });
