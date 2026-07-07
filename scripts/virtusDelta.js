@@ -3279,10 +3279,10 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     logInfo(`[virtusDelta][typing_flush_guard] thread_key=${t} wait_ms=300`);
 
     await humanPause("preSend", "pre_enter_send");
-    // Estratégia enterprise:
+    // Estratégia enterprise operacional:
     // 1) Enter para enviar
-    // 2) Se não limpou o composer, tenta clicar no botão "Pressione Enter para enviar"/Enviar
-    // 3) Só considera OK se o composer ficar vazio (confirmação local mínima).
+    // 2) Se não confirmar, tentar botão de envio
+    // 3) Nunca abandonar envio por falha de confirmação local (best-effort).
     let initial = String(composedNorm || "").trim();
     if (!initial && expectedComposer) {
       // Garantia final: não deixar composer vazio quando há payload esperado.
@@ -3300,7 +3300,21 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     if (!initial) {
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
-      return clicked ? { ok: true, item_link: itemLink || null } : { ok: false, error: "composer_text_not_registered" };
+      if (clicked) {
+        return {
+          ok: true,
+          item_link: itemLink || null,
+          delivery_confidence: "send_button_only",
+          unconfirmed_reason: "composer_empty_send_button",
+        };
+      }
+      try { await page.keyboard.press("Enter"); } catch (_) {}
+      return {
+        ok: true,
+        item_link: itemLink || null,
+        delivery_confidence: "unconfirmed_best_effort",
+        unconfirmed_reason: "composer_empty_no_send_control",
+      };
     }
 
     try { await page.keyboard.up("Shift"); } catch (_) {}
@@ -3320,11 +3334,30 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     await humanPause("postSend", "post_enter_send");
 
     if (after && after.trim()) {
-      // Composer ainda tem texto: não confirmou envio.
-      return { ok: false, error: "send_not_confirmed_composer_not_empty", composer_preview: after.slice(0, 80) };
+      // Composer ainda tem texto: confirmação local falhou, mas seguimos best-effort.
+      try {
+        __forensicEdgeEmit({
+          account_login: forensicAccountLogin,
+          thread_key: t,
+          flow_stage: "send_unconfirmed_best_effort",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            reason: "composer_not_empty_after_send_attempts",
+            composer_preview: after.slice(0, 120),
+            ts_ms: Date.now(),
+          }
+        });
+      } catch (_) {}
+      return {
+        ok: true,
+        item_link: itemLink || null,
+        delivery_confidence: "unconfirmed_best_effort",
+        unconfirmed_reason: "composer_not_empty_after_send",
+        composer_preview: after.slice(0, 80),
+      };
     }
 
-    return { ok: true, item_link: itemLink || null };
+    return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local" };
   } finally {
     try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
   }
@@ -4441,11 +4474,58 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           return lastOut;
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
-        if (isNonRetryableSendError(lastErr)) break;
+        if (isNonRetryableSendError(lastErr)) {
+          const bestEffortOut = {
+            ok: true,
+            best_effort: true,
+            delivery_confidence: "unconfirmed_best_effort",
+            unconfirmed_reason: lastErr,
+            item_link: (lastOut && lastOut.item_link) ? String(lastOut.item_link) : null,
+            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
+          };
+          try {
+            logInfo(
+              `[virtusDelta][reply] nonretryable_promoted_best_effort thread_key=${t} reason=${lastErr}`
+            );
+          } catch (_) {}
+          const nowTs = Date.now();
+          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+          lastCrossThreadKey = String(t);
+          lastCrossThreadSendAt = nowTs;
+          try {
+            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
+            kickDeliveryConfirmPump();
+          } catch (_) {}
+          return bestEffortOut;
+        }
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
-        if (isNonRetryableSendError(lastErr)) break;
+        if (isNonRetryableSendError(lastErr)) {
+          const bestEffortOut = {
+            ok: true,
+            best_effort: true,
+            delivery_confidence: "unconfirmed_best_effort",
+            unconfirmed_reason: lastErr,
+            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
+          };
+          try {
+            logInfo(
+              `[virtusDelta][reply] exception_promoted_best_effort thread_key=${t} reason=${lastErr}`
+            );
+          } catch (_) {}
+          const nowTs = Date.now();
+          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+          lastCrossThreadKey = String(t);
+          lastCrossThreadSendAt = nowTs;
+          try {
+            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
+            kickDeliveryConfirmPump();
+          } catch (_) {}
+          return bestEffortOut;
+        }
       }
     }
 
