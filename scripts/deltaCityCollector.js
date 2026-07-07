@@ -91,6 +91,11 @@ const STATE_NAME_TO_UF = new Map([
   ["sergipe", "SE"],
   ["tocantins", "TO"],
 ]);
+const BR_VALID_UF = new Set([
+  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA",
+  "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN",
+  "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+]);
 
 function normalizeStateKey(value) {
   return String(value || "")
@@ -122,6 +127,7 @@ function normalizeCityUfLabel(raw) {
     const city = toTitleCaseCityName(String(cityRaw || "").trim());
     const uf = String(ufRaw || "").trim().toUpperCase();
     if (!city || !/^[A-Z]{2}$/.test(uf)) return "";
+    if (!BR_VALID_UF.has(uf)) return "";
     if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}$/.test(city)) return "";
     return `${city} (${uf})`.slice(0, 80);
   };
