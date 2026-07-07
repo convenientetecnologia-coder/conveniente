@@ -3229,8 +3229,8 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       `[virtusDelta][composer] after_type chars=${composedNorm.length} expected_chars=${expectedComposer.length} integrity=${composerIntegrityOk ? "ok" : "mismatch"} mode=${String(typeOut && typeOut.mode || "unknown")} preview="${composedNorm.slice(0, 60)}"`
     );
 
-    // Blindagem estrutural: só envia quando o payload digitado no composer
-    // bater exatamente com o payload de origem.
+    // Blindagem estrutural: tenta convergir o payload digitado com o payload de origem.
+    // Se não convergir, mantém best-effort operacional (não abandona envio).
     if (!composerIntegrityOk) {
       logInfo(`[virtusDelta][composer] integrity_retry thread_key=${t}`);
       await humanPause("domSettle", "composer_integrity_retry_settle");
@@ -3244,14 +3244,27 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         `[virtusDelta][composer] after_integrity_retry chars=${composedNorm.length} expected_chars=${expectedComposer.length} integrity=${composerIntegrityOk ? "ok" : "mismatch"} mode=${String(retryTypeOut && retryTypeOut.mode || "unknown")} preview="${composedNorm.slice(0, 60)}"`
       );
     }
-    if (!composerIntegrityOk) {
-      return {
-        ok: false,
-        error: "composer_payload_integrity_mismatch",
-        expected_chars: expectedComposer.length,
-        actual_chars: composedNorm.length,
-        composer_preview: composedNorm.slice(0, 80),
-      };
+    const composerIntegrityDegraded = !composerIntegrityOk;
+    if (composerIntegrityDegraded) {
+      // Política operacional: nunca abandonar envio por mismatch de composer.
+      // Mantemos best-effort com evidência forense e seguimos para o Enter.
+      logInfo(
+        `[virtusDelta][composer] integrity_degraded_proceed thread_key=${t} expected_chars=${expectedComposer.length} actual_chars=${composedNorm.length}`
+      );
+      try {
+        __forensicEdgeEmit({
+          account_login: forensicAccountLogin,
+          thread_key: t,
+          flow_stage: "composer_integrity_degraded_proceed",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            expected_chars: expectedComposer.length,
+            actual_chars: composedNorm.length,
+            composer_preview: composedNorm.slice(0, 120),
+            ts_ms: Date.now(),
+          }
+        });
+      } catch (_) {}
     }
 
     if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
@@ -3270,7 +3283,20 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     // 1) Enter para enviar
     // 2) Se não limpou o composer, tenta clicar no botão "Pressione Enter para enviar"/Enviar
     // 3) Só considera OK se o composer ficar vazio (confirmação local mínima).
-    const initial = String(composedNorm || "").trim();
+    let initial = String(composedNorm || "").trim();
+    if (!initial && expectedComposer) {
+      // Garantia final: não deixar composer vazio quando há payload esperado.
+      try {
+        await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+        await typeHumanized(page, textoResposta);
+        composed = await readComposerText(page);
+        composedNorm = normalizeComposerPayload(composed);
+        initial = String(composedNorm || "").trim();
+        logInfo(
+          `[virtusDelta][composer] final_rehydrate chars=${composedNorm.length} expected_chars=${expectedComposer.length} preview="${composedNorm.slice(0, 60)}"`
+        );
+      } catch (_) {}
+    }
     if (!initial) {
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
@@ -3283,15 +3309,10 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 2200, pollMs: 80 });
     let after = String(emptyAfterEnter && emptyAfterEnter.text_preview || "").trim();
     if (!(emptyAfterEnter && emptyAfterEnter.ok)) {
-      // Mensagens humanas (dashboard) usam estratégia single-shot para evitar duplicidade.
-      // Se o Enter não confirmar, devolve erro e deixa retry explícito para o operador.
-      if (!fromNetworkLead) {
-        return { ok: false, error: "send_not_confirmed_after_enter_only", composer_preview: after.slice(0, 80) };
-      }
       const clickedStrict = await clickStrictPhysicalSendButton(page);
       const clickedFallback = clickedStrict ? true : await clickSendButtonIfPresent(page);
       logInfo(
-        `[virtusDelta][reply] send_button_fallback thread_key=${t} strict=${clickedStrict ? "sim" : "nao"} clicked=${clickedFallback ? "sim" : "nao"}`
+        `[virtusDelta][reply] send_button_fallback thread_key=${t} origin=${fromNetworkLead ? "network" : "dashboard"} strict=${clickedStrict ? "sim" : "nao"} clicked=${clickedFallback ? "sim" : "nao"}`
       );
       const emptyAfterFallback = await waitLexicalComposerEmpty(page, { timeoutMs: 1800, pollMs: 80 });
       after = String(emptyAfterFallback && emptyAfterFallback.text_preview || "").trim();
