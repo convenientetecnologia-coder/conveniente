@@ -14985,8 +14985,8 @@ const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensag
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
-const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
-const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
@@ -15010,7 +15010,7 @@ const DELTA_ACTIVE_UPSERT_BUFFER_MAX_ITEMS = Math.max(
 // =========================
 // DELTA: Arquitetura 2 camadas (REPRESA vs DISPARO)
 // - REPRESA: new leads timer queue (30–90s), serial POR CONTA, fora do Puppeteer.
-// - DISPARO: ctrl.virtus (Promise chain) executa DOM + cooldown 3–12s.
+// - DISPARO: ctrl.virtus (Promise chain) executa DOM + cooldown 2–10s.
 // Objetivo: eliminar bursts de timers simultâneos que geram head-of-line blocking.
 // =========================
 const DELTA_NEW_LEADS_TIMER_QUEUE_DIR = path.join(__dirname, '..', 'dados', 'delta_new_leads_timer_queue');

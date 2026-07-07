@@ -500,8 +500,8 @@ function envMs(minKey, maxKey, defMin, defMax) {
 const HUMAN_TIMINGS = {
   /** Pausa perceptiva pós-lead (Fabiana): padrão 3–7s */
   reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
-  /** Fila de ação das mãos (dashboard + chat novo): padrão 5–15s */
-  actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 5000, 15000),
+  /** Fila de ação das mãos (dashboard + chat novo): padrão 2–10s */
+  actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 2000, 10000),
   /** Antes de clicar no filtro Marketplace */
   preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 2200, 4200),
   /** Após ativar Marketplace — DOM lateral estabilizar */
@@ -540,8 +540,8 @@ const NEW_CHAT_WARMUP_DELAY = envMs(
 const CROSS_THREAD_SEND_GAP = envMs(
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MIN",
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MAX",
-  3_000,
-  12_000
+  2_000,
+  10_000
 );
 
 const MARKETPLACE_STABILITY_ROUNDS = Math.max(
@@ -2950,12 +2950,14 @@ async function probeOpenLineContinuity(page, threadKey) {
   }
 }
 
-async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null, continuityProbe = null } = {}) {
+async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null, continuityProbe = null, skipActionDispatch = false } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
   try { if (page) page.__virtusDeltaReplyInFlight = true; } catch (_) {}
   try {
-    await humanReactionDelay(fromNetworkLead);
+    if (!skipActionDispatch) {
+      await humanReactionDelay(fromNetworkLead);
+    }
 
     // Proteção anti-freeze: expurga seleção residual do mouse antes de qualquer automação.
     try {
@@ -4252,25 +4254,23 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
 
     // Drenagem rápida de linha aberta:
-    // se a thread já está aberta/selecionada, mantém o canal e só aplica cooldown biológico 5–15s.
+    // se a thread já está aberta/selecionada, mantém o canal e aplica pacing 2–10s.
     const continuityProbe = await probeOpenLineContinuity(page, t).catch(() => ({ is_open_line_ready: false }));
     const openLineReady = !!(continuityProbe && continuityProbe.is_open_line_ready === true);
     const cooldownPolicy = openLineReady
-      ? { minMs: 5_000, maxMs: 15_000, reason: "open_line_fast_lane" }
+      ? { minMs: 2_000, maxMs: 10_000, reason: "open_line_fast_lane" }
       : null;
 
-    // Relógio sentinela por conta; em linha aberta usa faixa 5–15s.
+    // Relógio sentinela por conta; em linha aberta usa faixa 2–10s.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN, cooldownPolicy);
 
-    // Regra rígida do tiro certeiro: um único ciclo síncrono por tarefa (A -> B -> hard-fail).
-    // O fallback de abertura acontece dentro de openThreadByClick; sem retries extras aqui.
-    const maxRetries = 0;
-    const isSelectorLikeError = (err) => {
+    // Resiliência controlada: 1 retry para falhas transitórias de abertura/hidratação
+    // sem repetir comando quando erro for de confirmação final de envio.
+    const maxRetries = Math.max(0, Math.min(2, Number(process.env.VIRTUS_DELTA_REPLY_MAX_RETRIES || 1) || 1));
+    const isNonRetryableSendError = (err) => {
       const e = String(err || "").trim();
       return (
-        e === "composer_missing" ||
-        e === "thread_card_not_found" ||
-        e === "thread_open_hydration_timeout" ||
+        e === "send_not_confirmed_after_enter_only" ||
         e === "send_not_confirmed_composer_not_empty" ||
         e === "composer_text_not_registered"
       );
@@ -4294,7 +4294,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           textoResposta: msg,
           fromNetworkLead: false,
           forensicAccountLogin: ACCOUNT_LOGIN,
-          continuityProbe
+          continuityProbe,
+          skipActionDispatch: true
         });
         lastOut = r && typeof r === "object" ? r : { ok: true };
         if (lastOut && lastOut.ok) {
@@ -4311,11 +4312,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           return lastOut;
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
-        if (isSelectorLikeError(lastErr)) break;
+        if (isNonRetryableSendError(lastErr)) break;
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
-        if (isSelectorLikeError(lastErr)) break;
+        if (isNonRetryableSendError(lastErr)) break;
       }
     }
 
@@ -4375,6 +4376,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         textoResposta: greetingText,
         fromNetworkLead: true,
         onItemLink: (link) => resolveItemLink(link),
+        skipActionDispatch: true,
       });
       if (sendOut && sendOut.item_link) {
         resolveItemLink(sendOut.item_link);
