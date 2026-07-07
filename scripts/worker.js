@@ -16191,11 +16191,38 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
 function __deltaGetThreadState(nome, threadKey) {
   return __deltaThreadStateMap.get(__deltaThreadStateKey(nome, threadKey)) || null;
 }
+function __deltaHydrateThreadStateFromDiskRow(st, row) {
+  if (!st || typeof st !== 'object' || !row || typeof row !== 'object') return st;
+  const statusRaw = String(row.status || '').trim().toLowerCase();
+  let status = statusRaw || st.status;
+  if (
+    status !== 'active' &&
+    status !== 'new_buffering' &&
+    status !== 'hands_in_progress' &&
+    status !== 'processed_historical' &&
+    status !== 'processed'
+  ) status = st.status || 'new_buffering';
+  if (status === 'hands_in_progress') status = 'new_buffering';
+  st.status = status;
+  st.createdAt = Number(row.createdAt || 0) || st.createdAt;
+  st.updatedAt = Number(row.updatedAt || 0) || st.updatedAt;
+  st.handsFailures = Number(row.handsFailures || 0) || 0;
+  st.city = row && row.city ? String(row.city).trim() : null;
+  st.seq = Number(row.seq || 0) || st.seq || 0;
+  st.lastDispatchAt = Number(row.lastDispatchAt || 0) || st.lastDispatchAt || 0;
+  st.high_watermark = Number(row.high_watermark || row.highWatermark || 0) || st.high_watermark || 0;
+  st.highWatermark = Number(st.high_watermark || 0) || 0;
+  return st;
+}
 function __deltaGetOrCreateThreadState(nome, threadKey) {
   const k = __deltaThreadStateKey(nome, threadKey);
   let st = __deltaThreadStateMap.get(k) || null;
   if (!st) {
     st = __deltaCreateThreadState(nome, threadKey);
+    const row = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
+    if (row && typeof row === 'object') {
+      __deltaHydrateThreadStateFromDiskRow(st, row);
+    }
     __deltaThreadStateMap.set(k, st);
     __deltaSchedulePersistThreadState();
   }
@@ -18781,6 +18808,9 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
+        const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
+        const diskCityRaw = String(diskRow && diskRow.city || '').trim();
+        const diskCity = diskCityRaw || null;
         let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
         const diskHighWatermark = __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(diskStatus)) {
@@ -18875,7 +18905,7 @@ async function __deltaAttachCdpEar(nome, page) {
                 dedup_meta_id: dedupMetaId || null,
                 meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
                 meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                cidade: null,
+                cidade: diskCity,
                 operacao_meta: op || 'message',
                 mensagem_seq: 0,
                 dispatch_ct: false,
@@ -18901,7 +18931,7 @@ async function __deltaAttachCdpEar(nome, page) {
             dedup_meta_id: dedupMetaId || null,
             meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
             meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: null,
+            cidade: diskCity,
             operacao_meta: op || 'message',
             mensagem_seq: 0,
             dispatch_ct: true,

@@ -1165,6 +1165,7 @@ async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
           const ready = document.readyState === "complete" || document.readyState === "interactive";
           const path = String(location.pathname || "").toLowerCase();
           const isMessages = path.includes("/messages");
+          const inThreadPath = /\/messages\/(?:e2ee\/)?t\//.test(path);
           const busy = !!document.querySelector('[aria-busy="true"]');
           const tablist = !!document.querySelector('[role="tablist"]');
           const inboxSearch =
@@ -1174,9 +1175,12 @@ async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
             50,
             document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length
           );
-          const sig0 = `${path}|tabs=${tablist ? 1 : 0}|search=${inboxSearch ? 1 : 0}|threads=${threadCount}`;
+          const lexicalEditors = Math.min(5, document.querySelectorAll('div[data-lexical-editor="true"]').length);
+          const composerReady = lexicalEditors > 0;
+          const hasMessagesSignals = tablist || inboxSearch || threadCount > 0 || composerReady;
+          const sig0 = `${path}|tabs=${tablist ? 1 : 0}|search=${inboxSearch ? 1 : 0}|threads=${threadCount}|threadPath=${inThreadPath ? 1 : 0}|composer=${composerReady ? 1 : 0}`;
           return {
-            ok: ready && isMessages && !busy && tablist && (inboxSearch || threadCount > 0),
+            ok: ready && isMessages && !busy && hasMessagesSignals,
             sig: sig0,
           };
         } catch (_) {
@@ -1978,14 +1982,34 @@ async function clickMarketplaceFilterIfPresent(page) {
 async function extractMarketplaceItemLink(page) {
   const href = await page.evaluate(() => {
     const host = location.origin || '';
-    const a =
-      document.querySelector('div[class*="x1a8lsjc"] a[href*="/marketplace/item/"]') ||
-      document.querySelector('a[href*="/marketplace/item/"]');
-    if (!a) return '';
-    const h = String(a.getAttribute('href') || '').trim();
-    if (!h) return '';
-    if (h.startsWith('http')) return h;
-    return host + h;
+    const candidates = [];
+    const push = (raw) => {
+      const h = String(raw || '').trim();
+      if (!h) return;
+      if (/\/marketplace\/item\//i.test(h)) candidates.push(h);
+    };
+
+    const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]'));
+    for (const a of anchors) {
+      try {
+        push(a.getAttribute('href'));
+        push(a.getAttribute('data-href'));
+      } catch (_) {}
+    }
+
+    if (!candidates.length) {
+      const body = String((document.body && document.body.innerText) || '').replace(/\s+/g, ' ');
+      const mHttp = body.match(/https?:\/\/(?:www\.)?facebook\.com\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/i);
+      if (mHttp && mHttp[0]) push(mHttp[0]);
+      const mRel = body.match(/\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/i);
+      if (mRel && mRel[0]) push(mRel[0]);
+    }
+
+    if (!candidates.length) return '';
+    const first = String(candidates[0] || '').trim();
+    if (!first) return '';
+    if (first.startsWith('http')) return first;
+    return host + first;
   }).catch(() => "");
   return String(href || "").trim();
 }
@@ -2840,7 +2864,21 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
         }
       });
     } catch (_) {}
-    return { ok: false, error: "messages_boot_not_stable" };
+    const rescue = await __deltaTryOpenThreadByDirectGoto(page, t, {
+      forensicAccountLogin,
+      stepAError: "messages_boot_not_stable"
+    }).catch(() => null);
+    if (rescue && rescue.ok) {
+      return {
+        ...rescue,
+        recovered_from_boot_not_stable: true
+      };
+    }
+    return {
+      ok: false,
+      error: "messages_boot_not_stable",
+      fallback_error: String(rescue && rescue.error || "").trim() || null
+    };
   }
 
   try {

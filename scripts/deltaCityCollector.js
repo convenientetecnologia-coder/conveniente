@@ -62,6 +62,46 @@ function toTitleCaseCityName(value) {
     .trim();
 }
 
+const STATE_NAME_TO_UF = new Map([
+  ["acre", "AC"],
+  ["alagoas", "AL"],
+  ["amapa", "AP"],
+  ["amazonas", "AM"],
+  ["bahia", "BA"],
+  ["ceara", "CE"],
+  ["distrito federal", "DF"],
+  ["espirito santo", "ES"],
+  ["goias", "GO"],
+  ["maranhao", "MA"],
+  ["mato grosso", "MT"],
+  ["mato grosso do sul", "MS"],
+  ["minas gerais", "MG"],
+  ["para", "PA"],
+  ["paraiba", "PB"],
+  ["parana", "PR"],
+  ["pernambuco", "PE"],
+  ["piaui", "PI"],
+  ["rio de janeiro", "RJ"],
+  ["rio grande do norte", "RN"],
+  ["rio grande do sul", "RS"],
+  ["rondonia", "RO"],
+  ["roraima", "RR"],
+  ["santa catarina", "SC"],
+  ["sao paulo", "SP"],
+  ["sergipe", "SE"],
+  ["tocantins", "TO"],
+]);
+
+function normalizeStateKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function normalizeCityUfLabel(raw) {
   const s0 = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s0) return "";
@@ -70,16 +110,52 @@ function normalizeCityUfLabel(raw) {
     .replace(/^listed\s+in\s+/i, "")
     .replace(/\s*·\s*a localiza[çc][aã]o é aproximada.*$/i, "")
     .replace(/\s*·\s*approximate location.*$/i, "")
+    .replace(/\s*-\s*a localiza[çc][aã]o é aproximada.*$/i, "")
+    .replace(/\s*-\s*approximate location.*$/i, "")
     .trim();
   if (!s) return "";
   const parts = s.split(/\s*·\s*/).map((p) => String(p || "").trim()).filter(Boolean);
   if (parts.length) s = parts[0];
-  const m = s.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/);
-  if (!m) return "";
-  const city = toTitleCaseCityName(String(m[1] || "").trim());
-  const uf = String(m[2] || "").trim().toUpperCase();
-  if (!city || !uf) return "";
-  return `${city} (${uf})`.slice(0, 80);
+  if (!s) return "";
+
+  const tryBuild = (cityRaw, ufRaw) => {
+    const city = toTitleCaseCityName(String(cityRaw || "").trim());
+    const uf = String(ufRaw || "").trim().toUpperCase();
+    if (!city || !/^[A-Z]{2}$/.test(uf)) return "";
+    if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}$/.test(city)) return "";
+    return `${city} (${uf})`.slice(0, 80);
+  };
+
+  const ufPatterns = [
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\(\s*([A-Za-z]{2})\s*\)$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-z]{2})$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-z]{2})$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s+([A-Za-z]{2})$/,
+  ];
+  for (const re of ufPatterns) {
+    const m = s.match(re);
+    if (!m) continue;
+    const built = tryBuild(m[1], m[2]);
+    if (built) return built;
+  }
+
+  const stateNamePatterns = [
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+  ];
+  for (const re of stateNamePatterns) {
+    const m = s.match(re);
+    if (!m) continue;
+    const stateKey = normalizeStateKey(m[2]);
+    const uf = STATE_NAME_TO_UF.get(stateKey);
+    if (!uf) continue;
+    const built = tryBuild(m[1], uf);
+    if (built) return built;
+  }
+
+  return "";
 }
 
 async function extractCityFromListingPage(page) {
