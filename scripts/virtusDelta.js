@@ -2004,6 +2004,22 @@ async function readComposerText(page) {
   ).trim();
 }
 
+function normalizeComposerPayload(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\u200b/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .trim();
+}
+
+function isComposerPayloadMatch(expected, actual) {
+  const exp = normalizeComposerPayload(expected);
+  const act = normalizeComposerPayload(actual);
+  return exp === act;
+}
+
 async function waitLexicalComposerEmpty(page, { timeoutMs = 500, pollMs = 50 } = {}) {
   const timeout = Math.max(80, Number(timeoutMs || 0) || 500);
   const poll = Math.max(20, Number(pollMs || 0) || 50);
@@ -2222,26 +2238,40 @@ async function ensureComposerFocused(page, ctx = {}) {
 async function typeHumanized(page, textoResposta) {
   const full = String(textoResposta || "").replace(/\r/g, "");
   logDelta("TYPING", `⌨️ Injetando fatiador combinatório do atendimentodelta.json caractere por caractere.`, { chars: full.length });
+  if (!full) return { ok: true, mode: "empty", chars: 0 };
+
+  // Caminho primário (blindado): injeção atômica elimina risco de quebra por Shift+Enter
+  // em cenários de alta carga de CPU/DOM.
+  try {
+    await page.keyboard.insertText(full);
+    return { ok: true, mode: "insert_text_atomic", chars: full.length };
+  } catch (_) {}
+
   for (const ch of full) {
-    if (ch === "\n") {
-      try {
-        await page.keyboard.down("Shift");
-        await page.keyboard.press("Enter");
-        await page.keyboard.up("Shift");
-      } catch (_) {}
-      await humanPause("lineBreak", "shift_enter");
-      continue;
-    }
-    const keyDelayMs = randomBetween(80, 130);
+    const keyDelayMs = randomBetween(70, 120);
     try {
-      await page.keyboard.type(ch, { delay: keyDelayMs });
+      await page.keyboard.insertText(ch);
     } catch (_) {
+      if (ch === "\n") {
+        try {
+          await page.keyboard.down("Shift");
+          await page.keyboard.press("Enter");
+          await page.keyboard.up("Shift");
+        } catch (_) {}
+        await humanPause("lineBreak", "shift_enter_fallback");
+        continue;
+      }
       try {
-        await page.keyboard.sendCharacter(ch);
-      } catch (_) {}
-      await sleep(keyDelayMs);
+        await page.keyboard.type(ch, { delay: keyDelayMs });
+      } catch (_) {
+        try {
+          await page.keyboard.sendCharacter(ch);
+        } catch (_) {}
+        await sleep(keyDelayMs);
+      }
     }
   }
+  return { ok: true, mode: "insert_text_char_fallback", chars: full.length };
 }
 
 async function scrollSidebarShort(page) {
@@ -3190,19 +3220,38 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         logInfo(`[virtusDelta][DOM] thread_key=${t} send_outerHTML=${dom.send_outerHTML}`);
       } catch (_) {}
     }
-    await typeHumanized(page, textoResposta);
+    const expectedComposer = normalizeComposerPayload(textoResposta);
+    const typeOut = await typeHumanized(page, textoResposta);
     let composed = await readComposerText(page);
-    logInfo(`[virtusDelta][composer] after_type chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+    let composedNorm = normalizeComposerPayload(composed);
+    let composerIntegrityOk = isComposerPayloadMatch(expectedComposer, composedNorm);
+    logInfo(
+      `[virtusDelta][composer] after_type chars=${composedNorm.length} expected_chars=${expectedComposer.length} integrity=${composerIntegrityOk ? "ok" : "mismatch"} mode=${String(typeOut && typeOut.mode || "unknown")} preview="${composedNorm.slice(0, 60)}"`
+    );
 
-    // IMPORTANT: mensagens curtas ("oi", "ok") são válidas; não podemos tratar <3 como "vazio".
-    if (!composed || composed.length < 1) {
-      logInfo(`[virtusDelta][composer] retry_focus_and_type thread_key=${t}`);
-      await humanPause("domSettle", "composer_retry_settle");
+    // Blindagem estrutural: só envia quando o payload digitado no composer
+    // bater exatamente com o payload de origem.
+    if (!composerIntegrityOk) {
+      logInfo(`[virtusDelta][composer] integrity_retry thread_key=${t}`);
+      await humanPause("domSettle", "composer_integrity_retry_settle");
       await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
-      await humanPause("preTyping", "pre_typing_retry");
-      await typeHumanized(page, textoResposta);
+      await humanPause("preTyping", "pre_typing_integrity_retry");
+      const retryTypeOut = await typeHumanized(page, textoResposta);
       composed = await readComposerText(page);
-      logInfo(`[virtusDelta][composer] after_retry chars=${composed.length} preview="${composed.slice(0, 60)}"`);
+      composedNorm = normalizeComposerPayload(composed);
+      composerIntegrityOk = isComposerPayloadMatch(expectedComposer, composedNorm);
+      logInfo(
+        `[virtusDelta][composer] after_integrity_retry chars=${composedNorm.length} expected_chars=${expectedComposer.length} integrity=${composerIntegrityOk ? "ok" : "mismatch"} mode=${String(retryTypeOut && retryTypeOut.mode || "unknown")} preview="${composedNorm.slice(0, 60)}"`
+      );
+    }
+    if (!composerIntegrityOk) {
+      return {
+        ok: false,
+        error: "composer_payload_integrity_mismatch",
+        expected_chars: expectedComposer.length,
+        actual_chars: composedNorm.length,
+        composer_preview: composedNorm.slice(0, 80),
+      };
     }
 
     if (process.env.VIRTUS_DELTA_DUMP_DOM === "1") {
@@ -3221,13 +3270,14 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     // 1) Enter para enviar
     // 2) Se não limpou o composer, tenta clicar no botão "Pressione Enter para enviar"/Enviar
     // 3) Só considera OK se o composer ficar vazio (confirmação local mínima).
-    const initial = String(composed || "").trim();
+    const initial = String(composedNorm || "").trim();
     if (!initial) {
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
       return clicked ? { ok: true, item_link: itemLink || null } : { ok: false, error: "composer_text_not_registered" };
     }
 
+    try { await page.keyboard.up("Shift"); } catch (_) {}
     try { await page.keyboard.press("Enter"); } catch (_) {}
     logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
     const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 2200, pollMs: 80 });
