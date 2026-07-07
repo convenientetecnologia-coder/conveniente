@@ -1391,6 +1391,27 @@ module.exports = (app, workerClient, fileStore) => {
             const man = await manifestStore.read(nome).catch(()=>null);
             if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
           } catch {}
+          // Fallback: se manifest não tiver vínculo, perguntar ao CT pelo mapeamento host+perfil.
+          if (!stockAccountId) {
+            try {
+              const Aborter = global.AbortController || require('node-abort-controller');
+              const acCred = new Aborter();
+              const tCred = setTimeout(() => { try { acCred.abort(); } catch {} }, 8000);
+              const respCred = await fetch(`${base}/api/stock/profile_credentials_secret`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+                body: JSON.stringify({ hostId, profileName: String(nome || '').trim() }),
+                signal: acCred.signal
+              }).catch(e => ({ ok: false, _err: e }));
+              clearTimeout(tCred);
+              if (respCred && respCred.ok) {
+                const jCred = await respCred.json().catch(()=>null);
+                if (jCred && jCred.ok && jCred.stockAccountId) {
+                  stockAccountId = Number(jCred.stockAccountId) || null;
+                }
+              }
+            } catch {}
+          }
 
           ct.attempted = true;
           const reason = `manual_delete:${String(op || 'system_delete_perfis').slice(0, 60)}`.slice(0, 120);
