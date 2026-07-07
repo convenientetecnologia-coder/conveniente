@@ -15318,16 +15318,35 @@ async function __deltaRunNewLeadsTimerPump(nome) {
         return;
       }
 
-      const dueAt = Math.max(0, Number(rec.dueAt || 0) || 0);
-      const remainMs = Math.max(0, dueAt ? (dueAt - Date.now()) : (Math.max(0, Number(rec.delayMs || 0) || 0)));
+      // Contrato de fila de espera estrita (FIFO real):
+      // o timer só começa quando o item vira cabeça da represa.
+      // Nunca herdamos "dueAt antigo" de itens que ainda não estavam na cabeça,
+      // evitando estouro em cascata e bloqueio da fila de ação.
+      const rawDelayMs = Math.max(0, Number(rec.delayMs || 0) || 0);
+      const waitDelayMs = rawDelayMs > 0
+        ? rawDelayMs
+        : __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
+      const scheduledAt = Date.now();
+      const dueAt = scheduledAt + waitDelayMs;
+      const remainMs = waitDelayMs;
+      try {
+        const stHead = __deltaGetThreadState(n, tk);
+        if (stHead && stHead.status !== 'active' && stHead.status !== 'hands_in_progress') {
+          stHead.timerDueAt = dueAt;
+          stHead.timerReason = 'initial_disk_head';
+          stHead.updatedAt = scheduledAt;
+          __deltaSchedulePersistThreadState();
+        }
+      } catch {}
       try {
         console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
           event: 'new_lead_reservoir_timer_begin',
-          scheduled_at: Date.now(),
+          scheduled_at: scheduledAt,
           account_login: n,
           thread_key: tk,
           remain_ms: remainMs,
           dueAt: dueAt || null,
+          timer_delay_ms: waitDelayMs,
         }));
       } catch {}
 

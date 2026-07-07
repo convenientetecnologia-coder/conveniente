@@ -1439,6 +1439,58 @@ async function ensureMarketplaceFilterActive(page) {
   }
 }
 
+async function ensureMarketplaceFilterActiveFast(page) {
+  if (!page) return { ok: false, error: "no_page", quick_path: true };
+
+  const activeBefore = await isMarketplaceFilterActive(page).catch(() => false);
+  if (activeBefore) {
+    return { ok: true, already_active: true, active_before: true, active_after: true, quick_path: true };
+  }
+
+  // Guardrail anti-thrash: evita repetir clique em janela curta.
+  const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
+  const now = Date.now();
+  const lastClickAt = Number(guard.lastClickAt || 0) || 0;
+  if (lastClickAt > 0 && (now - lastClickAt) < 8_000) {
+    const activeAfterGuard = await isMarketplaceFilterActive(page).catch(() => false);
+    return {
+      ok: !!activeAfterGuard,
+      guarded_recent_click: true,
+      active_before: false,
+      active_after: !!activeAfterGuard,
+      quick_path: true,
+    };
+  }
+
+  await humanPause("preMarketplace", "marketplace_fast_pre_click");
+  const click = await clickMarketplaceFilterIfPresent(page).catch(() => ({
+    ok: false,
+    changed: false,
+    reason: "click_failed",
+  }));
+  await humanPause("postMarketplace", "marketplace_fast_post_click");
+  const activeAfter = await isMarketplaceFilterActive(page).catch(() => false);
+
+  try {
+    page.__virtusDeltaMarketplaceGuard = {
+      ...(page.__virtusDeltaMarketplaceGuard || {}),
+      lastClickAt: (click && click.changed) ? Date.now() : lastClickAt,
+      lastStableAt: activeAfter ? Date.now() : Number(guard && guard.lastStableAt || 0) || 0,
+      inFlightUntil: 0,
+    };
+  } catch (_) {}
+
+  const out = {
+    ...(click && typeof click === "object" ? click : {}),
+    ok: !!activeAfter,
+    active_before: !!activeBefore,
+    active_after: !!activeAfter,
+    quick_path: true,
+  };
+  logInfo(`[virtusDelta][marketplace_fast] activate result=${JSON.stringify(out)}`);
+  return out;
+}
+
 function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
   if (!page || !DELTA_MARKETPLACE_ENFORCER_ENABLED) {
     logInfo(
@@ -1612,13 +1664,18 @@ async function forceSidebarRefreshByMessagesRoot(page) {
   return { ok: false, changed: false, strategy: "messages_root_missing" };
 }
 
-async function prepareDomForNetworkLead(page, threadKey) {
+async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = true } = {}) {
   const t = String(threadKey || "").trim();
   logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
   // Modo seguro: não forçar Marketplace por padrão para evitar "abre e sai" no passivo.
+  const useFastMarketplace = fastMarketplace !== false;
   const mp = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
-    ? await ensureMarketplaceFilterActive(page)
+    ? (
+      useFastMarketplace
+        ? await ensureMarketplaceFilterActiveFast(page)
+        : await ensureMarketplaceFilterActive(page)
+    )
     : { ok: true, skipped: true, reason: "autofilter_disabled", active_after: false };
 
   let cardVisible = await isThreadCardVisible(page, t);
@@ -1631,7 +1688,8 @@ async function prepareDomForNetworkLead(page, threadKey) {
     logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
     await humanPause("domSettle", "dom_prep_root_settle");
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !(await isMarketplaceFilterActive(page))) {
-      await ensureMarketplaceFilterActive(page);
+      if (useFastMarketplace) await ensureMarketplaceFilterActiveFast(page);
+      else await ensureMarketplaceFilterActive(page);
     }
     cardVisible = await isThreadCardVisible(page, t);
   }
@@ -2991,7 +3049,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     const canUseOpenLineFastPath = !!(continuity && continuity.is_open_line_ready === true);
     if (fromNetworkLead && !canUseOpenLineFastPath) {
       try {
-        await prepareDomForNetworkLead(page, threadKey);
+        await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: true });
       } catch (e) {
         logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
       }
@@ -3206,7 +3264,7 @@ async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead =
   if (!t) return { ok: false, error: "missing_thread_key" };
   try {
     if (fromNetworkLead) {
-      await prepareDomForNetworkLead(page, threadKey);
+      await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: true });
     }
   } catch (_) {}
 
