@@ -14980,11 +14980,21 @@ const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendente
 const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
+const DELTA_RESPONDED_HISTORY_FILENAME = 'chats_respondidos_delta.json';
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
 const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.jsonl');
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
+const DELTA_HISTORY_LOOKBACK_HOURS = Math.max(
+  1,
+  Math.min(48, Number(process.env.DELTA_HISTORY_LOOKBACK_HOURS || 12) || 12)
+);
+const DELTA_HISTORY_LOOKBACK_MS = DELTA_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1000;
+const DELTA_FIRST_BOOT_BASELINE_GRACE_MS = Math.max(
+  0,
+  Number(process.env.DELTA_FIRST_BOOT_BASELINE_GRACE_MS || 3000) || 3000
+);
 const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
 const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
@@ -15400,6 +15410,7 @@ async function __deltaRunNewLeadsTimerPump(nome) {
 }
 const __deltaThreadStateMap = new Map();
 const __deltaLegacyRespondedThreadsByAccount = new Map(); // nome -> Set(thread_key) legado (chats_respondidos.json)
+const __deltaAccountHistoryBootstrapByAccount = new Map(); // nome -> metadados do primeiro boot Delta
 // Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
 const __deltaActiveUpsertBuffer = new Map();
 let __deltaThreadStatePersistTimer = null;
@@ -15663,6 +15674,99 @@ function __deltaIsHistoricallyResolvedThreadOnDiskSync(nome, threadKey) {
   }
 }
 
+function __deltaProfileDirForAccount(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return '';
+  return path.join(__dirname, '..', 'dados', 'perfis', n);
+}
+
+function __deltaRespondedHistoryPathForAccount(nome) {
+  const dir = __deltaProfileDirForAccount(nome);
+  if (!dir) return '';
+  return path.join(dir, DELTA_RESPONDED_HISTORY_FILENAME);
+}
+
+function __deltaWriteJsonAtomicSync(filePath, payload) {
+  const fp = String(filePath || '').trim();
+  if (!fp) return false;
+  try {
+    ensureDirSync(path.dirname(fp));
+    const tmp = `${fp}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __deltaEnsureAccountHistoryBootstrapSync(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return null;
+  const cached = __deltaAccountHistoryBootstrapByAccount.get(n);
+  if (cached) return cached;
+
+  const filePath = __deltaRespondedHistoryPathForAccount(n);
+  const now = Date.now();
+  let hadExistingFile = false;
+  let seededThisRuntime = false;
+  let initializedAtMs = 0;
+  let createdAtMs = 0;
+  let existingParsed = null;
+
+  try {
+    hadExistingFile = !!(filePath && fs.existsSync(filePath));
+    if (hadExistingFile) {
+      const raw = String(fs.readFileSync(filePath, 'utf8') || '').trim();
+      const parsed = __deltaSafeJsonParse(raw) || {};
+      existingParsed = (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+      initializedAtMs = Number(existingParsed.initialized_at_ms || existingParsed.initializedAt || 0) || 0;
+      createdAtMs = Number(existingParsed.created_at_ms || existingParsed.createdAt || 0) || 0;
+    }
+  } catch {
+    hadExistingFile = false;
+    existingParsed = null;
+  }
+
+  if (!(initializedAtMs > 0)) initializedAtMs = now;
+  if (!(createdAtMs > 0)) createdAtMs = initializedAtMs;
+  if (!hadExistingFile) seededThisRuntime = true;
+
+  const payload = {
+    version: 1,
+    account_login: n,
+    initialized_at_ms: initializedAtMs,
+    lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
+    created_at_ms: createdAtMs,
+    updated_at_ms: now,
+    bootstrap_mode: seededThisRuntime
+      ? 'first_boot_seed_without_history'
+      : String(existingParsed && existingParsed.bootstrap_mode || 'existing_history')
+  };
+  __deltaWriteJsonAtomicSync(filePath, payload);
+
+  const state = {
+    nome: n,
+    filePath,
+    initializedAtMs,
+    seededThisRuntime: !!seededThisRuntime,
+    hadExistingFile: !!hadExistingFile
+  };
+  __deltaAccountHistoryBootstrapByAccount.set(n, state);
+
+  if (seededThisRuntime) {
+    try {
+      logger.info('[DELTA][HIST_BOOT] arquivo Delta de respondidos criado no primeiro boot da conta', {
+        nome: n,
+        filePath: String(filePath || ''),
+        initializedAtMs,
+        lookbackHours: DELTA_HISTORY_LOOKBACK_HOURS
+      });
+    } catch {}
+  }
+  return state;
+}
+
 function __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey) {
   const n = String(nome || '').trim();
   const tk = String(threadKey || '').trim();
@@ -15724,6 +15828,70 @@ function __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTs) {
         createdAt: now,
         updatedAt: now,
         high_watermark: ts,
+      });
+    }
+
+    const body = JSON.stringify({ updatedAt: now, threads: arr }, null, 2);
+    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, body, 'utf8');
+    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, { highWatermark = 0, reason = '' } = {}) {
+  try {
+    const n = String(nome || '').trim();
+    const tk = String(threadKey || '').trim();
+    if (!n || !tk) return false;
+
+    const ts = Number(highWatermark || 0) || 0;
+    const parsed = __deltaReadThreadStateFileSync();
+    const arr = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    let found = -1;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const row = arr[i];
+      if (!row || typeof row !== 'object') continue;
+      const rn = String(row.nome || '').trim();
+      const rt = String(row.thread_key || '').trim();
+      if (rn === n && rt === tk) { found = i; break; }
+    }
+
+    const now = Date.now();
+    if (found >= 0) {
+      const row = arr[found] && typeof arr[found] === 'object' ? arr[found] : {};
+      const prevHw = Number(row.high_watermark || row.highWatermark || 0) || 0;
+      const nextHw = Math.max(prevHw, ts);
+      const currentStatus = String(row.status || '').trim().toLowerCase();
+      const nextStatus = (currentStatus === 'active') ? 'active' : 'processed_historical';
+      arr[found] = {
+        ...row,
+        nome: n,
+        thread_key: tk,
+        status: nextStatus,
+        updatedAt: now,
+        high_watermark: nextHw > 0 ? nextHw : prevHw,
+        historical_reason: String(reason || row.historical_reason || '').slice(0, 120)
+      };
+    } else {
+      arr.push({
+        nome: n,
+        thread_key: tk,
+        status: 'processed_historical',
+        createdAt: now,
+        updatedAt: now,
+        high_watermark: ts > 0 ? ts : 0,
+        historical_reason: String(reason || '').slice(0, 120),
+        timerDueAt: 0,
+        timerReason: '',
+        handsFailures: 0,
+        city: null,
+        seq: 0,
+        lastDispatchAt: 0,
+        messages: []
       });
     }
 
@@ -15903,6 +16071,7 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
     baseDir,
     scannedProfiles: 0,
     importedThreads: 0,
+    updatedExisting: 0,
     skippedExisting: 0,
     parseErrors: 0,
     filesMissing: 0
@@ -15948,19 +16117,40 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
         continue;
       }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-      const respondedSet = new Set(
-        Object.keys(parsed)
-          .map((k) => String(k || '').trim())
-          .filter(Boolean)
-      );
+      const respondedEntries = [];
+      const respondedSet = new Set();
+      for (const kRaw of Object.keys(parsed)) {
+        const threadKey = String(kRaw || '').trim();
+        if (!threadKey) continue;
+        respondedSet.add(threadKey);
+        const tsRaw = Number(parsed[kRaw] || 0) || 0;
+        const tsMs = tsRaw > 0
+          ? (tsRaw < 1_000_000_000_000 ? (tsRaw * 1000) : tsRaw)
+          : 0;
+        respondedEntries.push({ threadKey, tsMs });
+      }
       if (respondedSet.size > 0) {
         __deltaLegacyRespondedThreadsByAccount.set(String(nome || '').trim(), respondedSet);
       }
-      for (const threadKeyRaw of respondedSet) {
-        const threadKey = String(threadKeyRaw || '').trim();
+      for (const rec of respondedEntries) {
+        const threadKey = String(rec && rec.threadKey || '').trim();
+        const tsMs = Number(rec && rec.tsMs || 0) || 0;
         if (!threadKey) continue;
         const k = __deltaThreadStateKey(nome, threadKey);
         if (rowsByKey.has(k)) {
+          const prev = rowsByKey.get(k) || {};
+          const prevHw = Number(prev && (prev.high_watermark || prev.highWatermark) || 0) || 0;
+          if (tsMs > prevHw) {
+            rowsByKey.set(k, {
+              ...(prev && typeof prev === 'object' ? prev : {}),
+              nome: String(nome || '').trim(),
+              thread_key: threadKey,
+              updatedAt: Date.now(),
+              high_watermark: tsMs,
+              status: String(prev && prev.status || 'processed_historical')
+            });
+            out.updatedExisting += 1;
+          }
           out.skippedExisting += 1;
           continue;
         }
@@ -15977,12 +16167,13 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
           city: null,
           seq: 0,
           lastDispatchAt: 0,
-          messages: []
+          messages: [],
+          high_watermark: tsMs > 0 ? tsMs : 0
         });
         out.importedThreads += 1;
       }
     }
-    if (out.importedThreads > 0) {
+    if (out.importedThreads > 0 || out.updatedExisting > 0) {
       const rows = Array.from(rowsByKey.values());
       const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
       const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
@@ -16591,6 +16782,7 @@ try {
     ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
     scannedProfiles: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.scannedProfiles || 0) || 0,
     importedThreads: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.importedThreads || 0) || 0,
+    updatedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.updatedExisting || 0) || 0,
     skippedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skippedExisting || 0) || 0,
     parseErrors: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.parseErrors || 0) || 0,
     filesMissing: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.filesMissing || 0) || 0,
@@ -18383,51 +18575,9 @@ async function __deltaAttachCdpEar(nome, page) {
           (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
             ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
             : Date.now();
-        const resolvedGate = __deltaIsHistoricallyResolvedThreadOnDiskSync(nome, threadKey);
-        if (resolvedGate && resolvedGate.resolved === true) {
-          try {
-            __forensicEdgeEmit({
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
-              details: {
-                reason: 'resolved_thread_key_vitalicio',
-                resolved_source: String(resolvedGate.source || ''),
-                state_status: String(resolvedGate.status || ''),
-                op,
-                transport: String(transport || ''),
-                requestId: String(requestId || ''),
-                sourceHint: String(sourceHint || ''),
-                message_at: nowMs,
-                text_preview: String(texto || '').slice(0, 220)
-              }
-            });
-          } catch {}
-          try {
-            __deltaAppendPendingJsonlSync({
-              event: 'lead_skip_resolved_thread_key_vitalicio',
-              server_id: serverId || null,
-              account_login: String(nome || ''),
-              thread_key: threadKey,
-              texto_limpo: texto,
-              cidade: null,
-              operacao_meta: op || 'message',
-              mensagem_seq: 0,
-              dispatch_ct: false,
-              queue_mode: 'capture_only',
-              flow_stage: 'skip_resolved_thread_key_vitalicio',
-              state_status: String(resolvedGate.status || ''),
-              resolved_source: String(resolvedGate.source || ''),
-              message_at: nowMs,
-              network_transport: String(transport || '').trim() || null,
-              network_request_id: String(requestId || '').trim() || null,
-              network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
-              network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
-            });
-          } catch {}
-          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-          continue;
-        }
+        // Regra nova (Delta 12h):
+        // decisões de histórico devem considerar timestamp/metaTs.
+        // Portanto, o gate vitalício por thread foi substituído pela avaliação abaixo.
 
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const metaDedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
@@ -18565,23 +18715,50 @@ async function __deltaAttachCdpEar(nome, page) {
           network_source_url: String(sourceUrl || '').trim().slice(0, 500) || null,
           network_source_hint: String(sourceHint || '').trim().slice(0, 120) || null,
         };
-        const diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
-        if (__deltaIsKnownProcessedStatus(diskStatus)) {
+        const accountHistState = __deltaEnsureAccountHistoryBootstrapSync(nome);
+        const tsForWindow = Number(metaTsMs || nowMs) || nowMs;
+        const nowWindowRef = Date.now();
+        const lookbackCutoffMs = nowWindowRef - DELTA_HISTORY_LOOKBACK_MS;
+        const initAtMs = Number(accountHistState && accountHistState.initializedAtMs || 0) || 0;
+        const shouldSkipOutsideLookback = tsForWindow < lookbackCutoffMs;
+        const shouldSkipFirstBootSeed = !!(
+          accountHistState &&
+          accountHistState.seededThisRuntime === true &&
+          initAtMs > 0 &&
+          tsForWindow <= (initAtMs + DELTA_FIRST_BOOT_BASELINE_GRACE_MS)
+        );
+        if (shouldSkipOutsideLookback || shouldSkipFirstBootSeed) {
+          const skipReason = shouldSkipOutsideLookback
+            ? 'outside_12h_lookback_window'
+            : 'first_boot_seed_without_delta_history';
+          const hwMark = shouldSkipFirstBootSeed
+            ? Math.max(tsForWindow, initAtMs)
+            : Math.max(tsForWindow, lookbackCutoffMs);
+          try {
+            __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, {
+              highWatermark: hwMark,
+              reason: skipReason
+            });
+          } catch {}
           try {
             __forensicEdgeEmit({
               account_login: String(nome || ''),
               thread_key: threadKey,
               flow_stage: 'discard_filter_triggered',
               details: {
-                reason: 'legacy_historical',
-                state_status: String(diskStatus || ''),
+                reason: skipReason,
+                state_status: 'processed_historical',
                 op: op || null,
+                message_at: tsForWindow,
+                lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
+                lookback_cutoff_ms: lookbackCutoffMs,
+                bootstrap_initialized_at_ms: initAtMs || null,
                 text_preview: String(texto || '').slice(0, 220)
               }
             });
           } catch {}
           __deltaAppendPendingJsonlSync({
-            event: 'lead_skip_forense_estado_conhecido',
+            event: 'lead_skip_delta_history_bootstrap',
             server_id: serverId || null,
             account_login: String(nome || ''),
             thread_key: threadKey,
@@ -18591,13 +18768,78 @@ async function __deltaAttachCdpEar(nome, page) {
             mensagem_seq: 0,
             dispatch_ct: false,
             queue_mode: 'capture_only',
-            flow_stage: 'skip_known_processed_state_disk_lookup',
-            state_status: String(diskStatus || ''),
-            message_at: nowMs,
+            flow_stage: 'skip_delta_history_bootstrap',
+            state_status: 'processed_historical',
+            history_reason: skipReason,
+            lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
+            lookback_cutoff_ms: lookbackCutoffMs,
+            bootstrap_initialized_at_ms: initAtMs || null,
+            message_at: tsForWindow,
             ...networkCtx
           });
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
+        }
+
+        let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
+        const diskHighWatermark = __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey);
+        if (__deltaIsKnownProcessedStatus(diskStatus)) {
+          const previousDiskStatus = String(diskStatus || '');
+          const canReactivateByTimestamp = tsForWindow > Math.max(0, Number(diskHighWatermark || 0) || 0);
+          if (canReactivateByTimestamp) {
+            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, tsForWindow); } catch {}
+            diskStatus = 'active';
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'processed_thread_reactivated',
+                details: {
+                  reason: 'new_message_after_historical_high_watermark',
+                  previous_status: previousDiskStatus,
+                  previous_high_watermark: Number(diskHighWatermark || 0) || 0,
+                  message_at: tsForWindow,
+                  op: op || null
+                }
+              });
+            } catch {}
+          } else {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'historical_watermark_guard',
+                  state_status: String(diskStatus || ''),
+                  high_watermark: Number(diskHighWatermark || 0) || 0,
+                  message_at: tsForWindow,
+                  op: op || null,
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_skip_forense_estado_conhecido',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              cidade: null,
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'skip_known_processed_state_disk_lookup',
+              state_status: String(diskStatus || ''),
+              high_watermark: Number(diskHighWatermark || 0) || 0,
+              message_at: tsForWindow,
+              ...networkCtx
+            });
+            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
           // Contrato de borda (thread active):
@@ -18676,37 +18918,51 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         const st = __deltaGetOrCreateThreadState(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(st.status)) {
-          try {
-            __forensicEdgeEmit({
+          const stateHighWatermark = Math.max(
+            Number(st.high_watermark || st.highWatermark || 0) || 0,
+            __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey)
+          );
+          if (tsForWindow > stateHighWatermark) {
+            st.status = 'active';
+            st.updatedAt = nowMs;
+            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, tsForWindow); } catch {}
+          } else {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'historical_watermark_guard_state_map',
+                  state_status: String(st.status || ''),
+                  high_watermark: Number(stateHighWatermark || 0) || 0,
+                  op: op || null,
+                  message_at: tsForWindow,
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            __deltaAppendPendingJsonlSync({
+              event: 'lead_skip_forense_estado_conhecido',
+              server_id: serverId || null,
               account_login: String(nome || ''),
               thread_key: threadKey,
-              flow_stage: 'discard_filter_triggered',
-              details: {
-                reason: 'legacy_historical',
-                state_status: String(st.status || ''),
-                op: op || null,
-                text_preview: String(texto || '').slice(0, 220)
-              }
+              texto_limpo: texto,
+              cidade: st.city || null,
+              operacao_meta: op || 'message',
+              mensagem_seq: Number(st.seq || 0) || 0,
+              dispatch_ct: false,
+              queue_mode: 'capture_only',
+              flow_stage: 'skip_known_processed_state',
+              state_status: String(st.status || ''),
+              high_watermark: Number(stateHighWatermark || 0) || 0,
+              message_at: tsForWindow,
+              ...networkCtx
             });
-          } catch {}
-          __deltaAppendPendingJsonlSync({
-            event: 'lead_skip_forense_estado_conhecido',
-            server_id: serverId || null,
-            account_login: String(nome || ''),
-            thread_key: threadKey,
-            texto_limpo: texto,
-            cidade: st.city || null,
-            operacao_meta: op || 'message',
-            mensagem_seq: Number(st.seq || 0) || 0,
-            dispatch_ct: false,
-            queue_mode: 'capture_only',
-            flow_stage: 'skip_known_processed_state',
-            state_status: String(st.status || ''),
-            message_at: nowMs,
-            ...networkCtx
-          });
-          try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
-          continue;
+            try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
         }
         if (!dedupMetaId && __deltaIsRecentDuplicate(st, texto, op, nowMs)) {
           try {
