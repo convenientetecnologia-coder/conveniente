@@ -3372,7 +3372,14 @@ function maybeAutoRotateCriticalJsonl() {
 async function postLogsToNotifier({ requestId, items }) {
   const base = notifierBaseFromEndpoints();
   if (!base) throw new Error('notifier_base_unavailable');
-  if (!hostIdCache) throw new Error('hostId_unavailable');
+  let hostId = String(hostIdCache || '').trim();
+  if (!hostId) {
+    try {
+      hostId = String(await getOrCreateHostId() || '').trim();
+      if (hostId) hostIdCache = hostId;
+    } catch {}
+  }
+  if (!hostId) throw new Error('hostId_unavailable');
   const sec = logsSecret();
   const controller = new (global.AbortController || require('node-abort-controller'))();
   const t = setTimeout(() => { try { controller.abort(); } catch {} }, 8000);
@@ -3384,7 +3391,7 @@ async function postLogsToNotifier({ requestId, items }) {
         ...(sec ? { 'X-Log-Secret': sec } : {})
       },
       body: JSON.stringify({
-        hostId: hostIdCache,
+        hostId,
         hostname: (os && os.hostname) ? os.hostname() : '',
         requestId,
         sentAt: Date.now(),
