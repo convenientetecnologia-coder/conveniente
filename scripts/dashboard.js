@@ -3149,6 +3149,7 @@ function logsAllowlist() {
     status: path.join(base, 'status.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
     server_runtime_config: path.join(base, 'server_runtime_config.json'),
+    ct_config: path.join(base, 'ct_config.json'),
     // Fila durável Delta (diagnóstico de reenvio/queda CT sem perda).
     delta_thread_state: path.join(base, 'delta_thread_state.json'),
     delta_queue: path.join(base, 'mensagens_pendentes.jsonl'),

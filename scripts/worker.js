@@ -173,7 +173,7 @@ const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
-const { readCtConfig, writeCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
+const { readCtConfig, writeCtConfig, normalizeCtBaseUrl, isNgrokCtBaseUrl } = require('./ctConfig.js');
 const serverConfig = require('./serverConfig.js');
 
 async function _stopVirtusRunnerMaybePromise(v) {
@@ -15123,6 +15123,15 @@ const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
+const DELTA_CT_CANONICAL_BASE = (() => {
+  const raw = String(
+    process.env.CT_DELTA_CANONICAL_BASE_URL ||
+    process.env.CT_INGEST_CANONICAL_BASE_URL ||
+    'https://painel.convenientetecnologia.com'
+  ).trim();
+  const normalized = normalizeCtBaseUrl(raw, { allowLegacyNgrok: true });
+  return String(normalized || 'https://painel.convenientetecnologia.com').replace(/\/+$/, '');
+})();
 const DELTA_HISTORY_LOOKBACK_HOURS = Math.max(
   1,
   Math.min(48, Number(process.env.DELTA_HISTORY_LOOKBACK_HOURS || 12) || 12)
@@ -17431,6 +17440,85 @@ function __deltaWriteGateBBundleMergedSafe(nextPatch) {
   };
   return __deltaWriteJsonAtomicSafe(DELTA_GATE_B_BUNDLE_PATH, merged);
 }
+function __deltaBaseFromUrlSafe(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return '';
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host}`.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+function __deltaBuildCtIngestUrlFromBase(rawBase) {
+  const base = normalizeCtBaseUrl(String(rawBase || '').trim());
+  if (!base) return '';
+  return `${base.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
+}
+function __deltaLooksLikeWrongIngestEndpointResponse(res) {
+  const status = Number(res && res.status || 0) || 0;
+  if (![404, 405, 410, 421].includes(status)) return false;
+  const body = String(res && res.body || '').toLowerCase();
+  if (!body) return false;
+  if (body.includes('server_id_not_registered')) return false;
+  if (body.includes('missing_key_fields')) return false;
+  if (body.includes('<!doctype html') || body.includes('<html')) return true;
+  if (body.includes('cannot post /api/messenger-delta/ingest')) return true;
+  if (body.includes('ngrok')) return true;
+  if (body.includes('404 not found') || body.includes('page not found')) return true;
+  return false;
+}
+function __deltaBuildIngestRepairCandidates(currentIngestUrl = '') {
+  const currentBase = __deltaBaseFromUrlSafe(currentIngestUrl);
+  const seen = new Set();
+  const out = [];
+  const push = (rawBase, source) => {
+    const base = normalizeCtBaseUrl(String(rawBase || '').trim());
+    if (!base) return;
+    if (isNgrokCtBaseUrl(base)) return;
+    if (base === currentBase) return;
+    if (seen.has(base)) return;
+    seen.add(base);
+    out.push({
+      ctBaseUrl: base,
+      ingestUrl: `${base.replace(/\/+$/, '')}/api/messenger-delta/ingest`,
+      source: String(source || '').trim() || 'unknown'
+    });
+  };
+
+  push(process.env.CT_BASE_URL || process.env.CT_URL || '', 'env_ct_base');
+  try {
+    const { notifierBaseFromEndpoints } = require('./notifierEndpoints.js');
+    push(String(notifierBaseFromEndpoints() || '').trim(), 'notifier_endpoints');
+  } catch {}
+  push(DELTA_CT_CANONICAL_BASE, 'canonical_base');
+  push('https://api.convenientetecnologia.com', 'api_default');
+  return out;
+}
+async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempotencyKey = '' } = {}) {
+  const candidates = __deltaBuildIngestRepairCandidates(ingestUrl);
+  if (!candidates.length) return { ok: false, reason: 'no_candidates' };
+
+  for (const cand of candidates.slice(0, 4)) {
+    const retryHeaders = __deltaBuildCtIngestHeaders({ idempotencyKey });
+    const res = await __deltaPostWebhookJson(cand.ingestUrl, payload, { timeoutMs: 4500, headers: retryHeaders });
+    if (__deltaLooksLikeWrongIngestEndpointResponse(res)) continue;
+
+    try {
+      writeCtConfig({ ctBaseUrl: cand.ctBaseUrl });
+    } catch {}
+
+    return {
+      ok: true,
+      ingestUrl: cand.ingestUrl,
+      ctBaseUrl: cand.ctBaseUrl,
+      source: cand.source,
+      response: res
+    };
+  }
+
+  return { ok: false, reason: 'all_candidates_failed' };
+}
 function __deltaResolveCtIngestUrlAutonomous() {
   const envUrl = String(process.env.VIRTUS_DELTA_CT_INGEST_URL || '').trim();
   if (envUrl) return envUrl;
@@ -17438,16 +17526,18 @@ function __deltaResolveCtIngestUrlAutonomous() {
   try {
     const cfg = readCtConfig();
     const base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || '');
-    if (base) return `${base.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
+    const ingestFromCfg = __deltaBuildCtIngestUrlFromBase(base);
+    if (ingestFromCfg) return ingestFromCfg;
   } catch {}
 
   try {
     const { notifierBaseFromEndpoints } = require('./notifierEndpoints.js');
     const notifierBase = String(notifierBaseFromEndpoints() || '').trim();
-    if (notifierBase) return `${notifierBase.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
+    const ingestFromNotifier = __deltaBuildCtIngestUrlFromBase(notifierBase);
+    if (ingestFromNotifier) return ingestFromNotifier;
   } catch {}
 
-  return 'https://painel.convenientetecnologia.com/api/messenger-delta/ingest';
+  return __deltaBuildCtIngestUrlFromBase(DELTA_CT_CANONICAL_BASE) || 'https://painel.convenientetecnologia.com/api/messenger-delta/ingest';
 }
 function __deltaExtractBootstrapSecrets(parsed) {
   const p = parsed && typeof parsed === 'object' ? parsed : {};
@@ -17969,6 +18059,36 @@ async function __deltaIngestTick() {
         });
         res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers: retryHeaders });
       }
+    }
+    if (__deltaLooksLikeWrongIngestEndpointResponse(res)) {
+      try {
+        const repaired = await __deltaTryAutoRepairIngestEndpoint({
+          ingestUrl,
+          payload: ctPayload,
+          idempotencyKey: payload.idempotency_key
+        });
+        if (repaired && repaired.ok) {
+          ingestUrl = String(repaired.ingestUrl || ingestUrl || '').trim() || ingestUrl;
+          res = repaired.response || res;
+          try {
+            logger.warn('[DELTA][INGEST] auto-repair de endpoint aplicado', {
+              source: repaired.source || null,
+              ctBaseUrl: repaired.ctBaseUrl || null,
+              ingestUrl
+            });
+          } catch {}
+          try {
+            if (typeof forensicLog === 'function') {
+              forensicLog('DELTA', 'ingest_endpoint_auto_repair', {
+                source: repaired.source || null,
+                ct_base_url: repaired.ctBaseUrl || null,
+                ingest_url: ingestUrl,
+                status: res && res.status ? Number(res.status) : null
+              });
+            }
+          } catch {}
+        }
+      } catch {}
     }
     if (res && res.status === 200) {
       const ackBody = __deltaSafeJsonParse(String(res && res.body || '')) || null;
