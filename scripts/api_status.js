@@ -57,6 +57,132 @@ function __readGateBStateSafe() {
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
 let _lastBaselineAt = 0;
+let __virtusMetricsCache = { at: 0, key: '', value: null };
+
+function __buildUtcMinus3DayWindow(dayDelta) {
+  const nowMs = Date.now();
+  const shifted = new Date(nowMs - (3 * 60 * 60 * 1000));
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const d = shifted.getUTCDate() + (Number(dayDelta || 0) || 0);
+  const startMs = Date.UTC(y, m, d, 3, 0, 0, 0);
+  const endMs = startMs + (24 * 60 * 60 * 1000);
+  return {
+    startSec: Math.floor(startMs / 1000),
+    endSec: Math.floor(endMs / 1000)
+  };
+}
+
+function __collectVirtusProfileNames(statusLike) {
+  const set = new Set();
+  try {
+    const perfis = Array.isArray(statusLike && statusLike.perfis) ? statusLike.perfis : [];
+    for (const p of perfis) {
+      const nome = String(p && p.nome || '').trim();
+      if (nome) set.add(nome);
+    }
+  } catch {}
+  try {
+    const desiredPath = (fileStore && fileStore.desiredPath)
+      ? String(fileStore.desiredPath)
+      : path.join(__dirname, '..', 'dados', 'desired.json');
+    if (desiredPath && fs.existsSync(desiredPath)) {
+      const desired = JSON.parse(fs.readFileSync(desiredPath, 'utf8'));
+      const perfisObj = (desired && typeof desired === 'object' && desired.perfis && typeof desired.perfis === 'object')
+        ? desired.perfis
+        : null;
+      if (perfisObj) {
+        for (const nome of Object.keys(perfisObj)) {
+          const n = String(nome || '').trim();
+          if (n) set.add(n);
+        }
+      }
+    }
+  } catch {}
+  return Array.from(set);
+}
+
+function __computeVirtusMetricsFromNames(profileNames) {
+  const names = Array.isArray(profileNames) ? profileNames : [];
+  const base = path.join(__dirname, '..', 'dados', 'perfis');
+  const today = __buildUtcMinus3DayWindow(0);
+  const yesterday = __buildUtcMinus3DayWindow(-1);
+
+  let profilesWithFile = 0;
+  let profilesMissingFile = 0;
+  let parseErrors = 0;
+  let todayCount = 0;
+  let yesterdayCount = 0;
+
+  for (const nome of names) {
+    try {
+      const safeNome = String(nome || '').trim();
+      if (!safeNome) continue;
+      const fp = path.join(base, safeNome, 'chats_respondidos.json');
+      if (!fs.existsSync(fp)) {
+        profilesMissingFile += 1;
+        continue;
+      }
+      profilesWithFile += 1;
+      let obj = null;
+      try {
+        obj = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      } catch {
+        parseErrors += 1;
+        continue;
+      }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue;
+      for (const v of Object.values(obj)) {
+        const t = Number(v || 0) || 0;
+        if (!t) continue;
+        if (t >= today.startSec && t < today.endSec) todayCount += 1;
+        if (t >= yesterday.startSec && t < yesterday.endSec) yesterdayCount += 1;
+      }
+    } catch {
+      parseErrors += 1;
+    }
+  }
+
+  return {
+    source: 'chats_respondidos',
+    generatedAt: Date.now(),
+    timezone: 'UTC-3',
+    profiles: {
+      expected: names.length,
+      withFile: profilesWithFile,
+      missingFile: profilesMissingFile,
+      parseErrors
+    },
+    windows: {
+      yesterday: {
+        startSec: yesterday.startSec,
+        endSec: yesterday.endSec,
+        chatsRespondidos: yesterdayCount
+      },
+      today: {
+        startSec: today.startSec,
+        endSec: today.endSec,
+        chatsRespondidos: todayCount
+      }
+    }
+  };
+}
+
+function __getVirtusMetricsCached(statusLike) {
+  try {
+    const names = __collectVirtusProfileNames(statusLike).sort();
+    const key = names.join('|');
+    const nowMs = Date.now();
+    if (__virtusMetricsCache.value && __virtusMetricsCache.key === key && (nowMs - Number(__virtusMetricsCache.at || 0)) < 25000) {
+      return __virtusMetricsCache.value;
+    }
+    const value = __computeVirtusMetricsFromNames(names);
+    __virtusMetricsCache = { at: nowMs, key, value };
+    return value;
+  } catch {
+    return null;
+  }
+}
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
 app.get('/api/status', async (req, res) => {
@@ -524,6 +650,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     }
   })();
   const gateB = __readGateBStateSafe();
+  const virtusMetrics = __getVirtusMetricsCached({ perfis: perfisFinalINST });
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -538,6 +665,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     autoOpen,
     serverConfig: serverConfigEffective,
     gateB,
+    virtusMetrics,
     ts: Date.now()
   });
   return;
@@ -615,6 +743,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
   })();
   const gateB = __readGateBStateSafe();
+  const virtusMetrics = __getVirtusMetricsCached({ perfis: perfisSkeleton });
   res.json({
     perfis: perfisSkeleton,
     robes: {},
@@ -646,7 +775,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       } catch { return { enabled: false, changedAt: 0, changedBy: null }; }
     })(),
     serverConfig: serverConfigEffective,
-    gateB
+    gateB,
+    virtusMetrics
   });
 }
 

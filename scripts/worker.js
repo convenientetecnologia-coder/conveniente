@@ -15018,6 +15018,15 @@ const DELTA_DEADLETTER_REPLAY_BATCH = Math.max(
   1,
   Math.min(500, Number(process.env.DELTA_DEADLETTER_REPLAY_BATCH || 60) || 60)
 );
+const DELTA_BOOT_REPLAY_LOOKBACK_HOURS = Math.max(
+  1,
+  Math.min(168, Number(process.env.DELTA_BOOT_REPLAY_LOOKBACK_HOURS || 72) || 72)
+);
+const DELTA_BOOT_REPLAY_LOOKBACK_MS = DELTA_BOOT_REPLAY_LOOKBACK_HOURS * 60 * 60 * 1000;
+const DELTA_BOOT_REPLAY_MAX_THREADS = Math.max(
+  10,
+  Math.min(3000, Number(process.env.DELTA_BOOT_REPLAY_MAX_THREADS || 500) || 500)
+);
 const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
   256 * 1024,
   Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
@@ -16231,6 +16240,109 @@ function __deltaHydrateThreadStateFromDiskRow(st, row) {
   st.highWatermark = Number(st.high_watermark || 0) || 0;
   return st;
 }
+let __deltaBootReplayDone = false;
+function __deltaReplayRecentThreadsToCtOnBoot() {
+  if (__deltaBootReplayDone) return { ok: true, skipped: true, reason: 'already_done' };
+  __deltaBootReplayDone = true;
+  const out = {
+    ok: true,
+    scanned: 0,
+    enqueued: 0,
+    skipped_old: 0,
+    skipped_status: 0,
+    skipped_empty: 0,
+    skipped_invalid: 0,
+    hit_max: false
+  };
+  try {
+    const parsed = __deltaReadThreadStateFileSync();
+    const rows = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    const now = Date.now();
+    const minTs = now - DELTA_BOOT_REPLAY_LOOKBACK_MS;
+    const hostId = String(readHostIdSync() || __deltaEnsureHostIdSync() || '').trim();
+
+    for (const row of rows) {
+      out.scanned += 1;
+      if (out.enqueued >= DELTA_BOOT_REPLAY_MAX_THREADS) {
+        out.hit_max = true;
+        break;
+      }
+      const nome = String(row && row.nome || '').trim();
+      const threadKey = String(row && row.thread_key || '').trim();
+      if (!nome || !threadKey || !hostId) {
+        out.skipped_invalid += 1;
+        continue;
+      }
+      const status = String(row && row.status || '').trim().toLowerCase();
+      if (status !== 'active' && status !== 'new_buffering' && status !== 'hands_in_progress') {
+        out.skipped_status += 1;
+        continue;
+      }
+      const lastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
+      const updatedAt = Number(row && row.updatedAt || 0) || 0;
+      const createdAt = Number(row && row.createdAt || 0) || 0;
+      const recentRefTs = Math.max(lastDispatchAt, updatedAt, createdAt);
+      if (!recentRefTs || recentRefTs < minTs) {
+        out.skipped_old += 1;
+        continue;
+      }
+
+      const messages = Array.isArray(row && row.messages) ? row.messages : [];
+      const normalizedMessages = messages
+        .map((m) => ({
+          text: String(m && m.text || '').trim(),
+          at: Number(m && m.at || 0) || 0,
+          seq: Number(m && m.seq || 0) || 0
+        }))
+        .filter((m) => !!m.text)
+        .slice(-80);
+      const concatText = normalizedMessages.map((m) => m.text).join('\n').trim();
+      const city = String(row && row.city || '').trim() || DELTA_FALLBACK_CITY;
+      if (!concatText && !city) {
+        out.skipped_empty += 1;
+        continue;
+      }
+
+      const tail = normalizedMessages[normalizedMessages.length - 1] || null;
+      const messageAt = Math.max(
+        Number(tail && tail.at || 0) || 0,
+        recentRefTs
+      );
+      const messageSeq = Math.max(
+        Number(tail && tail.seq || 0) || 0,
+        Number(row && row.seq || 0) || 0
+      );
+      __deltaAppendPendingJsonlSync({
+        event: 'lead_thread_state_boot_replay',
+        server_id: hostId,
+        account_login: nome,
+        thread_key: threadKey,
+        texto_limpo: concatText || '',
+        mensagens_cliente_concatenadas: concatText || '',
+        mensagens_cliente_qtd: Number(normalizedMessages.length || 0) || 0,
+        mensagem_seq: messageSeq,
+        cidade: city,
+        link_anuncio: DELTA_FALLBACK_LINK,
+        client_name: DELTA_FALLBACK_CLIENT_NAME,
+        customer_name: DELTA_FALLBACK_CLIENT_NAME,
+        nome_cliente_limpo: DELTA_FALLBACK_CLIENT_NAME,
+        operacao_meta: 'thread_state_boot_replay',
+        dispatch_ct: true,
+        queue_mode: 'dispatch_ct',
+        flow_stage: 'thread_state_boot_replay',
+        message_at: messageAt,
+        ingest_boot_replay: true
+      });
+      out.enqueued += 1;
+    }
+    if (out.enqueued > 0) __deltaKickIngestLoop();
+    return out;
+  } catch (e) {
+    out.ok = false;
+    out.error = (e && e.message) ? e.message : String(e);
+    return out;
+  }
+}
 function __deltaGetOrCreateThreadState(nome, threadKey) {
   const k = __deltaThreadStateKey(nome, threadKey);
   let st = __deltaThreadStateMap.get(k) || null;
@@ -16821,6 +16933,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 }
 __deltaLoadThreadStateSync();
 const __deltaLegacyAssimilationSummary = __deltaAssimilateLegacyRespondedHistorySync();
+const __deltaBootReplaySummary = __deltaReplayRecentThreadsToCtOnBoot();
 try {
   logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
     ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
@@ -16832,6 +16945,21 @@ try {
     filesMissing: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.filesMissing || 0) || 0,
     reason: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.reason || ''),
     error: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.error || '')
+  });
+} catch {}
+try {
+  logger.info('[DELTA][BOOT_REPLAY] replay de threads recentes para CT', {
+    ok: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.ok),
+    scanned: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.scanned || 0) || 0,
+    enqueued: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueued || 0) || 0,
+    skipped_old: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_old || 0) || 0,
+    skipped_status: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_status || 0) || 0,
+    skipped_empty: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_empty || 0) || 0,
+    skipped_invalid: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_invalid || 0) || 0,
+    hit_max: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.hit_max),
+    lookback_hours: DELTA_BOOT_REPLAY_LOOKBACK_HOURS,
+    max_threads: DELTA_BOOT_REPLAY_MAX_THREADS,
+    error: String(__deltaBootReplaySummary && __deltaBootReplaySummary.error || '')
   });
 } catch {}
 
@@ -17669,14 +17797,43 @@ async function __deltaIngestTick() {
       }
     }
     if (res && res.status === 200) {
-      try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
-      try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
-      __deltaIngestClearRetryCounter(retryKey);
-      __deltaWriteCursorOffsetSync(nextOffset);
-      try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
-      try { if (typeof global.gc === 'function') global.gc(); } catch {}
-      __deltaIngestBackoffMs = 650;
-      return;
+      const ackBody = __deltaSafeJsonParse(String(res && res.body || '')) || null;
+      const droppedCount = Number(
+        ackBody && (
+          ackBody.dropped_count != null
+            ? ackBody.dropped_count
+            : ackBody.dropped
+        ) || 0
+      ) || 0;
+      const hasAckError = !!String(ackBody && (ackBody.error || ackBody.message || '') || '').trim();
+      const queuedFalse = ackBody && (
+        ackBody.queued === false ||
+        ackBody.sucesso === false ||
+        ackBody.ok === false
+      );
+      if (droppedCount > 0 || hasAckError || queuedFalse) {
+        res = {
+          ...(res && typeof res === 'object' ? res : {}),
+          ok: false,
+          status: 429,
+          error: 'ct_ingest_backpressure',
+          body: JSON.stringify({
+            error: 'ct_ingest_backpressure',
+            dropped_count: droppedCount,
+            queued: !(queuedFalse || hasAckError),
+            original_ack: ackBody
+          })
+        };
+      } else {
+        try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
+        try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
+        __deltaIngestClearRetryCounter(retryKey);
+        __deltaWriteCursorOffsetSync(nextOffset);
+        try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
+        try { if (typeof global.gc === 'function') global.gc(); } catch {}
+        __deltaIngestBackoffMs = 650;
+        return;
+      }
     }
     if (__deltaIsRetryableIngestResponse(res)) {
       const attempt = __deltaIngestBumpRetryCounter(retryKey);
