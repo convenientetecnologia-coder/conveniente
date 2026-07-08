@@ -17085,6 +17085,28 @@ function __deltaEnsureHostIdSync() {
   try {
     const existing = readHostIdSync();
     if (existing) return existing;
+    const envHostId = String(
+      process.env.CONVENIENTE_HOST_ID ||
+      process.env.VIRTUS_HOST_ID ||
+      process.env.HOST_ID ||
+      ''
+    ).trim();
+    let legacyHostId = '';
+    try {
+      const legacyPath = path.join(DATA_DIR, 'hostid');
+      if (fs.existsSync(legacyPath)) {
+        legacyHostId = String(fs.readFileSync(legacyPath, 'utf8') || '').trim();
+      }
+    } catch {}
+    const canonicalSeed = String(envHostId || legacyHostId || '').trim();
+    if (canonicalSeed) {
+      const hostIdFromSeed = canonicalSeed.replace(/[^\w.-]/g, '').slice(0, 180);
+      if (hostIdFromSeed) {
+        try { fs.mkdirSync(path.dirname(HOSTID_PATH), { recursive: true }); } catch {}
+        fs.writeFileSync(HOSTID_PATH, String(hostIdFromSeed) + '\n', 'utf8');
+        return hostIdFromSeed;
+      }
+    }
     const hostId = (crypto && typeof crypto.randomUUID === 'function')
       ? crypto.randomUUID()
       : crypto.randomBytes(16).toString('hex');
