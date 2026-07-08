@@ -2138,8 +2138,14 @@ function __resolveCtServerEventConfig() {
     const logSecret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
     // Fallback "primeiro mundo": usar também infra secret do bootstrap Gate B.
     const infraSecret = String(__resolveInfraSecret() || '').trim();
-    if (!eventUrl || (!logSecret && !infraSecret)) return null;
-    return { ctBaseUrl, eventUrl, logSecret, infraSecret };
+    if (!eventUrl) return null;
+    return {
+      ctBaseUrl,
+      eventUrl,
+      logSecret,
+      infraSecret,
+      authMode: logSecret ? 'log_secret' : (infraSecret ? 'infra_secret' : 'no_secret')
+    };
   } catch {
     return null;
   }
