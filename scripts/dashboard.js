@@ -3149,6 +3149,14 @@ function logsAllowlist() {
     status: path.join(base, 'status.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
     server_runtime_config: path.join(base, 'server_runtime_config.json'),
+    // Fila durável Delta (diagnóstico de reenvio/queda CT sem perda).
+    delta_thread_state: path.join(base, 'delta_thread_state.json'),
+    delta_queue: path.join(base, 'mensagens_pendentes.jsonl'),
+    delta_queue_cursor: path.join(base, 'mensagens_pendentes.cursor.json'),
+    delta_deadletter: path.join(base, 'mensagens_pendentes.deadletter.jsonl'),
+    delta_deadletter_cursor: path.join(base, 'mensagens_pendentes.deadletter.cursor.json'),
+    // Forense de parsing/rede do Delta (sem depender de logger.log).
+    forensic_triagem: path.join(base, 'forensic_triagem.log'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),

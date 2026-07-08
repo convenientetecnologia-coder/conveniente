@@ -15708,10 +15708,31 @@ function __deltaExtractMetaMessageIds(ev) {
   return { msgId, offlineId, txId: null, dedupId: msgId || null };
 }
 
+function __deltaLooksLikeEpochSeconds(value) {
+  const n = Number(value || 0) || 0;
+  return Number.isFinite(n) && n >= 1_000_000_000 && n < 10_000_000_000;
+}
+
+function __deltaNormalizeTimestampMs(value, fallbackNowMs = 0) {
+  const fallback = Number(fallbackNowMs || 0) || 0;
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  const n = Math.round(raw);
+  // Epoch seconds (10 dígitos) -> milissegundos.
+  if (n >= 1_000_000_000 && n < 10_000_000_000) return n * 1000;
+  // Epoch em milissegundos (faixa segura ~2001..2103).
+  if (n >= 1_000_000_000_000 && n <= 4_200_000_000_000) return n;
+  // Epoch em microssegundos.
+  if (n >= 1_000_000_000_000_000 && n <= 4_200_000_000_000_000) return Math.round(n / 1000);
+  // Epoch em nanossegundos.
+  if (n >= 1_000_000_000_000_000_000 && n <= 4_200_000_000_000_000_000) return Math.round(n / 1_000_000);
+  return fallback;
+}
+
 function __deltaExtractMetaTimestampMs(ev, fallbackNowMs) {
   try {
     const e = ev && typeof ev === 'object' ? ev : {};
-    const ts = Number(
+    const tsRaw = Number(
       e.timestamp_ms ||
       e.timestampMs ||
       e.created_at ||
@@ -15722,7 +15743,7 @@ function __deltaExtractMetaTimestampMs(ev, fallbackNowMs) {
       fallbackNowMs ||
       0
     ) || 0;
-    return ts > 0 ? ts : (Number(fallbackNowMs || 0) || Date.now());
+    return __deltaNormalizeTimestampMs(tsRaw, Number(fallbackNowMs || 0) || Date.now());
   } catch {
     return (Number(fallbackNowMs || 0) || Date.now());
   }
@@ -16366,13 +16387,16 @@ function __deltaHydrateThreadStateFromDiskRow(st, row) {
   ) status = st.status || 'new_buffering';
   if (status === 'hands_in_progress') status = 'new_buffering';
   st.status = status;
-  st.createdAt = Number(row.createdAt || 0) || st.createdAt;
-  st.updatedAt = Number(row.updatedAt || 0) || st.updatedAt;
+  st.createdAt = __deltaNormalizeTimestampMs(row.createdAt, st.createdAt || 0) || st.createdAt;
+  st.updatedAt = __deltaNormalizeTimestampMs(row.updatedAt, st.updatedAt || 0) || st.updatedAt;
   st.handsFailures = Number(row.handsFailures || 0) || 0;
   st.city = row && row.city ? String(row.city).trim() : null;
   st.seq = Number(row.seq || 0) || st.seq || 0;
-  st.lastDispatchAt = Number(row.lastDispatchAt || 0) || st.lastDispatchAt || 0;
-  st.high_watermark = Number(row.high_watermark || row.highWatermark || 0) || st.high_watermark || 0;
+  st.lastDispatchAt = __deltaNormalizeTimestampMs(row.lastDispatchAt, st.lastDispatchAt || 0) || st.lastDispatchAt || 0;
+  st.high_watermark = __deltaNormalizeTimestampMs(
+    row.high_watermark || row.highWatermark,
+    st.high_watermark || 0
+  ) || st.high_watermark || 0;
   st.highWatermark = Number(st.high_watermark || 0) || 0;
   return st;
 }
@@ -16410,13 +16434,26 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         continue;
       }
       const status = String(row && row.status || '').trim().toLowerCase();
-      if (status !== 'active' && status !== 'new_buffering' && status !== 'hands_in_progress') {
+      const rawLastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
+      const rawUpdatedAt = Number(row && row.updatedAt || 0) || 0;
+      const rawCreatedAt = Number(row && row.createdAt || 0) || 0;
+      const hasLegacySecondTs =
+        __deltaLooksLikeEpochSeconds(rawLastDispatchAt) ||
+        __deltaLooksLikeEpochSeconds(rawUpdatedAt) ||
+        __deltaLooksLikeEpochSeconds(rawCreatedAt);
+      const statusAllowed = (
+        status === 'active' ||
+        status === 'new_buffering' ||
+        status === 'hands_in_progress' ||
+        (hasLegacySecondTs && (status === 'processed_historical' || status === 'processed'))
+      );
+      if (!statusAllowed) {
         out.skipped_status += 1;
         continue;
       }
-      const lastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
-      const updatedAt = Number(row && row.updatedAt || 0) || 0;
-      const createdAt = Number(row && row.createdAt || 0) || 0;
+      const lastDispatchAt = __deltaNormalizeTimestampMs(rawLastDispatchAt, 0);
+      const updatedAt = __deltaNormalizeTimestampMs(rawUpdatedAt, 0);
+      const createdAt = __deltaNormalizeTimestampMs(rawCreatedAt, 0);
       const recentRefTs = Math.max(lastDispatchAt, updatedAt, createdAt);
       if (!recentRefTs || recentRefTs < minTs) {
         out.skipped_old += 1;
@@ -16427,7 +16464,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
       const normalizedMessages = messages
         .map((m) => ({
           text: String(m && m.text || '').trim(),
-          at: Number(m && m.at || 0) || 0,
+          at: __deltaNormalizeTimestampMs(Number(m && m.at || 0) || 0, 0),
           seq: Number(m && m.seq || 0) || 0
         }))
         .filter((m) => !!m.text)
@@ -17742,7 +17779,7 @@ function __deltaBuildCtIngestPayload(payload) {
     ''
   ).trim() || DELTA_FALLBACK_CLIENT_NAME;
   const saudacaoTexto = String(p.saudacao_texto || '').trim() || null;
-  const ts = Number(
+  const tsRaw = Number(
     p.timestamp_ms ||
     p.timestampMs ||
     p.message_at ||
@@ -17750,6 +17787,7 @@ function __deltaBuildCtIngestPayload(payload) {
     p.ts ||
     Date.now()
   ) || Date.now();
+  const ts = __deltaNormalizeTimestampMs(tsRaw, Date.now());
 
   return {
     server_id,
@@ -18548,16 +18586,17 @@ function __deltaExtractDeltaNewMessageEvents(root, accountUserId) {
         (node.deltaNewMessage.messageMetadata && (node.deltaNewMessage.messageMetadata.actorFbId || node.deltaNewMessage.messageMetadata.actor_fbid)) ||
         node.deltaNewMessage.senderId;
       const messageId = (msg && (msg.message_id || msg.messageId)) || '';
-      const timestampMs =
+      const timestampMsRaw =
         (msg && (msg.timestamp_ms || msg.timestampMs)) ||
         (node.deltaNewMessage.messageMetadata && node.deltaNewMessage.messageMetadata.timestamp);
+      const timestampMs = __deltaNormalizeTimestampMs(timestampMsRaw, 0);
       if (threadKey && typeof text === 'string' && __deltaLooksLikeHumanText(text)) {
         out.push({
           operation: 'deltaNewMessage',
           thread_key: String(threadKey),
           message_text: String(text),
           message_id: String(messageId || ''),
-          server_timestamp_ms: Number(timestampMs || 0) || null,
+          server_timestamp_ms: timestampMs || null,
           actor_id: senderId ? String(senderId) : '',
           account_user_id: String(accountUserId || ''),
           direction: 'nao_classificado',
@@ -19176,10 +19215,10 @@ async function __deltaAttachCdpEar(nome, page) {
         // - updateThreadSnippet: fluxo textual controlado, sem dispatch realtime em thread ativa.
         // - dedupe: proibido cache de IDs em RAM; checar duplicidade consultando SSD (mensagens_pendentes.jsonl tail).
 
-        const nowMs =
-          (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || 0) > 0
-            ? (Number(ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at) || 0) || Date.now())
-            : Date.now();
+        const nowMs = __deltaNormalizeTimestampMs(
+          ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at),
+          Date.now()
+        );
         // Regra nova (Delta 12h):
         // decisões de histórico devem considerar timestamp/metaTs.
         // Portanto, o gate vitalício por thread foi substituído pela avaliação abaixo.
