@@ -170,6 +170,8 @@ module.exports = (app, workerClient, fileStore) => {
         : {};
       const applyNow = !!(req.body && req.body.applyNow === true);
       const requestedVirtusEngine = extractRequestedVirtusEngine(payload);
+      const previousVirtusEngine = readDesiredVirtusEngine();
+      let engineChanged = false;
       const hasConfigFields = hasServerConfigFields(payload);
       try {
         provisionAudit.append({
@@ -210,13 +212,16 @@ module.exports = (app, workerClient, fileStore) => {
         if (!desiredOk) {
           return res.json({ ok: false, error: 'virtus_engine_persist_failed' });
         }
+        engineChanged = requestedVirtusEngine !== previousVirtusEngine;
         try {
           provisionAudit.append({
             ts: Date.now(),
             event: 'server_config_engine_persist',
             by: operator,
             requestedVirtusEngine,
-            desiredOk
+            desiredOk,
+            previousVirtusEngine: previousVirtusEngine || null,
+            engineChanged
           });
         } catch {}
       }
@@ -224,6 +229,7 @@ module.exports = (app, workerClient, fileStore) => {
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });
       const virtusEngine = readDesiredVirtusEngine();
       const effectiveWithVirtusEngine = { ...effective, virtusEngine };
+      const shouldEngineRollover = !!(engineChanged || (applyNow && requestedVirtusEngine));
       try {
         provisionAudit.append({
           ts: Date.now(),
@@ -248,10 +254,33 @@ module.exports = (app, workerClient, fileStore) => {
           return { ok: false, error: 'robe_v2_warmup_failed', details: (e && e.message) || String(e) };
         }
       };
+      const tryEngineRollover = async () => {
+        try {
+          if (!shouldEngineRollover) return null;
+          if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+            return { ok: false, error: 'worker_client_unavailable', skipped: true, reason: 'engine_changed_but_worker_unavailable' };
+          }
+          const targetEngine = requestedVirtusEngine || virtusEngine;
+          return await workerClient.sendWorkerCommand('virtus-engine-rollover', {
+            desiredEngine: targetEngine,
+            operator,
+            reason: engineChanged ? 'server_config_engine_changed' : 'server_config_apply_now_engine_reconcile'
+          }, { timeoutMs: 240000 });
+        } catch (e) {
+          return { ok: false, error: 'engine_rollover_failed', details: (e && e.message) || String(e) };
+        }
+      };
 
       const finish = async (result) => {
         const robeV2WarmupResult = await tryWarmupV2();
-        return res.json({ ok: true, config: effectiveWithVirtusEngine, applyNowResult: result || null, robeV2WarmupResult: robeV2WarmupResult || null });
+        const engineRolloverResult = await tryEngineRollover();
+        return res.json({
+          ok: true,
+          config: effectiveWithVirtusEngine,
+          applyNowResult: result || null,
+          robeV2WarmupResult: robeV2WarmupResult || null,
+          engineRolloverResult: engineRolloverResult || null
+        });
       };
       if (!applyNow) return finish(null);
       if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
@@ -287,7 +316,18 @@ module.exports = (app, workerClient, fileStore) => {
         reason: 'manual_apply_now',
         operator
       }, { timeoutMs: 180000 });
-      return res.json({ ok: true, result: r || null });
+      let engineRolloverResult = null;
+      try {
+        const targetEngine = readDesiredVirtusEngine();
+        engineRolloverResult = await workerClient.sendWorkerCommand('virtus-engine-rollover', {
+          desiredEngine: targetEngine,
+          operator,
+          reason: 'manual_apply_now_engine_reconcile'
+        }, { timeoutMs: 240000 });
+      } catch (e) {
+        engineRolloverResult = { ok: false, error: 'engine_rollover_failed', details: (e && e.message) || String(e) };
+      }
+      return res.json({ ok: true, result: r || null, engineRolloverResult });
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }

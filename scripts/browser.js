@@ -19,10 +19,6 @@ const DESIRED_ENGINE_PATH = path.join(__dirname, '..', 'dados', 'desired.json');
 let __desiredEngineCache = { at: 0, engine: 'legacy' };
 function readDesiredVirtusEngineRuntimeBestEffort() {
   try {
-    // Override operacional (portável):
-    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return 'delta';
-  } catch {}
-  try {
     const now = Date.now();
     if (__desiredEngineCache && __desiredEngineCache.at && (now - __desiredEngineCache.at) < 2000) {
       return __desiredEngineCache.engine || 'legacy';

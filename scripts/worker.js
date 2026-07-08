@@ -198,12 +198,7 @@ function currentVirtusEngine(autoMode) {
 }
 
 function isDeltaMotorEnabledRuntime() {
-  // Portável (todos os servidores):
-  // - Override operacional por env: FB_MOTOR_DELTA=1
-  // - Fonte de verdade: desired.json (resolveDesiredVirtusEngineRuntime)
-  try {
-    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
-  } catch {}
+  // Contrato determinístico: a engine vem exclusivamente de desired.json.
   try {
     const r = resolveDesiredVirtusEngineRuntime();
     return !!(r && r.engine === 'delta');
@@ -212,9 +207,6 @@ function isDeltaMotorEnabledRuntime() {
 }
 
 function isDeltaEngineActiveStrict() {
-  try {
-    if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
-  } catch {}
   try {
     if (autoMode && String(autoMode.engine || '').trim().toLowerCase() === 'delta') return true;
   } catch {}
@@ -364,6 +356,17 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     autoMode.engine = engFromDesired;
   }
   const eng = engFromDesired || currentVirtusEngine(autoMode);
+  try {
+    const now = Date.now();
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].virtusEngineRuntime = String(eng || 'legacy');
+    robeMeta[nome].virtusEngineRuntimeAt = now;
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.virtusEngineRuntime = String(eng || 'legacy');
+      ctrl.virtusEngineRuntimeAt = now;
+    }
+  } catch {}
   try {
     logger.info('[ENGINE_SWITCH][RESOLVE]', {
       nome,
@@ -7908,9 +7911,6 @@ async function robeTickGlobal() {
   // Delta opera escuta/passivo em messages + marketplace UI; Robe so cicla com feature flags de convivencia.
   const deltaModeActive = (() => {
     try {
-      if (String(process.env.FB_MOTOR_DELTA || '').trim() === '1') return true;
-    } catch {}
-    try {
       if (readDesiredVirtusEngineRuntime() === 'delta') return true;
     } catch {}
     return false;
@@ -11848,6 +11848,127 @@ const handlers = {
     }
   },
 
+  async ['virtus-engine-rollover']({ desiredEngine, operator, reason } = {}) {
+    try {
+      const targetEngine = (() => {
+        const norm = String(desiredEngine || '').trim().toLowerCase();
+        if (norm === 'delta' || norm === 'legacy') return norm;
+        return readDesiredVirtusEngineRuntime();
+      })();
+      const perfisArr = loadPerfisJson();
+      const nomes = (Array.isArray(perfisArr) ? perfisArr : [])
+        .map((p) => String(p && p.nome || '').trim())
+        .filter(Boolean);
+      const out = {
+        ok: true,
+        targetEngine,
+        totalProfiles: nomes.length,
+        activeProfiles: 0,
+        restarted: 0,
+        skippedBusy: 0,
+        skippedAligned: 0,
+        failed: 0,
+        details: []
+      };
+      for (const nome of nomes) {
+        const ctrl = controllers.get(nome);
+        if (!ctrl || !ctrl.browser) continue;
+        out.activeProfiles += 1;
+        const runtimeEngine = String(
+          (ctrl && ctrl.virtusEngineRuntime) ||
+          (robeMeta[nome] && robeMeta[nome].virtusEngineRuntime) ||
+          ''
+        ).trim().toLowerCase();
+        const aligned = runtimeEngine && runtimeEngine === targetEngine;
+        if (aligned) {
+          out.skippedAligned += 1;
+          continue;
+        }
+        const busy = !!(
+          ctrl.configurando ||
+          ctrl.humanControl ||
+          (robeMeta[nome] && robeMeta[nome].emExecucao)
+        );
+        if (busy) {
+          out.skippedBusy += 1;
+          out.details.push({
+            nome,
+            status: 'skipped_busy',
+            runtimeEngine: runtimeEngine || null
+          });
+          continue;
+        }
+        try {
+          const deact = await handlers.deactivate({
+            nome,
+            reason: `engine_rollover_${targetEngine}`,
+            policy: 'preserveDesired'
+          });
+          if (!deact || deact.ok !== true) {
+            out.failed += 1;
+            out.details.push({
+              nome,
+              status: 'deactivate_failed',
+              runtimeEngine: runtimeEngine || null,
+              error: (deact && deact.error) ? String(deact.error) : 'deactivate_failed'
+            });
+            continue;
+          }
+          await sleep(250);
+          const act = await handlers.activate({
+            nome,
+            operator: String(operator || 'engine_rollover').slice(0, 120)
+          });
+          if (!act || act.ok !== true) {
+            out.failed += 1;
+            out.details.push({
+              nome,
+              status: 'activate_failed',
+              runtimeEngine: runtimeEngine || null,
+              error: (act && act.error) ? String(act.error) : 'activate_failed'
+            });
+            continue;
+          }
+          out.restarted += 1;
+          out.details.push({
+            nome,
+            status: 'restarted',
+            runtimeEngineBefore: runtimeEngine || null,
+            targetEngine
+          });
+          await sleep(180);
+        } catch (e) {
+          out.failed += 1;
+          out.details.push({
+            nome,
+            status: 'exception',
+            runtimeEngine: runtimeEngine || null,
+            error: (e && e.message) ? String(e.message) : String(e)
+          });
+        }
+      }
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'virtus_engine_rollover',
+          targetEngine,
+          reason: String(reason || '').slice(0, 180) || null,
+          operator: String(operator || '').slice(0, 120) || null,
+          totalProfiles: Number(out.totalProfiles || 0) || 0,
+          activeProfiles: Number(out.activeProfiles || 0) || 0,
+          restarted: Number(out.restarted || 0) || 0,
+          skippedBusy: Number(out.skippedBusy || 0) || 0,
+          skippedAligned: Number(out.skippedAligned || 0) || 0,
+          failed: Number(out.failed || 0) || 0
+        });
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return out;
+    } catch (e) {
+      return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+    }
+  },
+
   async ['set-shard']({ names }) {
     try {
       const newSet = new Set(Array.isArray(names) ? names : []);
@@ -11936,6 +12057,7 @@ const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
 // - fonte: desired.json (ex.: desired._autoMode.engine = "delta")
 // - default seguro: legacy
 autoMode.engine = readDesiredVirtusEngineRuntime();
+const desiredEngineRuntime = readDesiredVirtusEngineRuntime();
 const perfis = [];
 // #region agent log
 // Forense enterprise: detectar e registrar (via provision_audit) quedas de working/Virtus inesperadas,
@@ -12017,6 +12139,20 @@ perfis.push({
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
   trabalhando: !!(controllers.get(nome)?.trabalhando),
+  virtusEngineDesired: desiredEngineRuntime,
+  virtusEngineRuntime: (() => {
+    try {
+      const ctrlSnap = controllers.get(nome);
+      const raw = String(
+        (ctrlSnap && ctrlSnap.virtusEngineRuntime) ||
+        (robeMeta[nome] && robeMeta[nome].virtusEngineRuntime) ||
+        ''
+      ).trim().toLowerCase();
+      return (raw === 'delta' || raw === 'legacy') ? raw : null;
+    } catch {
+      return null;
+    }
+  })(),
   // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
   virtusOnline: !!(controllers.get(nome)?.virtus),
   sendLockActive: !!(controllers.get(nome)?.browser && controllers.get(nome).browser._sendLock && controllers.get(nome).browser._sendLock.active),
@@ -18819,6 +18955,16 @@ async function __deltaAttachCdpEar(nome, page) {
   } catch {}
   __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs, lastError: null });
 
+  const deltaRuntimeEnabled = (() => {
+    try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; }
+  })();
+  if (!deltaRuntimeEnabled) {
+    try { await __deltaDetachCdpSession(nome); } catch {}
+    try { page.__deltaCdpEarAttached = false; } catch {}
+    __deltaMarkBootEarState(nome, { earAttached: false, lastError: 'delta_engine_disabled' });
+    return;
+  }
+
   __deltaStartIngestLoopOnce();
 
   try {
@@ -18844,20 +18990,6 @@ async function __deltaAttachCdpEar(nome, page) {
   if (!ctrl) return;
 
   try {
-    const bypassStateGate = !isDeltaMotorEnabledRuntime();
-    if (bypassStateGate) {
-      try {
-        logger.info('[DELTA][EAR] bypass de gate por estado legado (captura soberana por tráfego)', {
-          nome: String(nome || '')
-        });
-      } catch {}
-      try {
-        if (typeof forensicLog === 'function') {
-          forensicLog('DELTA', 'ear_state_gate_bypassed', { nome: String(nome || '') });
-        }
-      } catch {}
-    }
-
     const cdp = await page.target().createCDPSession();
     await cdp.send('Network.enable');
     __deltaEnsureFrameTelemetryState();
@@ -19854,8 +19986,16 @@ async function wirePageObservers(nome, page) {
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 
-  // 👂 Ouvido Delta (CDP) — acopla escuta passiva na própria aba do perfil.
-  try { await __deltaAttachCdpEar(nome, page); } catch {}
+  // 👂 Ouvido Delta (CDP) — somente no motor Delta.
+  const deltaEnabledNow = (() => {
+    try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; }
+  })();
+  if (deltaEnabledNow) {
+    try { await __deltaAttachCdpEar(nome, page); } catch {}
+  } else {
+    try { await __deltaDetachCdpSession(nome); } catch {}
+    try { if (page) page.__deltaCdpEarAttached = false; } catch {}
+  }
 }
 
 async function isPageLikelyAlive(page, nome) {
