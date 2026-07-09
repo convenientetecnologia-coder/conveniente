@@ -665,6 +665,11 @@ function toTitleCaseCityName(raw) {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 }
+const BR_VALID_UF = new Set([
+  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA",
+  "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN",
+  "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+]);
 function normalizeCityToUfPattern(raw) {
   const s0 = String(raw || "")
     .replace(/\s+/g, " ")
@@ -679,22 +684,45 @@ function normalizeCityToUfPattern(raw) {
     .trim();
   const m1 = s.match(/^(.+?)\s*\(\s*([A-Za-z]{2})\s*\)$/);
   if (m1 && m1[1] && m1[2]) {
-    return `${toTitleCaseCityName(m1[1].trim())} (${String(m1[2]).toUpperCase()})`.slice(0, 80);
+    const uf = String(m1[2]).toUpperCase();
+    if (!BR_VALID_UF.has(uf)) return "";
+    return `${toTitleCaseCityName(m1[1].trim())} (${uf})`.slice(0, 80);
   }
   const m2 = s.match(/^(.+?)\s*[-,\/]\s*([A-Za-z]{2})$/);
   if (m2 && m2[1] && m2[2]) {
-    return `${toTitleCaseCityName(m2[1].trim())} (${String(m2[2]).toUpperCase()})`.slice(0, 80);
+    const uf = String(m2[2]).toUpperCase();
+    if (!BR_VALID_UF.has(uf)) return "";
+    return `${toTitleCaseCityName(m2[1].trim())} (${uf})`.slice(0, 80);
   }
   return s.slice(0, 80);
 }
 function sanitizeLeadClientName(rawTitle) {
-  const left = String(rawTitle || "").split(" · ")[0] || "";
-  const cleaned = left
+  const cleanedSource = String(rawTitle || "")
     .replace(/^conversa intitulada\s+/i, "")
+    .replace(/^conversation titled\s+/i, "")
+    .replace(/^visto por\s+/i, "")
+    .replace(/^seen by\s+/i, "")
+    .replace(/^title:\s*/i, "")
     .replace(/\s+/g, " ")
-    .replace(/^[:\-]\s*/, "")
     .trim();
-  return cleaned.slice(0, 90);
+  if (!cleanedSource) return "";
+  const left = String(cleanedSource.split(" · ")[0] || cleanedSource)
+    .replace(/^[:\-]\s*/, "")
+    .replace(/\s*\|\s*marketplace.*$/i, "")
+    .replace(/\s*[-–—]\s*marketplace.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!left) return "";
+  const low = left.toLowerCase();
+  if (
+    low === "messenger" ||
+    low === "marketplace" ||
+    low === "cliente marketplace" ||
+    low === "cliente sem nome"
+  ) return "";
+  if (/^(você|voce|you)\b[:\-]?/i.test(low)) return "";
+  if (/^(há|ha)\s+\d+\s*(sem|mins|min|h|dia|dias|week|weeks)/i.test(low)) return "";
+  return left.slice(0, 90);
 }
 const FEED_ACTIVE_LEAD_SELECTOR =
   "span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft";
@@ -715,12 +743,41 @@ async function extractLeadClientNameFromFeedDom(page) {
         }
       };
       const pickBestConversationTitle = (list) => {
+        const isLikelyNoise = (v) => {
+          const t = clean(v || "");
+          if (!t) return true;
+          if (t.length < 2 || t.length > 160) return true;
+          const low = t.toLowerCase();
+          if (/^(você|voce|you)\b[:\-]?/i.test(low)) return true;
+          if (low === "messenger" || low === "marketplace") return true;
+          if (low === "cliente marketplace" || low === "cliente sem nome") return true;
+          if (/https?:\/\//i.test(low)) return true;
+          if (/\b\d{6,}\b/.test(low)) return true;
+          if (/^(há|ha)\s+\d+\s*(sem|mins|min|h|dia|dias|week|weeks)/i.test(low)) return true;
+          return false;
+        };
+        const normalizeTitle = (value) => {
+          const base = clean(value || "")
+            .replace(/^Conversa intitulada\s+/i, "")
+            .replace(/^Conversation titled\s+/i, "")
+            .replace(/^Visto por\s+/i, "")
+            .replace(/^Seen by\s+/i, "")
+            .trim();
+          if (!base) return "";
+          if (!base.includes(" · ")) return base;
+          return clean(base.split(" · ")[0] || "");
+        };
         for (const raw of list) {
           const t = clean(raw || "");
-          if (!t) continue;
-          if (!t.includes(" · ")) continue;
-          if (t.length < 3) continue;
+          if (!t || !t.includes(" · ")) continue;
+          const normalized = normalizeTitle(t);
+          if (isLikelyNoise(normalized)) continue;
           return t;
+        }
+        for (const raw of list) {
+          const normalized = normalizeTitle(raw);
+          if (isLikelyNoise(normalized)) continue;
+          return normalized;
         }
         return "";
       };
@@ -736,6 +793,19 @@ async function extractLeadClientNameFromFeedDom(page) {
       }
       const fromAria = pickBestConversationTitle(ariaCandidates);
       if (fromAria) return fromAria;
+
+      const seenByCandidates = [];
+      const seenByNodes = Array.from(
+        document.querySelectorAll('[aria-label^="Visto por "], [aria-label^="Seen by "]')
+      );
+      for (const el of seenByNodes) {
+        if (!getVisible(el)) continue;
+        const aria = clean(el.getAttribute("aria-label") || "");
+        if (!aria) continue;
+        seenByCandidates.push(aria.replace(/^Visto por\s+/i, "").replace(/^Seen by\s+/i, ""));
+      }
+      const fromSeenBy = pickBestConversationTitle(seenByCandidates);
+      if (fromSeenBy) return fromSeenBy;
 
       // 2) Título semântico na área de cabeçalho da conversa.
       const headingCandidates = Array.from(document.querySelectorAll('h1 span, h2 span, h3 span, [role="heading"] span'))
@@ -4651,9 +4721,24 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
     }
 
+    const itemLinkFinal = String(
+      (sendOut && sendOut.item_link) ||
+      (prior && prior.itemLink) ||
+      ""
+    ).trim() || null;
+
+    const leadNamePromise = (async () => {
+      try {
+        const out = await extractLeadClientNameFromFeedDom(page);
+        return String(out || "").trim() || null;
+      } catch {
+        return null;
+      }
+    })();
+
     const cityCollectMaxWaitMs = Math.max(
-      4_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 8_000) || 8_000
+      8_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 18_000) || 18_000
     );
     const cityOut = await Promise.race([
       cityCollectionPromise,
@@ -4676,34 +4761,86 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         });
       } catch (_) {}
     }
-    if (!cityOut || cityOut.ok !== true || !String(cityOut.cidade || "").trim()) {
-      const itemLinkToKeep = String(
-        (sendOut && sendOut.item_link) ||
-        (prior && prior.itemLink) ||
-        ""
-      ).trim() || null;
+
+    let cityCandidate = String((cityOut && cityOut.cidade) || "").trim() || null;
+    let citySource = cityCandidate
+      ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
+      : null;
+    if (!cityCandidate) {
+      try {
+        const domCity = await extractCityFromMarketplaceDom(page);
+        const domCityCandidate = String(domCity || "").trim();
+        if (domCityCandidate) {
+          cityCandidate = domCityCandidate;
+          citySource = "dom_live_fallback";
+        }
+      } catch (_) {}
+    }
+    if (!cityCandidate) {
+      const cachedCity = String((cityCache && cityCache.value) || "").trim();
+      if (cachedCity) {
+        cityCandidate = cachedCity;
+        citySource = "dom_cache_fallback";
+      }
+    }
+
+    let profileUrl = null;
+    try {
+      const u = String(page && page.url ? page.url() : "").trim();
+      if (u) profileUrl = u;
+    } catch (_) {}
+    const nomeClienteLimpo = await leadNamePromise;
+    try {
+      __forensicEdgeEmit({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        flow_stage: "dom_automation_tracking",
+        details: {
+          action: "lead_name_extracted",
+          name_clean: nomeClienteLimpo || null
+        }
+      });
+    } catch (_) {}
+
+    if (!cityCandidate) {
       greetingStateByThread.set(t, {
         sentAt: Number((prior && prior.sentAt) || Date.now()),
         greetingText,
-        itemLink: itemLinkToKeep,
+        itemLink: itemLinkFinal,
         city: null,
         citySource: null,
       });
+      try {
+        __forensicEdgeEmit({
+          account_login: ACCOUNT_LOGIN,
+          thread_key: t,
+          flow_stage: "city_collect_contingency",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            reason: String((cityOut && cityOut.error) || "city_collect_failed"),
+            item_link: itemLinkFinal || null,
+            city_cache_hit: !!(cityCache && cityCache.value),
+          }
+        });
+      } catch (_) {}
+      const nowTs = Date.now();
+      writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+      lastCrossThreadKey = String(t);
+      lastCrossThreadSendAt = nowTs;
       return {
-        ok: false,
-        error: String((cityOut && cityOut.error) || "city_collect_failed"),
-        greeting_already_sent: true,
+        ok: true,
+        cidade: null,
+        city_source: null,
+        link_anuncio: itemLinkFinal || null,
+        profile_url: profileUrl,
         greeting_text: greetingText,
+        mensagens_cliente: mensagensConcatenadas,
+        nome_cliente_limpo: nomeClienteLimpo,
+        customer_name: nomeClienteLimpo,
+        metadata_contingency_applied: true,
+        metadata_error: String((cityOut && cityOut.error) || "city_collect_failed"),
       };
     }
-
-    const cityCandidate = String(cityOut.cidade || "").trim();
-    const citySource = String(cityOut.city_source || "collector_listing_page").trim();
-    const itemLinkFinal = String(
-      (sendOut && sendOut.item_link) ||
-      (prior && prior.itemLink) ||
-      ""
-    ).trim() || null;
 
     greetingStateByThread.set(t, {
       sentAt: Number((prior && prior.sentAt) || Date.now()),
@@ -4726,27 +4863,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       });
     } catch (_) {}
 
-    let profileUrl = null;
-    try {
-      const u = String(page && page.url ? page.url() : "").trim();
-      if (u) profileUrl = u;
-    } catch (_) {}
-    let nomeClienteLimpo = null;
-    try {
-      nomeClienteLimpo = await extractLeadClientNameFromFeedDom(page);
-    } catch (_) {}
-    try {
-      __forensicEdgeEmit({
-        account_login: ACCOUNT_LOGIN,
-        thread_key: t,
-        flow_stage: "dom_automation_tracking",
-        details: {
-          action: "lead_name_extracted",
-          name_clean: nomeClienteLimpo || null
-        }
-      });
-    } catch (_) {}
-
     const nowTs = Date.now();
     writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
     lastCrossThreadKey = String(t);
@@ -4756,6 +4872,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       ok: true,
       cidade: cityCandidate || null,
       city_source: citySource,
+      link_anuncio: itemLinkFinal || null,
       profile_url: profileUrl,
       greeting_text: greetingText,
       mensagens_cliente: mensagensConcatenadas,

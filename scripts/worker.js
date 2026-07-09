@@ -15122,7 +15122,7 @@ const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensag
 const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.cursor.json');
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
-const DELTA_FALLBACK_CLIENT_NAME = 'Cliente Marketplace';
+const DELTA_FALLBACK_CLIENT_NAME = 'Cliente sem Nome';
 const DELTA_CT_CANONICAL_BASE = (() => {
   const raw = String(
     process.env.CT_DELTA_CANONICAL_BASE_URL ||
