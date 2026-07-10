@@ -33,12 +33,29 @@ function createSerialQueue() {
   };
 }
 
+function extractMarketplaceItemId(pathname) {
+  const m = String(pathname || "").match(/\/marketplace\/item\/([0-9A-Za-z_-]+)/i);
+  return m && m[1] ? String(m[1]).trim() : "";
+}
+
 function normalizeItemLink(raw) {
-  const s = String(raw || "").trim();
-  if (!s) return "";
-  if (/^https?:\/\//i.test(s)) return s;
-  if (s.startsWith("/")) return `https://www.facebook.com${s}`;
-  return "";
+  const input = String(raw || "").replace(/&amp;/gi, "&").trim();
+  if (!input) return "";
+  try {
+    const parsed = input.startsWith("http")
+      ? new URL(input)
+      : input.startsWith("/")
+        ? new URL(input, "https://www.facebook.com")
+        : null;
+    if (!parsed) return "";
+    const host = String(parsed.hostname || "").toLowerCase();
+    if (host && !host.includes("facebook.com")) return "";
+    const itemId = extractMarketplaceItemId(parsed.pathname);
+    if (!itemId) return "";
+    return `https://www.facebook.com/marketplace/item/${itemId}/`;
+  } catch {
+    return "";
+  }
 }
 
 function sanitizeCity(value) {
@@ -231,6 +248,85 @@ async function extractCityFromListingPage(page) {
   return null;
 }
 
+async function dismissLoginOverlay(page) {
+  if (!page) return { closed: false, escaped: false };
+  let closed = false;
+  try {
+    closed = await page.evaluate(() => {
+      const isVisible = (el) => {
+        try {
+          if (!el) return false;
+          const st = window.getComputedStyle(el);
+          if (!st) return false;
+          if (st.visibility === "hidden" || st.display === "none" || Number(st.opacity || "1") === 0) return false;
+          const r = el.getBoundingClientRect();
+          return !!(r && r.width > 4 && r.height > 4);
+        } catch (_) {
+          return false;
+        }
+      };
+      const selectors = [
+        '[role="dialog"] [aria-label="Fechar"]',
+        '[role="dialog"] [aria-label="Close"]',
+        '[aria-modal="true"] [aria-label="Fechar"]',
+        '[aria-modal="true"] [aria-label="Close"]',
+        'div[aria-label="Fechar"][role="button"]',
+        'div[aria-label="Close"][role="button"]',
+      ];
+      const nodes = [];
+      for (const sel of selectors) {
+        try {
+          for (const el of document.querySelectorAll(sel)) nodes.push(el);
+        } catch (_) {}
+      }
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        try {
+          el.click();
+          return true;
+        } catch (_) {}
+      }
+      return false;
+    }).catch(() => false);
+  } catch (_) {
+    closed = false;
+  }
+
+  let escaped = false;
+  if (!closed) {
+    try {
+      await page.keyboard.press("Escape");
+      escaped = true;
+    } catch (_) {}
+  }
+
+  if (closed || escaped) {
+    await sleep(randomBetween(180, 420));
+  }
+  return { closed, escaped };
+}
+
+async function waitForListingHints(page, timeoutMs) {
+  if (!page) return;
+  const timeout = Math.max(400, Number(timeoutMs || 0) || 1500);
+  try {
+    await page.waitForFunction(() => {
+      const body = String((document.body && document.body.innerText) || "")
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+      if (!body) return false;
+      if (body.includes("anunciado em")) return true;
+      if (body.includes("listed in")) return true;
+      if (body.includes("localização é aproximada")) return true;
+      if (body.includes("localizacao e aproximada")) return true;
+      if (body.includes("approximate location")) return true;
+      return Boolean(
+        document.querySelector('a[href*="/marketplace/"][role="link"] span,[aria-label*="localização"],[aria-label*="location"]')
+      );
+    }, { timeout });
+  } catch (_) {}
+}
+
 async function createCollectorRuntime() {
   const userDataDir = String(
     process.env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR ||
@@ -332,9 +428,17 @@ async function createCollectorRuntime() {
         try {
           const p = await ensurePage();
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
-          await sleep(randomBetween(450, 950));
+          await sleep(randomBetween(320, 760));
+          await dismissLoginOverlay(p);
+          await waitForListingHints(p, Math.min(3200, Math.max(1200, Math.floor(navTimeoutMs / 4))));
 
-          const extracted = await extractCityFromListingPage(p);
+          let extracted = await extractCityFromListingPage(p);
+          if (!extracted || !extracted.cidade) {
+            // Segunda passada: tenta fechar pop-up novamente e reler o DOM da página do item.
+            await dismissLoginOverlay(p);
+            await waitForListingHints(p, 1200);
+            extracted = await extractCityFromListingPage(p);
+          }
           if (extracted && extracted.cidade) {
             log(`cidade coletada account=${account || "n/a"} thread=${tk || "n/a"} cidade="${extracted.cidade}" attempt=${attempt}`);
             return {

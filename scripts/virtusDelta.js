@@ -2049,39 +2049,129 @@ async function clickMarketplaceFilterIfPresent(page) {
   return { ok: Boolean(afterFinal && afterFinal !== before), changed: Boolean(afterFinal && afterFinal !== before), strategy: "none" };
 }
 
+function canonicalizeMarketplaceItemLink(raw) {
+  const input = String(raw || "").replace(/&amp;/gi, "&").trim();
+  if (!input) return "";
+  try {
+    const parsed = input.startsWith("http")
+      ? new URL(input)
+      : input.startsWith("/")
+        ? new URL(input, "https://www.facebook.com")
+        : null;
+    if (!parsed) return "";
+    const host = String(parsed.hostname || "").toLowerCase();
+    if (host && !host.includes("facebook.com")) return "";
+    const m = String(parsed.pathname || "").match(/\/marketplace\/item\/([0-9A-Za-z_-]+)/i);
+    if (!m || !m[1]) return "";
+    const itemId = String(m[1] || "").trim();
+    if (!itemId) return "";
+    return `https://www.facebook.com/marketplace/item/${itemId}/`;
+  } catch {
+    return "";
+  }
+}
+
 async function extractMarketplaceItemLink(page) {
-  const href = await page.evaluate(() => {
-    const host = location.origin || '';
-    const candidates = [];
-    const push = (raw) => {
-      const h = String(raw || '').trim();
-      if (!h) return;
-      if (/\/marketplace\/item\//i.test(h)) candidates.push(h);
+  const rawCandidates = await page.evaluate(() => {
+    const out = [];
+    const push = (raw, source) => {
+      const h = String(raw || "").trim();
+      if (!h || !/\/marketplace\/item\//i.test(h)) return;
+      out.push({ raw: h, source: String(source || "").trim() || "unknown" });
     };
 
-    const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]'));
+    // Prioridade máxima: CTA de detalhe do próprio card do chat.
+    const detailAnchors = Array.from(
+      document.querySelectorAll(
+        'a[aria-label*="Ver detalhes"][href],a[aria-label*="See details"][href],a[aria-label*="Detalhes"][href]'
+      )
+    );
+    for (const a of detailAnchors) {
+      try { push(a.getAttribute("href"), "details_anchor"); } catch (_) {}
+    }
+
+    // Links com referral do messenger tendem a ser o item correto do thread.
+    const messengerAnchors = Array.from(
+      document.querySelectorAll('a[href*="/marketplace/item/"][href*="referralSurface=messenger_banner"]')
+    );
+    for (const a of messengerAnchors) {
+      try { push(a.getAttribute("href"), "messenger_referral_anchor"); } catch (_) {}
+    }
+
+    const anchors = Array.from(
+      document.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]')
+    );
     for (const a of anchors) {
       try {
-        push(a.getAttribute('href'));
-        push(a.getAttribute('data-href'));
+        push(a.getAttribute("href"), "generic_anchor_href");
+        push(a.getAttribute("data-href"), "generic_anchor_data_href");
       } catch (_) {}
     }
 
-    if (!candidates.length) {
-      const body = String((document.body && document.body.innerText) || '').replace(/\s+/g, ' ');
-      const mHttp = body.match(/https?:\/\/(?:www\.)?facebook\.com\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/i);
-      if (mHttp && mHttp[0]) push(mHttp[0]);
-      const mRel = body.match(/\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/i);
-      if (mRel && mRel[0]) push(mRel[0]);
+    // Quando abre em página de item ou login interstitial, o "next" costuma carregar o item URL.
+    const nextInputs = Array.from(document.querySelectorAll('input[name="next"][value*="/marketplace/item/"]'));
+    for (const inp of nextInputs) {
+      try { push(inp.getAttribute("value"), "hidden_next_input"); } catch (_) {}
     }
 
-    if (!candidates.length) return '';
-    const first = String(candidates[0] || '').trim();
-    if (!first) return '';
-    if (first.startsWith('http')) return first;
-    return host + first;
-  }).catch(() => "");
-  return String(href || "").trim();
+    try {
+      const hrefNow = String(location && location.href || "").trim();
+      if (/\/marketplace\/item\//i.test(hrefNow)) push(hrefNow, "location_href");
+    } catch (_) {}
+
+    const body = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+    const bodyHttp = body.match(/https?:\/\/(?:www\.)?facebook\.com\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
+    for (const h of bodyHttp) push(h, "body_http");
+    const bodyRel = body.match(/\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
+    for (const h of bodyRel) push(h, "body_relative");
+
+    return out;
+  }).catch(() => []);
+
+  const candidates = Array.isArray(rawCandidates) ? rawCandidates : [];
+  const ranked = [];
+  const seen = new Set();
+  const scoreOf = (raw, source) => {
+    const text = String(raw || "").toLowerCase();
+    let score = 0;
+    if (source === "details_anchor") score += 100;
+    if (source === "messenger_referral_anchor") score += 80;
+    if (source === "hidden_next_input") score += 60;
+    if (source === "location_href") score += 40;
+    if (text.includes("referralsurface=messenger_banner")) score += 20;
+    if (text.includes("ref=messenger_banner")) score += 10;
+    return score;
+  };
+
+  for (const cand of candidates) {
+    const raw = String(cand && cand.raw || "").trim();
+    const source = String(cand && cand.source || "").trim();
+    const canonical = canonicalizeMarketplaceItemLink(raw);
+    if (!canonical || seen.has(canonical)) continue;
+    seen.add(canonical);
+    ranked.push({ link: canonical, score: scoreOf(raw, source) });
+  }
+
+  if (!ranked.length) return "";
+  ranked.sort((a, b) => (Number(b.score || 0) - Number(a.score || 0)));
+  return String(ranked[0] && ranked[0].link || "").trim();
+}
+
+async function extractMarketplaceItemLinkWithRetry(page, { attempts = 4 } = {}) {
+  const maxAttempts = Math.max(1, Math.min(8, Number(attempts || 4) || 4));
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const link = await extractMarketplaceItemLink(page).catch(() => "");
+    if (link) return link;
+    if (attempt < maxAttempts) {
+      try {
+        await page.waitForSelector('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]', {
+          timeout: Math.min(1800, 500 + (attempt * 350))
+        });
+      } catch (_) {}
+      await sleep(randomBetween(220, 520));
+    }
+  }
+  return "";
 }
 
 async function readComposerText(page) {
@@ -3300,8 +3390,9 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
     let itemLink = null;
     if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
+      const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
       try {
-        itemLink = await extractMarketplaceItemLink(page);
+        itemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
         if (itemLink) {
           logInfo(`[COLETOR_101_LINK] ${itemLink}`);
           if (typeof onItemLink === "function") {
@@ -3485,9 +3576,10 @@ async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead =
     return { ok: false, error: String((open && open.error) || "thread_open_failed") };
   }
 
+  const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
   let itemLink = null;
   try {
-    itemLink = await extractMarketplaceItemLink(page);
+    itemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
   } catch (_) {}
   if (!itemLink) {
     return { ok: false, error: "item_link_missing" };
@@ -3495,7 +3587,13 @@ async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead =
   return { ok: true, item_link: itemLink };
 }
 
-async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey, accountLogin }) {
+async function collectCityFromItemLinkUsingGlobalCollector({
+  itemLink,
+  threadKey,
+  accountLogin,
+  timeoutMs,
+  attempts
+}) {
   if (typeof getDeltaCityCollector !== "function") {
     return { ok: false, error: "delta_city_collector_unavailable" };
   }
@@ -3507,6 +3605,8 @@ async function collectCityFromItemLinkUsingGlobalCollector({ itemLink, threadKey
     item_link: itemLink,
     thread_key: threadKey,
     account_login: accountLogin,
+    timeoutMs,
+    attempts
   });
   return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
 }
@@ -4659,6 +4759,22 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const prior = greetingStateByThread.get(t) || null;
     const greetingAlreadySent = !!(prior && prior.sentAt);
     const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
+    const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+    const cityCollectorTimeoutMs = Math.max(
+      8_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000
+    );
+    const cityCollectorAttempts = Math.max(
+      1,
+      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 3) || 3)
+    );
+    const cityCollectorInterAttemptMaxMs = 1_600;
+    const cityCollectorBudgetMs =
+      (cityCollectorTimeoutMs * cityCollectorAttempts) +
+      (Math.max(0, cityCollectorAttempts - 1) * cityCollectorInterAttemptMaxMs) +
+      2_500;
+    const cityCollectMaxWaitEnvMs = Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 0) || 0;
+    const cityCollectMaxWaitMs = Math.max(18_000, cityCollectorBudgetMs, cityCollectMaxWaitEnvMs);
 
     let itemLinkResolved = false;
     let itemLinkResolver = null;
@@ -4679,6 +4795,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         itemLink,
         threadKey: t,
         accountLogin: ACCOUNT_LOGIN,
+        timeoutMs: cityCollectorTimeoutMs,
+        attempts: cityCollectorAttempts,
       });
     })().catch((e) => ({
       ok: false,
@@ -4698,7 +4816,28 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       if (sendOut && sendOut.item_link) {
         resolveItemLink(sendOut.item_link);
       } else {
-        resolveItemLink(null);
+        let recoveredItemLink = null;
+        try {
+          recoveredItemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
+        } catch (_) {}
+        if (!recoveredItemLink) {
+          try {
+            const openOut = await openThreadAndExtractItemLink(page, t, { fromNetworkLead: false });
+            if (openOut && openOut.ok && openOut.item_link) {
+              recoveredItemLink = String(openOut.item_link || "").trim() || null;
+            }
+          } catch (_) {}
+        }
+        if (recoveredItemLink) {
+          try {
+            logInfo(`[virtusDelta][city_link_recovery] thread_key=${t} recovered=sim`);
+          } catch (_) {}
+        } else {
+          try {
+            logInfo(`[virtusDelta][city_link_recovery] thread_key=${t} recovered=nao`);
+          } catch (_) {}
+        }
+        resolveItemLink(recoveredItemLink || null);
       }
       if (!sendOut || !sendOut.ok) {
         return {
@@ -4736,10 +4875,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
     })();
 
-    const cityCollectMaxWaitMs = Math.max(
-      8_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 18_000) || 18_000
-    );
     const cityOut = await Promise.race([
       cityCollectionPromise,
       sleep(cityCollectMaxWaitMs).then(() => ({
@@ -4757,6 +4892,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           details: {
             tag: "FORENSIC_DOM_REVERSE",
             timeout_ms: cityCollectMaxWaitMs,
+            collector_timeout_ms: cityCollectorTimeoutMs,
+            collector_attempts: cityCollectorAttempts,
+            collector_budget_ms: cityCollectorBudgetMs,
           }
         });
       } catch (_) {}
