@@ -1408,7 +1408,13 @@ module.exports = (app, workerClient, fileStore) => {
       // ===== Enterprise 110%: enviar para CT (Estoque Excluídas) ANTES de deletar local =====
       // Motivação: evitar duplicidade (mesma conta em 2 servidores) e garantir rastreabilidade no CT.
       // Regra: se CT estiver fora, enfileirar em dados/ct_archive_queue/pending para retry pelo worker.
-      let ct = { attempted: false, ok: false, queued: false, error: null };
+      let ct = {
+        attempted: false,
+        ok: false,
+        queued: false,
+        error: null,
+        ticketReject: { attempted: false, ok: false, error: null, rejected: 0, failed: 0 }
+      };
       try {
         const fs = require('fs');
         const path = require('path');
@@ -1423,7 +1429,13 @@ module.exports = (app, workerClient, fileStore) => {
         let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) ? cfg.ctBaseUrl : (process.env.CT_BASE_URL || process.env.CT_URL || ''));
         const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
         if (!hostId || !base || !secret) {
-          ct = { attempted: true, ok: false, queued: false, error: 'ct_config_missing' };
+          ct = {
+            attempted: true,
+            ok: false,
+            queued: false,
+            error: 'ct_config_missing',
+            ticketReject: { attempted: false, ok: false, error: 'ct_config_missing', rejected: 0, failed: 0 }
+          };
         } else {
           // Descobrir stockAccountId se existir (ajuda o CT a mapear)
           let stockAccountId = null;
@@ -1516,14 +1528,65 @@ module.exports = (app, workerClient, fileStore) => {
               ct.error = `ct_queue_failed:${(e && e.message) ? String(e.message) : String(e)}`;
             }
           }
+
+          // Exclusão explícita no servidor: dispara reprovação dos tickets do perfil no CT.
+          // Importante: este é o ÚNICO gatilho de auto-reprovação (não depende de perfis.json).
+          try {
+            ct.ticketReject = { attempted: true, ok: false, error: null, rejected: 0, failed: 0 };
+            const Aborter = global.AbortController || require('node-abort-controller');
+            const acReject = new Aborter();
+            const tReject = setTimeout(() => { try { acReject.abort(); } catch {} }, 12000);
+            const respReject = await fetch(`${base}/api/attendance/messenger-delta/account-deleted_secret`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+              body: JSON.stringify({
+                hostId,
+                profileName: String(nome || '').trim(),
+                actor: String(op || 'manual_delete').slice(0, 120) || 'manual_delete'
+              }),
+              signal: acReject.signal
+            }).catch((e) => ({ ok: false, _err: e }));
+            clearTimeout(tReject);
+            if (respReject && respReject.ok) {
+              const jr = await respReject.json().catch(() => null);
+              if (jr && jr.ok === true) {
+                ct.ticketReject.ok = true;
+                ct.ticketReject.rejected = Math.max(0, Number(jr.rejected || 0) || 0);
+                ct.ticketReject.failed = Math.max(0, Number(jr.failed || 0) || 0);
+              } else {
+                ct.ticketReject.ok = false;
+                ct.ticketReject.error = (jr && jr.error) ? String(jr.error) : `http_${respReject.status || 0}`;
+              }
+            } else {
+              ct.ticketReject.ok = false;
+              ct.ticketReject.error = (respReject && respReject._err && respReject._err.message)
+                ? String(respReject._err.message)
+                : 'ct_ticket_reject_fetch_failed';
+            }
+          } catch (e) {
+            ct.ticketReject.ok = false;
+            ct.ticketReject.error = (e && e.message) ? String(e.message) : String(e);
+          }
         }
       } catch (e) {
-        ct = { attempted: true, ok: false, queued: false, error: (e && e.message) ? String(e.message) : String(e) };
+        ct = {
+          attempted: true,
+          ok: false,
+          queued: false,
+          error: (e && e.message) ? String(e.message) : String(e),
+          ticketReject: { attempted: true, ok: false, error: (e && e.message) ? String(e.message) : String(e), rejected: 0, failed: 0 }
+        };
       }
 
       // Política (2026-01-28): CT é registro; se falhar, seguimos com purge e deixamos rastreio no tombstone.
       if (ct && ct.attempted && ct.ok !== true && ct.queued !== true) {
         logger.error('CT falhou e queue falhou durante delete — seguindo com purge local', { nome, ctError: ct.error });
+      }
+      if (ct && ct.ticketReject && ct.ticketReject.attempted && ct.ticketReject.ok !== true) {
+        logger.error('CT falhou ao reprovar tickets na exclusao de perfil', {
+          nome,
+          ctTicketRejectError: ct.ticketReject.error
+        });
       }
 
       // Tenta remover userDataDir externo de forma correta (busca perfis.json)
@@ -1577,10 +1640,19 @@ module.exports = (app, workerClient, fileStore) => {
           ctAttempted: !!(ct && ct.attempted),
           ctOk: !!(ct && ct.ok),
           ctQueued: !!(ct && ct.queued),
-          ctError: ct && ct.error ? String(ct.error).slice(0, 180) : null
+          ctError: ct && ct.error ? String(ct.error).slice(0, 180) : null,
+          ctTicketRejectAttempted: !!(ct && ct.ticketReject && ct.ticketReject.attempted),
+          ctTicketRejectOk: !!(ct && ct.ticketReject && ct.ticketReject.ok),
+          ctTicketRejectError: (ct && ct.ticketReject && ct.ticketReject.error) ? String(ct.ticketReject.error).slice(0, 180) : null
         });
       } catch {}
-      res.json({ ok: true, ct, warning: (ct && ct.ok !== true) ? 'ct_pending_or_failed' : null });
+      const ctArchivePendingOrFailed = !!(ct && ct.ok !== true);
+      const ctTicketRejectPendingOrFailed = !!(ct && ct.ticketReject && ct.ticketReject.attempted && ct.ticketReject.ok !== true);
+      res.json({
+        ok: true,
+        ct,
+        warning: (ctArchivePendingOrFailed || ctTicketRejectPendingOrFailed) ? 'ct_pending_or_failed' : null
+      });
     } catch (e) {
       logger.error('Erro fatal na rota delete perfil', { rota: '/api/perfis/:nome', nome: req.params && req.params.nome, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
