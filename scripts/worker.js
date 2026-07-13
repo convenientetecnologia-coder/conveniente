@@ -15159,6 +15159,10 @@ const DELTA_INGEST_RETRY_MAX_MS = Math.max(
   DELTA_INGEST_RETRY_BASE_MS,
   Number(process.env.DELTA_INGEST_RETRY_MAX_MS || 45_000) || 45_000
 );
+const DELTA_INGEST_REQUIRED_200_ACKS = Math.max(
+  1,
+  Math.min(4, Number(process.env.DELTA_INGEST_REQUIRED_200_ACKS || 2) || 2)
+);
 const DELTA_DEADLETTER_REPLAY_BATCH = Math.max(
   1,
   Math.min(500, Number(process.env.DELTA_DEADLETTER_REPLAY_BATCH || 60) || 60)
@@ -17526,6 +17530,7 @@ function __deltaBuildQueueRecord(payload, {
 function __deltaBuildCompactQueuePayload(payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
   return {
+    idempotency_key: __deltaClampQueueString(p.idempotency_key, 120) || null,
     server_id: String(p.server_id || '').trim() || null,
     account_login: __deltaClampQueueString(p.account_login, 180) || null,
     thread_key: __deltaClampQueueString(p.thread_key, 220) || null,
@@ -17556,6 +17561,9 @@ function __deltaBuildCompactQueuePayload(payload) {
     dedup_meta_id: __deltaClampQueueString(p.dedup_meta_id, 120) || null,
     meta_message_id: __deltaClampQueueString(p.meta_message_id, 160) || null,
     meta_offline_threading_id: __deltaClampQueueString(p.meta_offline_threading_id, 160) || null,
+    delivery_ack_count: Math.max(0, Number(p.delivery_ack_count || 0) || 0),
+    delivery_ack_required: Math.max(0, Number(p.delivery_ack_required || 0) || 0),
+    ingest_ack_redundancy: p.ingest_ack_redundancy === true,
     ingest_deadletter_replayed: p.ingest_deadletter_replayed === true,
     ingest_deadletter_replay_count: Math.max(0, Number(p.ingest_deadletter_replay_count || 0) || 0),
   };
@@ -17575,7 +17583,7 @@ function __deltaAppendPendingJsonlSync(payload) {
     ...pIn,
     server_id: serverId || null
   };
-  const idempotencyKey = __deltaComputeIdempotencyKey(p);
+  const idempotencyKey = String(p.idempotency_key || '').trim() || __deltaComputeIdempotencyKey(p);
   let record = __deltaBuildQueueRecord(p, { idempotencyKey });
   let line = '';
   let lineBytes = 0;
@@ -18697,8 +18705,89 @@ async function __deltaIngestTick() {
           })
         };
       } else {
-        try { logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', { nextOffset }); } catch {}
-        try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ingest_ack_200', { nextOffset }); } catch {}
+        const requiredAcks = Math.max(1, Number(DELTA_INGEST_REQUIRED_200_ACKS || 1) || 1);
+        const currentAckCount = Math.max(0, Number(payload && payload.delivery_ack_count || 0) || 0);
+        const nextAckCount = currentAckCount + 1;
+        if (nextAckCount < requiredAcks) {
+          const baseIdempotencyKey = String(
+            (payload && payload.idempotency_key) ||
+            retryKey ||
+            __deltaComputeIdempotencyKey(ctPayload) ||
+            ''
+          ).trim();
+          const redundancyPayload = {
+            ...(payload && typeof payload === 'object' ? payload : {}),
+            idempotency_key: baseIdempotencyKey || null,
+            dispatch_ct: true,
+            queue_mode: 'dispatch_ct',
+            flow_stage: String(payload && payload.flow_stage || '').trim() || 'ingest_ack_redundancy',
+            ingest_ack_redundancy: true,
+            delivery_ack_count: nextAckCount,
+            delivery_ack_required: requiredAcks,
+            delivery_ack_last_at: Date.now()
+          };
+          const redundancyQueued = __deltaAppendPendingJsonlSync(redundancyPayload);
+          if (!redundancyQueued) {
+            try {
+              logger.warn('[DELTA][INGEST] ACK 200 sem persistência de redundância; mantendo cursor', {
+                nextOffset,
+                current_ack_count: currentAckCount,
+                required_acks: requiredAcks
+              });
+            } catch {}
+            try {
+              if (typeof forensicLog === 'function') {
+                forensicLog('DELTA', 'ingest_ack_redundancy_persist_failed', {
+                  next_offset: nextOffset,
+                  current_ack_count: currentAckCount,
+                  required_acks: requiredAcks
+                });
+              }
+            } catch {}
+            __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.5)));
+            return;
+          }
+          try {
+            logger.info('[DELTA][INGEST] ACK 200 parcial; redundância reenfileirada', {
+              nextOffset,
+              current_ack_count: currentAckCount,
+              next_ack_count: nextAckCount,
+              required_acks: requiredAcks
+            });
+          } catch {}
+          try {
+            if (typeof forensicLog === 'function') {
+              forensicLog('DELTA', 'ingest_ack_200_redundancy_requeued', {
+                next_offset: nextOffset,
+                current_ack_count: currentAckCount,
+                next_ack_count: nextAckCount,
+                required_acks: requiredAcks
+              });
+            }
+          } catch {}
+          __deltaIngestClearRetryCounter(retryKey);
+          __deltaWriteCursorOffsetSync(nextOffset);
+          try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
+          try { if (typeof global.gc === 'function') global.gc(); } catch {}
+          __deltaIngestBackoffMs = 180;
+          return;
+        }
+        try {
+          logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', {
+            nextOffset,
+            ack_count: nextAckCount,
+            required_acks: requiredAcks
+          });
+        } catch {}
+        try {
+          if (typeof forensicLog === 'function') {
+            forensicLog('DELTA', 'ingest_ack_200', {
+              nextOffset,
+              ack_count: nextAckCount,
+              required_acks: requiredAcks
+            });
+          }
+        } catch {}
         __deltaIngestClearRetryCounter(retryKey);
         __deltaWriteCursorOffsetSync(nextOffset);
         try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
