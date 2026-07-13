@@ -15172,6 +15172,29 @@ const DELTA_BOOT_REPLAY_MAX_THREADS = Math.max(
   10,
   Math.min(3000, Number(process.env.DELTA_BOOT_REPLAY_MAX_THREADS || 500) || 500)
 );
+const DELTA_FORENSIC_BOOT_REPLAY_ENABLED = String(
+  process.env.DELTA_FORENSIC_BOOT_REPLAY_ENABLED == null
+    ? '1'
+    : process.env.DELTA_FORENSIC_BOOT_REPLAY_ENABLED
+).trim() !== '0';
+const DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE = String(
+  process.env.DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE == null
+    ? '1'
+    : process.env.DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE
+).trim() !== '0';
+const DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS = Math.max(
+  1,
+  Math.min(168, Number(process.env.DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS || 36) || 36)
+);
+const DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_MS = DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS * 60 * 60 * 1000;
+const DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS = Math.max(
+  50,
+  Math.min(10_000, Number(process.env.DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS || 2_000) || 2_000)
+);
+const DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE = Math.max(
+  1000,
+  Math.min(500_000, Number(process.env.DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE || 160_000) || 160_000)
+);
 const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
   256 * 1024,
   Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
@@ -16533,6 +16556,260 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
     return out;
   }
 }
+let __deltaForensicBootReplayDone = false;
+function __deltaReadQueueBacklogStatsSync() {
+  try {
+    const queueExists = !!fs.existsSync(DELTA_QUEUE_PATH);
+    const queueBytes = queueExists ? (Number(fs.statSync(DELTA_QUEUE_PATH).size || 0) || 0) : 0;
+    const cursorOffset = __deltaReadCursorOffsetSync();
+    const lagBytes = Math.max(0, queueBytes - Math.max(0, Number(cursorOffset || 0) || 0));
+    return {
+      ok: true,
+      queue_exists: queueExists,
+      queue_bytes: queueBytes,
+      cursor_offset: Math.max(0, Number(cursorOffset || 0) || 0),
+      lag_bytes: lagBytes
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      queue_exists: false,
+      queue_bytes: 0,
+      cursor_offset: 0,
+      lag_bytes: 0,
+      error: (e && e.message) ? e.message : String(e)
+    };
+  }
+}
+function __deltaListForensicLeadFilesForReplaySync() {
+  const base = String(LEADS_BRUTOS_JSONL_PATH || '').trim();
+  if (!base) return [];
+  const files = [base];
+  for (let i = 1; i <= 4; i += 1) files.push(`${base}.${i}`);
+  return files.filter((fp) => {
+    try { return !!fs.existsSync(fp); } catch { return false; }
+  });
+}
+function __deltaCollectForensicLeadReplayCandidatesSync({
+  lookbackMs = DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_MS,
+  maxThreads = DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS,
+  maxLinesPerFile = DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE
+} = {}) {
+  const out = {
+    ok: true,
+    files_scanned: 0,
+    lines_scanned: 0,
+    parsed_records: 0,
+    matched_records: 0,
+    missing_keys: 0,
+    skipped_old: 0,
+    skipped_op: 0,
+    read_errors: 0,
+    hit_max: false,
+    candidates: []
+  };
+  try {
+    const now = Date.now();
+    const lookback = Math.max(60_000, Number(lookbackMs || DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_MS) || DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_MS);
+    const minTs = now - lookback;
+    const lineLimit = Math.max(100, Number(maxLinesPerFile || DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE) || DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE);
+    const files = __deltaListForensicLeadFilesForReplaySync();
+    const byThread = new Map();
+    for (const fp of files) {
+      out.files_scanned += 1;
+      let offset = 0;
+      for (let i = 0; i < lineLimit; i += 1) {
+        const lineRes = __deltaReadNextJsonlLineByOffsetSync(
+          fp,
+          offset,
+          { chunkBytes: 64 * 1024, maxLineBytes: 1024 * 1024 }
+        );
+        if (!lineRes || !lineRes.ok) {
+          out.read_errors += 1;
+          break;
+        }
+        if (lineRes.eof) break;
+        const nextOffset = Number(lineRes.nextOffset || offset) || offset;
+        offset = Math.max(offset, nextOffset);
+        const line = String(lineRes.line || '').trim();
+        if (!line) continue;
+        out.lines_scanned += 1;
+        const rec = __deltaSafeJsonParse(line);
+        if (!rec || typeof rec !== 'object') continue;
+        out.parsed_records += 1;
+        const flowStage = String(rec.flow_stage || '').trim().toLowerCase();
+        if (flowStage !== 'lead_bruto_seen') continue;
+        const accountLogin = String(rec.account_login || '').trim();
+        const threadKey = String(rec.thread_key || '').trim();
+        if (!accountLogin || !threadKey) {
+          out.missing_keys += 1;
+          continue;
+        }
+        const details = (rec.details && typeof rec.details === 'object' && !Array.isArray(rec.details))
+          ? rec.details
+          : {};
+        const op = String(details.op || '').trim().toLowerCase();
+        if (op && op !== 'insertmessage' && op !== 'upsertmessage' && op !== 'updatethreadsnippet') {
+          out.skipped_op += 1;
+          continue;
+        }
+        const rawTs = Number(details.message_at || rec.timestamp || Date.now()) || Date.now();
+        const messageAt = __deltaNormalizeTimestampMs(rawTs, Date.now());
+        if (messageAt < minTs) {
+          out.skipped_old += 1;
+          continue;
+        }
+        const candidate = {
+          account_login: accountLogin,
+          thread_key: threadKey,
+          message_at: messageAt,
+          texto_limpo: __deltaClampQueueString(details.text_preview || '', 1600) || '',
+          dedup_meta_id: String(details.dedup_meta_id || '').trim() || null,
+          meta_message_id: String(details.message_id || '').trim() || null,
+          meta_offline_threading_id: String(details.offline_threading_id || '').trim() || null,
+          network_transport: String(details.transport || '').trim() || null,
+          network_request_id: String(details.requestId || '').trim() || null,
+          network_source_url: String(details.sourceUrl || '').trim().slice(0, 500) || null,
+          network_source_hint: String(details.sourceHint || '').trim().slice(0, 120) || null,
+          flow_stage: flowStage
+        };
+        const key = `${accountLogin}|${threadKey}`;
+        const prev = byThread.get(key);
+        if (!prev || Number(candidate.message_at || 0) > Number(prev.message_at || 0)) {
+          byThread.set(key, candidate);
+        }
+        out.matched_records += 1;
+      }
+    }
+    const lim = Math.max(1, Number(maxThreads || DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS) || DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS);
+    let items = Array.from(byThread.values())
+      .sort((a, b) => (Number(b && b.message_at || 0) || 0) - (Number(a && a.message_at || 0) || 0));
+    if (items.length > lim) {
+      out.hit_max = true;
+      items = items.slice(0, lim);
+    }
+    out.candidates = items;
+    return out;
+  } catch (e) {
+    out.ok = false;
+    out.error = (e && e.message) ? e.message : String(e);
+    return out;
+  }
+}
+function __deltaReplayForensicLeadsToCtOnBoot({ bootReplaySummary = null } = {}) {
+  if (__deltaForensicBootReplayDone) return { ok: true, skipped: true, reason: 'already_done' };
+  __deltaForensicBootReplayDone = true;
+  const out = {
+    ok: true,
+    skipped: false,
+    reason: '',
+    queue_lag_bytes: 0,
+    candidates: 0,
+    enqueued: 0,
+    files_scanned: 0,
+    lines_scanned: 0,
+    parsed_records: 0,
+    matched_records: 0,
+    missing_keys: 0,
+    skipped_old: 0,
+    skipped_op: 0,
+    read_errors: 0,
+    hit_max: false
+  };
+  try {
+    if (!DELTA_FORENSIC_BOOT_REPLAY_ENABLED) {
+      out.skipped = true;
+      out.reason = 'disabled';
+      return out;
+    }
+    const threadStateBootEnqueued = Number(bootReplaySummary && bootReplaySummary.enqueued || 0) || 0;
+    if (threadStateBootEnqueued > 0) {
+      out.skipped = true;
+      out.reason = 'thread_state_boot_replay_has_items';
+      return out;
+    }
+    const queueStats = __deltaReadQueueBacklogStatsSync();
+    out.queue_lag_bytes = Number(queueStats && queueStats.lag_bytes || 0) || 0;
+    if (DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE && out.queue_lag_bytes > 0) {
+      out.skipped = true;
+      out.reason = 'queue_backlog_present';
+      return out;
+    }
+    const hostId = String(readHostIdSync() || __deltaEnsureHostIdSync() || '').trim();
+    if (!hostId) {
+      out.skipped = true;
+      out.reason = 'missing_host_id';
+      return out;
+    }
+    const collect = __deltaCollectForensicLeadReplayCandidatesSync({
+      lookbackMs: DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_MS,
+      maxThreads: DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS,
+      maxLinesPerFile: DELTA_FORENSIC_BOOT_REPLAY_MAX_LINES_PER_FILE
+    });
+    out.files_scanned = Number(collect && collect.files_scanned || 0) || 0;
+    out.lines_scanned = Number(collect && collect.lines_scanned || 0) || 0;
+    out.parsed_records = Number(collect && collect.parsed_records || 0) || 0;
+    out.matched_records = Number(collect && collect.matched_records || 0) || 0;
+    out.missing_keys = Number(collect && collect.missing_keys || 0) || 0;
+    out.skipped_old = Number(collect && collect.skipped_old || 0) || 0;
+    out.skipped_op = Number(collect && collect.skipped_op || 0) || 0;
+    out.read_errors = Number(collect && collect.read_errors || 0) || 0;
+    out.hit_max = !!(collect && collect.hit_max);
+    if (!collect || collect.ok !== true) {
+      out.ok = false;
+      out.error = String(collect && collect.error || 'collect_failed');
+      return out;
+    }
+    const candidates = Array.isArray(collect.candidates) ? collect.candidates : [];
+    out.candidates = candidates.length;
+    if (!candidates.length) {
+      out.skipped = true;
+      out.reason = 'no_forensic_candidates';
+      return out;
+    }
+    for (const cand of candidates) {
+      const accountLogin = String(cand && cand.account_login || '').trim();
+      const threadKey = String(cand && cand.thread_key || '').trim();
+      if (!accountLogin || !threadKey) continue;
+      __deltaAppendPendingJsonlSync({
+        event: 'lead_forensic_boot_replay',
+        server_id: hostId,
+        account_login: accountLogin,
+        thread_key: threadKey,
+        texto_limpo: String(cand && cand.texto_limpo || '').trim() || '',
+        mensagens_cliente_concatenadas: String(cand && cand.texto_limpo || '').trim() || '',
+        mensagens_cliente_qtd: 1,
+        mensagem_seq: 0,
+        cidade: DELTA_FALLBACK_CITY,
+        link_anuncio: DELTA_FALLBACK_LINK,
+        client_name: DELTA_FALLBACK_CLIENT_NAME,
+        customer_name: DELTA_FALLBACK_CLIENT_NAME,
+        nome_cliente_limpo: DELTA_FALLBACK_CLIENT_NAME,
+        operacao_meta: 'forensic_boot_replay',
+        dispatch_ct: true,
+        queue_mode: 'dispatch_ct',
+        flow_stage: 'forensic_boot_replay',
+        message_at: Number(cand && cand.message_at || Date.now()) || Date.now(),
+        dedup_meta_id: cand && cand.dedup_meta_id ? String(cand.dedup_meta_id) : null,
+        meta_message_id: cand && cand.meta_message_id ? String(cand.meta_message_id) : null,
+        meta_offline_threading_id: cand && cand.meta_offline_threading_id ? String(cand.meta_offline_threading_id) : null,
+        network_transport: cand && cand.network_transport ? String(cand.network_transport) : null,
+        network_request_id: cand && cand.network_request_id ? String(cand.network_request_id) : null,
+        network_source_url: cand && cand.network_source_url ? String(cand.network_source_url) : null,
+        network_source_hint: cand && cand.network_source_hint ? String(cand.network_source_hint) : null,
+        ingest_boot_replay: true,
+        forensic_boot_replay: true
+      });
+      out.enqueued += 1;
+    }
+    if (out.enqueued > 0) __deltaKickIngestLoop();
+    return out;
+  } catch (e) {
+    out.ok = false;
+    out.error = (e && e.message) ? e.message : String(e);
+    return out;
+  }
+}
 function __deltaGetOrCreateThreadState(nome, threadKey) {
   const k = __deltaThreadStateKey(nome, threadKey);
   let st = __deltaThreadStateMap.get(k) || null;
@@ -17124,6 +17401,9 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 __deltaLoadThreadStateSync();
 const __deltaLegacyAssimilationSummary = __deltaAssimilateLegacyRespondedHistorySync();
 const __deltaBootReplaySummary = __deltaReplayRecentThreadsToCtOnBoot();
+const __deltaForensicBootReplaySummary = __deltaReplayForensicLeadsToCtOnBoot({
+  bootReplaySummary: __deltaBootReplaySummary
+});
 try {
   logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
     ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
@@ -17150,6 +17430,29 @@ try {
     lookback_hours: DELTA_BOOT_REPLAY_LOOKBACK_HOURS,
     max_threads: DELTA_BOOT_REPLAY_MAX_THREADS,
     error: String(__deltaBootReplaySummary && __deltaBootReplaySummary.error || '')
+  });
+} catch {}
+try {
+  logger.info('[DELTA][BOOT_FORENSIC_REPLAY] replay forense de leads para CT', {
+    ok: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.ok),
+    skipped: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped),
+    reason: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.reason || ''),
+    queue_lag_bytes: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.queue_lag_bytes || 0) || 0,
+    candidates: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.candidates || 0) || 0,
+    enqueued: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueued || 0) || 0,
+    files_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.files_scanned || 0) || 0,
+    lines_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.lines_scanned || 0) || 0,
+    parsed_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.parsed_records || 0) || 0,
+    matched_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.matched_records || 0) || 0,
+    missing_keys: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.missing_keys || 0) || 0,
+    skipped_old: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_old || 0) || 0,
+    skipped_op: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_op || 0) || 0,
+    read_errors: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.read_errors || 0) || 0,
+    hit_max: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.hit_max),
+    lookback_hours: DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS,
+    max_threads: DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS,
+    require_empty_queue: !!DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE,
+    error: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.error || '')
   });
 } catch {}
 
