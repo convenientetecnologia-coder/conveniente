@@ -15176,6 +15176,14 @@ const DELTA_DISK_DEDUP_TAIL_BYTES = Math.max(
   256 * 1024,
   Math.min(32 * 1024 * 1024, Number(process.env.DELTA_DISK_DEDUP_TAIL_BYTES || 4 * 1024 * 1024) || (4 * 1024 * 1024))
 );
+const DELTA_QUEUE_MAX_LINE_BYTES = Math.max(
+  64 * 1024,
+  Math.min(2 * 1024 * 1024, Number(process.env.DELTA_QUEUE_MAX_LINE_BYTES || 512 * 1024) || (512 * 1024))
+);
+const DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES = Math.max(
+  256 * 1024,
+  Math.min(32 * 1024 * 1024, Number(process.env.DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES || 8 * 1024 * 1024) || (8 * 1024 * 1024))
+);
 // Captura offline em thread ativa:
 // - upsertMessage pode representar mensagem válida durante período offline.
 // - Guardrail canônico: aceitar somente se ID Meta for inédito no disco.
@@ -17184,6 +17192,72 @@ function __deltaComputeIdempotencyKey(payload) {
   return crypto.createHash('sha1').update(base).digest('hex');
 }
 
+function __deltaClampQueueString(value, maxLen = 8192) {
+  const s = String(value == null ? '' : value);
+  if (!s) return '';
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(64, maxLen - 32))}...[truncated]`;
+}
+
+function __deltaBuildQueueRecord(payload, {
+  idempotencyKey = '',
+  compacted = false,
+  originalBytes = 0,
+  compactReason = '',
+} = {}) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const record = {
+    ts: Date.now(),
+    event: 'lead_capturado',
+    idempotency_key: String(idempotencyKey || __deltaComputeIdempotencyKey(p)),
+    ...p,
+  };
+  if (compacted) {
+    record.queue_payload_compacted = true;
+    record.queue_payload_original_bytes = Math.max(0, Number(originalBytes || 0) || 0);
+    record.queue_payload_compact_reason = String(compactReason || 'line_too_large').trim() || 'line_too_large';
+  }
+  return record;
+}
+
+function __deltaBuildCompactQueuePayload(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  return {
+    server_id: String(p.server_id || '').trim() || null,
+    account_login: __deltaClampQueueString(p.account_login, 180) || null,
+    thread_key: __deltaClampQueueString(p.thread_key, 220) || null,
+    texto_limpo: __deltaClampQueueString(p.texto_limpo, 3000) || '',
+    mensagens_cliente_concatenadas: __deltaClampQueueString(
+      p.mensagens_cliente_concatenadas || p.texto_limpo || '',
+      3000
+    ) || '',
+    cidade: __deltaClampQueueString(p.cidade, 180) || null,
+    link_anuncio: __deltaClampQueueString(p.link_anuncio, 600) || null,
+    client_name: __deltaClampQueueString(p.client_name, 220) || null,
+    customer_name: __deltaClampQueueString(p.customer_name, 220) || null,
+    nome_cliente_limpo: __deltaClampQueueString(p.nome_cliente_limpo, 220) || null,
+    operacao_meta: __deltaClampQueueString(p.operacao_meta || p.operation, 120) || null,
+    mensagem_seq: Math.max(0, Number(p.mensagem_seq || 0) || 0),
+    dispatch_ct: p.dispatch_ct === false ? false : true,
+    queue_mode: __deltaClampQueueString(p.queue_mode, 80) || null,
+    flow_stage: __deltaClampQueueString(p.flow_stage, 120) || null,
+    message_at: Number(p.message_at || p.server_timestamp_ms || p.timestamp_ms || 0) || Date.now(),
+    network_transport: __deltaClampQueueString(p.network_transport, 40) || null,
+    network_request_id: __deltaClampQueueString(p.network_request_id, 120) || null,
+    network_source_url: __deltaClampQueueString(p.network_source_url, 600) || null,
+    network_source_hint: __deltaClampQueueString(p.network_source_hint, 120) || null,
+    hands_error: __deltaClampQueueString(p.hands_error, 300) || null,
+    retry_in_ms: Math.max(0, Number(p.retry_in_ms || 0) || 0),
+    history_reason: __deltaClampQueueString(p.history_reason, 120) || null,
+    state_status: __deltaClampQueueString(p.state_status, 120) || null,
+    dedup_meta_id: __deltaClampQueueString(p.dedup_meta_id, 120) || null,
+    meta_message_id: __deltaClampQueueString(p.meta_message_id, 160) || null,
+    meta_offline_threading_id: __deltaClampQueueString(p.meta_offline_threading_id, 160) || null,
+    ingest_deadletter_replayed: p.ingest_deadletter_replayed === true,
+    ingest_deadletter_replay_count: Math.max(0, Number(p.ingest_deadletter_replay_count || 0) || 0),
+  };
+}
+
 function __deltaAppendPendingJsonlSync(payload) {
   const pIn = payload && typeof payload === 'object' ? payload : {};
   let serverId = String(pIn.server_id || pIn.serverId || pIn.hostId || pIn.host_id || '').trim();
@@ -17198,15 +17272,95 @@ function __deltaAppendPendingJsonlSync(payload) {
     ...pIn,
     server_id: serverId || null
   };
-  const line = JSON.stringify({
-    ts: Date.now(),
-    event: 'lead_capturado',
-    idempotency_key: __deltaComputeIdempotencyKey(p),
-    ...p,
-  });
-  try { fs.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true }); } catch {}
-  fs.appendFileSync(DELTA_QUEUE_PATH, line + '\n', 'utf8');
+  const idempotencyKey = __deltaComputeIdempotencyKey(p);
+  let record = __deltaBuildQueueRecord(p, { idempotencyKey });
+  let line = '';
+  let lineBytes = 0;
+  let compacted = false;
+  try {
+    line = JSON.stringify(record);
+    lineBytes = Buffer.byteLength(line, 'utf8');
+  } catch {
+    compacted = true;
+    const compactPayload = __deltaBuildCompactQueuePayload(p);
+    record = __deltaBuildQueueRecord(compactPayload, {
+      idempotencyKey,
+      compacted: true,
+      originalBytes: 0,
+      compactReason: 'stringify_failed_fallback',
+    });
+    line = JSON.stringify(record);
+    lineBytes = Buffer.byteLength(line, 'utf8');
+  }
+  if (lineBytes > DELTA_QUEUE_MAX_LINE_BYTES) {
+    compacted = true;
+    const compactPayload = __deltaBuildCompactQueuePayload(p);
+    record = __deltaBuildQueueRecord(compactPayload, {
+      idempotencyKey,
+      compacted: true,
+      originalBytes: lineBytes,
+      compactReason: 'line_too_large',
+    });
+    line = JSON.stringify(record);
+    lineBytes = Buffer.byteLength(line, 'utf8');
+    if (lineBytes > DELTA_QUEUE_MAX_LINE_BYTES) {
+      record.texto_limpo = __deltaClampQueueString(record.texto_limpo || '', 1200) || '';
+      record.mensagens_cliente_concatenadas = __deltaClampQueueString(record.mensagens_cliente_concatenadas || '', 1200) || '';
+      line = JSON.stringify(record);
+      lineBytes = Buffer.byteLength(line, 'utf8');
+    }
+  }
+  try {
+    fs.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true });
+  } catch {}
+  try {
+    fs.appendFileSync(DELTA_QUEUE_PATH, line + '\n', 'utf8');
+  } catch (e) {
+    try {
+      __deltaAppendIngestDeadLetterSync({
+        payload: __deltaBuildCompactQueuePayload(p),
+        response: {
+          ok: false,
+          status: 0,
+          error: 'queue_append_failed',
+          body: String((e && e.message) || e || '').slice(0, 400)
+        },
+        nextOffset: __deltaReadCursorOffsetSync(),
+        ingest_url: 'queue_local_append'
+      });
+    } catch {}
+    try {
+      logger.error('[DELTA][QUEUE] falha ao persistir registro na fila', {
+        error: (e && e.message) || String(e),
+        account_login: String(p.account_login || ''),
+        thread_key: String(p.thread_key || ''),
+        line_bytes: lineBytes
+      });
+    } catch {}
+    return false;
+  }
+  if (compacted) {
+    try {
+      logger.warn('[DELTA][QUEUE] registro compactado para evitar travamento', {
+        account_login: String(p.account_login || ''),
+        thread_key: String(p.thread_key || ''),
+        line_bytes: lineBytes,
+        max_line_bytes: DELTA_QUEUE_MAX_LINE_BYTES
+      });
+    } catch {}
+    try {
+      if (typeof forensicLog === 'function') {
+        forensicLog('DELTA', 'queue_record_compacted', {
+          account_login: String(p.account_login || ''),
+          thread_key: String(p.thread_key || ''),
+          line_bytes: lineBytes,
+          max_line_bytes: DELTA_QUEUE_MAX_LINE_BYTES
+        });
+      }
+    } catch {}
+  }
   try { if (typeof global.gc === 'function') global.gc(); } catch {}
+  return true;
 }
 
 function __deltaAppendIngestDeadLetterSync({ payload = null, response = null, nextOffset = 0, ingest_url = '' } = {}) {
@@ -17337,7 +17491,16 @@ function __deltaReadNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkByte
       if (!n) break;
       const slice = buf.subarray(0, n);
       acc = Buffer.concat([acc, slice], acc.length + slice.length);
-      if (acc.length > maxLineBytes) return { ok: false, error: 'line_too_large', offset: off };
+      if (acc.length > maxLineBytes) {
+        return {
+          ok: false,
+          error: 'line_too_large',
+          offset: off,
+          maxLineBytes: Math.max(0, Number(maxLineBytes || 0) || 0),
+          scannedBytes: Math.max(0, Number(acc.length || 0) || 0),
+          fileSize: size
+        };
+      }
       foundNl = acc.indexOf(0x0a); // \n
       if (foundNl >= 0) break;
       cursor += n;
@@ -17355,6 +17518,109 @@ function __deltaReadNextJsonlLineByOffsetSync(filePath, offsetBytes, { chunkByte
   } finally {
     try { fs.closeSync(fd); } catch {}
   }
+}
+
+function __deltaFindQueueNextOffsetSync(filePath, fromOffset, { maxScanBytes = DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES, chunkBytes = 64 * 1024 } = {}) {
+  const start = Math.max(0, Number(fromOffset || 0) || 0);
+  if (!fs.existsSync(filePath)) return { ok: false, reason: 'queue_missing', start, nextOffset: start, fileSize: 0 };
+  const stat = fs.statSync(filePath);
+  const fileSize = Math.max(0, Number(stat && stat.size || 0) || 0);
+  if (start >= fileSize) {
+    return { ok: false, reason: 'offset_out_of_bounds', start, nextOffset: fileSize, fileSize };
+  }
+  const scanCap = Math.max(64 * 1024, Number(maxScanBytes || DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES) || DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES);
+  const scanEnd = Math.min(fileSize, start + scanCap);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    let cursor = start;
+    while (cursor < scanEnd) {
+      const remain = scanEnd - cursor;
+      const toRead = Math.max(1, Math.min(remain, chunkBytes));
+      const buf = Buffer.allocUnsafe(toRead);
+      const n = fs.readSync(fd, buf, 0, toRead, cursor);
+      if (!n) break;
+      const idx = buf.subarray(0, n).indexOf(0x0a);
+      if (idx >= 0) {
+        const nextOffset = cursor + idx + 1;
+        return { ok: true, reason: 'newline_found', start, nextOffset, fileSize, scanEnd };
+      }
+      cursor += n;
+    }
+    const nextOffset = scanEnd > start ? scanEnd : fileSize;
+    return {
+      ok: true,
+      reason: scanEnd >= fileSize ? 'fallback_to_file_end' : 'fallback_to_scan_window_end',
+      start,
+      nextOffset,
+      fileSize,
+      scanEnd
+    };
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
+function __deltaRecoverQueueReadErrorSync({ offset = 0, lineError = '', lineRes = null } = {}) {
+  const off = Math.max(0, Number(offset || 0) || 0);
+  const err = String(lineError || (lineRes && lineRes.error) || 'queue_read_error').trim() || 'queue_read_error';
+  const recov = __deltaFindQueueNextOffsetSync(DELTA_QUEUE_PATH, off, {
+    maxScanBytes: DELTA_QUEUE_RECOVERY_SCAN_MAX_BYTES
+  });
+  const nextOffset = Math.max(off, Number(recov && recov.nextOffset || off) || off);
+  if (!(recov && recov.ok) || nextOffset <= off) {
+    return { ok: false, error: err, offset: off, nextOffset };
+  }
+  __deltaWriteCursorOffsetSync(nextOffset);
+  try {
+    __deltaAppendIngestDeadLetterSync({
+      payload: {
+        server_id: readHostIdSync() || null,
+        account_login: null,
+        thread_key: null,
+        flow_stage: 'queue_read_error_recovered',
+        queue_offset: off,
+        queue_next_offset: nextOffset,
+        queue_error: err,
+        queue_recovery_reason: String(recov.reason || '')
+      },
+      response: {
+        ok: false,
+        status: 0,
+        error: 'queue_read_error_recovered',
+        body: JSON.stringify({
+          queue_error: err,
+          offset: off,
+          next_offset: nextOffset,
+          recovery_reason: String(recov.reason || ''),
+          file_size: Number(recov.fileSize || 0) || 0,
+          scan_end: Number(recov.scanEnd || 0) || 0
+        }).slice(0, 1200)
+      },
+      nextOffset,
+      ingest_url: 'queue_local_recovery'
+    });
+  } catch {}
+  try {
+    logger.warn('[DELTA][INGEST] registro corrompido/ilegivel pulado para destravar fila', {
+      error: err,
+      offset: off,
+      nextOffset,
+      recoveryReason: String(recov.reason || ''),
+      fileSize: Number(recov.fileSize || 0) || 0
+    });
+  } catch {}
+  try {
+    if (typeof forensicLog === 'function') {
+      forensicLog('DELTA', 'queue_read_error_recovered', {
+        error: err,
+        offset: off,
+        next_offset: nextOffset,
+        recovery_reason: String(recov.reason || ''),
+        file_size: Number(recov.fileSize || 0) || 0
+      });
+    }
+  } catch {}
+  return { ok: true, offset: off, nextOffset, recoveryReason: String(recov.reason || '') };
 }
 
 function __deltaTryAcquireCompactLock() {
@@ -17974,6 +18240,15 @@ async function __deltaIngestTick() {
     const offset = __deltaReadCursorOffsetSync();
     const lineRes = __deltaReadNextJsonlLineByOffsetSync(DELTA_QUEUE_PATH, offset);
     if (!lineRes.ok) {
+      const recovered = __deltaRecoverQueueReadErrorSync({
+        offset,
+        lineError: String(lineRes && lineRes.error || ''),
+        lineRes
+      });
+      if (recovered && recovered.ok) {
+        __deltaIngestBackoffMs = 450;
+        return;
+      }
       __deltaIngestBackoffMs = Math.min(60_000, Math.max(1500, Math.floor(__deltaIngestBackoffMs * 1.6)));
       return;
     }
