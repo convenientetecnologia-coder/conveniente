@@ -18006,12 +18006,30 @@ function __deltaNormalizeCtApiBase(rawBase) {
   }
   return base;
 }
+function __deltaIsTransportLevelEndpointFailure(res) {
+  const status = Number(res && res.status || 0) || 0;
+  if (status !== 0) return false;
+  const err = String(res && res.error || '').toLowerCase();
+  if (!err) return false;
+  return (
+    err.includes('abort') ||
+    err.includes('timeout') ||
+    err.includes('fetch') ||
+    err.includes('econn') ||
+    err.includes('enotfound') ||
+    err.includes('socket') ||
+    err.includes('network') ||
+    err.includes('tls') ||
+    err.includes('handshake')
+  );
+}
 function __deltaBuildCtIngestUrlFromBase(rawBase) {
   const base = __deltaNormalizeCtApiBase(rawBase);
   if (!base) return '';
   return `${base.replace(/\/+$/, '')}/api/messenger-delta/ingest`;
 }
 function __deltaLooksLikeWrongIngestEndpointResponse(res) {
+  if (__deltaIsTransportLevelEndpointFailure(res)) return true;
   const status = Number(res && res.status || 0) || 0;
   if (![404, 405, 410, 421].includes(status)) return false;
   const body = String(res && res.body || '').toLowerCase();
@@ -18023,6 +18041,22 @@ function __deltaLooksLikeWrongIngestEndpointResponse(res) {
   if (body.includes('ngrok')) return true;
   if (body.includes('404 not found') || body.includes('page not found')) return true;
   return false;
+}
+function __deltaIsReachableIngestEndpointResponse(res) {
+  const status = Number(res && res.status || 0) || 0;
+  if (status <= 0) return false;
+  const body = String(res && res.body || '').toLowerCase();
+  if (!body) return true;
+  if (
+    body.includes('<!doctype html') ||
+    body.includes('<html') ||
+    body.includes('cannot post /api/messenger-delta/ingest') ||
+    body.includes('cannot get /api/messenger-delta/ingest') ||
+    body.includes('page not found')
+  ) {
+    return false;
+  }
+  return true;
 }
 function __deltaBuildIngestRepairCandidates(currentIngestUrl = '') {
   const currentBase = __deltaBaseFromUrlSafe(currentIngestUrl);
@@ -18048,6 +18082,7 @@ function __deltaBuildIngestRepairCandidates(currentIngestUrl = '') {
     push(String(notifierBaseFromEndpoints() || '').trim(), 'notifier_endpoints');
   } catch {}
   push(DELTA_CT_CANONICAL_BASE, 'canonical_base');
+  push('https://painel.convenientetecnologia.com', 'painel_default');
   push('https://api.convenientetecnologia.com', 'api_default');
   return out;
 }
@@ -18059,6 +18094,7 @@ async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempote
     const retryHeaders = __deltaBuildCtIngestHeaders({ idempotencyKey });
     const res = await __deltaPostWebhookJson(cand.ingestUrl, payload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
     if (__deltaLooksLikeWrongIngestEndpointResponse(res)) continue;
+    if (!__deltaIsReachableIngestEndpointResponse(res)) continue;
 
     try {
       writeCtConfig({ ctBaseUrl: cand.ctBaseUrl });
@@ -18085,6 +18121,9 @@ function __deltaResolveCtIngestUrlAutonomous() {
     const ingestFromCfg = __deltaBuildCtIngestUrlFromBase(base);
     if (ingestFromCfg) return ingestFromCfg;
   } catch {}
+
+  const ingestFromCanonical = __deltaBuildCtIngestUrlFromBase(DELTA_CT_CANONICAL_BASE);
+  if (ingestFromCanonical) return ingestFromCanonical;
 
   try {
     const { notifierBaseFromEndpoints } = require('./notifierEndpoints.js');
@@ -18153,6 +18192,7 @@ function __deltaBuildBootstrapUrls() {
     if (base) push(`${base.replace(/\/+$/, '')}/api/edge/bootstrap`);
   } catch {}
 
+  push('https://painel.convenientetecnologia.com/api/edge/bootstrap');
   push('https://api.convenientetecnologia.com/api/edge/bootstrap');
   return out;
 }

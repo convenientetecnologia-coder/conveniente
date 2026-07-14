@@ -2514,35 +2514,112 @@ function __resolveCtServerEventConfig() {
   }
 }
 
+function __buildServerEventBridgeCandidates(cfg) {
+  const out = [];
+  const seen = new Set();
+  const pushUrl = (rawUrl, source = 'unknown') => {
+    const s = String(rawUrl || '').trim().replace(/\/+$/, '');
+    if (!s) return;
+    if (seen.has(s)) return;
+    seen.add(s);
+    let ctBaseUrl = '';
+    try {
+      const u = new URL(s);
+      ctBaseUrl = `${u.protocol}//${u.host}`;
+    } catch {}
+    out.push({
+      eventUrl: s,
+      ctBaseUrl,
+      source: String(source || '').trim() || 'unknown'
+    });
+  };
+  const pushBase = (rawBase, source = 'unknown') => {
+    const baseRaw = String(rawBase || '').trim();
+    if (!baseRaw) return;
+    const mappedBase = /^https?:\/\/convenientetecnologia\.com\/?$/i.test(baseRaw)
+      ? 'https://painel.convenientetecnologia.com'
+      : baseRaw;
+    pushUrl(`${mappedBase.replace(/\/+$/, '')}/api/servers/event_secret`, source);
+  };
+
+  if (cfg && cfg.eventUrl) pushUrl(cfg.eventUrl, 'configured_event_url');
+  if (cfg && cfg.ctBaseUrl) pushBase(cfg.ctBaseUrl, 'configured_base');
+  pushBase(process.env.CT_BASE_URL || process.env.CT_URL || '', 'env_base');
+  pushBase('https://painel.convenientetecnologia.com', 'painel_default');
+  pushBase('https://api.convenientetecnologia.com', 'api_default');
+  return out;
+}
+
 async function __postServerEventToCt(payload) {
   const cfg = __resolveCtServerEventConfig();
   if (!cfg) return { ok: false, skipped: true, error: 'ct_config_incomplete' };
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), 8000);
-  try {
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-    if (cfg.logSecret) headers['x-log-secret'] = cfg.logSecret;
-    if (cfg.infraSecret) headers['x-infra-secret'] = cfg.infraSecret;
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+  if (cfg.logSecret) headers['x-log-secret'] = cfg.logSecret;
+  if (cfg.infraSecret) headers['x-infra-secret'] = cfg.infraSecret;
 
-    const res = await fetch(cfg.eventUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload || {}),
-      signal: controller.signal
-    });
-    if (!res.ok) {
+  const candidates = __buildServerEventBridgeCandidates(cfg);
+  if (!candidates.length) {
+    return { ok: false, skipped: true, error: 'event_url_missing' };
+  }
+
+  let lastFailure = {
+    ok: false,
+    status: null,
+    ctBaseUrl: cfg.ctBaseUrl || null,
+    eventUrl: cfg.eventUrl || null,
+    error: 'event_post_unreachable'
+  };
+  let attempt = 0;
+
+  for (const cand of candidates.slice(0, 5)) {
+    attempt += 1;
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(cand.eventUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload || {}),
+        signal: controller.signal
+      });
+      if (res.ok) {
+        return {
+          ok: true,
+          status: res.status,
+          ctBaseUrl: cand.ctBaseUrl || cfg.ctBaseUrl || null,
+          eventUrl: cand.eventUrl,
+          source: cand.source,
+          attempt
+        };
+      }
       const body = await res.text().catch(() => '');
       const errPreview = String(body || '').slice(0, 180);
-      return { ok: false, status: res.status, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl, error: `event_post_http_${res.status}:${errPreview}` };
+      lastFailure = {
+        ok: false,
+        status: res.status,
+        ctBaseUrl: cand.ctBaseUrl || cfg.ctBaseUrl || null,
+        eventUrl: cand.eventUrl,
+        source: cand.source,
+        attempt,
+        error: `event_post_http_${res.status}:${errPreview}`
+      };
+    } catch (e) {
+      lastFailure = {
+        ok: false,
+        status: null,
+        ctBaseUrl: cand.ctBaseUrl || cfg.ctBaseUrl || null,
+        eventUrl: cand.eventUrl,
+        source: cand.source,
+        attempt,
+        error: (e && e.message) || String(e)
+      };
+    } finally {
+      clearTimeout(to);
     }
-    return { ok: true, status: res.status, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl };
-  } catch (e) {
-    return { ok: false, ctBaseUrl: cfg.ctBaseUrl, eventUrl: cfg.eventUrl, error: (e && e.message) || String(e) };
-  } finally {
-    clearTimeout(to);
   }
+  return lastFailure;
 }
 
 async function __serverEventBridgeTick(reason) {
@@ -2605,6 +2682,8 @@ async function __serverEventBridgeTick(reason) {
         stateHash: telemetry.stateHash,
         pendingTicks: __serverEventPendingTicks,
         status: out.status || null,
+        source: out.source || null,
+        attempt: Number(out.attempt || 0) || null,
         ctBaseUrl: out.ctBaseUrl || null,
         eventUrl: out.eventUrl || null
       });
@@ -2616,12 +2695,16 @@ async function __serverEventBridgeTick(reason) {
         pendingTicks: __serverEventPendingTicks,
         error: out.error || 'unknown',
         status: out.status || null,
+        source: out.source || null,
+        attempt: Number(out.attempt || 0) || null,
         ctBaseUrl: out.ctBaseUrl || null,
         eventUrl: out.eventUrl || null
       });
       logger.warn('[SERVER_EVENT_BRIDGE] falha ao postar evento no CT', {
         error: out.error || 'unknown',
         status: out.status || null,
+        source: out.source || null,
+        attempt: Number(out.attempt || 0) || null,
         ctBaseUrl: out.ctBaseUrl || null,
         eventUrl: out.eventUrl || null
       });
