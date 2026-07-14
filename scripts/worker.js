@@ -15114,6 +15114,7 @@ try {
 const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.jsonl');
 const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
+const DELTA_FORENSIC_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_forense.jsonl');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
 const DELTA_RESPONDED_HISTORY_FILENAME = 'chats_respondidos_delta.json';
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
@@ -15165,7 +15166,38 @@ const DELTA_INGEST_HTTP_TIMEOUT_MS = Math.max(
 );
 const DELTA_INGEST_REQUIRED_200_ACKS = Math.max(
   1,
-  Math.min(4, Number(process.env.DELTA_INGEST_REQUIRED_200_ACKS || 2) || 2)
+  Math.min(4, Number(process.env.DELTA_INGEST_REQUIRED_200_ACKS || 1) || 1)
+);
+const DELTA_INGEST_SUCCESS_BACKOFF_MS = Math.max(
+  10,
+  Number(process.env.DELTA_INGEST_SUCCESS_BACKOFF_MS || 40) || 40
+);
+const DELTA_INGEST_SKIP_BACKOFF_MS = Math.max(
+  5,
+  Number(process.env.DELTA_INGEST_SKIP_BACKOFF_MS || 10) || 10
+);
+const DELTA_INGEST_ERROR_BACKOFF_MS = Math.max(
+  40,
+  Number(process.env.DELTA_INGEST_ERROR_BACKOFF_MS || 150) || 150
+);
+const DELTA_INGEST_LOOP_KICK_WAIT_MS = Math.max(
+  5,
+  Number(process.env.DELTA_INGEST_LOOP_KICK_WAIT_MS || 15) || 15
+);
+const DELTA_INGEST_LOOP_JITTER_MS = Math.max(
+  0,
+  Number(process.env.DELTA_INGEST_LOOP_JITTER_MS || 60) || 60
+);
+const DELTA_FORENSIC_QUEUE_MAX_BYTES = Math.max(
+  8 * 1024 * 1024,
+  Number(process.env.DELTA_FORENSIC_QUEUE_MAX_BYTES || 64 * 1024 * 1024) || (64 * 1024 * 1024)
+);
+const DELTA_QUEUE_BOOT_PRUNE_ENABLED = String(
+  process.env.DELTA_QUEUE_BOOT_PRUNE_ENABLED == null ? '1' : process.env.DELTA_QUEUE_BOOT_PRUNE_ENABLED
+).trim() !== '0';
+const DELTA_QUEUE_BOOT_PRUNE_MIN_BYTES = Math.max(
+  4 * 1024 * 1024,
+  Number(process.env.DELTA_QUEUE_BOOT_PRUNE_MIN_BYTES || 12 * 1024 * 1024) || (12 * 1024 * 1024)
 );
 const DELTA_DEADLETTER_REPLAY_BATCH = Math.max(
   1,
@@ -17447,6 +17479,126 @@ function __deltaWriteCursorOffsetSync(byteOffset) {
   fs.renameSync(tmp, DELTA_CURSOR_PATH);
 }
 
+function __deltaTrimFileTailBytesSync(filePath, maxBytes) {
+  try {
+    const fp = String(filePath || '').trim();
+    const lim = Math.max(1024, Number(maxBytes || 0) || 0);
+    if (!fp || !lim) return { ok: false, skipped: true, reason: 'invalid_args' };
+    if (!fs.existsSync(fp)) return { ok: true, skipped: true, reason: 'missing_file' };
+    const st = fs.statSync(fp);
+    const size = Number(st.size || 0) || 0;
+    if (size <= lim) return { ok: true, skipped: true, reason: 'below_limit', size };
+    const tmp = `${fp}.trim.tmp`;
+    const fd = fs.openSync(fp, 'r');
+    const outFd = fs.openSync(tmp, 'w');
+    try {
+      const start = Math.max(0, size - lim);
+      const CHUNK = 256 * 1024;
+      let pos = start;
+      while (pos < size) {
+        const remain = size - pos;
+        const toRead = Math.max(1, Math.min(remain, CHUNK));
+        const buf = Buffer.allocUnsafe(toRead);
+        const n = fs.readSync(fd, buf, 0, toRead, pos);
+        if (!n) break;
+        fs.writeSync(outFd, buf, 0, n);
+        pos += n;
+      }
+    } finally {
+      try { fs.closeSync(outFd); } catch {}
+      try { fs.closeSync(fd); } catch {}
+    }
+    fs.renameSync(tmp, fp);
+    return { ok: true, trimmed: true, size_before: size, size_after: lim };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  }
+}
+
+function __deltaPruneMainQueueDispatchOnlyOnBootSync() {
+  if (!DELTA_QUEUE_BOOT_PRUNE_ENABLED) return { ok: true, skipped: true, reason: 'disabled' };
+  if (!fs.existsSync(DELTA_QUEUE_PATH)) return { ok: true, skipped: true, reason: 'queue_missing' };
+  const st = fs.statSync(DELTA_QUEUE_PATH);
+  const size = Number(st.size || 0) || 0;
+  if (size < DELTA_QUEUE_BOOT_PRUNE_MIN_BYTES) {
+    return { ok: true, skipped: true, reason: 'queue_small', size };
+  }
+  if (!__deltaTryAcquireCompactLock()) return { ok: true, skipped: true, reason: 'lock_busy' };
+  const tmp = `${DELTA_QUEUE_PATH}.boot-prune.tmp`;
+  let outFd = null;
+  try {
+    outFd = fs.openSync(tmp, 'w');
+    let offset = 0;
+    let scanned = 0;
+    let kept = 0;
+    let skippedForensic = 0;
+    let skippedInvalid = 0;
+    let skippedDuplicate = 0;
+    const seenIdempotency = new Set();
+    for (;;) {
+      const lineRes = __deltaReadNextJsonlLineByOffsetSync(
+        DELTA_QUEUE_PATH,
+        offset,
+        { chunkBytes: 256 * 1024, maxLineBytes: 4 * 1024 * 1024 }
+      );
+      if (!lineRes || !lineRes.ok) break;
+      if (lineRes.eof) break;
+      offset = Math.max(offset, Number(lineRes.nextOffset || offset) || offset);
+      const line = String(lineRes.line || '').trim();
+      if (!line) continue;
+      scanned += 1;
+      const payload = __deltaSafeJsonParse(line);
+      if (!payload || typeof payload !== 'object') {
+        skippedInvalid += 1;
+        continue;
+      }
+      if (payload.dispatch_ct === false) {
+        skippedForensic += 1;
+        continue;
+      }
+      const idempotencyKey = String(payload.idempotency_key || __deltaComputeIdempotencyKey(payload) || '').trim();
+      if (idempotencyKey) {
+        if (seenIdempotency.has(idempotencyKey)) {
+          skippedDuplicate += 1;
+          continue;
+        }
+        seenIdempotency.add(idempotencyKey);
+      }
+      const compactPayload = __deltaBuildCompactQueuePayload(payload);
+      compactPayload.dispatch_ct = true;
+      compactPayload.queue_mode = String(compactPayload.queue_mode || 'dispatch_ct').trim() || 'dispatch_ct';
+      const rec = __deltaBuildQueueRecord(compactPayload, { idempotencyKey });
+      fs.writeSync(outFd, JSON.stringify(rec) + '\n');
+      kept += 1;
+    }
+    try { fs.closeSync(outFd); } catch {}
+    outFd = null;
+    fs.renameSync(tmp, DELTA_QUEUE_PATH);
+    __deltaWriteCursorOffsetSync(0);
+    const summary = {
+      ok: true,
+      pruned: true,
+      size_before: size,
+      scanned,
+      kept,
+      skipped_forensic: skippedForensic,
+      skipped_invalid: skippedInvalid,
+      skipped_duplicate: skippedDuplicate
+    };
+    try {
+      logger.info('[DELTA][QUEUE] boot prune aplicado (somente dispatch_ct=true)', summary);
+    } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'delta_queue_boot_pruned', ...summary }); } catch {}
+    return summary;
+  } catch (e) {
+    try { if (outFd != null) fs.closeSync(outFd); } catch {}
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  } finally {
+    __deltaReleaseCompactLock();
+  }
+}
+
 function __deltaComputeIdempotencyKey(payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
   const base = [
@@ -17546,8 +17698,17 @@ function __deltaAppendPendingJsonlSync(payload) {
     ...pIn,
     server_id: serverId || null
   };
+  const dispatchToCt = p.dispatch_ct !== false;
   const idempotencyKey = String(p.idempotency_key || '').trim() || __deltaComputeIdempotencyKey(p);
-  let record = __deltaBuildQueueRecord(p, { idempotencyKey });
+  let record = __deltaBuildQueueRecord(
+    dispatchToCt ? p : __deltaBuildCompactQueuePayload({
+      ...p,
+      dispatch_ct: false,
+      queue_mode: String(p.queue_mode || '').trim() || 'capture_only',
+      flow_stage: String(p.flow_stage || '').trim() || 'capture_only'
+    }),
+    { idempotencyKey }
+  );
   let line = '';
   let lineBytes = 0;
   let compacted = false;
@@ -17585,10 +17746,10 @@ function __deltaAppendPendingJsonlSync(payload) {
     }
   }
   try {
-    fs.mkdirSync(path.dirname(DELTA_QUEUE_PATH), { recursive: true });
+    fs.mkdirSync(path.dirname(dispatchToCt ? DELTA_QUEUE_PATH : DELTA_FORENSIC_QUEUE_PATH), { recursive: true });
   } catch {}
   try {
-    fs.appendFileSync(DELTA_QUEUE_PATH, line + '\n', 'utf8');
+    fs.appendFileSync(dispatchToCt ? DELTA_QUEUE_PATH : DELTA_FORENSIC_QUEUE_PATH, line + '\n', 'utf8');
   } catch (e) {
     try {
       __deltaAppendIngestDeadLetterSync({
@@ -17608,10 +17769,18 @@ function __deltaAppendPendingJsonlSync(payload) {
         error: (e && e.message) || String(e),
         account_login: String(p.account_login || ''),
         thread_key: String(p.thread_key || ''),
-        line_bytes: lineBytes
+        line_bytes: lineBytes,
+        queue_target: dispatchToCt ? 'ct_outbox' : 'forensic'
       });
     } catch {}
     return false;
+  }
+  if (!dispatchToCt) {
+    __deltaForensicQueueWriteCount += 1;
+    if ((__deltaForensicQueueWriteCount % 200) === 0) {
+      try { __deltaTrimFileTailBytesSync(DELTA_FORENSIC_QUEUE_PATH, DELTA_FORENSIC_QUEUE_MAX_BYTES); } catch {}
+    }
+    return true;
   }
   if (compacted) {
     try {
@@ -17683,6 +17852,8 @@ function __deltaShouldReplayDeadletterRecord(rec) {
   const r = rec && typeof rec === 'object' ? rec : {};
   const p = r.payload && typeof r.payload === 'object' ? r.payload : null;
   if (!p) return false;
+  const replayCount = Math.max(0, Number(p.ingest_deadletter_replay_count || 0) || 0);
+  if (replayCount >= DELTA_INGEST_MAX_RETRY_ATTEMPTS) return false;
   const status = Number(r.status || 0) || 0;
   const err = String(r.error || '').toLowerCase();
   const body = String(r.body || '').toLowerCase();
@@ -18495,6 +18666,7 @@ let __deltaIngestLoopRunning = false;
 let __deltaIngestBackoffMs = 900;
 const __deltaIngestRetryCounterByKey = new Map();
 let __deltaDeadletterReplayLastAt = 0;
+let __deltaForensicQueueWriteCount = 0;
 
 function __deltaIngestRetryKeyFromPayload(payload, ctPayload) {
   const p = payload && typeof payload === 'object' ? payload : {};
@@ -18620,14 +18792,14 @@ async function __deltaIngestTick() {
 
     const line = String(lineRes.line || '').trim();
     const nextOffset = Number(lineRes.nextOffset || offset) || offset;
-    if (!line) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = 900; return; }
+    if (!line) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = DELTA_INGEST_SKIP_BACKOFF_MS; return; }
 
     const payload = __deltaSafeJsonParse(line);
-    if (!payload) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = 1500; return; }
+    if (!payload) { __deltaWriteCursorOffsetSync(nextOffset); __deltaIngestBackoffMs = DELTA_INGEST_ERROR_BACKOFF_MS; return; }
     if (payload && payload.dispatch_ct === false) {
       // Captura forense (sem envio ao CT), mas com avanço de cursor para não bloquear a fila.
       __deltaWriteCursorOffsetSync(nextOffset);
-      __deltaIngestBackoffMs = 350;
+      __deltaIngestBackoffMs = DELTA_INGEST_SKIP_BACKOFF_MS;
       return;
     }
     const ctPayload = __deltaBuildCtIngestPayload(payload);
@@ -18641,7 +18813,7 @@ async function __deltaIngestTick() {
         });
       } catch {}
       __deltaWriteCursorOffsetSync(nextOffset);
-      __deltaIngestBackoffMs = 900;
+      __deltaIngestBackoffMs = DELTA_INGEST_ERROR_BACKOFF_MS;
       return;
     }
 
@@ -18797,7 +18969,7 @@ async function __deltaIngestTick() {
           __deltaWriteCursorOffsetSync(nextOffset);
           try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
           try { if (typeof global.gc === 'function') global.gc(); } catch {}
-          __deltaIngestBackoffMs = 180;
+          __deltaIngestBackoffMs = DELTA_INGEST_SUCCESS_BACKOFF_MS;
           return;
         }
         try {
@@ -18813,16 +18985,19 @@ async function __deltaIngestTick() {
         __deltaWriteCursorOffsetSync(nextOffset);
         try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
         try { if (typeof global.gc === 'function') global.gc(); } catch {}
-        __deltaIngestBackoffMs = 650;
+        __deltaIngestBackoffMs = DELTA_INGEST_SUCCESS_BACKOFF_MS;
         return;
       }
     }
     if (__deltaIsRetryableIngestResponse(res)) {
-      const attempt = __deltaIngestBumpRetryCounter(retryKey);
+      const persistedAttempts = Math.max(
+        Number(payload && payload.ingest_retry_attempt || 0) || 0,
+        Number(payload && payload.ingest_deadletter_replay_count || 0) || 0
+      );
+      const attempt = persistedAttempts + 1;
       if (attempt <= DELTA_INGEST_MAX_RETRY_ATTEMPTS) {
         const waitMs = __deltaComputeRetryBackoffMs(attempt);
-        __deltaIngestBackoffMs = waitMs;
-        try { logger.warn(`⚠️ [WARN] Redundância Reenfileirada - Mantendo Cursor em Offset: ${nextOffset}`); } catch {}
+        __deltaIngestBackoffMs = DELTA_INGEST_ERROR_BACKOFF_MS;
         try {
           if (typeof forensicLog === 'function') {
             forensicLog('DELTA', 'ingest_ack_retryable', {
@@ -18836,6 +19011,24 @@ async function __deltaIngestTick() {
             });
           }
         } catch {}
+        try {
+          __deltaAppendIngestDeadLetterSync({
+            payload: {
+              ...(payload && typeof payload === 'object' ? payload : {}),
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              ingest_retry_attempt: attempt,
+              ingest_retry_wait_ms: waitMs,
+              ingest_retry_deferred_at: Date.now()
+            },
+            response: res,
+            nextOffset,
+            ingest_url: ingestUrl
+          });
+        } catch {}
+        __deltaIngestClearRetryCounter(retryKey);
+        __deltaWriteCursorOffsetSync(nextOffset);
+        try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
         return;
       }
     }
@@ -18865,7 +19058,11 @@ async function __deltaIngestTick() {
     } catch {}
     try {
       __deltaAppendIngestDeadLetterSync({
-        payload: ctPayload,
+        payload: {
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          dispatch_ct: true,
+          queue_mode: 'dispatch_ct'
+        },
         response: res,
         nextOffset,
         ingest_url: ingestUrl
@@ -18873,7 +19070,7 @@ async function __deltaIngestTick() {
     } catch {}
     __deltaWriteCursorOffsetSync(nextOffset);
     try { __deltaCompactQueueFileIfNeededSync(nextOffset); } catch {}
-    __deltaIngestBackoffMs = 650;
+    __deltaIngestBackoffMs = DELTA_INGEST_ERROR_BACKOFF_MS;
     return;
   } finally {
     __deltaIngestLoopRunning = false;
@@ -18884,11 +19081,16 @@ function __deltaStartIngestLoopOnce() {
   if (__deltaStartIngestLoopOnce._started) return;
   __deltaStartIngestLoopOnce._started = true;
   try { __deltaEnsureHostIdSync(); } catch {}
+  try { __deltaPruneMainQueueDispatchOnlyOnBootSync(); } catch {}
   const loop = async () => {
     __deltaIngestKickRequested = false;
     try { await __deltaIngestTick(); } catch {}
-    const jitter = Math.floor(Math.random() * 220);
-    const waitMs = __deltaIngestKickRequested ? 100 : (__deltaIngestBackoffMs + jitter);
+    const jitter = __deltaIngestBackoffMs <= DELTA_INGEST_SUCCESS_BACKOFF_MS
+      ? 0
+      : Math.floor(Math.random() * DELTA_INGEST_LOOP_JITTER_MS);
+    const waitMs = __deltaIngestKickRequested
+      ? DELTA_INGEST_LOOP_KICK_WAIT_MS
+      : Math.max(5, __deltaIngestBackoffMs + jitter);
     setTimeout(loop, waitMs).unref?.();
   };
   setTimeout(loop, 300).unref?.();
