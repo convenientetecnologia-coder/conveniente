@@ -15447,6 +15447,23 @@ function __deltaScrubNewLeadTimersOutboxSync(nome, { consumeUntilOffset = 0, dro
     return { ok: false, removed_total: 0, removed_consumed: 0, removed_thread: 0, kept: 0 };
   }
 }
+function __deltaFlushPostHandsTimerCursorSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return { ok: false, reason: 'invalid_args' };
+  try {
+    const stats = __deltaScrubNewLeadTimersOutboxSync(n, { dropThreadKey: tk });
+    return {
+      ok: !!(stats && stats.ok === true),
+      removed_total: Number(stats && stats.removed_total || 0) || 0,
+      removed_consumed: Number(stats && stats.removed_consumed || 0) || 0,
+      removed_thread: Number(stats && stats.removed_thread || 0) || 0,
+      kept: Number(stats && stats.kept || 0) || 0
+    };
+  } catch {
+    return { ok: false, reason: 'cursor_scrub_failed' };
+  }
+}
 function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs, forceEnqueue = false, queueLane = 'primary', retryReason = null } = {}) {
   try {
     const n = String(nome || '').trim();
@@ -16241,7 +16258,13 @@ function __deltaSerializeThreadState(st) {
           seq: Number(m && m.seq || 0) || 0,
           text: String(m && m.text || '').slice(0, 4000),
           op: String(m && m.op || '').slice(0, 64),
-          at: Number(m && m.at || 0) || 0
+          at: Number(m && m.at || 0) || 0,
+          dedup_meta_id: String(m && m.dedup_meta_id || '').slice(0, 160) || null,
+          meta_message_id: String(m && m.meta_message_id || '').slice(0, 240) || null,
+          meta_offline_threading_id: String(m && m.meta_offline_threading_id || '').slice(0, 240) || null,
+          sender_id: String(m && m.sender_id || '').slice(0, 64) || null,
+          account_user_id: String(m && m.account_user_id || '').slice(0, 64) || null,
+          direction: String(m && m.direction || '').slice(0, 40) || null,
         }))
       : []
   };
@@ -16311,7 +16334,13 @@ function __deltaLoadThreadStateSync() {
               seq: Number(m && m.seq || 0) || 0,
               text: String(m && m.text || ''),
               op: String(m && m.op || ''),
-              at: Number(m && m.at || 0) || 0
+              at: Number(m && m.at || 0) || 0,
+              dedup_meta_id: String(m && m.dedup_meta_id || '').trim() || null,
+              meta_message_id: String(m && m.meta_message_id || '').trim() || null,
+              meta_offline_threading_id: String(m && m.meta_offline_threading_id || '').trim() || null,
+              sender_id: String(m && m.sender_id || '').replace(/\D/g, '') || null,
+              account_user_id: String(m && m.account_user_id || '').replace(/\D/g, '') || null,
+              direction: String(m && m.direction || '').trim().toLowerCase() || null
             }))
             .filter((m) => m.text)
             .slice(-DELTA_THREAD_MAX_MESSAGES)
@@ -17054,14 +17083,73 @@ function __deltaBuildConcatFromState(st) {
     : 0;
   return { text: texts.join('\n'), count: texts.length, fromSeq, toSeq, minAt, maxAt };
 }
-function __deltaPushMessageToState(st, { text, op, at }) {
+function __deltaCollectInboundDispatchMessagesFromState(st) {
+  const msgs = Array.isArray(st && st.messages) ? st.messages : [];
+  const out = [];
+  const seenDedup = new Set();
+  const seenFallback = new Set();
+  for (const m of msgs) {
+    if (!m || typeof m !== 'object') continue;
+    const op = String(m.op || '').trim();
+    if (op !== 'insertMessage' && op !== 'upsertMessage') continue;
+    const text = String(m.text || '').trim();
+    if (!text) continue;
+    if (/^(você|voce|you)\s*:/i.test(text)) continue;
+    const at = Number(m.at || 0) || 0;
+    const dedupId = String(m.dedup_meta_id || '').trim();
+    if (dedupId) {
+      if (seenDedup.has(dedupId)) continue;
+      seenDedup.add(dedupId);
+    } else {
+      const fallbackKey = `${op}|${text}|${at}`;
+      if (seenFallback.has(fallbackKey)) continue;
+      seenFallback.add(fallbackKey);
+    }
+    out.push({
+      seq: Number(m.seq || 0) || 0,
+      text,
+      op,
+      at: at > 0 ? at : Date.now(),
+      dedup_meta_id: dedupId || null,
+      meta_message_id: String(m.meta_message_id || '').trim() || null,
+      meta_offline_threading_id: String(m.meta_offline_threading_id || '').trim() || null,
+      sender_id: String(m.sender_id || '').replace(/\D/g, '') || null,
+      account_user_id: String(m.account_user_id || '').replace(/\D/g, '') || null,
+      direction: String(m.direction || '').trim().toLowerCase() || null
+    });
+  }
+  out.sort((a, b) => {
+    const aAt = Number(a.at || 0) || 0;
+    const bAt = Number(b.at || 0) || 0;
+    if (aAt !== bAt) return aAt - bAt;
+    return (Number(a.seq || 0) || 0) - (Number(b.seq || 0) || 0);
+  });
+  return out;
+}
+function __deltaPushMessageToState(st, {
+  text,
+  op,
+  at,
+  dedup_meta_id = null,
+  meta_message_id = null,
+  meta_offline_threading_id = null,
+  sender_id = null,
+  account_user_id = null,
+  direction = null
+}) {
   if (!st || typeof st !== 'object') return null;
   st.seq = (Number(st.seq || 0) || 0) + 1;
   const msg = {
     seq: st.seq,
     text: String(text || ''),
     op: String(op || ''),
-    at: Number(at || Date.now()) || Date.now()
+    at: Number(at || Date.now()) || Date.now(),
+    dedup_meta_id: String(dedup_meta_id || '').trim() || null,
+    meta_message_id: String(meta_message_id || '').trim() || null,
+    meta_offline_threading_id: String(meta_offline_threading_id || '').trim() || null,
+    sender_id: String(sender_id || '').replace(/\D/g, '') || null,
+    account_user_id: String(account_user_id || '').replace(/\D/g, '') || null,
+    direction: String(direction || '').trim().toLowerCase() || null
   };
   st.messages = Array.isArray(st.messages) ? st.messages : [];
   st.messages.push(msg);
@@ -17407,20 +17495,16 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
-  const messageAt = Number(after.maxAt || after.minAt || 0) || Date.now();
+  const bufferedDispatchMessages = __deltaCollectInboundDispatchMessagesFromState(st);
+  const bufferedLastAt = bufferedDispatchMessages.length
+    ? Number(bufferedDispatchMessages[bufferedDispatchMessages.length - 1].at || 0) || 0
+    : 0;
+  const messageAt = Number(bufferedLastAt || after.maxAt || after.minAt || 0) || Date.now();
   const city = String((handsOut && handsOut.cidade) || '').trim() || DELTA_FALLBACK_CITY;
   const linkAnuncio = String((handsOut && (handsOut.link_anuncio || handsOut.profile_url)) || '').trim() || DELTA_FALLBACK_LINK;
   const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
-  const diskHighWatermarkBeforeDispatch = __deltaReadKnownThreadHighWatermarkFromDiskSync(n, tk);
-  const suppressBufferedConcatForCt = (
-    messageAt > 0 &&
-    diskHighWatermarkBeforeDispatch > 0 &&
-    diskHighWatermarkBeforeDispatch >= messageAt
-  );
-  const dispatchCustomerConcat = suppressBufferedConcatForCt ? '' : finalText;
-  const dispatchCustomerCount = suppressBufferedConcatForCt ? 0 : (Number(after.count || 0) || 0);
   const greetingTimestampMs = __deltaNormalizeTimestampMs(
     Number(
       (handsOut && (handsOut.greeting_sent_at || handsOut.greeting_ts || handsOut.greeting_timestamp_ms)) ||
@@ -17459,32 +17543,133 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   st.lastDispatchAt = Date.now();
   st.updatedAt = Date.now();
 
-  const dispatchQueued = __deltaAppendPendingJsonlSync({
-    event: 'lead_consolidado_pos_hands',
-    server_id: readHostIdSync() || null,
-    account_login: n,
-    thread_key: tk,
-    texto_limpo: finalText,
-    mensagens_cliente_concatenadas: dispatchCustomerConcat,
-    mensagens_cliente_qtd: dispatchCustomerCount,
-    mensagem_seq: Number(after.toSeq || st.seq || 0) || 0,
-    cidade: city,
-    link_anuncio: linkAnuncio,
-    client_name: clientName,
-    operacao_meta: 'buffered_concat_after_hands',
-    dispatch_ct: true,
-    queue_mode: 'dispatch_ct',
-    flow_stage: suppressBufferedConcatForCt ? 'new_chat_buffered_snapshot_only' : 'new_chat_buffered_dispatched',
-    message_at: messageAt,
-    saudacao_enviada: true,
-    saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
-    saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null,
-    nome_cliente_limpo: nomeClienteLimpo,
-    customer_name: customerName,
-    snapshot_only: suppressBufferedConcatForCt ? true : undefined,
-    high_watermark_before_dispatch: suppressBufferedConcatForCt ? Number(diskHighWatermarkBeforeDispatch || 0) || 0 : undefined,
-  });
-  if (!dispatchQueued) {
+  let dispatchPersistFailed = false;
+  let queuedDispatchCount = 0;
+  let skippedDuplicateOnDisk = 0;
+  for (const one of bufferedDispatchMessages) {
+    if (dispatchPersistFailed) break;
+    const oneText = String(one && one.text || '').trim();
+    if (!oneText) continue;
+    const oneTs = __deltaNormalizeTimestampMs(
+      Number(one && one.at || 0) || messageAt,
+      messageAt
+    );
+    let dedupMetaId = String(one && one.dedup_meta_id || '').trim();
+    if (!dedupMetaId) {
+      try {
+        const synthSeed = `${String(tk || '').trim()}|${oneText}|${Number(oneTs || messageAt || Date.now()) || Date.now()}`;
+        dedupMetaId = `synth_${crypto.createHash('sha1').update(synthSeed).digest('hex')}`;
+      } catch {
+        dedupMetaId = `synth_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+      }
+    }
+    if (dedupMetaId && __deltaIsMetaIdAlreadyOnDisk(dedupMetaId)) {
+      skippedDuplicateOnDisk += 1;
+      try {
+        __forensicEdgeEmit({
+          account_login: n,
+          thread_key: tk,
+          flow_stage: 'discard_filter_triggered',
+          details: {
+            reason: 'meta_message_id_duplicate_on_disk',
+            op: String(one && one.op || '').trim() || 'message',
+            dedup_meta_id: dedupMetaId,
+            message_id: String(one && one.meta_message_id || '').trim() || null,
+            offline_threading_id: String(one && one.meta_offline_threading_id || '').trim() || null,
+            text_preview: oneText.slice(0, 220),
+            source: 'post_hands_individual_dispatch'
+          }
+        });
+      } catch {}
+      continue;
+    }
+    const queued = __deltaAppendPendingJsonlSync({
+      event: 'lead_chat_ativo_realtime',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: oneText,
+      mensagens_cliente_concatenadas: oneText,
+      mensagens_cliente_qtd: 1,
+      dedup_meta_id: dedupMetaId || null,
+      meta_message_id: String(one && one.meta_message_id || '').trim() || null,
+      meta_offline_threading_id: String(one && one.meta_offline_threading_id || '').trim() || null,
+      cidade: city,
+      link_anuncio: linkAnuncio,
+      client_name: clientName,
+      customer_name: customerName,
+      nome_cliente_limpo: nomeClienteLimpo,
+      operacao_meta: String(one && one.op || '').trim() || 'message',
+      dispatch_ct: true,
+      queue_mode: 'dispatch_ct',
+      flow_stage: 'new_chat_hands_individual_dispatch',
+      message_at: oneTs,
+      sender_id: String(one && one.sender_id || '').replace(/\D/g, '') || null,
+      account_user_id: String(one && one.account_user_id || '').replace(/\D/g, '') || null,
+      direction: String(one && one.direction || '').trim().toLowerCase() || null
+    });
+    if (!queued) {
+      dispatchPersistFailed = true;
+      break;
+    }
+    queuedDispatchCount += 1;
+  }
+
+  if (!dispatchPersistFailed && handsOut && handsOut.greeting_text) {
+    const greetQueued = __deltaAppendPendingJsonlSync({
+      event: 'lead_hands_greeting_dispatched',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: '',
+      mensagens_cliente_concatenadas: '',
+      mensagens_cliente_qtd: 0,
+      cidade: city,
+      link_anuncio: linkAnuncio,
+      client_name: clientName,
+      customer_name: customerName,
+      nome_cliente_limpo: nomeClienteLimpo,
+      operacao_meta: 'hands_greeting_only',
+      dispatch_ct: true,
+      queue_mode: 'dispatch_ct',
+      flow_stage: 'new_chat_hands_greeting_dispatch',
+      message_at: greetingTimestampMs,
+      saudacao_enviada: true,
+      saudacao_texto: String(handsOut.greeting_text || '').trim() || null,
+      saudacao_timestamp_ms: greetingTimestampMs
+    });
+    if (!greetQueued) dispatchPersistFailed = true;
+    else queuedDispatchCount += 1;
+  }
+
+  if (!dispatchPersistFailed && queuedDispatchCount === 0) {
+    const snapshotQueued = __deltaAppendPendingJsonlSync({
+      event: 'lead_hands_snapshot_minimal',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: '',
+      mensagens_cliente_concatenadas: '',
+      mensagens_cliente_qtd: 0,
+      cidade: city,
+      link_anuncio: linkAnuncio,
+      client_name: clientName,
+      customer_name: customerName,
+      nome_cliente_limpo: nomeClienteLimpo,
+      operacao_meta: 'hands_snapshot_only',
+      dispatch_ct: true,
+      queue_mode: 'dispatch_ct',
+      flow_stage: 'new_chat_hands_snapshot_minimal',
+      message_at: messageAt,
+      saudacao_enviada: !!(handsOut && handsOut.greeting_text),
+      saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text).trim() : null,
+      saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null
+    });
+    if (!snapshotQueued) dispatchPersistFailed = true;
+    else queuedDispatchCount += 1;
+  }
+
+  if (dispatchPersistFailed) {
     st.status = 'new_buffering';
     st.inFlight = false;
     st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
@@ -17497,9 +17682,10 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
     const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
     try {
-      logger.error('[DELTA][QUEUE] falha ao enfileirar lead_consolidado_pos_hands; retry armado', {
+      logger.error('[DELTA][QUEUE] falha ao enfileirar dispatch pos-hands individual; retry armado', {
         account_login: n,
         thread_key: tk,
+        queued_dispatch_count: queuedDispatchCount,
         retry_in_ms: retryInMs,
         retry_queue_mode: retryQueueMode
       });
@@ -17507,6 +17693,22 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     __deltaSchedulePersistThreadState();
     return;
   }
+  const cursorFlush = __deltaFlushPostHandsTimerCursorSync(n, tk);
+  try {
+    __forensicEdgeEmit({
+      account_login: n,
+      thread_key: tk,
+      flow_stage: 'hands_post_cursor_flush',
+      details: {
+        ok: !!(cursorFlush && cursorFlush.ok),
+        queued_dispatch_count: Number(queuedDispatchCount || 0) || 0,
+        skipped_duplicate_on_disk: Number(skippedDuplicateOnDisk || 0) || 0,
+        removed_total: Number(cursorFlush && cursorFlush.removed_total || 0) || 0,
+        removed_thread: Number(cursorFlush && cursorFlush.removed_thread || 0) || 0,
+        kept: Number(cursorFlush && cursorFlush.kept || 0) || 0
+      }
+    });
+  } catch {}
   __deltaKickIngestLoop();
 
   // Após criação do card, mantemos thread em modo ativo (tempo real),
@@ -20806,6 +21008,27 @@ async function __deltaAttachCdpEar(nome, page) {
             } catch {}
             continue;
           }
+          // Snippet nunca entra no buffer de dispatch; só captura forense.
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_sync_only_snippet',
+            server_id: serverId || null,
+            account_login: String(nome || ''),
+            thread_key: threadKey,
+            texto_limpo: texto,
+            dedup_meta_id: dedupMetaId || null,
+            dedup_meta_id_synthetic: dedupMetaIdSynthetic,
+            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+            cidade: st.city || null,
+            operacao_meta: op,
+            mensagem_seq: Number(st.seq || 0) || 0,
+            dispatch_ct: false,
+            queue_mode: 'capture_only',
+            flow_stage: 'snippet_sync_only',
+            message_at: metaTsMs,
+            ...networkCtx
+          });
+          continue;
         }
         if (!dedupMetaId && __deltaIsRecentDuplicate(st, texto, op, nowMs)) {
           try {
@@ -20838,7 +21061,17 @@ async function __deltaAttachCdpEar(nome, page) {
           } catch {}
           continue;
         }
-        const msg = __deltaPushMessageToState(st, { text: texto, op, at: nowMs });
+        const msg = __deltaPushMessageToState(st, {
+          text: texto,
+          op,
+          at: metaTsMs,
+          dedup_meta_id: dedupMetaId || null,
+          meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+          meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+          sender_id: senderIdNormalized || null,
+          account_user_id: accountUserIdNormalized || null,
+          direction: directionNormalized || null
+        });
         const msgSeq = Number(msg && msg.seq || st.seq || 0) || 0;
 
         __deltaAppendPendingJsonlSync({
@@ -20856,35 +21089,12 @@ async function __deltaAttachCdpEar(nome, page) {
           dispatch_ct: false,
           queue_mode: 'capture_only',
           flow_stage: String(st.status || 'new_buffering'),
-          message_at: nowMs,
+          message_at: metaTsMs,
           ...networkCtx
         });
 
         if (st.status === 'active') {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
-          // Opção canônica A (anti-duplicidade):
-          // Em thread ativa, updateThreadSnippet não pode gerar dispatch realtime.
-          if (op === 'updateThreadSnippet') {
-            try {
-              __forensicEdgeEmit({
-                account_login: String(nome || ''),
-                thread_key: threadKey,
-                flow_stage: 'discard_filter_triggered',
-                details: {
-                  reason: 'active_thread_snippet_blocked_realtime',
-                  op,
-                  transport: String(transport || ''),
-                  requestId: String(requestId || ''),
-                  sourceHint: String(sourceHint || ''),
-                  text_preview: String(texto || '').slice(0, 220)
-                }
-              });
-            } catch {}
-            st.lastDispatchAt = Number(st.lastDispatchAt || 0) || 0;
-            st.updatedAt = nowMs;
-            __deltaSchedulePersistThreadState();
-            continue;
-          }
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
