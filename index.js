@@ -1064,8 +1064,6 @@ function __rotateForensicFileIfNeededSync(fp) {
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
-    // Regra: sempre no console e no arquivo físico.
-    try { console.log(line); } catch {}
     try {
       const fp = String(filePath || '').trim();
       if (fp) {
@@ -1535,6 +1533,20 @@ async function __edgeRunDeltaReplyPump() {
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
     const __edgeDeferredOnceInRun = new Set();
+    const emitOutboxReceived = (threadKey) => {
+      try {
+        logger.info(
+          `🔵 [OUTBOX] Resposta Enviada pro Robô - Chat: ${String(threadKey || '-')} | Status: received_by_edge`
+        );
+      } catch {}
+    };
+    const emitVmDeliveryError = (threadKey, errorCode) => {
+      try {
+        logger.error(
+          `🔴 [ERROR] Falha de Entrega na VM - Chat: ${String(threadKey || '-')} | Erro: ${String(errorCode || 'unknown_error')}`
+        );
+      } catch {}
+    };
     while (true) {
       if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
       const cursor = __edgeReadDeltaReplyCursorSync();
@@ -1601,6 +1613,7 @@ async function __edgeRunDeltaReplyPump() {
                 max_retries: retryBudgetDecision.maxRetries
               }
             });
+            emitVmDeliveryError(rec.thread_key, 'cluster_unavailable');
             __edgeResetDeltaReplyPumpBackoff();
             continue;
           }
@@ -1612,6 +1625,7 @@ async function __edgeRunDeltaReplyPump() {
             flow_stage: 'reverse_command_bus',
             details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'cluster_unavailable' }
           });
+          emitVmDeliveryError(rec.thread_key, 'cluster_unavailable');
           __edgeIncreaseDeltaReplyPumpBackoff();
           __edgeScheduleDeltaReplyPumpRetry();
           if (__edgeDeferredOnceInRun.has(cmdId)) break;
@@ -1652,6 +1666,7 @@ async function __edgeRunDeltaReplyPump() {
               flow_stage: 'reverse_command_bus',
               details: { stage: 'ipc_dispatch_ok', cmd_id: cmdId }
             });
+            emitOutboxReceived(rec.thread_key);
             continue;
           }
           const retryError = (r && r.error) ? String(r.error) : 'ipc_not_ok';
@@ -1682,6 +1697,7 @@ async function __edgeRunDeltaReplyPump() {
                 retry_count: Math.max(0, Number(rec && rec.retry_count || 0) || 0)
               }
             });
+            emitVmDeliveryError(rec.thread_key, retryError || 'ipc_not_ok');
             __edgeResetDeltaReplyPumpBackoff();
             continue;
           }
@@ -1712,6 +1728,7 @@ async function __edgeRunDeltaReplyPump() {
                 max_retries: retryBudgetDecision.maxRetries
               }
             });
+            emitVmDeliveryError(rec.thread_key, retryError || 'ipc_not_ok');
             __edgeResetDeltaReplyPumpBackoff();
             continue;
           }
@@ -1728,6 +1745,7 @@ async function __edgeRunDeltaReplyPump() {
             flow_stage: 'reverse_command_bus',
             details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'ipc_not_ok', error: retryError }
           });
+          emitVmDeliveryError(rec.thread_key, retryError || 'ipc_not_ok');
           __edgeIncreaseDeltaReplyPumpBackoff();
           __edgeScheduleDeltaReplyPumpRetry();
           if (__edgeDeferredOnceInRun.has(cmdId)) break;
@@ -1761,6 +1779,7 @@ async function __edgeRunDeltaReplyPump() {
                 max_retries: retryBudgetDecision.maxRetries
               }
             });
+            emitVmDeliveryError(rec.thread_key, e && e.message ? String(e.message) : String(e));
             __edgeResetDeltaReplyPumpBackoff();
             continue;
           }
@@ -1776,6 +1795,7 @@ async function __edgeRunDeltaReplyPump() {
             flow_stage: 'reverse_command_bus',
             details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'ipc_error', error: e && e.message ? String(e.message) : String(e) }
           });
+          emitVmDeliveryError(rec.thread_key, e && e.message ? String(e.message) : String(e));
           __edgeIncreaseDeltaReplyPumpBackoff();
           __edgeScheduleDeltaReplyPumpRetry();
           if (__edgeDeferredOnceInRun.has(cmdId)) break;

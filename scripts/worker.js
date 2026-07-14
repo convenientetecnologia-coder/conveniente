@@ -44,7 +44,6 @@ function __rotateForensicFileIfNeededSync(fp) {
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
-    try { console.log(line); } catch {}
     try {
       const fp = String(filePath || '').trim();
       if (fp) {
@@ -15558,17 +15557,6 @@ async function __deltaRunNewLeadsTimerPump(nome) {
           __deltaSchedulePersistThreadState();
         }
       } catch {}
-      try {
-        console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
-          event: 'new_lead_reservoir_timer_begin',
-          scheduled_at: scheduledAt,
-          account_login: n,
-          thread_key: tk,
-          remain_ms: remainMs,
-          dueAt: dueAt || null,
-          timer_delay_ms: waitDelayMs,
-        }));
-      } catch {}
 
       const handle = setTimeout(() => {
         __deltaNewLeadsTimerInFlight.delete(n);
@@ -15586,18 +15574,6 @@ async function __deltaRunNewLeadsTimerPump(nome) {
         if (!scrubStats || scrubStats.ok !== true) {
           try { __deltaWriteNewLeadsCursorSync(n, nextOffset); } catch {}
         }
-        try {
-          console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
-            event: 'new_lead_reservoir_timer_fired',
-            fired_at: Date.now(),
-            account_login: n,
-            thread_key: tk,
-            dueAt: dueAt || null,
-            scrub_removed_total: Number(scrubStats && scrubStats.removed_total || 0) || 0,
-            scrub_removed_thread: Number(scrubStats && scrubStats.removed_thread || 0) || 0,
-            scrub_kept: Number(scrubStats && scrubStats.kept || 0) || 0,
-          }));
-        } catch {}
         // Downstream: dispara a ação no pipeline soberano (ctrl.virtus) em background.
         // Regra enterprise: desacoplar totalmente a fila de espera (1–2 min)
         // da fila de ação das mãos. O próximo timer deve começar IMEDIATAMENTE
@@ -17125,28 +17101,6 @@ function __deltaScheduleThreadTimer(st, { retry = false } = {}) {
   st.timerDueAt = Date.now() + delayMs;
   const nome = String(st.nome || '');
   const threadKey = String(st.thread_key || '');
-  // Sensor forense: ciclo de vida do buffer (timer armado)
-  try {
-    const msgs = Array.isArray(st.messages) ? st.messages : [];
-    const opCounts = {};
-    for (const m of msgs) {
-      const op = String(m && m.op || '').trim() || '(vazio)';
-      opCounts[op] = (Number(opCounts[op] || 0) || 0) + 1;
-    }
-    console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
-      event: 'timer_scheduled',
-      fired_at: null,
-      scheduled_at: Date.now(),
-      account_login: String(nome || '').trim() || null,
-      thread_key: String(threadKey || '').trim() || null,
-      reason: String(st.timerReason || '').trim() || null,
-      status: String(st.status || '').trim() || null,
-      delayMs,
-      dueAt: Number(st.timerDueAt || 0) || 0,
-      messages_len: msgs.length,
-      op_counts: opCounts,
-    }));
-  } catch {}
   st.timerHandle = setTimeout(() => {
     __deltaHandleBufferedThreadTimer(nome, threadKey, { reason: st.timerReason }).catch(() => {});
   }, delayMs);
@@ -17189,37 +17143,6 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   if (!st) return;
   if (st.status === 'active') return;
   if (st.inFlight) return;
-
-  // Sensor forense: ciclo de vida do buffer (timer estourou)
-  try {
-    const firedAt = Date.now();
-    const dueAt = Number(st.timerDueAt || 0) || 0;
-    const msgs = Array.isArray(st.messages) ? st.messages : [];
-    const opCounts = {};
-    for (const m of msgs) {
-      const op = String(m && m.op || '').trim() || '(vazio)';
-      opCounts[op] = (Number(opCounts[op] || 0) || 0) + 1;
-    }
-    const concat = __deltaBuildConcatFromState(st);
-    const concatText = String(concat && concat.text || '');
-    const approxLines = concatText ? (concatText.split('\n').length) : 0;
-    console.log('[FORENSIC_BUFFER] ' + JSON.stringify({
-      event: 'timer_fired',
-      fired_at: firedAt,
-      scheduled_at: null,
-      account_login: n || null,
-      thread_key: tk || null,
-      reason: String(reason || '').trim() || null,
-      status: String(st.status || '').trim() || null,
-      dueAt,
-      due_in_ms: dueAt ? (dueAt - firedAt) : null,
-      messages_len: msgs.length,
-      op_counts: opCounts,
-      concat_message_count: Number(concat && concat.count || 0) || 0,
-      concat_lines_approx: approxLines,
-      text_preview: concatText.slice(0, 320),
-    }));
-  } catch {}
 
   __deltaClearThreadTimer(st);
   st.status = 'hands_in_progress';
@@ -18610,11 +18533,9 @@ async function __deltaIngestTick() {
     const retryKey = __deltaIngestRetryKeyFromPayload(payload, ctPayload);
 
     try {
-      logger.info('[DELTA][INGEST] enviando stateless para CT', {
-        account_login: ctPayload.account_login || null,
-        thread_key: ctPayload.thread_key || null,
-        nextOffset
-      });
+      logger.info(
+        `🟢 [INGEST] Lead Recebido da VM - Conta: ${String(ctPayload.account_login || '-')} | Chat: ${String(ctPayload.thread_key || '-')} | Cidade: ${String(ctPayload.cidade || '-')}`
+      );
     } catch {}
     try {
       if (typeof forensicLog === 'function') {
@@ -18732,13 +18653,7 @@ async function __deltaIngestTick() {
           };
           const redundancyQueued = __deltaAppendPendingJsonlSync(redundancyPayload);
           if (!redundancyQueued) {
-            try {
-              logger.warn('[DELTA][INGEST] ACK 200 sem persistência de redundância; mantendo cursor', {
-                nextOffset,
-                current_ack_count: currentAckCount,
-                required_acks: requiredAcks
-              });
-            } catch {}
+          try { logger.warn(`⚠️ [WARN] Redundância Reenfileirada - Mantendo Cursor em Offset: ${nextOffset}`); } catch {}
             try {
               if (typeof forensicLog === 'function') {
                 forensicLog('DELTA', 'ingest_ack_redundancy_persist_failed', {
@@ -18751,14 +18666,7 @@ async function __deltaIngestTick() {
             __deltaIngestBackoffMs = Math.min(60_000, Math.max(1200, Math.floor(__deltaIngestBackoffMs * 1.5)));
             return;
           }
-          try {
-            logger.info('[DELTA][INGEST] ACK 200 parcial; redundância reenfileirada', {
-              nextOffset,
-              current_ack_count: currentAckCount,
-              next_ack_count: nextAckCount,
-              required_acks: requiredAcks
-            });
-          } catch {}
+          try { logger.warn(`⚠️ [WARN] Redundância Reenfileirada - Mantendo Cursor em Offset: ${nextOffset}`); } catch {}
           try {
             if (typeof forensicLog === 'function') {
               forensicLog('DELTA', 'ingest_ack_200_redundancy_requeued', {
@@ -18776,13 +18684,6 @@ async function __deltaIngestTick() {
           __deltaIngestBackoffMs = 180;
           return;
         }
-        try {
-          logger.info('[DELTA][INGEST] ACK 200; cursor avançado + GC', {
-            nextOffset,
-            ack_count: nextAckCount,
-            required_acks: requiredAcks
-          });
-        } catch {}
         try {
           if (typeof forensicLog === 'function') {
             forensicLog('DELTA', 'ingest_ack_200', {
@@ -18805,16 +18706,7 @@ async function __deltaIngestTick() {
       if (attempt <= DELTA_INGEST_MAX_RETRY_ATTEMPTS) {
         const waitMs = __deltaComputeRetryBackoffMs(attempt);
         __deltaIngestBackoffMs = waitMs;
-        try {
-          logger.warn('[DELTA][INGEST] ACK retryable; cursor mantido para reenvio', {
-            status: res && res.status ? Number(res.status) : null,
-            body: String(res && res.body || '').slice(0, 220),
-            attempt,
-            max_attempts: DELTA_INGEST_MAX_RETRY_ATTEMPTS,
-            waitMs,
-            nextOffset
-          });
-        } catch {}
+        try { logger.warn(`⚠️ [WARN] Redundância Reenfileirada - Mantendo Cursor em Offset: ${nextOffset}`); } catch {}
         try {
           if (typeof forensicLog === 'function') {
             forensicLog('DELTA', 'ingest_ack_retryable', {
@@ -19952,15 +19844,6 @@ async function __deltaAttachCdpEar(nome, page) {
         if (!threadKey) {
           // Mensagem válida sem identificador (causa: missing_identifiers).
           try {
-            try {
-              console.log('[FORENSIC_RAW_PARSE] ' + JSON.stringify({
-                timestamp: Date.now(),
-                flow_stage: 'raw_frame_parsed',
-                text_value: texto,
-                text_type: typeof texto,
-                operation: op
-              }));
-            } catch {}
             if (__deltaShouldEmitLeadText(texto)) {
               __forensicEdgeEmit({
                 account_login: String(nome || ''),
@@ -19989,15 +19872,6 @@ async function __deltaAttachCdpEar(nome, page) {
           } catch {}
           continue;
         }
-        try {
-          console.log('[FORENSIC_RAW_PARSE] ' + JSON.stringify({
-            timestamp: Date.now(),
-            flow_stage: 'raw_frame_parsed',
-            text_value: texto,
-            text_type: typeof texto,
-            operation: op
-          }));
-        } catch {}
         if (!__deltaShouldEmitLeadText(texto)) continue;
 
         // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================

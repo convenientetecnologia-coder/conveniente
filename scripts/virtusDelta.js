@@ -43,7 +43,6 @@ function __rotateForensicFileIfNeededSync(fp) {
 function __forensicEmitSync(filePath, obj) {
   try {
     const line = JSON.stringify(obj);
-    try { console.log(line); } catch (_) {}
     try {
       const fp = String(filePath || "").trim();
       if (fp) {
@@ -2619,19 +2618,6 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
   const reason = !urlMatches
     ? "URL_mismatch_preventing_cross_routing"
     : "composer_signature_mismatch";
-  try {
-    console.log(JSON.stringify({
-      timestamp: Date.now(),
-      flow_stage: "wrong_thread_guard_blocked",
-      thread_key: t,
-      current_url: currentUrl,
-      expected_target: expectedTarget,
-      stage,
-      reason,
-      composer_count: composerCheck && composerCheck.composer_count,
-      active_sidebar_href: composerCheck && composerCheck.active_sidebar_href
-    }));
-  } catch (_) {}
   try {
     __forensicEdgeEmit({
       account_login: forensicAccountLogin,
