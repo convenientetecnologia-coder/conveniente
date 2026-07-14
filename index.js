@@ -1246,6 +1246,82 @@ const EDGE_DELTA_REPLY_OUTBOX_DIR = path.join(__dirname, 'dados', 'edge_delta_re
 const EDGE_DELTA_REPLY_OUTBOX_PATH = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'outbox.jsonl');
 const EDGE_DELTA_REPLY_OUTBOX_CURSOR_PATH = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'cursor.json');
 const EDGE_DELTA_REPLY_OUTBOX_ACK_DIR = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, 'acked');
+const EDGE_DELTA_RESPONDED_FILENAME = 'chats_respondidos_delta.json';
+const EDGE_DELTA_REJECT_STATUS = 'rejected_by_agent';
+
+function __edgeResolveProfileDirSafe(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return '';
+  const base = path.resolve(path.join(__dirname, 'dados', 'perfis'));
+  const target = path.resolve(path.join(base, n));
+  const basePrefix = base.endsWith(path.sep) ? base : `${base}${path.sep}`;
+  if (!target.startsWith(basePrefix)) return '';
+  return target;
+}
+
+function __edgeReadJsonSafeSync(filePath, fallback = {}) {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return fallback;
+    const raw = String(fs.readFileSync(filePath, 'utf8') || '').trim();
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback;
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function __edgeWriteJsonAtomicSync(filePath, payload) {
+  try {
+    if (!filePath) return false;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __edgeMarkDeltaRejectedThreadSync({ nome, thread_key, status = EDGE_DELTA_REJECT_STATUS, ts } = {}) {
+  const n = String(nome || '').trim();
+  const tk = String(thread_key || '').trim();
+  const now = Math.max(0, Number(ts || Date.now()) || Date.now());
+  if (!n || !tk) return { ok: false, error: 'missing_nome_or_thread_key' };
+  const profileDir = __edgeResolveProfileDirSafe(n);
+  if (!profileDir) return { ok: false, error: 'invalid_profile_dir' };
+  const filePath = path.join(profileDir, EDGE_DELTA_RESPONDED_FILENAME);
+  const current = __edgeReadJsonSafeSync(filePath, {});
+  const base = (current && typeof current === 'object' && !Array.isArray(current)) ? current : {};
+  const currentThreads = (base.rejected_threads && typeof base.rejected_threads === 'object' && !Array.isArray(base.rejected_threads))
+    ? base.rejected_threads
+    : {};
+  const prevThread = (currentThreads[tk] && typeof currentThreads[tk] === 'object' && !Array.isArray(currentThreads[tk]))
+    ? currentThreads[tk]
+    : {};
+  const next = {
+    ...base,
+    version: Math.max(1, Number(base.version || 1) || 1),
+    account_login: String(base.account_login || n).trim() || n,
+    initialized_at_ms: Math.max(0, Number(base.initialized_at_ms || base.initializedAt || now) || now),
+    created_at_ms: Math.max(0, Number(base.created_at_ms || base.createdAt || now) || now),
+    updated_at_ms: now,
+    bootstrap_mode: String(base.bootstrap_mode || base.bootstrapMode || 'existing_history').trim() || 'existing_history',
+    rejected_threads: {
+      ...currentThreads,
+      [tk]: {
+        status: String(status || EDGE_DELTA_REJECT_STATUS).trim() || EDGE_DELTA_REJECT_STATUS,
+        rejected_at_ms: Math.max(0, Number(prevThread.rejected_at_ms || prevThread.ts || now) || now),
+        updated_at_ms: now
+      }
+    }
+  };
+  const wrote = __edgeWriteJsonAtomicSync(filePath, next);
+  if (!wrote) return { ok: false, error: 'persist_failed', filePath };
+  return { ok: true, filePath, updated_at_ms: now, nome: n, thread_key: tk };
+}
 
 function __edgeEnsureDeltaReplyOutboxDirsSync() {
   try { fs.mkdirSync(EDGE_DELTA_REPLY_OUTBOX_DIR, { recursive: true }); } catch {}
@@ -1736,6 +1812,65 @@ app.post('/api/infra/command-bus', async (req, res) => {
     for (let i = 0; i < incoming.length; i++) {
       const cmd = incoming[i] && typeof incoming[i] === 'object' ? incoming[i] : {};
       const t = String(cmd.type || '').trim();
+      if (t === 'delta_reject') {
+        const nome = String(cmd.nome || cmd.account_login || cmd.profile || cmd.profileName || '').trim();
+        const thread_key = String(cmd.thread_key || cmd.threadKey || cmd.customer_conversation_ref || cmd.conversation_ref || '').trim();
+        const cmdId = String(cmd && cmd.id ? cmd.id : '').trim() || `delta_reject:${nome}:${thread_key}`;
+        if (!nome || !thread_key) {
+          __forensicEdgeEmit({
+            account_login: nome || null,
+            thread_key: thread_key || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'delta_reject_rejected', reason: 'missing_fields', has_nome: !!nome, has_thread_key: !!thread_key }
+          });
+          results[i] = { id: cmdId, type: 'delta_reject', ok: false, error: 'missing_nome_or_thread_key' };
+          continue;
+        }
+        const markResult = __edgeMarkDeltaRejectedThreadSync({
+          nome,
+          thread_key,
+          status: EDGE_DELTA_REJECT_STATUS,
+          ts: Number(cmd && cmd.ts || Date.now()) || Date.now()
+        });
+        if (!(markResult && markResult.ok)) {
+          __forensicEdgeEmit({
+            account_login: nome || null,
+            thread_key: thread_key || null,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'delta_reject_persist_failed',
+              reason: String(markResult && markResult.error || 'persist_failed'),
+              file_path: String(markResult && markResult.filePath || '') || null
+            }
+          });
+          results[i] = {
+            id: cmdId,
+            type: 'delta_reject',
+            ok: false,
+            error: String(markResult && markResult.error || 'persist_failed')
+          };
+          continue;
+        }
+        __forensicEdgeEmit({
+          account_login: nome,
+          thread_key,
+          flow_stage: 'reverse_command_bus',
+          details: {
+            stage: 'delta_reject_recorded',
+            cmd_id: cmdId,
+            status: EDGE_DELTA_REJECT_STATUS,
+            file_path: String(markResult.filePath || '') || null
+          }
+        });
+        results[i] = {
+          id: cmdId,
+          type: 'delta_reject',
+          ok: true,
+          status: 'recorded_in_chats_respondidos_delta',
+          recorded_at: Number(markResult.updated_at_ms || 0) || 0
+        };
+        continue;
+      }
       if (t === 'delta_reply') {
         const nome = String(cmd.nome || '').trim();
         const thread_key = String(cmd.thread_key || '').trim();

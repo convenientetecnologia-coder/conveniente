@@ -15159,6 +15159,10 @@ const DELTA_INGEST_RETRY_MAX_MS = Math.max(
   DELTA_INGEST_RETRY_BASE_MS,
   Number(process.env.DELTA_INGEST_RETRY_MAX_MS || 45_000) || 45_000
 );
+const DELTA_INGEST_HTTP_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.DELTA_INGEST_HTTP_TIMEOUT_MS || 30_000) || 30_000
+);
 const DELTA_INGEST_REQUIRED_200_ACKS = Math.max(
   1,
   Math.min(4, Number(process.env.DELTA_INGEST_REQUIRED_200_ACKS || 2) || 2)
@@ -18078,7 +18082,7 @@ async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempote
 
   for (const cand of candidates.slice(0, 4)) {
     const retryHeaders = __deltaBuildCtIngestHeaders({ idempotencyKey });
-    const res = await __deltaPostWebhookJson(cand.ingestUrl, payload, { timeoutMs: 4500, headers: retryHeaders });
+    const res = await __deltaPostWebhookJson(cand.ingestUrl, payload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
     if (__deltaLooksLikeWrongIngestEndpointResponse(res)) continue;
 
     try {
@@ -18622,7 +18626,7 @@ async function __deltaIngestTick() {
       }
     } catch {}
 
-    let res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers });
+    let res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers });
     let statusCode = Number(res && res.status || 0) || 0;
     if (statusCode === 401 || statusCode === 403) {
       auth = await __deltaResolveCtIngestAuth({ forceBootstrap: true, reason: 'ingest_unauthorized' });
@@ -18631,7 +18635,7 @@ async function __deltaIngestTick() {
         const retryHeaders = __deltaBuildCtIngestHeaders({
           idempotencyKey: payload.idempotency_key
         });
-        res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers: retryHeaders });
+        res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
       }
     }
     statusCode = Number(res && res.status || 0) || 0;
@@ -18643,7 +18647,7 @@ async function __deltaIngestTick() {
         const retryHeaders = __deltaBuildCtIngestHeaders({
           idempotencyKey: payload.idempotency_key
         });
-        res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: 4500, headers: retryHeaders });
+        res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
       }
     }
     if (__deltaLooksLikeWrongIngestEndpointResponse(res)) {
@@ -20215,14 +20219,15 @@ async function __deltaAttachCdpEar(nome, page) {
         const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
         const diskCityRaw = String(diskRow && diskRow.city || '').trim();
         const diskCity = diskCityRaw || null;
+        const normalizedWindowTs = Math.max(0, Number(tsForWindow || 0) || 0);
         let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
-        const diskHighWatermark = __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey);
+        const diskHighWatermark = Math.max(0, Number(__deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey) || 0) || 0);
         if (__deltaIsKnownProcessedStatus(diskStatus)) {
           const previousDiskStatus = String(diskStatus || '');
-          const canReactivateByTimestamp = tsForWindow > Math.max(0, Number(diskHighWatermark || 0) || 0);
+          const canReactivateByTimestamp = normalizedWindowTs > diskHighWatermark;
           if (canReactivateByTimestamp) {
             try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
-            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, tsForWindow); } catch {}
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
             diskStatus = 'active';
             try {
               __forensicEdgeEmit({
@@ -20232,8 +20237,8 @@ async function __deltaAttachCdpEar(nome, page) {
                 details: {
                   reason: 'new_message_after_historical_high_watermark',
                   previous_status: previousDiskStatus,
-                  previous_high_watermark: Number(diskHighWatermark || 0) || 0,
-                  message_at: tsForWindow,
+                  previous_high_watermark: diskHighWatermark,
+                  message_at: normalizedWindowTs,
                   op: op || null
                 }
               });
@@ -20247,8 +20252,8 @@ async function __deltaAttachCdpEar(nome, page) {
                 details: {
                   reason: 'historical_watermark_guard',
                   state_status: String(diskStatus || ''),
-                  high_watermark: Number(diskHighWatermark || 0) || 0,
-                  message_at: tsForWindow,
+                  high_watermark: diskHighWatermark,
+                  message_at: normalizedWindowTs,
                   op: op || null,
                   text_preview: String(texto || '').slice(0, 220)
                 }
@@ -20267,8 +20272,8 @@ async function __deltaAttachCdpEar(nome, page) {
               queue_mode: 'capture_only',
               flow_stage: 'skip_known_processed_state_disk_lookup',
               state_status: String(diskStatus || ''),
-              high_watermark: Number(diskHighWatermark || 0) || 0,
-              message_at: tsForWindow,
+              high_watermark: diskHighWatermark,
+              message_at: normalizedWindowTs,
               ...networkCtx
             });
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
@@ -20356,11 +20361,11 @@ async function __deltaAttachCdpEar(nome, page) {
             Number(st.high_watermark || st.highWatermark || 0) || 0,
             __deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey)
           );
-          if (tsForWindow > stateHighWatermark) {
+          if (normalizedWindowTs > stateHighWatermark) {
             st.status = 'active';
             st.updatedAt = nowMs;
             try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
-            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, tsForWindow); } catch {}
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
           } else {
             try {
               __forensicEdgeEmit({
@@ -20372,7 +20377,7 @@ async function __deltaAttachCdpEar(nome, page) {
                   state_status: String(st.status || ''),
                   high_watermark: Number(stateHighWatermark || 0) || 0,
                   op: op || null,
-                  message_at: tsForWindow,
+                  message_at: normalizedWindowTs,
                   text_preview: String(texto || '').slice(0, 220)
                 }
               });
@@ -20391,7 +20396,7 @@ async function __deltaAttachCdpEar(nome, page) {
               flow_stage: 'skip_known_processed_state',
               state_status: String(st.status || ''),
               high_watermark: Number(stateHighWatermark || 0) || 0,
-              message_at: tsForWindow,
+              message_at: normalizedWindowTs,
               ...networkCtx
             });
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
