@@ -15208,6 +15208,16 @@ const DELTA_BOOT_REPLAY_LOOKBACK_HOURS = Math.max(
   Math.min(168, Number(process.env.DELTA_BOOT_REPLAY_LOOKBACK_HOURS || 72) || 72)
 );
 const DELTA_BOOT_REPLAY_LOOKBACK_MS = DELTA_BOOT_REPLAY_LOOKBACK_HOURS * 60 * 60 * 1000;
+const DELTA_BOOT_REPLAY_ENABLED = String(
+  process.env.DELTA_BOOT_REPLAY_ENABLED == null
+    ? '0'
+    : process.env.DELTA_BOOT_REPLAY_ENABLED
+).trim() !== '0';
+const DELTA_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE = String(
+  process.env.DELTA_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE == null
+    ? '1'
+    : process.env.DELTA_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE
+).trim() !== '0';
 const DELTA_BOOT_REPLAY_MAX_THREADS = Math.max(
   10,
   Math.min(3000, Number(process.env.DELTA_BOOT_REPLAY_MAX_THREADS || 500) || 500)
@@ -16463,6 +16473,9 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
   __deltaBootReplayDone = true;
   const out = {
     ok: true,
+    skipped: false,
+    reason: '',
+    queue_lag_bytes: 0,
     scanned: 0,
     enqueued: 0,
     enqueue_failed: 0,
@@ -16473,6 +16486,18 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
     hit_max: false
   };
   try {
+    if (!DELTA_BOOT_REPLAY_ENABLED) {
+      out.skipped = true;
+      out.reason = 'disabled';
+      return out;
+    }
+    const queueStats = __deltaReadQueueBacklogStatsSync();
+    out.queue_lag_bytes = Number(queueStats && queueStats.lag_bytes || 0) || 0;
+    if (DELTA_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE && out.queue_lag_bytes > 0) {
+      out.skipped = true;
+      out.reason = 'queue_backlog_present';
+      return out;
+    }
     const parsed = __deltaReadThreadStateFileSync();
     const rows = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
     const now = Date.now();
@@ -16526,6 +16551,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
           seq: Number(m && m.seq || 0) || 0
         }))
         .filter((m) => !!m.text)
+        .filter((m) => !/^\s*(você|voce|you)\s*:/i.test(String(m && m.text || '')))
         .slice(-80);
       const concatText = normalizedMessages.map((m) => m.text).join('\n').trim();
       const city = String(row && row.city || '').trim() || DELTA_FALLBACK_CITY;
@@ -17669,6 +17695,9 @@ function __deltaBuildCompactQueuePayload(payload) {
     network_request_id: __deltaClampQueueString(p.network_request_id, 120) || null,
     network_source_url: __deltaClampQueueString(p.network_source_url, 600) || null,
     network_source_hint: __deltaClampQueueString(p.network_source_hint, 120) || null,
+    sender_id: __deltaClampQueueString(p.sender_id || p.actor_id, 40) || null,
+    account_user_id: __deltaClampQueueString(p.account_user_id || p.accountUserId, 40) || null,
+    direction: __deltaClampQueueString(p.direction || p.message_direction, 40) || null,
     hands_error: __deltaClampQueueString(p.hands_error, 300) || null,
     retry_in_ms: Math.max(0, Number(p.retry_in_ms || 0) || 0),
     history_reason: __deltaClampQueueString(p.history_reason, 120) || null,
@@ -18657,6 +18686,14 @@ function __deltaBuildCtIngestPayload(payload) {
     link_anuncio: linkAnuncio,
     client_name: clientName,
     saudacao_texto: saudacaoTexto,
+    operacao_meta: String(p.operacao_meta || p.operation || '').trim() || undefined,
+    flow_stage: String(p.flow_stage || '').trim() || undefined,
+    event: String(p.event || '').trim() || undefined,
+    sender_id: String(p.sender_id || p.actor_id || '').replace(/\D/g, '').trim() || undefined,
+    account_user_id: String(p.account_user_id || p.accountUserId || '').replace(/\D/g, '').trim() || undefined,
+    direction: String(p.direction || p.message_direction || '').trim() || undefined,
+    ingest_boot_replay: p.ingest_boot_replay === true ? true : undefined,
+    forensic_boot_replay: p.forensic_boot_replay === true ? true : undefined,
     customer_name: String(p.customer_name || p.nome_cliente_limpo || clientName).trim() || clientName,
     nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || clientName).trim() || clientName,
   };
@@ -20021,6 +20058,18 @@ async function __deltaAttachCdpEar(nome, page) {
     if (uid && uid.length >= 5) {
       const ctrl = controllers.get(nome);
       if (ctrl) ctrl.deltaAccountUserId = String(uid);
+    } else {
+      try {
+        const runtimeCookies = await page.cookies('https://www.facebook.com');
+        const runtimeUser = Array.isArray(runtimeCookies)
+          ? runtimeCookies.find((c) => c && String(c.name || '').trim().toLowerCase() === 'c_user')
+          : null;
+        const runtimeUid = String(runtimeUser && runtimeUser.value || '').replace(/\D/g, '');
+        if (runtimeUid && runtimeUid.length >= 5) {
+          const ctrl = controllers.get(nome);
+          if (ctrl) ctrl.deltaAccountUserId = runtimeUid;
+        }
+      } catch {}
     }
   } catch {}
 
@@ -20329,10 +20378,18 @@ async function __deltaAttachCdpEar(nome, page) {
 
         // Classificação robusta inbound/outbound:
         // - Se sender == account_user_id (c_user), é outbound (mensagem nossa) -> não deve virar “mensagem do cliente”.
+        const senderIdNormalized = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
+        const accountUserIdNormalized = String(ev && (ev.account_user_id || ev.accountUserId) || ctrl.deltaAccountUserId || '').replace(/\D/g, '');
+        const directionNormalized = String(ev && ev.direction || '').trim().toLowerCase();
         try {
-          const sender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
-          const account = String(ev && (ev.account_user_id || ev.accountUserId) || ctrl.deltaAccountUserId || '').replace(/\D/g, '');
-          if (sender && account && sender === account) {
+          if (senderIdNormalized && accountUserIdNormalized && senderIdNormalized === accountUserIdNormalized) {
+            continue;
+          }
+          if (
+            !senderIdNormalized &&
+            !accountUserIdNormalized &&
+            /^\s*(você|voce|you)\s*:/i.test(String(texto || ''))
+          ) {
             continue;
           }
         } catch {}
@@ -20540,6 +20597,9 @@ async function __deltaAttachCdpEar(nome, page) {
             flow_stage: 'chat_ativo_realtime_disk_lookup',
             state_status: 'active',
             message_at: metaTsMs,
+            sender_id: senderIdNormalized || null,
+            account_user_id: accountUserIdNormalized || null,
+            direction: directionNormalized || null,
             ...networkCtx
           });
           try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
@@ -20690,6 +20750,9 @@ async function __deltaAttachCdpEar(nome, page) {
             dispatch_ct: true,
             queue_mode: 'dispatch_ct',
             flow_stage: 'chat_ativo_realtime',
+            sender_id: senderIdNormalized || null,
+            account_user_id: accountUserIdNormalized || null,
+            direction: directionNormalized || null,
             ...networkCtx
           });
           st.lastDispatchAt = nowMs;
