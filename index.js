@@ -2473,19 +2473,7 @@ async function __readLocalStatusForEventBridge() {
 function __resolveCtServerEventConfig() {
   try {
     const cfg = readCtConfig();
-    const fromCfg = String((cfg && cfg.ctBaseUrl) || '').trim();
-    const isLegacyNgrokUrl = (raw) => {
-      const s = String(raw || '').trim().toLowerCase();
-      return !!s && (s.includes('.ngrok.io') || s.includes('.ngrok-free.app') || s.includes('.ngrok.app'));
-    };
-    const allowNgrok = String(process.env.CT_ALLOW_NGROK_URL || '').trim() === '1';
-    const cfgCtBaseUrl = (fromCfg && !(isLegacyNgrokUrl(fromCfg) && !allowNgrok)) ? fromCfg : '';
-    const ctBaseUrlRaw = String(
-      cfgCtBaseUrl ||
-      process.env.CT_BASE_URL ||
-      process.env.CT_URL ||
-      'https://api.convenientetecnologia.com'
-    ).trim();
+    const ctBaseUrlRaw = 'https://convenientetecnologia.com';
     const ctBaseUrl = ctBaseUrlRaw.replace(/\/+$/, '');
     const explicitEventUrl = String(
       process.env.CT_SERVER_EVENT_URL ||

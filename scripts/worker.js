@@ -15127,10 +15127,10 @@ const DELTA_CT_CANONICAL_BASE = (() => {
   const raw = String(
     process.env.CT_DELTA_CANONICAL_BASE_URL ||
     process.env.CT_INGEST_CANONICAL_BASE_URL ||
-    'https://painel.convenientetecnologia.com'
+    'https://convenientetecnologia.com'
   ).trim();
   const normalized = normalizeCtBaseUrl(raw, { allowLegacyNgrok: true });
-  return String(normalized || 'https://painel.convenientetecnologia.com').replace(/\/+$/, '');
+  return String(normalized || 'https://convenientetecnologia.com').replace(/\/+$/, '');
 })();
 const DELTA_HISTORY_LOOKBACK_HOURS = Math.max(
   1,
@@ -18003,7 +18003,7 @@ function __deltaBuildIngestRepairCandidates(currentIngestUrl = '') {
     push(String(notifierBaseFromEndpoints() || '').trim(), 'notifier_endpoints');
   } catch {}
   push(DELTA_CT_CANONICAL_BASE, 'canonical_base');
-  push('https://api.convenientetecnologia.com', 'api_default');
+  push('https://convenientetecnologia.com', 'api_default');
   return out;
 }
 async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempotencyKey = '' } = {}) {
@@ -18048,7 +18048,7 @@ function __deltaResolveCtIngestUrlAutonomous() {
     if (ingestFromNotifier) return ingestFromNotifier;
   } catch {}
 
-  return __deltaBuildCtIngestUrlFromBase(DELTA_CT_CANONICAL_BASE) || 'https://painel.convenientetecnologia.com/api/messenger-delta/ingest';
+  return __deltaBuildCtIngestUrlFromBase(DELTA_CT_CANONICAL_BASE) || 'https://convenientetecnologia.com/api/messenger-delta/ingest';
 }
 function __deltaExtractBootstrapSecrets(parsed) {
   const p = parsed && typeof parsed === 'object' ? parsed : {};
@@ -18108,7 +18108,7 @@ function __deltaBuildBootstrapUrls() {
     if (base) push(`${base.replace(/\/+$/, '')}/api/edge/bootstrap`);
   } catch {}
 
-  push('https://api.convenientetecnologia.com/api/edge/bootstrap');
+  push('https://convenientetecnologia.com/api/edge/bootstrap');
   return out;
 }
 async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } = {}) {
