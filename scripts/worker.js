@@ -17694,21 +17694,27 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     return;
   }
   const cursorFlush = __deltaFlushPostHandsTimerCursorSync(n, tk);
-  try {
-    __forensicEdgeEmit({
-      account_login: n,
-      thread_key: tk,
-      flow_stage: 'hands_post_cursor_flush',
-      details: {
-        ok: !!(cursorFlush && cursorFlush.ok),
-        queued_dispatch_count: Number(queuedDispatchCount || 0) || 0,
-        skipped_duplicate_on_disk: Number(skippedDuplicateOnDisk || 0) || 0,
-        removed_total: Number(cursorFlush && cursorFlush.removed_total || 0) || 0,
-        removed_thread: Number(cursorFlush && cursorFlush.removed_thread || 0) || 0,
-        kept: Number(cursorFlush && cursorFlush.kept || 0) || 0
-      }
-    });
-  } catch {}
+  if (
+    !cursorFlush ||
+    cursorFlush.ok !== true ||
+    (Number(skippedDuplicateOnDisk || 0) || 0) > 0
+  ) {
+    try {
+      __forensicEdgeEmit({
+        account_login: n,
+        thread_key: tk,
+        flow_stage: 'hands_post_cursor_flush',
+        details: {
+          ok: !!(cursorFlush && cursorFlush.ok),
+          queued_dispatch_count: Number(queuedDispatchCount || 0) || 0,
+          skipped_duplicate_on_disk: Number(skippedDuplicateOnDisk || 0) || 0,
+          removed_total: Number(cursorFlush && cursorFlush.removed_total || 0) || 0,
+          removed_thread: Number(cursorFlush && cursorFlush.removed_thread || 0) || 0,
+          kept: Number(cursorFlush && cursorFlush.kept || 0) || 0
+        }
+      });
+    } catch {}
+  }
   __deltaKickIngestLoop();
 
   // Após criação do card, mantemos thread em modo ativo (tempo real),
@@ -20566,7 +20572,7 @@ async function __deltaAttachCdpEar(nome, page) {
         let dedupMetaIdSynthetic = false;
         // Contingência canônica: quando a Meta omite mid/message_id nos primeiros frames de boot,
         // geramos ID sintético estável por thread+texto+timestamp para evitar descarte cego.
-        if ((op === 'insertMessage' || op === 'upsertMessage' || op === 'updateThreadSnippet') && !dedupMetaId) {
+        if ((op === 'insertMessage' || op === 'upsertMessage') && !dedupMetaId) {
           try {
             const synthSeed = `${String(threadKey || '').trim()}|${String(texto || '')}|${Number(metaTsMs || nowMs || Date.now()) || Date.now()}`;
             dedupMetaId = `synth_${crypto.createHash('sha1').update(synthSeed).digest('hex')}`;
@@ -20959,77 +20965,7 @@ async function __deltaAttachCdpEar(nome, page) {
             continue;
           }
         }
-        if (op === 'updateThreadSnippet') {
-          const snippetCheck = __deltaShouldFilterDuplicateSnippet(st, texto);
-          if (snippetCheck && snippetCheck.shouldFilter === true) {
-            try {
-              __forensicEdgeEmit({
-                account_login: String(nome || ''),
-                thread_key: threadKey,
-                flow_stage: 'discard_filter_triggered',
-                details: {
-                  reason: 'duplicate_snippet_filtered',
-                  snippet_reason: String(snippetCheck.reason || ''),
-                  known_count: Number(snippetCheck.knownCount || 0) || 0,
-                  unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
-                  total_lines: Number(snippetCheck.totalLines || 0) || 0,
-                  op,
-                  transport: String(transport || ''),
-                  requestId: String(requestId || ''),
-                  sourceHint: String(sourceHint || ''),
-                  dedup_meta_id: dedupMetaId || null,
-                  dedup_meta_id_synthetic: dedupMetaIdSynthetic,
-                  message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-                  offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-                  text_preview: String(texto || '').slice(0, 220)
-                }
-              });
-            } catch {}
-            try {
-              __deltaTriagemEmit('duplicate_snippet_filtered', {
-                thread_key: String(threadKey || ''),
-                text_purged: true,
-                snippet_reason: String(snippetCheck.reason || ''),
-                known_count: Number(snippetCheck.knownCount || 0) || 0,
-                unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
-                total_lines: Number(snippetCheck.totalLines || 0) || 0
-              });
-            } catch {}
-            try {
-              __deltaLogTriagemWorker({
-                msg: 'duplicate_snippet_filtered',
-                thread_key: String(threadKey || ''),
-                text_purged: true,
-                snippet_reason: String(snippetCheck.reason || ''),
-                known_count: Number(snippetCheck.knownCount || 0) || 0,
-                unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
-                total_lines: Number(snippetCheck.totalLines || 0) || 0
-              });
-            } catch {}
-            continue;
-          }
-          // Snippet nunca entra no buffer de dispatch; só captura forense.
-          __deltaAppendPendingJsonlSync({
-            event: 'lead_sync_only_snippet',
-            server_id: serverId || null,
-            account_login: String(nome || ''),
-            thread_key: threadKey,
-            texto_limpo: texto,
-            dedup_meta_id: dedupMetaId || null,
-            dedup_meta_id_synthetic: dedupMetaIdSynthetic,
-            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: st.city || null,
-            operacao_meta: op,
-            mensagem_seq: Number(st.seq || 0) || 0,
-            dispatch_ct: false,
-            queue_mode: 'capture_only',
-            flow_stage: 'snippet_sync_only',
-            message_at: metaTsMs,
-            ...networkCtx
-          });
-          continue;
-        }
+        if (op === 'updateThreadSnippet') continue;
         if (!dedupMetaId && __deltaIsRecentDuplicate(st, texto, op, nowMs)) {
           try {
             __forensicEdgeEmit({
