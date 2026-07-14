@@ -17160,6 +17160,10 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const handsErrorRaw = String(handsOut && handsOut.error || '').trim();
   const handsErrorNorm = handsErrorRaw.toLowerCase();
+  const handsRoutingFailure =
+    handsErrorNorm.includes('wrong_thread_guard_blocked') ||
+    handsErrorNorm.includes('messages_boot_not_stable') ||
+    handsErrorNorm.includes('thread_open_hydration_timeout');
   const handsMetadataFailure =
     (
       handsErrorNorm.includes('city_') ||
@@ -17168,6 +17172,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       handsErrorNorm.includes('link') ||
       handsErrorNorm.includes('metadata')
     ) ||
+    handsRoutingFailure ||
     !!(handsOut && handsOut.greeting_already_sent === true);
 
   if (!handsOut || handsOut.ok !== true) {
@@ -17208,6 +17213,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
           queue_mode: 'capture_only',
           flow_stage: 'hands_metadata_contingency_applied',
           hands_error: handsErrorRaw || null,
+          hands_routing_contingency: handsRoutingFailure,
           hands_failures: Number(st.handsFailures || 0) || 0,
         });
       } catch {}
