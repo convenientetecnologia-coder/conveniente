@@ -4745,6 +4745,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const prior = greetingStateByThread.get(t) || null;
     const greetingAlreadySent = !!(prior && prior.sentAt);
     const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
+    let greetingSentAt = Number((prior && prior.sentAt) || 0) || 0;
     const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
     const cityCollectorTimeoutMs = Math.max(
       8_000,
@@ -4831,6 +4832,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           error: String((sendOut && sendOut.error) || "hands_send_failed"),
         };
       }
+      greetingSentAt = Date.now();
     } else {
       // Retry de cidade não reenvia saudação: somente reabre o thread para recuperar link, se necessário.
       if (!(prior && prior.itemLink)) {
@@ -4844,6 +4846,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         resolveItemLink(prior.itemLink);
       }
       sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
+      if (!greetingSentAt) greetingSentAt = Date.now();
     }
 
     const itemLinkFinal = String(
@@ -4928,7 +4931,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
     if (!cityCandidate) {
       greetingStateByThread.set(t, {
-        sentAt: Number((prior && prior.sentAt) || Date.now()),
+        sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()),
         greetingText,
         itemLink: itemLinkFinal,
         city: null,
@@ -4963,11 +4966,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         customer_name: nomeClienteLimpo,
         metadata_contingency_applied: true,
         metadata_error: String((cityOut && cityOut.error) || "city_collect_failed"),
+        greeting_already_sent: greetingAlreadySent,
+        greeting_sent_at: Number(greetingSentAt || Date.now()) || Date.now(),
       };
     }
 
     greetingStateByThread.set(t, {
-      sentAt: Number((prior && prior.sentAt) || Date.now()),
+      sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()),
       greetingText,
       itemLink: itemLinkFinal,
       city: cityCandidate,
@@ -5002,6 +5007,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       mensagens_cliente: mensagensConcatenadas,
       nome_cliente_limpo: nomeClienteLimpo,
       customer_name: nomeClienteLimpo,
+      greeting_already_sent: greetingAlreadySent,
+      greeting_sent_at: Number(greetingSentAt || Date.now()) || Date.now(),
     };
   }
 

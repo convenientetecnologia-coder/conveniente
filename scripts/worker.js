@@ -17331,12 +17331,19 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
-  const messageAt = Number(after.minAt || 0) || Date.now();
+  const messageAt = Number(after.maxAt || after.minAt || 0) || Date.now();
   const city = String((handsOut && handsOut.cidade) || '').trim() || DELTA_FALLBACK_CITY;
   const linkAnuncio = String((handsOut && (handsOut.link_anuncio || handsOut.profile_url)) || '').trim() || DELTA_FALLBACK_LINK;
   const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+  const greetingTimestampMs = __deltaNormalizeTimestampMs(
+    Number(
+      (handsOut && (handsOut.greeting_sent_at || handsOut.greeting_ts || handsOut.greeting_timestamp_ms)) ||
+      messageAt
+    ) || messageAt,
+    messageAt
+  );
 
   if (!String((handsOut && handsOut.cidade) || '').trim()) {
     try {
@@ -17356,6 +17363,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
         hands_error: String(handsOut && handsOut.error || '').slice(0, 300) || null,
         saudacao_enviada: !!(handsOut && handsOut.greeting_text),
         saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+        saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null,
       });
     } catch {}
   }
@@ -17386,6 +17394,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     message_at: messageAt,
     saudacao_enviada: true,
     saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
+    saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null,
     nome_cliente_limpo: nomeClienteLimpo,
     customer_name: customerName,
   });
@@ -17691,6 +17700,8 @@ function __deltaBuildCompactQueuePayload(payload) {
     queue_mode: __deltaClampQueueString(p.queue_mode, 80) || null,
     flow_stage: __deltaClampQueueString(p.flow_stage, 120) || null,
     message_at: Number(p.message_at || p.server_timestamp_ms || p.timestamp_ms || 0) || Date.now(),
+    saudacao_texto: __deltaClampQueueString(p.saudacao_texto, 3000) || null,
+    saudacao_timestamp_ms: Number(p.saudacao_timestamp_ms || p.saudacao_ts || p.greeting_timestamp_ms || 0) || 0,
     network_transport: __deltaClampQueueString(p.network_transport, 40) || null,
     network_request_id: __deltaClampQueueString(p.network_request_id, 120) || null,
     network_source_url: __deltaClampQueueString(p.network_source_url, 600) || null,
@@ -18673,6 +18684,10 @@ function __deltaBuildCtIngestPayload(payload) {
     p.ts ||
     Date.now()
   ) || Date.now();
+  const saudacaoTimestampMs = __deltaNormalizeTimestampMs(
+    Number(p.saudacao_timestamp_ms || p.saudacao_ts || p.greeting_timestamp_ms || tsRaw) || tsRaw,
+    tsRaw
+  );
   const ts = __deltaNormalizeTimestampMs(tsRaw, Date.now());
 
   return {
@@ -18686,6 +18701,7 @@ function __deltaBuildCtIngestPayload(payload) {
     link_anuncio: linkAnuncio,
     client_name: clientName,
     saudacao_texto: saudacaoTexto,
+    saudacao_timestamp_ms: saudacaoTexto ? saudacaoTimestampMs : undefined,
     operacao_meta: String(p.operacao_meta || p.operation || '').trim() || undefined,
     flow_stage: String(p.flow_stage || '').trim() || undefined,
     event: String(p.event || '').trim() || undefined,
