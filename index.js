@@ -2473,8 +2473,23 @@ async function __readLocalStatusForEventBridge() {
 function __resolveCtServerEventConfig() {
   try {
     const cfg = readCtConfig();
-    const ctBaseUrlRaw = 'https://convenientetecnologia.com';
-    const ctBaseUrl = ctBaseUrlRaw.replace(/\/+$/, '');
+    const fromCfg = String((cfg && cfg.ctBaseUrl) || '').trim();
+    const isLegacyNgrokUrl = (raw) => {
+      const s = String(raw || '').trim().toLowerCase();
+      return !!s && (s.includes('.ngrok.io') || s.includes('.ngrok-free.app') || s.includes('.ngrok.app'));
+    };
+    const allowNgrok = String(process.env.CT_ALLOW_NGROK_URL || '').trim() === '1';
+    const cfgCtBaseUrl = (fromCfg && !(isLegacyNgrokUrl(fromCfg) && !allowNgrok)) ? fromCfg : '';
+    const ctBaseUrlRaw = String(
+      cfgCtBaseUrl ||
+      process.env.CT_BASE_URL ||
+      process.env.CT_URL ||
+      'https://painel.convenientetecnologia.com'
+    ).trim();
+    const ctBaseUrlSanitized = ctBaseUrlRaw.replace(/\/+$/, '');
+    const ctBaseUrl = /^https?:\/\/convenientetecnologia\.com\/?$/i.test(ctBaseUrlSanitized)
+      ? 'https://painel.convenientetecnologia.com'
+      : ctBaseUrlSanitized;
     const explicitEventUrl = String(
       process.env.CT_SERVER_EVENT_URL ||
       process.env.CONVENIENTE_CT_SERVER_EVENT_URL ||
@@ -2670,7 +2685,7 @@ function __deltaProvisionDeliveryConfirmEnv() {
   try {
     // 1) URL canônica e rígida do confirm-delivery (balão azul)
     // Regra soberana: não derivar de envs genéricas nem hosts de VM/api.*
-    const CT_CANONICAL_BASE = 'https://convenientetecnologia.com';
+    const CT_CANONICAL_BASE = 'https://painel.convenientetecnologia.com';
     process.env.VIRTUS_DELTA_CT_DELIVERY_CONFIRM_URL = CT_CANONICAL_BASE;
 
     try {
