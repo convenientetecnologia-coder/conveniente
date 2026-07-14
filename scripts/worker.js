@@ -16433,6 +16433,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
     ok: true,
     scanned: 0,
     enqueued: 0,
+    enqueue_failed: 0,
     skipped_old: 0,
     skipped_status: 0,
     skipped_empty: 0,
@@ -16510,7 +16511,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         Number(tail && tail.seq || 0) || 0,
         Number(row && row.seq || 0) || 0
       );
-      __deltaAppendPendingJsonlSync({
+      const queued = __deltaAppendPendingJsonlSync({
         event: 'lead_thread_state_boot_replay',
         server_id: hostId,
         account_login: nome,
@@ -16531,7 +16532,8 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         message_at: messageAt,
         ingest_boot_replay: true
       });
-      out.enqueued += 1;
+      if (queued) out.enqueued += 1;
+      else out.enqueue_failed += 1;
     }
     if (out.enqueued > 0) __deltaKickIngestLoop();
     return out;
@@ -16691,6 +16693,7 @@ function __deltaReplayForensicLeadsToCtOnBoot({ bootReplaySummary = null } = {})
     queue_lag_bytes: 0,
     candidates: 0,
     enqueued: 0,
+    enqueue_failed: 0,
     files_scanned: 0,
     lines_scanned: 0,
     parsed_records: 0,
@@ -16756,7 +16759,7 @@ function __deltaReplayForensicLeadsToCtOnBoot({ bootReplaySummary = null } = {})
       const accountLogin = String(cand && cand.account_login || '').trim();
       const threadKey = String(cand && cand.thread_key || '').trim();
       if (!accountLogin || !threadKey) continue;
-      __deltaAppendPendingJsonlSync({
+      const queued = __deltaAppendPendingJsonlSync({
         event: 'lead_forensic_boot_replay',
         server_id: hostId,
         account_login: accountLogin,
@@ -16785,7 +16788,8 @@ function __deltaReplayForensicLeadsToCtOnBoot({ bootReplaySummary = null } = {})
         ingest_boot_replay: true,
         forensic_boot_replay: true
       });
-      out.enqueued += 1;
+      if (queued) out.enqueued += 1;
+      else out.enqueue_failed += 1;
     }
     if (out.enqueued > 0) __deltaKickIngestLoop();
     return out;
@@ -17305,7 +17309,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   st.lastDispatchAt = Date.now();
   st.updatedAt = Date.now();
 
-  __deltaAppendPendingJsonlSync({
+  const dispatchQueued = __deltaAppendPendingJsonlSync({
     event: 'lead_consolidado_pos_hands',
     server_id: readHostIdSync() || null,
     account_login: n,
@@ -17327,6 +17331,29 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     nome_cliente_limpo: nomeClienteLimpo,
     customer_name: customerName,
   });
+  if (!dispatchQueued) {
+    st.status = 'new_buffering';
+    st.inFlight = false;
+    st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
+    st.updatedAt = Date.now();
+    const retryCtl = __deltaQueueThreadRetryOnDiskSecondary(st, {
+      nome: n,
+      threadKey: tk,
+      retryReason: 'queue_persist_failed'
+    });
+    const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
+    const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
+    try {
+      logger.error('[DELTA][QUEUE] falha ao enfileirar lead_consolidado_pos_hands; retry armado', {
+        account_login: n,
+        thread_key: tk,
+        retry_in_ms: retryInMs,
+        retry_queue_mode: retryQueueMode
+      });
+    } catch {}
+    __deltaSchedulePersistThreadState();
+    return;
+  }
   __deltaKickIngestLoop();
 
   // Após criação do card, mantemos thread em modo ativo (tempo real),
@@ -17360,6 +17387,7 @@ try {
     ok: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.ok),
     scanned: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.scanned || 0) || 0,
     enqueued: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueued || 0) || 0,
+    enqueue_failed: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueue_failed || 0) || 0,
     skipped_old: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_old || 0) || 0,
     skipped_status: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_status || 0) || 0,
     skipped_empty: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_empty || 0) || 0,
@@ -17378,6 +17406,7 @@ try {
     queue_lag_bytes: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.queue_lag_bytes || 0) || 0,
     candidates: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.candidates || 0) || 0,
     enqueued: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueued || 0) || 0,
+    enqueue_failed: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueue_failed || 0) || 0,
     files_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.files_scanned || 0) || 0,
     lines_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.lines_scanned || 0) || 0,
     parsed_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.parsed_records || 0) || 0,
@@ -18513,6 +18542,31 @@ async function __deltaIngestTick() {
       return;
     }
     if (lineRes.eof) {
+      try {
+        const queueExists = !!fs.existsSync(DELTA_QUEUE_PATH);
+        if (!queueExists && offset > 0) {
+          __deltaWriteCursorOffsetSync(0);
+          try {
+            logger.warn('[DELTA][INGEST] cursor stale detectado sem fila; reset para 0', { offset });
+          } catch {}
+          __deltaIngestBackoffMs = 220;
+          return;
+        }
+        if (queueExists) {
+          const queueSize = Number(fs.statSync(DELTA_QUEUE_PATH).size || 0) || 0;
+          if (offset > queueSize) {
+            __deltaWriteCursorOffsetSync(queueSize);
+            try {
+              logger.warn('[DELTA][INGEST] cursor acima do tamanho da fila; cursor ajustado', {
+                offset,
+                queue_size: queueSize
+              });
+            } catch {}
+            __deltaIngestBackoffMs = 220;
+            return;
+          }
+        }
+      } catch {}
       try {
         const replayOut = __deltaReplayDeadletterBatchSync({ maxItems: DELTA_DEADLETTER_REPLAY_BATCH });
         if (replayOut && Number(replayOut.replayed || 0) > 0) {
