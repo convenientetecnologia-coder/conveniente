@@ -15574,7 +15574,13 @@ async function __deltaRunNewLeadsTimerPump(nome) {
 
       // Se o thread já ficou ativo (ou em voo), não faz sentido segurar represa: consome e segue.
       const stThread = __deltaGetThreadState(n, tk);
-      if (stThread && (stThread.status === 'active' || stThread.status === 'hands_in_progress' || stThread.inFlight)) {
+      const diskRow = __deltaReadThreadStateRowFromDiskSync(n, tk);
+      const diskStatus = String(diskRow && diskRow.status || '').trim().toLowerCase();
+      const diskAlreadyOperational = (diskStatus === 'active' || diskStatus === 'hands_in_progress');
+      if (
+        (stThread && (stThread.status === 'active' || stThread.status === 'hands_in_progress' || stThread.inFlight)) ||
+        diskAlreadyOperational
+      ) {
         try { __deltaScrubNewLeadTimersOutboxSync(n, { consumeUntilOffset: nextOffset }); } catch { __deltaWriteNewLeadsCursorSync(n, nextOffset); }
         __deltaKickNewLeadsTimerPump(n);
         return;
@@ -17337,6 +17343,14 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+  const diskHighWatermarkBeforeDispatch = __deltaReadKnownThreadHighWatermarkFromDiskSync(n, tk);
+  const suppressBufferedConcatForCt = (
+    messageAt > 0 &&
+    diskHighWatermarkBeforeDispatch > 0 &&
+    diskHighWatermarkBeforeDispatch >= messageAt
+  );
+  const dispatchCustomerConcat = suppressBufferedConcatForCt ? '' : finalText;
+  const dispatchCustomerCount = suppressBufferedConcatForCt ? 0 : (Number(after.count || 0) || 0);
   const greetingTimestampMs = __deltaNormalizeTimestampMs(
     Number(
       (handsOut && (handsOut.greeting_sent_at || handsOut.greeting_ts || handsOut.greeting_timestamp_ms)) ||
@@ -17381,8 +17395,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     account_login: n,
     thread_key: tk,
     texto_limpo: finalText,
-    mensagens_cliente_concatenadas: finalText,
-    mensagens_cliente_qtd: Number(after.count || 0) || 0,
+    mensagens_cliente_concatenadas: dispatchCustomerConcat,
+    mensagens_cliente_qtd: dispatchCustomerCount,
     mensagem_seq: Number(after.toSeq || st.seq || 0) || 0,
     cidade: city,
     link_anuncio: linkAnuncio,
@@ -17390,13 +17404,15 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     operacao_meta: 'buffered_concat_after_hands',
     dispatch_ct: true,
     queue_mode: 'dispatch_ct',
-    flow_stage: 'new_chat_buffered_dispatched',
+    flow_stage: suppressBufferedConcatForCt ? 'new_chat_buffered_snapshot_only' : 'new_chat_buffered_dispatched',
     message_at: messageAt,
     saudacao_enviada: true,
     saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text) : null,
     saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null,
     nome_cliente_limpo: nomeClienteLimpo,
     customer_name: customerName,
+    snapshot_only: suppressBufferedConcatForCt ? true : undefined,
+    high_watermark_before_dispatch: suppressBufferedConcatForCt ? Number(diskHighWatermarkBeforeDispatch || 0) || 0 : undefined,
   });
   if (!dispatchQueued) {
     st.status = 'new_buffering';
