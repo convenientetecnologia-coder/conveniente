@@ -16894,6 +16894,76 @@ function __deltaNormalizeMirrorComparableText(value) {
     .trim()
     .toLowerCase();
 }
+function __deltaTriagemEmit(message, ctx = {}) {
+  try {
+    const payloadCtx = (ctx && typeof ctx === 'object' && !Array.isArray(ctx)) ? ctx : {};
+    __forensicEmitSync(FORENSIC_TRIAGEM_LOG_PATH, {
+      ts: Date.now(),
+      tag: 'TRIAGEM_WORKER',
+      msg: String(message || '').trim() || 'triagem_event',
+      ctx: payloadCtx
+    });
+  } catch {}
+}
+function __deltaCollectRecentCanonicalMessageNormSet(st, { maxItems = 80 } = {}) {
+  try {
+    const msgs = Array.isArray(st && st.messages) ? st.messages : [];
+    const lim = Math.max(10, Math.min(400, Number(maxItems || 80) || 80));
+    const out = new Set();
+    for (let i = msgs.length - 1; i >= 0 && out.size < lim; i -= 1) {
+      const item = msgs[i];
+      const op = String(item && item.op || '').trim();
+      if (op !== 'insertMessage' && op !== 'upsertMessage') continue;
+      const norm = __deltaNormalizeMirrorComparableText(item && item.text || '');
+      if (!norm) continue;
+      out.add(norm);
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+function __deltaShouldFilterDuplicateSnippet(st, text) {
+  const raw = String(text || '').replace(/\r/g, '\n').trim();
+  if (!raw) return { shouldFilter: false, reason: 'empty' };
+  const lines = raw
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  const canonicalSet = __deltaCollectRecentCanonicalMessageNormSet(st, { maxItems: 120 });
+  if (!canonicalSet.size) return { shouldFilter: false, reason: 'no_canonical_reference' };
+  const normalizedLines = lines
+    .map((line) => __deltaNormalizeMirrorComparableText(line))
+    .filter(Boolean);
+  if (!normalizedLines.length) return { shouldFilter: false, reason: 'no_normalized_lines' };
+  const knownCount = normalizedLines.reduce((acc, lineNorm) => acc + (canonicalSet.has(lineNorm) ? 1 : 0), 0);
+  const unknownCount = Math.max(0, normalizedLines.length - knownCount);
+  if (normalizedLines.length >= 2 && knownCount >= 2 && unknownCount <= 1) {
+    return {
+      shouldFilter: true,
+      reason: 'snippet_multiline_mirror',
+      knownCount,
+      unknownCount,
+      totalLines: normalizedLines.length
+    };
+  }
+  if (normalizedLines.length === 1 && canonicalSet.has(normalizedLines[0])) {
+    return {
+      shouldFilter: true,
+      reason: 'snippet_singleline_duplicate',
+      knownCount,
+      unknownCount,
+      totalLines: normalizedLines.length
+    };
+  }
+  return {
+    shouldFilter: false,
+    reason: 'snippet_not_confirmed_as_duplicate',
+    knownCount,
+    unknownCount,
+    totalLines: normalizedLines.length
+  };
+}
 function __deltaCollapseSnippetMirrorMessages(messages, { windowMs = 20_000 } = {}) {
   const src = Array.isArray(messages) ? messages : [];
   const merged = [];
@@ -20294,7 +20364,7 @@ async function __deltaAttachCdpEar(nome, page) {
         let dedupMetaIdSynthetic = false;
         // Contingência canônica: quando a Meta omite mid/message_id nos primeiros frames de boot,
         // geramos ID sintético estável por thread+texto+timestamp para evitar descarte cego.
-        if ((op === 'insertMessage' || op === 'upsertMessage') && !dedupMetaId) {
+        if ((op === 'insertMessage' || op === 'upsertMessage' || op === 'updateThreadSnippet') && !dedupMetaId) {
           try {
             const synthSeed = `${String(threadKey || '').trim()}|${String(texto || '')}|${Number(metaTsMs || nowMs || Date.now()) || Date.now()}`;
             dedupMetaId = `synth_${crypto.createHash('sha1').update(synthSeed).digest('hex')}`;
@@ -20684,6 +20754,56 @@ async function __deltaAttachCdpEar(nome, page) {
               ...networkCtx
             });
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
+            continue;
+          }
+        }
+        if (op === 'updateThreadSnippet') {
+          const snippetCheck = __deltaShouldFilterDuplicateSnippet(st, texto);
+          if (snippetCheck && snippetCheck.shouldFilter === true) {
+            try {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'discard_filter_triggered',
+                details: {
+                  reason: 'duplicate_snippet_filtered',
+                  snippet_reason: String(snippetCheck.reason || ''),
+                  known_count: Number(snippetCheck.knownCount || 0) || 0,
+                  unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
+                  total_lines: Number(snippetCheck.totalLines || 0) || 0,
+                  op,
+                  transport: String(transport || ''),
+                  requestId: String(requestId || ''),
+                  sourceHint: String(sourceHint || ''),
+                  dedup_meta_id: dedupMetaId || null,
+                  dedup_meta_id_synthetic: dedupMetaIdSynthetic,
+                  message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+                  offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+                  text_preview: String(texto || '').slice(0, 220)
+                }
+              });
+            } catch {}
+            try {
+              __deltaTriagemEmit('duplicate_snippet_filtered', {
+                thread_key: String(threadKey || ''),
+                text_purged: true,
+                snippet_reason: String(snippetCheck.reason || ''),
+                known_count: Number(snippetCheck.knownCount || 0) || 0,
+                unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
+                total_lines: Number(snippetCheck.totalLines || 0) || 0
+              });
+            } catch {}
+            try {
+              __deltaLogTriagemWorker({
+                msg: 'duplicate_snippet_filtered',
+                thread_key: String(threadKey || ''),
+                text_purged: true,
+                snippet_reason: String(snippetCheck.reason || ''),
+                known_count: Number(snippetCheck.knownCount || 0) || 0,
+                unknown_count: Number(snippetCheck.unknownCount || 0) || 0,
+                total_lines: Number(snippetCheck.totalLines || 0) || 0
+              });
+            } catch {}
             continue;
           }
         }
