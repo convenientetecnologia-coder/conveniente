@@ -15119,6 +15119,7 @@ const DELTA_RESPONDED_HISTORY_FILENAME = 'chats_respondidos_delta.json';
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
 const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.jsonl');
 const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.cursor.json');
+let __deltaIngestKickRequested = false;
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente sem Nome';
@@ -18407,7 +18408,6 @@ function __deltaBuildCtIngestPayload(payload) {
 
 let __deltaIngestLoopRunning = false;
 let __deltaIngestBackoffMs = 900;
-let __deltaIngestKickRequested = false;
 const __deltaIngestRetryCounterByKey = new Map();
 let __deltaDeadletterReplayLastAt = 0;
 
