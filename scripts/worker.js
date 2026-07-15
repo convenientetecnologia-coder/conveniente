@@ -15124,6 +15124,29 @@ let __deltaIngestKickRequested = false;
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente sem Nome';
+
+/** Link real de item Marketplace — nunca confundir com sentinel. */
+function __deltaIsMarketplaceItemLink(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return false;
+  if (/link\s*n[aã]o\s*coletado/i.test(s)) return false;
+  return /(?:facebook|fb|messenger)\.com\/marketplace\/item\/[0-9A-Za-z_-]+/i.test(s);
+}
+
+/** Cidade sentinel / vazia (nao e cidade geografica). */
+function __deltaIsPendingCityLabel(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return true;
+  return s === 'cidade pendente' || s === 'pendente';
+}
+
+/** Escolhe o primeiro link de item valido; nunca devolve o sentinel. */
+function __deltaPickBestItemLink(...candidates) {
+  for (const c of candidates) {
+    if (__deltaIsMarketplaceItemLink(c)) return String(c).trim();
+  }
+  return null;
+}
 const DELTA_CT_CANONICAL_BASE = (() => {
   const raw = String(
     process.env.CT_DELTA_CANONICAL_BASE_URL ||
@@ -16232,6 +16255,8 @@ function __deltaCreateThreadState(nome, threadKey) {
     timerHandle: null,
     handsFailures: 0,
     city: null,
+    city_source: null,
+    link_anuncio: null,
     seq: 0,
     messages: [],
     recentMessageKeys: new Map(), // dedupe curto anti-duplicação fantasma
@@ -16241,6 +16266,7 @@ function __deltaCreateThreadState(nome, threadKey) {
 }
 function __deltaSerializeThreadState(st) {
   if (!st || typeof st !== 'object') return null;
+  const link = __deltaPickBestItemLink(st.link_anuncio);
   return {
     nome: String(st.nome || '').trim(),
     thread_key: String(st.thread_key || '').trim(),
@@ -16251,6 +16277,8 @@ function __deltaSerializeThreadState(st) {
     timerReason: String(st.timerReason || '').slice(0, 32),
     handsFailures: Number(st.handsFailures || 0) || 0,
     city: st.city ? String(st.city).slice(0, 120) : null,
+    city_source: st.city_source ? String(st.city_source).slice(0, 80) : null,
+    link_anuncio: link ? String(link).slice(0, 600) : null,
     seq: Number(st.seq || 0) || 0,
     lastDispatchAt: Number(st.lastDispatchAt || 0) || 0,
     messages: Array.isArray(st.messages)
@@ -16326,6 +16354,8 @@ function __deltaLoadThreadStateSync() {
       st.updatedAt = Number(row && row.updatedAt || 0) || st.updatedAt;
       st.handsFailures = Number(row && row.handsFailures || 0) || 0;
       st.city = row && row.city ? String(row.city).trim() : null;
+      st.city_source = row && row.city_source ? String(row.city_source).trim() : null;
+      st.link_anuncio = __deltaPickBestItemLink(row && row.link_anuncio);
       st.seq = Number(row && row.seq || 0) || 0;
       st.lastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
       st.messages = Array.isArray(row && row.messages)
@@ -16492,7 +16522,9 @@ function __deltaHydrateThreadStateFromDiskRow(st, row) {
   st.createdAt = __deltaNormalizeTimestampMs(row.createdAt, st.createdAt || 0) || st.createdAt;
   st.updatedAt = __deltaNormalizeTimestampMs(row.updatedAt, st.updatedAt || 0) || st.updatedAt;
   st.handsFailures = Number(row.handsFailures || 0) || 0;
-  st.city = row && row.city ? String(row.city).trim() : null;
+  st.city = row && row.city ? String(row.city).trim() : (st.city || null);
+  st.city_source = row && row.city_source ? String(row.city_source).trim() : (st.city_source || null);
+  st.link_anuncio = __deltaPickBestItemLink(row && row.link_anuncio, st.link_anuncio);
   st.seq = Number(row.seq || 0) || st.seq || 0;
   st.lastDispatchAt = __deltaNormalizeTimestampMs(row.lastDispatchAt, st.lastDispatchAt || 0) || st.lastDispatchAt || 0;
   st.high_watermark = __deltaNormalizeTimestampMs(
@@ -16590,6 +16622,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         .slice(-80);
       const concatText = normalizedMessages.map((m) => m.text).join('\n').trim();
       const city = String(row && row.city || '').trim() || DELTA_FALLBACK_CITY;
+      const bootLink = __deltaPickBestItemLink(row && row.link_anuncio);
       if (!concatText && !city) {
         out.skipped_empty += 1;
         continue;
@@ -16614,7 +16647,7 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         mensagens_cliente_qtd: Number(normalizedMessages.length || 0) || 0,
         mensagem_seq: messageSeq,
         cidade: city,
-        link_anuncio: DELTA_FALLBACK_LINK,
+        ...(bootLink ? { link_anuncio: bootLink } : {}),
         client_name: DELTA_FALLBACK_CLIENT_NAME,
         customer_name: DELTA_FALLBACK_CLIENT_NAME,
         nome_cliente_limpo: DELTA_FALLBACK_CLIENT_NAME,
@@ -16862,7 +16895,6 @@ function __deltaReplayForensicLeadsToCtOnBoot({ bootReplaySummary = null } = {})
         mensagens_cliente_qtd: 1,
         mensagem_seq: 0,
         cidade: DELTA_FALLBACK_CITY,
-        link_anuncio: DELTA_FALLBACK_LINK,
         client_name: DELTA_FALLBACK_CLIENT_NAME,
         customer_name: DELTA_FALLBACK_CLIENT_NAME,
         nome_cliente_limpo: DELTA_FALLBACK_CLIENT_NAME,
@@ -17408,10 +17440,12 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
         (handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) ||
         DELTA_FALLBACK_CLIENT_NAME
       ).trim() || DELTA_FALLBACK_CLIENT_NAME;
-      const fallbackLink = String(
-        (handsOut && (handsOut.link_anuncio || handsOut.profile_url)) ||
-        DELTA_FALLBACK_LINK
-      ).trim() || DELTA_FALLBACK_LINK;
+      const fallbackLink =
+        __deltaPickBestItemLink(
+          handsOut && handsOut.link_anuncio,
+          handsOut && handsOut.profile_url,
+          st.link_anuncio
+        ) || null;
       const fallbackCity = String(st.city || DELTA_FALLBACK_CITY).trim() || DELTA_FALLBACK_CITY;
       handsOut = {
         ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
@@ -17433,7 +17467,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
           thread_key: tk,
           texto_limpo: preMessages || '',
           cidade: fallbackCity,
-          link_anuncio: fallbackLink,
+          ...(fallbackLink ? { link_anuncio: fallbackLink } : {}),
           client_name: fallbackClientName,
           operacao_meta: 'hands_metadata_contingency',
           dispatch_ct: false,
@@ -17501,7 +17535,14 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     : 0;
   const messageAt = Number(bufferedLastAt || after.maxAt || after.minAt || 0) || Date.now();
   const city = String((handsOut && handsOut.cidade) || '').trim() || DELTA_FALLBACK_CITY;
-  const linkAnuncio = String((handsOut && (handsOut.link_anuncio || handsOut.profile_url)) || '').trim() || DELTA_FALLBACK_LINK;
+  const citySource = String((handsOut && handsOut.city_source) || '').trim() || null;
+  // Link soberano: so marketplace real. Nunca inventar sentinel — CT preserva vazio.
+  const linkAnuncio =
+    __deltaPickBestItemLink(
+      handsOut && handsOut.link_anuncio,
+      handsOut && handsOut.profile_url,
+      st.link_anuncio
+    ) || null;
   const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
   const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
@@ -17522,7 +17563,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
         thread_key: tk,
         texto_limpo: finalText || preMessages || '',
         cidade: city,
-        link_anuncio: linkAnuncio,
+        city_source: citySource,
+        ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
         client_name: clientName,
         operacao_meta: 'city_contingency',
         dispatch_ct: false,
@@ -17537,11 +17579,15 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   }
 
   st.city = city;
+  st.city_source = citySource;
+  st.link_anuncio = linkAnuncio; // so item real (ou null) — soberania no disco
   st.status = 'active';
   st.inFlight = false;
   st.handsFailures = 0;
   st.lastDispatchAt = Date.now();
   st.updatedAt = Date.now();
+  // Persiste ANTES do dispatch CT: telefone concurrent le o link do disco, nao inventa vazio.
+  __deltaPersistThreadStateSync();
 
   let dispatchPersistFailed = false;
   let queuedDispatchCount = 0;
@@ -17595,7 +17641,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       meta_message_id: String(one && one.meta_message_id || '').trim() || null,
       meta_offline_threading_id: String(one && one.meta_offline_threading_id || '').trim() || null,
       cidade: city,
-      link_anuncio: linkAnuncio,
+      city_source: citySource,
+      ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
       nome_cliente_limpo: nomeClienteLimpo,
@@ -17625,7 +17672,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       mensagens_cliente_concatenadas: '',
       mensagens_cliente_qtd: 0,
       cidade: city,
-      link_anuncio: linkAnuncio,
+      city_source: citySource,
+      ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
       nome_cliente_limpo: nomeClienteLimpo,
@@ -17652,7 +17700,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       mensagens_cliente_concatenadas: '',
       mensagens_cliente_qtd: 0,
       cidade: city,
-      link_anuncio: linkAnuncio,
+      city_source: citySource,
+      ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
       nome_cliente_limpo: nomeClienteLimpo,
@@ -18961,8 +19010,13 @@ function __deltaBuildCtIngestPayload(payload) {
     p.texto_limpo ||
     ''
   ).trim();
-  const cidade = String(p.cidade || '').trim() || DELTA_FALLBACK_CITY;
-  const linkAnuncio = String(p.link_anuncio || p.profile_url || '').trim() || DELTA_FALLBACK_LINK;
+  // INVARIANTE: nunca inventar "Link Não Coletado" em mensagem parcial.
+  // CT faz merge e preserva link bom quando o campo vem vazio/omitido.
+  // Hands bootstrap pode mandar cidade pendente + link real; realtime reforça link do disco.
+  const cityRaw = String(p.cidade || '').trim();
+  const cidade = cityRaw || undefined;
+  const bestLink = __deltaPickBestItemLink(p.link_anuncio, p.profile_url);
+  const linkAnuncio = bestLink || undefined;
   const clientName = String(
     p.client_name ||
     p.customer_name ||
@@ -18991,8 +19045,8 @@ function __deltaBuildCtIngestPayload(payload) {
     timestamp_ms: ts,
     texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,
-    cidade,
-    link_anuncio: linkAnuncio,
+    ...(cidade ? { cidade } : {}),
+    ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
     client_name: clientName,
     saudacao_texto: saudacaoTexto,
     saudacao_timestamp_ms: saudacaoTexto ? saudacaoTimestampMs : undefined,
@@ -20778,6 +20832,7 @@ async function __deltaAttachCdpEar(nome, page) {
         const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
         const diskCityRaw = String(diskRow && diskRow.city || '').trim();
         const diskCity = diskCityRaw || null;
+        const diskLink = __deltaPickBestItemLink(diskRow && diskRow.link_anuncio);
         const normalizedWindowTs = Math.max(0, Number(tsForWindow || 0) || 0);
         let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
         const diskHighWatermark = Math.max(0, Number(__deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey) || 0) || 0);
@@ -20899,7 +20954,8 @@ async function __deltaAttachCdpEar(nome, page) {
             dedup_meta_id: dedupMetaId || null,
             meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
             meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: diskCity,
+            cidade: (diskCity && !__deltaIsPendingCityLabel(diskCity)) ? diskCity : undefined,
+            ...(diskLink ? { link_anuncio: diskLink } : {}),
             operacao_meta: op || 'message',
             mensagem_seq: 0,
             dispatch_ct: true,
@@ -21031,6 +21087,7 @@ async function __deltaAttachCdpEar(nome, page) {
 
         if (st.status === 'active') {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+          const stLink = __deltaPickBestItemLink(st.link_anuncio);
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
@@ -21042,7 +21099,8 @@ async function __deltaAttachCdpEar(nome, page) {
             dedup_meta_id: dedupMetaId || null,
             meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
             meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: st.city || null,
+            cidade: (st.city && !__deltaIsPendingCityLabel(st.city)) ? st.city : undefined,
+            ...(stLink ? { link_anuncio: stLink } : {}),
             operacao_meta: op || 'message',
             mensagem_seq: msgSeq,
             dispatch_ct: true,

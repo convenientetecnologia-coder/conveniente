@@ -21,20 +21,10 @@ const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_
 const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Append circular em forensic_triagem.log (RAM constante). */
-function logTriagemDomCityCommunion(ctx = {}) {
+function appendForensicTriagemLine(obj) {
   try {
     const fp = FORENSIC_TRIAGEM_LOG_PATH;
-    const obj = {
-      ts: Date.now(),
-      tag: "TRIAGEM_DOM",
-      msg: "city_communion_processed",
-      ctx: {
-        block_a: String((ctx && ctx.block_a) || "").slice(0, 400),
-        block_b: String((ctx && ctx.block_b) || "").slice(0, 400),
-        final_extracted: (ctx && ctx.final_extracted) || null,
-      },
-    };
-    const line = JSON.stringify(obj) + "\n";
+    const line = JSON.stringify(obj && typeof obj === "object" ? obj : { ts: Date.now(), msg: "invalid" }) + "\n";
     const lineBytes = Buffer.byteLength(line, "utf8");
     try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
 
@@ -68,6 +58,39 @@ function logTriagemDomCityCommunion(ctx = {}) {
     }
     fs.appendFileSync(fp, line, "utf8");
   } catch (_) {}
+}
+
+function logTriagemDomCityCommunion(ctx = {}) {
+  appendForensicTriagemLine({
+    ts: Date.now(),
+    tag: "TRIAGEM_DOM",
+    msg: "city_communion_processed",
+    ctx: {
+      block_a: String((ctx && ctx.block_a) || "").slice(0, 400),
+      block_b: String((ctx && ctx.block_b) || "").slice(0, 400),
+      final_extracted: (ctx && ctx.final_extracted) || null,
+    },
+  });
+}
+
+function logTriagemCityCollectFailed(ctx = {}) {
+  appendForensicTriagemLine({
+    ts: Date.now(),
+    tag: "TRIAGEM_DOM",
+    msg: "city_collect_failed",
+    ctx: {
+      account_login: String((ctx && ctx.account_login) || "").slice(0, 80) || null,
+      thread_key: String((ctx && ctx.thread_key) || "").slice(0, 80) || null,
+      item_link: String((ctx && ctx.item_link) || "").slice(0, 300) || null,
+      error: String((ctx && ctx.error) || "").slice(0, 120) || null,
+      login_wall: !!(ctx && ctx.login_wall),
+      has_localizacao: !!(ctx && ctx.has_localizacao),
+      has_anunciado: !!(ctx && ctx.has_anunciado),
+      candidates_count: Number((ctx && ctx.candidates_count) || 0) || 0,
+      attempts: Number((ctx && ctx.attempts) || 0) || 0,
+      last_nav_error: String((ctx && ctx.last_nav_error) || "").slice(0, 200) || null,
+    },
+  });
 }
 
 function sleep(ms) {
@@ -614,10 +637,11 @@ async function extractCityFromListingPage(page, {
   retryIntervalMs = 250,
   scanLimit = 320,
 } = {}) {
-  if (!page) return null;
+  if (!page) return { cidade: null, error: "city_page_missing" };
   const attempts = Math.max(1, Math.min(20, Number(maxAttempts || 12) || 12));
   const intervalMs = Math.max(80, Math.min(700, Number(retryIntervalMs || 250) || 250));
   const nodeLimit = Math.max(80, Math.min(500, Number(scanLimit || 320) || 320));
+  let lastDiag = null;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const out = await page.evaluate((maxNodes) => {
@@ -713,7 +737,7 @@ async function extractCityFromListingPage(page, {
       };
     }
 
-    // 2) Via unica: ancora laser em localizacao no body (com expurgo Novo/Seminovo)
+    // 2) Via unica: ancora laser em localizacao no body (sem strip Novo/Seminovo)
     const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
     if (fromBodyAnchor) {
       try {
@@ -756,11 +780,26 @@ async function extractCityFromListingPage(page, {
         login_wall: !!payload.loginWall,
       };
     }
+    lastDiag = {
+      login_wall: !!payload.loginWall,
+      has_localizacao: !!payload.hasLocalizacao,
+      has_anunciado: !!payload.hasAnunciado,
+      candidates_count: candidates.length,
+      attempt,
+    };
     if (attempt < attempts) {
       await sleep(intervalMs);
     }
   }
-  return null;
+  return {
+    cidade: null,
+    error: "city_not_found_in_dom",
+    login_wall: !!(lastDiag && lastDiag.login_wall),
+    has_localizacao: !!(lastDiag && lastDiag.has_localizacao),
+    has_anunciado: !!(lastDiag && lastDiag.has_anunciado),
+    candidates_count: Number((lastDiag && lastDiag.candidates_count) || 0) || 0,
+    attempt: Number((lastDiag && lastDiag.attempt) || attempts) || attempts,
+  };
 }
 
 async function dismissLoginOverlay(page) {
@@ -1059,6 +1098,15 @@ async function createCollectorRuntime() {
       const navTimeoutMs = Math.max(8_000, Number(timeoutMs || process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000);
 
       if (!itemLink) {
+        try {
+          logTriagemCityCollectFailed({
+            account_login: account,
+            thread_key: tk,
+            item_link: "",
+            error: "city_collector_item_link_missing",
+            attempts: 0,
+          });
+        } catch (_) {}
         return { ok: false, error: "city_collector_item_link_missing" };
       }
       if (itemId) {
@@ -1073,6 +1121,8 @@ async function createCollectorRuntime() {
         }
       }
 
+      let lastExtracted = null;
+      let lastNavError = null;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           const p = await ensurePage();
@@ -1107,6 +1157,7 @@ async function createCollectorRuntime() {
               scanLimit: 320,
             });
           }
+          lastExtracted = extracted;
           if (extracted && extracted.cidade) {
             if (itemId) {
               cityCacheSet(itemId, extracted.cidade, extracted.city_source || "collector_dom");
@@ -1116,19 +1167,43 @@ async function createCollectorRuntime() {
               ok: true,
               cidade: extracted.cidade,
               city_source: extracted.city_source || "collector_dom",
+              login_wall: !!extracted.login_wall,
             };
           }
         } catch (e) {
-          log(`tentativa falhou account=${account || "n/a"} thread=${tk || "n/a"} attempt=${attempt} error=${e && e.message ? e.message : String(e)}`);
+          lastNavError = (e && e.message) ? String(e.message) : String(e);
+          log(`tentativa falhou account=${account || "n/a"} thread=${tk || "n/a"} attempt=${attempt} error=${lastNavError}`);
         }
         if (attempt < maxAttempts) {
           await sleep(randomBetween(700, 1500));
         }
       }
 
+      const failError = lastNavError && !lastExtracted
+        ? "city_collector_navigation_failed"
+        : "city_not_found_in_listing_page";
+      try {
+        logTriagemCityCollectFailed({
+          account_login: account,
+          thread_key: tk,
+          item_link: itemLink,
+          error: failError,
+          login_wall: !!(lastExtracted && lastExtracted.login_wall),
+          has_localizacao: !!(lastExtracted && lastExtracted.has_localizacao),
+          has_anunciado: !!(lastExtracted && lastExtracted.has_anunciado),
+          candidates_count: Number((lastExtracted && lastExtracted.candidates_count) || 0) || 0,
+          attempts: maxAttempts,
+          last_nav_error: lastNavError,
+        });
+      } catch (_) {}
       return {
         ok: false,
-        error: "city_not_found_in_listing_page",
+        error: failError,
+        login_wall: !!(lastExtracted && lastExtracted.login_wall),
+        has_localizacao: !!(lastExtracted && lastExtracted.has_localizacao),
+        has_anunciado: !!(lastExtracted && lastExtracted.has_anunciado),
+        candidates_count: Number((lastExtracted && lastExtracted.candidates_count) || 0) || 0,
+        last_nav_error: lastNavError || null,
       };
     });
   }

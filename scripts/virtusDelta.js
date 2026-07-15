@@ -4864,6 +4864,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           try {
             logInfo(`[virtusDelta][city_link_recovery] thread_key=${t} recovered=sim`);
           } catch (_) {}
+          // Propaga o link recuperado para o retorno hands (nao so para o collector).
+          sendOut = {
+            ...(sendOut && typeof sendOut === "object" ? sendOut : {}),
+            item_link: recoveredItemLink,
+          };
         } else {
           try {
             logInfo(`[virtusDelta][city_link_recovery] thread_key=${t} recovered=nao`);
@@ -4884,21 +4889,33 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         const openOut = await openThreadAndExtractItemLink(page, t, { fromNetworkLead: true });
         if (openOut && openOut.ok && openOut.item_link) {
           resolveItemLink(openOut.item_link);
+          sendOut = { ok: true, item_link: String(openOut.item_link || "").trim() || null };
         } else {
           resolveItemLink(null);
+          sendOut = { ok: true, item_link: null };
         }
       } else {
         resolveItemLink(prior.itemLink);
+        sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
       }
-      sendOut = { ok: true, item_link: (prior && prior.itemLink) || null };
       if (!greetingSentAt) greetingSentAt = Date.now();
     }
 
-    const itemLinkFinal = String(
-      (sendOut && sendOut.item_link) ||
-      (prior && prior.itemLink) ||
-      ""
-    ).trim() || null;
+    // Link soberano = o mesmo que alimentou o collector (promise ja resolvida neste ponto).
+    const awaitedItemLink = await itemLinkPromise;
+    const pickMarketplaceLink = (...cands) => {
+      for (const c of cands) {
+        const s = String(c || "").trim();
+        if (!s || /link\s*n[aã]o\s*coletado/i.test(s)) continue;
+        if (/(?:facebook|fb|messenger)\.com\/marketplace\/item\/[0-9A-Za-z_-]+/i.test(s)) return s;
+      }
+      return null;
+    };
+    const itemLinkFinal = pickMarketplaceLink(
+      sendOut && sendOut.item_link,
+      prior && prior.itemLink,
+      awaitedItemLink
+    );
 
     const leadNamePromise = (async () => {
       try {
@@ -4909,7 +4926,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
     })();
 
-    const cityOut = await Promise.race([
+    let cityOut = await Promise.race([
       cityCollectionPromise,
       sleep(cityCollectMaxWaitMs).then(() => ({
         ok: false,
@@ -4929,9 +4946,38 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             collector_timeout_ms: cityCollectorTimeoutMs,
             collector_attempts: cityCollectorAttempts,
             collector_budget_ms: cityCollectorBudgetMs,
+            item_link: itemLinkFinal || null,
           }
         });
       } catch (_) {}
+      // Grace: se o goto ainda esta em voo, nao descartar cidade que chega atrasada.
+      if (itemLinkFinal) {
+        const graceMs = Math.max(
+          4_000,
+          Math.min(12_000, Math.floor(Number(cityCollectMaxWaitMs || 0) / 3) || 8_000)
+        );
+        const late = await Promise.race([
+          cityCollectionPromise,
+          sleep(graceMs).then(() => null),
+        ]);
+        if (late && late.ok && late.cidade) {
+          cityOut = late;
+          try {
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              flow_stage: "city_collect_grace_recovered",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                grace_ms: graceMs,
+                cidade: String(late.cidade || "").slice(0, 120),
+                city_source: String(late.city_source || "").slice(0, 80) || null,
+                item_link: itemLinkFinal,
+              }
+            });
+          } catch (_) {}
+        }
+      }
     }
 
     let cityCandidate = String((cityOut && cityOut.cidade) || "").trim() || null;
@@ -4993,6 +5039,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             reason: String((cityOut && cityOut.error) || "city_collect_failed"),
             item_link: itemLinkFinal || null,
             city_cache_hit: !!(cityCache && cityCache.value),
+            login_wall: !!(cityOut && cityOut.login_wall),
+            has_localizacao: !!(cityOut && cityOut.has_localizacao),
+            has_anunciado: !!(cityOut && cityOut.has_anunciado),
+            candidates_count: Number((cityOut && cityOut.candidates_count) || 0) || 0,
           }
         });
       } catch (_) {}
