@@ -1,0 +1,2642 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-15T18:33:51.719Z",
+  "count": 527,
+  "cities": [
+    {
+      "city": "Abadiânia",
+      "uf": "GO",
+      "label": "Abadiânia (GO)"
+    },
+    {
+      "city": "Abreu e Lima",
+      "uf": "PE",
+      "label": "Abreu e Lima (PE)"
+    },
+    {
+      "city": "Acarape",
+      "uf": "CE",
+      "label": "Acarape (CE)"
+    },
+    {
+      "city": "Acorizal",
+      "uf": "MT",
+      "label": "Acorizal (MT)"
+    },
+    {
+      "city": "Acreúna",
+      "uf": "GO",
+      "label": "Acreúna (GO)"
+    },
+    {
+      "city": "Açucena",
+      "uf": "MG",
+      "label": "Açucena (MG)"
+    },
+    {
+      "city": "Agrestina",
+      "uf": "PE",
+      "label": "Agrestina (PE)"
+    },
+    {
+      "city": "Águas Lindas de Goiás",
+      "uf": "DF",
+      "label": "Águas Lindas de Goiás (DF)"
+    },
+    {
+      "city": "Agudo",
+      "uf": "RS",
+      "label": "Agudo (RS)"
+    },
+    {
+      "city": "Agudos",
+      "uf": "SP",
+      "label": "Agudos (SP)"
+    },
+    {
+      "city": "Agudos do Sul",
+      "uf": "PR",
+      "label": "Agudos do Sul (PR)"
+    },
+    {
+      "city": "Alagoa Nova",
+      "uf": "PB",
+      "label": "Alagoa Nova (PB)"
+    },
+    {
+      "city": "Altaneira",
+      "uf": "CE",
+      "label": "Altaneira (CE)"
+    },
+    {
+      "city": "Altinho",
+      "uf": "PE",
+      "label": "Altinho (PE)"
+    },
+    {
+      "city": "Alto Alegre",
+      "uf": "RR",
+      "label": "Alto Alegre (RR)"
+    },
+    {
+      "city": "Alto Longá",
+      "uf": "PI",
+      "label": "Alto Longá (PI)"
+    },
+    {
+      "city": "Altos",
+      "uf": "PI",
+      "label": "Altos (PI)"
+    },
+    {
+      "city": "Alumínio",
+      "uf": "SP",
+      "label": "Alumínio (SP)"
+    },
+    {
+      "city": "Amajari",
+      "uf": "RR",
+      "label": "Amajari (RR)"
+    },
+    {
+      "city": "Anagé",
+      "uf": "BA",
+      "label": "Anagé (BA)"
+    },
+    {
+      "city": "Ananindeua",
+      "uf": "PA",
+      "label": "Ananindeua (PA)"
+    },
+    {
+      "city": "Anápolis",
+      "uf": "GO",
+      "label": "Anápolis (GO)"
+    },
+    {
+      "city": "Angelina",
+      "uf": "SC",
+      "label": "Angelina (SC)"
+    },
+    {
+      "city": "Antônio Carlos",
+      "uf": "SC",
+      "label": "Antônio Carlos (SC)"
+    },
+    {
+      "city": "Antônio Dias",
+      "uf": "MG",
+      "label": "Antônio Dias (MG)"
+    },
+    {
+      "city": "Antônio Prado",
+      "uf": "RS",
+      "label": "Antônio Prado (RS)"
+    },
+    {
+      "city": "Aparecida de Goiânia",
+      "uf": "GO",
+      "label": "Aparecida de Goiânia (GO)"
+    },
+    {
+      "city": "Aparecida do Rio Doce",
+      "uf": "GO",
+      "label": "Aparecida do Rio Doce (GO)"
+    },
+    {
+      "city": "Apucarana",
+      "uf": "PR",
+      "label": "Apucarana (PR)"
+    },
+    {
+      "city": "Aracaju",
+      "uf": "SE",
+      "label": "Aracaju (SE)"
+    },
+    {
+      "city": "Aracoiaba",
+      "uf": "CE",
+      "label": "Aracoiaba (CE)"
+    },
+    {
+      "city": "Araçoiaba da Serra",
+      "uf": "SP",
+      "label": "Araçoiaba da Serra (SP)"
+    },
+    {
+      "city": "Aragoiânia",
+      "uf": "GO",
+      "label": "Aragoiânia (GO)"
+    },
+    {
+      "city": "Araguari",
+      "uf": "MG",
+      "label": "Araguari (MG)"
+    },
+    {
+      "city": "Arapongas",
+      "uf": "PR",
+      "label": "Arapongas (PR)"
+    },
+    {
+      "city": "Aratuba",
+      "uf": "CE",
+      "label": "Aratuba (CE)"
+    },
+    {
+      "city": "Araucária",
+      "uf": "PR",
+      "label": "Araucária (PR)"
+    },
+    {
+      "city": "Ariquemes",
+      "uf": "RO",
+      "label": "Ariquemes (RO)"
+    },
+    {
+      "city": "Artur Nogueira",
+      "uf": "SP",
+      "label": "Artur Nogueira (SP)"
+    },
+    {
+      "city": "Assis Chateaubriand",
+      "uf": "PR",
+      "label": "Assis Chateaubriand (PR)"
+    },
+    {
+      "city": "Astorga",
+      "uf": "PR",
+      "label": "Astorga (PR)"
+    },
+    {
+      "city": "Aurora",
+      "uf": "CE",
+      "label": "Aurora (CE)"
+    },
+    {
+      "city": "Avaí",
+      "uf": "SP",
+      "label": "Avaí (SP)"
+    },
+    {
+      "city": "Bacabeira",
+      "uf": "MA",
+      "label": "Bacabeira (MA)"
+    },
+    {
+      "city": "Bady Bassitt",
+      "uf": "SP",
+      "label": "Bady Bassitt (SP)"
+    },
+    {
+      "city": "Balneário Barra do Sul",
+      "uf": "SC",
+      "label": "Balneário Barra do Sul (SC)"
+    },
+    {
+      "city": "Balneário Camboriú",
+      "uf": "SC",
+      "label": "Balneário Camboriú (SC)"
+    },
+    {
+      "city": "Balsa Nova",
+      "uf": "PR",
+      "label": "Balsa Nova (PR)"
+    },
+    {
+      "city": "Bálsamo",
+      "uf": "SP",
+      "label": "Bálsamo (SP)"
+    },
+    {
+      "city": "Barbalha",
+      "uf": "CE",
+      "label": "Barbalha (CE)"
+    },
+    {
+      "city": "Barra de Santo Antônio",
+      "uf": "AL",
+      "label": "Barra de Santo Antônio (AL)"
+    },
+    {
+      "city": "Barra do Choça",
+      "uf": "BA",
+      "label": "Barra do Choça (BA)"
+    },
+    {
+      "city": "Barra Velha",
+      "uf": "SC",
+      "label": "Barra Velha (SC)"
+    },
+    {
+      "city": "Barreira",
+      "uf": "CE",
+      "label": "Barreira (CE)"
+    },
+    {
+      "city": "Barrinha",
+      "uf": "SP",
+      "label": "Barrinha (SP)"
+    },
+    {
+      "city": "Barueri",
+      "uf": "SP",
+      "label": "Barueri (SP)"
+    },
+    {
+      "city": "Batatais",
+      "uf": "SP",
+      "label": "Batatais (SP)"
+    },
+    {
+      "city": "Baturité",
+      "uf": "CE",
+      "label": "Baturité (CE)"
+    },
+    {
+      "city": "Bauru",
+      "uf": "SP",
+      "label": "Bauru (SP)"
+    },
+    {
+      "city": "Bayeux",
+      "uf": "PB",
+      "label": "Bayeux (PB)"
+    },
+    {
+      "city": "Beberibe",
+      "uf": "CE",
+      "label": "Beberibe (CE)"
+    },
+    {
+      "city": "Belém",
+      "uf": "PA",
+      "label": "Belém (PA)"
+    },
+    {
+      "city": "Belo Horizonte",
+      "uf": "MG",
+      "label": "Belo Horizonte (MG)"
+    },
+    {
+      "city": "Belo Oriente",
+      "uf": "MG",
+      "label": "Belo Oriente (MG)"
+    },
+    {
+      "city": "Benevides",
+      "uf": "PA",
+      "label": "Benevides (PA)"
+    },
+    {
+      "city": "Bertioga",
+      "uf": "SP",
+      "label": "Bertioga (SP)"
+    },
+    {
+      "city": "Betim",
+      "uf": "MG",
+      "label": "Betim (MG)"
+    },
+    {
+      "city": "Bicas",
+      "uf": "MG",
+      "label": "Bicas (MG)"
+    },
+    {
+      "city": "Biguaçu",
+      "uf": "SC",
+      "label": "Biguaçu (SC)"
+    },
+    {
+      "city": "Biritiba Mirim",
+      "uf": "SP",
+      "label": "Biritiba Mirim (SP)"
+    },
+    {
+      "city": "Blumenau",
+      "uf": "SC",
+      "label": "Blumenau (SC)"
+    },
+    {
+      "city": "Boa Vista",
+      "uf": "RR",
+      "label": "Boa Vista (RR)"
+    },
+    {
+      "city": "Bombinhas",
+      "uf": "SC",
+      "label": "Bombinhas (SC)"
+    },
+    {
+      "city": "Brasília",
+      "uf": "DF",
+      "label": "Brasília (DF)"
+    },
+    {
+      "city": "Brazabantes",
+      "uf": "GO",
+      "label": "Brazabantes (GO)"
+    },
+    {
+      "city": "Brejo da Me. de Deus",
+      "uf": "PE",
+      "label": "Brejo da Me. de Deus (PE)"
+    },
+    {
+      "city": "Brodowski",
+      "uf": "SP",
+      "label": "Brodowski (SP)"
+    },
+    {
+      "city": "Brusque",
+      "uf": "SC",
+      "label": "Brusque (SC)"
+    },
+    {
+      "city": "Bujari",
+      "uf": "AC",
+      "label": "Bujari (AC)"
+    },
+    {
+      "city": "Buritirana",
+      "uf": "MA",
+      "label": "Buritirana (MA)"
+    },
+    {
+      "city": "Buritis",
+      "uf": "RO",
+      "label": "Buritis (RO)"
+    },
+    {
+      "city": "Buritizal",
+      "uf": "SP",
+      "label": "Buritizal (SP)"
+    },
+    {
+      "city": "Caçador",
+      "uf": "RJ",
+      "label": "Caçador (RJ)"
+    },
+    {
+      "city": "Caçapava",
+      "uf": "SP",
+      "label": "Caçapava (SP)"
+    },
+    {
+      "city": "Cachoeirinha",
+      "uf": "PE",
+      "label": "Cachoeirinha (PE)"
+    },
+    {
+      "city": "Cachoeirinha",
+      "uf": "RS",
+      "label": "Cachoeirinha (RS)"
+    },
+    {
+      "city": "Caçu",
+      "uf": "GO",
+      "label": "Caçu (GO)"
+    },
+    {
+      "city": "Caeté",
+      "uf": "MG",
+      "label": "Caeté (MG)"
+    },
+    {
+      "city": "Cafelândia",
+      "uf": "PR",
+      "label": "Cafelândia (PR)"
+    },
+    {
+      "city": "Caieiras",
+      "uf": "SP",
+      "label": "Caieiras (SP)"
+    },
+    {
+      "city": "Cajamar",
+      "uf": "SP",
+      "label": "Cajamar (SP)"
+    },
+    {
+      "city": "Caldazinha",
+      "uf": "GO",
+      "label": "Caldazinha (GO)"
+    },
+    {
+      "city": "Camaçari",
+      "uf": "BA",
+      "label": "Camaçari (BA)"
+    },
+    {
+      "city": "Camaragibe",
+      "uf": "PE",
+      "label": "Camaragibe (PE)"
+    },
+    {
+      "city": "Cambé",
+      "uf": "PR",
+      "label": "Cambé (PR)"
+    },
+    {
+      "city": "Camboriú",
+      "uf": "SC",
+      "label": "Camboriú (SC)"
+    },
+    {
+      "city": "Camocim de São Félix",
+      "uf": "PE",
+      "label": "Camocim de São Félix (PE)"
+    },
+    {
+      "city": "Campina da Lagoa",
+      "uf": "PR",
+      "label": "Campina da Lagoa (PR)"
+    },
+    {
+      "city": "Campina Grande",
+      "uf": "PB",
+      "label": "Campina Grande (PB)"
+    },
+    {
+      "city": "Campinas",
+      "uf": "SP",
+      "label": "Campinas (SP)"
+    },
+    {
+      "city": "Campo Alegre",
+      "uf": "SC",
+      "label": "Campo Alegre (SC)"
+    },
+    {
+      "city": "Campo Bom",
+      "uf": "RS",
+      "label": "Campo Bom (RS)"
+    },
+    {
+      "city": "Campo Grande",
+      "uf": "MS",
+      "label": "Campo Grande (MS)"
+    },
+    {
+      "city": "Campo Largo",
+      "uf": "PR",
+      "label": "Campo Largo (PR)"
+    },
+    {
+      "city": "Campo Limpo de Goiás",
+      "uf": "GO",
+      "label": "Campo Limpo de Goiás (GO)"
+    },
+    {
+      "city": "Campo Maior",
+      "uf": "PI",
+      "label": "Campo Maior (PI)"
+    },
+    {
+      "city": "Campos dos Goytacazes",
+      "uf": "RJ",
+      "label": "Campos dos Goytacazes (RJ)"
+    },
+    {
+      "city": "Canaã dos Carajás",
+      "uf": "PA",
+      "label": "Canaã dos Carajás (PA)"
+    },
+    {
+      "city": "Candeias",
+      "uf": "BA",
+      "label": "Candeias (BA)"
+    },
+    {
+      "city": "Canoas",
+      "uf": "RS",
+      "label": "Canoas (RS)"
+    },
+    {
+      "city": "Cap. Andrade",
+      "uf": "MG",
+      "label": "Cap. Andrade (MG)"
+    },
+    {
+      "city": "Cap. Leônidas Marques",
+      "uf": "PR",
+      "label": "Cap. Leônidas Marques (PR)"
+    },
+    {
+      "city": "Capela do Alto",
+      "uf": "SP",
+      "label": "Capela do Alto (SP)"
+    },
+    {
+      "city": "Capivari",
+      "uf": "SP",
+      "label": "Capivari (SP)"
+    },
+    {
+      "city": "Caracaraí",
+      "uf": "RR",
+      "label": "Caracaraí (RR)"
+    },
+    {
+      "city": "Carambeí",
+      "uf": "PR",
+      "label": "Carambeí (PR)"
+    },
+    {
+      "city": "Caratinga",
+      "uf": "MG",
+      "label": "Caratinga (MG)"
+    },
+    {
+      "city": "Cardoso Moreira",
+      "uf": "RJ",
+      "label": "Cardoso Moreira (RJ)"
+    },
+    {
+      "city": "Careiro",
+      "uf": "AM",
+      "label": "Careiro (AM)"
+    },
+    {
+      "city": "Cariacica",
+      "uf": "ES",
+      "label": "Cariacica (ES)"
+    },
+    {
+      "city": "Caridade",
+      "uf": "CE",
+      "label": "Caridade (CE)"
+    },
+    {
+      "city": "Caririaçu",
+      "uf": "CE",
+      "label": "Caririaçu (CE)"
+    },
+    {
+      "city": "Caruaru",
+      "uf": "PE",
+      "label": "Caruaru (PE)"
+    },
+    {
+      "city": "Cascavel",
+      "uf": "PR",
+      "label": "Cascavel (PR)"
+    },
+    {
+      "city": "Castro",
+      "uf": "PR",
+      "label": "Castro (PR)"
+    },
+    {
+      "city": "Caturaí",
+      "uf": "GO",
+      "label": "Caturaí (GO)"
+    },
+    {
+      "city": "Caxias do Sul",
+      "uf": "RS",
+      "label": "Caxias do Sul (RS)"
+    },
+    {
+      "city": "Ceará-Mirim",
+      "uf": "RN",
+      "label": "Ceará-Mirim (RN)"
+    },
+    {
+      "city": "Cedral",
+      "uf": "SP",
+      "label": "Cedral (SP)"
+    },
+    {
+      "city": "Cel. Pacheco",
+      "uf": "MG",
+      "label": "Cel. Pacheco (MG)"
+    },
+    {
+      "city": "Chácara",
+      "uf": "MG",
+      "label": "Chácara (MG)"
+    },
+    {
+      "city": "Charqueada",
+      "uf": "SP",
+      "label": "Charqueada (SP)"
+    },
+    {
+      "city": "Chorozinho",
+      "uf": "CE",
+      "label": "Chorozinho (CE)"
+    },
+    {
+      "city": "Coivaras",
+      "uf": "PI",
+      "label": "Coivaras (PI)"
+    },
+    {
+      "city": "Colombo",
+      "uf": "PR",
+      "label": "Colombo (PR)"
+    },
+    {
+      "city": "Conceição de Macabu",
+      "uf": "RJ",
+      "label": "Conceição de Macabu (RJ)"
+    },
+    {
+      "city": "Conchal",
+      "uf": "SP",
+      "label": "Conchal (SP)"
+    },
+    {
+      "city": "Conde",
+      "uf": "PB",
+      "label": "Conde (PB)"
+    },
+    {
+      "city": "Contenda",
+      "uf": "PR",
+      "label": "Contenda (PR)"
+    },
+    {
+      "city": "Coqueiro Seco",
+      "uf": "AL",
+      "label": "Coqueiro Seco (AL)"
+    },
+    {
+      "city": "Corbélia",
+      "uf": "PR",
+      "label": "Corbélia (PR)"
+    },
+    {
+      "city": "Corumbá de Goiás",
+      "uf": "GO",
+      "label": "Corumbá de Goiás (GO)"
+    },
+    {
+      "city": "Corupá",
+      "uf": "SC",
+      "label": "Corupá (SC)"
+    },
+    {
+      "city": "Cosmópolis",
+      "uf": "SP",
+      "label": "Cosmópolis (SP)"
+    },
+    {
+      "city": "Crato",
+      "uf": "CE",
+      "label": "Crato (CE)"
+    },
+    {
+      "city": "Cravinhos",
+      "uf": "SP",
+      "label": "Cravinhos (SP)"
+    },
+    {
+      "city": "Cristais Paulista",
+      "uf": "SP",
+      "label": "Cristais Paulista (SP)"
+    },
+    {
+      "city": "Cubatão",
+      "uf": "SP",
+      "label": "Cubatão (SP)"
+    },
+    {
+      "city": "Cuiabá",
+      "uf": "MT",
+      "label": "Cuiabá (MT)"
+    },
+    {
+      "city": "Cujubim",
+      "uf": "RO",
+      "label": "Cujubim (RO)"
+    },
+    {
+      "city": "Curionópolis",
+      "uf": "PA",
+      "label": "Curionópolis (PA)"
+    },
+    {
+      "city": "Curitiba",
+      "uf": "PR",
+      "label": "Curitiba (PR)"
+    },
+    {
+      "city": "Curralinhos",
+      "uf": "PI",
+      "label": "Curralinhos (PI)"
+    },
+    {
+      "city": "Davinópolis",
+      "uf": "MA",
+      "label": "Davinópolis (MA)"
+    },
+    {
+      "city": "Demerval Lobão",
+      "uf": "PI",
+      "label": "Demerval Lobão (PI)"
+    },
+    {
+      "city": "Diadema",
+      "uf": "SP",
+      "label": "Diadema (SP)"
+    },
+    {
+      "city": "Dois Irmãos",
+      "uf": "RS",
+      "label": "Dois Irmãos (RS)"
+    },
+    {
+      "city": "Dom Cavati",
+      "uf": "MG",
+      "label": "Dom Cavati (MG)"
+    },
+    {
+      "city": "Dr. Camargo",
+      "uf": "PR",
+      "label": "Dr. Camargo (PR)"
+    },
+    {
+      "city": "Dumont",
+      "uf": "SP",
+      "label": "Dumont (SP)"
+    },
+    {
+      "city": "Duque de Caxias",
+      "uf": "RJ",
+      "label": "Duque de Caxias (RJ)"
+    },
+    {
+      "city": "Eldorado do Carajás",
+      "uf": "PA",
+      "label": "Eldorado do Carajás (PA)"
+    },
+    {
+      "city": "Eldorado do Sul",
+      "uf": "RS",
+      "label": "Eldorado do Sul (RS)"
+    },
+    {
+      "city": "Elias Fausto",
+      "uf": "SP",
+      "label": "Elias Fausto (SP)"
+    },
+    {
+      "city": "Eng. Caldas",
+      "uf": "MG",
+      "label": "Eng. Caldas (MG)"
+    },
+    {
+      "city": "Eng. Coelho",
+      "uf": "SP",
+      "label": "Eng. Coelho (SP)"
+    },
+    {
+      "city": "Entre Folhas",
+      "uf": "MG",
+      "label": "Entre Folhas (MG)"
+    },
+    {
+      "city": "Estância Velha",
+      "uf": "RS",
+      "label": "Estância Velha (RS)"
+    },
+    {
+      "city": "Eusébio",
+      "uf": "CE",
+      "label": "Eusébio (CE)"
+    },
+    {
+      "city": "Ewbank da Câmara",
+      "uf": "MG",
+      "label": "Ewbank da Câmara (MG)"
+    },
+    {
+      "city": "Extremoz",
+      "uf": "RN",
+      "label": "Extremoz (RN)"
+    },
+    {
+      "city": "Farias Brito",
+      "uf": "CE",
+      "label": "Farias Brito (CE)"
+    },
+    {
+      "city": "Farroupilha",
+      "uf": "RS",
+      "label": "Farroupilha (RS)"
+    },
+    {
+      "city": "Fazenda Rio Grande",
+      "uf": "PR",
+      "label": "Fazenda Rio Grande (PR)"
+    },
+    {
+      "city": "Flores da Cunha",
+      "uf": "RS",
+      "label": "Flores da Cunha (RS)"
+    },
+    {
+      "city": "Floresta",
+      "uf": "PR",
+      "label": "Floresta (PR)"
+    },
+    {
+      "city": "Florianópolis",
+      "uf": "SC",
+      "label": "Florianópolis (SC)"
+    },
+    {
+      "city": "Formigueiro",
+      "uf": "RS",
+      "label": "Formigueiro (RS)"
+    },
+    {
+      "city": "Formosa",
+      "uf": "DF",
+      "label": "Formosa (DF)"
+    },
+    {
+      "city": "Fortaleza",
+      "uf": "CE",
+      "label": "Fortaleza (CE)"
+    },
+    {
+      "city": "Foz do Iguaçu",
+      "uf": "PR",
+      "label": "Foz do Iguaçu (PR)"
+    },
+    {
+      "city": "Franca",
+      "uf": "SP",
+      "label": "Franca (SP)"
+    },
+    {
+      "city": "Francisco Morato",
+      "uf": "SP",
+      "label": "Francisco Morato (SP)"
+    },
+    {
+      "city": "Franco da Rocha",
+      "uf": "SP",
+      "label": "Franco da Rocha (SP)"
+    },
+    {
+      "city": "Fundão",
+      "uf": "ES",
+      "label": "Fundão (ES)"
+    },
+    {
+      "city": "Gameleira de Goiás",
+      "uf": "GO",
+      "label": "Gameleira de Goiás (GO)"
+    },
+    {
+      "city": "Garuva",
+      "uf": "SC",
+      "label": "Garuva (SC)"
+    },
+    {
+      "city": "Gaspar",
+      "uf": "SC",
+      "label": "Gaspar (SC)"
+    },
+    {
+      "city": "Goianá",
+      "uf": "MG",
+      "label": "Goianá (MG)"
+    },
+    {
+      "city": "Goianápolis",
+      "uf": "GO",
+      "label": "Goianápolis (GO)"
+    },
+    {
+      "city": "Goiânia",
+      "uf": "GO",
+      "label": "Goiânia (GO)"
+    },
+    {
+      "city": "Goianira",
+      "uf": "GO",
+      "label": "Goianira (GO)"
+    },
+    {
+      "city": "Gov. Celso Ramos",
+      "uf": "SC",
+      "label": "Gov. Celso Ramos (SC)"
+    },
+    {
+      "city": "Gov. Valadares",
+      "uf": "MG",
+      "label": "Gov. Valadares (MG)"
+    },
+    {
+      "city": "Granjeiro",
+      "uf": "CE",
+      "label": "Granjeiro (CE)"
+    },
+    {
+      "city": "Gravatá",
+      "uf": "PE",
+      "label": "Gravatá (PE)"
+    },
+    {
+      "city": "Gravataí",
+      "uf": "RS",
+      "label": "Gravataí (RS)"
+    },
+    {
+      "city": "Guapó",
+      "uf": "GO",
+      "label": "Guapó (GO)"
+    },
+    {
+      "city": "Guará",
+      "uf": "SP",
+      "label": "Guará (SP)"
+    },
+    {
+      "city": "Guaramiranga",
+      "uf": "CE",
+      "label": "Guaramiranga (CE)"
+    },
+    {
+      "city": "Guarapari",
+      "uf": "ES",
+      "label": "Guarapari (ES)"
+    },
+    {
+      "city": "Guararema",
+      "uf": "SP",
+      "label": "Guararema (SP)"
+    },
+    {
+      "city": "Guarujá",
+      "uf": "SP",
+      "label": "Guarujá (SP)"
+    },
+    {
+      "city": "Hidrolândia",
+      "uf": "GO",
+      "label": "Hidrolândia (GO)"
+    },
+    {
+      "city": "Holambra",
+      "uf": "SP",
+      "label": "Holambra (SP)"
+    },
+    {
+      "city": "Horizonte",
+      "uf": "CE",
+      "label": "Horizonte (CE)"
+    },
+    {
+      "city": "Hortolândia",
+      "uf": "SP",
+      "label": "Hortolândia (SP)"
+    },
+    {
+      "city": "Iapu",
+      "uf": "MG",
+      "label": "Iapu (MG)"
+    },
+    {
+      "city": "Ibiporã",
+      "uf": "PR",
+      "label": "Ibiporã (PR)"
+    },
+    {
+      "city": "Ibirá",
+      "uf": "SP",
+      "label": "Ibirá (SP)"
+    },
+    {
+      "city": "Ibirité",
+      "uf": "MG",
+      "label": "Ibirité (MG)"
+    },
+    {
+      "city": "Igarassu",
+      "uf": "PE",
+      "label": "Igarassu (PE)"
+    },
+    {
+      "city": "Ilhota",
+      "uf": "SC",
+      "label": "Ilhota (SC)"
+    },
+    {
+      "city": "Imbituva",
+      "uf": "PR",
+      "label": "Imbituva (PR)"
+    },
+    {
+      "city": "Imperatriz",
+      "uf": "MA",
+      "label": "Imperatriz (MA)"
+    },
+    {
+      "city": "Indaial",
+      "uf": "SC",
+      "label": "Indaial (SC)"
+    },
+    {
+      "city": "Indaiatuba",
+      "uf": "SP",
+      "label": "Indaiatuba (SP)"
+    },
+    {
+      "city": "Indiara",
+      "uf": "GO",
+      "label": "Indiara (GO)"
+    },
+    {
+      "city": "Inhapim",
+      "uf": "MG",
+      "label": "Inhapim (MG)"
+    },
+    {
+      "city": "Inhumas",
+      "uf": "GO",
+      "label": "Inhumas (GO)"
+    },
+    {
+      "city": "Ipaba",
+      "uf": "MG",
+      "label": "Ipaba (MG)"
+    },
+    {
+      "city": "Ipatinga",
+      "uf": "MG",
+      "label": "Ipatinga (MG)"
+    },
+    {
+      "city": "Iperó",
+      "uf": "SP",
+      "label": "Iperó (SP)"
+    },
+    {
+      "city": "Ipiguá",
+      "uf": "SP",
+      "label": "Ipiguá (SP)"
+    },
+    {
+      "city": "Ipiranga",
+      "uf": "PR",
+      "label": "Ipiranga (PR)"
+    },
+    {
+      "city": "Iracema",
+      "uf": "RR",
+      "label": "Iracema (RR)"
+    },
+    {
+      "city": "Iranduba",
+      "uf": "AM",
+      "label": "Iranduba (AM)"
+    },
+    {
+      "city": "Itaara",
+      "uf": "RS",
+      "label": "Itaara (RS)"
+    },
+    {
+      "city": "Itaboraí",
+      "uf": "RJ",
+      "label": "Itaboraí (RJ)"
+    },
+    {
+      "city": "Itaguaí",
+      "uf": "RJ",
+      "label": "Itaguaí (RJ)"
+    },
+    {
+      "city": "Itaipulândia",
+      "uf": "PR",
+      "label": "Itaipulândia (PR)"
+    },
+    {
+      "city": "Itajaí",
+      "uf": "SC",
+      "label": "Itajaí (SC)"
+    },
+    {
+      "city": "Italva",
+      "uf": "RJ",
+      "label": "Italva (RJ)"
+    },
+    {
+      "city": "Itambé",
+      "uf": "BA",
+      "label": "Itambé (BA)"
+    },
+    {
+      "city": "Itanhomi",
+      "uf": "MG",
+      "label": "Itanhomi (MG)"
+    },
+    {
+      "city": "Itapecerica da Serra",
+      "uf": "SP",
+      "label": "Itapecerica da Serra (SP)"
+    },
+    {
+      "city": "Itapema",
+      "uf": "SC",
+      "label": "Itapema (SC)"
+    },
+    {
+      "city": "Itapevi",
+      "uf": "SP",
+      "label": "Itapevi (SP)"
+    },
+    {
+      "city": "Itapoá",
+      "uf": "SC",
+      "label": "Itapoá (SC)"
+    },
+    {
+      "city": "Itaporanga d´Ajuda",
+      "uf": "SE",
+      "label": "Itaporanga d´Ajuda (SE)"
+    },
+    {
+      "city": "Itapuã do Oeste",
+      "uf": "RO",
+      "label": "Itapuã do Oeste (RO)"
+    },
+    {
+      "city": "Itaquaquecetuba",
+      "uf": "SP",
+      "label": "Itaquaquecetuba (SP)"
+    },
+    {
+      "city": "Itarumã",
+      "uf": "GO",
+      "label": "Itarumã (GO)"
+    },
+    {
+      "city": "Itatiba",
+      "uf": "SP",
+      "label": "Itatiba (SP)"
+    },
+    {
+      "city": "Itaubal",
+      "uf": "AP",
+      "label": "Itaubal (AP)"
+    },
+    {
+      "city": "Itu",
+      "uf": "SP",
+      "label": "Itu (SP)"
+    },
+    {
+      "city": "Itupiranga",
+      "uf": "PA",
+      "label": "Itupiranga (PA)"
+    },
+    {
+      "city": "Ituverava",
+      "uf": "SP",
+      "label": "Ituverava (SP)"
+    },
+    {
+      "city": "Ivatuba",
+      "uf": "PR",
+      "label": "Ivatuba (PR)"
+    },
+    {
+      "city": "Ivoti",
+      "uf": "RS",
+      "label": "Ivoti (RS)"
+    },
+    {
+      "city": "Jaboatão dos Guararapes",
+      "uf": "PE",
+      "label": "Jaboatão dos Guararapes (PE)"
+    },
+    {
+      "city": "Jacareí",
+      "uf": "SP",
+      "label": "Jacareí (SP)"
+    },
+    {
+      "city": "Jaci",
+      "uf": "SP",
+      "label": "Jaci (SP)"
+    },
+    {
+      "city": "Jangada",
+      "uf": "MT",
+      "label": "Jangada (MT)"
+    },
+    {
+      "city": "Jaraguá do Sul",
+      "uf": "SC",
+      "label": "Jaraguá do Sul (SC)"
+    },
+    {
+      "city": "Jaraguari",
+      "uf": "MS",
+      "label": "Jaraguari (MS)"
+    },
+    {
+      "city": "Jardinópolis",
+      "uf": "SP",
+      "label": "Jardinópolis (SP)"
+    },
+    {
+      "city": "Jataí",
+      "uf": "GO",
+      "label": "Jataí (GO)"
+    },
+    {
+      "city": "Jataizinho",
+      "uf": "PR",
+      "label": "Jataizinho (PR)"
+    },
+    {
+      "city": "Jeriquara",
+      "uf": "SP",
+      "label": "Jeriquara (SP)"
+    },
+    {
+      "city": "Joanésia",
+      "uf": "MG",
+      "label": "Joanésia (MG)"
+    },
+    {
+      "city": "João Lisboa",
+      "uf": "MA",
+      "label": "João Lisboa (MA)"
+    },
+    {
+      "city": "João Pessoa",
+      "uf": "PB",
+      "label": "João Pessoa (PB)"
+    },
+    {
+      "city": "Joinville",
+      "uf": "SC",
+      "label": "Joinville (SC)"
+    },
+    {
+      "city": "José de Freitas",
+      "uf": "PI",
+      "label": "José de Freitas (PI)"
+    },
+    {
+      "city": "Juazeiro",
+      "uf": "BA",
+      "label": "Juazeiro (BA)"
+    },
+    {
+      "city": "Juazeiro do Norte",
+      "uf": "CE",
+      "label": "Juazeiro do Norte (CE)"
+    },
+    {
+      "city": "Juiz de Fora",
+      "uf": "MG",
+      "label": "Juiz de Fora (MG)"
+    },
+    {
+      "city": "Jundiaí",
+      "uf": "SP",
+      "label": "Jundiaí (SP)"
+    },
+    {
+      "city": "Juramento",
+      "uf": "MG",
+      "label": "Juramento (MG)"
+    },
+    {
+      "city": "Lagoa Alegre",
+      "uf": "PI",
+      "label": "Lagoa Alegre (PI)"
+    },
+    {
+      "city": "Lagoa Seca",
+      "uf": "PB",
+      "label": "Lagoa Seca (PB)"
+    },
+    {
+      "city": "Lagoinha",
+      "uf": "SP",
+      "label": "Lagoinha (SP)"
+    },
+    {
+      "city": "Lapa",
+      "uf": "PR",
+      "label": "Lapa (PR)"
+    },
+    {
+      "city": "Lauro de Freitas",
+      "uf": "BA",
+      "label": "Lauro de Freitas (BA)"
+    },
+    {
+      "city": "Limeira",
+      "uf": "SP",
+      "label": "Limeira (SP)"
+    },
+    {
+      "city": "Londrina",
+      "uf": "PR",
+      "label": "Londrina (PR)"
+    },
+    {
+      "city": "Luziânia",
+      "uf": "DF",
+      "label": "Luziânia (DF)"
+    },
+    {
+      "city": "Macaíba",
+      "uf": "RN",
+      "label": "Macaíba (RN)"
+    },
+    {
+      "city": "Macapá",
+      "uf": "AP",
+      "label": "Macapá (AP)"
+    },
+    {
+      "city": "Maceió",
+      "uf": "AL",
+      "label": "Maceió (AL)"
+    },
+    {
+      "city": "Magé",
+      "uf": "RJ",
+      "label": "Magé (RJ)"
+    },
+    {
+      "city": "Mairiporã",
+      "uf": "SP",
+      "label": "Mairiporã (SP)"
+    },
+    {
+      "city": "Mal. Candido Rondon",
+      "uf": "PR",
+      "label": "Mal. Candido Rondon (PR)"
+    },
+    {
+      "city": "Mal. Deodoro",
+      "uf": "AL",
+      "label": "Mal. Deodoro (AL)"
+    },
+    {
+      "city": "Manacapuru",
+      "uf": "AM",
+      "label": "Manacapuru (AM)"
+    },
+    {
+      "city": "Manaquiri",
+      "uf": "AM",
+      "label": "Manaquiri (AM)"
+    },
+    {
+      "city": "Manaus",
+      "uf": "AM",
+      "label": "Manaus (AM)"
+    },
+    {
+      "city": "Mandaguaçu",
+      "uf": "PR",
+      "label": "Mandaguaçu (PR)"
+    },
+    {
+      "city": "Mandirituba",
+      "uf": "PR",
+      "label": "Mandirituba (PR)"
+    },
+    {
+      "city": "Mar de Espanha",
+      "uf": "MG",
+      "label": "Mar de Espanha (MG)"
+    },
+    {
+      "city": "Marabá",
+      "uf": "PA",
+      "label": "Marabá (PA)"
+    },
+    {
+      "city": "Maracanaú",
+      "uf": "CE",
+      "label": "Maracanaú (CE)"
+    },
+    {
+      "city": "Marialva",
+      "uf": "PR",
+      "label": "Marialva (PR)"
+    },
+    {
+      "city": "Maringá",
+      "uf": "PR",
+      "label": "Maringá (PR)"
+    },
+    {
+      "city": "Mário Campos",
+      "uf": "MG",
+      "label": "Mário Campos (MG)"
+    },
+    {
+      "city": "Maripá de Minas",
+      "uf": "MG",
+      "label": "Maripá de Minas (MG)"
+    },
+    {
+      "city": "Maruim",
+      "uf": "SE",
+      "label": "Maruim (SE)"
+    },
+    {
+      "city": "Massaranduba",
+      "uf": "PB",
+      "label": "Massaranduba (PB)"
+    },
+    {
+      "city": "Mata de São João",
+      "uf": "BA",
+      "label": "Mata de São João (BA)"
+    },
+    {
+      "city": "Matelândia",
+      "uf": "PR",
+      "label": "Matelândia (PR)"
+    },
+    {
+      "city": "Matias Barbosa",
+      "uf": "MG",
+      "label": "Matias Barbosa (MG)"
+    },
+    {
+      "city": "Mauá",
+      "uf": "SP",
+      "label": "Mauá (SP)"
+    },
+    {
+      "city": "Mazagão",
+      "uf": "AP",
+      "label": "Mazagão (AP)"
+    },
+    {
+      "city": "Medianeira",
+      "uf": "PR",
+      "label": "Medianeira (PR)"
+    },
+    {
+      "city": "Mesquita",
+      "uf": "RJ",
+      "label": "Mesquita (RJ)"
+    },
+    {
+      "city": "Mirassol",
+      "uf": "SP",
+      "label": "Mirassol (SP)"
+    },
+    {
+      "city": "Mirassolândia",
+      "uf": "SP",
+      "label": "Mirassolândia (SP)"
+    },
+    {
+      "city": "Missal",
+      "uf": "PR",
+      "label": "Missal (PR)"
+    },
+    {
+      "city": "Missão Velha",
+      "uf": "CE",
+      "label": "Missão Velha (CE)"
+    },
+    {
+      "city": "Mogi das Cruzes",
+      "uf": "SP",
+      "label": "Mogi das Cruzes (SP)"
+    },
+    {
+      "city": "Mombuca",
+      "uf": "SP",
+      "label": "Mombuca (SP)"
+    },
+    {
+      "city": "Monte Aprazível",
+      "uf": "SP",
+      "label": "Monte Aprazível (SP)"
+    },
+    {
+      "city": "Monteiro Lobato",
+      "uf": "SP",
+      "label": "Monteiro Lobato (SP)"
+    },
+    {
+      "city": "Montes Claros",
+      "uf": "MG",
+      "label": "Montes Claros (MG)"
+    },
+    {
+      "city": "Montividiu",
+      "uf": "GO",
+      "label": "Montividiu (GO)"
+    },
+    {
+      "city": "Morro Reuter",
+      "uf": "RS",
+      "label": "Morro Reuter (RS)"
+    },
+    {
+      "city": "Mosenhor Gil",
+      "uf": "PI",
+      "label": "Mosenhor Gil (PI)"
+    },
+    {
+      "city": "Mucajaí",
+      "uf": "RR",
+      "label": "Mucajaí (RR)"
+    },
+    {
+      "city": "Naque",
+      "uf": "MG",
+      "label": "Naque (MG)"
+    },
+    {
+      "city": "Natal",
+      "uf": "RN",
+      "label": "Natal (RN)"
+    },
+    {
+      "city": "Navegantes",
+      "uf": "SC",
+      "label": "Navegantes (SC)"
+    },
+    {
+      "city": "Nerópolis",
+      "uf": "GO",
+      "label": "Nerópolis (GO)"
+    },
+    {
+      "city": "Nilópolis",
+      "uf": "RJ",
+      "label": "Nilópolis (RJ)"
+    },
+    {
+      "city": "Niterói",
+      "uf": "RJ",
+      "label": "Niterói (RJ)"
+    },
+    {
+      "city": "Nossa Sra do Socorro",
+      "uf": "SE",
+      "label": "Nossa Sra do Socorro (SE)"
+    },
+    {
+      "city": "Nossa Sra. do Livramento",
+      "uf": "MT",
+      "label": "Nossa Sra. do Livramento (MT)"
+    },
+    {
+      "city": "Nova Iguaçu",
+      "uf": "RJ",
+      "label": "Nova Iguaçu (RJ)"
+    },
+    {
+      "city": "Nova Ipixuna",
+      "uf": "PA",
+      "label": "Nova Ipixuna (PA)"
+    },
+    {
+      "city": "Nova Odessa",
+      "uf": "SP",
+      "label": "Nova Odessa (SP)"
+    },
+    {
+      "city": "Nova Olinda",
+      "uf": "CE",
+      "label": "Nova Olinda (CE)"
+    },
+    {
+      "city": "Nova Pádua",
+      "uf": "RS",
+      "label": "Nova Pádua (RS)"
+    },
+    {
+      "city": "Nova Petrópolis",
+      "uf": "RS",
+      "label": "Nova Petrópolis (RS)"
+    },
+    {
+      "city": "Nova Roma do Sul",
+      "uf": "RS",
+      "label": "Nova Roma do Sul (RS)"
+    },
+    {
+      "city": "Nova Santa Rita",
+      "uf": "RS",
+      "label": "Nova Santa Rita (RS)"
+    },
+    {
+      "city": "Nova Veneza",
+      "uf": "GO",
+      "label": "Nova Veneza (GO)"
+    },
+    {
+      "city": "Novo Hamburgo",
+      "uf": "RS",
+      "label": "Novo Hamburgo (RS)"
+    },
+    {
+      "city": "Nuporanga",
+      "uf": "SP",
+      "label": "Nuporanga (SP)"
+    },
+    {
+      "city": "Olinda",
+      "uf": "PE",
+      "label": "Olinda (PE)"
+    },
+    {
+      "city": "Onda Verde",
+      "uf": "SP",
+      "label": "Onda Verde (SP)"
+    },
+    {
+      "city": "Orlândia",
+      "uf": "SP",
+      "label": "Orlândia (SP)"
+    },
+    {
+      "city": "Osasco",
+      "uf": "SP",
+      "label": "Osasco (SP)"
+    },
+    {
+      "city": "Pacajus",
+      "uf": "CE",
+      "label": "Pacajus (CE)"
+    },
+    {
+      "city": "Paiçandu",
+      "uf": "PR",
+      "label": "Paiçandu (PR)"
+    },
+    {
+      "city": "Palhoça",
+      "uf": "SC",
+      "label": "Palhoça (SC)"
+    },
+    {
+      "city": "Palmeira",
+      "uf": "PR",
+      "label": "Palmeira (PR)"
+    },
+    {
+      "city": "Palotina",
+      "uf": "PR",
+      "label": "Palotina (PR)"
+    },
+    {
+      "city": "Paracuru",
+      "uf": "CE",
+      "label": "Paracuru (CE)"
+    },
+    {
+      "city": "Paraibuna",
+      "uf": "SP",
+      "label": "Paraibuna (SP)"
+    },
+    {
+      "city": "Paraipaba",
+      "uf": "CE",
+      "label": "Paraipaba (CE)"
+    },
+    {
+      "city": "Paramoti",
+      "uf": "CE",
+      "label": "Paramoti (CE)"
+    },
+    {
+      "city": "Parauapebas",
+      "uf": "PA",
+      "label": "Parauapebas (PA)"
+    },
+    {
+      "city": "Paripueira",
+      "uf": "AL",
+      "label": "Paripueira (AL)"
+    },
+    {
+      "city": "Parnamirim",
+      "uf": "RN",
+      "label": "Parnamirim (RN)"
+    },
+    {
+      "city": "Patrocínio Paulista",
+      "uf": "SP",
+      "label": "Patrocínio Paulista (SP)"
+    },
+    {
+      "city": "Pau D´Arco do Piauí",
+      "uf": "PI",
+      "label": "Pau D´Arco do Piauí (PI)"
+    },
+    {
+      "city": "Paulínia",
+      "uf": "SP",
+      "label": "Paulínia (SP)"
+    },
+    {
+      "city": "Pedregulho",
+      "uf": "SP",
+      "label": "Pedregulho (SP)"
+    },
+    {
+      "city": "Penha",
+      "uf": "SC",
+      "label": "Penha (SC)"
+    },
+    {
+      "city": "Pentecoste",
+      "uf": "CE",
+      "label": "Pentecoste (CE)"
+    },
+    {
+      "city": "Pequeri",
+      "uf": "MG",
+      "label": "Pequeri (MG)"
+    },
+    {
+      "city": "Perolândia",
+      "uf": "GO",
+      "label": "Perolândia (GO)"
+    },
+    {
+      "city": "Petrolina",
+      "uf": "PE",
+      "label": "Petrolina (PE)"
+    },
+    {
+      "city": "Piau",
+      "uf": "MG",
+      "label": "Piau (MG)"
+    },
+    {
+      "city": "Piedade",
+      "uf": "SP",
+      "label": "Piedade (SP)"
+    },
+    {
+      "city": "Pilar",
+      "uf": "AL",
+      "label": "Pilar (AL)"
+    },
+    {
+      "city": "Pindamonhangaba",
+      "uf": "SP",
+      "label": "Pindamonhangaba (SP)"
+    },
+    {
+      "city": "Pindoretama",
+      "uf": "CE",
+      "label": "Pindoretama (CE)"
+    },
+    {
+      "city": "Piracicaba",
+      "uf": "SP",
+      "label": "Piracicaba (SP)"
+    },
+    {
+      "city": "Pirajuí",
+      "uf": "SP",
+      "label": "Pirajuí (SP)"
+    },
+    {
+      "city": "Piraquara",
+      "uf": "PR",
+      "label": "Piraquara (PR)"
+    },
+    {
+      "city": "Piratininga",
+      "uf": "SP",
+      "label": "Piratininga (SP)"
+    },
+    {
+      "city": "Pirenópolis",
+      "uf": "GO",
+      "label": "Pirenópolis (GO)"
+    },
+    {
+      "city": "Planalmira",
+      "uf": "GO",
+      "label": "Planalmira (GO)"
+    },
+    {
+      "city": "Planaltina",
+      "uf": "DF",
+      "label": "Planaltina (DF)"
+    },
+    {
+      "city": "Planalto",
+      "uf": "BA",
+      "label": "Planalto (BA)"
+    },
+    {
+      "city": "Poá",
+      "uf": "SP",
+      "label": "Poá (SP)"
+    },
+    {
+      "city": "Ponta Grossa",
+      "uf": "PR",
+      "label": "Ponta Grossa (PR)"
+    },
+    {
+      "city": "Pontal",
+      "uf": "SP",
+      "label": "Pontal (SP)"
+    },
+    {
+      "city": "Portão",
+      "uf": "RS",
+      "label": "Portão (RS)"
+    },
+    {
+      "city": "Porto Alegre",
+      "uf": "RS",
+      "label": "Porto Alegre (RS)"
+    },
+    {
+      "city": "Porto Amazonas",
+      "uf": "PR",
+      "label": "Porto Amazonas (PR)"
+    },
+    {
+      "city": "Porto Belo",
+      "uf": "SC",
+      "label": "Porto Belo (SC)"
+    },
+    {
+      "city": "Porto Velho",
+      "uf": "RO",
+      "label": "Porto Velho (RO)"
+    },
+    {
+      "city": "Potirendaba",
+      "uf": "SP",
+      "label": "Potirendaba (SP)"
+    },
+    {
+      "city": "Pradópolis",
+      "uf": "SP",
+      "label": "Pradópolis (SP)"
+    },
+    {
+      "city": "Praia Grande",
+      "uf": "SP",
+      "label": "Praia Grande (SP)"
+    },
+    {
+      "city": "Pres. Alves",
+      "uf": "SP",
+      "label": "Pres. Alves (SP)"
+    },
+    {
+      "city": "Pres. Figueiredo",
+      "uf": "AM",
+      "label": "Pres. Figueiredo (AM)"
+    },
+    {
+      "city": "Puxinanã",
+      "uf": "PB",
+      "label": "Puxinanã (PB)"
+    },
+    {
+      "city": "Queimados",
+      "uf": "RJ",
+      "label": "Queimados (RJ)"
+    },
+    {
+      "city": "Quirinópolis",
+      "uf": "GO",
+      "label": "Quirinópolis (GO)"
+    },
+    {
+      "city": "Quissamã",
+      "uf": "RJ",
+      "label": "Quissamã (RJ)"
+    },
+    {
+      "city": "Rancho Queimado",
+      "uf": "SC",
+      "label": "Rancho Queimado (SC)"
+    },
+    {
+      "city": "Raposa",
+      "uf": "MA",
+      "label": "Raposa (MA)"
+    },
+    {
+      "city": "Recife",
+      "uf": "PE",
+      "label": "Recife (PE)"
+    },
+    {
+      "city": "Redenção da Serra",
+      "uf": "SP",
+      "label": "Redenção da Serra (SP)"
+    },
+    {
+      "city": "Restinga Sêca",
+      "uf": "RS",
+      "label": "Restinga Sêca (RS)"
+    },
+    {
+      "city": "Riachuelo",
+      "uf": "SE",
+      "label": "Riachuelo (SE)"
+    },
+    {
+      "city": "Ribas do Rio Pardo",
+      "uf": "MS",
+      "label": "Ribas do Rio Pardo (MS)"
+    },
+    {
+      "city": "Ribeirão Corrente",
+      "uf": "SP",
+      "label": "Ribeirão Corrente (SP)"
+    },
+    {
+      "city": "Ribeirão das Neves",
+      "uf": "MG",
+      "label": "Ribeirão das Neves (MG)"
+    },
+    {
+      "city": "Ribeirão Pires",
+      "uf": "SP",
+      "label": "Ribeirão Pires (SP)"
+    },
+    {
+      "city": "Ribeirão Preto",
+      "uf": "SP",
+      "label": "Ribeirão Preto (SP)"
+    },
+    {
+      "city": "Rio Branco",
+      "uf": "AC",
+      "label": "Rio Branco (AC)"
+    },
+    {
+      "city": "Rio Branco do Sul",
+      "uf": "PR",
+      "label": "Rio Branco do Sul (PR)"
+    },
+    {
+      "city": "Rio Claro",
+      "uf": "SP",
+      "label": "Rio Claro (SP)"
+    },
+    {
+      "city": "Rio de Janeiro",
+      "uf": "RJ",
+      "label": "Rio de Janeiro (RJ)"
+    },
+    {
+      "city": "Rio Grande da Serra",
+      "uf": "SP",
+      "label": "Rio Grande da Serra (SP)"
+    },
+    {
+      "city": "Rio Largo",
+      "uf": "AL",
+      "label": "Rio Largo (AL)"
+    },
+    {
+      "city": "Rio Preto da Eva",
+      "uf": "AM",
+      "label": "Rio Preto da Eva (AM)"
+    },
+    {
+      "city": "Rio Verde",
+      "uf": "GO",
+      "label": "Rio Verde (GO)"
+    },
+    {
+      "city": "Rochedo",
+      "uf": "MS",
+      "label": "Rochedo (MS)"
+    },
+    {
+      "city": "Rodeio",
+      "uf": "SC",
+      "label": "Rodeio (SC)"
+    },
+    {
+      "city": "Rolândia",
+      "uf": "PR",
+      "label": "Rolândia (PR)"
+    },
+    {
+      "city": "Rorainópolis",
+      "uf": "RR",
+      "label": "Rorainópolis (RR)"
+    },
+    {
+      "city": "Roseira",
+      "uf": "SP",
+      "label": "Roseira (SP)"
+    },
+    {
+      "city": "Sabará",
+      "uf": "MG",
+      "label": "Sabará (MG)"
+    },
+    {
+      "city": "Sales Oliveira",
+      "uf": "SP",
+      "label": "Sales Oliveira (SP)"
+    },
+    {
+      "city": "Salto de Pirapora",
+      "uf": "SP",
+      "label": "Salto de Pirapora (SP)"
+    },
+    {
+      "city": "Salvador",
+      "uf": "BA",
+      "label": "Salvador (BA)"
+    },
+    {
+      "city": "Santa Bárbara d´Oeste",
+      "uf": "SP",
+      "label": "Santa Bárbara d´Oeste (SP)"
+    },
+    {
+      "city": "Santa Branca",
+      "uf": "SP",
+      "label": "Santa Branca (SP)"
+    },
+    {
+      "city": "Santa Cruz do Capibaribe",
+      "uf": "PE",
+      "label": "Santa Cruz do Capibaribe (PE)"
+    },
+    {
+      "city": "Santa Helena de Goiás",
+      "uf": "GO",
+      "label": "Santa Helena de Goiás (GO)"
+    },
+    {
+      "city": "Santa Izabel do Pará",
+      "uf": "PA",
+      "label": "Santa Izabel do Pará (PA)"
+    },
+    {
+      "city": "Santa Leopoldina",
+      "uf": "ES",
+      "label": "Santa Leopoldina (ES)"
+    },
+    {
+      "city": "Santa Luzia",
+      "uf": "MG",
+      "label": "Santa Luzia (MG)"
+    },
+    {
+      "city": "Santa Luzia do Norte",
+      "uf": "AL",
+      "label": "Santa Luzia do Norte (AL)"
+    },
+    {
+      "city": "Santa Maria",
+      "uf": "RS",
+      "label": "Santa Maria (RS)"
+    },
+    {
+      "city": "Santa Maria Madalena",
+      "uf": "RJ",
+      "label": "Santa Maria Madalena (RJ)"
+    },
+    {
+      "city": "Santa Rita",
+      "uf": "PB",
+      "label": "Santa Rita (PB)"
+    },
+    {
+      "city": "Santa Terezinha de Itaipu",
+      "uf": "PR",
+      "label": "Santa Terezinha de Itaipu (PR)"
+    },
+    {
+      "city": "Santana do Paraíso",
+      "uf": "MG",
+      "label": "Santana do Paraíso (MG)"
+    },
+    {
+      "city": "Santo Amaro da Imperatriz",
+      "uf": "SC",
+      "label": "Santo Amaro da Imperatriz (SC)"
+    },
+    {
+      "city": "Santo Amaro das Brotas",
+      "uf": "SE",
+      "label": "Santo Amaro das Brotas (SE)"
+    },
+    {
+      "city": "Santo Antônio da Barra",
+      "uf": "GO",
+      "label": "Santo Antônio da Barra (GO)"
+    },
+    {
+      "city": "Santo Antônio de Goiás",
+      "uf": "GO",
+      "label": "Santo Antônio de Goiás (GO)"
+    },
+    {
+      "city": "Santo Antônio do Descoberto",
+      "uf": "DF",
+      "label": "Santo Antônio do Descoberto (DF)"
+    },
+    {
+      "city": "Santo Antônio do Leverger",
+      "uf": "MT",
+      "label": "Santo Antônio do Leverger (MT)"
+    },
+    {
+      "city": "Santos",
+      "uf": "SP",
+      "label": "Santos (SP)"
+    },
+    {
+      "city": "São Bento do Sul",
+      "uf": "SC",
+      "label": "São Bento do Sul (SC)"
+    },
+    {
+      "city": "São Bernardo do Campo",
+      "uf": "SP",
+      "label": "São Bernardo do Campo (SP)"
+    },
+    {
+      "city": "São Cristóvão",
+      "uf": "SE",
+      "label": "São Cristóvão (SE)"
+    },
+    {
+      "city": "São Francisco de Itabapoana",
+      "uf": "RJ",
+      "label": "São Francisco de Itabapoana (RJ)"
+    },
+    {
+      "city": "São Gonçalo",
+      "uf": "RJ",
+      "label": "São Gonçalo (RJ)"
+    },
+    {
+      "city": "São Gonçalo do Amarante",
+      "uf": "RN",
+      "label": "São Gonçalo do Amarante (RN)"
+    },
+    {
+      "city": "São João de Meriti",
+      "uf": "RJ",
+      "label": "São João de Meriti (RJ)"
+    },
+    {
+      "city": "São João do Polêsine",
+      "uf": "RS",
+      "label": "São João do Polêsine (RS)"
+    },
+    {
+      "city": "São Joaquim da Barra",
+      "uf": "SP",
+      "label": "São Joaquim da Barra (SP)"
+    },
+    {
+      "city": "São José",
+      "uf": "SC",
+      "label": "São José (SC)"
+    },
+    {
+      "city": "São José da Bela Vista",
+      "uf": "SP",
+      "label": "São José da Bela Vista (SP)"
+    },
+    {
+      "city": "São José de Ribamar",
+      "uf": "MA",
+      "label": "São José de Ribamar (MA)"
+    },
+    {
+      "city": "São José do Rio Preto",
+      "uf": "SP",
+      "label": "São José do Rio Preto (SP)"
+    },
+    {
+      "city": "São José dos Campos",
+      "uf": "SP",
+      "label": "São José dos Campos (SP)"
+    },
+    {
+      "city": "São José dos Pinhais",
+      "uf": "PR",
+      "label": "São José dos Pinhais (PR)"
+    },
+    {
+      "city": "São Leopoldo",
+      "uf": "RS",
+      "label": "São Leopoldo (RS)"
+    },
+    {
+      "city": "São Lourenço da Mata",
+      "uf": "PE",
+      "label": "São Lourenço da Mata (PE)"
+    },
+    {
+      "city": "São Luís",
+      "uf": "MA",
+      "label": "São Luís (MA)"
+    },
+    {
+      "city": "São Luís do Curu",
+      "uf": "CE",
+      "label": "São Luís do Curu (CE)"
+    },
+    {
+      "city": "São Luiz do Paraitinga",
+      "uf": "SP",
+      "label": "São Luiz do Paraitinga (SP)"
+    },
+    {
+      "city": "São Marcos",
+      "uf": "RS",
+      "label": "São Marcos (RS)"
+    },
+    {
+      "city": "São Miguel do Iguaçu",
+      "uf": "PR",
+      "label": "São Miguel do Iguaçu (PR)"
+    },
+    {
+      "city": "São Paulo",
+      "uf": "SP",
+      "label": "São Paulo (SP)"
+    },
+    {
+      "city": "São Pedro",
+      "uf": "SP",
+      "label": "São Pedro (SP)"
+    },
+    {
+      "city": "São Pedro de Alcântara",
+      "uf": "SC",
+      "label": "São Pedro de Alcântara (SC)"
+    },
+    {
+      "city": "São Pedro do Sul",
+      "uf": "RS",
+      "label": "São Pedro do Sul (RS)"
+    },
+    {
+      "city": "São Roque",
+      "uf": "SP",
+      "label": "São Roque (SP)"
+    },
+    {
+      "city": "São Sebastião de Lagoa de Roça",
+      "uf": "PB",
+      "label": "São Sebastião de Lagoa de Roça (PB)"
+    },
+    {
+      "city": "São Sebastião do Anta",
+      "uf": "MG",
+      "label": "São Sebastião do Anta (MG)"
+    },
+    {
+      "city": "São Sebastião do Passé",
+      "uf": "BA",
+      "label": "São Sebastião do Passé (BA)"
+    },
+    {
+      "city": "São Sepé",
+      "uf": "RS",
+      "label": "São Sepé (RS)"
+    },
+    {
+      "city": "São Simão",
+      "uf": "SP",
+      "label": "São Simão (SP)"
+    },
+    {
+      "city": "São Vendelino",
+      "uf": "RS",
+      "label": "São Vendelino (RS)"
+    },
+    {
+      "city": "São Vicente",
+      "uf": "SP",
+      "label": "São Vicente (SP)"
+    },
+    {
+      "city": "Sapiranga",
+      "uf": "RS",
+      "label": "Sapiranga (RS)"
+    },
+    {
+      "city": "Sapucaia do Sul",
+      "uf": "RS",
+      "label": "Sapucaia do Sul (RS)"
+    },
+    {
+      "city": "Sarandi",
+      "uf": "PR",
+      "label": "Sarandi (PR)"
+    },
+    {
+      "city": "Sarzedo",
+      "uf": "MG",
+      "label": "Sarzedo (MG)"
+    },
+    {
+      "city": "Satuba",
+      "uf": "AL",
+      "label": "Satuba (AL)"
+    },
+    {
+      "city": "Schroeder",
+      "uf": "SC",
+      "label": "Schroeder (SC)"
+    },
+    {
+      "city": "Sen. La Rocque",
+      "uf": "MA",
+      "label": "Sen. La Rocque (MA)"
+    },
+    {
+      "city": "Serra",
+      "uf": "ES",
+      "label": "Serra (ES)"
+    },
+    {
+      "city": "Serra Azul",
+      "uf": "SP",
+      "label": "Serra Azul (SP)"
+    },
+    {
+      "city": "Serra Redonda",
+      "uf": "PB",
+      "label": "Serra Redonda (PB)"
+    },
+    {
+      "city": "Serrana",
+      "uf": "SP",
+      "label": "Serrana (SP)"
+    },
+    {
+      "city": "Serranópolis do Iguaçu",
+      "uf": "PR",
+      "label": "Serranópolis do Iguaçu (PR)"
+    },
+    {
+      "city": "Serrinha",
+      "uf": "RJ",
+      "label": "Serrinha (RJ)"
+    },
+    {
+      "city": "Sidrolândia",
+      "uf": "MS",
+      "label": "Sidrolândia (MS)"
+    },
+    {
+      "city": "Silveira Martins",
+      "uf": "RS",
+      "label": "Silveira Martins (RS)"
+    },
+    {
+      "city": "Simão Pereira",
+      "uf": "MG",
+      "label": "Simão Pereira (MG)"
+    },
+    {
+      "city": "Simões Filho",
+      "uf": "BA",
+      "label": "Simões Filho (BA)"
+    },
+    {
+      "city": "Sorocaba",
+      "uf": "SP",
+      "label": "Sorocaba (SP)"
+    },
+    {
+      "city": "Sumaré",
+      "uf": "SP",
+      "label": "Sumaré (SP)"
+    },
+    {
+      "city": "Taboão da Serra",
+      "uf": "SP",
+      "label": "Taboão da Serra (SP)"
+    },
+    {
+      "city": "Tacaimbó",
+      "uf": "PE",
+      "label": "Tacaimbó (PE)"
+    },
+    {
+      "city": "Taguaritinga do Norte",
+      "uf": "PE",
+      "label": "Taguaritinga do Norte (PE)"
+    },
+    {
+      "city": "Tarumirim",
+      "uf": "MG",
+      "label": "Tarumirim (MG)"
+    },
+    {
+      "city": "Taubaté",
+      "uf": "SP",
+      "label": "Taubaté (SP)"
+    },
+    {
+      "city": "Teixeira Soares",
+      "uf": "PR",
+      "label": "Teixeira Soares (PR)"
+    },
+    {
+      "city": "Terenos",
+      "uf": "MS",
+      "label": "Terenos (MS)"
+    },
+    {
+      "city": "Teresina",
+      "uf": "PI",
+      "label": "Teresina (PI)"
+    },
+    {
+      "city": "Terra Roxa",
+      "uf": "PR",
+      "label": "Terra Roxa (PR)"
+    },
+    {
+      "city": "Tijucas",
+      "uf": "SC",
+      "label": "Tijucas (SC)"
+    },
+    {
+      "city": "Tijucas do Sul",
+      "uf": "PR",
+      "label": "Tijucas do Sul (PR)"
+    },
+    {
+      "city": "Timbó",
+      "uf": "SC",
+      "label": "Timbó (SC)"
+    },
+    {
+      "city": "Timóteo",
+      "uf": "MG",
+      "label": "Timóteo (MG)"
+    },
+    {
+      "city": "Toritama",
+      "uf": "PE",
+      "label": "Toritama (PE)"
+    },
+    {
+      "city": "Tremembé",
+      "uf": "SP",
+      "label": "Tremembé (SP)"
+    },
+    {
+      "city": "Trindade",
+      "uf": "GO",
+      "label": "Trindade (GO)"
+    },
+    {
+      "city": "Tunas do Paraná",
+      "uf": "PR",
+      "label": "Tunas do Paraná (PR)"
+    },
+    {
+      "city": "Uberlândia",
+      "uf": "MG",
+      "label": "Uberlândia (MG)"
+    },
+    {
+      "city": "Uchoa",
+      "uf": "SP",
+      "label": "Uchoa (SP)"
+    },
+    {
+      "city": "Umirim",
+      "uf": "CE",
+      "label": "Umirim (CE)"
+    },
+    {
+      "city": "União",
+      "uf": "PI",
+      "label": "União (PI)"
+    },
+    {
+      "city": "Vale Real",
+      "uf": "RS",
+      "label": "Vale Real (RS)"
+    },
+    {
+      "city": "Valinhos",
+      "uf": "SP",
+      "label": "Valinhos (SP)"
+    },
+    {
+      "city": "Valparaíso de Goiás",
+      "uf": "DF",
+      "label": "Valparaíso de Goiás (DF)"
+    },
+    {
+      "city": "Vargem Grande Paulista",
+      "uf": "SP",
+      "label": "Vargem Grande Paulista (SP)"
+    },
+    {
+      "city": "Várzea Alegre",
+      "uf": "CE",
+      "label": "Várzea Alegre (CE)"
+    },
+    {
+      "city": "Várzea Grande",
+      "uf": "MT",
+      "label": "Várzea Grande (MT)"
+    },
+    {
+      "city": "Viamão",
+      "uf": "RS",
+      "label": "Viamão (RS)"
+    },
+    {
+      "city": "Viana",
+      "uf": "ES",
+      "label": "Viana (ES)"
+    },
+    {
+      "city": "Vila Velha",
+      "uf": "ES",
+      "label": "Vila Velha (ES)"
+    },
+    {
+      "city": "Vitória",
+      "uf": "ES",
+      "label": "Vitória (ES)"
+    },
+    {
+      "city": "Vitória da Conquista",
+      "uf": "BA",
+      "label": "Vitória da Conquista (BA)"
+    },
+    {
+      "city": "Votorantim",
+      "uf": "SP",
+      "label": "Votorantim (SP)"
+    }
+  ]
+}

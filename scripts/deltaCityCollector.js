@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 
 let puppeteer = null;
 try {
@@ -139,7 +140,20 @@ function normalizeStateKey(value) {
     .toLowerCase();
 }
 
-const CITY_NOISE_RE = /\b(enviar|mensagem|message|save|share|anunciado|listed|detalhe|detalhes|condi[cç][aã]o|selec[cç][oõ]es|hoje|mini?atura|ver mais|facebook|localiza[cç][aã]o|location|aproximada|approximate|dias?|hours?|horas?|minutos?|weeks?|semanas?|months?|meses?|ago|classificado)\b/i;
+const CITY_NOISE_RE = /\b(enviar|mensagem|message|save|share|anunciado|listed|detalhe|detalhes|condi[cç][aã]o|condi[cç][oõ]es|razo[aá]veis|selec[cç][oõ]es|hoje|mini?atura|ver mais|facebook|localiza[cç][aã]o|location|aproximada|approximate|dias?|hours?|horas?|minutos?|weeks?|semanas?|months?|meses?|ago|classificado|usado|nova?)\b/i;
+
+const GEO_COMMA_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*,\s*([A-Za-z]{2})\b/gi;
+const GEO_PAREN_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*\(\s*([A-Za-z]{2})\s*\)/gi;
+
+function stripMarketplaceConditionNoise(raw) {
+  return String(raw || "")
+    .replace(/condi[cç][oõ]es?\s*razo[aá]veis/gi, " ")
+    .replace(/boas?\s*condi[cç][oõ]es?/gi, " ")
+    .replace(/condi[cç][aã]o\s*[:\-–]?\s*/gi, " ")
+    .replace(/usado\s*[—\-–]\s*em\s*boas?\s*condi[cç][oõ]es?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function isPlausibleCityName(cityRaw) {
   const city = String(cityRaw || "").replace(/\s+/g, " ").trim();
@@ -151,9 +165,70 @@ function isPlausibleCityName(cityRaw) {
     .toLowerCase();
   if (CITY_NOISE_RE.test(cityKey)) return false;
   if (/\b(em|in|ha|ago)\b/.test(cityKey)) return false;
+  // Colado tipo "razoaveisjuazeiro" / "condicoesjuazeiro"
+  if (/razoaveis|condicoes|boascond/i.test(cityKey.replace(/\s+/g, ""))) return false;
   const words = city.split(/\s+/).filter(Boolean);
   if (words.length < 1 || words.length > 5) return false;
+  // Fragmentos tipo "do Norte" / "da Serra" sem cidade completa
+  const first = String(words[0] || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (/^(do|da|de|dos|das|e|o|a|os|as)$/.test(first) && words.length <= 2) return false;
   return true;
+}
+
+/** Resolve Cidade+UF a partir do miolo capturado: sufixos do fim + dicionario homologado. */
+function resolveCityUfCapture(cityRaw, ufRaw) {
+  const uf = String(ufRaw || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
+  const words = String(cityRaw || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "";
+
+  const norm = (s) => String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  const cities = loadHomologCities();
+  const firstKey = norm(words[0]);
+
+  // Fragmento incompleto ("do Norte") — so homolog, nunca "Norte (CE)"
+  if (/^(do|da|de|dos|das)$/.test(firstKey) && words.length <= 2) {
+    for (let n = words.length; n >= 1; n -= 1) {
+      const key = norm(words.slice(-n).join(" "));
+      const hit = cities.find((row) => row.cityNorm === key && row.uf === uf);
+      if (hit) return hit.label;
+    }
+    return "";
+  }
+
+  // 1) Homolog: maior sufixo que bata cidade+UF
+  for (let n = Math.min(5, words.length); n >= 1; n -= 1) {
+    const tryCity = words.slice(-n).join(" ");
+    const key = norm(tryCity);
+    const hit = cities.find((row) => row.cityNorm === key && row.uf === uf);
+    if (hit) return hit.label;
+  }
+
+  // 2) Dicionario no miolo (mesmo UF)
+  const fromDict = matchCityFromHomologDict(words.join(" "));
+  if (fromDict) {
+    const m = fromDict.match(/\(([A-Z]{2})\)\s*$/);
+    if (m && m[1] === uf) return fromDict;
+  }
+
+  // 3) Fallback: maior sufixo plausivel (da direita)
+  let fallback = "";
+  for (let n = 1; n <= Math.min(5, words.length); n += 1) {
+    const built = buildCityUf(words.slice(-n).join(" "), uf);
+    if (built) fallback = built;
+  }
+  return fallback;
 }
 
 function buildCityUf(cityRaw, ufRaw) {
@@ -164,96 +239,173 @@ function buildCityUf(cityRaw, ufRaw) {
   return `${city} (${uf})`.slice(0, 80);
 }
 
-/** Extrai Cidade (UF) de qualquer blob — não exige match da string inteira. */
-function normalizeCityUfLabel(raw) {
-  const s0 = String(raw || "").replace(/\s+/g, " ").trim();
-  if (!s0) return "";
+/** Lexico homologado em disco (contingencia + limpeza de blob). */
+let __homologCitiesCache = null;
+function loadHomologCities() {
+  if (__homologCitiesCache) return __homologCitiesCache;
+  try {
+    const fp = path.join(__dirname, "..", "dados", "cidades_homologadas.json");
+    const raw = JSON.parse(fs.readFileSync(fp, "utf8"));
+    const list = Array.isArray(raw && raw.cities) ? raw.cities : (Array.isArray(raw) ? raw : []);
+    const cities = list
+      .map((row) => {
+        const city = String((row && (row.city || row.nome || row.name)) || "").trim();
+        const uf = String((row && row.uf) || "").trim().toUpperCase();
+        const label = String((row && row.label) || (city && uf ? `${city} (${uf})` : "")).trim();
+        if (!city || !uf || !label) return null;
+        const norm = label
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+        const cityNorm = city
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+        return { city, uf, label, norm, cityNorm };
+      })
+      .filter(Boolean)
+      // Cidade mais longa primeiro (evita match curto falso)
+      .sort((a, b) => b.cityNorm.length - a.cityNorm.length);
+    __homologCitiesCache = cities;
+  } catch (_) {
+    __homologCitiesCache = [];
+  }
+  return __homologCitiesCache;
+}
 
-  // Preferência: trecho antes de "· localização" / "localização"
-  const locSplit = s0.split(/\s*·\s*(?=a\s+localiza|localiza|approximate)/i);
-  const preferred = String(locSplit[0] || s0).trim();
+function matchCityFromHomologDict(rawText) {
+  const text = String(rawText || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || text.length < 3) return "";
+  const cities = loadHomologCities();
+  for (const row of cities) {
+    if (!row.cityNorm || row.cityNorm.length < 3) continue;
+    // palavra inteira aproximada
+    const re = new RegExp(`(?:^|[^a-z])${row.cityNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[^a-z]|$)`, "i");
+    if (re.test(text)) return row.label;
+  }
+  return "";
+}
 
-  const parseCityUfToken = (t0) => {
-    const t = String(t0 || "").replace(/\s*·\s*.*$/i, "").trim();
-    if (!t) return "";
-    const ufPatterns = [
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\(\s*([A-Za-z]{2})\s*\)$/,
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/,
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-z]{2})$/,
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-z]{2})$/,
-    ];
-    for (const re of ufPatterns) {
-      const m = t.match(re);
-      if (!m) continue;
-      const built = buildCityUf(m[1], m[2]);
+/**
+ * LEI 1+2: ancora incondicional em "localizacao" / "localizacao e aproximada".
+ * Nao depende do caractere medio (·). Pega ate 80 chars ANTES do marcador e aplica regex geografica.
+ */
+function extractCityFromLocationAnchorText(bodyText) {
+  const body = String(bodyText || "").replace(/\s+/g, " ").trim();
+  if (!body) return "";
+
+  const markers = [
+    /localiza[cç][aã]o\s*é\s*aproximada/gi,
+    /approximate\s+location/gi,
+    /a\s+localiza[cç][aã]o\b/gi,
+    /localiza[cç][aã]o\b/gi,
+  ];
+
+  const tryChunk = (chunk0) => {
+    const chunk = stripMarketplaceConditionNoise(chunk0);
+    if (!chunk) return "";
+
+    // LEI 2: ancora no ultimo terminal ", UF" / "(UF)" do bloco (perto do marcador)
+    const ufMarks = [];
+    const markRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
+    let um;
+    while ((um = markRe.exec(chunk)) !== null) {
+      const uf = String(um[1] || um[2] || "").toUpperCase();
+      if (!BR_VALID_UF.has(uf)) continue;
+      ufMarks.push({ index: um.index, uf });
+    }
+    for (let i = ufMarks.length - 1; i >= 0; i -= 1) {
+      const mark = ufMarks[i];
+      const before = chunk.slice(0, mark.index).trim();
+      const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
+      if (!tail || !tail[1]) continue;
+      const built = resolveCityUfCapture(tail[1], mark.uf);
       if (built) return built;
     }
-    const stateNamePatterns = [
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
-      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
-    ];
-    for (const re of stateNamePatterns) {
-      const m = t.match(re);
-      if (!m) continue;
-      const uf = STATE_NAME_TO_UF.get(normalizeStateKey(m[2]));
-      if (!uf) continue;
-      const built = buildCityUf(m[1], uf);
+
+    // Regex imperial (fallback) + dicionario no chunk
+    GEO_COMMA_RE.lastIndex = 0;
+    let m;
+    let lastComma = null;
+    while ((m = GEO_COMMA_RE.exec(chunk)) !== null) lastComma = m;
+    if (lastComma) {
+      const built = resolveCityUfCapture(lastComma[1], lastComma[2]);
       if (built) return built;
     }
-    return "";
+    GEO_PAREN_RE.lastIndex = 0;
+    let lastParen = null;
+    while ((m = GEO_PAREN_RE.exec(chunk)) !== null) lastParen = m;
+    if (lastParen) {
+      const built = resolveCityUfCapture(lastParen[1], lastParen[2]);
+      if (built) return built;
+    }
+
+    return matchCityFromHomologDict(chunk) || "";
   };
 
-  const tryExact = (s) => {
-    let t = String(s || "").trim();
-    if (!t) return "";
-    // "Anunciado <miolo livre> em Cidade, UF" — usa o ÚLTIMO em/in (evita "em 2 horas")
-    if (/^anunciado\b/i.test(t) || /^listed\b/i.test(t)) {
-      const emCities = Array.from(t.matchAll(
-        /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
-      ));
-      for (let i = emCities.length - 1; i >= 0; i -= 1) {
-        const built = parseCityUfToken(emCities[i][1]);
+  for (const re of markers) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const chunk = body.slice(Math.max(0, m.index - 80), m.index);
+      const hit = tryChunk(chunk);
+      if (hit) return hit;
+    }
+  }
+  return "";
+}
+
+/** Extrai Cidade (UF) de qualquer blob — nao exige match da string inteira nem do ·. */
+function normalizeCityUfLabel(raw) {
+  const s0 = stripMarketplaceConditionNoise(String(raw || "").replace(/\s+/g, " ").trim());
+  if (!s0) return "";
+
+  // 1) Ancora por palavra localizacao (sem depender de ·)
+  const fromAnchor = extractCityFromLocationAnchorText(s0);
+  if (fromAnchor) return fromAnchor;
+
+  // 2) Anunciado <miolo livre> em Cidade, UF — ultimo em/in
+  if (/\banunciado\b/i.test(s0) || /\blisted\b/i.test(s0)) {
+    const emCities = Array.from(s0.matchAll(
+      /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
+    ));
+    for (let i = emCities.length - 1; i >= 0; i -= 1) {
+      const token = String(emCities[i][1] || "").trim();
+      const mComma = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})$/i);
+      if (mComma) {
+        const built = buildCityUf(mComma[1], mComma[2]);
+        if (built) return built;
+      }
+      const mParen = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)$/i);
+      if (mParen) {
+        const built = buildCityUf(mParen[1], mParen[2]);
         if (built) return built;
       }
     }
-    return parseCityUfToken(t);
-  };
+  }
 
-  const exactPreferred = tryExact(preferred);
-  if (exactPreferred) return exactPreferred;
-  const exactFull = tryExact(s0);
-  if (exactFull) return exactFull;
+  // 3) Scan ", UF" / "(UF)" com walk-back + homolog
+  const ufRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
+  let m;
+  let best = "";
+  while ((m = ufRe.exec(s0)) !== null) {
+    const uf = String(m[1] || m[2] || "").toUpperCase();
+    if (!BR_VALID_UF.has(uf)) continue;
+    const before = stripMarketplaceConditionNoise(s0.slice(Math.max(0, m.index - 70), m.index));
+    const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
+    if (!tail || !tail[1]) continue;
+    const built = resolveCityUfCapture(tail[1], uf);
+    if (built) best = built;
+  }
+  if (best) return best;
 
-  // Scan por ", UF" / "(UF)" e anda pra trás nas palavras até achar cidade limpa.
-  // Evita engolir "dias em Santa Maria, RS" sem nunca testar só "Santa Maria, RS".
-  const scanCityNearUf = (text) => {
-    const src = String(text || "");
-    if (!src) return "";
-    const ufRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
-    let m;
-    let best = "";
-    while ((m = ufRe.exec(src)) !== null) {
-      const uf = String(m[1] || m[2] || "").toUpperCase();
-      if (!BR_VALID_UF.has(uf)) continue;
-      const before = src.slice(Math.max(0, m.index - 70), m.index);
-      const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
-      if (!tail || !tail[1]) continue;
-      const words = tail[1].split(/\s+/).filter(Boolean);
-      for (let start = 0; start < words.length; start += 1) {
-        const cityTry = words.slice(start).join(" ");
-        const built = buildCityUf(cityTry, uf);
-        if (built) {
-          best = built;
-          break;
-        }
-      }
-    }
-    return best;
-  };
-
-  // Preferir o trecho antes de "localização"; senão o texto inteiro.
-  return scanCityNearUf(preferred) || scanCityNearUf(s0) || "";
+  // 4) Dicionario no blob inteiro
+  return matchCityFromHomologDict(s0) || "";
 }
 
 function candidateSourcePriority(source) {
@@ -294,104 +446,41 @@ async function extractCityFromListingPage(page, {
         candidates.push({ value: c, source });
       };
 
-      const CITY_UF_CHUNK = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b|\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?\s*\(\s*[A-Za-z]{2}\s*\))/gi;
-      const extractCityChunks = (text) => {
-        const t = clean(text);
-        if (!t) return [];
-        const outChunks = [];
-        let m;
-        const re = new RegExp(CITY_UF_CHUNK.source, "gi");
-        while ((m = re.exec(t)) !== null) {
-          const chunk = clean(m[1] || m[2] || m[0]);
-          if (chunk) outChunks.push(chunk);
-        }
-        return outChunks;
-      };
-
-      // ── 1) ÂNCORA ESTÁVEL: "localização" (quase todo anúncio tem)
-      // Ex.: "Santa Maria, RS · A localização é aproximada"
-      const pushFromLocalizacaoContext = (text, source) => {
-        const t = clean(text);
-        if (!t || !/localiza/i.test(t)) return;
-        // Cidade fica antes do · ou imediatamente antes da palavra localização
-        const beforeDot = clean((t.split(/\s*·\s*/)[0]) || "");
-        if (beforeDot && beforeDot.length <= 80) push(beforeDot, `${source}_before_dot`);
-        const beforeWord = t.split(/localiza/i)[0] || "";
-        for (const chunk of extractCityChunks(beforeWord)) {
-          push(chunk, `${source}_before_word`);
-        }
-        push(t, `${source}_full`);
-      };
-
-      // Nós curtos com "localização" — prioridade máxima
-      const locNodes = Array.from(document.querySelectorAll("span, div, a")).slice(0, 900);
-      for (const el of locNodes) {
-        const t = clean(el.textContent || "");
-        if (!t || t.length > 140) continue;
-        if (!/localiza/i.test(t) && !/approximate\s+location/i.test(t)) continue;
-        pushFromLocalizacaoContext(t, "loc_node");
-      }
-
-      // Body: cidade imediatamente antes de qualquer menção a localização
-      {
-        const reLoc = /localiza[cç][aã]o|approximate\s+location/gi;
+      // LEI 1: fatias de 80 chars ANTES de cada marcador de localizacao (sem depender de ·)
+      const markerRes = [
+        /localiza[cç][aã]o\s*é\s*aproximada/gi,
+        /approximate\s+location/gi,
+        /a\s+localiza[cç][aã]o\b/gi,
+        /localiza[cç][aã]o\b/gi,
+      ];
+      for (const re of markerRes) {
+        re.lastIndex = 0;
         let lm;
-        while ((lm = reLoc.exec(bodyText)) !== null) {
+        while ((lm = re.exec(bodyText)) !== null) {
           const slice = bodyText.slice(Math.max(0, lm.index - 80), lm.index);
-          for (const chunk of extractCityChunks(slice)) {
-            push(chunk, "loc_body_near");
-          }
-          // também "Cidade, UF · " colado no marcador
-          const tail = slice.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\s*$/i);
-          if (tail && tail[1]) push(tail[1], "loc_body_tail");
+          push(slice, "loc_anchor_80");
         }
       }
 
-      // ── 2) ÂNCORA ESTÁVEL: "anunciado" (miolo livre: há 2 dias / em 2h / etc.)
-      // Pega o trecho após "anunciado" e procura "em|in" + Cidade, UF
+      // Anunciado (fallback): janela apos a palavra
       {
         const reAn = /\banunciado\b/gi;
         let am;
         while ((am = reAn.exec(bodyText)) !== null) {
-          const windowText = bodyText.slice(am.index, am.index + 140);
-          push(windowText, "anunciado_window");
-          // Último "em|in" + cidade (miolo "há 2 dias" / "em 2 horas" não importa)
-          const emCities = Array.from(windowText.matchAll(
-            /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/gi
-          ));
-          if (emCities.length) {
-            push(emCities[emCities.length - 1][1], "anunciado_em_city");
-          }
-          for (const chunk of extractCityChunks(windowText)) {
-            push(chunk, "anunciado_chunk");
-          }
-        }
-        const reListed = /\blisted\b/gi;
-        let lm;
-        while ((lm = reListed.exec(bodyText)) !== null) {
-          const windowText = bodyText.slice(lm.index, lm.index + 140);
-          const inMatch = windowText.match(/\bin\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/i);
-          if (inMatch && inMatch[1]) push(inMatch[1], "anunciado_listed_in_city");
+          push(bodyText.slice(am.index, am.index + 140), "anunciado_window");
         }
       }
 
-      // ── 3) Mapa / aria-label com localização
+      // Mapa / aria-label
       const mapBlocks = Array.from(document.querySelectorAll(
         '[aria-label*="localiza"], [aria-label*="Localiza"], [aria-label*="location"], [aria-label*="Location"]'
       )).slice(0, 40);
       for (const el of mapBlocks) {
         push(el.textContent || "", "map_text");
         try { push(el.getAttribute("aria-label") || "", "map_aria"); } catch (_) {}
-        try {
-          const nearby = el.closest("div");
-          if (nearby) {
-            const nt = clean(nearby.textContent || "");
-            if (nt && nt.length <= 180) pushFromLocalizacaoContext(nt, "map_nearby");
-          }
-        } catch (_) {}
       }
 
-      // ── 4) Link curto de cidade no marketplace (não cards de "Seleções")
+      // Links curtos marketplace (nao cards com R$)
       const cityLinks = Array.from(document.querySelectorAll('a[href*="/marketplace/"][role="link"]'))
         .slice(0, Math.max(1, Number(maxNodes || 320) || 320));
       for (const el of cityLinks) {
@@ -402,15 +491,31 @@ async function extractCityFromListingPage(page, {
         push(t, "marketplace_city_link");
       }
 
+      // Body inteiro por ultimo (ancora no Node usa isso)
+      push(bodyText.slice(0, 4000), "body_head");
+
       return {
+        bodyText,
         candidates,
         loginWall,
         hasLocalizacao: /localiza/i.test(bodyText),
         hasAnunciado: /\banunciado\b/i.test(bodyText),
       };
-    }, nodeLimit).catch(() => ({ candidates: [], loginWall: false }));
+    }, nodeLimit).catch(() => ({ bodyText: "", candidates: [], loginWall: false }));
 
-    const payload = out && typeof out === "object" ? out : { candidates: [] };
+    const payload = out && typeof out === "object" ? out : { bodyText: "", candidates: [] };
+
+    // LEI 1+2 no Node: ancora laser em localizacao no body completo
+    const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
+    if (fromBodyAnchor) {
+      return {
+        cidade: fromBodyAnchor,
+        city_source: "loc_anchor_body",
+        attempt,
+        login_wall: !!payload.loginWall,
+      };
+    }
+
     const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
     candidates.sort((a, b) => candidateSourcePriority(a && a.source) - candidateSourcePriority(b && b.source));
 
@@ -714,11 +819,13 @@ async function createCollectorRuntime() {
     timeoutMs,
     attempts,
     session_cookies,
+    client_messages,
   } = {}) {
     return enqueue(async () => {
       const itemLink = normalizeItemLink(item_link);
       const tk = String(thread_key || "").trim();
       const account = String(account_login || "").trim();
+      const clientMsgs = String(client_messages || "").trim();
       const itemId = (() => {
         try {
           if (!itemLink) return "";
@@ -732,6 +839,11 @@ async function createCollectorRuntime() {
       const navTimeoutMs = Math.max(8_000, Number(timeoutMs || process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000);
 
       if (!itemLink) {
+        // Sem link: ainda tenta dicionario nas mensagens do cliente
+        const fromDict = matchCityFromHomologDict(clientMsgs);
+        if (fromDict) {
+          return { ok: true, cidade: fromDict, city_source: "homolog_dict_messages" };
+        }
         return { ok: false, error: "city_collector_item_link_missing" };
       }
       if (itemId) {
@@ -799,6 +911,14 @@ async function createCollectorRuntime() {
         }
       }
 
+      // LEI 3: contingencia por dicionario JSON nas mensagens do cliente
+      const fromDict = matchCityFromHomologDict(clientMsgs);
+      if (fromDict) {
+        if (itemId) cityCacheSet(itemId, fromDict, "homolog_dict_messages");
+        log(`cidade via dicionario homologado account=${account || "n/a"} thread=${tk || "n/a"} cidade="${fromDict}"`);
+        return { ok: true, cidade: fromDict, city_source: "homolog_dict_messages" };
+      }
+
       return {
         ok: false,
         error: "city_not_found_in_listing_page",
@@ -833,4 +953,8 @@ async function getDeltaCityCollector() {
 
 module.exports = {
   getDeltaCityCollector,
+  extractCityFromLocationAnchorText,
+  normalizeCityUfLabel,
+  matchCityFromHomologDict,
+  buildCityUf,
 };
