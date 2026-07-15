@@ -4787,15 +4787,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
     let greetingSentAt = Number((prior && prior.sentAt) || 0) || 0;
     const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+    // Pacote robusto (headed): goto mais paciente, 3 tentativas, teto ~35-40s.
     const cityCollectorTimeoutMs = Math.max(
       6_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 9_000) || 9_000
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 14_000) || 14_000
     );
     const cityCollectorAttempts = Math.max(
       1,
-      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 2) || 2)
+      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 3) || 3)
     );
-    const cityCollectorInterAttemptMaxMs = 1_600;
+    const cityCollectorInterAttemptMaxMs = 2_000;
     const cityCollectorBudgetMs =
       (cityCollectorTimeoutMs * cityCollectorAttempts) +
       (Math.max(0, cityCollectorAttempts - 1) * cityCollectorInterAttemptMaxMs) +
@@ -4803,7 +4804,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const cityCollectMaxWaitEnvMs = Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 0) || 0;
     const cityCollectMaxWaitMs = Math.max(
       9_000,
-      Math.min(25_000, cityCollectorBudgetMs, cityCollectMaxWaitEnvMs || cityCollectorBudgetMs)
+      Math.min(40_000, cityCollectorBudgetMs, cityCollectMaxWaitEnvMs || cityCollectorBudgetMs)
     );
 
     let itemLinkResolved = false;

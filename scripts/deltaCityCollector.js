@@ -327,9 +327,24 @@ async function dismissLoginOverlay(page) {
   }
 
   if (closed || escaped) {
-    await sleep(randomBetween(180, 420));
+    await sleep(randomBetween(280, 620));
   }
   return { closed, escaped };
+}
+
+async function dismissLoginOverlayPatient(page, { rounds = 3 } = {}) {
+  if (!page) return { closed: false, escaped: false, rounds: 0 };
+  const maxRounds = Math.max(1, Math.min(5, Number(rounds || 3) || 3));
+  let closed = false;
+  let escaped = false;
+  for (let i = 0; i < maxRounds; i += 1) {
+    const out = await dismissLoginOverlay(page);
+    if (out && out.closed) closed = true;
+    if (out && out.escaped) escaped = true;
+    // Apos Esc/X, espera a pagina estabilizar antes da proxima rodada/scrape.
+    await sleep(randomBetween(800, 1500));
+  }
+  return { closed, escaped, rounds: maxRounds };
 }
 
 async function waitForListingHints(page, timeoutMs) {
@@ -548,22 +563,22 @@ async function createCollectorRuntime() {
           const p = await ensurePage();
           await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
-          await sleep(randomBetween(320, 760));
-          await dismissLoginOverlay(p);
-          await waitForListingHints(p, Math.min(3200, Math.max(1200, Math.floor(navTimeoutMs / 4))));
+          await sleep(randomBetween(500, 1100));
+          await dismissLoginOverlayPatient(p, { rounds: 3 });
+          await waitForListingHints(p, Math.min(5000, Math.max(2500, Math.floor(navTimeoutMs / 3))));
 
           let extracted = await extractCityFromListingPage(p, {
             maxAttempts: 12,
-            retryIntervalMs: 250,
+            retryIntervalMs: 500,
             scanLimit: 320,
           });
           if (!extracted || !extracted.cidade) {
-            // Segunda passada: tenta fechar pop-up novamente e reler o DOM da página do item.
-            await dismissLoginOverlay(p);
-            await waitForListingHints(p, 1200);
+            // Segunda passada: fecha pop-up de novo, espera hidratar e relê o DOM.
+            await dismissLoginOverlayPatient(p, { rounds: 2 });
+            await waitForListingHints(p, 3000);
             extracted = await extractCityFromListingPage(p, {
               maxAttempts: 8,
-              retryIntervalMs: 220,
+              retryIntervalMs: 400,
               scanLimit: 320,
             });
           }
