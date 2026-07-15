@@ -679,8 +679,13 @@ function normalizeCityToUfPattern(raw) {
   const s = s0
     .replace(/–/g, "-")
     .replace(/—/g, "-")
+    .replace(/^anunciado\b.*?\bem\s+/i, "")
+    .replace(/^listed\b.*?\bin\s+/i, "")
     .replace(/\s*,\s*/g, ", ")
     .trim();
+  if (!s) return "";
+  const cityKey = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (/\b(anunciado|listed)\b/.test(cityKey) && /\b(em|in)\b/.test(cityKey)) return "";
   const m1 = s.match(/^(.+?)\s*\(\s*([A-Za-z]{2})\s*\)$/);
   if (m1 && m1[1] && m1[2]) {
     const uf = String(m1[2]).toUpperCase();
@@ -693,7 +698,7 @@ function normalizeCityToUfPattern(raw) {
     if (!BR_VALID_UF.has(uf)) return "";
     return `${toTitleCaseCityName(m2[1].trim())} (${uf})`.slice(0, 80);
   }
-  return s.slice(0, 80);
+  return "";
 }
 function sanitizeLeadClientName(rawTitle) {
   const cleanedSource = String(rawTitle || "")

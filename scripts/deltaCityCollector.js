@@ -143,8 +143,8 @@ function normalizeCityUfLabel(raw) {
   const s0 = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s0) return "";
   let s = s0
-    .replace(/^anunciado\s+em\s+/i, "")
-    .replace(/^listed\s+in\s+/i, "")
+    .replace(/^anunciado\b.*?\bem\s+/i, "")
+    .replace(/^listed\b.*?\bin\s+/i, "")
     .replace(/\s*·\s*a localiza[çc][aã]o é aproximada.*$/i, "")
     .replace(/\s*·\s*approximate location.*$/i, "")
     .replace(/\s*-\s*a localiza[çc][aã]o é aproximada.*$/i, "")
@@ -157,9 +157,16 @@ function normalizeCityUfLabel(raw) {
 
   const tryBuild = (cityRaw, ufRaw) => {
     const city = toTitleCaseCityName(String(cityRaw || "").trim());
+    const cityKey = String(city || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
     const uf = String(ufRaw || "").trim().toUpperCase();
     if (!city || !/^[A-Z]{2}$/.test(uf)) return "";
     if (!BR_VALID_UF.has(uf)) return "";
+    if (/\b(anunciado|listed)\b/.test(cityKey)) return "";
+    if (/\bha\b.*\bem\b/.test(cityKey)) return "";
+    if (/\bago\b.*\bin\b/.test(cityKey)) return "";
     if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}$/.test(city)) return "";
     return `${city} (${uf})`.slice(0, 80);
   };
