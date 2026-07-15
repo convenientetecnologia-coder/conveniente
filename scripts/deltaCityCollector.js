@@ -199,34 +199,18 @@ const GEO_COMMA_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*,\s*([A-Za-
 const GEO_PAREN_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*\(\s*([A-Za-z]{2})\s*\)/gi;
 
 /**
- * Limpa ruido do Marketplace.
- * @param {string} raw
- * @param {{ stripProductPrefixes?: boolean }} [opts]
- *   stripProductPrefixes=true (default): remove Seminovo/Novo/Usado/Condicoes (via unica).
- *   stripProductPrefixes=false: so condicoes — preserva "Novo Hamburgo" na intersecao.
+ * Limpa so ruido de rotulo "condicoes" colado no DOM.
+ * NAO remove Novo/Seminovo/Usado — existem cidades (Novo Hamburgo) e a comunhao dual
+ * resolve poluicao por identidade nos dois blocos, nao por strip.
  */
-function stripMarketplaceConditionNoise(raw, opts = {}) {
-  const stripProductPrefixes = opts.stripProductPrefixes !== false;
-  let s = String(raw || "")
+function stripMarketplaceConditionNoise(raw) {
+  return String(raw || "")
     .replace(/condi[cç][oõ]es?\s*razo[aá]veis/gi, " ")
     .replace(/boas?\s*condi[cç][oõ]es?/gi, " ")
     .replace(/condi[cç][aã]o\s*[:\-–]?\s*/gi, " ")
-    .replace(/usado\s*[—\-–]\s*em\s*boas?\s*condi[cç][oõ]es?/gi, " ");
-  if (stripProductPrefixes) {
-    // Gemini pediu semini?novo; o regex correto p/ "Seminovo" e semi?novo / seminovos?
-    s = s
-      .replace(/\bseminovos?\b/gi, " ")
-      .replace(/\bsemi\s*novos?\b/gi, " ")
-      .replace(/\bsemi?novos?\b/gi, " ")
-      .replace(/\bnovos?\b/gi, " ")
-      .replace(/\busados?\b/gi, " ")
-      .replace(/\bcondi[cç][oõ]es?\b/gi, " ")
-      // colado: SeminovoRibeirao / NovoPorto
-      .replace(/\bseminovos?(?=[A-Za-zÀ-ÿ])/gi, " ")
-      .replace(/\bsemi?novos?(?=[A-Za-zÀ-ÿ])/gi, " ")
-      .replace(/\bnovos?(?=[A-Za-zÀ-ÿ])/gi, " ");
-  }
-  return s.replace(/\s+/g, " ").trim();
+    .replace(/usado\s*[—\-–]\s*em\s*boas?\s*condi[cç][oõ]es?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normCityUfKey(built) {
@@ -238,22 +222,94 @@ function normCityUfKey(built) {
     .trim();
 }
 
-/** Extrai todos os Cidade (UF) plausiveis de um blob (sufixos da direita). */
-function collectGeoHitsFromBlob(raw, { stripProductPrefixes = false } = {}) {
-  const chunk = stripMarketplaceConditionNoise(
-    String(raw || "").replace(/\s+/g, " ").trim(),
-    { stripProductPrefixes }
-  );
+function normLooseText(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Fragmento canonico "cidade, uf" / "cidade (uf)" para bater identidade nos dois blocos. */
+function cityFragmentVariants(cityRaw, ufRaw) {
+  const city = String(cityRaw || "").replace(/\s+/g, " ").trim();
+  const uf = String(ufRaw || "").trim().toUpperCase();
+  if (!city || !/^[A-Z]{2}$/.test(uf)) return [];
+  return [
+    `${city}, ${uf}`,
+    `${city} (${uf})`,
+    `${city},${uf}`,
+  ];
+}
+
+/** True se o fragmento da cidade aparece de forma contigúa no blob (identidade literal). */
+function blobContainsCityFragment(blob, cityRaw, ufRaw) {
+  const hay = normLooseText(blob);
+  if (!hay) return false;
+  for (const frag of cityFragmentVariants(cityRaw, ufRaw)) {
+    const needle = normLooseText(frag);
+    if (needle && hay.includes(needle)) return true;
+  }
+  return false;
+}
+
+/**
+ * Extrai so os hits do padrao Anunciado/Listed: "em|in Cidade, UF".
+ * Esse e o texto geografico limpo do Marketplace — a cidade que se repete nos dois lugares.
+ */
+function collectEmInGeoHitsFromBlob(raw) {
+  const chunk = String(raw || "").replace(/\s+/g, " ").trim();
   const hits = [];
   if (!chunk) return hits;
 
-  const pushHit = (cityRaw, ufRaw) => {
-    const built = resolveCityUfCapture(cityRaw, ufRaw);
+  const emCities = chunk.matchAll(
+    /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
+  );
+  for (const em of emCities) {
+    const token = String(em[1] || "").trim();
+    let cityRaw = "";
+    let ufRaw = "";
+    const mComma = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})$/i);
+    if (mComma) {
+      cityRaw = mComma[1];
+      ufRaw = mComma[2];
+    } else {
+      const mParen = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)$/i);
+      if (mParen) {
+        cityRaw = mParen[1];
+        ufRaw = mParen[2];
+      }
+    }
+    const built = buildCityUf(cityRaw, ufRaw);
+    if (!built) continue;
+    hits.push({
+      built,
+      norm: normCityUfKey(built),
+      cityRaw: String(cityRaw || "").replace(/\s+/g, " ").trim(),
+      ufRaw: String(ufRaw || "").trim().toUpperCase(),
+      from_em_in: true,
+    });
+  }
+  return hits;
+}
+
+/** Extrai todos os Cidade (UF) plausiveis de um blob (sufixos da direita). Sem strip de Novo/Seminovo. */
+function collectGeoHitsFromBlob(raw) {
+  const chunk = String(raw || "").replace(/\s+/g, " ").trim();
+  const hits = [];
+  if (!chunk) return hits;
+
+  const pushHit = (cityRaw, ufRaw, extra = {}) => {
+    const built = buildCityUf(cityRaw, ufRaw);
     if (!built) return;
     hits.push({
       built,
       norm: normCityUfKey(built),
+      cityRaw: String(cityRaw || "").replace(/\s+/g, " ").trim(),
+      ufRaw: String(ufRaw || "").trim().toUpperCase(),
       fragment: `${String(cityRaw || "").replace(/\s+/g, " ").trim()}, ${String(ufRaw || "").trim().toUpperCase()}`,
+      ...extra,
     });
   };
 
@@ -271,24 +327,22 @@ function collectGeoHitsFromBlob(raw, { stripProductPrefixes = false } = {}) {
     }
   }
 
-  // Anunciado/Listed: "em|in Cidade, UF"
-  const emCities = chunk.matchAll(
-    /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
-  );
-  for (const em of emCities) {
-    const token = String(em[1] || "").trim();
-    const mComma = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})$/i);
-    if (mComma) pushHit(mComma[1], mComma[2]);
-    const mParen = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)$/i);
-    if (mParen) pushHit(mParen[1], mParen[2]);
+  for (const hit of collectEmInGeoHitsFromBlob(chunk)) {
+    pushHit(hit.cityRaw, hit.ufRaw, { from_em_in: true });
   }
 
   return hits;
 }
 
 /**
- * Intersecao de comunhao identica: Cidade (UF) presente em anunciado_window (A)
- * E em loc_anchor_80 (B). Preferencia pelo match mais longo comum.
+ * Comunhao identica Anunciado (A) ∩ Localizacao (B):
+ * pega a cidade do "em|in Cidade, UF" do Anunciado e exige o MESMO fragmento
+ * contigúo no bloco Loc. Nao usa "mais longo", nao stripa Novo/Seminovo.
+ *
+ * Ex: A="... em Novo Hamburgo, RS" + B="seminovo Novo Hamburgo, RS"
+ *     → identico = Novo Hamburgo (RS)
+ * Ex: A="... em Rio Branco, AC ... seminovo Rio Branco, AC" + B=igual
+ *     → identico = Rio Branco (AC) (vem do em/in, nao do seminovo*)
  */
 function resolveDualIntersectionCommunion(candidates) {
   const list = Array.isArray(candidates) ? candidates : [];
@@ -299,26 +353,62 @@ function resolveDualIntersectionCommunion(candidates) {
   const blockAText = blockA.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
   const blockBText = blockB.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
 
-  // Intersecao SEM strip de Novo/Seminovo (preserva Novo Hamburgo etc.)
-  const mapA = new Map();
+  let finalExtracted = null;
+
+  // 1) Vitoria: cidade do "em|in" do Anunciado, identica (substring) no bloco Loc
+  const emHits = [];
+  const seenEm = new Set();
   for (const c of blockA) {
-    for (const hit of collectGeoHitsFromBlob(c && c.value, { stripProductPrefixes: false })) {
-      const prev = mapA.get(hit.norm);
-      if (!prev || hit.built.length > prev.built.length) mapA.set(hit.norm, hit);
+    for (const hit of collectEmInGeoHitsFromBlob(c && c.value)) {
+      if (seenEm.has(hit.norm)) continue;
+      seenEm.add(hit.norm);
+      emHits.push(hit);
     }
   }
-
-  const commons = [];
-  for (const c of blockB) {
-    for (const hit of collectGeoHitsFromBlob(c && c.value, { stripProductPrefixes: false })) {
-      if (!mapA.has(hit.norm)) continue;
-      commons.push(hit);
-    }
+  for (const hit of emHits) {
+    if (!blobContainsCityFragment(blockBText, hit.cityRaw, hit.ufRaw)) continue;
+    // tambem precisa existir no proprio A (sempre verdade pro em/in, mas fecha o contrato)
+    if (!blobContainsCityFragment(blockAText, hit.cityRaw, hit.ufRaw)) continue;
+    finalExtracted = hit.built;
+    break;
   }
 
-  commons.sort((a, b) => String(b.built || "").length - String(a.built || "").length);
-  const best = commons[0] || null;
-  const finalExtracted = best ? best.built : null;
+  // 2) Fallback sem "em|in": fragmento Cidade,UF que aparece identico nos DOIS textos.
+  //    Se A contem B e B contem A (ex: Rio Branco ⊂ Seminovo Rio Branco), fica o que
+  //    NAO e extensao poluida: preferimos o hit cujo fragmento e substring propria
+  //    de outro comum (o nucleo identico), nao o superstring.
+  if (!finalExtracted) {
+    const commons = [];
+    const seen = new Set();
+    for (const c of blockA) {
+      for (const hit of collectGeoHitsFromBlob(c && c.value)) {
+        if (!blobContainsCityFragment(blockAText, hit.cityRaw, hit.ufRaw)) continue;
+        if (!blobContainsCityFragment(blockBText, hit.cityRaw, hit.ufRaw)) continue;
+        if (seen.has(hit.norm)) continue;
+        seen.add(hit.norm);
+        commons.push(hit);
+      }
+    }
+    if (commons.length) {
+      // Nucleo identico: entre commons, preferir o que e substring de outro comum
+      // (Rio Branco dentro de Seminovo Rio Branco) — NUNCA o mais longo.
+      const scored = commons.map((hit) => {
+        const frag = normLooseText(`${hit.cityRaw}, ${hit.ufRaw}`);
+        let containedInOthers = 0;
+        for (const other of commons) {
+          if (other.norm === hit.norm) continue;
+          const otherFrag = normLooseText(`${other.cityRaw}, ${other.ufRaw}`);
+          if (otherFrag.includes(frag)) containedInOthers += 1;
+        }
+        return { hit, containedInOthers, len: frag.length };
+      });
+      scored.sort((a, b) => {
+        if (b.containedInOthers !== a.containedInOthers) return b.containedInOthers - a.containedInOthers;
+        return a.len - b.len; // empate: menor fragmento (nucleo), nao o mais longo
+      });
+      finalExtracted = scored[0].hit.built;
+    }
+  }
 
   try {
     logTriagemDomCityCommunion({
