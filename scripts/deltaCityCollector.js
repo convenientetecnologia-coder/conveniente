@@ -173,17 +173,9 @@ function normalizeCityUfLabel(raw) {
   const locSplit = s0.split(/\s*·\s*(?=a\s+localiza|localiza|approximate)/i);
   const preferred = String(locSplit[0] || s0).trim();
 
-  const tryExact = (s) => {
-    let t = String(s || "").trim();
+  const parseCityUfToken = (t0) => {
+    const t = String(t0 || "").replace(/\s*·\s*.*$/i, "").trim();
     if (!t) return "";
-    // "Anunciado <qualquer miolo> em Cidade, UF" — miolo livre (há 2 dias / em 2 horas / etc.)
-    t = t
-      .replace(/^anunciado\b[\s\S]{0,80}?\bem\s+/i, "")
-      .replace(/^listed\b[\s\S]{0,80}?\bin\s+/i, "")
-      .replace(/\s*·\s*.*$/i, "")
-      .trim();
-    if (!t) return "";
-
     const ufPatterns = [
       /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\(\s*([A-Za-z]{2})\s*\)$/,
       /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/,
@@ -196,7 +188,6 @@ function normalizeCityUfLabel(raw) {
       const built = buildCityUf(m[1], m[2]);
       if (built) return built;
     }
-
     const stateNamePatterns = [
       /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
       /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
@@ -213,26 +204,56 @@ function normalizeCityUfLabel(raw) {
     return "";
   };
 
+  const tryExact = (s) => {
+    let t = String(s || "").trim();
+    if (!t) return "";
+    // "Anunciado <miolo livre> em Cidade, UF" — usa o ÚLTIMO em/in (evita "em 2 horas")
+    if (/^anunciado\b/i.test(t) || /^listed\b/i.test(t)) {
+      const emCities = Array.from(t.matchAll(
+        /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
+      ));
+      for (let i = emCities.length - 1; i >= 0; i -= 1) {
+        const built = parseCityUfToken(emCities[i][1]);
+        if (built) return built;
+      }
+    }
+    return parseCityUfToken(t);
+  };
+
   const exactPreferred = tryExact(preferred);
   if (exactPreferred) return exactPreferred;
   const exactFull = tryExact(s0);
   if (exactFull) return exactFull;
 
-  // Scan flexível: acha "Cidade, UF" / "Cidade (UF)" em qualquer posição
-  const inlineRes = [
-    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})\b/g,
-    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)/g,
-    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\/\s*([A-Za-z]{2})\b/g,
-  ];
-  for (const re of inlineRes) {
-    re.lastIndex = 0;
+  // Scan por ", UF" / "(UF)" e anda pra trás nas palavras até achar cidade limpa.
+  // Evita engolir "dias em Santa Maria, RS" sem nunca testar só "Santa Maria, RS".
+  const scanCityNearUf = (text) => {
+    const src = String(text || "");
+    if (!src) return "";
+    const ufRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
     let m;
-    while ((m = re.exec(s0)) !== null) {
-      const built = buildCityUf(m[1], m[2]);
-      if (built) return built;
+    let best = "";
+    while ((m = ufRe.exec(src)) !== null) {
+      const uf = String(m[1] || m[2] || "").toUpperCase();
+      if (!BR_VALID_UF.has(uf)) continue;
+      const before = src.slice(Math.max(0, m.index - 70), m.index);
+      const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
+      if (!tail || !tail[1]) continue;
+      const words = tail[1].split(/\s+/).filter(Boolean);
+      for (let start = 0; start < words.length; start += 1) {
+        const cityTry = words.slice(start).join(" ");
+        const built = buildCityUf(cityTry, uf);
+        if (built) {
+          best = built;
+          break;
+        }
+      }
     }
-  }
-  return "";
+    return best;
+  };
+
+  // Preferir o trecho antes de "localização"; senão o texto inteiro.
+  return scanCityNearUf(preferred) || scanCityNearUf(s0) || "";
 }
 
 function candidateSourcePriority(source) {
@@ -334,9 +355,13 @@ async function extractCityFromListingPage(page, {
         while ((am = reAn.exec(bodyText)) !== null) {
           const windowText = bodyText.slice(am.index, am.index + 140);
           push(windowText, "anunciado_window");
-          // último "em|in" no trecho → cidade depois
-          const emMatch = windowText.match(/\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/i);
-          if (emMatch && emMatch[1]) push(emMatch[1], "anunciado_em_city");
+          // Último "em|in" + cidade (miolo "há 2 dias" / "em 2 horas" não importa)
+          const emCities = Array.from(windowText.matchAll(
+            /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/gi
+          ));
+          if (emCities.length) {
+            push(emCities[emCities.length - 1][1], "anunciado_em_city");
+          }
           for (const chunk of extractCityChunks(windowText)) {
             push(chunk, "anunciado_chunk");
           }
