@@ -24,13 +24,28 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-function createSerialQueue() {
-  let chain = Promise.resolve();
-  return (fn) => {
-    const run = chain.then(() => fn());
-    chain = run.catch(() => {});
-    return run;
+function createLimitedQueue(maxConcurrent = 1) {
+  const limit = Math.max(1, Number(maxConcurrent || 1) || 1);
+  const queue = [];
+  let inFlight = 0;
+  const runNext = () => {
+    if (inFlight >= limit) return;
+    const next = queue.shift();
+    if (!next) return;
+    inFlight += 1;
+    Promise.resolve()
+      .then(() => next.fn())
+      .then((out) => next.resolve(out))
+      .catch((err) => next.reject(err))
+      .finally(() => {
+        inFlight = Math.max(0, inFlight - 1);
+        runNext();
+      });
   };
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    runNext();
+  });
 }
 
 function extractMarketplaceItemId(pathname) {
@@ -181,69 +196,73 @@ function normalizeCityUfLabel(raw) {
   return "";
 }
 
-async function extractCityFromListingPage(page) {
+async function extractCityFromListingPage(page, {
+  maxAttempts = 12,
+  retryIntervalMs = 250,
+  scanLimit = 320,
+} = {}) {
   if (!page) return null;
-  const out = await page.evaluate(() => {
-    const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
-    const bodyText = clean(document.body && document.body.innerText ? document.body.innerText : "");
-    const candidates = [];
+  const attempts = Math.max(1, Math.min(20, Number(maxAttempts || 12) || 12));
+  const intervalMs = Math.max(80, Math.min(700, Number(retryIntervalMs || 250) || 250));
+  const nodeLimit = Math.max(80, Math.min(500, Number(scanLimit || 320) || 320));
 
-    const push = (v, source) => {
-      const c = clean(v);
-      if (!c) return;
-      candidates.push({ value: c, source });
-    };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const out = await page.evaluate((maxNodes) => {
+      const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const bodyText = clean(document.body && document.body.innerText ? document.body.innerText : "");
+      const candidates = [];
 
-    const matchBodyPattern = (regex, source) => {
-      const m = bodyText.match(regex);
-      if (m && m[1]) push(m[1], source);
-    };
+      const push = (v, source) => {
+        const c = clean(v);
+        if (!c) return;
+        candidates.push({ value: c, source });
+      };
+      const pushFromNode = (el, sourcePrefix) => {
+        if (!el) return;
+        push(el.textContent || "", `${sourcePrefix}_text`);
+        try { push(el.getAttribute && el.getAttribute("aria-label"), `${sourcePrefix}_aria`); } catch (_) {}
+        try { push(el.getAttribute && el.getAttribute("title"), `${sourcePrefix}_title`); } catch (_) {}
+        try { push(el.getAttribute && el.getAttribute("data-testid"), `${sourcePrefix}_testid`); } catch (_) {}
+      };
 
-    matchBodyPattern(/anunciado em\s*([^\n\r|]+)/i, "body_label_pt");
-    matchBodyPattern(/listed in\s*([^\n\r|]+)/i, "body_label_en");
+      const matchBodyPattern = (regex, source) => {
+        const m = bodyText.match(regex);
+        if (m && m[1]) push(m[1], source);
+      };
 
-    const nodes = Array.from(document.querySelectorAll("span,div,a")).slice(0, 5000);
-    for (const el of nodes) {
-      const t = clean(el.textContent || "");
-      if (!t) continue;
-      if (!/anunciado em|listed in/i.test(t)) continue;
+      matchBodyPattern(/anunciado em\s*([^\n\r|]+)/i, "body_label_pt");
+      matchBodyPattern(/listed in\s*([^\n\r|]+)/i, "body_label_en");
+      matchBodyPattern(/localiza[çc][aã]o(?:\s+aproximada)?\s*[:\-]\s*([^\n\r|]+)/i, "body_location_pt");
+      matchBodyPattern(/approximate\s+location\s*[:\-]\s*([^\n\r|]+)/i, "body_location_en");
 
-      const m = t.match(/anunciado em\s*(.+)$/i) || t.match(/listed in\s*(.+)$/i);
-      if (m && m[1]) push(m[1], "dom_inline");
-
-      const nearAnchor =
-        (el.querySelector && el.querySelector("a")) ||
-        (el.parentElement && el.parentElement.querySelector && el.parentElement.querySelector("a")) ||
-        null;
-      if (nearAnchor) {
-        const v = clean(nearAnchor.textContent || "");
-        if (v) push(v, "dom_anchor");
+      const semanticNodes = Array.from(document.querySelectorAll(
+        'a[href*="/marketplace/item/"], a[href*="/marketplace/"], div[data-testid="marketplace_profile_banner"], span, [aria-label*="localiza"], [aria-label*="location"]'
+      )).slice(0, Math.max(1, Number(maxNodes || 320) || 320));
+      for (const el of semanticNodes) {
+        pushFromNode(el, "semantic_node");
       }
+
+      const approxSpans = Array.from(document.querySelectorAll("span"))
+        .map((el) => clean(el.textContent || ""))
+        .filter((t) => /localiza[çc][aã]o é aproximada|approximate location/i.test(t));
+      for (const value of approxSpans) push(value, "approx_location_badge");
+
+      return candidates;
+    }, nodeLimit).catch(() => []);
+
+    const candidates = Array.isArray(out) ? out : [];
+    for (const cand of candidates) {
+      const v = normalizeCityUfLabel(cand && cand.value);
+      if (!v) continue;
+      return {
+        cidade: v,
+        city_source: String((cand && cand.source) || "collector_unknown"),
+        attempt,
+      };
     }
-
-    // Fonte semântica: links de localização da própria página do item.
-    const locationLinks = Array.from(document.querySelectorAll('a[href*="/marketplace/"] span, a[href*="/marketplace/"]'))
-      .map((el) => clean(el.textContent || ""))
-      .filter(Boolean);
-    for (const value of locationLinks) push(value, "marketplace_location_link");
-
-    // Selo "Cidade, UF · A localização é aproximada".
-    const approxSpans = Array.from(document.querySelectorAll("span"))
-      .map((el) => clean(el.textContent || ""))
-      .filter((t) => /localiza[çc][aã]o é aproximada|approximate location/i.test(t));
-    for (const value of approxSpans) push(value, "approx_location_badge");
-
-    return candidates;
-  }).catch(() => []);
-
-  const candidates = Array.isArray(out) ? out : [];
-  for (const cand of candidates) {
-    const v = normalizeCityUfLabel(cand && cand.value);
-    if (!v) continue;
-    return {
-      cidade: v,
-      city_source: String((cand && cand.source) || "collector_unknown"),
-    };
+    if (attempt < attempts) {
+      await sleep(intervalMs);
+    }
   }
   return null;
 }
@@ -340,8 +359,78 @@ async function createCollectorRuntime() {
 
   let browser = null;
   let page = null;
-  const enqueue = createSerialQueue();
+  const collectorConcurrency = Math.max(
+    1,
+    Math.min(4, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_MAX_CONCURRENCY || 2) || 2)
+  );
+  const enqueue = createLimitedQueue(collectorConcurrency);
+  const cityCacheByItem = new Map(); // itemId -> { cidade, city_source, at }
+  const cityCacheTtlMs = Math.max(
+    5 * 60 * 1000,
+    Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_CACHE_TTL_MS || (2 * 60 * 60 * 1000)) || (2 * 60 * 60 * 1000)
+  );
+  const cityCacheMax = Math.max(
+    200,
+    Math.min(5000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_CACHE_MAX || 1200) || 1200)
+  );
   let tabGuardAttached = false;
+
+  const cityCacheGet = (itemId) => {
+    const key = String(itemId || "").trim();
+    if (!key) return null;
+    const rec = cityCacheByItem.get(key);
+    if (!rec) return null;
+    const ageMs = Date.now() - (Number(rec.at || 0) || 0);
+    if (ageMs > cityCacheTtlMs) {
+      cityCacheByItem.delete(key);
+      return null;
+    }
+    return rec;
+  };
+  const cityCacheSet = (itemId, cidade, city_source) => {
+    const key = String(itemId || "").trim();
+    const city = String(cidade || "").trim();
+    if (!key || !city) return;
+    cityCacheByItem.set(key, {
+      cidade: city,
+      city_source: String(city_source || "collector_cache"),
+      at: Date.now()
+    });
+    if (cityCacheByItem.size > cityCacheMax) {
+      const entries = [...cityCacheByItem.entries()]
+        .sort((a, b) => (Number(a[1] && a[1].at || 0) || 0) - (Number(b[1] && b[1].at || 0) || 0));
+      const toDelete = Math.max(1, cityCacheByItem.size - cityCacheMax);
+      for (let i = 0; i < toDelete; i += 1) {
+        const oldKey = String(entries[i] && entries[i][0] || "").trim();
+        if (oldKey) cityCacheByItem.delete(oldKey);
+      }
+    }
+  };
+
+  async function applySessionCookies(pageRef, sessionCookies) {
+    try {
+      const p = pageRef;
+      if (!p || !Array.isArray(sessionCookies) || !sessionCookies.length) return { applied: 0 };
+      const safeCookies = sessionCookies
+        .filter((ck) => ck && typeof ck === "object")
+        .map((ck) => ({
+          name: String(ck.name || "").trim(),
+          value: String(ck.value || ""),
+          domain: String(ck.domain || "").trim() || ".facebook.com",
+          path: String(ck.path || "/"),
+          expires: Number(ck.expires || 0) || undefined,
+          httpOnly: !!ck.httpOnly,
+          secure: ck.secure !== false,
+          sameSite: (String(ck.sameSite || "").trim() || undefined),
+        }))
+        .filter((ck) => !!ck.name);
+      if (!safeCookies.length) return { applied: 0 };
+      await p.setCookie(...safeCookies);
+      return { applied: safeCookies.length };
+    } catch {
+      return { applied: 0 };
+    }
+  }
 
   async function pruneCollectorTabs() {
     try {
@@ -412,34 +501,67 @@ async function createCollectorRuntime() {
     account_login,
     timeoutMs,
     attempts,
+    session_cookies,
   } = {}) {
     return enqueue(async () => {
       const itemLink = normalizeItemLink(item_link);
       const tk = String(thread_key || "").trim();
       const account = String(account_login || "").trim();
+      const itemId = (() => {
+        try {
+          if (!itemLink) return "";
+          const u = new URL(itemLink);
+          return extractMarketplaceItemId(u.pathname);
+        } catch {
+          return "";
+        }
+      })();
       const maxAttempts = Math.max(1, Number(attempts || 3) || 3);
       const navTimeoutMs = Math.max(8_000, Number(timeoutMs || process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000);
 
       if (!itemLink) {
         return { ok: false, error: "city_collector_item_link_missing" };
       }
+      if (itemId) {
+        const cached = cityCacheGet(itemId);
+        if (cached && cached.cidade) {
+          return {
+            ok: true,
+            cidade: String(cached.cidade),
+            city_source: String(cached.city_source || "collector_cache"),
+            cached: true,
+          };
+        }
+      }
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           const p = await ensurePage();
+          await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
           await sleep(randomBetween(320, 760));
           await dismissLoginOverlay(p);
           await waitForListingHints(p, Math.min(3200, Math.max(1200, Math.floor(navTimeoutMs / 4))));
 
-          let extracted = await extractCityFromListingPage(p);
+          let extracted = await extractCityFromListingPage(p, {
+            maxAttempts: 12,
+            retryIntervalMs: 250,
+            scanLimit: 320,
+          });
           if (!extracted || !extracted.cidade) {
             // Segunda passada: tenta fechar pop-up novamente e reler o DOM da página do item.
             await dismissLoginOverlay(p);
             await waitForListingHints(p, 1200);
-            extracted = await extractCityFromListingPage(p);
+            extracted = await extractCityFromListingPage(p, {
+              maxAttempts: 8,
+              retryIntervalMs: 220,
+              scanLimit: 320,
+            });
           }
           if (extracted && extracted.cidade) {
+            if (itemId) {
+              cityCacheSet(itemId, extracted.cidade, extracted.city_source || "collector_dom");
+            }
             log(`cidade coletada account=${account || "n/a"} thread=${tk || "n/a"} cidade="${extracted.cidade}" attempt=${attempt}`);
             return {
               ok: true,

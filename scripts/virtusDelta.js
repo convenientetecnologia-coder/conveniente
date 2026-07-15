@@ -3603,7 +3603,8 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   threadKey,
   accountLogin,
   timeoutMs,
-  attempts
+  attempts,
+  page,
 }) {
   if (typeof getDeltaCityCollector !== "function") {
     return { ok: false, error: "delta_city_collector_unavailable" };
@@ -3612,12 +3613,21 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   if (!collector || typeof collector.collectCityFromItemLink !== "function") {
     return { ok: false, error: "delta_city_collector_runtime_invalid" };
   }
+  let sessionCookies = [];
+  try {
+    if (page && typeof page.cookies === "function") {
+      const cookiesA = await page.cookies("https://www.facebook.com").catch(() => []);
+      const cookiesB = await page.cookies("https://facebook.com").catch(() => []);
+      sessionCookies = [...cookiesA, ...cookiesB].filter(Boolean);
+    }
+  } catch (_) {}
   const out = await collector.collectCityFromItemLink({
     item_link: itemLink,
     thread_key: threadKey,
     account_login: accountLogin,
     timeoutMs,
-    attempts
+    attempts,
+    session_cookies: sessionCookies
   });
   return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
 }
@@ -4773,12 +4783,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     let greetingSentAt = Number((prior && prior.sentAt) || 0) || 0;
     const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
     const cityCollectorTimeoutMs = Math.max(
-      8_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000
+      6_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 9_000) || 9_000
     );
     const cityCollectorAttempts = Math.max(
       1,
-      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 3) || 3)
+      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 2) || 2)
     );
     const cityCollectorInterAttemptMaxMs = 1_600;
     const cityCollectorBudgetMs =
@@ -4786,7 +4796,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       (Math.max(0, cityCollectorAttempts - 1) * cityCollectorInterAttemptMaxMs) +
       2_500;
     const cityCollectMaxWaitEnvMs = Number(process.env.VIRTUS_DELTA_CITY_COLLECT_MAX_WAIT_MS || 0) || 0;
-    const cityCollectMaxWaitMs = Math.max(18_000, cityCollectorBudgetMs, cityCollectMaxWaitEnvMs);
+    const cityCollectMaxWaitMs = Math.max(
+      9_000,
+      Math.min(25_000, cityCollectorBudgetMs, cityCollectMaxWaitEnvMs || cityCollectorBudgetMs)
+    );
 
     let itemLinkResolved = false;
     let itemLinkResolver = null;
@@ -4809,6 +4822,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         accountLogin: ACCOUNT_LOGIN,
         timeoutMs: cityCollectorTimeoutMs,
         attempts: cityCollectorAttempts,
+        page,
       });
     })().catch((e) => ({
       ok: false,
