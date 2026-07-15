@@ -3610,7 +3610,6 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   timeoutMs,
   attempts,
   page,
-  clientMessages,
 }) {
   if (typeof getDeltaCityCollector !== "function") {
     return { ok: false, error: "delta_city_collector_unavailable" };
@@ -3634,7 +3633,6 @@ async function collectCityFromItemLinkUsingGlobalCollector({
     timeoutMs,
     attempts,
     session_cookies: sessionCookies,
-    client_messages: clientMessages,
   });
   return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
 }
@@ -4823,19 +4821,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const cityCollectionPromise = (async () => {
       const preferredLink = String((prior && prior.itemLink) || "").trim() || null;
       const itemLink = preferredLink || (await itemLinkPromise);
-      if (!itemLink) {
-        // Sem link: ainda tenta dicionario homologado nas mensagens do cliente
-        try {
-          const cityMod = require("./deltaCityCollector");
-          const fromDict = cityMod && typeof cityMod.matchCityFromHomologDict === "function"
-            ? cityMod.matchCityFromHomologDict(mensagensConcatenadas)
-            : "";
-          if (fromDict) {
-            return { ok: true, cidade: fromDict, city_source: "homolog_dict_messages" };
-          }
-        } catch (_) {}
-        return { ok: false, error: "item_link_missing" };
-      }
+      if (!itemLink) return { ok: false, error: "item_link_missing" };
       return await collectCityFromItemLinkUsingGlobalCollector({
         itemLink,
         threadKey: t,
@@ -4843,7 +4829,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         timeoutMs: cityCollectorTimeoutMs,
         attempts: cityCollectorAttempts,
         page,
-        clientMessages: mensagensConcatenadas,
       });
     })().catch((e) => ({
       ok: false,
@@ -4969,18 +4954,6 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         cityCandidate = cachedCity;
         citySource = "dom_cache_fallback";
       }
-    }
-    if (!cityCandidate) {
-      try {
-        const cityMod = require("./deltaCityCollector");
-        const fromDict = cityMod && typeof cityMod.matchCityFromHomologDict === "function"
-          ? cityMod.matchCityFromHomologDict(mensagensConcatenadas)
-          : "";
-        if (fromDict) {
-          cityCandidate = fromDict;
-          citySource = "homolog_dict_messages";
-        }
-      } catch (_) {}
     }
 
     let profileUrl = null;

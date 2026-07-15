@@ -1,5 +1,4 @@
 const path = require("path");
-const fs = require("fs");
 
 let puppeteer = null;
 try {
@@ -178,7 +177,7 @@ function isPlausibleCityName(cityRaw) {
   return true;
 }
 
-/** Resolve Cidade+UF a partir do miolo capturado: sufixos do fim + dicionario homologado. */
+/** Resolve Cidade+UF a partir do miolo capturado: sufixos da direita no DOM. */
 function resolveCityUfCapture(cityRaw, ufRaw) {
   const uf = String(ufRaw || "").trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
@@ -189,46 +188,19 @@ function resolveCityUfCapture(cityRaw, ufRaw) {
     .filter(Boolean);
   if (!words.length) return "";
 
-  const norm = (s) => String(s || "")
+  const firstKey = String(words[0] || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+  // Fragmento incompleto ("do Norte") — descartar
+  if (/^(do|da|de|dos|das)$/.test(firstKey) && words.length <= 2) return "";
 
-  const cities = loadHomologCities();
-  const firstKey = norm(words[0]);
-
-  // Fragmento incompleto ("do Norte") — so homolog, nunca "Norte (CE)"
-  if (/^(do|da|de|dos|das)$/.test(firstKey) && words.length <= 2) {
-    for (let n = words.length; n >= 1; n -= 1) {
-      const key = norm(words.slice(-n).join(" "));
-      const hit = cities.find((row) => row.cityNorm === key && row.uf === uf);
-      if (hit) return hit.label;
-    }
-    return "";
-  }
-
-  // 1) Homolog: maior sufixo que bata cidade+UF
-  for (let n = Math.min(5, words.length); n >= 1; n -= 1) {
-    const tryCity = words.slice(-n).join(" ");
-    const key = norm(tryCity);
-    const hit = cities.find((row) => row.cityNorm === key && row.uf === uf);
-    if (hit) return hit.label;
-  }
-
-  // 2) Dicionario no miolo (mesmo UF)
-  const fromDict = matchCityFromHomologDict(words.join(" "));
-  if (fromDict) {
-    const m = fromDict.match(/\(([A-Z]{2})\)\s*$/);
-    if (m && m[1] === uf) return fromDict;
-  }
-
-  // 3) Fallback: maior sufixo plausivel (da direita)
-  let fallback = "";
+  let best = "";
   for (let n = 1; n <= Math.min(5, words.length); n += 1) {
     const built = buildCityUf(words.slice(-n).join(" "), uf);
-    if (built) fallback = built;
+    if (built) best = built;
   }
-  return fallback;
+  return best;
 }
 
 function buildCityUf(cityRaw, ufRaw) {
@@ -237,58 +209,6 @@ function buildCityUf(cityRaw, ufRaw) {
   if (!isPlausibleCityName(city)) return "";
   if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
   return `${city} (${uf})`.slice(0, 80);
-}
-
-/** Lexico homologado em disco (contingencia + limpeza de blob). */
-let __homologCitiesCache = null;
-function loadHomologCities() {
-  if (__homologCitiesCache) return __homologCitiesCache;
-  try {
-    const fp = path.join(__dirname, "..", "dados", "cidades_homologadas.json");
-    const raw = JSON.parse(fs.readFileSync(fp, "utf8"));
-    const list = Array.isArray(raw && raw.cities) ? raw.cities : (Array.isArray(raw) ? raw : []);
-    const cities = list
-      .map((row) => {
-        const city = String((row && (row.city || row.nome || row.name)) || "").trim();
-        const uf = String((row && row.uf) || "").trim().toUpperCase();
-        const label = String((row && row.label) || (city && uf ? `${city} (${uf})` : "")).trim();
-        if (!city || !uf || !label) return null;
-        const norm = label
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLowerCase();
-        const cityNorm = city
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLowerCase();
-        return { city, uf, label, norm, cityNorm };
-      })
-      .filter(Boolean)
-      // Cidade mais longa primeiro (evita match curto falso)
-      .sort((a, b) => b.cityNorm.length - a.cityNorm.length);
-    __homologCitiesCache = cities;
-  } catch (_) {
-    __homologCitiesCache = [];
-  }
-  return __homologCitiesCache;
-}
-
-function matchCityFromHomologDict(rawText) {
-  const text = String(rawText || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!text || text.length < 3) return "";
-  const cities = loadHomologCities();
-  for (const row of cities) {
-    if (!row.cityNorm || row.cityNorm.length < 3) continue;
-    // palavra inteira aproximada
-    const re = new RegExp(`(?:^|[^a-z])${row.cityNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[^a-z]|$)`, "i");
-    if (re.test(text)) return row.label;
-  }
-  return "";
 }
 
 /**
@@ -328,7 +248,7 @@ function extractCityFromLocationAnchorText(bodyText) {
       if (built) return built;
     }
 
-    // Regex imperial (fallback) + dicionario no chunk
+    // Regex geografica no chunk
     GEO_COMMA_RE.lastIndex = 0;
     let m;
     let lastComma = null;
@@ -345,7 +265,7 @@ function extractCityFromLocationAnchorText(bodyText) {
       if (built) return built;
     }
 
-    return matchCityFromHomologDict(chunk) || "";
+    return "";
   };
 
   for (const re of markers) {
@@ -389,7 +309,7 @@ function normalizeCityUfLabel(raw) {
     }
   }
 
-  // 3) Scan ", UF" / "(UF)" com walk-back + homolog
+  // 3) Scan ", UF" / "(UF)" com walk-back de palavras no DOM
   const ufRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
   let m;
   let best = "";
@@ -402,10 +322,7 @@ function normalizeCityUfLabel(raw) {
     const built = resolveCityUfCapture(tail[1], uf);
     if (built) best = built;
   }
-  if (best) return best;
-
-  // 4) Dicionario no blob inteiro
-  return matchCityFromHomologDict(s0) || "";
+  return best || "";
 }
 
 function candidateSourcePriority(source) {
@@ -819,13 +736,11 @@ async function createCollectorRuntime() {
     timeoutMs,
     attempts,
     session_cookies,
-    client_messages,
   } = {}) {
     return enqueue(async () => {
       const itemLink = normalizeItemLink(item_link);
       const tk = String(thread_key || "").trim();
       const account = String(account_login || "").trim();
-      const clientMsgs = String(client_messages || "").trim();
       const itemId = (() => {
         try {
           if (!itemLink) return "";
@@ -839,11 +754,6 @@ async function createCollectorRuntime() {
       const navTimeoutMs = Math.max(8_000, Number(timeoutMs || process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000);
 
       if (!itemLink) {
-        // Sem link: ainda tenta dicionario nas mensagens do cliente
-        const fromDict = matchCityFromHomologDict(clientMsgs);
-        if (fromDict) {
-          return { ok: true, cidade: fromDict, city_source: "homolog_dict_messages" };
-        }
         return { ok: false, error: "city_collector_item_link_missing" };
       }
       if (itemId) {
@@ -911,14 +821,6 @@ async function createCollectorRuntime() {
         }
       }
 
-      // LEI 3: contingencia por dicionario JSON nas mensagens do cliente
-      const fromDict = matchCityFromHomologDict(clientMsgs);
-      if (fromDict) {
-        if (itemId) cityCacheSet(itemId, fromDict, "homolog_dict_messages");
-        log(`cidade via dicionario homologado account=${account || "n/a"} thread=${tk || "n/a"} cidade="${fromDict}"`);
-        return { ok: true, cidade: fromDict, city_source: "homolog_dict_messages" };
-      }
-
       return {
         ok: false,
         error: "city_not_found_in_listing_page",
@@ -955,6 +857,5 @@ module.exports = {
   getDeltaCityCollector,
   extractCityFromLocationAnchorText,
   normalizeCityUfLabel,
-  matchCityFromHomologDict,
   buildCityUf,
 };
