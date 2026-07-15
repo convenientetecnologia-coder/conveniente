@@ -362,7 +362,9 @@ async function createCollectorRuntime() {
     process.env.CHROME_PATH ||
     path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
 
-  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "1").trim() === "1";
+  // Default visivel (headed): facilita diagnostico de scrape de cidade no Marketplace.
+  // Para voltar headless: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=1
+  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "0").trim() === "1";
 
   let browser = null;
   let page = null;
