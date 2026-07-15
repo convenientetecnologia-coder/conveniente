@@ -139,68 +139,111 @@ function normalizeStateKey(value) {
     .toLowerCase();
 }
 
+const CITY_NOISE_RE = /\b(enviar|mensagem|message|save|share|anunciado|listed|detalhe|detalhes|condi[cç][aã]o|selec[cç][oõ]es|hoje|mini?atura|ver mais|facebook|localiza[cç][aã]o|location|aproximada|approximate|dias?|hours?|horas?|minutos?|weeks?|semanas?|months?|meses?|ago|classificado)\b/i;
+
+function isPlausibleCityName(cityRaw) {
+  const city = String(cityRaw || "").replace(/\s+/g, " ").trim();
+  if (!city) return false;
+  if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{0,80}$/.test(city)) return false;
+  const cityKey = city
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (CITY_NOISE_RE.test(cityKey)) return false;
+  if (/\b(em|in|ha|ago)\b/.test(cityKey)) return false;
+  const words = city.split(/\s+/).filter(Boolean);
+  if (words.length < 1 || words.length > 5) return false;
+  return true;
+}
+
+function buildCityUf(cityRaw, ufRaw) {
+  const city = toTitleCaseCityName(String(cityRaw || "").trim());
+  const uf = String(ufRaw || "").trim().toUpperCase();
+  if (!isPlausibleCityName(city)) return "";
+  if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
+  return `${city} (${uf})`.slice(0, 80);
+}
+
+/** Extrai Cidade (UF) de qualquer blob — não exige match da string inteira. */
 function normalizeCityUfLabel(raw) {
   const s0 = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s0) return "";
-  let s = s0
-    .replace(/^anunciado\b.*?\bem\s+/i, "")
-    .replace(/^listed\b.*?\bin\s+/i, "")
-    .replace(/\s*·\s*a localiza[çc][aã]o é aproximada.*$/i, "")
-    .replace(/\s*·\s*approximate location.*$/i, "")
-    .replace(/\s*-\s*a localiza[çc][aã]o é aproximada.*$/i, "")
-    .replace(/\s*-\s*approximate location.*$/i, "")
-    .trim();
-  if (!s) return "";
-  const parts = s.split(/\s*·\s*/).map((p) => String(p || "").trim()).filter(Boolean);
-  if (parts.length) s = parts[0];
-  if (!s) return "";
 
-  const tryBuild = (cityRaw, ufRaw) => {
-    const city = toTitleCaseCityName(String(cityRaw || "").trim());
-    const cityKey = String(city || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase();
-    const uf = String(ufRaw || "").trim().toUpperCase();
-    if (!city || !/^[A-Z]{2}$/.test(uf)) return "";
-    if (!BR_VALID_UF.has(uf)) return "";
-    if (/\b(anunciado|listed)\b/.test(cityKey)) return "";
-    if (/\bha\b.*\bem\b/.test(cityKey)) return "";
-    if (/\bago\b.*\bin\b/.test(cityKey)) return "";
-    if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}$/.test(city)) return "";
-    return `${city} (${uf})`.slice(0, 80);
+  // Preferência: trecho antes de "· localização" / "localização"
+  const locSplit = s0.split(/\s*·\s*(?=a\s+localiza|localiza|approximate)/i);
+  const preferred = String(locSplit[0] || s0).trim();
+
+  const tryExact = (s) => {
+    let t = String(s || "").trim();
+    if (!t) return "";
+    // "Anunciado <qualquer miolo> em Cidade, UF" — miolo livre (há 2 dias / em 2 horas / etc.)
+    t = t
+      .replace(/^anunciado\b[\s\S]{0,80}?\bem\s+/i, "")
+      .replace(/^listed\b[\s\S]{0,80}?\bin\s+/i, "")
+      .replace(/\s*·\s*.*$/i, "")
+      .trim();
+    if (!t) return "";
+
+    const ufPatterns = [
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\(\s*([A-Za-z]{2})\s*\)$/,
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/,
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-z]{2})$/,
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-z]{2})$/,
+    ];
+    for (const re of ufPatterns) {
+      const m = t.match(re);
+      if (!m) continue;
+      const built = buildCityUf(m[1], m[2]);
+      if (built) return built;
+    }
+
+    const stateNamePatterns = [
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+      /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+    ];
+    for (const re of stateNamePatterns) {
+      const m = t.match(re);
+      if (!m) continue;
+      const uf = STATE_NAME_TO_UF.get(normalizeStateKey(m[2]));
+      if (!uf) continue;
+      const built = buildCityUf(m[1], uf);
+      if (built) return built;
+    }
+    return "";
   };
 
-  const ufPatterns = [
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\(\s*([A-Za-z]{2})\s*\)$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-z]{2})$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-z]{2})$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-z]{2})$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s+([A-Za-z]{2})$/,
-  ];
-  for (const re of ufPatterns) {
-    const m = s.match(re);
-    if (!m) continue;
-    const built = tryBuild(m[1], m[2]);
-    if (built) return built;
-  }
+  const exactPreferred = tryExact(preferred);
+  if (exactPreferred) return exactPreferred;
+  const exactFull = tryExact(s0);
+  if (exactFull) return exactFull;
 
-  const stateNamePatterns = [
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*,\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*\/\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
-    /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,80}?)\s*[-–]\s*([A-Za-zÀ-ÿ'’.\- ]{3,40})$/,
+  // Scan flexível: acha "Cidade, UF" / "Cidade (UF)" em qualquer posição
+  const inlineRes = [
+    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})\b/g,
+    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)/g,
+    /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\/\s*([A-Za-z]{2})\b/g,
   ];
-  for (const re of stateNamePatterns) {
-    const m = s.match(re);
-    if (!m) continue;
-    const stateKey = normalizeStateKey(m[2]);
-    const uf = STATE_NAME_TO_UF.get(stateKey);
-    if (!uf) continue;
-    const built = tryBuild(m[1], uf);
-    if (built) return built;
+  for (const re of inlineRes) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(s0)) !== null) {
+      const built = buildCityUf(m[1], m[2]);
+      if (built) return built;
+    }
   }
-
   return "";
+}
+
+function candidateSourcePriority(source) {
+  const s = String(source || "").toLowerCase();
+  if (s.startsWith("loc_")) return 0;
+  if (s.startsWith("anunciado_")) return 1;
+  if (s.startsWith("map_")) return 2;
+  if (s.startsWith("marketplace_city_link")) return 3;
+  if (s.startsWith("body_")) return 4;
+  if (s.startsWith("semantic_")) return 5;
+  return 9;
 }
 
 async function extractCityFromListingPage(page, {
@@ -218,53 +261,147 @@ async function extractCityFromListingPage(page, {
       const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
       const bodyText = clean(document.body && document.body.innerText ? document.body.innerText : "");
       const candidates = [];
+      const loginWall = !!(
+        document.querySelector("#login_popup_cta_form")
+        || document.querySelector('form[action*="/login/"]')
+        || /ver mais no facebook/i.test(bodyText)
+      );
 
       const push = (v, source) => {
         const c = clean(v);
-        if (!c) return;
+        if (!c || c.length > 200) return;
         candidates.push({ value: c, source });
       };
-      const pushFromNode = (el, sourcePrefix) => {
-        if (!el) return;
-        push(el.textContent || "", `${sourcePrefix}_text`);
-        try { push(el.getAttribute && el.getAttribute("aria-label"), `${sourcePrefix}_aria`); } catch (_) {}
-        try { push(el.getAttribute && el.getAttribute("title"), `${sourcePrefix}_title`); } catch (_) {}
-        try { push(el.getAttribute && el.getAttribute("data-testid"), `${sourcePrefix}_testid`); } catch (_) {}
+
+      const CITY_UF_CHUNK = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b|\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?\s*\(\s*[A-Za-z]{2}\s*\))/gi;
+      const extractCityChunks = (text) => {
+        const t = clean(text);
+        if (!t) return [];
+        const outChunks = [];
+        let m;
+        const re = new RegExp(CITY_UF_CHUNK.source, "gi");
+        while ((m = re.exec(t)) !== null) {
+          const chunk = clean(m[1] || m[2] || m[0]);
+          if (chunk) outChunks.push(chunk);
+        }
+        return outChunks;
       };
 
-      const matchBodyPattern = (regex, source) => {
-        const m = bodyText.match(regex);
-        if (m && m[1]) push(m[1], source);
+      // ── 1) ÂNCORA ESTÁVEL: "localização" (quase todo anúncio tem)
+      // Ex.: "Santa Maria, RS · A localização é aproximada"
+      const pushFromLocalizacaoContext = (text, source) => {
+        const t = clean(text);
+        if (!t || !/localiza/i.test(t)) return;
+        // Cidade fica antes do · ou imediatamente antes da palavra localização
+        const beforeDot = clean((t.split(/\s*·\s*/)[0]) || "");
+        if (beforeDot && beforeDot.length <= 80) push(beforeDot, `${source}_before_dot`);
+        const beforeWord = t.split(/localiza/i)[0] || "";
+        for (const chunk of extractCityChunks(beforeWord)) {
+          push(chunk, `${source}_before_word`);
+        }
+        push(t, `${source}_full`);
       };
 
-      matchBodyPattern(/anunciado em\s*([^\n\r|]+)/i, "body_label_pt");
-      matchBodyPattern(/listed in\s*([^\n\r|]+)/i, "body_label_en");
-      matchBodyPattern(/localiza[çc][aã]o(?:\s+aproximada)?\s*[:\-]\s*([^\n\r|]+)/i, "body_location_pt");
-      matchBodyPattern(/approximate\s+location\s*[:\-]\s*([^\n\r|]+)/i, "body_location_en");
-
-      const semanticNodes = Array.from(document.querySelectorAll(
-        'a[href*="/marketplace/item/"], a[href*="/marketplace/"], div[data-testid="marketplace_profile_banner"], span, [aria-label*="localiza"], [aria-label*="location"]'
-      )).slice(0, Math.max(1, Number(maxNodes || 320) || 320));
-      for (const el of semanticNodes) {
-        pushFromNode(el, "semantic_node");
+      // Nós curtos com "localização" — prioridade máxima
+      const locNodes = Array.from(document.querySelectorAll("span, div, a")).slice(0, 900);
+      for (const el of locNodes) {
+        const t = clean(el.textContent || "");
+        if (!t || t.length > 140) continue;
+        if (!/localiza/i.test(t) && !/approximate\s+location/i.test(t)) continue;
+        pushFromLocalizacaoContext(t, "loc_node");
       }
 
-      const approxSpans = Array.from(document.querySelectorAll("span"))
-        .map((el) => clean(el.textContent || ""))
-        .filter((t) => /localiza[çc][aã]o é aproximada|approximate location/i.test(t));
-      for (const value of approxSpans) push(value, "approx_location_badge");
+      // Body: cidade imediatamente antes de qualquer menção a localização
+      {
+        const reLoc = /localiza[cç][aã]o|approximate\s+location/gi;
+        let lm;
+        while ((lm = reLoc.exec(bodyText)) !== null) {
+          const slice = bodyText.slice(Math.max(0, lm.index - 80), lm.index);
+          for (const chunk of extractCityChunks(slice)) {
+            push(chunk, "loc_body_near");
+          }
+          // também "Cidade, UF · " colado no marcador
+          const tail = slice.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\s*$/i);
+          if (tail && tail[1]) push(tail[1], "loc_body_tail");
+        }
+      }
 
-      return candidates;
-    }, nodeLimit).catch(() => []);
+      // ── 2) ÂNCORA ESTÁVEL: "anunciado" (miolo livre: há 2 dias / em 2h / etc.)
+      // Pega o trecho após "anunciado" e procura "em|in" + Cidade, UF
+      {
+        const reAn = /\banunciado\b/gi;
+        let am;
+        while ((am = reAn.exec(bodyText)) !== null) {
+          const windowText = bodyText.slice(am.index, am.index + 140);
+          push(windowText, "anunciado_window");
+          // último "em|in" no trecho → cidade depois
+          const emMatch = windowText.match(/\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/i);
+          if (emMatch && emMatch[1]) push(emMatch[1], "anunciado_em_city");
+          for (const chunk of extractCityChunks(windowText)) {
+            push(chunk, "anunciado_chunk");
+          }
+        }
+        const reListed = /\blisted\b/gi;
+        let lm;
+        while ((lm = reListed.exec(bodyText)) !== null) {
+          const windowText = bodyText.slice(lm.index, lm.index + 140);
+          const inMatch = windowText.match(/\bin\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?,\s*[A-Za-z]{2})\b/i);
+          if (inMatch && inMatch[1]) push(inMatch[1], "anunciado_listed_in_city");
+        }
+      }
 
-    const candidates = Array.isArray(out) ? out : [];
+      // ── 3) Mapa / aria-label com localização
+      const mapBlocks = Array.from(document.querySelectorAll(
+        '[aria-label*="localiza"], [aria-label*="Localiza"], [aria-label*="location"], [aria-label*="Location"]'
+      )).slice(0, 40);
+      for (const el of mapBlocks) {
+        push(el.textContent || "", "map_text");
+        try { push(el.getAttribute("aria-label") || "", "map_aria"); } catch (_) {}
+        try {
+          const nearby = el.closest("div");
+          if (nearby) {
+            const nt = clean(nearby.textContent || "");
+            if (nt && nt.length <= 180) pushFromLocalizacaoContext(nt, "map_nearby");
+          }
+        } catch (_) {}
+      }
+
+      // ── 4) Link curto de cidade no marketplace (não cards de "Seleções")
+      const cityLinks = Array.from(document.querySelectorAll('a[href*="/marketplace/"][role="link"]'))
+        .slice(0, Math.max(1, Number(maxNodes || 320) || 320));
+      for (const el of cityLinks) {
+        const t = clean(el.textContent || "");
+        if (!t || t.length > 60) continue;
+        if (/R\$|classificado\s+\d+/i.test(t)) continue;
+        if (!/,\s*[A-Za-z]{2}\s*$/.test(t) && !/\(\s*[A-Za-z]{2}\s*\)\s*$/.test(t)) continue;
+        push(t, "marketplace_city_link");
+      }
+
+      return {
+        candidates,
+        loginWall,
+        hasLocalizacao: /localiza/i.test(bodyText),
+        hasAnunciado: /\banunciado\b/i.test(bodyText),
+      };
+    }, nodeLimit).catch(() => ({ candidates: [], loginWall: false }));
+
+    const payload = out && typeof out === "object" ? out : { candidates: [] };
+    const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
+    candidates.sort((a, b) => candidateSourcePriority(a && a.source) - candidateSourcePriority(b && b.source));
+
     for (const cand of candidates) {
       const v = normalizeCityUfLabel(cand && cand.value);
       if (!v) continue;
+      if (payload.loginWall) {
+        try {
+          log(`cidade lida atras do login wall source=${cand.source || "?"} cidade="${v}" attempt=${attempt}`);
+        } catch (_) {}
+      }
       return {
         cidade: v,
         city_source: String((cand && cand.source) || "collector_unknown"),
         attempt,
+        login_wall: !!payload.loginWall,
       };
     }
     if (attempt < attempts) {
@@ -291,6 +428,34 @@ async function dismissLoginOverlay(page) {
           return false;
         }
       };
+      const tryClick = (el) => {
+        if (!el || !isVisible(el)) return false;
+        try {
+          el.click();
+          return true;
+        } catch (_) {
+          try {
+            el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+      };
+
+      // Prioriza o modal "Ver mais no Facebook" / login_popup_cta_form
+      const loginForm = document.querySelector("#login_popup_cta_form")
+        || document.querySelector('form[action*="/login/"]');
+      if (loginForm) {
+        const dialog = loginForm.closest('[role="dialog"], [aria-modal="true"]') || loginForm.parentElement;
+        if (dialog) {
+          const closeInDialog = dialog.querySelector(
+            '[aria-label="Fechar"], [aria-label="Close"], [aria-label="fechar"], [aria-label="close"]'
+          );
+          if (tryClick(closeInDialog)) return true;
+        }
+      }
+
       const selectors = [
         '[role="dialog"] [aria-label="Fechar"]',
         '[role="dialog"] [aria-label="Close"]',
@@ -298,6 +463,8 @@ async function dismissLoginOverlay(page) {
         '[aria-modal="true"] [aria-label="Close"]',
         'div[aria-label="Fechar"][role="button"]',
         'div[aria-label="Close"][role="button"]',
+        '[aria-label="Fechar"][role="button"]',
+        '[aria-label="Close"][role="button"]',
       ];
       const nodes = [];
       for (const sel of selectors) {
@@ -306,11 +473,7 @@ async function dismissLoginOverlay(page) {
         } catch (_) {}
       }
       for (const el of nodes) {
-        if (!isVisible(el)) continue;
-        try {
-          el.click();
-          return true;
-        } catch (_) {}
+        if (tryClick(el)) return true;
       }
       return false;
     }).catch(() => false);
@@ -318,16 +481,15 @@ async function dismissLoginOverlay(page) {
     closed = false;
   }
 
+  // Sempre tenta Esc: no DOM real o X às vezes não fecha de primeira.
   let escaped = false;
-  if (!closed) {
-    try {
-      await page.keyboard.press("Escape");
-      escaped = true;
-    } catch (_) {}
-  }
+  try {
+    await page.keyboard.press("Escape");
+    escaped = true;
+  } catch (_) {}
 
   if (closed || escaped) {
-    await sleep(randomBetween(280, 620));
+    await sleep(randomBetween(350, 750));
   }
   return { closed, escaped };
 }
@@ -356,13 +518,14 @@ async function waitForListingHints(page, timeoutMs) {
         .replace(/\s+/g, " ")
         .toLowerCase();
       if (!body) return false;
-      if (body.includes("anunciado em")) return true;
-      if (body.includes("listed in")) return true;
-      if (body.includes("localização é aproximada")) return true;
-      if (body.includes("localizacao e aproximada")) return true;
+      // Âncoras estáveis (miolo do tempo muda; estas palavras não)
+      if (body.includes("localiza")) return true;
+      if (body.includes("anunciado") || body.includes("listed")) return true;
       if (body.includes("approximate location")) return true;
       return Boolean(
-        document.querySelector('a[href*="/marketplace/"][role="link"] span,[aria-label*="localização"],[aria-label*="location"]')
+        document.querySelector(
+          'a[href*="/marketplace/"][role="link"] span, [aria-label*="localiza"], [aria-label*="location"], #login_popup_cta_form'
+        )
       );
     }, { timeout });
   } catch (_) {}
@@ -564,14 +727,24 @@ async function createCollectorRuntime() {
           await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
           await sleep(randomBetween(500, 1100));
-          await dismissLoginOverlayPatient(p, { rounds: 3 });
-          await waitForListingHints(p, Math.min(5000, Math.max(2500, Math.floor(navTimeoutMs / 3))));
+          await waitForListingHints(p, Math.min(4000, Math.max(1800, Math.floor(navTimeoutMs / 4))));
 
+          // Lê a cidade mesmo com o modal de login na frente (DOM do anúncio fica atrás).
           let extracted = await extractCityFromListingPage(p, {
-            maxAttempts: 12,
-            retryIntervalMs: 500,
+            maxAttempts: 4,
+            retryIntervalMs: 350,
             scanLimit: 320,
           });
+
+          if (!extracted || !extracted.cidade) {
+            await dismissLoginOverlayPatient(p, { rounds: 3 });
+            await waitForListingHints(p, Math.min(5000, Math.max(2500, Math.floor(navTimeoutMs / 3))));
+            extracted = await extractCityFromListingPage(p, {
+              maxAttempts: 12,
+              retryIntervalMs: 500,
+              scanLimit: 320,
+            });
+          }
           if (!extracted || !extracted.cidade) {
             // Segunda passada: fecha pop-up de novo, espera hidratar e relê o DOM.
             await dismissLoginOverlayPatient(p, { rounds: 2 });
