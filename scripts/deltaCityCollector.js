@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 
 let puppeteer = null;
 try {
@@ -14,6 +15,59 @@ const LOG_ENABLED = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_LOG || "1").t
 function log(...args) {
   if (!LOG_ENABLED) return;
   try { console.log("[deltaCityCollector]", ...args); } catch (_) {}
+}
+
+const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_triagem.log");
+const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Append circular em forensic_triagem.log (RAM constante). */
+function logTriagemDomCityCommunion(ctx = {}) {
+  try {
+    const fp = FORENSIC_TRIAGEM_LOG_PATH;
+    const obj = {
+      ts: Date.now(),
+      tag: "TRIAGEM_DOM",
+      msg: "city_communion_processed",
+      ctx: {
+        block_a: String((ctx && ctx.block_a) || "").slice(0, 400),
+        block_b: String((ctx && ctx.block_b) || "").slice(0, 400),
+        final_extracted: (ctx && ctx.final_extracted) || null,
+      },
+    };
+    const line = JSON.stringify(obj) + "\n";
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
+
+    let currentSize = 0;
+    try {
+      if (fs.existsSync(fp)) currentSize = Number(fs.statSync(fp).size || 0) || 0;
+    } catch (_) {}
+
+    if ((currentSize + lineBytes) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES) {
+      const keepBytes = Math.max(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes);
+      let tail = "";
+      if (keepBytes > 0 && currentSize > 0) {
+        let fd = null;
+        try {
+          fd = fs.openSync(fp, "r");
+          const start = Math.max(0, currentSize - keepBytes);
+          const toRead = Math.max(0, currentSize - start);
+          if (toRead > 0) {
+            const buf = Buffer.allocUnsafe(toRead);
+            const got = fs.readSync(fd, buf, 0, toRead, start);
+            tail = buf.slice(0, Math.max(0, got)).toString("utf8");
+          }
+        } catch (_) {
+          tail = "";
+        } finally {
+          try { if (fd) fs.closeSync(fd); } catch (_) {}
+        }
+      }
+      fs.writeFileSync(fp, tail + line, "utf8");
+      return;
+    }
+    fs.appendFileSync(fp, line, "utf8");
+  } catch (_) {}
 }
 
 function sleep(ms) {
@@ -144,14 +198,143 @@ const CITY_NOISE_RE = /\b(enviar|mensagem|message|save|share|anunciado|listed|de
 const GEO_COMMA_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*,\s*([A-Za-z]{2})\b/gi;
 const GEO_PAREN_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*\(\s*([A-Za-z]{2})\s*\)/gi;
 
-function stripMarketplaceConditionNoise(raw) {
-  return String(raw || "")
+/**
+ * Limpa ruido do Marketplace.
+ * @param {string} raw
+ * @param {{ stripProductPrefixes?: boolean }} [opts]
+ *   stripProductPrefixes=true (default): remove Seminovo/Novo/Usado/Condicoes (via unica).
+ *   stripProductPrefixes=false: so condicoes — preserva "Novo Hamburgo" na intersecao.
+ */
+function stripMarketplaceConditionNoise(raw, opts = {}) {
+  const stripProductPrefixes = opts.stripProductPrefixes !== false;
+  let s = String(raw || "")
     .replace(/condi[cç][oõ]es?\s*razo[aá]veis/gi, " ")
     .replace(/boas?\s*condi[cç][oõ]es?/gi, " ")
     .replace(/condi[cç][aã]o\s*[:\-–]?\s*/gi, " ")
-    .replace(/usado\s*[—\-–]\s*em\s*boas?\s*condi[cç][oõ]es?/gi, " ")
+    .replace(/usado\s*[—\-–]\s*em\s*boas?\s*condi[cç][oõ]es?/gi, " ");
+  if (stripProductPrefixes) {
+    // Gemini pediu semini?novo; o regex correto p/ "Seminovo" e semi?novo / seminovos?
+    s = s
+      .replace(/\bseminovos?\b/gi, " ")
+      .replace(/\bsemi\s*novos?\b/gi, " ")
+      .replace(/\bsemi?novos?\b/gi, " ")
+      .replace(/\bnovos?\b/gi, " ")
+      .replace(/\busados?\b/gi, " ")
+      .replace(/\bcondi[cç][oõ]es?\b/gi, " ")
+      // colado: SeminovoRibeirao / NovoPorto
+      .replace(/\bseminovos?(?=[A-Za-zÀ-ÿ])/gi, " ")
+      .replace(/\bsemi?novos?(?=[A-Za-zÀ-ÿ])/gi, " ")
+      .replace(/\bnovos?(?=[A-Za-zÀ-ÿ])/gi, " ");
+  }
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function normCityUfKey(built) {
+  return String(built || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Extrai todos os Cidade (UF) plausiveis de um blob (sufixos da direita). */
+function collectGeoHitsFromBlob(raw, { stripProductPrefixes = false } = {}) {
+  const chunk = stripMarketplaceConditionNoise(
+    String(raw || "").replace(/\s+/g, " ").trim(),
+    { stripProductPrefixes }
+  );
+  const hits = [];
+  if (!chunk) return hits;
+
+  const pushHit = (cityRaw, ufRaw) => {
+    const built = resolveCityUfCapture(cityRaw, ufRaw);
+    if (!built) return;
+    hits.push({
+      built,
+      norm: normCityUfKey(built),
+      fragment: `${String(cityRaw || "").replace(/\s+/g, " ").trim()}, ${String(ufRaw || "").trim().toUpperCase()}`,
+    });
+  };
+
+  const markRe = /,\s*([A-Za-z]{2})\b|\(\s*([A-Za-z]{2})\s*\)/g;
+  let um;
+  while ((um = markRe.exec(chunk)) !== null) {
+    const uf = String(um[1] || um[2] || "").toUpperCase();
+    if (!BR_VALID_UF.has(uf)) continue;
+    const before = chunk.slice(0, um.index).trim();
+    const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
+    if (!tail || !tail[1]) continue;
+    const words = tail[1].split(/\s+/).filter(Boolean);
+    for (let n = 1; n <= Math.min(5, words.length); n += 1) {
+      pushHit(words.slice(-n).join(" "), uf);
+    }
+  }
+
+  // Anunciado/Listed: "em|in Cidade, UF"
+  const emCities = chunk.matchAll(
+    /\b(?:em|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?(?:,\s*[A-Za-z]{2}|\s*\(\s*[A-Za-z]{2}\s*\)))/gi
+  );
+  for (const em of emCities) {
+    const token = String(em[1] || "").trim();
+    const mComma = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*,\s*([A-Za-z]{2})$/i);
+    if (mComma) pushHit(mComma[1], mComma[2]);
+    const mParen = token.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{1,50}?)\s*\(\s*([A-Za-z]{2})\s*\)$/i);
+    if (mParen) pushHit(mParen[1], mParen[2]);
+  }
+
+  return hits;
+}
+
+/**
+ * Intersecao de comunhao identica: Cidade (UF) presente em anunciado_window (A)
+ * E em loc_anchor_80 (B). Preferencia pelo match mais longo comum.
+ */
+function resolveDualIntersectionCommunion(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const blockA = list.filter((c) => /^anunciado_/i.test(String((c && c.source) || "")));
+  const blockB = list.filter((c) => /^loc_/i.test(String((c && c.source) || "")));
+  if (!blockA.length || !blockB.length) return null;
+
+  const blockAText = blockA.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
+  const blockBText = blockB.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
+
+  // Intersecao SEM strip de Novo/Seminovo (preserva Novo Hamburgo etc.)
+  const mapA = new Map();
+  for (const c of blockA) {
+    for (const hit of collectGeoHitsFromBlob(c && c.value, { stripProductPrefixes: false })) {
+      const prev = mapA.get(hit.norm);
+      if (!prev || hit.built.length > prev.built.length) mapA.set(hit.norm, hit);
+    }
+  }
+
+  const commons = [];
+  for (const c of blockB) {
+    for (const hit of collectGeoHitsFromBlob(c && c.value, { stripProductPrefixes: false })) {
+      if (!mapA.has(hit.norm)) continue;
+      commons.push(hit);
+    }
+  }
+
+  commons.sort((a, b) => String(b.built || "").length - String(a.built || "").length);
+  const best = commons[0] || null;
+  const finalExtracted = best ? best.built : null;
+
+  try {
+    logTriagemDomCityCommunion({
+      block_a: blockAText,
+      block_b: blockBText,
+      final_extracted: finalExtracted,
+    });
+  } catch (_) {}
+
+  if (!finalExtracted) return null;
+  return {
+    cidade: finalExtracted,
+    city_source: "dual_intersection_communion",
+    block_a: blockAText,
+    block_b: blockBText,
+  };
 }
 
 function isPlausibleCityName(cityRaw) {
@@ -379,9 +562,9 @@ async function extractCityFromListingPage(page, {
         }
       }
 
-      // Anunciado (fallback): janela apos a palavra
+      // Anunciado/Listed (Bloco A): janela apos a palavra
       {
-        const reAn = /\banunciado\b/gi;
+        const reAn = /\b(?:anunciado|listed)\b/gi;
         let am;
         while ((am = reAn.exec(bodyText)) !== null) {
           push(bodyText.slice(am.index, am.index + 140), "anunciado_window");
@@ -421,10 +604,35 @@ async function extractCityFromListingPage(page, {
     }, nodeLimit).catch(() => ({ bodyText: "", candidates: [], loginWall: false }));
 
     const payload = out && typeof out === "object" ? out : { bodyText: "", candidates: [] };
+    const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
 
-    // LEI 1+2 no Node: ancora laser em localizacao no body completo
+    // 1) Intersecao de comunhao identica Anunciado (A) ∩ Localizacao (B)
+    const communion = resolveDualIntersectionCommunion(candidates);
+    if (communion && communion.cidade) {
+      try {
+        log(
+          `comunhao dual cidade="${communion.cidade}" attempt=${attempt}` +
+          ` login_wall=${payload.loginWall ? "sim" : "nao"}`
+        );
+      } catch (_) {}
+      return {
+        cidade: communion.cidade,
+        city_source: "dual_intersection_communion",
+        attempt,
+        login_wall: !!payload.loginWall,
+      };
+    }
+
+    // 2) Via unica: ancora laser em localizacao no body (com expurgo Novo/Seminovo)
     const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
     if (fromBodyAnchor) {
+      try {
+        logTriagemDomCityCommunion({
+          block_a: "",
+          block_b: String(payload.bodyText || "").slice(0, 400),
+          final_extracted: fromBodyAnchor,
+        });
+      } catch (_) {}
       return {
         cidade: fromBodyAnchor,
         city_source: "loc_anchor_body",
@@ -433,7 +641,7 @@ async function extractCityFromListingPage(page, {
       };
     }
 
-    const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
+    // 3) Demais candidatos (prioridade loc > anunciado > mapa > link)
     candidates.sort((a, b) => candidateSourcePriority(a && a.source) - candidateSourcePriority(b && b.source));
 
     for (const cand of candidates) {
@@ -444,6 +652,13 @@ async function extractCityFromListingPage(page, {
           log(`cidade lida atras do login wall source=${cand.source || "?"} cidade="${v}" attempt=${attempt}`);
         } catch (_) {}
       }
+      try {
+        logTriagemDomCityCommunion({
+          block_a: /^anunciado_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : "",
+          block_b: /^loc_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : String(cand.value || ""),
+          final_extracted: v,
+        });
+      } catch (_) {}
       return {
         cidade: v,
         city_source: String((cand && cand.source) || "collector_unknown"),
@@ -858,4 +1073,7 @@ module.exports = {
   extractCityFromLocationAnchorText,
   normalizeCityUfLabel,
   buildCityUf,
+  stripMarketplaceConditionNoise,
+  resolveDualIntersectionCommunion,
+  collectGeoHitsFromBlob,
 };
