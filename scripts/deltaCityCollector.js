@@ -101,6 +101,10 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * Fila limitada. Para o city collector o contrato soberano e SEMPRE limit=1:
+ * 1 browser + 1 page + 1 userDataDir. Concorrencia >1 no mesmo perfil = Code 21.
+ */
 function createLimitedQueue(maxConcurrent = 1) {
   const limit = Math.max(1, Number(maxConcurrent || 1) || 1);
   const queue = [];
@@ -119,10 +123,44 @@ function createLimitedQueue(maxConcurrent = 1) {
         runNext();
       });
   };
-  return (fn) => new Promise((resolve, reject) => {
+  const enqueue = (fn) => new Promise((resolve, reject) => {
     queue.push({ fn, resolve, reject });
     runNext();
   });
+  enqueue.getDepth = () => queue.length + inFlight;
+  enqueue.getInFlight = () => inFlight;
+  enqueue.getWaiting = () => queue.length;
+  return enqueue;
+}
+
+function isChromiumLaunchFailure(err) {
+  const msg = String((err && err.message) || err || "");
+  if (!msg) return false;
+  return (
+    /Failed to launch the browser process/i.test(msg) ||
+    /Code:\s*21\b/i.test(msg) ||
+    /SingletonLock/i.test(msg) ||
+    /The browser is already running/i.test(msg) ||
+    /user data directory is already in use/i.test(msg)
+  );
+}
+
+/** Remove locks orfaos do perfil unico do collector (Chrome morto deixou Singleton*). */
+function clearOrphanChromeProfileLocks(userDataDir) {
+  const base = String(userDataDir || "").trim();
+  if (!base) return { cleared: [] };
+  const cleared = [];
+  const names = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+  for (const name of names) {
+    const fp = path.join(base, name);
+    try {
+      if (fs.existsSync(fp)) {
+        fs.unlinkSync(fp);
+        cleared.push(name);
+      }
+    } catch (_) {}
+  }
+  return { cleared };
 }
 
 function extractMarketplaceItemId(pathname) {
@@ -937,11 +975,11 @@ async function createCollectorRuntime() {
 
   let browser = null;
   let page = null;
-  const collectorConcurrency = Math.max(
-    1,
-    Math.min(4, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_MAX_CONCURRENCY || 2) || 2)
-  );
-  const enqueue = createLimitedQueue(collectorConcurrency);
+  // LEI: 1 browser por host. Concorrencia >1 no mesmo userDataDir = Chromium Code 21.
+  // Env antiga (MAX_CONCURRENCY=2) e ignorada de proposito — serial e soberano.
+  const enqueue = createLimitedQueue(1);
+  let launchPromise = null; // mutex de launch/relaunch
+  let launchGeneration = 0;
   const cityCacheByItem = new Map(); // itemId -> { cidade, city_source, at }
   const cityCacheTtlMs = Math.max(
     5 * 60 * 1000,
@@ -1024,24 +1062,32 @@ async function createCollectorRuntime() {
     } catch (_) {}
   }
 
-  async function ensurePage() {
+  async function invalidateBrowser(reason) {
+    const why = String(reason || "invalidate").slice(0, 120);
     try {
-      if (browser && browser.isConnected && browser.isConnected() && page && !page.isClosed()) {
-        await pruneCollectorTabs();
-        return page;
+      if (browser) {
+        try { await browser.close(); } catch (_) {}
       }
     } catch (_) {}
+    browser = null;
+    page = null;
+    tabGuardAttached = false;
+    launchGeneration += 1;
+    log(`collector browser invalidado reason=${why} gen=${launchGeneration}`);
+  }
 
-    try {
-      if (browser && browser.isConnected && browser.isConnected()) {
-        const pages = await browser.pages().catch(() => []);
-        page = pages[0] || (await browser.newPage());
-        await pruneCollectorTabs();
-        return page;
+  async function launchBrowserFresh({ clearLocks = false } = {}) {
+    if (clearLocks) {
+      const lockOut = clearOrphanChromeProfileLocks(userDataDir);
+      if (lockOut.cleared.length) {
+        log(`collector limpou locks orfaos=${lockOut.cleared.join(",")}`);
       }
-    } catch (_) {}
+      await sleep(400);
+    }
 
-    browser = await puppeteer.launch({
+    try { fs.mkdirSync(userDataDir, { recursive: true }); } catch (_) {}
+
+    const launched = await puppeteer.launch({
       headless: headlessEnabled ? "new" : false,
       executablePath,
       userDataDir,
@@ -1050,13 +1096,30 @@ async function createCollectorRuntime() {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
       ],
       defaultViewport: { width: 1366, height: 900 },
     });
 
+    browser = launched;
     const pages = await browser.pages().catch(() => []);
     page = pages[0] || (await browser.newPage());
-    await page.setDefaultTimeout(Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000));
+    await page.setDefaultTimeout(
+      Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000)
+    );
+
+    try {
+      browser.on("disconnected", () => {
+        try {
+          log(`collector browser disconnected gen=${launchGeneration}`);
+        } catch (_) {}
+        browser = null;
+        page = null;
+        tabGuardAttached = false;
+      });
+    } catch (_) {}
+
     if (!tabGuardAttached) {
       tabGuardAttached = true;
       browser.on("targetcreated", async (target) => {
@@ -1069,8 +1132,65 @@ async function createCollectorRuntime() {
       });
     }
     await pruneCollectorTabs();
-    log(`collector iniciado headless=${headlessEnabled ? "sim" : "nao"} userDataDir=${userDataDir}`);
+    log(
+      `collector iniciado headless=${headlessEnabled ? "sim" : "nao"}` +
+      ` concurrency=1 userDataDir=${userDataDir} gen=${launchGeneration}`
+    );
     return page;
+  }
+
+  /**
+   * Garante 1 page viva. Launch e serializado por mutex (mesmo com fila=1,
+   * relaunch apos Code 21 nao pode atropelar outro launch).
+   */
+  async function ensurePage({ forceRelaunch = false } = {}) {
+    if (!forceRelaunch) {
+      try {
+        if (browser && browser.isConnected && browser.isConnected() && page && !page.isClosed()) {
+          await pruneCollectorTabs();
+          return page;
+        }
+      } catch (_) {}
+
+      try {
+        if (browser && browser.isConnected && browser.isConnected()) {
+          const pages = await browser.pages().catch(() => []);
+          page = pages[0] || (await browser.newPage());
+          await pruneCollectorTabs();
+          return page;
+        }
+      } catch (_) {}
+    } else {
+      await invalidateBrowser("force_relaunch");
+    }
+
+    if (launchPromise) return launchPromise;
+
+    launchPromise = (async () => {
+      let lastErr = null;
+      for (let launchAttempt = 1; launchAttempt <= 2; launchAttempt += 1) {
+        try {
+          return await launchBrowserFresh({ clearLocks: launchAttempt > 1 });
+        } catch (e) {
+          lastErr = e;
+          const launchFail = isChromiumLaunchFailure(e);
+          log(
+            `collector launch falhou attempt=${launchAttempt}` +
+            ` code21=${launchFail ? "sim" : "nao"}` +
+            ` error=${e && e.message ? e.message : String(e)}`
+          );
+          await invalidateBrowser(launchFail ? "launch_code21" : "launch_failed");
+          if (launchAttempt < 2) {
+            await sleep(launchFail ? 1200 : 600);
+          }
+        }
+      }
+      throw lastErr || new Error("city_collector_browser_launch_failed");
+    })().finally(() => {
+      launchPromise = null;
+    });
+
+    return launchPromise;
   }
 
   async function collectCityFromItemLink({
@@ -1081,6 +1201,17 @@ async function createCollectorRuntime() {
     attempts,
     session_cookies,
   } = {}) {
+    const waitingBefore = typeof enqueue.getWaiting === "function" ? enqueue.getWaiting() : 0;
+    if (waitingBefore > 0) {
+      try {
+        log(
+          `collector fila waiting=${waitingBefore}` +
+          ` depth=${typeof enqueue.getDepth === "function" ? enqueue.getDepth() : "?"}` +
+          ` thread=${String(thread_key || "").trim() || "n/a"}`
+        );
+      } catch (_) {}
+    }
+
     return enqueue(async () => {
       const itemLink = normalizeItemLink(item_link);
       const tk = String(thread_key || "").trim();
@@ -1123,9 +1254,12 @@ async function createCollectorRuntime() {
 
       let lastExtracted = null;
       let lastNavError = null;
+      let sawLaunchFailure = false;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          const p = await ensurePage();
+          // Se a tentativa anterior foi Code 21, relaunch com limpeza de locks.
+          const p = await ensurePage({ forceRelaunch: sawLaunchFailure });
+          sawLaunchFailure = false;
           await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
           await sleep(randomBetween(500, 1100));
@@ -1172,15 +1306,25 @@ async function createCollectorRuntime() {
           }
         } catch (e) {
           lastNavError = (e && e.message) ? String(e.message) : String(e);
-          log(`tentativa falhou account=${account || "n/a"} thread=${tk || "n/a"} attempt=${attempt} error=${lastNavError}`);
+          sawLaunchFailure = isChromiumLaunchFailure(e);
+          log(
+            `tentativa falhou account=${account || "n/a"} thread=${tk || "n/a"}` +
+            ` attempt=${attempt} code21=${sawLaunchFailure ? "sim" : "nao"}` +
+            ` error=${lastNavError}`
+          );
+          if (sawLaunchFailure) {
+            try { await invalidateBrowser("collect_code21"); } catch (_) {}
+          }
         }
         if (attempt < maxAttempts) {
-          await sleep(randomBetween(700, 1500));
+          await sleep(sawLaunchFailure ? randomBetween(1200, 2200) : randomBetween(700, 1500));
         }
       }
 
       const failError = lastNavError && !lastExtracted
-        ? "city_collector_navigation_failed"
+        ? (isChromiumLaunchFailure(lastNavError)
+          ? "city_collector_browser_launch_failed"
+          : "city_collector_navigation_failed")
         : "city_not_found_in_listing_page";
       try {
         logTriagemCityCollectFailed({
@@ -1204,6 +1348,7 @@ async function createCollectorRuntime() {
         has_anunciado: !!(lastExtracted && lastExtracted.has_anunciado),
         candidates_count: Number((lastExtracted && lastExtracted.candidates_count) || 0) || 0,
         last_nav_error: lastNavError || null,
+        queue_serial: true,
       };
     });
   }
@@ -1211,14 +1356,20 @@ async function createCollectorRuntime() {
   return {
     ok: true,
     collectCityFromItemLink,
+    getQueueMeta: () => ({
+      concurrency: 1,
+      depth: typeof enqueue.getDepth === "function" ? enqueue.getDepth() : null,
+      waiting: typeof enqueue.getWaiting === "function" ? enqueue.getWaiting() : null,
+      in_flight: typeof enqueue.getInFlight === "function" ? enqueue.getInFlight() : null,
+      launch_generation: launchGeneration,
+    }),
     shutdown: async () => {
       try {
-        if (browser && browser.isConnected && browser.isConnected()) {
-          await browser.close();
-        }
-      } catch (_) {}
-      browser = null;
-      page = null;
+        await invalidateBrowser("shutdown");
+      } catch (_) {
+        browser = null;
+        page = null;
+      }
     },
   };
 }
