@@ -894,62 +894,87 @@ function generateDeltaGreeting() {
 async function extractCityFromMarketplaceDom(page) {
   try {
     if (!page) return null;
-    const res = await page.evaluate(() => {
-      const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
-      // Regex rígida (não-gulosa) para evitar capturar "Message Save Share..."
-      // Formato alvo: "Cidade, UF" ou "Cidade - UF" (retornamos normalizado para "Cidade (UF)").
-      const GEO_RE = /([A-ZÀ-ÿ][A-ZÀ-ÿ\s]{1,60}?)\s*[,\-]\s*([A-Z]{2})\b/i;
-      const out = [];
-      const push = (value, source) => {
-        const v = clean(value);
-        if (!v) return;
-        out.push({ value: v, source });
-      };
+    const maxAttempts = Math.max(
+      1,
+      Math.min(20, Number(process.env.VIRTUS_DELTA_CITY_DOM_RETRY_ATTEMPTS || 12) || 12)
+    );
+    const retryIntervalMs = Math.max(
+      80,
+      Math.min(600, Number(process.env.VIRTUS_DELTA_CITY_DOM_RETRY_INTERVAL_MS || 250) || 250)
+    );
+    const scanLimit = Math.max(
+      50,
+      Math.min(500, Number(process.env.VIRTUS_DELTA_CITY_DOM_SCAN_LIMIT || 300) || 300)
+    );
 
-      // Varredura nos mesmos blocos de detalhe/links do painel.
-      const nodes = Array.from(document.querySelectorAll("span,div,a")).slice(0, 5500);
-      for (const el of nodes) {
-        const t = clean(el.textContent || "");
-        if (!t) continue;
-        const m = t.match(GEO_RE);
-        if (!m || !m[1] || !m[2]) continue;
-        const city = clean(m[1]);
-        const uf = String(m[2] || "").trim().toUpperCase();
-        if (!city || !uf) continue;
-        push(`${city} (${uf})`, "dom_geo_regex");
-      }
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const res = await page.evaluate((maxNodes) => {
+        const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+        // Formato alvo: "Cidade, UF" ou "Cidade - UF" (normalizado para "Cidade (UF)").
+        const GEO_RE = /([A-ZÀ-ÿ][A-ZÀ-ÿ\s]{1,60}?)\s*[,\-]\s*([A-Z]{2})\b/i;
+        const pushFromText = (raw, source) => {
+          const txt = clean(raw);
+          if (!txt) return null;
+          const m = txt.match(GEO_RE);
+          if (!m || !m[1] || !m[2]) return null;
+          const city = clean(m[1]);
+          const uf = String(m[2] || "").trim().toUpperCase();
+          if (!city || !uf) return null;
+          return { value: `${city} (${uf})`, source };
+        };
 
-      // Fallback no texto total da página para layouts alternativos.
-      const body = clean(document.body && document.body.innerText ? document.body.innerText : "");
-      const bodyMatch = body.match(GEO_RE);
-      if (bodyMatch && bodyMatch[1] && bodyMatch[2]) {
-        const city = clean(bodyMatch[1]);
-        const uf = String(bodyMatch[2] || "").trim().toUpperCase();
-        if (city && uf) push(`${city} (${uf})`, "body_geo_regex");
-      }
+        // Escopo semântico: links de item + banner de perfil marketplace + spans (até limite quente).
+        const nodes = Array.from(
+          document.querySelectorAll('a[href*="/marketplace/item/"], div[data-testid="marketplace_profile_banner"], span')
+        ).slice(0, Math.max(1, Number(maxNodes || 300) || 300));
 
-      if (!out.length) return { ok: false, value: null, source: null };
-      return { ok: true, value: out[0].value, source: out[0].source };
-    });
-    const v = res && res.ok ? String(res.value || "").trim() : "";
-    if (!v) return null;
-    const normalized = normalizeCityToUfPattern(v);
-    try {
-      __forensicEdgeEmit({
-        account_login: null,
-        thread_key: null,
-        flow_stage: "dom_automation_tracking",
-        details: {
-          action: "city_extract_dom",
-          city_raw: String(v || "").slice(0, 120),
-          city_clean: String(normalized || "").slice(0, 120),
-          source: String(res && res.source || "").slice(0, 60) || null
+        for (const el of nodes) {
+          const t0 = clean(el.textContent || "");
+          const r0 = pushFromText(t0, "semantic_node_text");
+          if (r0) return { ok: true, value: r0.value, source: r0.source };
+
+          const aria = clean(el.getAttribute && el.getAttribute("aria-label"));
+          const rAria = pushFromText(aria, "semantic_node_aria_label");
+          if (rAria) return { ok: true, value: rAria.value, source: rAria.source };
+
+          const title = clean(el.getAttribute && el.getAttribute("title"));
+          const rTitle = pushFromText(title, "semantic_node_title");
+          if (rTitle) return { ok: true, value: rTitle.value, source: rTitle.source };
+
+          const testid = clean(el.getAttribute && el.getAttribute("data-testid"));
+          const rTest = pushFromText(testid, "semantic_node_data_testid");
+          if (rTest) return { ok: true, value: rTest.value, source: rTest.source };
         }
-      });
-    } catch (_) {}
-    // Trava final: só aceita se terminar em (UF). Caso contrário, considera inválido (evita lixo no CT).
-    if (!/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(String(normalized || "").trim())) return null;
-    return normalized;
+
+        return { ok: false, value: null, source: null };
+      }, scanLimit);
+
+      const v = res && res.ok ? String(res.value || "").trim() : "";
+      if (v) {
+        const normalized = normalizeCityToUfPattern(v);
+        try {
+          __forensicEdgeEmit({
+            account_login: null,
+            thread_key: null,
+            flow_stage: "dom_automation_tracking",
+            details: {
+              action: "city_extract_dom",
+              city_raw: String(v || "").slice(0, 120),
+              city_clean: String(normalized || "").slice(0, 120),
+              source: String(res && res.source || "").slice(0, 60) || null,
+              attempt: Number(attempt + 1)
+            }
+          });
+        } catch (_) {}
+        // Trava final: só aceita se terminar em (UF). Caso contrário, considera inválido (evita lixo no CT).
+        if (/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(String(normalized || "").trim())) return normalized;
+      }
+
+      if (attempt < (maxAttempts - 1)) {
+        await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -4930,12 +4955,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch (_) {}
 
     if (!cityCandidate) {
+      const cityPendingFallback = "Cidade Pendente";
       greetingStateByThread.set(t, {
         sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()),
         greetingText,
         itemLink: itemLinkFinal,
-        city: null,
-        citySource: null,
+        city: cityPendingFallback,
+        citySource: "fallback_city_pending",
       });
       try {
         __forensicEdgeEmit({
@@ -4956,8 +4982,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       lastCrossThreadSendAt = nowTs;
       return {
         ok: true,
-        cidade: null,
-        city_source: null,
+        cidade: cityPendingFallback,
+        city_source: "fallback_city_pending",
         link_anuncio: itemLinkFinal || null,
         profile_url: profileUrl,
         greeting_text: greetingText,
