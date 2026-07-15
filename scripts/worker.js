@@ -391,7 +391,11 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     }
     if (deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') {
       try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (HTTP stateless + fila JSONL em disco).', { nome }); } catch {}
-      return deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
+      const started = deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
+      Promise.resolve(started)
+        .then((runner) => { try { __deltaAttachCityCollectSettledHandler(runner); } catch {} })
+        .catch(() => {});
+      return started;
     }
     const errMsg = (deltaVirtusLoadError && (deltaVirtusLoadError.stack || deltaVirtusLoadError.message)) || 'delta_runtime_unavailable';
     try {
@@ -15137,7 +15141,54 @@ function __deltaIsMarketplaceItemLink(raw) {
 function __deltaIsPendingCityLabel(raw) {
   const s = String(raw || '').trim().toLowerCase();
   if (!s) return true;
-  return s === 'cidade pendente' || s === 'pendente';
+  return (
+    s === 'cidade pendente' ||
+    s === 'pendente' ||
+    s === 'aguardando coletar cidade' ||
+    s === 'aguardando cidade'
+  );
+}
+
+/**
+ * Estado soberano da cidade no edge (contrato CT):
+ * collecting | resolved | pending
+ */
+function __deltaCanonicalCityStatus(raw, { hasCanonicalCity = false } = {}) {
+  if (hasCanonicalCity) return 'resolved';
+  const s = String(raw || '').trim().toLowerCase();
+  if (s === 'collecting' || s === 'awaiting' || s === 'awaiting_collect') return 'collecting';
+  if (s === 'resolved' || s === 'ready' || s === 'ok') return 'resolved';
+  if (s === 'pending' || s === 'failed' || s === 'fallback_city_pending') return 'pending';
+  return '';
+}
+
+function __deltaResolveCityDispatchFields({ cidade, city_source, city_status } = {}) {
+  const cityRaw = String(cidade || '').trim();
+  const hasCanonicalCity = !!(cityRaw && !__deltaIsPendingCityLabel(cityRaw));
+  let status = __deltaCanonicalCityStatus(city_status, { hasCanonicalCity });
+  if (!status) {
+    status = hasCanonicalCity ? 'resolved' : 'pending';
+  }
+  const source = String(city_source || '').trim() || null;
+  if (status === 'resolved') {
+    return {
+      city: cityRaw,
+      city_source: source || 'collector_listing_page',
+      city_status: 'resolved',
+    };
+  }
+  if (status === 'collecting') {
+    return {
+      city: null,
+      city_source: source,
+      city_status: 'collecting',
+    };
+  }
+  return {
+    city: DELTA_FALLBACK_CITY,
+    city_source: source || 'fallback_city_pending',
+    city_status: 'pending',
+  };
 }
 
 /** Escolhe o primeiro link de item valido; nunca devolve o sentinel. */
@@ -16256,6 +16307,7 @@ function __deltaCreateThreadState(nome, threadKey) {
     handsFailures: 0,
     city: null,
     city_source: null,
+    city_status: null,
     link_anuncio: null,
     seq: 0,
     messages: [],
@@ -16278,6 +16330,7 @@ function __deltaSerializeThreadState(st) {
     handsFailures: Number(st.handsFailures || 0) || 0,
     city: st.city ? String(st.city).slice(0, 120) : null,
     city_source: st.city_source ? String(st.city_source).slice(0, 80) : null,
+    city_status: st.city_status ? String(st.city_status).slice(0, 32) : null,
     link_anuncio: link ? String(link).slice(0, 600) : null,
     seq: Number(st.seq || 0) || 0,
     lastDispatchAt: Number(st.lastDispatchAt || 0) || 0,
@@ -16355,6 +16408,9 @@ function __deltaLoadThreadStateSync() {
       st.handsFailures = Number(row && row.handsFailures || 0) || 0;
       st.city = row && row.city ? String(row.city).trim() : null;
       st.city_source = row && row.city_source ? String(row.city_source).trim() : null;
+      st.city_status = __deltaCanonicalCityStatus(row && row.city_status, {
+        hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
+      }) || null;
       st.link_anuncio = __deltaPickBestItemLink(row && row.link_anuncio);
       st.seq = Number(row && row.seq || 0) || 0;
       st.lastDispatchAt = Number(row && row.lastDispatchAt || 0) || 0;
@@ -16524,6 +16580,10 @@ function __deltaHydrateThreadStateFromDiskRow(st, row) {
   st.handsFailures = Number(row.handsFailures || 0) || 0;
   st.city = row && row.city ? String(row.city).trim() : (st.city || null);
   st.city_source = row && row.city_source ? String(row.city_source).trim() : (st.city_source || null);
+  st.city_status = __deltaCanonicalCityStatus(
+    row && row.city_status != null ? row.city_status : st.city_status,
+    { hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city)) }
+  ) || st.city_status || null;
   st.link_anuncio = __deltaPickBestItemLink(row && row.link_anuncio, st.link_anuncio);
   st.seq = Number(row.seq || 0) || st.seq || 0;
   st.lastDispatchAt = __deltaNormalizeTimestampMs(row.lastDispatchAt, st.lastDispatchAt || 0) || st.lastDispatchAt || 0;
@@ -16621,9 +16681,18 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         .filter((m) => !/^\s*(você|voce|you)\s*:/i.test(String(m && m.text || '')))
         .slice(-80);
       const concatText = normalizedMessages.map((m) => m.text).join('\n').trim();
-      const city = String(row && row.city || '').trim() || DELTA_FALLBACK_CITY;
+      const cityFields = __deltaResolveCityDispatchFields({
+        cidade: row && row.city,
+        city_source: row && row.city_source,
+        city_status: row && row.city_status,
+      });
+      // Boot: collecting sem cidade canônica nao vira "Cidade Pendente".
+      const cityForBoot =
+        cityFields.city_status === 'collecting'
+          ? null
+          : (cityFields.city || DELTA_FALLBACK_CITY);
       const bootLink = __deltaPickBestItemLink(row && row.link_anuncio);
-      if (!concatText && !city) {
+      if (!concatText && !cityForBoot && cityFields.city_status !== 'collecting') {
         out.skipped_empty += 1;
         continue;
       }
@@ -16646,7 +16715,9 @@ function __deltaReplayRecentThreadsToCtOnBoot() {
         mensagens_cliente_concatenadas: concatText || '',
         mensagens_cliente_qtd: Number(normalizedMessages.length || 0) || 0,
         mensagem_seq: messageSeq,
-        cidade: city,
+        ...(cityForBoot ? { cidade: cityForBoot } : {}),
+        city_status: cityFields.city_status,
+        ...(cityFields.city_source ? { city_source: cityFields.city_source } : {}),
         ...(bootLink ? { link_anuncio: bootLink } : {}),
         client_name: DELTA_FALLBACK_CLIENT_NAME,
         customer_name: DELTA_FALLBACK_CLIENT_NAME,
@@ -17254,7 +17325,10 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     };
 
     const direct = await resolveRunner(ctrl.virtus);
-    if (direct && typeof direct[requiredFn] === 'function') return direct;
+    if (direct && typeof direct[requiredFn] === 'function') {
+      try { __deltaAttachCityCollectSettledHandler(direct); } catch {}
+      return direct;
+    }
 
     // Imunidade de estado: se já há evidência soberana de tráfego de rede
     // do Facebook/Messenger, unificamos o runtime Delta em ctrl.virtus (PROIBIDO split-brain).
@@ -17289,6 +17363,7 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     });
     const booted = await resolveRunner(ctrl.virtus);
     if (booted && typeof booted[requiredFn] === 'function') {
+      try { __deltaAttachCityCollectSettledHandler(booted); } catch {}
       try {
         logger.info('[DELTA][UNIFIED_BOOT] Runtime Delta unificado em ctrl.virtus por evidência de rede', {
           nome: String(nome || ''),
@@ -17314,12 +17389,109 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     return null;
   }
 }
+function __deltaHandleCityCollectSettled(payload) {
+  try {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const n = String(p.account_login || '').trim();
+    const tk = String(p.thread_key || '').trim();
+    if (!n || !tk) return { ok: false, error: 'missing_thread_key' };
+
+    const st = __deltaGetOrCreateThreadState(n, tk);
+    const existingStatus = __deltaCanonicalCityStatus(st.city_status, {
+      hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
+    });
+    // Soberania: nunca rebaixar cidade ja resolvida.
+    if (existingStatus === 'resolved' && st.city && !__deltaIsPendingCityLabel(st.city)) {
+      return { ok: true, skipped: true, reason: 'already_resolved' };
+    }
+
+    const cityFields = __deltaResolveCityDispatchFields({
+      cidade: p.cidade || (p.cityOut && p.cityOut.cidade),
+      city_source: p.city_source || (p.cityOut && p.cityOut.city_source),
+      city_status: p.city_status || (p.cidade || (p.cityOut && p.cityOut.ok && p.cityOut.cidade) ? 'resolved' : 'pending'),
+    });
+
+    st.city = cityFields.city_status === 'collecting' ? null : cityFields.city;
+    st.city_source = cityFields.city_source;
+    st.city_status = cityFields.city_status;
+    const lateLink = __deltaPickBestItemLink(p.item_link, st.link_anuncio);
+    if (lateLink) st.link_anuncio = lateLink;
+    st.updatedAt = Date.now();
+    __deltaPersistThreadStateSync();
+
+    const eventName = cityFields.city_status === 'resolved'
+      ? 'lead_city_resolved'
+      : 'lead_city_pending';
+    const queued = __deltaAppendPendingJsonlSync({
+      event: eventName,
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: '',
+      mensagens_cliente_concatenadas: '',
+      mensagens_cliente_qtd: 0,
+      ...(cityFields.city_status === 'collecting'
+        ? {}
+        : (cityFields.city ? { cidade: cityFields.city } : {})),
+      city_status: cityFields.city_status,
+      ...(cityFields.city_source ? { city_source: cityFields.city_source } : {}),
+      ...(st.link_anuncio ? { link_anuncio: st.link_anuncio } : {}),
+      // Patch de cidade nao mexe em nome — omite pra CT preservar o do 1º ingest.
+      operacao_meta: 'city_patch',
+      dispatch_ct: true,
+      queue_mode: 'dispatch_ct',
+      flow_stage: cityFields.city_status === 'resolved'
+        ? 'city_collect_deferred_resolved'
+        : 'city_collect_deferred_pending',
+      message_at: Date.now(),
+      collector_error: cityFields.city_status === 'pending'
+        ? String((p.cityOut && p.cityOut.error) || p.error || '').slice(0, 300) || null
+        : null,
+    });
+    if (queued) __deltaKickIngestLoop();
+    try {
+      __forensicEdgeEmit({
+        account_login: n,
+        thread_key: tk,
+        flow_stage: 'city_patch_queued',
+        details: {
+          tag: 'FORENSIC_DOM_REVERSE',
+          city_status: cityFields.city_status,
+          city: cityFields.city || null,
+          city_source: cityFields.city_source || null,
+          queued: !!queued,
+        }
+      });
+    } catch {}
+    return { ok: true, queued: !!queued, city_status: cityFields.city_status };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  }
+}
+
+function __deltaAttachCityCollectSettledHandler(runner) {
+  try {
+    if (!runner || typeof runner.setCityCollectSettledHandler !== 'function') return false;
+    runner.setCityCollectSettledHandler((payload) => {
+      try {
+        return __deltaHandleCityCollectSettled(payload);
+      } catch (e) {
+        return { ok: false, error: (e && e.message) ? e.message : String(e) };
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function __deltaRunHandsGreetingFlow({ nome, threadKey, mensagensCliente }) {
   const runner = await __deltaResolveVirtusRunner(nome, { need: 'greeting' });
   if (!runner || typeof runner.enqueueDeltaGreetingFlow !== 'function') {
     return { ok: false, error: 'delta_hands_unavailable' };
   }
   try {
+    try { __deltaAttachCityCollectSettledHandler(runner); } catch {}
     try {
       const n = String(nome || '').trim() || null;
       const tk = String(threadKey || '').trim() || null;
@@ -17446,11 +17618,22 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
           handsOut && handsOut.profile_url,
           st.link_anuncio
         ) || null;
-      const fallbackCity = String(st.city || DELTA_FALLBACK_CITY).trim() || DELTA_FALLBACK_CITY;
+      const priorCityFields = __deltaResolveCityDispatchFields({
+        cidade: (handsOut && handsOut.cidade) || st.city,
+        city_source: (handsOut && handsOut.city_source) || st.city_source,
+        city_status: (handsOut && handsOut.city_status) || st.city_status,
+      });
+      // Contingencia de metadata nao inventa "Cidade Pendente" se ainda esta collecting.
+      const contingencyCity =
+        priorCityFields.city_status === 'collecting'
+          ? null
+          : (priorCityFields.city || DELTA_FALLBACK_CITY);
       handsOut = {
         ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
         ok: true,
-        cidade: fallbackCity,
+        cidade: contingencyCity,
+        city_source: priorCityFields.city_source,
+        city_status: priorCityFields.city_status,
         link_anuncio: fallbackLink,
         profile_url: fallbackLink,
         client_name: fallbackClientName,
@@ -17466,7 +17649,9 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
           account_login: n,
           thread_key: tk,
           texto_limpo: preMessages || '',
-          cidade: fallbackCity,
+          ...(contingencyCity ? { cidade: contingencyCity } : {}),
+          city_status: priorCityFields.city_status,
+          ...(priorCityFields.city_source ? { city_source: priorCityFields.city_source } : {}),
           ...(fallbackLink ? { link_anuncio: fallbackLink } : {}),
           client_name: fallbackClientName,
           operacao_meta: 'hands_metadata_contingency',
@@ -17534,8 +17719,14 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     ? Number(bufferedDispatchMessages[bufferedDispatchMessages.length - 1].at || 0) || 0
     : 0;
   const messageAt = Number(bufferedLastAt || after.maxAt || after.minAt || 0) || Date.now();
-  const city = String((handsOut && handsOut.cidade) || '').trim() || DELTA_FALLBACK_CITY;
-  const citySource = String((handsOut && handsOut.city_source) || '').trim() || null;
+  const cityFields = __deltaResolveCityDispatchFields({
+    cidade: handsOut && handsOut.cidade,
+    city_source: handsOut && handsOut.city_source,
+    city_status: handsOut && handsOut.city_status,
+  });
+  const city = cityFields.city;
+  const citySource = cityFields.city_source;
+  const cityStatus = cityFields.city_status;
   // Link soberano: so marketplace real. Nunca inventar sentinel — CT preserva vazio.
   const linkAnuncio =
     __deltaPickBestItemLink(
@@ -17554,7 +17745,8 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     messageAt
   );
 
-  if (!String((handsOut && handsOut.cidade) || '').trim()) {
+  // Contingencia "Cidade Pendente" so quando pending definitivo — nunca em collecting.
+  if (cityStatus === 'pending' && !String((handsOut && handsOut.cidade) || '').trim()) {
     try {
       __deltaAppendPendingJsonlSync({
         event: 'lead_city_contingency_applied',
@@ -17564,6 +17756,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
         texto_limpo: finalText || preMessages || '',
         cidade: city,
         city_source: citySource,
+        city_status: cityStatus,
         ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
         client_name: clientName,
         operacao_meta: 'city_contingency',
@@ -17580,6 +17773,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   st.city = city;
   st.city_source = citySource;
+  st.city_status = cityStatus;
   st.link_anuncio = linkAnuncio; // so item real (ou null) — soberania no disco
   st.status = 'active';
   st.inFlight = false;
@@ -17640,8 +17834,9 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       dedup_meta_id: dedupMetaId || null,
       meta_message_id: String(one && one.meta_message_id || '').trim() || null,
       meta_offline_threading_id: String(one && one.meta_offline_threading_id || '').trim() || null,
-      cidade: city,
-      city_source: citySource,
+      ...(city && cityStatus !== 'collecting' ? { cidade: city } : {}),
+      city_status: cityStatus,
+      ...(citySource ? { city_source: citySource } : {}),
       ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
@@ -17671,8 +17866,9 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       texto_limpo: '',
       mensagens_cliente_concatenadas: '',
       mensagens_cliente_qtd: 0,
-      cidade: city,
-      city_source: citySource,
+      ...(city && cityStatus !== 'collecting' ? { cidade: city } : {}),
+      city_status: cityStatus,
+      ...(citySource ? { city_source: citySource } : {}),
       ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
@@ -17699,8 +17895,9 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       texto_limpo: '',
       mensagens_cliente_concatenadas: '',
       mensagens_cliente_qtd: 0,
-      cidade: city,
-      city_source: citySource,
+      ...(city && cityStatus !== 'collecting' ? { cidade: city } : {}),
+      city_status: cityStatus,
+      ...(citySource ? { city_source: citySource } : {}),
       ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
       client_name: clientName,
       customer_name: customerName,
@@ -18033,6 +18230,8 @@ function __deltaBuildCompactQueuePayload(payload) {
       3000
     ) || '',
     cidade: __deltaClampQueueString(p.cidade, 180) || null,
+    city_status: __deltaClampQueueString(p.city_status || p.cityStatus, 32) || null,
+    city_source: __deltaClampQueueString(p.city_source || p.citySource, 80) || null,
     link_anuncio: __deltaClampQueueString(p.link_anuncio, 600) || null,
     client_name: __deltaClampQueueString(p.client_name, 220) || null,
     customer_name: __deltaClampQueueString(p.customer_name, 220) || null,
@@ -19012,17 +19211,35 @@ function __deltaBuildCtIngestPayload(payload) {
   ).trim();
   // INVARIANTE: nunca inventar "Link Não Coletado" em mensagem parcial.
   // CT faz merge e preserva link bom quando o campo vem vazio/omitido.
-  // Hands bootstrap pode mandar cidade pendente + link real; realtime reforça link do disco.
-  const cityRaw = String(p.cidade || '').trim();
-  const cidade = cityRaw || undefined;
+  // Sem cidade/city_status no payload: omitir (telefone parcial nao inventa pending).
+  const hasExplicitCityStatus = !!String(p.city_status || p.cityStatus || '').trim();
+  const hasExplicitCity = !!String(p.cidade || '').trim();
+  let cidade;
+  let cityStatus;
+  let citySource;
+  if (hasExplicitCityStatus || hasExplicitCity) {
+    const cityFields = __deltaResolveCityDispatchFields({
+      cidade: p.cidade,
+      city_source: p.city_source || p.citySource,
+      city_status: p.city_status || p.cityStatus,
+    });
+    cityStatus = cityFields.city_status;
+    citySource = cityFields.city_source || undefined;
+    // collecting: sem cidade sentinel; pending: "Cidade Pendente"; resolved: cidade real.
+    cidade = cityStatus === 'collecting' ? undefined : (cityFields.city || undefined);
+  }
   const bestLink = __deltaPickBestItemLink(p.link_anuncio, p.profile_url);
   const linkAnuncio = bestLink || undefined;
-  const clientName = String(
+  const operacaoMeta = String(p.operacao_meta || p.operation || '').trim() || undefined;
+  const isCityPatchOnly = operacaoMeta === 'city_patch';
+  const clientNameRaw = String(
     p.client_name ||
     p.customer_name ||
     p.nome_cliente_limpo ||
     ''
-  ).trim() || DELTA_FALLBACK_CLIENT_NAME;
+  ).trim();
+  // city_patch nao inventa nome fallback (preserva o do 1º ingest no CT).
+  const clientName = clientNameRaw || (isCityPatchOnly ? '' : DELTA_FALLBACK_CLIENT_NAME);
   const saudacaoTexto = String(p.saudacao_texto || '').trim() || null;
   const tsRaw = Number(
     p.timestamp_ms ||
@@ -19046,11 +19263,17 @@ function __deltaBuildCtIngestPayload(payload) {
     texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,
     ...(cidade ? { cidade } : {}),
+    ...(cityStatus ? { city_status: cityStatus } : {}),
+    ...(citySource ? { city_source: citySource } : {}),
     ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
-    client_name: clientName,
+    ...(clientName ? {
+      client_name: clientName,
+      customer_name: String(p.customer_name || p.nome_cliente_limpo || clientName).trim() || clientName,
+      nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || clientName).trim() || clientName,
+    } : {}),
     saudacao_texto: saudacaoTexto,
     saudacao_timestamp_ms: saudacaoTexto ? saudacaoTimestampMs : undefined,
-    operacao_meta: String(p.operacao_meta || p.operation || '').trim() || undefined,
+    operacao_meta: operacaoMeta,
     flow_stage: String(p.flow_stage || '').trim() || undefined,
     event: String(p.event || '').trim() || undefined,
     sender_id: String(p.sender_id || p.actor_id || '').replace(/\D/g, '').trim() || undefined,
@@ -19058,8 +19281,6 @@ function __deltaBuildCtIngestPayload(payload) {
     direction: String(p.direction || p.message_direction || '').trim() || undefined,
     ingest_boot_replay: p.ingest_boot_replay === true ? true : undefined,
     forensic_boot_replay: p.forensic_boot_replay === true ? true : undefined,
-    customer_name: String(p.customer_name || p.nome_cliente_limpo || clientName).trim() || clientName,
-    nome_cliente_limpo: String(p.nome_cliente_limpo || p.customer_name || clientName).trim() || clientName,
   };
 }
 
@@ -21088,6 +21309,11 @@ async function __deltaAttachCdpEar(nome, page) {
         if (st.status === 'active') {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
           const stLink = __deltaPickBestItemLink(st.link_anuncio);
+          const stCityStatus = __deltaCanonicalCityStatus(st.city_status, {
+            hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
+          });
+          // Mensagem parcial: so manda cidade canônica. Se collecting, reforça status
+          // sem sentinel. Sem status/cidade: omite (CT preserva aguardando/resolved).
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
@@ -21099,7 +21325,12 @@ async function __deltaAttachCdpEar(nome, page) {
             dedup_meta_id: dedupMetaId || null,
             meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
             meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: (st.city && !__deltaIsPendingCityLabel(st.city)) ? st.city : undefined,
+            ...((st.city && !__deltaIsPendingCityLabel(st.city))
+              ? { cidade: st.city, city_status: 'resolved' }
+              : (stCityStatus === 'collecting'
+                ? { city_status: 'collecting' }
+                : {})),
+            ...(st.city_source ? { city_source: st.city_source } : {}),
             ...(stLink ? { link_anuncio: stLink } : {}),
             operacao_meta: op || 'message',
             mensagem_seq: msgSeq,
