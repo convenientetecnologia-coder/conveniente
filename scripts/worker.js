@@ -17149,11 +17149,14 @@ function __deltaBuildConcatFromState(st) {
   // Guardrail: o ouvido pode capturar texto outbound com prefixo "Você:"/"You:".
   // Esse texto NÃO deve compor o histórico inbound do cliente.
   const filteredBase = msgs.filter((m) => {
-    const t = String(m && m.text || '').trim();
+    const t = __deltaStripFacebookSystemPromptText(m && m.text);
     if (!t) return false;
     if (/^(você|voce|you)\s*:/i.test(t)) return false;
     return true;
-  });
+  }).map((m) => ({
+    ...m,
+    text: __deltaStripFacebookSystemPromptText(m && m.text)
+  }));
   const filtered = __deltaCollapseSnippetMirrorMessages(filteredBase, { windowMs: 20_000 });
   const textsRaw = filtered.map((m) => String(m && m.text || '').trim()).filter(Boolean);
   const texts = (() => {
@@ -17195,7 +17198,7 @@ function __deltaCollectInboundDispatchMessagesFromState(st) {
     if (!m || typeof m !== 'object') continue;
     const op = String(m.op || '').trim();
     if (op !== 'insertMessage' && op !== 'upsertMessage') continue;
-    const text = String(m.text || '').trim();
+    const text = __deltaStripFacebookSystemPromptText(m.text);
     if (!text) continue;
     if (/^(você|voce|you)\s*:/i.test(text)) continue;
     const at = Number(m.at || 0) || 0;
@@ -20388,8 +20391,30 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
   walk(root, 'message');
   return out;
 }
+function __deltaIsFacebookSystemPromptLine(line) {
+  const t = String(line || '').trim();
+  if (!t) return false;
+  // Prompts de sistema do Facebook/Messenger (padrao fechado).
+  if (/^.{2,160}\s+iniciou esta conversa[\.\!\?]?$/i.test(t)) return true;
+  if (/^.{2,160}\s+started this conversation[\.\!\?]?$/i.test(t)) return true;
+  // Ex.: "Miy está aguardando a sua resposta."
+  if (/^.{1,160}?\s+est[aá]\s+aguardando\s+a\s+sua\s+resposta[\.\!\?]?$/i.test(t)) return true;
+  if (/^.{1,160}?\s+is\s+waiting\s+for\s+your\s+response[\.\!\?]?$/i.test(t)) return true;
+  return false;
+}
+
+function __deltaStripFacebookSystemPromptText(textoLimpo) {
+  const value = String(textoLimpo || '').replace(/\r/g, '\n');
+  const lines = value
+    .split('\n')
+    .map((line) => String(line || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .filter((line) => !__deltaIsFacebookSystemPromptLine(line));
+  return lines.join('\n').trim();
+}
+
 function __deltaShouldEmitLeadText(textoLimpo) {
-  const t = String(textoLimpo || '').trim();
+  const t = __deltaStripFacebookSystemPromptText(textoLimpo);
   if (!t) return false;
   if (t.startsWith('mid.')) return false;
   if (/^\d+$/.test(t)) {
@@ -20825,6 +20850,8 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
         if (!__deltaShouldEmitLeadText(texto)) continue;
+        texto = __deltaStripFacebookSystemPromptText(texto);
+        if (!texto) continue;
 
         // ===================== TRATAMENTO CANÔNICO POR ID (META) =====================
         // Regra rígida de borda:
