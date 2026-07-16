@@ -509,8 +509,8 @@ const HUMAN_TIMINGS = {
   marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 2600, 5200),
   /** Antes de clicar no card do cliente */
   preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 600, 1400),
-  /** Após abrir o chat — ler contexto antes de digitar */
-  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 1200, 2400),
+  /** Após abrir o chat — ler contexto / banner Marketplace (VM fraca: budget dobrado) */
+  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 2400, 4800),
   /** Antes de focar o composer */
   preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 400, 850),
   /** Entre foco e primeira tecla */
@@ -2100,62 +2100,172 @@ function canonicalizeMarketplaceItemLink(raw) {
   }
 }
 
-async function extractMarketplaceItemLink(page) {
-  const rawCandidates = await page.evaluate(() => {
-    const out = [];
-    const push = (raw, source) => {
-      const h = String(raw || "").trim();
-      if (!h || !/\/marketplace\/item\//i.test(h)) return;
-      out.push({ raw: h, source: String(source || "").trim() || "unknown" });
-    };
+const MARKETPLACE_ITEM_LINK_READY_SELECTOR = [
+  'a[aria-label*="Ver detalhes"][href*="/marketplace/item/"]',
+  'a[aria-label*="See details"][href*="/marketplace/item/"]',
+  'a[aria-label*="Detalhes"][href*="/marketplace/item/"]',
+  'a[href*="/marketplace/item/"][href*="referralSurface=messenger_banner"]',
+  'a[href*="/marketplace/item/"]',
+  'a[data-href*="/marketplace/item/"]',
+  '[role="link"][href*="/marketplace/item/"]',
+].join(",");
 
-    // Prioridade máxima: CTA de detalhe do próprio card do chat.
-    const detailAnchors = Array.from(
-      document.querySelectorAll(
-        'a[aria-label*="Ver detalhes"][href],a[aria-label*="See details"][href],a[aria-label*="Detalhes"][href]'
-      )
-    );
-    for (const a of detailAnchors) {
-      try { push(a.getAttribute("href"), "details_anchor"); } catch (_) {}
+async function probeMarketplaceListingBannerState(page) {
+  return page
+    .evaluate(() => {
+      const q = (sel) => {
+        try {
+          return Array.from(document.querySelectorAll(sel)).length;
+        } catch (_) {
+          return 0;
+        }
+      };
+      const details = q(
+        'a[aria-label*="Ver detalhes"][href*="/marketplace/item/"],a[aria-label*="See details"][href*="/marketplace/item/"],a[aria-label*="Detalhes"][href*="/marketplace/item/"]'
+      );
+      const messengerBanner = q('a[href*="/marketplace/item/"][href*="referralSurface=messenger_banner"]');
+      const roleLink = q('[role="link"][href*="/marketplace/item/"]');
+      const anyItem = q('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]');
+      return {
+        ready: details > 0 || messengerBanner > 0,
+        soft_ready: anyItem > 0 || roleLink > 0,
+        details_count: details,
+        messenger_banner_count: messengerBanner,
+        role_link_count: roleLink,
+        any_item_count: anyItem,
+      };
+    })
+    .catch(() => ({
+      ready: false,
+      soft_ready: false,
+      details_count: 0,
+      messenger_banner_count: 0,
+      role_link_count: 0,
+      any_item_count: 0,
+    }));
+}
+
+async function waitForMarketplaceListingBanner(page, { timeoutMs = 8000 } = {}) {
+  const t0 = Date.now();
+  const budget = Math.max(1200, Number(timeoutMs || 8000) || 8000);
+  const deadline = t0 + budget;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await probeMarketplaceListingBannerState(page);
+    if (last && last.ready) {
+      return { ok: true, quality: "banner", elapsed_ms: Date.now() - t0, ...last };
     }
-
-    // Links com referral do messenger tendem a ser o item correto do thread.
-    const messengerAnchors = Array.from(
-      document.querySelectorAll('a[href*="/marketplace/item/"][href*="referralSurface=messenger_banner"]')
-    );
-    for (const a of messengerAnchors) {
-      try { push(a.getAttribute("href"), "messenger_referral_anchor"); } catch (_) {}
-    }
-
-    const anchors = Array.from(
-      document.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]')
-    );
-    for (const a of anchors) {
-      try {
-        push(a.getAttribute("href"), "generic_anchor_href");
-        push(a.getAttribute("data-href"), "generic_anchor_data_href");
-      } catch (_) {}
-    }
-
-    // Quando abre em página de item ou login interstitial, o "next" costuma carregar o item URL.
-    const nextInputs = Array.from(document.querySelectorAll('input[name="next"][value*="/marketplace/item/"]'));
-    for (const inp of nextInputs) {
-      try { push(inp.getAttribute("value"), "hidden_next_input"); } catch (_) {}
-    }
-
+    const remain = deadline - Date.now();
+    if (remain <= 40) break;
     try {
-      const hrefNow = String(location && location.href || "").trim();
-      if (/\/marketplace\/item\//i.test(hrefNow)) push(hrefNow, "location_href");
+      await page.waitForSelector(MARKETPLACE_ITEM_LINK_READY_SELECTOR, {
+        timeout: Math.min(1100, Math.max(120, remain)),
+      });
     } catch (_) {}
+    await sleep(randomBetween(320, 720));
+  }
+  if (last && last.soft_ready) {
+    return { ok: true, quality: "soft", elapsed_ms: Date.now() - t0, ...last };
+  }
+  return { ok: false, quality: "none", elapsed_ms: Date.now() - t0, ...(last || {}) };
+}
 
-    const body = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
-    const bodyHttp = body.match(/https?:\/\/(?:www\.)?facebook\.com\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
-    for (const h of bodyHttp) push(h, "body_http");
-    const bodyRel = body.match(/\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
-    for (const h of bodyRel) push(h, "body_relative");
+async function extractMarketplaceItemLinkDetailed(page) {
+  const rawCandidates = await page
+    .evaluate(() => {
+      const out = [];
+      const push = (raw, source) => {
+        const h = String(raw || "").trim();
+        if (!h || !/\/marketplace\/item\//i.test(h)) return;
+        out.push({ raw: h, source: String(source || "").trim() || "unknown" });
+      };
 
-    return out;
-  }).catch(() => []);
+      // Prioridade máxima: CTA de detalhe do próprio card do chat.
+      const detailAnchors = Array.from(
+        document.querySelectorAll(
+          'a[aria-label*="Ver detalhes"][href],a[aria-label*="See details"][href],a[aria-label*="Detalhes"][href]'
+        )
+      );
+      for (const a of detailAnchors) {
+        try {
+          push(a.getAttribute("href"), "details_anchor");
+        } catch (_) {}
+      }
+
+      // Links com referral do messenger tendem a ser o item correto do thread.
+      const messengerAnchors = Array.from(
+        document.querySelectorAll('a[href*="/marketplace/item/"][href*="referralSurface=messenger_banner"]')
+      );
+      for (const a of messengerAnchors) {
+        try {
+          push(a.getAttribute("href"), "messenger_referral_anchor");
+        } catch (_) {}
+      }
+
+      const roleLinks = Array.from(document.querySelectorAll('[role="link"][href*="/marketplace/item/"]'));
+      for (const a of roleLinks) {
+        try {
+          push(a.getAttribute("href"), "role_link_href");
+        } catch (_) {}
+      }
+
+      const anchors = Array.from(
+        document.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]')
+      );
+      for (const a of anchors) {
+        try {
+          push(a.getAttribute("href"), "generic_anchor_href");
+          push(a.getAttribute("data-href"), "generic_anchor_data_href");
+        } catch (_) {}
+      }
+
+      // Banner / attachment containers: sobe até 4 pais e pega âncoras internas.
+      try {
+        const seeds = Array.from(
+          document.querySelectorAll(
+            '[aria-label*="Marketplace"],[aria-label*="marketplace"],img[src*="marketplace"],img[alt*="Marketplace"]'
+          )
+        ).slice(0, 12);
+        for (const seed of seeds) {
+          let node = seed;
+          for (let depth = 0; depth < 4 && node; depth += 1) {
+            try {
+              const localAnchors = node.querySelectorAll
+                ? node.querySelectorAll('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]')
+                : [];
+              for (const a of Array.from(localAnchors || [])) {
+                push(a.getAttribute("href"), "banner_container_anchor");
+                push(a.getAttribute("data-href"), "banner_container_data_href");
+              }
+            } catch (_) {}
+            node = node.parentElement;
+          }
+        }
+      } catch (_) {}
+
+      // Quando abre em página de item ou login interstitial, o "next" costuma carregar o item URL.
+      const nextInputs = Array.from(document.querySelectorAll('input[name="next"][value*="/marketplace/item/"]'));
+      for (const inp of nextInputs) {
+        try {
+          push(inp.getAttribute("value"), "hidden_next_input");
+        } catch (_) {}
+      }
+
+      try {
+        const hrefNow = String((location && location.href) || "").trim();
+        if (/\/marketplace\/item\//i.test(hrefNow)) push(hrefNow, "location_href");
+      } catch (_) {}
+
+      const body = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+      const bodyHttp =
+        body.match(/https?:\/\/(?:www\.)?facebook\.com\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
+      for (const h of bodyHttp) push(h, "body_http");
+      const bodyRel = body.match(/\/marketplace\/item\/[0-9A-Za-z_-]+[^\s]*/gi) || [];
+      for (const h of bodyRel) push(h, "body_relative");
+
+      return out;
+    })
+    .catch(() => []);
 
   const candidates = Array.isArray(rawCandidates) ? rawCandidates : [];
   const ranked = [];
@@ -2165,6 +2275,8 @@ async function extractMarketplaceItemLink(page) {
     let score = 0;
     if (source === "details_anchor") score += 100;
     if (source === "messenger_referral_anchor") score += 80;
+    if (source === "banner_container_anchor" || source === "banner_container_data_href") score += 70;
+    if (source === "role_link_href") score += 65;
     if (source === "hidden_next_input") score += 60;
     if (source === "location_href") score += 40;
     if (text.includes("referralsurface=messenger_banner")) score += 20;
@@ -2173,31 +2285,114 @@ async function extractMarketplaceItemLink(page) {
   };
 
   for (const cand of candidates) {
-    const raw = String(cand && cand.raw || "").trim();
-    const source = String(cand && cand.source || "").trim();
+    const raw = String((cand && cand.raw) || "").trim();
+    const source = String((cand && cand.source) || "").trim();
     const canonical = canonicalizeMarketplaceItemLink(raw);
     if (!canonical || seen.has(canonical)) continue;
     seen.add(canonical);
-    ranked.push({ link: canonical, score: scoreOf(raw, source) });
+    ranked.push({ link: canonical, score: scoreOf(raw, source), source });
   }
 
-  if (!ranked.length) return "";
-  ranked.sort((a, b) => (Number(b.score || 0) - Number(a.score || 0)));
-  return String(ranked[0] && ranked[0].link || "").trim();
+  ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  const top = ranked[0] || null;
+  return {
+    link: top ? String(top.link || "").trim() : "",
+    candidates_count: ranked.length,
+    top_source: top ? String(top.source || "").trim() || null : null,
+    top_score: top ? Number(top.score || 0) || 0 : 0,
+  };
 }
 
-async function extractMarketplaceItemLinkWithRetry(page, { attempts = 4 } = {}) {
-  const maxAttempts = Math.max(1, Math.min(8, Number(attempts || 4) || 4));
+async function extractMarketplaceItemLink(page) {
+  const detailed = await extractMarketplaceItemLinkDetailed(page).catch(() => null);
+  return String((detailed && detailed.link) || "").trim();
+}
+
+async function extractMarketplaceItemLinkWithRetry(
+  page,
+  {
+    attempts = null,
+    readinessTimeoutMs = null,
+    forensicAccountLogin = null,
+    threadKey = null,
+    skipReadiness = false,
+  } = {}
+) {
+  const defaultAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+  const maxAttempts = Math.max(2, Math.min(12, Number(attempts != null ? attempts : defaultAttempts) || defaultAttempts));
+  const readyBudget = Math.max(
+    1500,
+    Number(readinessTimeoutMs != null ? readinessTimeoutMs : process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000
+  );
+  const t0 = Date.now();
+  let ready = { ok: false, quality: "skipped", elapsed_ms: 0 };
+  if (!skipReadiness) {
+    ready = await waitForMarketplaceListingBanner(page, { timeoutMs: readyBudget });
+    try {
+      __deltaLogTriagemDom({
+        stage: "link_extract_readiness",
+        thread_key: threadKey || null,
+        account_login: forensicAccountLogin || null,
+        banner_ready: !!(ready && ready.ok),
+        quality: (ready && ready.quality) || null,
+        elapsed_ms: Number((ready && ready.elapsed_ms) || 0) || 0,
+        details_count: Number((ready && ready.details_count) || 0) || 0,
+        messenger_banner_count: Number((ready && ready.messenger_banner_count) || 0) || 0,
+        any_item_count: Number((ready && ready.any_item_count) || 0) || 0,
+      });
+    } catch (_) {}
+    // VM sob pressão: se banner ainda não veio, dá um settle extra antes do loop.
+    if (!ready || !ready.ok) {
+      await sleep(randomBetween(700, 1400));
+    } else if (ready.quality === "soft") {
+      await sleep(randomBetween(400, 900));
+    }
+  }
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const link = await extractMarketplaceItemLink(page).catch(() => "");
+    const detailed = await extractMarketplaceItemLinkDetailed(page).catch(() => null);
+    const link = String((detailed && detailed.link) || "").trim();
+    try {
+      __deltaLogTriagemDom({
+        stage: link ? "link_extract_hit" : "link_extract_miss",
+        thread_key: threadKey || null,
+        account_login: forensicAccountLogin || null,
+        attempt,
+        attempts_max: maxAttempts,
+        elapsed_ms: Date.now() - t0,
+        candidates_count: Number((detailed && detailed.candidates_count) || 0) || 0,
+        top_source: (detailed && detailed.top_source) || null,
+        top_score: Number((detailed && detailed.top_score) || 0) || 0,
+        banner_ready: !!(ready && ready.ok),
+        banner_quality: (ready && ready.quality) || null,
+        item_link: link || null,
+      });
+    } catch (_) {}
+    try {
+      __forensicEdgeEmit({
+        account_login: forensicAccountLogin,
+        thread_key: threadKey,
+        flow_stage: link ? "link_extract_hit" : "link_extract_miss",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          attempt,
+          attempts_max: maxAttempts,
+          elapsed_ms: Date.now() - t0,
+          candidates_count: Number((detailed && detailed.candidates_count) || 0) || 0,
+          top_source: (detailed && detailed.top_source) || null,
+          banner_ready: !!(ready && ready.ok),
+          item_link: link || null,
+        },
+      });
+    } catch (_) {}
     if (link) return link;
     if (attempt < maxAttempts) {
       try {
-        await page.waitForSelector('a[href*="/marketplace/item/"],a[data-href*="/marketplace/item/"]', {
-          timeout: Math.min(1800, 500 + (attempt * 350))
+        await page.waitForSelector(MARKETPLACE_ITEM_LINK_READY_SELECTOR, {
+          timeout: Math.min(3600, 1000 + attempt * 450),
         });
       } catch (_) {}
-      await sleep(randomBetween(220, 520));
+      await sleep(randomBetween(450, 980));
     }
   }
   return "";
@@ -3404,11 +3599,18 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
 
     // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
+    // VM fraca: readiness do banner + retries dobrados; nunca bloqueia o envio se falhar.
     let itemLink = null;
     if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
-      const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+      const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+      const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
       try {
-        itemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
+        itemLink = await extractMarketplaceItemLinkWithRetry(page, {
+          attempts: itemLinkAttempts,
+          readinessTimeoutMs: readyMs,
+          forensicAccountLogin,
+          threadKey: t,
+        });
         if (itemLink) {
           logInfo(`[COLETOR_101_LINK] ${itemLink}`);
           if (typeof onItemLink === "function") {
@@ -3578,7 +3780,11 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
   }
 }
 
-async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead = true } = {}) {
+async function openThreadAndExtractItemLink(
+  page,
+  threadKey,
+  { fromNetworkLead = true, forensicAccountLogin = null } = {}
+) {
   const t = String(threadKey || "").trim();
   if (!t) return { ok: false, error: "missing_thread_key" };
   try {
@@ -3587,15 +3793,28 @@ async function openThreadAndExtractItemLink(page, threadKey, { fromNetworkLead =
     }
   } catch (_) {}
 
-  const open = await openThreadByClick(page, threadKey, { maxScrollSteps: 20, forensicAccountLogin: null });
+  const open = await openThreadByClick(page, threadKey, {
+    maxScrollSteps: 20,
+    forensicAccountLogin: forensicAccountLogin || null,
+  });
   if (!open || !open.ok) {
     return { ok: false, error: String((open && open.error) || "thread_open_failed") };
   }
 
-  const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+  try {
+    await humanPause("postThreadOpen", "post_open_link_recovery");
+  } catch (_) {}
+
+  const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+  const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
   let itemLink = null;
   try {
-    itemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
+    itemLink = await extractMarketplaceItemLinkWithRetry(page, {
+      attempts: itemLinkAttempts,
+      readinessTimeoutMs: readyMs,
+      forensicAccountLogin: forensicAccountLogin || null,
+      threadKey: t,
+    });
   } catch (_) {}
   if (!itemLink) {
     return { ok: false, error: "item_link_missing" };
@@ -3881,11 +4100,195 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const autoGreetingEnabled = String(process.env.VIRTUS_DELTA_AUTO_GREETING || "1").trim() === "1";
   const autoGreetingSentThreads = new Set(); // threadKey
   const autoGreetingTimers = new Map(); // threadKey -> Timeout
-  const greetingStateByThread = new Map(); // threadKey -> { sentAt, greetingText, itemLink, city, citySource, cityStatus }
+  const greetingStateByThread = new Map(); // threadKey -> { sentAt, greetingText, itemLink, city, citySource, cityStatus, linkStatus }
   // Patch tardio de cidade (collecting → resolved/pending) sem bloquear hands.
   let cityCollectSettledHandler = null;
+  // Late-link recovery timers (VM sob pressão: reabre thread depois, sem travar saudação).
+  const linkRecoveryTimers = new Map(); // threadKey -> Timeout
   let lastCrossThreadSendAt = 0;
   let lastCrossThreadKey = "";
+
+  function clearLinkRecoveryTimer(threadKey) {
+    const t = String(threadKey || "").trim();
+    if (!t) return;
+    const h = linkRecoveryTimers.get(t);
+    if (h) {
+      try { clearTimeout(h); } catch (_) {}
+      linkRecoveryTimers.delete(t);
+    }
+  }
+
+  function scheduleDeferredLinkAndCityRecovery({
+    threadKey,
+    greetingText,
+    greetingSentAt,
+    cityCollectorTimeoutMs,
+    cityCollectorAttempts,
+  }) {
+    const t = String(threadKey || "").trim();
+    if (!t || !running) return false;
+    const prior = greetingStateByThread.get(t) || null;
+    if (prior && prior.linkRecoveryScheduled) return false;
+    if (prior && prior.itemLink && prior.cityStatus === "resolved") return false;
+
+    const deferAttempts = Math.max(
+      1,
+      Math.min(4, Number(process.env.VIRTUS_DELTA_LINK_DEFER_ATTEMPTS || 2) || 2)
+    );
+    const deferMin = Math.max(2500, Number(process.env.VIRTUS_DELTA_LINK_DEFER_MS_MIN || 5000) || 5000);
+    const deferMax = Math.max(deferMin, Number(process.env.VIRTUS_DELTA_LINK_DEFER_MS_MAX || 10000) || 10000);
+    const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+    const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
+    const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
+    const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
+
+    greetingStateByThread.set(t, {
+      sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now(),
+      greetingText: String(greetingText || (prior && prior.greetingText) || "").trim(),
+      itemLink: (prior && prior.itemLink) || null,
+      city: null,
+      citySource: null,
+      cityStatus: "collecting",
+      linkStatus: "collecting",
+      linkRecoveryScheduled: true,
+    });
+
+    const settleToHandler = (payload) => {
+      const handler = typeof cityCollectSettledHandler === "function" ? cityCollectSettledHandler : null;
+      if (!handler) return Promise.resolve(null);
+      return Promise.resolve(handler(payload)).catch(() => {});
+    };
+
+    const runAttempt = (attempt) => {
+      if (!running) return;
+      clearLinkRecoveryTimer(t);
+      const timer = setTimeout(() => {
+        linkRecoveryTimers.delete(t);
+        enqueue(async () => {
+          if (!running) return;
+          const stNow = greetingStateByThread.get(t) || null;
+          if (stNow && stNow.cityStatus === "resolved" && stNow.city) return;
+          if (stNow && stNow.itemLink && stNow.linkStatus === "resolved" && stNow.cityStatus === "resolved") return;
+
+          let recovered = null;
+          try {
+            const openOut = await openThreadAndExtractItemLink(page, t, {
+              fromNetworkLead: false,
+              forensicAccountLogin: ACCOUNT_LOGIN,
+            });
+            if (openOut && openOut.ok && openOut.item_link) {
+              recovered = String(openOut.item_link || "").trim() || null;
+            }
+          } catch (_) {}
+          if (!recovered) {
+            try {
+              recovered = await extractMarketplaceItemLinkWithRetry(page, {
+                attempts: itemLinkAttempts,
+                readinessTimeoutMs: readyMs,
+                forensicAccountLogin: ACCOUNT_LOGIN,
+                threadKey: t,
+              });
+            } catch (_) {}
+          }
+          recovered = String(recovered || "").trim() || null;
+
+          try {
+            __deltaLogTriagemDom({
+              stage: recovered ? "link_deferred_hit" : "link_deferred_miss",
+              thread_key: t,
+              account_login: ACCOUNT_LOGIN,
+              attempt,
+              attempts_max: deferAttempts,
+              item_link: recovered,
+            });
+          } catch (_) {}
+          try {
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              flow_stage: recovered ? "link_deferred_hit" : "link_deferred_miss",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                attempt,
+                attempts_max: deferAttempts,
+                item_link: recovered,
+              },
+            });
+          } catch (_) {}
+
+          if (!recovered) {
+            if (attempt < deferAttempts) {
+              runAttempt(attempt + 1);
+              return;
+            }
+            greetingStateByThread.set(t, {
+              sentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()),
+              greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+              itemLink: null,
+              city: null,
+              citySource: "fallback_city_pending",
+              cityStatus: "pending",
+              linkStatus: "pending",
+              linkRecoveryScheduled: false,
+            });
+            await settleToHandler({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              item_link: null,
+              cidade: null,
+              city_source: "fallback_city_pending",
+              city_status: "pending",
+              cityOut: { ok: false, error: "item_link_missing_after_deferred_recovery" },
+            });
+            return;
+          }
+
+          const cityOut = await collectCityFromItemLinkUsingGlobalCollector({
+            itemLink: recovered,
+            threadKey: t,
+            accountLogin: ACCOUNT_LOGIN,
+            timeoutMs: collectorTimeout,
+            attempts: collectorAttempts,
+            page,
+          }).catch((e) => ({
+            ok: false,
+            error: (e && e.message) ? String(e.message) : "city_collect_deferred_link_exception",
+          }));
+
+          const lateCity = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
+          const lateSource = lateCity
+            ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
+            : (String((cityOut && cityOut.error) || "city_collect_failed").trim() || "city_collect_failed");
+          const lateStatus = lateCity ? "resolved" : "pending";
+
+          greetingStateByThread.set(t, {
+            sentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()),
+            greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+            itemLink: recovered,
+            city: lateCity,
+            citySource: lateSource,
+            cityStatus: lateStatus,
+            linkStatus: "resolved",
+            linkRecoveryScheduled: false,
+          });
+
+          await settleToHandler({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: t,
+            item_link: recovered,
+            cidade: lateCity,
+            city_source: lateSource,
+            city_status: lateStatus,
+            cityOut: cityOut && typeof cityOut === "object" ? cityOut : null,
+          });
+        }).catch(() => {});
+      }, randomBetween(deferMin, deferMax));
+      linkRecoveryTimers.set(t, timer);
+      return true;
+    };
+
+    return runAttempt(1);
+  }
 
   // ===================== Delivery Confirm (CT) =====================
   // Objetivo: após envio real (Enter/click) confirmar de forma durável no CT
@@ -4788,7 +5191,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const greetingAlreadySent = !!(prior && prior.sentAt);
     const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
     let greetingSentAt = Number((prior && prior.sentAt) || 0) || 0;
-    const itemLinkAttempts = Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+    const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+    const linkReadyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
     // Collector serial (1 browser): budget completo fica em background.
     // Hands so espera um wait curto — se veio, manda resolved; senao collecting + patch depois.
     const cityCollectorTimeoutMs = Math.max(
@@ -4840,6 +5244,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         textoResposta: greetingText,
         fromNetworkLead: true,
         onItemLink: (link) => resolveItemLink(link),
+        forensicAccountLogin: ACCOUNT_LOGIN,
         skipActionDispatch: true,
       });
       if (sendOut && sendOut.item_link) {
@@ -4847,11 +5252,19 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } else {
         let recoveredItemLink = null;
         try {
-          recoveredItemLink = await extractMarketplaceItemLinkWithRetry(page, { attempts: itemLinkAttempts });
+          recoveredItemLink = await extractMarketplaceItemLinkWithRetry(page, {
+            attempts: itemLinkAttempts,
+            readinessTimeoutMs: linkReadyMs,
+            forensicAccountLogin: ACCOUNT_LOGIN,
+            threadKey: t,
+          });
         } catch (_) {}
         if (!recoveredItemLink) {
           try {
-            const openOut = await openThreadAndExtractItemLink(page, t, { fromNetworkLead: false });
+            const openOut = await openThreadAndExtractItemLink(page, t, {
+              fromNetworkLead: false,
+              forensicAccountLogin: ACCOUNT_LOGIN,
+            });
             if (openOut && openOut.ok && openOut.item_link) {
               recoveredItemLink = String(openOut.item_link || "").trim() || null;
             }
@@ -4883,7 +5296,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } else {
       // Retry de cidade não reenvia saudação: somente reabre o thread para recuperar link, se necessário.
       if (!(prior && prior.itemLink)) {
-        const openOut = await openThreadAndExtractItemLink(page, t, { fromNetworkLead: true });
+        const openOut = await openThreadAndExtractItemLink(page, t, {
+          fromNetworkLead: true,
+          forensicAccountLogin: ACCOUNT_LOGIN,
+        });
         if (openOut && openOut.ok && openOut.item_link) {
           resolveItemLink(openOut.item_link);
           sendOut = { ok: true, item_link: String(openOut.item_link || "").trim() || null };
@@ -5037,33 +5453,59 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       };
     }
 
-    // Sem link: nao ha o que raspar → pending definitivo.
+    // Sem link no hands: saudação já foi (ou pode ter sido); NÃO trava o chat.
+    // Marca collecting + agenda late-link recovery (reabre depois, sob menos pressão).
     if (!itemLinkFinal) {
-      greetingStateByThread.set(t, {
-        sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()),
-        greetingText,
-        itemLink: null,
-        city: null,
-        citySource: "fallback_city_pending",
-        cityStatus: "pending",
-      });
+      const sentAtFinal = Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now();
+      try {
+        scheduleDeferredLinkAndCityRecovery({
+          threadKey: t,
+          greetingText,
+          greetingSentAt: sentAtFinal,
+          cityCollectorTimeoutMs,
+          cityCollectorAttempts,
+        });
+      } catch (_) {
+        greetingStateByThread.set(t, {
+          sentAt: sentAtFinal,
+          greetingText,
+          itemLink: null,
+          city: null,
+          citySource: null,
+          cityStatus: "collecting",
+          linkStatus: "collecting",
+          linkRecoveryScheduled: false,
+        });
+      }
+      try {
+        __deltaLogTriagemDom({
+          stage: "link_collect_deferred",
+          thread_key: t,
+          account_login: ACCOUNT_LOGIN,
+          reason: String((cityOut && cityOut.error) || "item_link_missing"),
+        });
+      } catch (_) {}
       try {
         __forensicEdgeEmit({
           account_login: ACCOUNT_LOGIN,
           thread_key: t,
-          flow_stage: "city_collect_pending_no_link",
+          flow_stage: "link_collect_deferred",
           details: {
             tag: "FORENSIC_DOM_REVERSE",
             reason: String((cityOut && cityOut.error) || "item_link_missing"),
-          }
+            city_status: "collecting",
+            link_status: "collecting",
+          },
         });
       } catch (_) {}
       return {
         ...baseReturn,
         cidade: null,
-        city_source: "fallback_city_pending",
-        city_status: "pending",
-        city_collect_deferred: false,
+        city_source: null,
+        city_status: "collecting",
+        link_status: "collecting",
+        city_collect_deferred: true,
+        link_collect_deferred: true,
       };
     }
 
@@ -5261,6 +5703,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       try {
         for (const t of autoGreetingTimers.values()) { try { clearTimeout(t); } catch (_) {} }
         autoGreetingTimers.clear();
+      } catch (_) {}
+      try {
+        for (const tk of Array.from(linkRecoveryTimers.keys())) clearLinkRecoveryTimer(tk);
+        linkRecoveryTimers.clear();
       } catch (_) {}
     },
   };
