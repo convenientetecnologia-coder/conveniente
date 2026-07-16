@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const { execFileSync } = require("child_process");
 
 let puppeteer = null;
 try {
@@ -141,16 +142,117 @@ function isChromiumLaunchFailure(err) {
     /Code:\s*21\b/i.test(msg) ||
     /SingletonLock/i.test(msg) ||
     /The browser is already running/i.test(msg) ||
-    /user data directory is already in use/i.test(msg)
+    /user data directory is already in use/i.test(msg) ||
+    /browser has disconnected/i.test(msg) ||
+    /Target closed/i.test(msg) ||
+    /Session closed/i.test(msg)
   );
 }
 
-/** Remove locks orfaos do perfil unico do collector (Chrome morto deixou Singleton*). */
+function taskkillPidTreeWin(pid) {
+  const n = Number(pid || 0) || 0;
+  if (!(n > 0) || process.platform !== "win32") return false;
+  try {
+    execFileSync("taskkill", ["/PID", String(n), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 10_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Lista PIDs chrome.exe cujo CommandLine aponta para este userDataDir.
+ * Soberania: so mata o perfil do collector — nunca chrome das contas Messenger.
+ */
+function listChromePidsForUserDataDirWin(userDataDir) {
+  if (process.platform !== "win32") return [];
+  const dir = String(userDataDir || "").trim();
+  if (!dir) return [];
+  const needle = dir.replace(/\//g, "\\");
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$needle = ${JSON.stringify(needle)}`,
+    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" |",
+    "  Where-Object { $_.CommandLine -and ($_.CommandLine -like ('*' + $needle + '*')) } |",
+    "  Select-Object -ExpandProperty ProcessId",
+  ].join(" ");
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 15_000 }
+    );
+    return String(out || "")
+      .split(/\r?\n/)
+      .map((x) => Number(String(x).trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** Mata zumbis Chrome do perfil do collector (Code 21 / SingletonLock). */
+function killZombieChromeForUserDataDir(userDataDir) {
+  const dir = String(userDataDir || "").trim();
+  if (!dir) return { killed: 0, pids: [] };
+  const pids = [];
+  // Preferencia: helper enterprise do host (mesma arma das contas).
+  try {
+    const bh = require("./browser.js");
+    if (typeof bh.getChromeProfilePids === "function") {
+      const listed = bh.getChromeProfilePids(dir) || [];
+      for (const pid of listed) {
+        const n = Number(pid || 0) || 0;
+        if (n > 0) pids.push(n);
+      }
+    }
+    if (typeof bh.killChromeProfileProcesses === "function") {
+      bh.killChromeProfileProcesses(dir);
+    }
+  } catch (_) {}
+  // Fallback soberano Windows (nao depende do browser.js).
+  if (process.platform === "win32") {
+    try {
+      for (const pid of listChromePidsForUserDataDirWin(dir)) {
+        if (!pids.includes(pid)) pids.push(pid);
+      }
+    } catch (_) {}
+    let killed = 0;
+    for (const pid of pids) {
+      if (taskkillPidTreeWin(pid)) killed += 1;
+    }
+    // Segunda passada: ainda sobrou?
+    try {
+      const still = listChromePidsForUserDataDirWin(dir);
+      for (const pid of still) {
+        if (taskkillPidTreeWin(pid)) killed += 1;
+        if (!pids.includes(pid)) pids.push(pid);
+      }
+    } catch (_) {}
+    return { killed, pids };
+  }
+  return { killed: pids.length ? 1 : 0, pids };
+}
+
+/**
+ * Remove locks orfaos do perfil unico do collector
+ * (Chrome morto deixou Singleton* / DevToolsActivePort).
+ */
 function clearOrphanChromeProfileLocks(userDataDir) {
   const base = String(userDataDir || "").trim();
   if (!base) return { cleared: [] };
   const cleared = [];
-  const names = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+  const names = [
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "DevToolsActivePort",
+    "lockfile",
+  ];
   for (const name of names) {
     const fp = path.join(base, name);
     try {
@@ -160,7 +262,29 @@ function clearOrphanChromeProfileLocks(userDataDir) {
       }
     } catch (_) {}
   }
+  // Symlink/junction SingletonLock no Windows as vezes e reparse point
+  try {
+    const lockPath = path.join(base, "SingletonLock");
+    if (fs.existsSync(lockPath)) {
+      try { fs.lstatSync(lockPath); fs.unlinkSync(lockPath); cleared.push("SingletonLock_retry"); } catch (_) {}
+    }
+  } catch (_) {}
   return { cleared };
+}
+
+function logTriagemCollectorReclaim(ctx = {}) {
+  appendForensicTriagemLine({
+    ts: Date.now(),
+    tag: "TRIAGEM_DOM",
+    msg: "city_collector_profile_reclaim",
+    ctx: {
+      mode: String((ctx && ctx.mode) || "").slice(0, 40) || null,
+      killed: Number((ctx && ctx.killed) || 0) || 0,
+      locks: Array.isArray(ctx && ctx.locks) ? ctx.locks.slice(0, 12) : [],
+      reason: String((ctx && ctx.reason) || "").slice(0, 120) || null,
+      launch_generation: Number((ctx && ctx.launch_generation) || 0) || 0,
+    },
+  });
 }
 
 function extractMarketplaceItemId(pathname) {
@@ -975,11 +1099,15 @@ async function createCollectorRuntime() {
 
   let browser = null;
   let page = null;
+  let browserPid = null;
   // LEI: 1 browser por host. Concorrencia >1 no mesmo userDataDir = Chromium Code 21.
   // Env antiga (MAX_CONCURRENCY=2) e ignorada de proposito — serial e soberano.
   const enqueue = createLimitedQueue(1);
   let launchPromise = null; // mutex de launch/relaunch
   let launchGeneration = 0;
+  let reclaimCount = 0;
+  let lastReclaimAt = 0;
+  let lastLaunchError = null;
   const cityCacheByItem = new Map(); // itemId -> { cidade, city_source, at }
   const cityCacheTtlMs = Math.max(
     5 * 60 * 1000,
@@ -990,6 +1118,10 @@ async function createCollectorRuntime() {
     Math.min(5000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_CACHE_MAX || 1200) || 1200)
   );
   let tabGuardAttached = false;
+  const launchMaxAttempts = Math.max(
+    2,
+    Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_LAUNCH_ATTEMPTS || 3) || 3)
+  );
 
   const cityCacheGet = (itemId) => {
     const key = String(itemId || "").trim();
@@ -1062,30 +1194,108 @@ async function createCollectorRuntime() {
     } catch (_) {}
   }
 
-  async function invalidateBrowser(reason) {
+  async function pageIsHealthy(pageRef) {
+    const p = pageRef;
+    if (!p) return false;
+    try {
+      if (p.isClosed && p.isClosed()) return false;
+    } catch {
+      return false;
+    }
+    try {
+      const ok = await Promise.race([
+        p.evaluate(() => 1).then((v) => v === 1),
+        sleep(2_000).then(() => false),
+      ]);
+      return !!ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Reclaim soberano do perfil unico do collector:
+   * 1) mata chrome zumbi desse userDataDir
+   * 2) apaga SingletonLock / DevToolsActivePort
+   * 3) settle antes de relaunch
+   */
+  async function reclaimCollectorProfile({ mode = "soft", reason = "" } = {}) {
+    const hard = String(mode || "soft").toLowerCase() === "hard";
+    const why = String(reason || "").slice(0, 120);
+    let killed = 0;
+    let locks = [];
+    try {
+      const killOut = killZombieChromeForUserDataDir(userDataDir);
+      killed = Number(killOut && killOut.killed || 0) || 0;
+    } catch (_) {}
+    try {
+      locks = clearOrphanChromeProfileLocks(userDataDir).cleared || [];
+    } catch (_) {
+      locks = [];
+    }
+    reclaimCount += 1;
+    lastReclaimAt = Date.now();
+    const settleMs = hard
+      ? Math.max(1_200, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HARD_RECLAIM_MS || 1_800) || 1_800)
+      : Math.max(400, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_SOFT_RECLAIM_MS || 700) || 700);
+    await sleep(settleMs);
+    log(
+      `collector reclaim mode=${hard ? "hard" : "soft"}` +
+      ` killed=${killed} locks=${locks.length ? locks.join(",") : "none"}` +
+      ` reason=${why || "n/a"} gen=${launchGeneration}`
+    );
+    try {
+      logTriagemCollectorReclaim({
+        mode: hard ? "hard" : "soft",
+        killed,
+        locks,
+        reason: why,
+        launch_generation: launchGeneration,
+      });
+    } catch (_) {}
+    return { killed, locks, mode: hard ? "hard" : "soft" };
+  }
+
+  async function invalidateBrowser(reason, { reclaim = false, reclaimMode = "soft" } = {}) {
     const why = String(reason || "invalidate").slice(0, 120);
+    const pidToKill = Number(browserPid || 0) || 0;
     try {
       if (browser) {
-        try { await browser.close(); } catch (_) {}
+        try {
+          await Promise.race([
+            browser.close().catch(() => {}),
+            sleep(2_500),
+          ]);
+        } catch (_) {}
       }
     } catch (_) {}
+    // Puppeteer close as vezes deixa o process vivo — mata a arvore do PID.
+    if (pidToKill > 0) {
+      try { taskkillPidTreeWin(pidToKill); } catch (_) {}
+    }
     browser = null;
     page = null;
+    browserPid = null;
     tabGuardAttached = false;
     launchGeneration += 1;
     log(`collector browser invalidado reason=${why} gen=${launchGeneration}`);
+    if (reclaim) {
+      try {
+        await reclaimCollectorProfile({
+          mode: reclaimMode,
+          reason: `invalidate:${why}`,
+        });
+      } catch (_) {}
+    }
   }
 
-  async function launchBrowserFresh({ clearLocks = false } = {}) {
-    if (clearLocks) {
-      const lockOut = clearOrphanChromeProfileLocks(userDataDir);
-      if (lockOut.cleared.length) {
-        log(`collector limpou locks orfaos=${lockOut.cleared.join(",")}`);
-      }
-      await sleep(400);
-    }
-
+  async function launchBrowserFresh({ reclaimMode = "soft" } = {}) {
     try { fs.mkdirSync(userDataDir, { recursive: true }); } catch (_) {}
+    // SEMPRE reclaim antes de launch: Code 21 nasce de zumbi/lock orfao.
+    await reclaimCollectorProfile({
+      mode: reclaimMode,
+      reason: `pre_launch_${reclaimMode}`,
+    });
 
     const launched = await puppeteer.launch({
       headless: headlessEnabled ? "new" : false,
@@ -1098,24 +1308,42 @@ async function createCollectorRuntime() {
         "--disable-features=IsolateOrigins,site-per-process",
         "--disable-background-networking",
         "--disable-client-side-phishing-detection",
+        "--disable-sync",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-popup-blocking",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
       ],
       defaultViewport: { width: 1366, height: 900 },
     });
 
     browser = launched;
+    try {
+      const proc = browser.process && browser.process();
+      browserPid = proc && proc.pid ? Number(proc.pid) || null : null;
+    } catch {
+      browserPid = null;
+    }
     const pages = await browser.pages().catch(() => []);
     page = pages[0] || (await browser.newPage());
     await page.setDefaultTimeout(
       Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000)
     );
+    try {
+      await page.setDefaultNavigationTimeout(
+        Math.max(10_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 20_000) || 20_000)
+      );
+    } catch (_) {}
 
     try {
       browser.on("disconnected", () => {
         try {
-          log(`collector browser disconnected gen=${launchGeneration}`);
+          log(`collector browser disconnected gen=${launchGeneration} pid=${browserPid || "n/a"}`);
         } catch (_) {}
         browser = null;
         page = null;
+        browserPid = null;
         tabGuardAttached = false;
       });
     } catch (_) {}
@@ -1132,23 +1360,38 @@ async function createCollectorRuntime() {
       });
     }
     await pruneCollectorTabs();
+    // Smoke health: se page ja veio zumbi, falha e deixa ensurePage relaunchar.
+    if (!(await pageIsHealthy(page))) {
+      throw new Error("city_collector_page_unhealthy_after_launch");
+    }
+    lastLaunchError = null;
     log(
       `collector iniciado headless=${headlessEnabled ? "sim" : "nao"}` +
-      ` concurrency=1 userDataDir=${userDataDir} gen=${launchGeneration}`
+      ` concurrency=1 pid=${browserPid || "n/a"}` +
+      ` userDataDir=${userDataDir} gen=${launchGeneration}`
     );
     return page;
   }
 
   /**
-   * Garante 1 page viva. Launch e serializado por mutex (mesmo com fila=1,
-   * relaunch apos Code 21 nao pode atropelar outro launch).
+   * Garante 1 page viva. Launch serializado por mutex.
+   * Code 21 => reclaim hard (kill zumbis + locks) e relaunch ate N tentativas.
    */
   async function ensurePage({ forceRelaunch = false } = {}) {
     if (!forceRelaunch) {
       try {
-        if (browser && browser.isConnected && browser.isConnected() && page && !page.isClosed()) {
-          await pruneCollectorTabs();
-          return page;
+        if (
+          browser &&
+          browser.isConnected &&
+          browser.isConnected() &&
+          page &&
+          !(page.isClosed && page.isClosed())
+        ) {
+          if (await pageIsHealthy(page)) {
+            await pruneCollectorTabs();
+            return page;
+          }
+          await invalidateBrowser("unhealthy_page", { reclaim: true, reclaimMode: "soft" });
         }
       } catch (_) {}
 
@@ -1156,32 +1399,40 @@ async function createCollectorRuntime() {
         if (browser && browser.isConnected && browser.isConnected()) {
           const pages = await browser.pages().catch(() => []);
           page = pages[0] || (await browser.newPage());
-          await pruneCollectorTabs();
-          return page;
+          if (await pageIsHealthy(page)) {
+            await pruneCollectorTabs();
+            return page;
+          }
+          await invalidateBrowser("unhealthy_recovered_page", { reclaim: true, reclaimMode: "soft" });
         }
       } catch (_) {}
     } else {
-      await invalidateBrowser("force_relaunch");
+      await invalidateBrowser("force_relaunch", { reclaim: true, reclaimMode: "hard" });
     }
 
     if (launchPromise) return launchPromise;
 
     launchPromise = (async () => {
       let lastErr = null;
-      for (let launchAttempt = 1; launchAttempt <= 2; launchAttempt += 1) {
+      for (let launchAttempt = 1; launchAttempt <= launchMaxAttempts; launchAttempt += 1) {
+        const mode = launchAttempt === 1 ? "soft" : "hard";
         try {
-          return await launchBrowserFresh({ clearLocks: launchAttempt > 1 });
+          return await launchBrowserFresh({ reclaimMode: mode });
         } catch (e) {
           lastErr = e;
+          lastLaunchError = (e && e.message) ? String(e.message) : String(e);
           const launchFail = isChromiumLaunchFailure(e);
           log(
-            `collector launch falhou attempt=${launchAttempt}` +
+            `collector launch falhou attempt=${launchAttempt}/${launchMaxAttempts}` +
             ` code21=${launchFail ? "sim" : "nao"}` +
-            ` error=${e && e.message ? e.message : String(e)}`
+            ` error=${lastLaunchError}`
           );
-          await invalidateBrowser(launchFail ? "launch_code21" : "launch_failed");
-          if (launchAttempt < 2) {
-            await sleep(launchFail ? 1200 : 600);
+          await invalidateBrowser(launchFail ? "launch_code21" : "launch_failed", {
+            reclaim: true,
+            reclaimMode: "hard",
+          });
+          if (launchAttempt < launchMaxAttempts) {
+            await sleep(launchFail ? (1_400 + launchAttempt * 400) : 700);
           }
         }
       }
@@ -1257,7 +1508,7 @@ async function createCollectorRuntime() {
       let sawLaunchFailure = false;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          // Se a tentativa anterior foi Code 21, relaunch com limpeza de locks.
+          // Code 21 / page morta => force relaunch com reclaim hard (zumbis+locks).
           const p = await ensurePage({ forceRelaunch: sawLaunchFailure });
           sawLaunchFailure = false;
           await applySessionCookies(p, session_cookies);
@@ -1296,6 +1547,14 @@ async function createCollectorRuntime() {
             if (itemId) {
               cityCacheSet(itemId, extracted.cidade, extracted.city_source || "collector_dom");
             }
+            // Mantem browser vivo, mas pagina limpa (anti-vazamento de DOM/tabs).
+            try {
+              await Promise.race([
+                p.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }).catch(() => {}),
+                sleep(5_000),
+              ]);
+            } catch (_) {}
+            try { await pruneCollectorTabs(); } catch (_) {}
             log(`cidade coletada account=${account || "n/a"} thread=${tk || "n/a"} cidade="${extracted.cidade}" attempt=${attempt}`);
             return {
               ok: true,
@@ -1313,11 +1572,21 @@ async function createCollectorRuntime() {
             ` error=${lastNavError}`
           );
           if (sawLaunchFailure) {
-            try { await invalidateBrowser("collect_code21"); } catch (_) {}
+            try {
+              await invalidateBrowser("collect_code21", { reclaim: true, reclaimMode: "hard" });
+            } catch (_) {}
+          } else {
+            // Nav/target closed: invalida soft pra nao reusar page podre.
+            try {
+              if (/Target closed|Session closed|browser has disconnected|Navigation failed/i.test(lastNavError)) {
+                await invalidateBrowser("collect_nav_dead", { reclaim: true, reclaimMode: "soft" });
+                sawLaunchFailure = true;
+              }
+            } catch (_) {}
           }
         }
         if (attempt < maxAttempts) {
-          await sleep(sawLaunchFailure ? randomBetween(1200, 2200) : randomBetween(700, 1500));
+          await sleep(sawLaunchFailure ? randomBetween(1400, 2400) : randomBetween(700, 1500));
         }
       }
 
@@ -1353,6 +1622,11 @@ async function createCollectorRuntime() {
     });
   }
 
+  // Boot: limpa zumbis/locks deixados por crash anterior do worker.
+  try {
+    await reclaimCollectorProfile({ mode: "hard", reason: "runtime_boot" });
+  } catch (_) {}
+
   return {
     ok: true,
     collectCityFromItemLink,
@@ -1362,13 +1636,19 @@ async function createCollectorRuntime() {
       waiting: typeof enqueue.getWaiting === "function" ? enqueue.getWaiting() : null,
       in_flight: typeof enqueue.getInFlight === "function" ? enqueue.getInFlight() : null,
       launch_generation: launchGeneration,
+      browser_pid: browserPid,
+      reclaim_count: reclaimCount,
+      last_reclaim_at: lastReclaimAt || null,
+      last_launch_error: lastLaunchError ? String(lastLaunchError).slice(0, 220) : null,
+      user_data_dir: userDataDir,
     }),
     shutdown: async () => {
       try {
-        await invalidateBrowser("shutdown");
+        await invalidateBrowser("shutdown", { reclaim: true, reclaimMode: "hard" });
       } catch (_) {
         browser = null;
         page = null;
+        browserPid = null;
       }
     },
   };
