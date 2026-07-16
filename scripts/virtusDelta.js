@@ -3397,16 +3397,104 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     stepAError
   });
   if (fallback && fallback.ok) return fallback;
+
+  // Retry paciente na mesma tentativa: inbox pode ainda estar hidratando o card.
+  // Sem contingency burra — só paciência + 2ª abertura soberana.
+  try {
+    __deltaLogTriagemDom({
+      stage: "open_thread_patient_retry",
+      thread_key: t,
+      selector: stepASelector,
+      step_a_error: stepAError,
+      prior_error: String(fallback && fallback.error || "thread_open_failed"),
+    });
+  } catch (_) {}
+  try {
+    await humanPause("domSettle", "open_thread_patient_retry_settle");
+  } catch (_) {
+    try { await page.waitForTimeout(3200); } catch (_) {}
+  }
+  try {
+    await page.keyboard.press("Home").catch(() => {});
+  } catch (_) {}
+  try {
+    await humanPause("domSettle", "open_thread_patient_retry_scroll_top");
+  } catch (_) {}
+
+  const patientCard = await page.$(primaryCardSelector).catch(() => null);
+  if (patientCard) {
+    try {
+      await patientCard.evaluate((el) => {
+        try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }); } catch (_) {}
+      });
+    } catch (_) {}
+    try {
+      let clickPlan = null;
+      try { clickPlan = await computeVisibleThreadCardClickPlan(patientCard); } catch (_) {}
+      const points = (clickPlan && clickPlan.ok && Array.isArray(clickPlan.points)) ? clickPlan.points : [];
+      for (const p of points.slice(0, 2)) {
+        const px = Number(p && p.x);
+        const py = Number(p && p.y);
+        if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+        try {
+          await page.mouse.move(px, py, { steps: 6 });
+          await page.mouse.click(px, py, { delay: 100 });
+        } catch (_) {
+          continue;
+        }
+        try {
+          await page.waitForFunction(
+            (threadId) => {
+              const path = String(location.pathname || "");
+              return path.includes("/messages") && path.includes(`/t/${threadId}`);
+            },
+            { timeout: 2500 },
+            t
+          );
+          await humanPause("postThreadOpen", "patient_retry_post_click");
+          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 6000 }).catch(() => null);
+          const guard = await runWrongThreadGuard(page, t, {
+            forensicAccountLogin,
+            stage: "patient_retry_post_click",
+            requireComposer: true
+          });
+          if (guard.ok) {
+            return {
+              ok: true,
+              scrolled: 0,
+              matched_selector: primaryCardSelector,
+              hydrated: true,
+              patient_retry: true,
+            };
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  const patientGoto = await __deltaTryOpenThreadByDirectGoto(page, t, {
+    forensicAccountLogin,
+    stepAError: stepAError || "patient_retry",
+  });
+  if (patientGoto && patientGoto.ok) {
+    return { ...patientGoto, patient_retry: true };
+  }
+
   try {
     __deltaLogTriagemDom({
       stage: "hard_fail_after_fallback",
       thread_key: t,
       selector: stepASelector,
       step_a_error: stepAError,
-      final_error: String(fallback && fallback.error || "thread_open_failed"),
+      final_error: String(
+        (patientGoto && patientGoto.error) ||
+        (fallback && fallback.error) ||
+        "thread_open_failed"
+      ),
+      patient_retry_attempted: true,
     });
   } catch (_) {}
-  return fallback || { ok: false, error: "thread_open_failed", step_a_error: stepAError };
+  return patientGoto || fallback || { ok: false, error: "thread_open_failed", step_a_error: stepAError };
 }
 
 async function probeOpenLineContinuity(page, threadKey) {
@@ -5580,6 +5668,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             city_source: lateSource,
             city_status: lateStatus,
             cityOut: lateOut && typeof lateOut === "object" ? lateOut : null,
+            customer_name: nomeClienteLimpo || null,
+            client_name: nomeClienteLimpo || null,
+            nome_cliente_limpo: nomeClienteLimpo || null,
           })
         ).catch(() => {});
       };

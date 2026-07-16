@@ -15220,6 +15220,14 @@ const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
 const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
+/** Retry paciente p/ falha de rota (wrong_thread / card / hydration) — pressa é inimiga. */
+const DELTA_ROUTING_RETRY_TIMER_MIN_MS = 45_000;
+const DELTA_ROUTING_RETRY_TIMER_MAX_MS = 90_000;
+/** Máximo de tentativas hands antes de snapshot honesto (sem inventar saudação). */
+const DELTA_HANDS_MAX_FAILURES = Math.max(
+  2,
+  Math.min(8, Number(process.env.DELTA_HANDS_MAX_FAILURES || 4) || 4)
+);
 const DELTA_RECENT_DEDUP_WINDOW_MS = 3_500;
 const DELTA_THREAD_MAX_MESSAGES = 600;
 const DELTA_INGEST_MAX_RETRY_ATTEMPTS = Math.max(
@@ -16253,7 +16261,103 @@ function __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, { highW
   }
 }
 
-function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
+function __deltaIsHandsRoutingFailure(errorRaw) {
+  const e = String(errorRaw || '').trim().toLowerCase();
+  if (!e) return false;
+  return (
+    e.includes('wrong_thread_guard_blocked') ||
+    e.includes('messages_boot_not_stable') ||
+    e.includes('thread_open_hydration_timeout') ||
+    e.includes('thread_card_not_found') ||
+    e.includes('thread_open_failed')
+  );
+}
+
+/**
+ * Hands só conta como concluído com carimbo soberano (ou legado com link/cidade real).
+ * Active prematuro sem isso NÃO pode pular o fluxo de lead novo.
+ */
+function __deltaThreadHasHandsCompletion(diskRow, st) {
+  const fromDisk = Number(diskRow && diskRow.handsCompletedAt || 0) || 0;
+  const fromSt = Number(st && st.handsCompletedAt || 0) || 0;
+  if (fromDisk > 0 || fromSt > 0) return true;
+  const link = __deltaPickBestItemLink(
+    diskRow && diskRow.link_anuncio,
+    st && st.link_anuncio
+  );
+  if (link) return true;
+  const city = String((diskRow && diskRow.city) || (st && st.city) || '').trim();
+  if (city && !__deltaIsPendingCityLabel(city)) {
+    const cityStatus = __deltaCanonicalCityStatus(
+      (diskRow && diskRow.city_status) || (st && st.city_status),
+      { hasCanonicalCity: true }
+    );
+    if (cityStatus === 'resolved') return true;
+  }
+  return false;
+}
+
+function __deltaNormalizeRealCustomerName(...candidates) {
+  for (const c of candidates) {
+    const s = String(c || '').trim();
+    if (!s) continue;
+    if (/^cliente\s*sem\s*nome$/i.test(s)) continue;
+    if (s === DELTA_FALLBACK_CLIENT_NAME) continue;
+    return s.slice(0, 120);
+  }
+  return '';
+}
+
+function __deltaMarkThreadActiveOnDiskSync(nome, threadKey, opts = {}) {
+  try {
+    const n = String(nome || '').trim();
+    const tk = String(threadKey || '').trim();
+    if (!n || !tk) return false;
+    const options = opts && typeof opts === 'object' ? opts : {};
+    const parsed = __deltaReadThreadStateFileSync();
+    const prev = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    const k = __deltaThreadStateKey(n, tk);
+    const rowsByKey = new Map();
+    for (const row of prev) {
+      const rn = String(row && row.nome || '').trim();
+      const rt = String(row && row.thread_key || '').trim();
+      if (!rn || !rt) continue;
+      rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
+    }
+    const now = Date.now();
+    const base = rowsByKey.get(k) || {};
+    const prevCompleted = Number(base && base.handsCompletedAt || 0) || 0;
+    let nextCompleted = prevCompleted;
+    const wantCompleted = Number(options.handsCompletedAt || 0) || 0;
+    if (wantCompleted > 0) nextCompleted = Math.max(prevCompleted, wantCompleted);
+    else if (options.ensureHandsCompleted === true && prevCompleted <= 0) nextCompleted = now;
+    rowsByKey.set(k, {
+      ...(base && typeof base === 'object' ? base : {}),
+      nome: n,
+      thread_key: tk,
+      status: 'active',
+      updatedAt: now,
+      lastDispatchAt: now,
+      timerDueAt: 0,
+      timerReason: '',
+      handsFailures: 0,
+      ...(nextCompleted > 0 ? { handsCompletedAt: nextCompleted } : {}),
+      messages: [],
+    });
+    const rows = Array.from(rowsByKey.values());
+    const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
+    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, body, 'utf8');
+    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Active sem hands → demote para buffering (lead novo ainda precisa de hands). */
+function __deltaDemoteActiveWithoutHandsOnDiskSync(nome, threadKey) {
   try {
     const n = String(nome || '').trim();
     const tk = String(threadKey || '').trim();
@@ -16268,19 +16372,19 @@ function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
       if (!rn || !rt) continue;
       rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
     }
+    const base = rowsByKey.get(k);
+    if (!base || typeof base !== 'object') return false;
+    if (__deltaThreadHasHandsCompletion(base, null)) return false;
     const now = Date.now();
-    const base = rowsByKey.get(k) || {};
     rowsByKey.set(k, {
-      ...(base && typeof base === 'object' ? base : {}),
+      ...base,
       nome: n,
       thread_key: tk,
-      status: 'active',
+      status: 'new_buffering',
       updatedAt: now,
-      lastDispatchAt: now,
       timerDueAt: 0,
       timerReason: '',
-      handsFailures: 0,
-      messages: [],
+      handsFailures: Number(base.handsFailures || 0) || 0,
     });
     const rows = Array.from(rowsByKey.values());
     const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
@@ -16293,6 +16397,7 @@ function __deltaMarkThreadActiveOnDiskSync(nome, threadKey) {
     return false;
   }
 }
+
 function __deltaCreateThreadState(nome, threadKey) {
   const now = Date.now();
   return {
@@ -16305,6 +16410,7 @@ function __deltaCreateThreadState(nome, threadKey) {
     timerReason: '',
     timerHandle: null,
     handsFailures: 0,
+    handsCompletedAt: 0,
     city: null,
     city_source: null,
     city_status: null,
@@ -16319,6 +16425,7 @@ function __deltaCreateThreadState(nome, threadKey) {
 function __deltaSerializeThreadState(st) {
   if (!st || typeof st !== 'object') return null;
   const link = __deltaPickBestItemLink(st.link_anuncio);
+  const handsCompletedAt = Number(st.handsCompletedAt || 0) || 0;
   return {
     nome: String(st.nome || '').trim(),
     thread_key: String(st.thread_key || '').trim(),
@@ -16328,6 +16435,7 @@ function __deltaSerializeThreadState(st) {
     timerDueAt: Number(st.timerDueAt || 0) || 0,
     timerReason: String(st.timerReason || '').slice(0, 32),
     handsFailures: Number(st.handsFailures || 0) || 0,
+    ...(handsCompletedAt > 0 ? { handsCompletedAt } : {}),
     city: st.city ? String(st.city).slice(0, 120) : null,
     city_source: st.city_source ? String(st.city_source).slice(0, 80) : null,
     city_status: st.city_status ? String(st.city_status).slice(0, 32) : null,
@@ -16406,6 +16514,7 @@ function __deltaLoadThreadStateSync() {
       st.createdAt = Number(row && row.createdAt || 0) || st.createdAt;
       st.updatedAt = Number(row && row.updatedAt || 0) || st.updatedAt;
       st.handsFailures = Number(row && row.handsFailures || 0) || 0;
+      st.handsCompletedAt = Number(row && row.handsCompletedAt || 0) || 0;
       st.city = row && row.city ? String(row.city).trim() : null;
       st.city_source = row && row.city_source ? String(row.city_source).trim() : null;
       st.city_status = __deltaCanonicalCityStatus(row && row.city_status, {
@@ -16578,6 +16687,7 @@ function __deltaHydrateThreadStateFromDiskRow(st, row) {
   st.createdAt = __deltaNormalizeTimestampMs(row.createdAt, st.createdAt || 0) || st.createdAt;
   st.updatedAt = __deltaNormalizeTimestampMs(row.updatedAt, st.updatedAt || 0) || st.updatedAt;
   st.handsFailures = Number(row.handsFailures || 0) || 0;
+  st.handsCompletedAt = Number(row.handsCompletedAt || st.handsCompletedAt || 0) || 0;
   st.city = row && row.city ? String(row.city).trim() : (st.city || null);
   st.city_source = row && row.city_source ? String(row.city_source).trim() : (st.city_source || null);
   st.city_status = __deltaCanonicalCityStatus(
@@ -17403,27 +17513,45 @@ function __deltaHandleCityCollectSettled(payload) {
     const existingStatus = __deltaCanonicalCityStatus(st.city_status, {
       hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
     });
-    // Soberania: nunca rebaixar cidade ja resolvida.
-    if (existingStatus === 'resolved' && st.city && !__deltaIsPendingCityLabel(st.city)) {
+    const lateLink = __deltaPickBestItemLink(p.item_link, st.link_anuncio);
+    const prevLink = __deltaPickBestItemLink(st.link_anuncio);
+    const linkUpgrade = !!(lateLink && lateLink !== prevLink);
+    const realName = __deltaNormalizeRealCustomerName(
+      p.customer_name,
+      p.client_name,
+      p.nome_cliente_limpo
+    );
+    const nameUpgrade = !!realName;
+    // Soberania: nunca rebaixar cidade ja resolvida — mas ainda patcha link/nome tardios.
+    const cityAlreadyResolved =
+      existingStatus === 'resolved' && st.city && !__deltaIsPendingCityLabel(st.city);
+    if (cityAlreadyResolved && !linkUpgrade && !nameUpgrade) {
       return { ok: true, skipped: true, reason: 'already_resolved' };
     }
 
-    const cityFields = __deltaResolveCityDispatchFields({
-      cidade: p.cidade || (p.cityOut && p.cityOut.cidade),
-      city_source: p.city_source || (p.cityOut && p.cityOut.city_source),
-      city_status: p.city_status || (p.cidade || (p.cityOut && p.cityOut.ok && p.cityOut.cidade) ? 'resolved' : 'pending'),
-    });
+    const cityFields = cityAlreadyResolved
+      ? {
+          city: st.city,
+          city_source: st.city_source || null,
+          city_status: 'resolved',
+        }
+      : __deltaResolveCityDispatchFields({
+          cidade: p.cidade || (p.cityOut && p.cityOut.cidade),
+          city_source: p.city_source || (p.cityOut && p.cityOut.city_source),
+          city_status: p.city_status || (p.cidade || (p.cityOut && p.cityOut.ok && p.cityOut.cidade) ? 'resolved' : 'pending'),
+        });
 
-    st.city = cityFields.city_status === 'collecting' ? null : cityFields.city;
-    st.city_source = cityFields.city_source;
-    st.city_status = cityFields.city_status;
-    const lateLink = __deltaPickBestItemLink(p.item_link, st.link_anuncio);
+    if (!cityAlreadyResolved) {
+      st.city = cityFields.city_status === 'collecting' ? null : cityFields.city;
+      st.city_source = cityFields.city_source;
+      st.city_status = cityFields.city_status;
+    }
     if (lateLink) st.link_anuncio = lateLink;
     st.updatedAt = Date.now();
     __deltaPersistThreadStateSync();
 
     const eventName = cityFields.city_status === 'resolved'
-      ? 'lead_city_resolved'
+      ? (linkUpgrade || nameUpgrade ? 'lead_sovereign_patch' : 'lead_city_resolved')
       : 'lead_city_pending';
     const queued = __deltaAppendPendingJsonlSync({
       event: eventName,
@@ -17439,12 +17567,18 @@ function __deltaHandleCityCollectSettled(payload) {
       city_status: cityFields.city_status,
       ...(cityFields.city_source ? { city_source: cityFields.city_source } : {}),
       ...(st.link_anuncio ? { link_anuncio: st.link_anuncio } : {}),
-      // Patch de cidade nao mexe em nome — omite pra CT preservar o do 1º ingest.
-      operacao_meta: 'city_patch',
+      ...(realName
+        ? {
+            client_name: realName,
+            customer_name: realName,
+            nome_cliente_limpo: realName,
+          }
+        : {}),
+      operacao_meta: linkUpgrade || nameUpgrade ? 'sovereign_patch' : 'city_patch',
       dispatch_ct: true,
       queue_mode: 'dispatch_ct',
       flow_stage: cityFields.city_status === 'resolved'
-        ? 'city_collect_deferred_resolved'
+        ? (linkUpgrade || nameUpgrade ? 'sovereign_deferred_patch' : 'city_collect_deferred_resolved')
         : 'city_collect_deferred_pending',
       message_at: Date.now(),
       collector_error: cityFields.city_status === 'pending'
@@ -17462,11 +17596,13 @@ function __deltaHandleCityCollectSettled(payload) {
           city_status: cityFields.city_status,
           city: cityFields.city || null,
           city_source: cityFields.city_source || null,
+          link_upgrade: linkUpgrade,
+          name_upgrade: nameUpgrade,
           queued: !!queued,
         }
       });
     } catch {}
-    return { ok: true, queued: !!queued, city_status: cityFields.city_status };
+    return { ok: true, queued: !!queued, city_status: cityFields.city_status, link_upgrade: linkUpgrade };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? e.message : String(e) };
   }
@@ -17543,11 +17679,18 @@ function __deltaScheduleThreadTimer(st, { retry = false } = {}) {
   __deltaSchedulePersistThreadState();
   return delayMs;
 }
-function __deltaQueueThreadRetryOnDiskSecondary(st, { nome, threadKey, retryReason = 'hands_retry' } = {}) {
+function __deltaQueueThreadRetryOnDiskSecondary(st, {
+  nome,
+  threadKey,
+  retryReason = 'hands_retry',
+  patient = false,
+} = {}) {
   const n = String(nome || '').trim();
   const tk = String(threadKey || '').trim();
   if (!st || typeof st !== 'object' || !n || !tk) return { queued: false, retryInMs: 0, queueMode: 'invalid' };
-  const retryInMs = __deltaRandInt(DELTA_RETRY_TIMER_MIN_MS, DELTA_RETRY_TIMER_MAX_MS);
+  const retryInMs = patient
+    ? __deltaRandInt(DELTA_ROUTING_RETRY_TIMER_MIN_MS, DELTA_ROUTING_RETRY_TIMER_MAX_MS)
+    : __deltaRandInt(DELTA_RETRY_TIMER_MIN_MS, DELTA_RETRY_TIMER_MAX_MS);
   const dueAt = Date.now() + retryInMs;
   const queued = __deltaEnqueueNewLeadTimerToDiskSync({
     nome: n,
@@ -17555,16 +17698,28 @@ function __deltaQueueThreadRetryOnDiskSecondary(st, { nome, threadKey, retryReas
     delayMs: retryInMs,
     dueAt,
     forceEnqueue: true,
-    queueLane: 'hands_retry_secondary',
+    queueLane: patient ? 'hands_retry_routing_patient' : 'hands_retry_secondary',
     retryReason,
   });
   if (queued) {
     st.timerHandle = null;
-    st.timerReason = 'retry_disk_secondary';
+    st.timerReason = patient ? 'retry_routing_patient' : 'retry_disk_secondary';
     st.timerDueAt = dueAt;
     st.updatedAt = Date.now();
     try { __deltaKickNewLeadsTimerPump(n); } catch {}
-    return { queued: true, retryInMs, queueMode: 'disk_secondary', dueAt };
+    return { queued: true, retryInMs, queueMode: patient ? 'disk_secondary_patient' : 'disk_secondary', dueAt };
+  }
+  if (patient) {
+    __deltaClearThreadTimer(st);
+    st.timerReason = 'retry_routing_patient';
+    st.timerDueAt = dueAt;
+    st.timerHandle = setTimeout(() => {
+      __deltaHandleBufferedThreadTimer(n, tk, { reason: 'retry' }).catch(() => {});
+    }, retryInMs);
+    st.timerHandle.unref?.();
+    st.updatedAt = Date.now();
+    __deltaSchedulePersistThreadState();
+    return { queued: false, retryInMs, queueMode: 'memory_patient', dueAt };
   }
   const fallbackInMs = __deltaScheduleThreadTimer(st, { retry: true });
   return { queued: false, retryInMs: fallbackInMs, queueMode: 'memory_fallback', dueAt: Number(st.timerDueAt || 0) || 0 };
@@ -17594,27 +17749,36 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const handsErrorRaw = String(handsOut && handsOut.error || '').trim();
   const handsErrorNorm = handsErrorRaw.toLowerCase();
-  const handsRoutingFailure =
-    handsErrorNorm.includes('wrong_thread_guard_blocked') ||
-    handsErrorNorm.includes('messages_boot_not_stable') ||
-    handsErrorNorm.includes('thread_open_hydration_timeout');
+  const handsRoutingFailure = __deltaIsHandsRoutingFailure(handsErrorRaw);
+  const greetingAlreadySent = !!(handsOut && handsOut.greeting_already_sent === true);
+  const hasGreetingText = !!(handsOut && String(handsOut.greeting_text || '').trim());
+  const handsPartialProgress =
+    greetingAlreadySent ||
+    hasGreetingText ||
+    !!(handsOut && handsOut.link_collect_deferred === true) ||
+    !!(handsOut && handsOut.city_collect_deferred === true) ||
+    String(handsOut && handsOut.city_status || '').trim().toLowerCase() === 'collecting';
+  // Metadata contingency NUNCA engole falha de rota (wrong_thread / card / hydration).
   const handsMetadataFailure =
-    (
-      handsErrorNorm.includes('city_') ||
-      handsErrorNorm.includes('cidade') ||
-      handsErrorNorm.includes('item_link') ||
-      handsErrorNorm.includes('link') ||
-      handsErrorNorm.includes('metadata')
-    ) ||
-    handsRoutingFailure ||
-    !!(handsOut && handsOut.greeting_already_sent === true);
+    !handsRoutingFailure && (
+      (
+        handsErrorNorm.includes('city_') ||
+        handsErrorNorm.includes('cidade') ||
+        handsErrorNorm.includes('item_link') ||
+        handsErrorNorm.includes('link') ||
+        handsErrorNorm.includes('metadata')
+      ) ||
+      greetingAlreadySent
+    );
 
   if (!handsOut || handsOut.ok !== true) {
-    if (handsMetadataFailure) {
-      const fallbackClientName = String(
-        (handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) ||
-        DELTA_FALLBACK_CLIENT_NAME
-      ).trim() || DELTA_FALLBACK_CLIENT_NAME;
+    if (handsMetadataFailure && handsPartialProgress) {
+      const fallbackClientName =
+        __deltaNormalizeRealCustomerName(
+          handsOut && handsOut.client_name,
+          handsOut && handsOut.customer_name,
+          handsOut && handsOut.nome_cliente_limpo
+        ) || DELTA_FALLBACK_CLIENT_NAME;
       const fallbackLink =
         __deltaPickBestItemLink(
           handsOut && handsOut.link_anuncio,
@@ -17662,7 +17826,7 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
           queue_mode: 'capture_only',
           flow_stage: 'hands_metadata_contingency_applied',
           hands_error: handsErrorRaw || null,
-          hands_routing_contingency: handsRoutingFailure,
+          hands_routing_contingency: false,
           hands_failures: Number(st.handsFailures || 0) || 0,
         });
       } catch {}
@@ -17672,46 +17836,113 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
       st.updatedAt = Date.now();
       const handsError = String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300);
-      const isThreadCardNotFound = handsError === 'thread_card_not_found';
-      const retryCtl = isThreadCardNotFound
-        ? __deltaQueueThreadRetryOnDiskSecondary(st, { nome: n, threadKey: tk, retryReason: 'thread_card_not_found' })
-        : { queued: false, retryInMs: __deltaScheduleThreadTimer(st, { retry: true }), queueMode: 'memory' };
-      const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
-      const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
-      if (isThreadCardNotFound) {
+      const exhausted = st.handsFailures >= DELTA_HANDS_MAX_FAILURES;
+
+      if (exhausted) {
+        // Snapshot honesto: sem inventar saudação; fecha o ciclo pra não loop infinito.
+        const honestLink =
+          __deltaPickBestItemLink(
+            handsOut && handsOut.link_anuncio,
+            handsOut && handsOut.profile_url,
+            st.link_anuncio
+          ) || null;
+        const honestName =
+          __deltaNormalizeRealCustomerName(
+            handsOut && handsOut.client_name,
+            handsOut && handsOut.customer_name,
+            handsOut && handsOut.nome_cliente_limpo
+          ) || DELTA_FALLBACK_CLIENT_NAME;
+        const honestCityFields = __deltaResolveCityDispatchFields({
+          cidade: (handsOut && handsOut.cidade) || st.city,
+          city_source: (handsOut && handsOut.city_source) || st.city_source,
+          city_status: (handsOut && handsOut.city_status) || st.city_status || 'pending',
+        });
+        handsOut = {
+          ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
+          ok: true,
+          cidade: honestCityFields.city_status === 'collecting' ? null : (honestCityFields.city || DELTA_FALLBACK_CITY),
+          city_source: honestCityFields.city_source,
+          city_status: honestCityFields.city_status === 'collecting' ? 'pending' : honestCityFields.city_status,
+          link_anuncio: honestLink,
+          profile_url: honestLink,
+          client_name: honestName,
+          customer_name: honestName,
+          nome_cliente_limpo: honestName,
+          greeting_text: null,
+          hands_exhausted_honest_pending: true,
+          metadata_contingency_applied: false,
+          metadata_error: handsErrorRaw || null,
+        };
+        try {
+          __deltaAppendPendingJsonlSync({
+            event: 'lead_hands_exhausted_honest_pending',
+            server_id: readHostIdSync() || null,
+            account_login: n,
+            thread_key: tk,
+            texto_limpo: preMessages || '',
+            ...(handsOut.cidade ? { cidade: handsOut.cidade } : {}),
+            city_status: handsOut.city_status,
+            ...(honestLink ? { link_anuncio: honestLink } : {}),
+            client_name: honestName,
+            operacao_meta: 'hands_exhausted',
+            dispatch_ct: false,
+            queue_mode: 'capture_only',
+            flow_stage: 'hands_exhausted_honest_pending',
+            hands_error: handsError,
+            hands_failures: st.handsFailures,
+            routing_failure: handsRoutingFailure,
+          });
+        } catch {}
+        // cai no caminho de dispatch soberano abaixo
+      } else {
+        const retryCtl = __deltaQueueThreadRetryOnDiskSecondary(st, {
+          nome: n,
+          threadKey: tk,
+          retryReason: handsRoutingFailure
+            ? (handsErrorNorm.includes('thread_card_not_found') ? 'thread_card_not_found' : 'hands_routing_failure')
+            : 'hands_retry',
+          patient: !!handsRoutingFailure,
+        });
+        const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
+        const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
         try {
           __forensicEdgeEmit({
             account_login: n,
             thread_key: tk,
-            flow_stage: 'hands_thread_card_not_found_escaped',
+            flow_stage: handsRoutingFailure
+              ? 'hands_routing_retry_scheduled'
+              : 'hands_retry_scheduled',
             details: {
               retry_queue_mode: retryQueueMode,
               retry_in_ms: retryInMs,
               hands_failures: st.handsFailures,
-              queue_advanced: true
+              hands_error: handsError,
+              patient: !!handsRoutingFailure,
+              queue_advanced: true,
             }
           });
         } catch {}
+        __deltaAppendPendingJsonlSync({
+          event: 'lead_hands_retry_scheduled',
+          server_id: readHostIdSync() || null,
+          account_login: n,
+          thread_key: tk,
+          texto_limpo: preMessages || '',
+          cidade: st.city || null,
+          operacao_meta: handsRoutingFailure ? 'hands_routing_retry' : 'hands_retry',
+          dispatch_ct: false,
+          queue_mode: 'capture_only',
+          flow_stage: handsRoutingFailure ? 'hands_routing_retry' : 'hands_retry',
+          hands_error: handsError,
+          retry_in_ms: retryInMs,
+          hands_failures: st.handsFailures,
+          retry_queue_mode: retryQueueMode,
+          queue_advanced: true,
+          patient_routing_retry: !!handsRoutingFailure,
+        });
+        __deltaSchedulePersistThreadState();
+        return;
       }
-      __deltaAppendPendingJsonlSync({
-        event: 'lead_hands_retry_scheduled',
-        server_id: readHostIdSync() || null,
-        account_login: n,
-        thread_key: tk,
-        texto_limpo: preMessages || '',
-        cidade: st.city || null,
-        operacao_meta: 'hands_retry',
-        dispatch_ct: false,
-        queue_mode: 'capture_only',
-        flow_stage: 'hands_retry',
-        hands_error: handsError,
-        retry_in_ms: retryInMs,
-        hands_failures: st.handsFailures,
-        retry_queue_mode: retryQueueMode,
-        queue_advanced: isThreadCardNotFound ? true : undefined
-      });
-      __deltaSchedulePersistThreadState();
-      return;
     }
   }
 
@@ -17737,9 +17968,14 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
       handsOut && handsOut.profile_url,
       st.link_anuncio
     ) || null;
-  const nomeClienteLimpo = String((handsOut && (handsOut.nome_cliente_limpo || handsOut.client_name || handsOut.customer_name)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
-  const customerName = String((handsOut && (handsOut.customer_name || handsOut.client_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
-  const clientName = String((handsOut && (handsOut.client_name || handsOut.customer_name || handsOut.nome_cliente_limpo)) || '').trim() || DELTA_FALLBACK_CLIENT_NAME;
+  const realCustomerName = __deltaNormalizeRealCustomerName(
+    handsOut && handsOut.nome_cliente_limpo,
+    handsOut && handsOut.client_name,
+    handsOut && handsOut.customer_name
+  );
+  const nomeClienteLimpo = realCustomerName || DELTA_FALLBACK_CLIENT_NAME;
+  const customerName = realCustomerName || DELTA_FALLBACK_CLIENT_NAME;
+  const clientName = realCustomerName || DELTA_FALLBACK_CLIENT_NAME;
   const greetingTimestampMs = __deltaNormalizeTimestampMs(
     Number(
       (handsOut && (handsOut.greeting_sent_at || handsOut.greeting_ts || handsOut.greeting_timestamp_ms)) ||
@@ -17781,10 +18017,14 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   st.status = 'active';
   st.inFlight = false;
   st.handsFailures = 0;
+  st.handsCompletedAt = Date.now();
   st.lastDispatchAt = Date.now();
   st.updatedAt = Date.now();
   // Persiste ANTES do dispatch CT: telefone concurrent le o link do disco, nao inventa vazio.
   __deltaPersistThreadStateSync();
+  try {
+    __deltaMarkThreadActiveOnDiskSync(n, tk, { handsCompletedAt: st.handsCompletedAt });
+  } catch {}
 
   let dispatchPersistFailed = false;
   let queuedDispatchCount = 0;
@@ -17916,6 +18156,39 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     });
     if (!snapshotQueued) dispatchPersistFailed = true;
     else queuedDispatchCount += 1;
+  }
+
+  // Patch soberano pós-hands: garante CT recebe link/nome/cidade/saudação mesmo
+  // se o 1º ingest parcial chegou cedo (sem fallback inventado).
+  if (
+    !dispatchPersistFailed &&
+    (linkAnuncio || realCustomerName || cityStatus === 'resolved' || (handsOut && handsOut.greeting_text))
+  ) {
+    const sovereignQueued = __deltaAppendPendingJsonlSync({
+      event: 'lead_hands_sovereign_patch',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: '',
+      mensagens_cliente_concatenadas: '',
+      mensagens_cliente_qtd: 0,
+      ...(city && cityStatus !== 'collecting' ? { cidade: city } : {}),
+      city_status: cityStatus,
+      ...(citySource ? { city_source: citySource } : {}),
+      ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
+      client_name: clientName,
+      customer_name: customerName,
+      nome_cliente_limpo: nomeClienteLimpo,
+      operacao_meta: 'sovereign_patch',
+      dispatch_ct: true,
+      queue_mode: 'dispatch_ct',
+      flow_stage: 'new_chat_hands_sovereign_patch',
+      message_at: greetingTimestampMs || messageAt,
+      saudacao_enviada: !!(handsOut && handsOut.greeting_text),
+      saudacao_texto: handsOut && handsOut.greeting_text ? String(handsOut.greeting_text).trim() : null,
+      saudacao_timestamp_ms: handsOut && handsOut.greeting_text ? greetingTimestampMs : null,
+    });
+    if (sovereignQueued) queuedDispatchCount += 1;
   }
 
   if (dispatchPersistFailed) {
@@ -21088,7 +21361,8 @@ async function __deltaAttachCdpEar(nome, page) {
           const previousDiskStatus = String(diskStatus || '');
           const canReactivateByTimestamp = normalizedWindowTs > diskHighWatermark;
           if (canReactivateByTimestamp) {
-            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+            // Thread histórica reativada: já teve ciclo de vida — não rearmar hands.
+            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
             try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
             diskStatus = 'active';
             try {
@@ -21143,6 +21417,24 @@ async function __deltaAttachCdpEar(nome, page) {
           }
         }
         if (String(diskStatus || '').trim().toLowerCase() === 'active') {
+          // Active prematuro (sem hands) NÃO pode pular lead novo — demote e segue buffering.
+          if (!__deltaThreadHasHandsCompletion(diskRow, null)) {
+            try {
+              __deltaDemoteActiveWithoutHandsOnDiskSync(nome, threadKey);
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'active_without_hands_demoted',
+                details: {
+                  tag: 'FORENSIC_DOM_REVERSE',
+                  reason: 'disk_active_missing_hands_completion',
+                  op: op || null,
+                  text_preview: String(texto || '').slice(0, 220),
+                }
+              });
+            } catch {}
+            diskStatus = 'new_buffering';
+          } else {
           // Contrato de borda (thread active):
           // - insertMessage/upsertMessage: realtime imediato (ID Meta inédito já validado antes).
           // - updateThreadSnippet: nunca despacha ao CT (ruído de layout/hidratação).
@@ -21189,8 +21481,8 @@ async function __deltaAttachCdpEar(nome, page) {
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
             continue;
           }
-          // Trava de ciclo de vida: "active" em disco nunca pode rearmar timer/hands.
-          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+          // Trava de ciclo de vida: "active" com hands concluído nunca rearma timer/hands.
+          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
           __deltaAppendPendingJsonlSync({
             event: 'lead_chat_ativo_realtime',
             server_id: serverId || null,
@@ -21220,6 +21512,7 @@ async function __deltaAttachCdpEar(nome, page) {
           __deltaKickIngestLoop();
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
+          }
         }
         const st = __deltaGetOrCreateThreadState(nome, threadKey);
         if (__deltaIsKnownProcessedStatus(st.status)) {
@@ -21229,8 +21522,9 @@ async function __deltaAttachCdpEar(nome, page) {
           );
           if (normalizedWindowTs > stateHighWatermark) {
             st.status = 'active';
+            st.handsCompletedAt = Number(st.handsCompletedAt || 0) || Date.now();
             st.updatedAt = nowMs;
-            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+            try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true, handsCompletedAt: st.handsCompletedAt }); } catch {}
             try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
           } else {
             try {
@@ -21334,7 +21628,25 @@ async function __deltaAttachCdpEar(nome, page) {
         });
 
         if (st.status === 'active') {
-          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey); } catch {}
+          if (!__deltaThreadHasHandsCompletion(null, st)) {
+            st.status = 'new_buffering';
+            st.updatedAt = nowMs;
+            try {
+              __deltaDemoteActiveWithoutHandsOnDiskSync(nome, threadKey);
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: threadKey,
+                flow_stage: 'active_without_hands_demoted',
+                details: {
+                  tag: 'FORENSIC_DOM_REVERSE',
+                  reason: 'ram_active_missing_hands_completion',
+                  op: op || null,
+                }
+              });
+            } catch {}
+            // cai no armamento do timer de lead novo abaixo
+          } else {
+          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true, handsCompletedAt: st.handsCompletedAt }); } catch {}
           const stLink = __deltaPickBestItemLink(st.link_anuncio);
           const stCityStatus = __deltaCanonicalCityStatus(st.city_status, {
             hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
@@ -21374,6 +21686,7 @@ async function __deltaAttachCdpEar(nome, page) {
           __deltaKickIngestLoop();
           __deltaSchedulePersistThreadState();
           continue;
+          }
         }
 
         // Arquitetura 2 camadas (Gemini): novo lead NÃO arma timer em paralelo por thread.
