@@ -20673,6 +20673,12 @@ function __deltaIsFacebookSystemPromptLine(line) {
   // Ex.: "Miy está aguardando a sua resposta."
   if (/^.{1,160}?\s+est[aá]\s+aguardando\s+a\s+sua\s+resposta[\.\!\?]?$/i.test(t)) return true;
   if (/^.{1,160}?\s+is\s+waiting\s+for\s+your\s+response[\.\!\?]?$/i.test(t)) return true;
+  // Ex.: "valeria mudou a foto do grupo." / "Chay deu o nome Chay · Frete ao grupo."
+  if (/^.{1,160}?\s+mudou a foto do grupo[\.\!\?]?$/i.test(t)) return true;
+  if (/^.{1,160}?\s+deu o nome\s+.+\s+ao grupo[\.\!\?]?$/i.test(t)) return true;
+  if (/^.{1,160}?\s+changed the group photo[\.\!\?]?$/i.test(t)) return true;
+  if (/^.{1,160}?\s+named the group\s+.+$/i.test(t)) return true;
+  if (/^.{1,160}?\s+changed the group name to\s+.+$/i.test(t)) return true;
   return false;
 }
 
