@@ -4998,7 +4998,7 @@ const AUTO_CFG = {
 const ramPolicy = require('./ramPolicy.js');
 
 // RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: hostBaseMb + (reservePer8GbMb × nós), nós = ceil(totalGB/8) — ver ramPolicy.js + server_runtime_config.memory
+// - Operação normal: hostBaseMb + (reservePer8GbMb × nós), nós = ceil(totalGB/16) — ver ramPolicy.js + server_runtime_config.memory
 // - Durante provision (somente dono do lock): hostBaseMb + provisionSpikeMb
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);

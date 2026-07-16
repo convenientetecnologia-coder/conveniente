@@ -2,7 +2,7 @@
 // Política única de RAM (ultra enterprise)
 //
 // Regras:
-// - Operação normal: manter livre (hostBaseMb + reservePer8GbMb × nós), nós = ceil(GB/8)
+// - Operação normal: manter livre (hostBaseMb + reservePer8GbMb × nós), nós = ceil(GB/16)
 // - Provisão (pico cookies): manter livre (hostBaseMb + provisionSpikeMb)
 //   Valores default e limites: server_runtime_config.json → memory (dashboard Config Servidor).
 
@@ -18,11 +18,11 @@ function getTotalMemMB() {
   try { return mb(os.totalmem() / (1024 * 1024)); } catch { return 0; }
 }
 
-// Heurística atual do projeto: 1 node a cada 8GB (ceil)
+// Heurística atual do projeto: 1 node a cada 16GB (ceil)
 function calcNodesByTotalMemMB(totalMB) {
   const total = mb(totalMB);
   const gb = total / 1024;
-  const nodes = Math.max(1, Math.ceil(gb / 8));
+  const nodes = Math.max(1, Math.ceil(gb / 16));
   return nodes;
 }
 
