@@ -3158,6 +3158,7 @@ function logsAllowlist() {
     delta_deadletter_cursor: path.join(base, 'mensagens_pendentes.deadletter.cursor.json'),
     // Forense de parsing/rede do Delta (sem depender de logger.log).
     forensic_triagem: path.join(base, 'forensic_triagem.log'),
+    forensic_edge: path.join(base, 'forensic_edge.log'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),

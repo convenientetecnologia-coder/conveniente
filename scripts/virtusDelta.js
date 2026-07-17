@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-07-17-mp-thread-force-feed-v5";
+const VIRTUS_DELTA_BUILD = "2026-07-17-city-collect-bg-retry-v6";
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
 
@@ -4304,6 +4304,32 @@ async function openThreadAndExtractItemLink(
   return { ok: true, item_link: itemLink };
 }
 
+/** Falha terminal: sem link/runtime — não adianta retry de listing. */
+function __deltaIsTerminalCityCollectError(err) {
+  const s = String(err || "").trim().toLowerCase();
+  if (!s) return false;
+  return (
+    s === "city_collector_item_link_missing" ||
+    s === "item_link_missing" ||
+    s === "item_link_missing_after_deferred_recovery" ||
+    s === "delta_city_collector_unavailable" ||
+    s === "delta_city_collector_runtime_invalid"
+  );
+}
+
+/**
+ * Com item_link válido: timeout/nav/DOM miss são retryáveis.
+ * Pending só depois de esgotar rounds soberanos (ou erro terminal).
+ */
+function __deltaIsRetryableCityCollectError(err) {
+  return !__deltaIsTerminalCityCollectError(err);
+}
+
+/**
+ * Collector soberano: um único hard-cap (jobTimeoutMs dentro do deltaCityCollector).
+ * NÃO usar Promise.race externo aqui — isso gerava city_collect_reply_outer_timeout
+ * e abandonava trabalho ainda vivo na fila serial.
+ */
 async function collectCityFromItemLinkUsingGlobalCollector({
   itemLink,
   threadKey,
@@ -4315,11 +4341,7 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   if (typeof getDeltaCityCollector !== "function") {
     return { ok: false, error: "delta_city_collector_unavailable" };
   }
-  const outerCapMs = Math.max(
-    20_000,
-    Number(timeoutMs || 14_000) + 15_000
-  );
-  const work = (async () => {
+  try {
     const collector = await getDeltaCityCollector();
     if (!collector || typeof collector.collectCityFromItemLink !== "function") {
       return { ok: false, error: "delta_city_collector_runtime_invalid" };
@@ -4341,14 +4363,12 @@ async function collectCityFromItemLinkUsingGlobalCollector({
       session_cookies: sessionCookies,
     });
     return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
-  })();
-  return Promise.race([
-    work,
-    sleep(outerCapMs).then(() => ({
+  } catch (e) {
+    return {
       ok: false,
-      error: `delta_city_collector_outer_timeout_${outerCapMs}ms`,
-    })),
-  ]);
+      error: (e && e.message) ? String(e.message).slice(0, 220) : "delta_city_collector_exception",
+    };
+  }
 }
 
 function createSerialQueue() {
@@ -4603,6 +4623,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   let cityCollectSettledHandler = null;
   // Late-link recovery timers (VM sob pressão: reabre thread depois, sem travar saudação).
   const linkRecoveryTimers = new Map(); // threadKey -> Timeout
+  // City collect em background (com link): reply/hands NÃO matam o collector.
+  const cityCollectBgTimers = new Map(); // threadKey -> Timeout
+  const cityCollectBgInFlight = new Set(); // threadKey
   let lastCrossThreadSendAt = 0;
   let lastCrossThreadKey = "";
 
@@ -4614,6 +4637,263 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       try { clearTimeout(h); } catch (_) {}
       linkRecoveryTimers.delete(t);
     }
+  }
+
+  function clearCityCollectBgTimer(threadKey) {
+    const t = String(threadKey || "").trim();
+    if (!t) return;
+    const h = cityCollectBgTimers.get(t);
+    if (h) {
+      try { clearTimeout(h); } catch (_) {}
+      cityCollectBgTimers.delete(t);
+    }
+  }
+
+  /**
+   * Plano A soberano: com item_link válido, coleta cidade em background com N rounds.
+   * - Não bloqueia reply/hands.
+   * - Mantém city_status=collecting até resolved ou falha real (rounds esgotados / terminal).
+   * - Pending só no fim — nunca por outer-timeout burro do reply.
+   */
+  function scheduleBackgroundCityCollectFromLink({
+    threadKey,
+    itemLink,
+    customerName = null,
+    greetingText = null,
+    greetingSentAt = null,
+    cityCollectorTimeoutMs,
+    cityCollectorAttempts,
+    reason = "bg_city_collect",
+  } = {}) {
+    const t = String(threadKey || "").trim();
+    const link = String(itemLink || "").trim();
+    if (!t || !link || !running) return false;
+    if (cityCollectBgInFlight.has(t)) return false;
+
+    const st0 = greetingStateByThread.get(t) || null;
+    if (st0 && st0.cityStatus === "resolved" && st0.city) return false;
+
+    const maxRounds = Math.max(
+      2,
+      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_ROUNDS || 3) || 3)
+    );
+    const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
+    const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
+    const backoffMin = Math.max(
+      2000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_BACKOFF_MIN_MS || 4000) || 4000
+    );
+    const backoffMax = Math.max(
+      backoffMin,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_BACKOFF_MAX_MS || 9000) || 9000
+    );
+    const nomeClienteLimpo = String(customerName || "").trim() || null;
+
+    const settleToHandler = (payload) => {
+      const handler = typeof cityCollectSettledHandler === "function" ? cityCollectSettledHandler : null;
+      if (!handler) return Promise.resolve(null);
+      return Promise.resolve(handler(payload)).catch(() => {});
+    };
+
+    const markCollecting = () => {
+      const prior = greetingStateByThread.get(t) || null;
+      if (prior && prior.cityStatus === "resolved" && prior.city) return;
+      greetingStateByThread.set(t, {
+        sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now(),
+        greetingText: String(greetingText || (prior && prior.greetingText) || "").trim(),
+        itemLink: link,
+        city: null,
+        citySource: null,
+        cityStatus: "collecting",
+        linkStatus: "resolved",
+        cityCollectBgScheduled: true,
+        linkRecoveryScheduled: !!(prior && prior.linkRecoveryScheduled),
+      });
+    };
+
+    const finishInFlight = () => {
+      cityCollectBgInFlight.delete(t);
+      clearCityCollectBgTimer(t);
+    };
+
+    cityCollectBgInFlight.add(t);
+    markCollecting();
+
+    const runRound = (round) => {
+      if (!running) {
+        finishInFlight();
+        return;
+      }
+      clearCityCollectBgTimer(t);
+      const delayMs = round <= 1 ? 0 : randomBetween(backoffMin, backoffMax);
+      const timer = setTimeout(() => {
+        cityCollectBgTimers.delete(t);
+        (async () => {
+          try {
+            if (!running) return;
+            const stNow = greetingStateByThread.get(t) || null;
+            if (stNow && stNow.cityStatus === "resolved" && stNow.city) return;
+
+            markCollecting();
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                flow_stage: "city_collect_bg_attempt",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  reason: String(reason || "bg_city_collect").slice(0, 80),
+                  round,
+                  rounds_max: maxRounds,
+                  item_link: link,
+                },
+              });
+            } catch (_) {}
+
+            const cityOut = await collectCityFromItemLinkUsingGlobalCollector({
+              itemLink: link,
+              threadKey: t,
+              accountLogin: ACCOUNT_LOGIN,
+              timeoutMs: collectorTimeout,
+              attempts: collectorAttempts,
+              page,
+            }).catch((e) => ({
+              ok: false,
+              error: (e && e.message) ? String(e.message) : "city_collect_bg_exception",
+            }));
+
+            const stAfter = greetingStateByThread.get(t) || null;
+            if (stAfter && stAfter.cityStatus === "resolved" && stAfter.city) return;
+
+            const lateCity = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
+            if (lateCity) {
+              const lateSource =
+                String((cityOut && cityOut.city_source) || "collector_listing_page").trim() ||
+                "collector_listing_page";
+              greetingStateByThread.set(t, {
+                sentAt: Number((stAfter && stAfter.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+                greetingText: String((stAfter && stAfter.greetingText) || greetingText || "").trim(),
+                itemLink: link,
+                city: lateCity,
+                citySource: lateSource,
+                cityStatus: "resolved",
+                linkStatus: "resolved",
+                cityCollectBgScheduled: false,
+                linkRecoveryScheduled: false,
+              });
+              try {
+                __forensicEdgeEmit({
+                  account_login: ACCOUNT_LOGIN,
+                  thread_key: t,
+                  flow_stage: "city_collect_bg_resolved",
+                  details: {
+                    tag: "FORENSIC_DOM_REVERSE",
+                    reason: String(reason || "").slice(0, 80),
+                    round,
+                    city_clean: lateCity,
+                    city_source: lateSource,
+                    item_link: link,
+                  },
+                });
+              } catch (_) {}
+              await settleToHandler({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                item_link: link,
+                cidade: lateCity,
+                city_source: lateSource,
+                city_status: "resolved",
+                cityOut: cityOut && typeof cityOut === "object" ? cityOut : null,
+                customer_name: nomeClienteLimpo,
+                client_name: nomeClienteLimpo,
+                nome_cliente_limpo: nomeClienteLimpo,
+              });
+              return;
+            }
+
+            const err =
+              String((cityOut && cityOut.error) || "city_collect_failed").trim() ||
+              "city_collect_failed";
+            const canRetry =
+              __deltaIsRetryableCityCollectError(err) &&
+              round < maxRounds;
+
+            if (canRetry) {
+              try {
+                __forensicEdgeEmit({
+                  account_login: ACCOUNT_LOGIN,
+                  thread_key: t,
+                  flow_stage: "city_collect_bg_retry",
+                  details: {
+                    tag: "FORENSIC_DOM_REVERSE",
+                    reason: String(reason || "").slice(0, 80),
+                    round,
+                    rounds_max: maxRounds,
+                    collector_error: err.slice(0, 220),
+                    item_link: link,
+                  },
+                });
+              } catch (_) {}
+              runRound(round + 1);
+              return;
+            }
+
+            greetingStateByThread.set(t, {
+              sentAt: Number((stAfter && stAfter.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+              greetingText: String((stAfter && stAfter.greetingText) || greetingText || "").trim(),
+              itemLink: link,
+              city: null,
+              citySource: err,
+              cityStatus: "pending",
+              linkStatus: "resolved",
+              cityCollectBgScheduled: false,
+              linkRecoveryScheduled: false,
+            });
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                flow_stage: "city_collect_bg_pending",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  reason: String(reason || "").slice(0, 80),
+                  round,
+                  rounds_max: maxRounds,
+                  collector_error: err.slice(0, 220),
+                  item_link: link,
+                  terminal: __deltaIsTerminalCityCollectError(err),
+                },
+              });
+            } catch (_) {}
+            await settleToHandler({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              item_link: link,
+              cidade: null,
+              city_source: err,
+              city_status: "pending",
+              cityOut: cityOut && typeof cityOut === "object"
+                ? cityOut
+                : { ok: false, error: err },
+              customer_name: nomeClienteLimpo,
+              client_name: nomeClienteLimpo,
+              nome_cliente_limpo: nomeClienteLimpo,
+            });
+          } finally {
+            // Só libera in-flight se não houver próximo round agendado.
+            if (!cityCollectBgTimers.has(t)) {
+              cityCollectBgInFlight.delete(t);
+            }
+          }
+        })().catch(() => {
+          cityCollectBgInFlight.delete(t);
+        });
+      }, delayMs);
+      cityCollectBgTimers.set(t, timer);
+      return true;
+    };
+
+    return runRound(1);
   }
 
   function scheduleDeferredLinkAndCityRecovery({
@@ -4741,43 +5021,35 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             return;
           }
 
-          const cityOut = await collectCityFromItemLinkUsingGlobalCollector({
-            itemLink: recovered,
-            threadKey: t,
-            accountLogin: ACCOUNT_LOGIN,
-            timeoutMs: collectorTimeout,
-            attempts: collectorAttempts,
-            page,
-          }).catch((e) => ({
-            ok: false,
-            error: (e && e.message) ? String(e.message) : "city_collect_deferred_link_exception",
-          }));
-
-          const lateCity = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
-          const lateSource = lateCity
-            ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
-            : (String((cityOut && cityOut.error) || "city_collect_failed").trim() || "city_collect_failed");
-          const lateStatus = lateCity ? "resolved" : "pending";
-
+          // Link recuperado: patch collecting + cidade em background com retry soberano.
+          // NÃO fazer collect síncrono aqui (engessa hands / gera pending por timeout).
           greetingStateByThread.set(t, {
             sentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()),
             greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
             itemLink: recovered,
-            city: lateCity,
-            citySource: lateSource,
-            cityStatus: lateStatus,
+            city: null,
+            citySource: null,
+            cityStatus: "collecting",
             linkStatus: "resolved",
             linkRecoveryScheduled: false,
           });
-
           await settleToHandler({
             account_login: ACCOUNT_LOGIN,
             thread_key: t,
             item_link: recovered,
-            cidade: lateCity,
-            city_source: lateSource,
-            city_status: lateStatus,
-            cityOut: cityOut && typeof cityOut === "object" ? cityOut : null,
+            cidade: null,
+            city_source: null,
+            city_status: "collecting",
+            cityOut: { ok: true, deferred: true },
+          });
+          scheduleBackgroundCityCollectFromLink({
+            threadKey: t,
+            itemLink: recovered,
+            greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+            greetingSentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+            cityCollectorTimeoutMs: collectorTimeout,
+            cityCollectorAttempts: collectorAttempts,
+            reason: "deferred_link_hit",
           });
         }).catch(() => {});
       }, randomBetween(deferMin, deferMax));
@@ -5645,51 +5917,85 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       return { ok: true, deferred: true, name: nomeClienteLimpo };
     }
 
-    // Collector com teto duro — nunca trava o fluxo se o browser de raspagem estiver morto.
-    const cityOut = await Promise.race([
-      collectCityFromItemLinkUsingGlobalCollector({
-        itemLink,
-        threadKey: t,
-        accountLogin: ACCOUNT_LOGIN,
-        timeoutMs: cityCollectorTimeoutMs,
-        attempts: cityCollectorAttempts,
-        page,
-      }).catch((e) => ({
-        ok: false,
-        error: (e && e.message) ? String(e.message) : "city_collect_reply_exception",
-      })),
-      sleep(Math.max(cityCollectorTimeoutMs + 8_000, 20_000)).then(() => ({
-        ok: false,
-        error: "city_collect_reply_outer_timeout",
-      })),
-    ]);
-
-    let cityCandidate = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
-    let citySource = cityCandidate
-      ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
-      : null;
-    if (!cityCandidate) {
-      try {
-        const domCity = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
-        if (domCity) {
-          cityCandidate = domCity;
-          citySource = "dom_live_fallback";
-        }
-      } catch (_) {}
+    // Link OK: reply NÃO espera / NÃO mata o collector.
+    // Patch imediato collecting + link/nome; cidade resolve em background com retry.
+    // (Bug forense 4/4: city_collect_reply_outer_timeout → pending com link válido.)
+    if (prior && prior.cityStatus === "resolved" && prior.city) {
+      await settleToHandler({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        item_link: itemLink,
+        customer_name: nomeClienteLimpo,
+        client_name: nomeClienteLimpo,
+        nome_cliente_limpo: nomeClienteLimpo,
+        cidade: prior.city,
+        city_source: prior.citySource || "collector_listing_page",
+        city_status: "resolved",
+      });
+      return {
+        ok: true,
+        cidade: prior.city,
+        city_status: "resolved",
+        link_anuncio: itemLink,
+        nome_cliente_limpo: nomeClienteLimpo,
+      };
     }
-    // Falha do collector → pending (não collecting eterno). Pedido/AB podem reagir.
-    const cityStatus = cityCandidate ? "resolved" : "pending";
+
+    // Fast-path: se o DOM do Messenger já tem cidade, resolve sem fila.
+    let cityCandidate = null;
+    let citySource = null;
+    try {
+      const domCity = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
+      if (domCity) {
+        cityCandidate = domCity;
+        citySource = "dom_live_fallback";
+      }
+    } catch (_) {}
+
+    if (cityCandidate) {
+      greetingStateByThread.set(t, {
+        sentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
+        greetingText: String((prior && prior.greetingText) || "").trim(),
+        itemLink,
+        city: cityCandidate,
+        citySource,
+        cityStatus: "resolved",
+        linkStatus: "resolved",
+      });
+      await settleToHandler({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        item_link: itemLink,
+        customer_name: nomeClienteLimpo,
+        client_name: nomeClienteLimpo,
+        nome_cliente_limpo: nomeClienteLimpo,
+        cidade: cityCandidate,
+        city_source: citySource,
+        city_status: "resolved",
+      });
+      try {
+        logInfo(
+          `[virtusDelta][reply_meta] thread_key=${t} city=${cityCandidate} link=sim name=${nomeClienteLimpo || "-"} mode=dom_fast`
+        );
+      } catch (_) {}
+      return {
+        ok: true,
+        cidade: cityCandidate,
+        city_status: "resolved",
+        link_anuncio: itemLink,
+        nome_cliente_limpo: nomeClienteLimpo,
+      };
+    }
 
     greetingStateByThread.set(t, {
       sentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
       greetingText: String((prior && prior.greetingText) || "").trim(),
       itemLink,
-      city: cityCandidate,
-      citySource,
-      cityStatus,
+      city: null,
+      citySource: null,
+      cityStatus: "collecting",
       linkStatus: "resolved",
     });
-
     await settleToHandler({
       account_login: ACCOUNT_LOGIN,
       thread_key: t,
@@ -5697,24 +6003,45 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       customer_name: nomeClienteLimpo,
       client_name: nomeClienteLimpo,
       nome_cliente_limpo: nomeClienteLimpo,
-      cidade: cityCandidate,
-      city_source: citySource,
-      city_status: cityStatus,
-      cityOut,
+      cidade: null,
+      city_source: null,
+      city_status: "collecting",
     });
-
+    scheduleBackgroundCityCollectFromLink({
+      threadKey: t,
+      itemLink,
+      customerName: nomeClienteLimpo,
+      greetingText: String((prior && prior.greetingText) || "").trim(),
+      greetingSentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
+      cityCollectorTimeoutMs,
+      cityCollectorAttempts,
+      reason: "reply_meta_bg",
+    });
+    try {
+      __forensicEdgeEmit({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        flow_stage: "city_collect_reply_deferred_bg",
+        details: {
+          tag: "FORENSIC_DOM_REVERSE",
+          item_link: itemLink,
+          city_status: "collecting",
+        },
+      });
+    } catch (_) {}
     try {
       logInfo(
-        `[virtusDelta][reply_meta] thread_key=${t} city=${cityCandidate || "-"} link=${itemLink ? "sim" : "nao"} name=${nomeClienteLimpo || "-"}`
+        `[virtusDelta][reply_meta] thread_key=${t} city=- link=sim name=${nomeClienteLimpo || "-"} mode=bg_collect`
       );
     } catch (_) {}
 
     return {
       ok: true,
-      cidade: cityCandidate,
-      city_status: cityStatus,
+      cidade: null,
+      city_status: "collecting",
       link_anuncio: itemLink,
       nome_cliente_limpo: nomeClienteLimpo,
+      city_collect_deferred: true,
     };
   }
 
@@ -6214,32 +6541,109 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         if (priorState && priorState.cityStatus === "resolved" && priorState.city) {
           return null;
         }
+        const linkNow = itemLinkFinal || (priorState && priorState.itemLink) || null;
         const lateCity = String((lateOut && lateOut.ok && lateOut.cidade) || "").trim() || null;
-        const lateSource = lateCity
-          ? (String((lateOut && lateOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
-          : (String((lateOut && lateOut.error) || "city_collect_failed").trim() || "city_collect_failed");
-        const lateStatus = lateCity ? "resolved" : "pending";
+        if (lateCity) {
+          const lateSource =
+            String((lateOut && lateOut.city_source) || "collector_listing_page").trim() ||
+            "collector_listing_page";
+          greetingStateByThread.set(t, {
+            sentAt: Number((priorState && priorState.sentAt) || greetingSentAt || Date.now()),
+            greetingText: String((priorState && priorState.greetingText) || greetingText || "").trim(),
+            itemLink: linkNow,
+            city: lateCity,
+            citySource: lateSource,
+            cityStatus: "resolved",
+          });
+          try {
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              flow_stage: "city_collect_deferred_resolved",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                city_status: "resolved",
+                city_clean: lateCity,
+                city_source: lateSource,
+                item_link: linkNow || null,
+              },
+            });
+          } catch (_) {}
+          const handler = typeof cityCollectSettledHandler === "function"
+            ? cityCollectSettledHandler
+            : null;
+          if (!handler) return null;
+          return Promise.resolve(
+            handler({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              item_link: linkNow,
+              cidade: lateCity,
+              city_source: lateSource,
+              city_status: "resolved",
+              cityOut: lateOut && typeof lateOut === "object" ? lateOut : null,
+              customer_name: nomeClienteLimpo || null,
+              client_name: nomeClienteLimpo || null,
+              nome_cliente_limpo: nomeClienteLimpo || null,
+            })
+          ).catch(() => {});
+        }
+
+        const err =
+          String((lateOut && lateOut.error) || "city_collect_failed").trim() ||
+          "city_collect_failed";
+        // Com link válido: não pending ainda — background retry soberano.
+        if (
+          linkNow &&
+          (__deltaIsRetryableCityCollectError(err) || cityCollectBgInFlight.has(t))
+        ) {
+          try {
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              flow_stage: "city_collect_deferred_bg_handoff",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                city_status: "collecting",
+                collector_error: err.slice(0, 220),
+                item_link: linkNow,
+                bg_inflight: cityCollectBgInFlight.has(t),
+              },
+            });
+          } catch (_) {}
+          scheduleBackgroundCityCollectFromLink({
+            threadKey: t,
+            itemLink: linkNow,
+            customerName: nomeClienteLimpo || null,
+            greetingText: String((priorState && priorState.greetingText) || greetingText || "").trim(),
+            greetingSentAt: Number((priorState && priorState.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+            cityCollectorTimeoutMs,
+            cityCollectorAttempts,
+            reason: "hands_deferred_miss",
+          });
+          return null;
+        }
+
         greetingStateByThread.set(t, {
           sentAt: Number((priorState && priorState.sentAt) || greetingSentAt || Date.now()),
           greetingText: String((priorState && priorState.greetingText) || greetingText || "").trim(),
-          itemLink: itemLinkFinal || (priorState && priorState.itemLink) || null,
-          city: lateCity,
-          citySource: lateSource,
-          cityStatus: lateStatus,
+          itemLink: linkNow,
+          city: null,
+          citySource: err,
+          cityStatus: "pending",
         });
         try {
           __forensicEdgeEmit({
             account_login: ACCOUNT_LOGIN,
             thread_key: t,
-            flow_stage: lateCity ? "city_collect_deferred_resolved" : "city_collect_deferred_pending",
+            flow_stage: "city_collect_deferred_pending",
             details: {
               tag: "FORENSIC_DOM_REVERSE",
-              city_status: lateStatus,
-              city_clean: lateCity,
-              city_source: lateSource,
-              item_link: itemLinkFinal || null,
-              collector_error: lateCity ? null : String((lateOut && lateOut.error) || "").slice(0, 220) || null,
-            }
+              city_status: "pending",
+              city_source: err,
+              item_link: linkNow || null,
+              collector_error: err.slice(0, 220),
+            },
           });
         } catch (_) {}
         const handler = typeof cityCollectSettledHandler === "function"
@@ -6250,11 +6654,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           handler({
             account_login: ACCOUNT_LOGIN,
             thread_key: t,
-            item_link: itemLinkFinal,
-            cidade: lateCity,
-            city_source: lateSource,
-            city_status: lateStatus,
-            cityOut: lateOut && typeof lateOut === "object" ? lateOut : null,
+            item_link: linkNow,
+            cidade: null,
+            city_source: err,
+            city_status: "pending",
+            cityOut: lateOut && typeof lateOut === "object" ? lateOut : { ok: false, error: err },
             customer_name: nomeClienteLimpo || null,
             client_name: nomeClienteLimpo || null,
             nome_cliente_limpo: nomeClienteLimpo || null,

@@ -67,6 +67,9 @@ function logTriagemDomCityCommunion(ctx = {}) {
     tag: "TRIAGEM_DOM",
     msg: "city_communion_processed",
     ctx: {
+      account_login: String((ctx && ctx.account_login) || "").slice(0, 80) || null,
+      thread_key: String((ctx && ctx.thread_key) || "").slice(0, 80) || null,
+      item_link: String((ctx && ctx.item_link) || "").slice(0, 300) || null,
       block_a: String((ctx && ctx.block_a) || "").slice(0, 400),
       block_b: String((ctx && ctx.block_b) || "").slice(0, 400),
       final_extracted: (ctx && ctx.final_extracted) || null,
@@ -529,7 +532,7 @@ function collectGeoHitsFromBlob(raw) {
  * Ex: A="... em Rio Branco, AC ... seminovo Rio Branco, AC" + B=igual
  *     → identico = Rio Branco (AC) (vem do em/in, nao do seminovo*)
  */
-function resolveDualIntersectionCommunion(candidates) {
+function resolveDualIntersectionCommunion(candidates, forensicCtx = null) {
   const list = Array.isArray(candidates) ? candidates : [];
   const blockA = list.filter((c) => /^anunciado_/i.test(String((c && c.source) || "")));
   const blockB = list.filter((c) => /^loc_/i.test(String((c && c.source) || "")));
@@ -537,6 +540,7 @@ function resolveDualIntersectionCommunion(candidates) {
 
   const blockAText = blockA.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
   const blockBText = blockB.map((c) => String((c && c.value) || "").trim()).filter(Boolean).join(" | ");
+  const forensic = forensicCtx && typeof forensicCtx === "object" ? forensicCtx : {};
 
   let finalExtracted = null;
 
@@ -597,6 +601,9 @@ function resolveDualIntersectionCommunion(candidates) {
 
   try {
     logTriagemDomCityCommunion({
+      account_login: forensic.account_login || null,
+      thread_key: forensic.thread_key || null,
+      item_link: forensic.item_link || null,
       block_a: blockAText,
       block_b: blockBText,
       final_extracted: finalExtracted,
@@ -798,11 +805,19 @@ async function extractCityFromListingPage(page, {
   maxAttempts = 12,
   retryIntervalMs = 250,
   scanLimit = 320,
+  thread_key = null,
+  account_login = null,
+  item_link = null,
 } = {}) {
   if (!page) return { cidade: null, error: "city_page_missing" };
   const attempts = Math.max(1, Math.min(20, Number(maxAttempts || 12) || 12));
   const intervalMs = Math.max(80, Math.min(700, Number(retryIntervalMs || 250) || 250));
   const nodeLimit = Math.max(80, Math.min(500, Number(scanLimit || 320) || 320));
+  const forensic = {
+    thread_key: String(thread_key || "").slice(0, 80) || null,
+    account_login: String(account_login || "").slice(0, 80) || null,
+    item_link: String(item_link || "").slice(0, 300) || null,
+  };
   let lastDiag = null;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -883,12 +898,13 @@ async function extractCityFromListingPage(page, {
     const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
 
     // 1) Intersecao de comunhao identica Anunciado (A) ∩ Localizacao (B)
-    const communion = resolveDualIntersectionCommunion(candidates);
+    const communion = resolveDualIntersectionCommunion(candidates, forensic);
     if (communion && communion.cidade) {
       try {
         log(
           `comunhao dual cidade="${communion.cidade}" attempt=${attempt}` +
-          ` login_wall=${payload.loginWall ? "sim" : "nao"}`
+          ` login_wall=${payload.loginWall ? "sim" : "nao"}` +
+          ` thread=${forensic.thread_key || "n/a"}`
         );
       } catch (_) {}
       return {
@@ -904,6 +920,7 @@ async function extractCityFromListingPage(page, {
     if (fromBodyAnchor) {
       try {
         logTriagemDomCityCommunion({
+          ...forensic,
           block_a: "",
           block_b: String(payload.bodyText || "").slice(0, 400),
           final_extracted: fromBodyAnchor,
@@ -930,6 +947,7 @@ async function extractCityFromListingPage(page, {
       }
       try {
         logTriagemDomCityCommunion({
+          ...forensic,
           block_a: /^anunciado_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : "",
           block_b: /^loc_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : String(cand.value || ""),
           final_extracted: v,
@@ -1544,10 +1562,16 @@ async function createCollectorRuntime() {
           await waitForListingHints(p, Math.min(4000, Math.max(1800, Math.floor(navTimeoutMs / 4))));
 
           // Lê a cidade mesmo com o modal de login na frente (DOM do anúncio fica atrás).
+          const listingForensic = {
+            thread_key: tk,
+            account_login: account,
+            item_link: itemLink,
+          };
           let extracted = await extractCityFromListingPage(p, {
             maxAttempts: 4,
             retryIntervalMs: 350,
             scanLimit: 320,
+            ...listingForensic,
           });
 
           if (!extracted || !extracted.cidade) {
@@ -1557,6 +1581,7 @@ async function createCollectorRuntime() {
               maxAttempts: 12,
               retryIntervalMs: 500,
               scanLimit: 320,
+              ...listingForensic,
             });
           }
           if (!extracted || !extracted.cidade) {
@@ -1567,6 +1592,7 @@ async function createCollectorRuntime() {
               maxAttempts: 8,
               retryIntervalMs: 400,
               scanLimit: 320,
+              ...listingForensic,
             });
           }
           lastExtracted = extracted;
