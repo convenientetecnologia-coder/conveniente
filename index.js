@@ -1530,7 +1530,12 @@ function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_respost
 }
 
 let __edgeDeltaReplyPumpInFlight = false;
+let __edgeDeltaReplyPumpStartedAt = 0;
 let __edgeDeltaReplyPumpBackoffMs = 500;
+const __EDGE_DELTA_REPLY_PUMP_STUCK_MS = Math.max(
+  60_000,
+  Math.min(10 * 60_000, Number(process.env.EDGE_DELTA_REPLY_PUMP_STUCK_MS || 210_000) || 210_000)
+);
 
 function __edgeResetDeltaReplyPumpBackoff() {
   __edgeDeltaReplyPumpBackoffMs = 500;
@@ -1544,6 +1549,48 @@ function __edgeIncreaseDeltaReplyPumpBackoff() {
 function __edgeScheduleDeltaReplyPumpRetry() {
   const delay = Math.min(60_000, Math.max(250, Number(__edgeDeltaReplyPumpBackoffMs || 500) || 500));
   try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, delay).unref?.(); } catch {}
+}
+
+function __edgeIsProfileRuntimeReadySync(nome) {
+  const target = String(nome || '').trim();
+  if (!target) return false;
+  try {
+    const st = __readJsonFileSafe(path.join(__dirname, 'dados', 'status.json'));
+    const perfis = (st && Array.isArray(st.perfis)) ? st.perfis : [];
+    const p = perfis.find((x) => String(x && x.nome || '').trim() === target);
+    if (!p) return false;
+    // Conta fechada/offline: não queimar 180s de IPC — refileira e segue a esteira.
+    return !!(p.active || p.trabalhando || p.virtusOnline);
+  } catch {
+    return true; // fail-open: tenta IPC
+  }
+}
+
+function __edgeClampDeltaReplyCursorToFileSizeSync(size) {
+  const fileSize = Math.max(0, Number(size || 0) || 0);
+  const cursor = __edgeReadDeltaReplyCursorSync();
+  const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+  if (offset <= fileSize) return { offset, clamped: false, fileSize };
+  __edgeWriteDeltaReplyCursorSync(0);
+  try {
+    logger.error(
+      `🔴 [OUTBOX] cursor_out_of_range reset offset=${offset} size=${fileSize} -> 0`
+    );
+  } catch {}
+  try {
+    __forensicEdgeEmit({
+      account_login: null,
+      thread_key: null,
+      flow_stage: 'reverse_command_bus',
+      details: {
+        stage: 'pump_cursor_clamped',
+        old_offset: offset,
+        file_size: fileSize,
+        new_offset: 0
+      }
+    });
+  } catch {}
+  return { offset: 0, clamped: true, fileSize };
 }
 
 function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetry = true } = {}) {
@@ -1572,12 +1619,38 @@ function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetr
 }
 
 function __edgeKickDeltaReplyPump() {
+  try {
+    if (__edgeDeltaReplyPumpInFlight) {
+      const startedAt = Number(__edgeDeltaReplyPumpStartedAt || 0) || 0;
+      const ageMs = startedAt ? (Date.now() - startedAt) : 0;
+      if (startedAt && ageMs >= __EDGE_DELTA_REPLY_PUMP_STUCK_MS) {
+        try {
+          logger.error(
+            `🔴 [OUTBOX] pump_stuck_force_unlock ageMs=${ageMs} thresholdMs=${__EDGE_DELTA_REPLY_PUMP_STUCK_MS}`
+          );
+        } catch {}
+        try {
+          __forensicEdgeEmit({
+            account_login: null,
+            thread_key: null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'pump_stuck_force_unlock', age_ms: ageMs, threshold_ms: __EDGE_DELTA_REPLY_PUMP_STUCK_MS }
+          });
+        } catch {}
+        __edgeDeltaReplyPumpInFlight = false;
+        __edgeDeltaReplyPumpStartedAt = 0;
+      } else {
+        return;
+      }
+    }
+  } catch {}
   try { setTimeout(() => { __edgeRunDeltaReplyPump().catch(() => {}); }, 0).unref?.(); } catch {}
 }
 
 async function __edgeRunDeltaReplyPump() {
   if (__edgeDeltaReplyPumpInFlight) return;
   __edgeDeltaReplyPumpInFlight = true;
+  __edgeDeltaReplyPumpStartedAt = Date.now();
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
     const __edgeDeferredOnceInRun = new Set();
@@ -1597,14 +1670,13 @@ async function __edgeRunDeltaReplyPump() {
     };
     while (true) {
       if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
-      const cursor = __edgeReadDeltaReplyCursorSync();
-      const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
-
       let fd = null;
       try {
         fd = fs.openSync(EDGE_DELTA_REPLY_OUTBOX_PATH, 'r');
         const stat = fs.fstatSync(fd);
         const size = Number(stat && stat.size || 0) || 0;
+        const clamped = __edgeClampDeltaReplyCursorToFileSizeSync(size);
+        const offset = Math.max(0, Number(clamped.offset || 0) || 0);
         if (offset >= size) break;
 
         // Ler um chunk e capturar a primeira linha completa
@@ -1629,6 +1701,34 @@ async function __edgeRunDeltaReplyPump() {
         const cmdId = String(rec.id || '').trim() || __edgeComputeCmdIdFallback(rec);
         if (__edgeHasAckSync(cmdId)) {
           __edgeWriteDeltaReplyCursorSync(nextOffset);
+          continue;
+        }
+
+        const accountNome = String(rec.nome || '').trim();
+        if (accountNome && !__edgeIsProfileRuntimeReadySync(accountNome)) {
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'profile_runtime_not_ready',
+            error: 'profile_inactive_or_offline',
+            burnRetry: false
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          __forensicEdgeEmit({
+            account_login: accountNome || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'ipc_dispatch_deferred',
+              cmd_id: cmdId,
+              reason: 'profile_runtime_not_ready'
+            }
+          });
+          try {
+            logger.warn(
+              `🟠 [OUTBOX] Conta offline/fechada — refileira sem IPC nome=${accountNome} chat=${String(rec.thread_key || '-')}`
+            );
+          } catch {}
+          // Não trava a esteira: segue para o próximo item (ex.: ponta_grossa aberta).
           continue;
         }
 
@@ -1896,6 +1996,7 @@ async function __edgeRunDeltaReplyPump() {
     }
   } finally {
     __edgeDeltaReplyPumpInFlight = false;
+    __edgeDeltaReplyPumpStartedAt = 0;
   }
 }
 
@@ -2038,6 +2139,44 @@ app.post('/api/infra/command-bus', async (req, res) => {
           ok: true,
           status: 'received_by_edge'
         };
+        continue;
+      }
+
+      if (t === 'delta_reply_outbox_repair') {
+        try {
+          __edgeEnsureDeltaReplyOutboxDirsSync();
+          let fileSize = 0;
+          try {
+            if (fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) {
+              fileSize = Number(fs.statSync(EDGE_DELTA_REPLY_OUTBOX_PATH).size || 0) || 0;
+            }
+          } catch {}
+          const before = __edgeReadDeltaReplyCursorSync();
+          const forceZero = !!(cmd && (cmd.force_zero === true || (cmd.data && cmd.data.force_zero === true)));
+          const clamped = forceZero
+            ? (__edgeWriteDeltaReplyCursorSync(0), { offset: 0, clamped: true, fileSize })
+            : __edgeClampDeltaReplyCursorToFileSizeSync(fileSize);
+          __edgeDeltaReplyPumpInFlight = false;
+          __edgeDeltaReplyPumpStartedAt = 0;
+          __edgeKickDeltaReplyPump();
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'delta_reply_outbox_repair',
+            ok: true,
+            before_offset: Number(before && before.offset || 0) || 0,
+            after_offset: Number(clamped && clamped.offset || 0) || 0,
+            file_size: fileSize,
+            clamped: !!(clamped && clamped.clamped) || forceZero,
+            pump_kicked: true
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'delta_reply_outbox_repair',
+            ok: false,
+            error: e && e.message ? String(e.message) : String(e)
+          };
+        }
         continue;
       }
 
