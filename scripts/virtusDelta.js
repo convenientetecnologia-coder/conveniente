@@ -536,10 +536,11 @@ const NEW_CHAT_WARMUP_DELAY = envMs(
   30_000,
   90_000
 );
+/** Tempo de “digitação” entre um reply e outro na fila de mãos (abre chat → espera → envia). */
 const CROSS_THREAD_SEND_GAP = envMs(
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MIN",
   "VIRTUS_DELTA_CROSS_THREAD_GAP_MS_MAX",
-  2_000,
+  3_000,
   10_000
 );
 
@@ -5135,6 +5136,137 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     return { waitedMs: remainMs, delayMs, elapsedMs: elapsed };
   }
 
+  /**
+   * Após reply do CT (IA): thread já aberta — coleta nome/link/cidade (via dupla)
+   * e patcha o CT. Não inventa fallback fraco; se não veio, agenda recovery.
+   */
+  async function collectMetadataAfterCtReply(threadKey, sendOut) {
+    const t = String(threadKey || "").trim();
+    if (!t || !running) return { ok: false, error: "not_ready" };
+    const prior = greetingStateByThread.get(t) || null;
+    if (prior && prior.cityStatus === "resolved" && prior.city && prior.itemLink) {
+      return { ok: true, skipped: "already_resolved" };
+    }
+
+    const cityCollectorTimeoutMs = Math.max(
+      6_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 14_000) || 14_000
+    );
+    const cityCollectorAttempts = Math.max(
+      1,
+      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_ATTEMPTS || 3) || 3)
+    );
+    const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
+    const linkReadyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
+
+    let itemLink = String((sendOut && sendOut.item_link) || (prior && prior.itemLink) || "").trim() || null;
+    if (!itemLink) {
+      try {
+        itemLink = await extractMarketplaceItemLinkWithRetry(page, {
+          attempts: itemLinkAttempts,
+          readinessTimeoutMs: linkReadyMs,
+          forensicAccountLogin: ACCOUNT_LOGIN,
+          threadKey: t,
+        });
+      } catch (_) {
+        itemLink = null;
+      }
+    }
+    itemLink = String(itemLink || "").trim() || null;
+
+    let nomeClienteLimpo = null;
+    try {
+      nomeClienteLimpo = String(await extractLeadClientNameFromFeedDom(page) || "").trim() || null;
+    } catch (_) {
+      nomeClienteLimpo = null;
+    }
+
+    const settleToHandler = (payload) => {
+      const handler = typeof cityCollectSettledHandler === "function" ? cityCollectSettledHandler : null;
+      if (!handler) return Promise.resolve(null);
+      return Promise.resolve(handler(payload)).catch(() => {});
+    };
+
+    if (!itemLink) {
+      try {
+        scheduleDeferredLinkAndCityRecovery({
+          threadKey: t,
+          greetingText: String((prior && prior.greetingText) || "").trim(),
+          greetingSentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
+          cityCollectorTimeoutMs,
+          cityCollectorAttempts,
+        });
+      } catch (_) {}
+      await settleToHandler({
+        account_login: ACCOUNT_LOGIN,
+        thread_key: t,
+        item_link: null,
+        customer_name: nomeClienteLimpo,
+        client_name: nomeClienteLimpo,
+        nome_cliente_limpo: nomeClienteLimpo,
+        cidade: null,
+        city_status: "collecting",
+        city_source: null,
+      });
+      return { ok: true, deferred: true, name: nomeClienteLimpo };
+    }
+
+    const cityOut = await collectCityFromItemLinkUsingGlobalCollector({
+      itemLink,
+      threadKey: t,
+      accountLogin: ACCOUNT_LOGIN,
+      timeoutMs: cityCollectorTimeoutMs,
+      attempts: cityCollectorAttempts,
+      page,
+    }).catch((e) => ({
+      ok: false,
+      error: (e && e.message) ? String(e.message) : "city_collect_reply_exception",
+    }));
+
+    const cityCandidate = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
+    const citySource = cityCandidate
+      ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
+      : null;
+    const cityStatus = cityCandidate ? "resolved" : "pending";
+
+    greetingStateByThread.set(t, {
+      sentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
+      greetingText: String((prior && prior.greetingText) || "").trim(),
+      itemLink,
+      city: cityCandidate,
+      citySource,
+      cityStatus,
+      linkStatus: "resolved",
+    });
+
+    await settleToHandler({
+      account_login: ACCOUNT_LOGIN,
+      thread_key: t,
+      item_link: itemLink,
+      customer_name: nomeClienteLimpo,
+      client_name: nomeClienteLimpo,
+      nome_cliente_limpo: nomeClienteLimpo,
+      cidade: cityCandidate,
+      city_source: citySource,
+      city_status: cityStatus,
+      cityOut,
+    });
+
+    try {
+      logInfo(
+        `[virtusDelta][reply_meta] thread_key=${t} city=${cityCandidate || "-"} link=${itemLink ? "sim" : "nao"} name=${nomeClienteLimpo || "-"}`
+      );
+    } catch (_) {}
+
+    return {
+      ok: true,
+      cidade: cityCandidate,
+      city_status: cityStatus,
+      link_anuncio: itemLink,
+      nome_cliente_limpo: nomeClienteLimpo,
+    };
+  }
+
   async function sendDeltaReplyNow({ threadKey, textoResposta, clientMessageId = null }) {
     if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
     const t = String(threadKey || "").trim();
@@ -5147,7 +5279,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const continuityProbe = await probeOpenLineContinuity(page, t).catch(() => ({ is_open_line_ready: false }));
     const openLineReady = !!(continuityProbe && continuityProbe.is_open_line_ready === true);
     const cooldownPolicy = openLineReady
-      ? { minMs: 2_000, maxMs: 10_000, reason: "open_line_fast_lane" }
+      ? { minMs: 3_000, maxMs: 10_000, reason: "open_line_fast_lane" }
       : null;
 
     // Relógio sentinela por conta; em linha aberta usa faixa 2–10s.
@@ -5197,6 +5329,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
             enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
             kickDeliveryConfirmPump();
+          } catch (_) {}
+          // Após abrir+enviar (resposta do CT/IA): coleta nome/link/cidade e patcha o CT.
+          try {
+            void collectMetadataAfterCtReply(t, lastOut).catch(() => {});
           } catch (_) {}
           return lastOut;
         }

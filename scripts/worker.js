@@ -10649,6 +10649,7 @@ const handlers = {
         if (cmid) __deltaReplyIngressRelease(n, cmid);
         return { ok: false, error: 'delta_hands_unavailable' };
       }
+      try { __deltaAttachCityCollectSettledHandler(runner); } catch {}
 
       try {
         const qDepth = (runner && typeof runner.getQueueDepth === 'function') ? runner.getQueueDepth() : null;
@@ -15216,8 +15217,19 @@ const DELTA_FIRST_BOOT_BASELINE_GRACE_MS = Math.max(
   0,
   Number(process.env.DELTA_FIRST_BOOT_BASELINE_GRACE_MS || 3000) || 3000
 );
-const DELTA_NEW_CHAT_TIMER_MIN_MS = 30_000;
-const DELTA_NEW_CHAT_TIMER_MAX_MS = 90_000;
+/**
+ * Chat novo: espera FIXA 1–2 min desde a 1ª detecção (NÃO reseta).
+ * Mensagens do cliente só acumulam no buffer até o timer estourar → CT.
+ */
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
+/**
+ * Mensagem nova em chat já atendido: 30–90s após a ÚLTIMA msg do cliente (COM reset).
+ * Junta o que o cliente ainda está digitando antes de mandar pro CT/IA.
+ * (Separado do cooldown 3–10s de digitação entre replies na fila de mãos.)
+ */
+const DELTA_ACTIVE_CHAT_TIMER_MIN_MS = 30_000;
+const DELTA_ACTIVE_CHAT_TIMER_MAX_MS = 90_000;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 /** Retry paciente p/ falha de rota (wrong_thread / card / hydration) — pressa é inimiga. */
@@ -15552,7 +15564,11 @@ function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs
     const tk = String(thread_key || '').trim();
     if (!n || !tk) return false;
     if (!forceEnqueue && !__deltaCanEnqueueNewLeadTimerFromDiskSync(n, tk)) return false;
-    if (__deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) return false;
+    // Reset (forceEnqueue): permite reescrever timer da mesma thread.
+    if (!forceEnqueue && __deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) return false;
+    if (forceEnqueue) {
+      try { __deltaScrubNewLeadTimersOutboxSync(n, { dropThreadKey: tk }); } catch {}
+    }
     __deltaEnsureNewLeadsQueueDirsSync(n);
     const rec = {
       ts: Date.now(),
@@ -15580,13 +15596,120 @@ function __deltaEnqueueNewLeadTimerToDiskSync({ nome, thread_key, dueAt, delayMs
   }
 }
 
-const __deltaNewLeadsTimerInFlight = new Map(); // nome -> Timeout
+const __deltaNewLeadsTimerInFlight = new Map(); // nome -> { handle, thread_key }
+/** Debounce de chat ativo: key nome|thread -> { items, timer, dueAt } */
+const __deltaActiveChatDebounce = new Map();
+
 function __deltaKickNewLeadsTimerPump(nome) {
   try {
     const n = String(nome || '').trim();
     if (!n) return;
     setTimeout(() => { __deltaRunNewLeadsTimerPump(n).catch(() => {}); }, 0).unref?.();
   } catch {}
+}
+
+/**
+ * Arma UMA VEZ o timer fixo de chat novo (1–2 min). Não reseta em msgs seguintes.
+ * Msgs extras só acumulam no buffer até o disparo.
+ */
+function __deltaArmNewLeadTimerOnceSync(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk) return { ok: false, reason: 'invalid_args' };
+  try {
+    const st = __deltaGetThreadState(n, tk);
+    if (!st) return { ok: false, reason: 'missing_state' };
+    const status = String(st.status || '').trim().toLowerCase();
+    if (status === 'active' || status === 'hands_in_progress' || st.inFlight) {
+      return { ok: false, reason: 'status_blocks_arm', status };
+    }
+    // Já armado: só acumula mensagem (sem mexer no relógio).
+    if (st.timerHandle || (Number(st.timerDueAt || 0) > 0)) {
+      st.updatedAt = Date.now();
+      __deltaSchedulePersistThreadState();
+      return { ok: true, already_armed: true, dueAt: Number(st.timerDueAt || 0) || 0 };
+    }
+    if (__deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) {
+      st.updatedAt = Date.now();
+      __deltaSchedulePersistThreadState();
+      return { ok: true, already_armed: true, pending_on_disk: true };
+    }
+
+    const delayMs = __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
+    const dueAt = Date.now() + delayMs;
+    st.timerReason = 'initial_fixed';
+    st.timerDueAt = dueAt;
+    st.updatedAt = Date.now();
+    __deltaSchedulePersistThreadState();
+
+    const queued = __deltaEnqueueNewLeadTimerToDiskSync({
+      nome: n,
+      thread_key: tk,
+      delayMs,
+      dueAt,
+      forceEnqueue: false,
+      queueLane: 'primary',
+    });
+    __deltaKickNewLeadsTimerPump(n);
+    try {
+      logger.info('[DELTA][BUFFER] chat novo: timer FIXO 1-2min armado', {
+        nome: n,
+        thread_key: tk,
+        delayMs,
+        dueAt,
+        queued: !!queued,
+      });
+    } catch {}
+    return { ok: true, delayMs, dueAt, queued: !!queued };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) ? e.message : 'arm_failed' };
+  }
+}
+
+/**
+ * Debounce 30–90s com reset para chat já active (mensagem nova).
+ * Cada msg nova zera o relógio; no fire despacha tudo ao CT.
+ * Não confundir com o cooldown 3–10s de digitação entre replies.
+ */
+function __deltaQueueActiveChatDebouncedDispatch({ nome, threadKey, payload } = {}) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !tk || !payload || typeof payload !== 'object') return false;
+  const key = `${n}|${tk}`;
+  let bucket = __deltaActiveChatDebounce.get(key);
+  if (!bucket) {
+    bucket = { items: [], timer: null, dueAt: 0 };
+    __deltaActiveChatDebounce.set(key, bucket);
+  }
+  bucket.items.push(payload);
+  if (bucket.timer) {
+    try { clearTimeout(bucket.timer); } catch {}
+    bucket.timer = null;
+  }
+  const delayMs = __deltaRandInt(DELTA_ACTIVE_CHAT_TIMER_MIN_MS, DELTA_ACTIVE_CHAT_TIMER_MAX_MS);
+  bucket.dueAt = Date.now() + delayMs;
+  bucket.timer = setTimeout(() => {
+    try {
+      const cur = __deltaActiveChatDebounce.get(key);
+      __deltaActiveChatDebounce.delete(key);
+      const items = (cur && Array.isArray(cur.items)) ? cur.items : [];
+      let queued = 0;
+      for (const one of items) {
+        if (__deltaAppendPendingJsonlSync(one)) queued += 1;
+      }
+      if (queued > 0) __deltaKickIngestLoop();
+      try {
+        logger.info('[DELTA][ACTIVE] debounce disparou lote ao CT', {
+          nome: n,
+          thread_key: tk,
+          queued,
+          delayMs,
+        });
+      } catch {}
+    } catch {}
+  }, delayMs);
+  bucket.timer.unref?.();
+  return true;
 }
 async function __deltaBootstrapNewLeadsTimerPumps() {
   try {
@@ -15722,10 +15845,8 @@ async function __deltaRunNewLeadsTimerPump(nome) {
         if (!scrubStats || scrubStats.ok !== true) {
           try { __deltaWriteNewLeadsCursorSync(n, nextOffset); } catch {}
         }
-        // Downstream: dispara a ação no pipeline soberano (ctrl.virtus) em background.
-        // Regra enterprise: desacoplar totalmente a fila de espera (1–2 min)
-        // da fila de ação das mãos. O próximo timer deve começar IMEDIATAMENTE
-        // após consumir este item da represa, sem aguardar execução de DOM.
+        // Downstream: promove buffer → CT (sem abrir chat / sem saudação local).
+        // Mãos (open+digitar) só quando o CT devolver texto via reverse reply.
         try {
           Promise.resolve()
             .then(() => __deltaHandleBufferedThreadTimer(n, tk, { reason: 'initial' }))
@@ -15736,7 +15857,7 @@ async function __deltaRunNewLeadsTimerPump(nome) {
         }
       }, Math.max(0, remainMs));
       handle.unref?.();
-      __deltaNewLeadsTimerInFlight.set(n, handle);
+      __deltaNewLeadsTimerInFlight.set(n, { handle, thread_key: tk });
     } finally {
       try { if (fd) fs.closeSync(fd); } catch {}
     }
@@ -17741,210 +17862,38 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
 
   const before = __deltaBuildConcatFromState(st);
   const preMessages = before.text;
-  let handsOut = await __deltaRunHandsGreetingFlow({
-    nome: n,
-    threadKey: tk,
-    mensagensCliente: preMessages
-  });
 
-  const handsErrorRaw = String(handsOut && handsOut.error || '').trim();
-  const handsErrorNorm = handsErrorRaw.toLowerCase();
-  const handsRoutingFailure = __deltaIsHandsRoutingFailure(handsErrorRaw);
-  const greetingAlreadySent = !!(handsOut && handsOut.greeting_already_sent === true);
-  const hasGreetingText = !!(handsOut && String(handsOut.greeting_text || '').trim());
-  const handsPartialProgress =
-    greetingAlreadySent ||
-    hasGreetingText ||
-    !!(handsOut && handsOut.link_collect_deferred === true) ||
-    !!(handsOut && handsOut.city_collect_deferred === true) ||
-    String(handsOut && handsOut.city_status || '').trim().toLowerCase() === 'collecting';
-  // Metadata contingency NUNCA engole falha de rota (wrong_thread / card / hydration).
-  const handsMetadataFailure =
-    !handsRoutingFailure && (
-      (
-        handsErrorNorm.includes('city_') ||
-        handsErrorNorm.includes('cidade') ||
-        handsErrorNorm.includes('item_link') ||
-        handsErrorNorm.includes('link') ||
-        handsErrorNorm.includes('metadata')
-      ) ||
-      greetingAlreadySent
-    );
-
-  if (!handsOut || handsOut.ok !== true) {
-    if (handsMetadataFailure && handsPartialProgress) {
-      const fallbackClientName =
-        __deltaNormalizeRealCustomerName(
-          handsOut && handsOut.client_name,
-          handsOut && handsOut.customer_name,
-          handsOut && handsOut.nome_cliente_limpo
-        ) || DELTA_FALLBACK_CLIENT_NAME;
-      const fallbackLink =
-        __deltaPickBestItemLink(
-          handsOut && handsOut.link_anuncio,
-          handsOut && handsOut.profile_url,
-          st.link_anuncio
-        ) || null;
-      const priorCityFields = __deltaResolveCityDispatchFields({
-        cidade: (handsOut && handsOut.cidade) || st.city,
-        city_source: (handsOut && handsOut.city_source) || st.city_source,
-        city_status: (handsOut && handsOut.city_status) || st.city_status,
-      });
-      // Contingencia de metadata nao inventa "Cidade Pendente" se ainda esta collecting.
-      const contingencyCity =
-        priorCityFields.city_status === 'collecting'
-          ? null
-          : (priorCityFields.city || DELTA_FALLBACK_CITY);
-      handsOut = {
-        ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
-        ok: true,
-        cidade: contingencyCity,
-        city_source: priorCityFields.city_source,
-        city_status: priorCityFields.city_status,
-        link_anuncio: fallbackLink,
-        profile_url: fallbackLink,
-        client_name: fallbackClientName,
-        customer_name: fallbackClientName,
-        nome_cliente_limpo: fallbackClientName,
-        metadata_contingency_applied: true,
-        metadata_error: handsErrorRaw || null,
-      };
-      try {
-        __deltaAppendPendingJsonlSync({
-          event: 'lead_hands_metadata_contingency_applied',
-          server_id: readHostIdSync() || null,
-          account_login: n,
-          thread_key: tk,
-          texto_limpo: preMessages || '',
-          ...(contingencyCity ? { cidade: contingencyCity } : {}),
-          city_status: priorCityFields.city_status,
-          ...(priorCityFields.city_source ? { city_source: priorCityFields.city_source } : {}),
-          ...(fallbackLink ? { link_anuncio: fallbackLink } : {}),
-          client_name: fallbackClientName,
-          operacao_meta: 'hands_metadata_contingency',
-          dispatch_ct: false,
-          queue_mode: 'capture_only',
-          flow_stage: 'hands_metadata_contingency_applied',
-          hands_error: handsErrorRaw || null,
-          hands_routing_contingency: false,
-          hands_failures: Number(st.handsFailures || 0) || 0,
-        });
-      } catch {}
-    } else {
-      st.status = 'new_buffering';
-      st.inFlight = false;
-      st.handsFailures = (Number(st.handsFailures || 0) || 0) + 1;
-      st.updatedAt = Date.now();
-      const handsError = String(handsOut && handsOut.error || 'hands_unknown_error').slice(0, 300);
-      const exhausted = st.handsFailures >= DELTA_HANDS_MAX_FAILURES;
-
-      if (exhausted) {
-        // Snapshot honesto: sem inventar saudação; fecha o ciclo pra não loop infinito.
-        const honestLink =
-          __deltaPickBestItemLink(
-            handsOut && handsOut.link_anuncio,
-            handsOut && handsOut.profile_url,
-            st.link_anuncio
-          ) || null;
-        const honestName =
-          __deltaNormalizeRealCustomerName(
-            handsOut && handsOut.client_name,
-            handsOut && handsOut.customer_name,
-            handsOut && handsOut.nome_cliente_limpo
-          ) || DELTA_FALLBACK_CLIENT_NAME;
-        const honestCityFields = __deltaResolveCityDispatchFields({
-          cidade: (handsOut && handsOut.cidade) || st.city,
-          city_source: (handsOut && handsOut.city_source) || st.city_source,
-          city_status: (handsOut && handsOut.city_status) || st.city_status || 'pending',
-        });
-        handsOut = {
-          ...(handsOut && typeof handsOut === 'object' ? handsOut : {}),
-          ok: true,
-          cidade: honestCityFields.city_status === 'collecting' ? null : (honestCityFields.city || DELTA_FALLBACK_CITY),
-          city_source: honestCityFields.city_source,
-          city_status: honestCityFields.city_status === 'collecting' ? 'pending' : honestCityFields.city_status,
-          link_anuncio: honestLink,
-          profile_url: honestLink,
-          client_name: honestName,
-          customer_name: honestName,
-          nome_cliente_limpo: honestName,
-          greeting_text: null,
-          hands_exhausted_honest_pending: true,
-          metadata_contingency_applied: false,
-          metadata_error: handsErrorRaw || null,
-        };
-        try {
-          __deltaAppendPendingJsonlSync({
-            event: 'lead_hands_exhausted_honest_pending',
-            server_id: readHostIdSync() || null,
-            account_login: n,
-            thread_key: tk,
-            texto_limpo: preMessages || '',
-            ...(handsOut.cidade ? { cidade: handsOut.cidade } : {}),
-            city_status: handsOut.city_status,
-            ...(honestLink ? { link_anuncio: honestLink } : {}),
-            client_name: honestName,
-            operacao_meta: 'hands_exhausted',
-            dispatch_ct: false,
-            queue_mode: 'capture_only',
-            flow_stage: 'hands_exhausted_honest_pending',
-            hands_error: handsError,
-            hands_failures: st.handsFailures,
-            routing_failure: handsRoutingFailure,
-          });
-        } catch {}
-        // cai no caminho de dispatch soberano abaixo
-      } else {
-        const retryCtl = __deltaQueueThreadRetryOnDiskSecondary(st, {
-          nome: n,
-          threadKey: tk,
-          retryReason: handsRoutingFailure
-            ? (handsErrorNorm.includes('thread_card_not_found') ? 'thread_card_not_found' : 'hands_routing_failure')
-            : 'hands_retry',
-          patient: !!handsRoutingFailure,
-        });
-        const retryInMs = Number(retryCtl && retryCtl.retryInMs || 0) || 0;
-        const retryQueueMode = String(retryCtl && retryCtl.queueMode || 'memory').trim() || 'memory';
-        try {
-          __forensicEdgeEmit({
-            account_login: n,
-            thread_key: tk,
-            flow_stage: handsRoutingFailure
-              ? 'hands_routing_retry_scheduled'
-              : 'hands_retry_scheduled',
-            details: {
-              retry_queue_mode: retryQueueMode,
-              retry_in_ms: retryInMs,
-              hands_failures: st.handsFailures,
-              hands_error: handsError,
-              patient: !!handsRoutingFailure,
-              queue_advanced: true,
-            }
-          });
-        } catch {}
-        __deltaAppendPendingJsonlSync({
-          event: 'lead_hands_retry_scheduled',
-          server_id: readHostIdSync() || null,
-          account_login: n,
-          thread_key: tk,
-          texto_limpo: preMessages || '',
-          cidade: st.city || null,
-          operacao_meta: handsRoutingFailure ? 'hands_routing_retry' : 'hands_retry',
-          dispatch_ct: false,
-          queue_mode: 'capture_only',
-          flow_stage: handsRoutingFailure ? 'hands_routing_retry' : 'hands_retry',
-          hands_error: handsError,
-          retry_in_ms: retryInMs,
-          hands_failures: st.handsFailures,
-          retry_queue_mode: retryQueueMode,
-          queue_advanced: true,
-          patient_routing_retry: !!handsRoutingFailure,
-        });
-        __deltaSchedulePersistThreadState();
-        return;
-      }
-    }
-  }
+  // First-world: CT gera a 1ª resposta (Prompt Delta).
+  // Edge NÃO abre chat e NÃO manda saudação template aqui.
+  // Open + coleta nome/link/cidade acontece no reverse reply (sendDeltaReplyNow).
+  let handsOut = {
+    ok: true,
+    cidade: st.city || null,
+    city_source: st.city_source || null,
+    city_status: st.city_status || 'pending',
+    link_anuncio: st.link_anuncio || null,
+    profile_url: null,
+    client_name: null,
+    customer_name: null,
+    nome_cliente_limpo: null,
+    greeting_text: null,
+    ct_owned_first_reply: true,
+    reason: String(reason || 'initial'),
+  };
+  try {
+    __deltaAppendPendingJsonlSync({
+      event: 'lead_buffer_promoted_to_ct',
+      server_id: readHostIdSync() || null,
+      account_login: n,
+      thread_key: tk,
+      texto_limpo: preMessages || '',
+      city_status: handsOut.city_status,
+      operacao_meta: 'buffer_promote_no_local_greeting',
+      dispatch_ct: false,
+      queue_mode: 'capture_only',
+      flow_stage: 'new_chat_buffer_promote_ct_owned',
+    });
+  } catch {}
 
   const after = __deltaBuildConcatFromState(st);
   const finalText = String(after.text || preMessages || '').trim();
@@ -21488,34 +21437,38 @@ async function __deltaAttachCdpEar(nome, page) {
             continue;
           }
           // Trava de ciclo de vida: "active" com hands concluído nunca rearma timer/hands.
+          // Debounce 30–90s com reset na última msg do cliente antes de ir ao CT.
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
-          __deltaAppendPendingJsonlSync({
-            event: 'lead_chat_ativo_realtime',
-            server_id: serverId || null,
-            account_login: String(nome || ''),
-            thread_key: threadKey,
-            texto_limpo: texto,
-            mensagens_cliente_concatenadas: texto,
-            mensagens_cliente_qtd: 1,
-            dedup_meta_id: dedupMetaId || null,
-            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            cidade: (diskCity && !__deltaIsPendingCityLabel(diskCity)) ? diskCity : undefined,
-            ...(diskLink ? { link_anuncio: diskLink } : {}),
-            operacao_meta: op || 'message',
-            mensagem_seq: 0,
-            dispatch_ct: true,
-            queue_mode: 'dispatch_ct',
-            flow_stage: 'chat_ativo_realtime_disk_lookup',
-            state_status: 'active',
-            message_at: metaTsMs,
-            sender_id: senderIdNormalized || null,
-            account_user_id: accountUserIdNormalized || null,
-            direction: directionNormalized || null,
-            ...networkCtx
+          __deltaQueueActiveChatDebouncedDispatch({
+            nome: String(nome || ''),
+            threadKey,
+            payload: {
+              event: 'lead_chat_ativo_realtime',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              mensagens_cliente_concatenadas: texto,
+              mensagens_cliente_qtd: 1,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              cidade: (diskCity && !__deltaIsPendingCityLabel(diskCity)) ? diskCity : undefined,
+              ...(diskLink ? { link_anuncio: diskLink } : {}),
+              operacao_meta: op || 'message',
+              mensagem_seq: 0,
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              flow_stage: 'chat_ativo_debounce_disk_lookup',
+              state_status: 'active',
+              message_at: metaTsMs,
+              sender_id: senderIdNormalized || null,
+              account_user_id: accountUserIdNormalized || null,
+              direction: directionNormalized || null,
+              ...networkCtx
+            }
           });
           try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
-          __deltaKickIngestLoop();
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
           }
@@ -21657,66 +21610,85 @@ async function __deltaAttachCdpEar(nome, page) {
           const stCityStatus = __deltaCanonicalCityStatus(st.city_status, {
             hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
           });
-          // Mensagem parcial: so manda cidade canônica. Se collecting, reforça status
-          // sem sentinel. Sem status/cidade: omite (CT preserva aguardando/resolved).
-          __deltaAppendPendingJsonlSync({
-            event: 'lead_chat_ativo_realtime',
-            server_id: serverId || null,
-            account_login: String(nome || ''),
-            thread_key: threadKey,
-            texto_limpo: texto,
-            mensagens_cliente_concatenadas: texto,
-            mensagens_cliente_qtd: 1,
-            dedup_meta_id: dedupMetaId || null,
-            meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
-            meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
-            ...((st.city && !__deltaIsPendingCityLabel(st.city))
-              ? { cidade: st.city, city_status: 'resolved' }
-              : (stCityStatus === 'collecting'
-                ? { city_status: 'collecting' }
-                : {})),
-            ...(st.city_source ? { city_source: st.city_source } : {}),
-            ...(stLink ? { link_anuncio: stLink } : {}),
-            operacao_meta: op || 'message',
-            mensagem_seq: msgSeq,
-            dispatch_ct: true,
-            queue_mode: 'dispatch_ct',
-            flow_stage: 'chat_ativo_realtime',
-            sender_id: senderIdNormalized || null,
-            account_user_id: accountUserIdNormalized || null,
-            direction: directionNormalized || null,
-            ...networkCtx
+          // Debounce 30–90s com reset — junta msgs rápidas antes do CT/IA.
+          __deltaQueueActiveChatDebouncedDispatch({
+            nome: String(nome || ''),
+            threadKey,
+            payload: {
+              event: 'lead_chat_ativo_realtime',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
+              thread_key: threadKey,
+              texto_limpo: texto,
+              mensagens_cliente_concatenadas: texto,
+              mensagens_cliente_qtd: 1,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              ...((st.city && !__deltaIsPendingCityLabel(st.city))
+                ? { cidade: st.city, city_status: 'resolved' }
+                : (stCityStatus === 'collecting'
+                  ? { city_status: 'collecting' }
+                  : {})),
+              ...(st.city_source ? { city_source: st.city_source } : {}),
+              ...(stLink ? { link_anuncio: stLink } : {}),
+              operacao_meta: op || 'message',
+              mensagem_seq: msgSeq,
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              flow_stage: 'chat_ativo_debounce',
+              sender_id: senderIdNormalized || null,
+              account_user_id: accountUserIdNormalized || null,
+              direction: directionNormalized || null,
+              ...networkCtx
+            }
           });
           st.lastDispatchAt = nowMs;
           st.updatedAt = nowMs;
-          __deltaKickIngestLoop();
           __deltaSchedulePersistThreadState();
           continue;
           }
         }
 
-        // Arquitetura 2 camadas (Gemini): novo lead NÃO arma timer em paralelo por thread.
-        // Enfileira na REPRESA (1 timer por vez por conta) e só depois dispara para ctrl.virtus.
-        if (st.status !== 'hands_in_progress' && !st.timerHandle && !(Number(st.timerDueAt || 0) > 0)) {
-          const delayMs = __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
-          st.timerReason = 'initial';
-          st.timerDueAt = Date.now() + delayMs;
-          st.updatedAt = nowMs;
-          __deltaSchedulePersistThreadState();
-          __deltaEnqueueNewLeadTimerToDiskSync({ nome: String(nome || ''), thread_key: threadKey, delayMs, dueAt: st.timerDueAt });
-          __deltaKickNewLeadsTimerPump(String(nome || ''));
-          try {
-            logger.info('[DELTA][BUFFER] novo chat detectado; timer armado', {
-              nome: String(nome || ''),
+        // Chat novo: timer FIXO 1–2 min (arma uma vez). Msgs só acumulam no buffer.
+        // Não abre o chat — CT gera a 1ª resposta. Digitação 3–10s é só na fila de mãos.
+        if (st.status === 'hands_in_progress' || st.inFlight) {
+          // No meio do promote/CT: não perde — já está no state E entra no debounce
+          // pra ir ao CT depois (caso tenha chegado depois do snapshot do promote).
+          const stLinkPending = __deltaPickBestItemLink(st.link_anuncio);
+          __deltaQueueActiveChatDebouncedDispatch({
+            nome: String(nome || ''),
+            threadKey,
+            payload: {
+              event: 'lead_chat_ativo_realtime',
+              server_id: serverId || null,
+              account_login: String(nome || ''),
               thread_key: threadKey,
-              delayMs,
-              dueAt: st.timerDueAt,
-              transport: String(transport || '')
-            });
-          } catch {}
-        } else {
+              texto_limpo: texto,
+              mensagens_cliente_concatenadas: texto,
+              mensagens_cliente_qtd: 1,
+              dedup_meta_id: dedupMetaId || null,
+              meta_message_id: metaIds && metaIds.msgId ? String(metaIds.msgId) : null,
+              meta_offline_threading_id: metaIds && metaIds.offlineId ? String(metaIds.offlineId) : null,
+              ...((st.city && !__deltaIsPendingCityLabel(st.city))
+                ? { cidade: st.city, city_status: 'resolved' }
+                : {}),
+              ...(stLinkPending ? { link_anuncio: stLinkPending } : {}),
+              operacao_meta: op || 'message',
+              mensagem_seq: msgSeq,
+              dispatch_ct: true,
+              queue_mode: 'dispatch_ct',
+              flow_stage: 'chat_midflight_debounce',
+              sender_id: senderIdNormalized || null,
+              account_user_id: accountUserIdNormalized || null,
+              direction: directionNormalized || null,
+              ...networkCtx
+            }
+          });
           st.updatedAt = nowMs;
           __deltaSchedulePersistThreadState();
+        } else {
+          __deltaArmNewLeadTimerOnceSync(String(nome || ''), threadKey);
         }
       }
 
