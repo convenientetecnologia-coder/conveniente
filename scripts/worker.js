@@ -15218,18 +15218,14 @@ const DELTA_FIRST_BOOT_BASELINE_GRACE_MS = Math.max(
   Number(process.env.DELTA_FIRST_BOOT_BASELINE_GRACE_MS || 3000) || 3000
 );
 /**
- * Chat novo: espera FIXA 1–2 min desde a 1ª detecção (NÃO reseta).
- * Mensagens do cliente só acumulam no buffer até o timer estourar → CT.
+ * Timers de negócio (1–2min novo / 30–90s ativo) CENTRALIZADOS NO CT.
+ * Edge é camada burra: escuta → POST ingest imediato. Constantes legadas = 0
+ * só para não quebrar pumps/retry de fila residual em disco.
  */
-const DELTA_NEW_CHAT_TIMER_MIN_MS = 60_000;
-const DELTA_NEW_CHAT_TIMER_MAX_MS = 120_000;
-/**
- * Mensagem nova em chat já atendido: 30–90s após a ÚLTIMA msg do cliente (COM reset).
- * Junta o que o cliente ainda está digitando antes de mandar pro CT/IA.
- * (Separado do cooldown 3–10s de digitação entre replies na fila de mãos.)
- */
-const DELTA_ACTIVE_CHAT_TIMER_MIN_MS = 30_000;
-const DELTA_ACTIVE_CHAT_TIMER_MAX_MS = 90_000;
+const DELTA_NEW_CHAT_TIMER_MIN_MS = 0;
+const DELTA_NEW_CHAT_TIMER_MAX_MS = 0;
+const DELTA_ACTIVE_CHAT_TIMER_MIN_MS = 0;
+const DELTA_ACTIVE_CHAT_TIMER_MAX_MS = 0;
 const DELTA_RETRY_TIMER_MIN_MS = 20_000;
 const DELTA_RETRY_TIMER_MAX_MS = 35_000;
 /** Retry paciente p/ falha de rota (wrong_thread / card / hydration) — pressa é inimiga. */
@@ -15609,8 +15605,9 @@ function __deltaKickNewLeadsTimerPump(nome) {
 }
 
 /**
- * Arma UMA VEZ o timer fixo de chat novo (1–2 min). Não reseta em msgs seguintes.
- * Msgs extras só acumulam no buffer até o disparo.
+ * Chat novo — Edge burro: SEM timer local 1–2min.
+ * Promove o buffer e POST /api/messenger-delta/ingest imediatamente.
+ * Timer de aglutinação (1–2min) vive no CT.
  */
 function __deltaArmNewLeadTimerOnceSync(nome, threadKey) {
   const n = String(nome || '').trim();
@@ -15623,93 +15620,63 @@ function __deltaArmNewLeadTimerOnceSync(nome, threadKey) {
     if (status === 'active' || status === 'hands_in_progress' || st.inFlight) {
       return { ok: false, reason: 'status_blocks_arm', status };
     }
-    // Já armado: só acumula mensagem (sem mexer no relógio).
-    if (st.timerHandle || (Number(st.timerDueAt || 0) > 0)) {
-      st.updatedAt = Date.now();
-      __deltaSchedulePersistThreadState();
-      return { ok: true, already_armed: true, dueAt: Number(st.timerDueAt || 0) || 0 };
-    }
-    if (__deltaHasPendingNewLeadTimerOnDiskSync(n, tk)) {
-      st.updatedAt = Date.now();
-      __deltaSchedulePersistThreadState();
-      return { ok: true, already_armed: true, pending_on_disk: true };
-    }
-
-    const delayMs = __deltaRandInt(DELTA_NEW_CHAT_TIMER_MIN_MS, DELTA_NEW_CHAT_TIMER_MAX_MS);
-    const dueAt = Date.now() + delayMs;
-    st.timerReason = 'initial_fixed';
-    st.timerDueAt = dueAt;
+    // Cancela qualquer relógio residual legado em RAM/disco.
+    try { __deltaClearThreadTimer(st); } catch {}
+    st.timerReason = 'immediate_ct_owned';
+    st.timerDueAt = 0;
     st.updatedAt = Date.now();
     __deltaSchedulePersistThreadState();
-
-    const queued = __deltaEnqueueNewLeadTimerToDiskSync({
-      nome: n,
-      thread_key: tk,
-      delayMs,
-      dueAt,
-      forceEnqueue: false,
-      queueLane: 'primary',
-    });
-    __deltaKickNewLeadsTimerPump(n);
+    setTimeout(() => {
+      __deltaHandleBufferedThreadTimer(n, tk, { reason: 'immediate_ct_owned' }).catch(() => {});
+    }, 0).unref?.();
     try {
-      logger.info('[DELTA][BUFFER] chat novo: timer FIXO 1-2min armado', {
+      logger.info('[DELTA][BUFFER] chat novo: promote imediato (timers no CT)', {
         nome: n,
         thread_key: tk,
-        delayMs,
-        dueAt,
-        queued: !!queued,
       });
     } catch {}
-    return { ok: true, delayMs, dueAt, queued: !!queued };
+    return { ok: true, immediate: true, delayMs: 0 };
   } catch (e) {
     return { ok: false, reason: (e && e.message) ? e.message : 'arm_failed' };
   }
 }
 
 /**
- * Debounce 30–90s com reset para chat já active (mensagem nova).
- * Cada msg nova zera o relógio; no fire despacha tudo ao CT.
- * Não confundir com o cooldown 3–10s de digitação entre replies.
+ * Chat ativo — Edge burro: SEM debounce 30–90s local.
+ * Enfileira e dispara ingest ao CT no mesmo tick. Timer 30–90s vive no CT.
  */
 function __deltaQueueActiveChatDebouncedDispatch({ nome, threadKey, payload } = {}) {
   const n = String(nome || '').trim();
   const tk = String(threadKey || '').trim();
   if (!n || !tk || !payload || typeof payload !== 'object') return false;
-  const key = `${n}|${tk}`;
-  let bucket = __deltaActiveChatDebounce.get(key);
-  if (!bucket) {
-    bucket = { items: [], timer: null, dueAt: 0 };
-    __deltaActiveChatDebounce.set(key, bucket);
-  }
-  bucket.items.push(payload);
-  if (bucket.timer) {
-    try { clearTimeout(bucket.timer); } catch {}
-    bucket.timer = null;
-  }
-  const delayMs = __deltaRandInt(DELTA_ACTIVE_CHAT_TIMER_MIN_MS, DELTA_ACTIVE_CHAT_TIMER_MAX_MS);
-  bucket.dueAt = Date.now() + delayMs;
-  bucket.timer = setTimeout(() => {
-    try {
-      const cur = __deltaActiveChatDebounce.get(key);
-      __deltaActiveChatDebounce.delete(key);
-      const items = (cur && Array.isArray(cur.items)) ? cur.items : [];
-      let queued = 0;
-      for (const one of items) {
-        if (__deltaAppendPendingJsonlSync(one)) queued += 1;
+  // Drena debounce legado se ainda houver bucket em RAM.
+  try {
+    const key = `${n}|${tk}`;
+    const legacy = __deltaActiveChatDebounce.get(key);
+    if (legacy) {
+      if (legacy.timer) {
+        try { clearTimeout(legacy.timer); } catch {}
       }
-      if (queued > 0) __deltaKickIngestLoop();
-      try {
-        logger.info('[DELTA][ACTIVE] debounce disparou lote ao CT', {
-          nome: n,
-          thread_key: tk,
-          queued,
-          delayMs,
-        });
-      } catch {}
-    } catch {}
-  }, delayMs);
-  bucket.timer.unref?.();
-  return true;
+      __deltaActiveChatDebounce.delete(key);
+      if (Array.isArray(legacy.items)) {
+        for (const one of legacy.items) {
+          try { __deltaAppendPendingJsonlSync(one); } catch {}
+        }
+      }
+    }
+  } catch {}
+  const next = { ...payload };
+  try {
+    const fs = String(next.flow_stage || '');
+    if (fs.includes('debounce')) {
+      next.flow_stage = fs.replace(/debounce/g, 'immediate');
+    } else if (!fs) {
+      next.flow_stage = 'chat_ativo_immediate';
+    }
+  } catch {}
+  const queued = __deltaAppendPendingJsonlSync(next);
+  if (queued) __deltaKickIngestLoop();
+  return !!queued;
 }
 async function __deltaBootstrapNewLeadsTimerPumps() {
   try {
@@ -21472,8 +21439,7 @@ async function __deltaAttachCdpEar(nome, page) {
             try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
             continue;
           }
-          // Trava de ciclo de vida: "active" com hands concluído nunca rearma timer/hands.
-          // Debounce 30–90s com reset na última msg do cliente antes de ir ao CT.
+          // Trava de ciclo de vida: "active" com hands concluído — POST imediato ao CT (timer 30–90s no CT).
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
           __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
@@ -21646,7 +21612,7 @@ async function __deltaAttachCdpEar(nome, page) {
           const stCityStatus = __deltaCanonicalCityStatus(st.city_status, {
             hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
           });
-          // Debounce 30–90s com reset — junta msgs rápidas antes do CT/IA.
+          // POST imediato ao CT — debounce 30–90s é CT-owned.
           __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
             threadKey,
@@ -21672,7 +21638,7 @@ async function __deltaAttachCdpEar(nome, page) {
               mensagem_seq: msgSeq,
               dispatch_ct: true,
               queue_mode: 'dispatch_ct',
-              flow_stage: 'chat_ativo_debounce',
+              flow_stage: 'chat_ativo_immediate',
               sender_id: senderIdNormalized || null,
               account_user_id: accountUserIdNormalized || null,
               direction: directionNormalized || null,
@@ -21686,11 +21652,9 @@ async function __deltaAttachCdpEar(nome, page) {
           }
         }
 
-        // Chat novo: timer FIXO 1–2 min (arma uma vez). Msgs só acumulam no buffer.
-        // Não abre o chat — CT gera a 1ª resposta. Digitação 3–10s é só na fila de mãos.
+        // Chat novo: promote/POST imediato (timer 1–2min no CT). Digitação 3–10s só na fila de mãos.
         if (st.status === 'hands_in_progress' || st.inFlight) {
-          // No meio do promote/CT: não perde — já está no state E entra no debounce
-          // pra ir ao CT depois (caso tenha chegado depois do snapshot do promote).
+          // Midflight: não perde — POST imediato ao CT.
           const stLinkPending = __deltaPickBestItemLink(st.link_anuncio);
           __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
@@ -21714,7 +21678,7 @@ async function __deltaAttachCdpEar(nome, page) {
               mensagem_seq: msgSeq,
               dispatch_ct: true,
               queue_mode: 'dispatch_ct',
-              flow_stage: 'chat_midflight_debounce',
+              flow_stage: 'chat_midflight_immediate',
               sender_id: senderIdNormalized || null,
               account_user_id: accountUserIdNormalized || null,
               direction: directionNormalized || null,
