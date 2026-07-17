@@ -1576,7 +1576,7 @@ async function ensureMarketplaceFilterActiveCore(page) {
   // Se clicamos há pouco, não reclicar: primeiro aguardar estabilização real do feed.
   if (lastClickAt && now - lastClickAt < 45000) {
     await waitForMarketplaceUiStable(page, "marketplace_recent_click");
-    const activeAfterRecent = await waitMarketplaceActiveStable(page, { timeoutMs: 30000, rounds: 2 });
+    const activeAfterRecent = await waitMarketplaceActiveStable(page, { timeoutMs: 55000, rounds: 3 });
     if (activeAfterRecent) {
       try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
       return { ok: true, already_active: true, guarded_recent_click: true, active_before: activeBefore, active_after: true };
@@ -1625,7 +1625,7 @@ async function ensureMarketplaceFilterActiveCore(page) {
     await waitForMarketplaceUiStable(page, "marketplace_safe_retry");
     const retry = await clickMarketplaceFilterIfPresent(page);
     await humanPause("domSettle", "marketplace_safe_retry_settle");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 26000, rounds: 2 });
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
     if (retry && retry.changed) {
       try {
         page.__virtusDeltaMarketplaceGuard = {
@@ -1642,7 +1642,7 @@ async function ensureMarketplaceFilterActiveCore(page) {
     await humanPause("domSettle", "marketplace_recover_once");
     const recover = await clickMarketplaceFilterIfPresent(page);
     await humanPause("domSettle", "marketplace_recover_settle");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 26000, rounds: 2 });
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
     if (recover && recover.changed) {
       try {
         page.__virtusDeltaMarketplaceGuard = {
@@ -1660,7 +1660,7 @@ async function ensureMarketplaceFilterActiveCore(page) {
     try {
       await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
       await humanPause("domSettle", "marketplace_route_fallback_settle");
-      activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 22000, rounds: 2 });
+      activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
       routeFallback = { attempted: true, ok: !!activeAfter, url: fallbackUrl };
     } catch (e) {
       routeFallback = {
