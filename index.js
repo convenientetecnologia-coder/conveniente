@@ -1364,7 +1364,26 @@ function __edgeAckFilePathForCmdId(cmdId) {
 function __edgeHasAckSync(cmdId) {
   try {
     const fp = __edgeAckFilePathForCmdId(cmdId);
-    return !!(fp && fs.existsSync(fp));
+    if (!(fp && fs.existsSync(fp))) return false;
+    // Contrato de aço: arquivo ack antigo/"ok" genérico NÃO conta.
+    // Só pula se houve send final real ou dead-letter explícito.
+    try {
+      const raw = JSON.parse(String(fs.readFileSync(fp, 'utf8') || '{}'));
+      if (raw && raw.dead_letter === true) return true;
+      const st = String(
+        (raw && raw.final_status)
+        || (raw && raw.worker && raw.worker.status)
+        || ''
+      ).trim().toLowerCase();
+      return (
+        st === 'send_ok' ||
+        st === 'duplicate_done_skip' ||
+        st === 'facebook_sent' ||
+        st === 'sent_to_facebook'
+      );
+    } catch {
+      return false;
+    }
   } catch {
     return false;
   }
@@ -2001,6 +2020,11 @@ app.post('/api/infra/command-bus', async (req, res) => {
           client_message_id: clientMessageId
         });
         try { forensicLog('EDGE_DELTA', 'delta_reply_received_by_edge', { id: cmdId, nome, thread_key, chars: texto_resposta.length }); } catch {}
+        try {
+          logger.info(
+            `🟡 [OUTBOX] Recebido do CT (disco) - Conta: ${nome} | Chat: ${thread_key} | cmd=${cmdId} | chars=${texto_resposta.length}`
+          );
+        } catch {}
         __forensicEdgeEmit({
           account_login: nome,
           thread_key,
