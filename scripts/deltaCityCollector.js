@@ -1093,9 +1093,9 @@ async function createCollectorRuntime() {
     process.env.CHROME_PATH ||
     path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
 
-  // Default HEADLESS: servidores RDP/sem GUI não mantêm Chrome visível aberto.
-  // Modo visivel só sob demanda: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=0
-  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "1").trim() !== "0";
+  // Default VISÍVEL (headed): dá pra ver o Chrome de raspagem no servidor.
+  // Headless só sob demanda: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=1
+  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "0").trim() === "1";
   const launchTimeoutMs = Math.max(
     8_000,
     Math.min(60_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_LAUNCH_TIMEOUT_MS || 25_000) || 25_000)
