@@ -1555,26 +1555,59 @@ function __edgeIsProfileRuntimeReadySync(nome) {
   const target = String(nome || '').trim();
   if (!target) return false;
   try {
+    // Fonte de verdade do painel: desired.active (start-closed zera tudo no boot).
+    try {
+      const desired = (fileStore && typeof fileStore.loadDesired === 'function')
+        ? (fileStore.loadDesired() || {})
+        : (__readJsonFileSafe(path.join(__dirname, 'dados', 'desired.json')) || {});
+      const d = desired && desired[target];
+      if (d && d.active === true) return true;
+      if (d && d.active === false) return false;
+    } catch {}
     const st = __readJsonFileSafe(path.join(__dirname, 'dados', 'status.json'));
     const perfis = (st && Array.isArray(st.perfis)) ? st.perfis : [];
     const p = perfis.find((x) => String(x && x.nome || '').trim() === target);
     if (!p) return false;
     // Conta fechada/offline: não queimar 180s de IPC — refileira e segue a esteira.
-    return !!(p.active || p.trabalhando || p.virtusOnline);
+    return !!(p.active === true || p.trabalhando === true);
   } catch {
     return true; // fail-open: tenta IPC
   }
 }
 
-function __edgeClampDeltaReplyCursorToFileSizeSync(size) {
-  const fileSize = Math.max(0, Number(size || 0) || 0);
-  const cursor = __edgeReadDeltaReplyCursorSync();
-  const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
-  if (offset <= fileSize) return { offset, clamped: false, fileSize };
-  __edgeWriteDeltaReplyCursorSync(0);
+function __edgeAlignDeltaReplyCursorToNewlineSync(fileSize, roughOffset) {
+  const size = Math.max(0, Number(fileSize || 0) || 0);
+  let offset = Math.max(0, Math.min(size, Number(roughOffset || 0) || 0));
+  if (offset <= 0 || offset >= size) return offset;
   try {
-    logger.error(
-      `🔴 [OUTBOX] cursor_out_of_range reset offset=${offset} size=${fileSize} -> 0`
+    const fd = fs.openSync(EDGE_DELTA_REPLY_OUTBOX_PATH, 'r');
+    try {
+      const maxScan = Math.min(1024 * 1024, size - offset);
+      const buf = Buffer.allocUnsafe(maxScan);
+      const n = fs.readSync(fd, buf, 0, maxScan, offset);
+      const txt = buf.slice(0, n).toString('utf8');
+      const nl = txt.indexOf('\n');
+      if (nl >= 0) offset = offset + Buffer.byteLength(txt.slice(0, nl + 1), 'utf8');
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+  } catch {}
+  return Math.max(0, Math.min(size, offset));
+}
+
+/** Para outbox gigante: vai pro fim (só processa o que chegar agora), não volta pro byte 0. */
+function __edgeSeekDeltaReplyCursorToTailSync(size, { keepBytes = 2 * 1024 * 1024 } = {}) {
+  const fileSize = Math.max(0, Number(size || 0) || 0);
+  const keep = Math.max(64 * 1024, Math.min(32 * 1024 * 1024, Number(keepBytes || 0) || (2 * 1024 * 1024)));
+  const rough = fileSize > keep ? (fileSize - keep) : 0;
+  const aligned = __edgeAlignDeltaReplyCursorToNewlineSync(fileSize, rough);
+  // Preferência operacional: pular o passado podre e pegar só a cauda recente.
+  const target = fileSize > 0 ? Math.max(aligned, Math.max(0, fileSize - keep)) : 0;
+  const finalOffset = __edgeAlignDeltaReplyCursorToNewlineSync(fileSize, target);
+  __edgeWriteDeltaReplyCursorSync(finalOffset);
+  try {
+    logger.warn(
+      `🟠 [OUTBOX] seek_tail offset=${finalOffset} size=${fileSize} keepBytes=${keep}`
     );
   } catch {}
   try {
@@ -1583,14 +1616,23 @@ function __edgeClampDeltaReplyCursorToFileSizeSync(size) {
       thread_key: null,
       flow_stage: 'reverse_command_bus',
       details: {
-        stage: 'pump_cursor_clamped',
-        old_offset: offset,
+        stage: 'pump_cursor_seek_tail',
+        new_offset: finalOffset,
         file_size: fileSize,
-        new_offset: 0
+        keep_bytes: keep
       }
     });
   } catch {}
-  return { offset: 0, clamped: true, fileSize };
+  return { offset: finalOffset, clamped: true, fileSize, mode: 'seek_tail' };
+}
+
+function __edgeClampDeltaReplyCursorToFileSizeSync(size) {
+  const fileSize = Math.max(0, Number(size || 0) || 0);
+  const cursor = __edgeReadDeltaReplyCursorSync();
+  const offset = Math.max(0, Number(cursor && cursor.offset || 0) || 0);
+  if (offset <= fileSize) return { offset, clamped: false, fileSize };
+  // Fora do arquivo: NÃO zerar (outbox de centenas de MB). Ir para a cauda.
+  return __edgeSeekDeltaReplyCursorToTailSync(fileSize, { keepBytes: 1 * 1024 * 1024 });
 }
 
 function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetry = true } = {}) {
@@ -2152,10 +2194,24 @@ app.post('/api/infra/command-bus', async (req, res) => {
             }
           } catch {}
           const before = __edgeReadDeltaReplyCursorSync();
-          const forceZero = !!(cmd && (cmd.force_zero === true || (cmd.data && cmd.data.force_zero === true)));
-          const clamped = forceZero
-            ? (__edgeWriteDeltaReplyCursorSync(0), { offset: 0, clamped: true, fileSize })
-            : __edgeClampDeltaReplyCursorToFileSizeSync(fileSize);
+          const data = (cmd && cmd.data && typeof cmd.data === 'object') ? cmd.data : {};
+          const forceZero = !!(cmd && (cmd.force_zero === true || data.force_zero === true));
+          const seekTail = !forceZero && (
+            cmd.seek_tail === true
+            || data.seek_tail === true
+            || cmd.seek_tail !== false
+          );
+          const keepBytes = Number(cmd.keep_bytes || data.keep_bytes || (2 * 1024 * 1024)) || (2 * 1024 * 1024);
+          let clamped;
+          if (forceZero) {
+            __edgeWriteDeltaReplyCursorSync(0);
+            clamped = { offset: 0, clamped: true, fileSize, mode: 'force_zero' };
+          } else if (seekTail || fileSize > (8 * 1024 * 1024)) {
+            // Default seguro: outbox grande → cauda. Nunca reprocessar 400MB+ do zero.
+            clamped = __edgeSeekDeltaReplyCursorToTailSync(fileSize, { keepBytes });
+          } else {
+            clamped = __edgeClampDeltaReplyCursorToFileSizeSync(fileSize);
+          }
           __edgeDeltaReplyPumpInFlight = false;
           __edgeDeltaReplyPumpStartedAt = 0;
           __edgeKickDeltaReplyPump();
@@ -2166,7 +2222,8 @@ app.post('/api/infra/command-bus', async (req, res) => {
             before_offset: Number(before && before.offset || 0) || 0,
             after_offset: Number(clamped && clamped.offset || 0) || 0,
             file_size: fileSize,
-            clamped: !!(clamped && clamped.clamped) || forceZero,
+            mode: String((clamped && clamped.mode) || (forceZero ? 'force_zero' : 'clamp')),
+            clamped: !!(clamped && clamped.clamped) || forceZero || seekTail,
             pump_kicked: true
           };
         } catch (e) {
