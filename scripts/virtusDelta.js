@@ -572,6 +572,16 @@ const DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS = Math.max(
   12000,
   Number(process.env.VIRTUS_DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS || 45000) || 45000
 );
+/** Após activate falhar (active_after=false), não martelar de novo por este tempo. */
+const DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS = Math.max(
+  60_000,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS || 300_000) || 300_000
+);
+
+function __isMessengerThreadUrl(urlOrPath) {
+  const u = String(urlOrPath || "").toLowerCase();
+  return u.includes("/messages/t/") || u.includes("/messages/e2ee/t/");
+}
 
 function clickDelayMs() {
   return randomBetween(HUMAN_TIMINGS.click.min, HUMAN_TIMINGS.click.max);
@@ -1753,6 +1763,26 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
       const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
       const now = Date.now();
 
+      // Chat aberto (/messages/t/...) NÃO é "marketplace inativo".
+      // Reativar filtro aqui rouba a aba do reply e cria o loop visto nos logs
+      // (activate → active_after=false → reactivate em todas as contas).
+      if (__isMessengerThreadUrl(currentUrl)) {
+        try {
+          page.__virtusDeltaMarketplaceGuard = {
+            ...guard,
+            marketplaceInactiveSince: 0,
+            outsideMessagesSince: 0,
+          };
+        } catch (_) {}
+        return;
+      }
+
+      // Cooldown após activate falho — evita DOS do host com 20 workers em loop.
+      const failCooldownUntil = Number(guard.enforcerFailCooldownUntil || 0) || 0;
+      if (failCooldownUntil > now) {
+        return;
+      }
+
       if (!currentUrl.includes("facebook.com/messages")) {
         const outsideSince = Number(guard.outsideMessagesSince || 0) || now;
         try {
@@ -1783,11 +1813,12 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
           page.__virtusDeltaMarketplaceGuard = {
             ...((page && page.__virtusDeltaMarketplaceGuard) || {}),
             marketplaceInactiveSince: 0,
+            enforcerFailCooldownUntil: 0,
           };
         } catch (_) {}
         return;
       }
-      // Janela de calma também quando estamos em /messages/t/...:
+      // Janela de calma também quando estamos em /messages (inbox):
       // evita "abre/fecha" repetitivo enquanto a thread está aberta.
       const guardNow = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
       const inactiveSince = Number(guardNow.marketplaceInactiveSince || 0) || now;
@@ -1804,10 +1835,30 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
       );
       const out = await ensureMarketplaceFilterActive(page);
       logInfo(`[virtusDelta][marketplace_enforcer] scope=${scope} result=${JSON.stringify(out)}`);
+      if (!(out && out.active_after)) {
+        const until = Date.now() + DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS;
+        try {
+          page.__virtusDeltaMarketplaceGuard = {
+            ...((page && page.__virtusDeltaMarketplaceGuard) || {}),
+            enforcerFailCooldownUntil: until,
+            marketplaceInactiveSince: 0,
+          };
+        } catch (_) {}
+        logInfo(
+          `[virtusDelta][marketplace_enforcer] scope=${scope} action=fail_cooldown cooldown_ms=${DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS} until=${until}`
+        );
+      }
     } catch (e) {
       logInfo(
         `[virtusDelta][marketplace_enforcer] scope=${scope} action=fail err=${e && e.message ? e.message : String(e)}`
       );
+      try {
+        page.__virtusDeltaMarketplaceGuard = {
+          ...((page && page.__virtusDeltaMarketplaceGuard) || {}),
+          enforcerFailCooldownUntil: Date.now() + DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS,
+          marketplaceInactiveSince: 0,
+        };
+      } catch (_) {}
     } finally {
       inFlight = false;
     }
@@ -1819,7 +1870,7 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
   timer.unref?.();
   setTimeout(() => tick().catch(() => {}), 2500).unref?.();
   logInfo(
-    `[virtusDelta][marketplace_enforcer] scope=${scope} status=armed interval_ms=${DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS}`
+    `[virtusDelta][marketplace_enforcer] scope=${scope} status=armed interval_ms=${DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS} fail_cooldown_ms=${DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS}`
   );
 
   return {
