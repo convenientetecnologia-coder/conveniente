@@ -3922,27 +3922,40 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   if (typeof getDeltaCityCollector !== "function") {
     return { ok: false, error: "delta_city_collector_unavailable" };
   }
-  const collector = await getDeltaCityCollector();
-  if (!collector || typeof collector.collectCityFromItemLink !== "function") {
-    return { ok: false, error: "delta_city_collector_runtime_invalid" };
-  }
-  let sessionCookies = [];
-  try {
-    if (page && typeof page.cookies === "function") {
-      const cookiesA = await page.cookies("https://www.facebook.com").catch(() => []);
-      const cookiesB = await page.cookies("https://facebook.com").catch(() => []);
-      sessionCookies = [...cookiesA, ...cookiesB].filter(Boolean);
+  const outerCapMs = Math.max(
+    20_000,
+    Number(timeoutMs || 14_000) + 15_000
+  );
+  const work = (async () => {
+    const collector = await getDeltaCityCollector();
+    if (!collector || typeof collector.collectCityFromItemLink !== "function") {
+      return { ok: false, error: "delta_city_collector_runtime_invalid" };
     }
-  } catch (_) {}
-  const out = await collector.collectCityFromItemLink({
-    item_link: itemLink,
-    thread_key: threadKey,
-    account_login: accountLogin,
-    timeoutMs,
-    attempts,
-    session_cookies: sessionCookies,
-  });
-  return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
+    let sessionCookies = [];
+    try {
+      if (page && typeof page.cookies === "function") {
+        const cookiesA = await page.cookies("https://www.facebook.com").catch(() => []);
+        const cookiesB = await page.cookies("https://facebook.com").catch(() => []);
+        sessionCookies = [...cookiesA, ...cookiesB].filter(Boolean);
+      }
+    } catch (_) {}
+    const out = await collector.collectCityFromItemLink({
+      item_link: itemLink,
+      thread_key: threadKey,
+      account_login: accountLogin,
+      timeoutMs,
+      attempts,
+      session_cookies: sessionCookies,
+    });
+    return out && typeof out === "object" ? out : { ok: false, error: "delta_city_collector_unknown_error" };
+  })();
+  return Promise.race([
+    work,
+    sleep(outerCapMs).then(() => ({
+      ok: false,
+      error: `delta_city_collector_outer_timeout_${outerCapMs}ms`,
+    })),
+  ]);
 }
 
 function createSerialQueue() {
@@ -5188,6 +5201,27 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
 
     if (!itemLink) {
+      // Sem link: tenta cidade no DOM do Messenger antes de ficar eternamente collecting.
+      let domCityNoLink = null;
+      try {
+        domCityNoLink = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
+      } catch (_) {
+        domCityNoLink = null;
+      }
+      if (domCityNoLink) {
+        await settleToHandler({
+          account_login: ACCOUNT_LOGIN,
+          thread_key: t,
+          item_link: null,
+          customer_name: nomeClienteLimpo,
+          client_name: nomeClienteLimpo,
+          nome_cliente_limpo: nomeClienteLimpo,
+          cidade: domCityNoLink,
+          city_status: "resolved",
+          city_source: "dom_live_fallback",
+        });
+        return { ok: true, cidade: domCityNoLink, name: nomeClienteLimpo };
+      }
       try {
         scheduleDeferredLinkAndCityRecovery({
           threadKey: t,
@@ -5211,22 +5245,39 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       return { ok: true, deferred: true, name: nomeClienteLimpo };
     }
 
-    const cityOut = await collectCityFromItemLinkUsingGlobalCollector({
-      itemLink,
-      threadKey: t,
-      accountLogin: ACCOUNT_LOGIN,
-      timeoutMs: cityCollectorTimeoutMs,
-      attempts: cityCollectorAttempts,
-      page,
-    }).catch((e) => ({
-      ok: false,
-      error: (e && e.message) ? String(e.message) : "city_collect_reply_exception",
-    }));
+    // Collector com teto duro — nunca trava o fluxo se o browser de raspagem estiver morto.
+    const cityOut = await Promise.race([
+      collectCityFromItemLinkUsingGlobalCollector({
+        itemLink,
+        threadKey: t,
+        accountLogin: ACCOUNT_LOGIN,
+        timeoutMs: cityCollectorTimeoutMs,
+        attempts: cityCollectorAttempts,
+        page,
+      }).catch((e) => ({
+        ok: false,
+        error: (e && e.message) ? String(e.message) : "city_collect_reply_exception",
+      })),
+      sleep(Math.max(cityCollectorTimeoutMs + 8_000, 20_000)).then(() => ({
+        ok: false,
+        error: "city_collect_reply_outer_timeout",
+      })),
+    ]);
 
-    const cityCandidate = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
-    const citySource = cityCandidate
+    let cityCandidate = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
+    let citySource = cityCandidate
       ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
       : null;
+    if (!cityCandidate) {
+      try {
+        const domCity = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
+        if (domCity) {
+          cityCandidate = domCity;
+          citySource = "dom_live_fallback";
+        }
+      } catch (_) {}
+    }
+    // Falha do collector → pending (não collecting eterno). Pedido/AB podem reagir.
     const cityStatus = cityCandidate ? "resolved" : "pending";
 
     greetingStateByThread.set(t, {

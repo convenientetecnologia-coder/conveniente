@@ -1093,9 +1093,17 @@ async function createCollectorRuntime() {
     process.env.CHROME_PATH ||
     path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
 
-  // Default visivel (headed): facilita diagnostico de scrape de cidade no Marketplace.
-  // Para voltar headless: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=1
-  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "0").trim() === "1";
+  // Default HEADLESS: servidores RDP/sem GUI não mantêm Chrome visível aberto.
+  // Modo visivel só sob demanda: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=0
+  const headlessEnabled = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS || "1").trim() !== "0";
+  const launchTimeoutMs = Math.max(
+    8_000,
+    Math.min(60_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_LAUNCH_TIMEOUT_MS || 25_000) || 25_000)
+  );
+  const jobTimeoutMs = Math.max(
+    15_000,
+    Math.min(120_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_JOB_TIMEOUT_MS || 45_000) || 45_000)
+  );
 
   let browser = null;
   let page = null;
@@ -1297,26 +1305,43 @@ async function createCollectorRuntime() {
       reason: `pre_launch_${reclaimMode}`,
     });
 
-    const launched = await puppeteer.launch({
-      headless: headlessEnabled ? "new" : false,
-      executablePath,
-      userDataDir,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-background-networking",
-        "--disable-client-side-phishing-detection",
-        "--disable-sync",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-popup-blocking",
-        "--disable-renderer-backgrounding",
-        "--disable-backgrounding-occluded-windows",
-      ],
-      defaultViewport: { width: 1366, height: 900 },
-    });
+    let launched = null;
+    try {
+      launched = await Promise.race([
+        puppeteer.launch({
+          headless: headlessEnabled ? "new" : false,
+          executablePath,
+          userDataDir,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-background-networking",
+            "--disable-client-side-phishing-detection",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-popup-blocking",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+          ],
+          defaultViewport: { width: 1366, height: 900 },
+        }),
+        sleep(launchTimeoutMs).then(() => {
+          throw new Error(`city_collector_launch_timeout_${launchTimeoutMs}ms`);
+        }),
+      ]);
+    } catch (e) {
+      lastLaunchError = (e && e.message) ? String(e.message) : String(e);
+      // Timeout/fail: mata qualquer chrome do perfil pra nao deixar zumbi.
+      try { killZombieChromeForUserDataDir(userDataDir); } catch (_) {}
+      try { clearOrphanChromeProfileLocks(userDataDir); } catch (_) {}
+      browser = null;
+      page = null;
+      browserPid = null;
+      throw e;
+    }
 
     browser = launched;
     try {
@@ -1464,6 +1489,8 @@ async function createCollectorRuntime() {
     }
 
     return enqueue(async () => {
+      let jobTimedOut = false;
+      const runJob = async () => {
       const itemLink = normalizeItemLink(item_link);
       const tk = String(thread_key || "").trim();
       const account = String(account_login || "").trim();
@@ -1619,6 +1646,38 @@ async function createCollectorRuntime() {
         last_nav_error: lastNavError || null,
         queue_serial: true,
       };
+      };
+
+      // Hard cap: nunca deixa a fila serial (concurrency=1) eternamente travada
+      // se o Chrome headed/headless pendurar no launch/nav.
+      try {
+        const out = await Promise.race([
+          runJob(),
+          sleep(jobTimeoutMs).then(() => {
+            jobTimedOut = true;
+            return {
+              ok: false,
+              error: `city_collector_job_timeout_${jobTimeoutMs}ms`,
+              queue_serial: true,
+            };
+          }),
+        ]);
+        if (jobTimedOut) {
+          try {
+            await invalidateBrowser("job_timeout", { reclaim: true, reclaimMode: "soft" });
+          } catch (_) {}
+          try {
+            log(`collector job timeout ${jobTimeoutMs}ms — fila liberada`);
+          } catch (_) {}
+        }
+        return out;
+      } catch (e) {
+        return {
+          ok: false,
+          error: String((e && e.message) || e || "city_collector_job_exception").slice(0, 220),
+          queue_serial: true,
+        };
+      }
     });
   }
 
