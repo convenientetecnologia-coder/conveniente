@@ -3456,6 +3456,85 @@ async function execFetchLogsQuery(cmd) {
   await postLogsToNotifier({ requestId, items });
 }
 
+/**
+ * ONE-SHOT / recovery: coleta cidade a partir do item_link Marketplace
+ * e devolve no details do command-bus (CT aplica + dispara grupo).
+ */
+async function execDeltaForceCityCollect(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const itemLink = String(payload.item_link || payload.itemLink || '').trim();
+  const accountLogin = String(payload.account_login || payload.accountLogin || '').trim();
+  const threadKey = String(payload.thread_key || payload.threadKey || '').trim();
+  const ticketId = Number(payload.ticket_id || payload.ticketId || 0) || 0;
+  if (!itemLink) return { ok: false, error: 'missing_item_link', ticket_id: ticketId || null };
+  if (!/marketplace\/item\//i.test(itemLink)) {
+    return { ok: false, error: 'invalid_marketplace_item_link', ticket_id: ticketId || null };
+  }
+
+  let sessionCookies = [];
+  if (accountLogin) {
+    try {
+      const manifestStore = require('./manifestStore');
+      const man = await manifestStore.read(accountLogin);
+      if (man && Array.isArray(man.cookies) && man.cookies.length) {
+        sessionCookies = man.cookies.filter(Boolean);
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const { getDeltaCityCollector } = require('./deltaCityCollector');
+    const collector = await getDeltaCityCollector();
+    if (!collector || typeof collector.collectCityFromItemLink !== 'function') {
+      return { ok: false, error: 'delta_city_collector_runtime_invalid', ticket_id: ticketId || null };
+    }
+    const out = await collector.collectCityFromItemLink({
+      item_link: itemLink,
+      thread_key: threadKey || null,
+      account_login: accountLogin || null,
+      timeoutMs: Math.max(12_000, Number(payload.timeoutMs || 20_000) || 20_000),
+      attempts: Math.max(1, Math.min(5, Number(payload.attempts || 3) || 3)),
+      session_cookies: sessionCookies,
+    });
+    const cidade = String((out && out.ok && out.cidade) || '').trim() || null;
+    if (!cidade) {
+      return {
+        ok: false,
+        error: String((out && out.error) || 'city_collect_failed').slice(0, 220),
+        ticket_id: ticketId || null,
+        account_login: accountLogin || null,
+        thread_key: threadKey || null,
+        item_link: itemLink,
+        collector: out && typeof out === 'object' ? {
+          login_wall: !!out.login_wall,
+          has_localizacao: !!out.has_localizacao,
+          has_anunciado: !!out.has_anunciado,
+          candidates_count: Number(out.candidates_count || 0) || 0,
+        } : null,
+      };
+    }
+    return {
+      ok: true,
+      cidade,
+      city_source: String((out && out.city_source) || 'collector_listing_page').trim() || 'collector_listing_page',
+      ticket_id: ticketId || null,
+      account_login: accountLogin || null,
+      thread_key: threadKey || null,
+      item_link: itemLink,
+      cached: !!(out && out.cached),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: String((e && e.message) || e || 'delta_force_city_collect_exception').slice(0, 220),
+      ticket_id: ticketId || null,
+      account_login: accountLogin || null,
+      thread_key: threadKey || null,
+      item_link: itemLink,
+    };
+  }
+}
+
 async function execLogsManifest(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const requestId = String(payload.requestId || '').trim();
@@ -4243,6 +4322,10 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_backfill_labels') { details = await execProfilesBackfillLabels(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'delta_force_city_collect') {
+        details = await execDeltaForceCityCollect(c);
+        results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok === true), details: details || null, error: (details && details.ok) ? null : String((details && details.error) || 'city_collect_failed') });
+      }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'health_bundle')    { await execHealthBundle(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'set_ct_config')    { details = await execSetCtConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
@@ -4466,6 +4549,7 @@ const COMMAND_HANDLERS = Object.freeze({
   profiles_backfill_labels: execProfilesBackfillLabels,
   fetch_logs: execFetchLogs,
   fetch_logs_query: execFetchLogsQuery,
+  delta_force_city_collect: execDeltaForceCityCollect,
   logs_manifest: execLogsManifest,
   health_bundle: execHealthBundle,
   set_ct_config: execSetCtConfig,
