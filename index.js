@@ -1428,7 +1428,8 @@ function __edgeIsNonRetryableDeltaSendError(error) {
     e === 'send_not_confirmed_after_enter_only' ||
     e === 'send_not_confirmed_composer_not_empty' ||
     e === 'composer_text_not_registered' ||
-    e === 'send_failed_nonretryable'
+    e === 'send_failed_nonretryable' ||
+    e === 'wrong_thread_guard_blocked'
   );
 }
 
@@ -1573,6 +1574,66 @@ function __edgeIsProfileRuntimeReadySync(nome) {
   } catch {
     return true; // fail-open: tenta IPC
   }
+}
+
+const __EDGE_DELTA_REPLY_MAX_AGE_MS = Math.max(
+  30 * 60 * 1000,
+  Math.min(48 * 3600 * 1000, Number(process.env.EDGE_DELTA_REPLY_MAX_AGE_MS || (6 * 3600 * 1000)) || (6 * 3600 * 1000))
+);
+
+/** Lixo que engessa a esteira: local:* antigo / item velho demais. */
+function __edgeIsStaleDeltaReplyJunkSync(rec) {
+  const id = String(rec && (rec.id || rec.client_message_id) || '').trim();
+  const cmid = String(rec && rec.client_message_id || '').trim();
+  const ts = Number(rec && rec.ts || 0) || 0;
+  const ageMs = ts > 0 ? (Date.now() - ts) : 0;
+  const isLocal = id.startsWith('local:') || cmid.startsWith('local:');
+  if (isLocal) return { junk: true, reason: 'stale_local_cmd' };
+  if (ts > 0 && ageMs > __EDGE_DELTA_REPLY_MAX_AGE_MS) {
+    return { junk: true, reason: 'stale_age_exceeded' };
+  }
+  return { junk: false, reason: '' };
+}
+
+function __edgeTruncateDeltaReplyOutboxSync({ reason = 'manual_truncate' } = {}) {
+  __edgeEnsureDeltaReplyOutboxDirsSync();
+  let fileSize = 0;
+  let bakPath = null;
+  try {
+    if (fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) {
+      fileSize = Number(fs.statSync(EDGE_DELTA_REPLY_OUTBOX_PATH).size || 0) || 0;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      bakPath = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, `outbox.BAK_${stamp}.jsonl`);
+      try { fs.renameSync(EDGE_DELTA_REPLY_OUTBOX_PATH, bakPath); } catch {
+        try { fs.copyFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, bakPath); } catch {}
+        try { fs.writeFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, '', 'utf8'); } catch {}
+        bakPath = bakPath;
+      }
+    }
+  } catch {}
+  try { fs.writeFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, '', 'utf8'); } catch {}
+  __edgeWriteDeltaReplyCursorSync(0);
+  __edgeDeltaReplyPumpInFlight = false;
+  __edgeDeltaReplyPumpStartedAt = 0;
+  try {
+    logger.error(
+      `🔴 [OUTBOX] TRUNCATE reason=${reason} old_size=${fileSize} bak=${bakPath || '-'}`
+    );
+  } catch {}
+  try {
+    __forensicEdgeEmit({
+      account_login: null,
+      thread_key: null,
+      flow_stage: 'reverse_command_bus',
+      details: {
+        stage: 'pump_outbox_truncated',
+        reason: String(reason || ''),
+        old_size: fileSize,
+        bak_path: bakPath
+      }
+    });
+  } catch {}
+  return { ok: true, old_size: fileSize, bak_path: bakPath, offset: 0 };
 }
 
 function __edgeAlignDeltaReplyCursorToNewlineSync(fileSize, roughOffset) {
@@ -1746,31 +1807,45 @@ async function __edgeRunDeltaReplyPump() {
           continue;
         }
 
+        const junk = __edgeIsStaleDeltaReplyJunkSync(rec);
+        if (junk && junk.junk) {
+          __edgeWriteAckSync(cmdId, {
+            ok: false,
+            dead_letter: true,
+            dead_reason: junk.reason,
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          try {
+            logger.warn(
+              `🟠 [OUTBOX] skip_junk reason=${junk.reason} cmd=${cmdId} nome=${String(rec.nome || '-')}`
+            );
+          } catch {}
+          __forensicEdgeEmit({
+            account_login: String(rec.nome || '').trim() || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'ipc_dispatch_dead_letter', cmd_id: cmdId, reason: junk.reason }
+          });
+          continue;
+        }
+
         const accountNome = String(rec.nome || '').trim();
         if (accountNome && !__edgeIsProfileRuntimeReadySync(accountNome)) {
-          __edgeRequeueDeltaReplyRecordSync(rec, {
-            cmdId,
-            reason: 'profile_runtime_not_ready',
-            error: 'profile_inactive_or_offline',
-            burnRetry: false
-          });
+          // NÃO append de volta no outbox (isso inchava pra 400MB+).
+          // Avança cursor; CT redispara via stale_received_by_edge quando a conta abrir.
           __edgeWriteDeltaReplyCursorSync(nextOffset);
           __forensicEdgeEmit({
             account_login: accountNome || null,
             thread_key: String(rec.thread_key || '').trim() || null,
             flow_stage: 'reverse_command_bus',
             details: {
-              stage: 'ipc_dispatch_deferred',
+              stage: 'ipc_dispatch_skipped_offline',
               cmd_id: cmdId,
-              reason: 'profile_runtime_not_ready'
+              reason: 'profile_runtime_not_ready_no_requeue'
             }
           });
-          try {
-            logger.warn(
-              `🟠 [OUTBOX] Conta offline/fechada — refileira sem IPC nome=${accountNome} chat=${String(rec.thread_key || '-')}`
-            );
-          } catch {}
-          // Não trava a esteira: segue para o próximo item (ex.: ponta_grossa aberta).
           continue;
         }
 
@@ -2195,19 +2270,32 @@ app.post('/api/infra/command-bus', async (req, res) => {
           } catch {}
           const before = __edgeReadDeltaReplyCursorSync();
           const data = (cmd && cmd.data && typeof cmd.data === 'object') ? cmd.data : {};
+          const truncate = !!(cmd.truncate === true || data.truncate === true);
           const forceZero = !!(cmd && (cmd.force_zero === true || data.force_zero === true));
-          const seekTail = !forceZero && (
+          const seekTail = !truncate && !forceZero && (
             cmd.seek_tail === true
             || data.seek_tail === true
-            || cmd.seek_tail !== false
+            || fileSize > (8 * 1024 * 1024)
           );
           const keepBytes = Number(cmd.keep_bytes || data.keep_bytes || (2 * 1024 * 1024)) || (2 * 1024 * 1024);
           let clamped;
-          if (forceZero) {
+          if (truncate || fileSize > (64 * 1024 * 1024)) {
+            // >64MB ou pedido explícito: arquiva e zera. CT redispara o pendente.
+            const tr = __edgeTruncateDeltaReplyOutboxSync({
+              reason: truncate ? 'repair_truncate' : 'repair_auto_truncate_huge'
+            });
+            clamped = {
+              offset: 0,
+              clamped: true,
+              fileSize: Number(tr && tr.old_size || fileSize) || fileSize,
+              mode: 'truncate',
+              bak_path: tr && tr.bak_path
+            };
+            fileSize = Number(tr && tr.old_size || fileSize) || fileSize;
+          } else if (forceZero) {
             __edgeWriteDeltaReplyCursorSync(0);
             clamped = { offset: 0, clamped: true, fileSize, mode: 'force_zero' };
-          } else if (seekTail || fileSize > (8 * 1024 * 1024)) {
-            // Default seguro: outbox grande → cauda. Nunca reprocessar 400MB+ do zero.
+          } else if (seekTail) {
             clamped = __edgeSeekDeltaReplyCursorToTailSync(fileSize, { keepBytes });
           } else {
             clamped = __edgeClampDeltaReplyCursorToFileSizeSync(fileSize);
@@ -2222,8 +2310,9 @@ app.post('/api/infra/command-bus', async (req, res) => {
             before_offset: Number(before && before.offset || 0) || 0,
             after_offset: Number(clamped && clamped.offset || 0) || 0,
             file_size: fileSize,
-            mode: String((clamped && clamped.mode) || (forceZero ? 'force_zero' : 'clamp')),
-            clamped: !!(clamped && clamped.clamped) || forceZero || seekTail,
+            mode: String((clamped && clamped.mode) || 'clamp'),
+            bak_path: (clamped && clamped.bak_path) || null,
+            clamped: true,
             pump_kicked: true
           };
         } catch (e) {
@@ -3168,6 +3257,27 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     startServerEventBridge();
     networkRotation.startNetworkRotationScheduler({ port: PORT });
     dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
+
+    // Outbox gordo = esteira morta. Arquiva e zera; CT redispara o pendente das contas abertas.
+    try {
+      __edgeEnsureDeltaReplyOutboxDirsSync();
+      let bootOutboxSize = 0;
+      try {
+        if (fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) {
+          bootOutboxSize = Number(fs.statSync(EDGE_DELTA_REPLY_OUTBOX_PATH).size || 0) || 0;
+        }
+      } catch {}
+      const bootTruncateBytes = Math.max(
+        8 * 1024 * 1024,
+        Number(process.env.EDGE_DELTA_REPLY_BOOT_TRUNCATE_BYTES || (32 * 1024 * 1024)) || (32 * 1024 * 1024)
+      );
+      if (bootOutboxSize >= bootTruncateBytes) {
+        __edgeTruncateDeltaReplyOutboxSync({ reason: 'boot_auto_truncate_huge' });
+      } else if (bootOutboxSize > (8 * 1024 * 1024)) {
+        __edgeSeekDeltaReplyCursorToTailSync(bootOutboxSize, { keepBytes: 2 * 1024 * 1024 });
+      }
+      __edgeKickDeltaReplyPump();
+    } catch {}
   });
 })();
 
