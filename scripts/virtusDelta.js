@@ -577,6 +577,61 @@ const DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS = Math.max(
   60_000,
   Number(process.env.VIRTUS_DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS || 300_000) || 300_000
 );
+/** Orçamento total do activate Marketplace (evita 3–5min por conta no boot). */
+const DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS = Math.max(
+  12_000,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS || 45_000) || 45_000
+);
+/** No boot do worker: não bloquear hands além deste teto (fail-open). */
+const DELTA_MARKETPLACE_BOOT_TIMEOUT_MS = Math.max(
+  8_000,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_BOOT_TIMEOUT_MS || 20_000) || 20_000
+);
+
+function __marketplaceClickTrusted(click) {
+  const c = click && typeof click === "object" ? click : null;
+  if (!c) return false;
+  return !!(
+    c.selected_after_click ||
+    c.selected_after_keyboard ||
+    c.selected_after_double_click
+  );
+}
+
+async function __raceMarketplaceActivate(page, { timeoutMs = DELTA_MARKETPLACE_BOOT_TIMEOUT_MS, reason = "boot" } = {}) {
+  const budget = Math.max(5_000, Number(timeoutMs || DELTA_MARKETPLACE_BOOT_TIMEOUT_MS) || DELTA_MARKETPLACE_BOOT_TIMEOUT_MS);
+  const raceReason = String(reason || "boot");
+  const bootFailOpen = /^boot/i.test(raceReason);
+  try {
+    const out = await Promise.race([
+      ensureMarketplaceFilterActive(page).then((r) => ({
+        ...(r && typeof r === "object" ? r : { ok: !!r }),
+        timed_out: false,
+        race_reason: raceReason,
+      })),
+      sleep(budget).then(() => ({
+        ok: bootFailOpen,
+        timed_out: true,
+        fail_open: true,
+        reason: "activate_budget_timeout",
+        race_reason: raceReason,
+        active_before: false,
+        // No boot: libera hands mesmo sem validação DOM (enforcer continua em background).
+        active_after: bootFailOpen,
+        budget_ms: budget,
+      })),
+    ]);
+    return out && typeof out === "object" ? out : { ok: false, error: "activate_empty" };
+  } catch (e) {
+    return {
+      ok: bootFailOpen,
+      fail_open: true,
+      error: e && e.message ? String(e.message) : String(e),
+      race_reason: raceReason,
+      active_after: bootFailOpen,
+    };
+  }
+}
 
 function __isMessengerThreadUrl(urlOrPath) {
   const u = String(urlOrPath || "").toLowerCase();
@@ -1569,6 +1624,8 @@ async function clickAcceptMessageRequestIfPresent(page, ctx = {}) {
 
 async function ensureMarketplaceFilterActiveCore(page) {
   const now = Date.now();
+  const deadline = now + DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS;
+  const remainingMs = () => Math.max(0, deadline - Date.now());
   const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
   const lastClickAt = Number(guard.lastClickAt || 0) || 0;
   const inFlight = Number(guard.inFlightUntil || 0) || 0;
@@ -1583,95 +1640,117 @@ async function ensureMarketplaceFilterActiveCore(page) {
     return { ok: true, already_active: true, active_after: true };
   }
 
-  // Se clicamos há pouco, não reclicar: primeiro aguardar estabilização real do feed.
+  // Clique recente: espera curta; se o DOM nao confirmar, fail-open (nao gastar o budget).
   if (lastClickAt && now - lastClickAt < 45000) {
-    await waitForMarketplaceUiStable(page, "marketplace_recent_click");
-    const activeAfterRecent = await waitMarketplaceActiveStable(page, { timeoutMs: 55000, rounds: 3 });
+    const recentWait = Math.min(12_000, remainingMs());
+    if (recentWait >= 1500) {
+      await waitMarketplaceActiveStable(page, { timeoutMs: recentWait, rounds: 2 }).catch(() => false);
+    }
+    const activeAfterRecent = await isMarketplaceFilterActive(page);
     if (activeAfterRecent) {
       try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
       return { ok: true, already_active: true, guarded_recent_click: true, active_before: activeBefore, active_after: true };
     }
+    try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
+    logInfo("[virtusDelta][marketplace] recent_click_fail_open=1");
+    return {
+      ok: true,
+      already_active: true,
+      guarded_recent_click: true,
+      fail_open: true,
+      active_before: activeBefore,
+      active_after: true,
+    };
   }
 
-  if (lastClickAt && now - lastClickAt < 15000) {
-    await humanPause("domSettle", "marketplace_guard_recheck");
-    const activeAfterGuard = await isMarketplaceFilterActive(page);
-    if (activeAfterGuard) {
-      try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() }; } catch (_) {}
-      return { ok: true, already_active: true, guarded: true, active_before: activeBefore, active_after: true };
-    }
+  if (remainingMs() < 2500) {
+    return { ok: false, reason: "activate_budget_exhausted_before_click", active_before: activeBefore, active_after: false };
   }
 
   logInfo("[virtusDelta][marketplace] activating_filter...");
   try {
     page.__virtusDeltaMarketplaceGuard = {
       ...guard,
-      inFlightUntil: Date.now() + 20000,
+      inFlightUntil: Date.now() + Math.min(20_000, Math.max(8_000, remainingMs())),
     };
   } catch (_) {}
-  // Paciência: Messages DOM precisa terminar ANTES do clique no Marketplace.
-  await waitForMessagesBootStable(page, "marketplace_pre_click_messages_boot").catch(() => false);
-  await waitForMarketplaceUiStable(page, "marketplace_pre_click");
-  await humanPause("preMarketplace", "pre_marketplace_click");
+  // Nao repetir 5 rounds de Messages boot aqui (ja rodou no worker boot).
+  await waitForMarketplaceUiStable(page, "marketplace_pre_click").catch(() => false);
+  if (remainingMs() > 4000) {
+    await humanPause("preMarketplace", "pre_marketplace_click");
+  }
   const click = await clickMarketplaceFilterIfPresent(page);
+  const clickTrusted = __marketplaceClickTrusted(click);
   try {
     page.__virtusDeltaMarketplaceGuard = {
       ...(page.__virtusDeltaMarketplaceGuard || {}),
       inFlightUntil: 0,
-      lastClickAt: click && click.changed ? Date.now() : lastClickAt,
+      lastClickAt: (click && click.changed) || clickTrusted ? Date.now() : lastClickAt,
     };
   } catch (_) {}
-  await humanPause("postMarketplace", "post_marketplace_click");
-
-  // NUNCA “quick_path” sem validar feed: clique na row Marketplace ainda exige
-  // filtro ativo + grade de chats estável (evita loop goto/reclique).
-  let activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 60000, rounds: 3 });
-  if (!activeAfter && click.changed) {
-    await humanPause("domSettle", "marketplace_changed_recheck");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 40000, rounds: 3 });
+  if (remainingMs() > 3500) {
+    await humanPause("postMarketplace", "post_marketplace_click");
   }
-  if (!activeAfter && !click.changed) {
-    // Retry seguro: revalida carregamento e tenta novamente somente via seletor seguro.
-    await waitForMarketplaceUiStable(page, "marketplace_safe_retry");
+
+  let activeAfter = false;
+  let trustReason = null;
+  // Clique visualmente selecionado = filtro ativo. O detector DOM (aria-*) falha com frequencia.
+  if (clickTrusted) {
+    activeAfter = true;
+    trustReason = "selected_after_click";
+    logInfo("[virtusDelta][marketplace] trust_selected_after_click=1");
+  } else {
+    const waitMs = Math.min(12_000, remainingMs());
+    if (waitMs >= 1200) {
+      activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: waitMs, rounds: 2 });
+    } else {
+      activeAfter = await isMarketplaceFilterActive(page);
+    }
+  }
+
+  // Um retry curto so se ainda houver budget e o primeiro clique nao mudou nada.
+  if (!activeAfter && !clickTrusted && !(click && click.changed) && remainingMs() > 10_000) {
+    await waitForMarketplaceUiStable(page, "marketplace_safe_retry").catch(() => false);
     const retry = await clickMarketplaceFilterIfPresent(page);
-    await humanPause("domSettle", "marketplace_safe_retry_settle");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
-    if (retry && retry.changed) {
+    if (__marketplaceClickTrusted(retry) || (retry && retry.changed)) {
+      activeAfter = true;
+      trustReason = __marketplaceClickTrusted(retry) ? "retry_selected" : "retry_changed";
       try {
         page.__virtusDeltaMarketplaceGuard = {
           ...(page.__virtusDeltaMarketplaceGuard || {}),
           lastClickAt: Date.now(),
         };
       } catch (_) {}
+    } else {
+      const retryWait = Math.min(8_000, remainingMs());
+      if (retryWait >= 1200) {
+        activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: retryWait, rounds: 2 });
+      }
     }
   }
 
-  if (!activeAfter && click.changed) {
-    // Se "entrou e saiu" por re-render/duplo evento, faz um retorno único e validado.
-    await waitForMarketplaceUiStable(page, "marketplace_recover");
-    await humanPause("domSettle", "marketplace_recover_once");
-    const recover = await clickMarketplaceFilterIfPresent(page);
-    await humanPause("domSettle", "marketplace_recover_settle");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
-    if (recover && recover.changed) {
-      try {
-        page.__virtusDeltaMarketplaceGuard = {
-          ...(page.__virtusDeltaMarketplaceGuard || {}),
-          lastClickAt: Date.now(),
-        };
-      } catch (_) {}
-    }
+  // Fail-open: clique com mudanca de sidebar / selecao -> libera hands (nao bloqueia reply).
+  if (!activeAfter && (clickTrusted || (click && click.changed))) {
+    activeAfter = true;
+    trustReason = trustReason || "fail_open_click_changed";
+    logInfo(`[virtusDelta][marketplace] fail_open_after_click=1 reason=${trustReason}`);
   }
 
   let routeFallback = null;
-  if (!activeAfter) {
-    // Fallback determinístico: manter no feed de chats do marketplace dentro de /messages.
+  if (!activeAfter && remainingMs() > 12_000) {
     const fallbackUrl = "https://www.facebook.com/messages/?folder=marketplace";
     try {
-      await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingMs()) });
       await humanPause("domSettle", "marketplace_route_fallback_settle");
-      activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 45000, rounds: 3 });
-      routeFallback = { attempted: true, ok: !!activeAfter, url: fallbackUrl };
+      activeAfter = await waitMarketplaceActiveStable(page, {
+        timeoutMs: Math.min(10_000, remainingMs()),
+        rounds: 2,
+      });
+      if (!activeAfter) {
+        activeAfter = true;
+        trustReason = "fail_open_folder_marketplace_url";
+      }
+      routeFallback = { attempted: true, ok: true, url: fallbackUrl, trusted: !!trustReason };
     } catch (e) {
       routeFallback = {
         attempted: true,
@@ -1683,8 +1762,11 @@ async function ensureMarketplaceFilterActiveCore(page) {
   }
 
   let feedReady = null;
-  if (activeAfter) {
-    feedReady = await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 });
+  if (activeAfter && remainingMs() > 2500) {
+    feedReady = await waitForMarketplaceFeedReady(page, {
+      timeoutMs: Math.min(18_000, remainingMs()),
+      minThreadLinks: 1,
+    }).catch(() => null);
     try {
       page.__virtusDeltaMarketplaceGuard = {
         ...(page.__virtusDeltaMarketplaceGuard || {}),
@@ -1698,15 +1780,20 @@ async function ensureMarketplaceFilterActiveCore(page) {
       ...click,
       active_before: activeBefore,
       active_after: activeAfter,
+      trust_reason: trustReason,
       feed_ready: !!(feedReady && feedReady.ok),
       feed_links: Number(feedReady && feedReady.links || 0) || 0,
       route_fallback: routeFallback,
+      budget_ms: DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS,
+      remaining_ms: remainingMs(),
     })}`
   );
   return {
     ...click,
+    ok: !!activeAfter,
     active_before: activeBefore,
     active_after: activeAfter,
+    trust_reason: trustReason,
     feed_ready: !!(feedReady && feedReady.ok),
     route_fallback: routeFallback,
   };
@@ -1958,22 +2045,24 @@ async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = fal
   const t = String(threadKey || "").trim();
   logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
-  // Sempre paciente: fastMarketplace=true agora também usa o core com waits completos.
+  // Budget curto: reply nao pode esperar 3–5min de Marketplace.
   const mp = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
-    ? (
-      fastMarketplace
-        ? await ensureMarketplaceFilterActiveFast(page)
-        : await ensureMarketplaceFilterActive(page)
-    )
+    ? await __raceMarketplaceActivate(page, {
+        timeoutMs: Math.min(
+          DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS,
+          Number(fastMarketplace ? 25_000 : 35_000) || 35_000
+        ),
+        reason: fastMarketplace ? "dom_prep_fast" : "dom_prep",
+      })
     : { ok: true, skipped: true, reason: "autofilter_disabled", active_after: false };
 
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && mp && mp.active_after) {
-    await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
+    await waitForMarketplaceFeedReady(page, { timeoutMs: 18_000, minThreadLinks: 1 }).catch(() => null);
   }
 
   let cardVisible = await isThreadCardVisible(page, t);
   logInfo(
-    `[virtusDelta][dom_prep] thread_key=${t} card_visible=${cardVisible ? "sim" : "nao"} marketplace_active=${mp.active_after ? "sim" : "nao"}`
+    `[virtusDelta][dom_prep] thread_key=${t} card_visible=${cardVisible ? "sim" : "nao"} marketplace_active=${mp.active_after ? "sim" : "nao"} timed_out=${mp.timed_out ? "sim" : "nao"}`
   );
 
   if (!cardVisible) {
@@ -1981,8 +2070,8 @@ async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = fal
     logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
     await humanPause("domSettle", "dom_prep_root_settle");
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !(await isMarketplaceFilterActive(page))) {
-      await ensureMarketplaceFilterActive(page);
-      await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
+      await __raceMarketplaceActivate(page, { timeoutMs: 20_000, reason: "dom_prep_retry" }).catch(() => null);
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 12_000, minThreadLinks: 1 }).catch(() => null);
     }
     cardVisible = await isThreadCardVisible(page, t);
   }
@@ -3469,13 +3558,13 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     };
   }
 
-  // Antes de procurar o card: Marketplace ativo + feed estável (paciência total).
+  // Antes de procurar o card: Marketplace com budget curto (fail-open).
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
     const mpActive = await isMarketplaceFilterActive(page).catch(() => false);
     if (!mpActive) {
-      await ensureMarketplaceFilterActive(page).catch(() => null);
+      await __raceMarketplaceActivate(page, { timeoutMs: 25_000, reason: "open_thread_pre" }).catch(() => null);
     } else {
-      await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 18_000, minThreadLinks: 1 }).catch(() => null);
     }
   }
 
@@ -4385,7 +4474,10 @@ async function startVirtusDeltaStandaloneRuntime({
   } catch (_) {}
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
     try {
-      const mpBoot = await ensureMarketplaceFilterActive(page);
+      const mpBoot = await __raceMarketplaceActivate(page, {
+        timeoutMs: DELTA_MARKETPLACE_BOOT_TIMEOUT_MS,
+        reason: "boot_standalone",
+      });
       logInfo(`[virtusDelta][boot] marketplace_boot=${JSON.stringify(mpBoot)}`);
     } catch (e) {
       logInfo(`[virtusDelta][boot] marketplace_boot_fail err=${e && e.message ? e.message : String(e)}`);
@@ -5267,7 +5359,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   } catch (_) {}
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
     try {
-      const mpBoot = await ensureMarketplaceFilterActive(page);
+      // Hands liberam em <= BOOT_TIMEOUT mesmo se o filtro DOM nao validar.
+      const mpBoot = await __raceMarketplaceActivate(page, {
+        timeoutMs: DELTA_MARKETPLACE_BOOT_TIMEOUT_MS,
+        reason: "boot_worker",
+      });
       logInfo(`[virtusDelta][boot][worker] marketplace_boot=${JSON.stringify(mpBoot)}`);
     } catch (e) {
       logInfo(
