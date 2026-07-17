@@ -1,6 +1,8 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
+const VIRTUS_DELTA_BUILD = "2026-07-17-mp-no-goto-fast-v4";
+try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
 
 // ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
@@ -502,11 +504,11 @@ const HUMAN_TIMINGS = {
   /** Fila de ação das mãos (dashboard + chat novo): padrão 2–10s */
   actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 2000, 10000),
   /** Antes de clicar no filtro Marketplace (x2.5 — DOM Messages precisa terminar) */
-  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 5500, 10500),
+  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 2200, 4500),
   /** Após ativar Marketplace — DOM lateral estabilizar (x2.5) */
-  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 8000, 14500),
+  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 2500, 5200),
   /** Janela extra para carregamento real da UI antes de clicar no Marketplace (x2.5) */
-  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 6500, 13000),
+  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 1800, 4200),
   /** Antes de clicar no card do cliente (x3) */
   preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 1800, 4200),
   /** Após abrir o chat — ler contexto / banner / Aceitar (x2.5) */
@@ -528,7 +530,7 @@ const HUMAN_TIMINGS = {
   /** Entre scrolls no sidebar */
   scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 350, 700),
   /** Refresh DOM / retries (x2.5 — evita clicar Marketplace com feed incompleto) */
-  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 3000, 6500),
+  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 700, 1600),
 };
 const NEW_CHAT_WARMUP_DELAY = envMs(
   "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MIN",
@@ -554,7 +556,7 @@ const MARKETPLACE_STABILITY_GAP_MS = Math.max(
 );
 const MESSAGES_BOOT_STABILITY_ROUNDS = Math.max(
   3,
-  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 5) || 5
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 2) || 2
 );
 const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
   1500,
@@ -1204,9 +1206,27 @@ async function isMarketplaceFilterActive(page) {
           pathNow.includes("/messages/t/") ||
           pathNow.includes("/messages/e2ee/t/");
         if (pathNow.includes("/marketplace/item/")) return false;
-        // Thread aberto não é feed de chats do marketplace.
-        if (isThreadView && !searchNow.includes("folder=marketplace")) return false;
         if (pathNow.includes("/messages") && searchNow.includes("folder=marketplace")) return true;
+
+        // Thread aberto: confiar no chrome Marketplace (h1/grid/botao pressed).
+        // Nao exigir folder=marketplace na URL — Messenger frequentemente omite isso.
+        if (isThreadView) {
+          const h1s = Array.from(document.querySelectorAll("h1,[role='heading']"));
+          const hasMarketplaceHeading = h1s.some((h) =>
+            String(h.textContent || "").trim().toLowerCase() === "marketplace"
+          );
+          const gridLabels = Array.from(document.querySelectorAll('[role="grid"][aria-label]'));
+          const hasMarketplaceGrid = gridLabels.some((g) =>
+            String(g.getAttribute("aria-label") || "").trim().toLowerCase().includes("marketplace")
+          );
+          if (hasMarketplaceHeading || hasMarketplaceGrid) return true;
+          for (const b of document.querySelectorAll('div[role="button"], [role="button"]')) {
+            const label = String(b.getAttribute("aria-label") || b.innerText || "").toLowerCase();
+            if (!label.includes("marketplace")) continue;
+            if (b.getAttribute("aria-pressed") === "true" || b.getAttribute("aria-current") === "page") return true;
+          }
+        }
+
 
         const h1s = Array.from(document.querySelectorAll("h1,[role='heading']"));
         const hasMarketplaceHeading = h1s.some((h) =>
@@ -1318,7 +1338,7 @@ async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable")
 async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
   let stableRounds = 0;
   let lastSig = "";
-  const maxRounds = Math.max(4, MESSAGES_BOOT_STABILITY_ROUNDS * 2 + 1);
+  const maxRounds = Math.max(MESSAGES_BOOT_STABILITY_ROUNDS + 1, 3);
 
   for (let i = 0; i < maxRounds; i++) {
     await humanPause("domSettle", `${label}_dom_settle`);
@@ -1640,6 +1660,36 @@ async function ensureMarketplaceFilterActiveCore(page) {
     return { ok: true, already_active: true, active_after: true };
   }
 
+  // Feed ja aberto (threads Marketplace) sem folder= na URL: nao reclicar / nao goto.
+  try {
+    const feedOpen = await page.evaluate(() => {
+      try {
+        const href = String(location.href || '');
+        const path = String(location.pathname || '').toLowerCase();
+        if (!path.includes('/messages')) return false;
+        const threads = document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length;
+        if (threads < 1) return false;
+        const h1 = Array.from(document.querySelectorAll('h1')).some((n) =>
+          /marketplace/i.test(String(n.textContent || '').trim())
+        );
+        const grid = !!document.querySelector('[role="grid"][aria-label*="Marketplace" i]');
+        const pressed = Array.from(
+          document.querySelectorAll('[role="button"][aria-pressed="true"], [role="button"][aria-current="page"]')
+        ).some((el) => /marketplace/i.test(String(el.getAttribute('aria-label') || el.textContent || '')));
+        return !!(h1 || grid || pressed || /[?&]folder=marketplace\b/i.test(href));
+      } catch (_) {
+        return false;
+      }
+    });
+    if (feedOpen) {
+      try {
+        page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() };
+      } catch (_) {}
+      logInfo('[virtusDelta][marketplace] feed_already_open_trust=1');
+      return { ok: true, already_active: true, feed_trust: true, active_before: false, active_after: true };
+    }
+  } catch (_) {}
+
   // Clique recente: espera curta; se o DOM nao confirmar, fail-open (nao gastar o budget).
   if (lastClickAt && now - lastClickAt < 45000) {
     const recentWait = Math.min(12_000, remainingMs());
@@ -1737,29 +1787,7 @@ async function ensureMarketplaceFilterActiveCore(page) {
   }
 
   let routeFallback = null;
-  if (!activeAfter && remainingMs() > 12_000) {
-    const fallbackUrl = "https://www.facebook.com/messages/?folder=marketplace";
-    try {
-      await page.goto(fallbackUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingMs()) });
-      await humanPause("domSettle", "marketplace_route_fallback_settle");
-      activeAfter = await waitMarketplaceActiveStable(page, {
-        timeoutMs: Math.min(10_000, remainingMs()),
-        rounds: 2,
-      });
-      if (!activeAfter) {
-        activeAfter = true;
-        trustReason = "fail_open_folder_marketplace_url";
-      }
-      routeFallback = { attempted: true, ok: true, url: fallbackUrl, trusted: !!trustReason };
-    } catch (e) {
-      routeFallback = {
-        attempted: true,
-        ok: false,
-        url: fallbackUrl,
-        error: e && e.message ? String(e.message) : String(e),
-      };
-    }
-  }
+  // NUNCA page.goto(?folder=marketplace): causa maw_proxy + reload + engessa hands.
 
   let feedReady = null;
   if (activeAfter && remainingMs() > 2500) {
