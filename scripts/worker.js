@@ -20207,6 +20207,20 @@ function __deltaLooksLikeHumanText(value) {
   return true;
 }
 function __deltaExtractPreferredTextFromNode(node) {
+  // Captura tolerante: string plana ou nó { text: "..." }.
+  // Só devolve texto que passe em __deltaLooksLikeHumanText (sem inventar lead).
+  const asHumanText = (raw) => {
+    if (typeof raw === 'string') {
+      const v = __deltaDecodeEscapedText(raw).trim();
+      return __deltaLooksLikeHumanText(v) ? v : '';
+    }
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.text === 'string') {
+      const v = __deltaDecodeEscapedText(raw.text).trim();
+      return __deltaLooksLikeHumanText(v) ? v : '';
+    }
+    return '';
+  };
+
   const visit = (n) => {
     if (n == null) return '';
     if (Array.isArray(n)) {
@@ -20218,21 +20232,31 @@ function __deltaExtractPreferredTextFromNode(node) {
     }
     if (!__deltaIsPlainObject(n)) return '';
 
-    const msgText = n && n.message && n.message.body && n.message.body.text;
-    if (typeof msgText === 'string') {
-      const v = __deltaDecodeEscapedText(msgText).trim();
-      if (__deltaLooksLikeHumanText(v)) return v;
+    // Prioridade canônica Meta/Lightspeed (plano → body → legado message.body):
+    // 1) unbundled_message_text  2) body.text / body string  3) message.body.text
+    const unbundled = asHumanText(n.unbundled_message_text);
+    if (unbundled) return unbundled;
+
+    if (typeof n.body === 'string') {
+      const bodyPlain = asHumanText(n.body);
+      if (bodyPlain) return bodyPlain;
+    } else {
+      const bodyText = asHumanText(n.body && n.body.text);
+      if (bodyText) return bodyText;
     }
-    const unbundled = n && n.unbundled_message_text;
-    if (typeof unbundled === 'string') {
-      const v = __deltaDecodeEscapedText(unbundled).trim();
-      if (__deltaLooksLikeHumanText(v)) return v;
+
+    const msgBody = n.message && n.message.body;
+    if (typeof msgBody === 'string') {
+      const msgPlain = asHumanText(msgBody);
+      if (msgPlain) return msgPlain;
+    } else {
+      const msgText = asHumanText(msgBody && msgBody.text);
+      if (msgText) return msgText;
     }
-    const bodyText = n && n.body && n.body.text;
-    if (typeof bodyText === 'string') {
-      const v = __deltaDecodeEscapedText(bodyText).trim();
-      if (__deltaLooksLikeHumanText(v)) return v;
-    }
+
+    // Plano residual comum em nós sync.
+    const flatText = asHumanText(n.text);
+    if (flatText) return flatText;
 
     for (const key of Object.keys(n)) {
       const found = visit(n[key]);
@@ -21045,7 +21069,8 @@ async function __deltaAttachCdpEar(nome, page) {
       for (const ev of arr) {
         const threadKey = String(ev && ev.thread_key || '').trim();
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
-        const texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
+        // let: precisa mutar após StripFacebookSystemPrompt (const quebrava com TypeError).
+        let texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
         if (!threadKey) {
           // Mensagem válida sem identificador (causa: missing_identifiers).
           try {
