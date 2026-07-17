@@ -498,39 +498,41 @@ function envMs(minKey, maxKey, defMin, defMax) {
   return { min, max };
 }
 
+// Defaults "ninja": wait-until-condition > sleep paranoico.
+// Env vars ainda sobrescrevem se precisar afrouxar/apertar por host.
 const HUMAN_TIMINGS = {
-  /** Pausa perceptiva pós-lead (Fabiana): padrão 3–7s */
+  /** Pausa perceptiva pós-lead (Fabiana) */
   reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
-  /** Fila de ação das mãos (dashboard + chat novo): padrão 2–10s */
+  /** Fila de ação das mãos (dashboard + chat novo) */
   actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 2000, 10000),
-  /** Antes de clicar no filtro Marketplace (x2.5 — DOM Messages precisa terminar) */
-  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 2200, 4500),
-  /** Após ativar Marketplace — DOM lateral estabilizar (x2.5) */
-  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 2500, 5200),
-  /** Janela extra para carregamento real da UI antes de clicar no Marketplace (x2.5) */
-  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 1800, 4200),
-  /** Antes de clicar no card do cliente (x3) */
-  preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 1800, 4200),
-  /** Após abrir o chat — ler contexto / banner / Aceitar (x2.5) */
-  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 6000, 12000),
+  /** Antes de clicar no filtro Marketplace */
+  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 250, 700),
+  /** Após ativar Marketplace — DOM lateral */
+  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 300, 800),
+  /** Extra após UI Marketplace estável */
+  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 200, 600),
+  /** Antes de clicar no card do cliente */
+  preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 200, 600),
+  /** Após abrir o chat — só respiro curto; composer usa waitForSelector */
+  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 400, 1200),
   /** Antes de focar o composer */
-  preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 900, 1800),
+  preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 200, 500),
   /** Entre foco e primeira tecla */
-  preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 700, 1600),
+  preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 200, 500),
   /** Por caractere */
   char: envMs("VIRTUS_DELTA_HUMAN_CHAR_MS_MIN", "VIRTUS_DELTA_HUMAN_CHAR_MS_MAX", 80, 130),
   /** Após Shift+Enter */
   lineBreak: envMs("VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MIN", "VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MAX", 45, 110),
   /** Antes do Enter final */
-  preSend: envMs("VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MAX", 500, 1200),
+  preSend: envMs("VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MAX", 200, 500),
   /** Após envio */
-  postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 400, 900),
+  postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 200, 500),
   /** delay do page.click */
-  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 220, 480),
+  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 120, 280),
   /** Entre scrolls no sidebar */
-  scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 350, 700),
-  /** Refresh DOM / retries (x2.5 — evita clicar Marketplace com feed incompleto) */
-  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 700, 1600),
+  scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 150, 350),
+  /** Refresh DOM / retries entre polls */
+  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 120, 350),
 };
 const NEW_CHAT_WARMUP_DELAY = envMs(
   "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MIN",
@@ -547,20 +549,20 @@ const CROSS_THREAD_SEND_GAP = envMs(
 );
 
 const MARKETPLACE_STABILITY_ROUNDS = Math.max(
-  3,
-  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_ROUNDS || 5) || 5
+  2,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_ROUNDS || 2) || 2
 );
 const MARKETPLACE_STABILITY_GAP_MS = Math.max(
-  1500,
-  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_GAP_MS || 4000) || 4000
+  300,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_GAP_MS || 700) || 700
 );
 const MESSAGES_BOOT_STABILITY_ROUNDS = Math.max(
-  3,
+  2,
   Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 2) || 2
 );
 const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
-  1500,
-  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 4500) || 4500
+  300,
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 700) || 700
 );
 const DELTA_MARKETPLACE_AUTOFILTER_ENABLED =
   String(process.env.VIRTUS_DELTA_MARKETPLACE_AUTOFILTER || "1").trim() === "1";
@@ -1269,10 +1271,10 @@ async function isMarketplaceFilterActive(page) {
 async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable") {
   let stableRounds = 0;
   let lastSig = "";
-  const maxRounds = Math.max(3, MARKETPLACE_STABILITY_ROUNDS * 2);
+  const maxRounds = Math.max(3, MARKETPLACE_STABILITY_ROUNDS + 2);
 
   for (let i = 0; i < maxRounds; i++) {
-    await humanPause("domSettle", null);
+    if (i > 0) await humanPause("domSettle", null);
     let ok = false;
     let sig = "";
     try {
@@ -1332,16 +1334,21 @@ async function waitForMarketplaceUiStable(page, label = "marketplace_ui_stable")
     await sleep(MARKETPLACE_STABILITY_GAP_MS);
   }
 
-  await humanPause("marketplaceLoad", `${label}_final_load`);
+  // Só respiro curto se ainda não estabilizou nas primeiras rodadas.
+  if (stableRounds < MARKETPLACE_STABILITY_ROUNDS) {
+    await humanPause("marketplaceLoad", `${label}_final_load`);
+  } else {
+    await humanPause("domSettle", `${label}_ready`);
+  }
 }
 
 async function waitForMessagesBootStable(page, label = "messages_boot_stable") {
   let stableRounds = 0;
   let lastSig = "";
-  const maxRounds = Math.max(MESSAGES_BOOT_STABILITY_ROUNDS + 1, 3);
+  const maxRounds = Math.max(MESSAGES_BOOT_STABILITY_ROUNDS + 2, 3);
 
   for (let i = 0; i < maxRounds; i++) {
-    await humanPause("domSettle", `${label}_dom_settle`);
+    if (i > 0) await humanPause("domSettle", `${label}_dom_settle`);
     let ok = false;
     let sig = "";
     try {
@@ -1443,7 +1450,7 @@ async function __injectAntiSelectionCss(page, { profileName = null, reason = "" 
   }
 }
 
-async function waitMarketplaceActiveStable(page, { timeoutMs = 60000, rounds = 3 } = {}) {
+async function waitMarketplaceActiveStable(page, { timeoutMs = 60000, rounds = 2 } = {}) {
   const start = Date.now();
   let okRounds = 0;
   while (Date.now() - start < timeoutMs) {
@@ -1454,7 +1461,7 @@ async function waitMarketplaceActiveStable(page, { timeoutMs = 60000, rounds = 3
     } else {
       okRounds = 0;
     }
-    await sleep(Math.max(1200, MARKETPLACE_STABILITY_GAP_MS));
+    await sleep(Math.max(350, MARKETPLACE_STABILITY_GAP_MS));
   }
   return false;
 }
@@ -1512,7 +1519,8 @@ async function waitForMarketplaceFeedReady(page, { timeoutMs = 70000, minThreadL
       if (count === lastCount && count >= need) stableHits += 1;
       else stableHits = 1;
       lastCount = count;
-      if (stableHits >= 2) {
+      // 1 hit com feed ok já basta — segundo hit era timer engessado.
+      if (stableHits >= 1) {
         try {
           logInfo(
             `[virtusDelta][marketplace_feed] ready links=${count} rows=${Number(snap.rows || 0) || 0}`
@@ -1524,7 +1532,7 @@ async function waitForMarketplaceFeedReady(page, { timeoutMs = 70000, minThreadL
       stableHits = 0;
       lastCount = count;
     }
-    await sleep(Math.max(1500, Math.floor(MARKETPLACE_STABILITY_GAP_MS * 0.75)));
+    await sleep(Math.max(350, Math.floor(MARKETPLACE_STABILITY_GAP_MS * 0.6)));
   }
   try {
     logInfo(`[virtusDelta][marketplace_feed] timeout links=${lastCount}`);
@@ -2089,22 +2097,41 @@ async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = fal
   const t = String(threadKey || "").trim();
   logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
+  // Inteligente: se o card já está no DOM, não martela Marketplace/feed.
+  let cardVisible = await isThreadCardVisible(page, t).catch(() => false);
+  if (cardVisible) {
+    const mpActive = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
+      ? await isMarketplaceFilterActive(page).catch(() => false)
+      : false;
+    logInfo(
+      `[virtusDelta][dom_prep] thread_key=${t} card_visible=sim marketplace_active=${mpActive ? "sim" : "nao"} skip_activate=sim`
+    );
+    return {
+      ok: true,
+      cardVisible: true,
+      marketplace: { ok: true, skipped: true, reason: "card_already_visible", active_after: !!mpActive },
+    };
+  }
+
   // Budget curto: reply nao pode esperar 3–5min de Marketplace.
   const mp = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
     ? await __raceMarketplaceActivate(page, {
         timeoutMs: Math.min(
           DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS,
-          Number(fastMarketplace ? 25_000 : 35_000) || 35_000
+          Number(fastMarketplace ? 12_000 : 20_000) || 20_000
         ),
         reason: fastMarketplace ? "dom_prep_fast" : "dom_prep",
       })
     : { ok: true, skipped: true, reason: "autofilter_disabled", active_after: false };
 
   if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && mp && mp.active_after) {
-    await waitForMarketplaceFeedReady(page, { timeoutMs: 18_000, minThreadLinks: 1 }).catch(() => null);
+    await waitForMarketplaceFeedReady(page, {
+      timeoutMs: fastMarketplace ? 6_000 : 10_000,
+      minThreadLinks: 1,
+    }).catch(() => null);
   }
 
-  let cardVisible = await isThreadCardVisible(page, t);
+  cardVisible = await isThreadCardVisible(page, t);
   logInfo(
     `[virtusDelta][dom_prep] thread_key=${t} card_visible=${cardVisible ? "sim" : "nao"} marketplace_active=${mp.active_after ? "sim" : "nao"} timed_out=${mp.timed_out ? "sim" : "nao"}`
   );
@@ -2114,8 +2141,8 @@ async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = fal
     logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
     await humanPause("domSettle", "dom_prep_root_settle");
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !(await isMarketplaceFilterActive(page))) {
-      await __raceMarketplaceActivate(page, { timeoutMs: 20_000, reason: "dom_prep_retry" }).catch(() => null);
-      await waitForMarketplaceFeedReady(page, { timeoutMs: 12_000, minThreadLinks: 1 }).catch(() => null);
+      await __raceMarketplaceActivate(page, { timeoutMs: 12_000, reason: "dom_prep_retry" }).catch(() => null);
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 6_000, minThreadLinks: 1 }).catch(() => null);
     }
     cardVisible = await isThreadCardVisible(page, t);
   }
@@ -3602,14 +3629,19 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     };
   }
 
-  // Antes de procurar o card: Marketplace com budget curto (fail-open).
-  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+  // Marketplace só se o card do alvo ainda não aparece — evita activate+feed em todo reply.
+  const cardAlreadyVisible = await isThreadCardVisible(page, t).catch(() => false);
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !cardAlreadyVisible) {
     const mpActive = await isMarketplaceFilterActive(page).catch(() => false);
     if (!mpActive) {
-      await __raceMarketplaceActivate(page, { timeoutMs: 25_000, reason: "open_thread_pre" }).catch(() => null);
+      await __raceMarketplaceActivate(page, { timeoutMs: 12_000, reason: "open_thread_pre" }).catch(() => null);
     } else {
-      await waitForMarketplaceFeedReady(page, { timeoutMs: 18_000, minThreadLinks: 1 }).catch(() => null);
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 6_000, minThreadLinks: 1 }).catch(() => null);
     }
+  } else if (cardAlreadyVisible) {
+    try {
+      logInfo(`[virtusDelta][open] skip_marketplace_pre thread_key=${t} card_visible=sim`);
+    } catch (_) {}
   }
 
   try {
@@ -3621,7 +3653,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
         const nonNew = hrefs.filter((h) => !h.includes("/messages/new"));
         return nonNew.length >= 1;
       },
-      { timeout: 12000 }
+      { timeout: 6000 }
     );
   } catch (_) {}
 
@@ -3713,14 +3745,15 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
       continue;
     }
 
-    await humanPause("postThreadOpen", "post_thread_card_click");
+    // Wait-until composer — não sleep fixo de 6–12s.
+    await humanPause("domSettle", "post_thread_card_click");
     // Pedido de mensagem: Aceitar libera o composer.
     await clickAcceptMessageRequestIfPresent(page, {
       account_login: forensicAccountLogin,
       thread_key: t,
     }).catch(() => null);
     try {
-      await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 12000 });
+      await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 8000 });
     } catch (_) {
       // Segunda chance: Aceitar + esperar de novo
       await clickAcceptMessageRequestIfPresent(page, {
@@ -3728,7 +3761,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
         thread_key: t,
       }).catch(() => null);
       try {
-        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 10000 });
+        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 6000 });
       } catch (_) {
         stepAError = "thread_open_hydration_timeout";
         break;
@@ -3952,11 +3985,10 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     })();
     const continuity = providedContinuity || await probeOpenLineContinuity(page, t);
     const canUseOpenLineFastPath = !!(continuity && continuity.is_open_line_ready === true);
-    // Com mensagem na mão: SEMPRE preparar Marketplace com paciência
-    // (não só network lead) — evita clicar card no inbox geral / feed incompleto.
+    // Hands/dashboard: prep rápido (card first). Network lead ainda passa pelo mesmo path.
     if (!canUseOpenLineFastPath) {
       try {
-        await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: false });
+        await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: true });
       } catch (e) {
         logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
       }
@@ -4062,16 +4094,18 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    if (!canUseOpenLineFastPath) {
-      await humanPause("postThreadOpen", "post_open_read_context");
-    }
+    // Removido post_open_read_context (6–12s duplicado): composer + wrong_thread_guard bastam.
 
-    // Link do classificado (Coletor 101) - coletado no exato momento de abertura do chat.
-    // VM fraca: readiness do banner + retries dobrados; nunca bloqueia o envio se falhar.
+    // Link do classificado: path agent hands é curto; não engessa o envio.
     let itemLink = null;
     if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
-      const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
-      const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
+      const handsPath = !!skipActionDispatch && !fromNetworkLead;
+      const itemLinkAttempts = handsPath
+        ? Math.max(1, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 2) || 2)
+        : Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+      const readyMs = handsPath
+        ? Math.max(600, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 1500) || 1500)
+        : Math.max(1000, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 4000) || 4000);
       try {
         itemLink = await extractMarketplaceItemLinkWithRetry(page, {
           attempts: itemLinkAttempts,
