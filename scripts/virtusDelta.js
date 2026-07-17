@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-07-17-mp-no-goto-fast-v4";
+const VIRTUS_DELTA_BUILD = "2026-07-17-mp-thread-force-feed-v5";
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
 
@@ -1653,42 +1653,58 @@ async function ensureMarketplaceFilterActiveCore(page) {
     return { ok: false, skipped: true, reason: "in_flight_guard", active_before: false, active_after: false };
   }
 
+  // Thread aberto (/messages/t/...) NAO e feed. Chrome Marketplace no DOM nao basta:
+  // early-return aqui pula o clique e engessa a aba no chat antigo (regressao v4).
+  let onThreadView = false;
+  try {
+    const hrefNow = String(page.url ? page.url() : "");
+    onThreadView = __isMessengerThreadUrl(hrefNow);
+  } catch (_) {
+    onThreadView = false;
+  }
+
   const activeBefore = await isMarketplaceFilterActive(page);
-  if (activeBefore) {
+  if (activeBefore && !onThreadView) {
     try { page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: now }; } catch (_) {}
     logInfo("[virtusDelta][marketplace] filter_already_active=sim");
     return { ok: true, already_active: true, active_after: true };
   }
+  if (activeBefore && onThreadView) {
+    logInfo("[virtusDelta][marketplace] already_active_but_thread_open_force_feed=1");
+  }
 
-  // Feed ja aberto (threads Marketplace) sem folder= na URL: nao reclicar / nao goto.
-  try {
-    const feedOpen = await page.evaluate(() => {
-      try {
-        const href = String(location.href || '');
-        const path = String(location.pathname || '').toLowerCase();
-        if (!path.includes('/messages')) return false;
-        const threads = document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length;
-        if (threads < 1) return false;
-        const h1 = Array.from(document.querySelectorAll('h1')).some((n) =>
-          /marketplace/i.test(String(n.textContent || '').trim())
-        );
-        const grid = !!document.querySelector('[role="grid"][aria-label*="Marketplace" i]');
-        const pressed = Array.from(
-          document.querySelectorAll('[role="button"][aria-pressed="true"], [role="button"][aria-current="page"]')
-        ).some((el) => /marketplace/i.test(String(el.getAttribute('aria-label') || el.textContent || '')));
-        return !!(h1 || grid || pressed || /[?&]folder=marketplace\b/i.test(href));
-      } catch (_) {
-        return false;
+  // Feed ja aberto (lista, nao thread) sem folder= na URL: nao reclicar / nao goto.
+  if (!onThreadView) {
+    try {
+      const feedOpen = await page.evaluate(() => {
+        try {
+          const href = String(location.href || '');
+          const path = String(location.pathname || '').toLowerCase();
+          if (!path.includes('/messages')) return false;
+          if (path.includes('/messages/t/') || path.includes('/messages/e2ee/t/')) return false;
+          const threads = document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length;
+          if (threads < 1) return false;
+          const h1 = Array.from(document.querySelectorAll('h1')).some((n) =>
+            /marketplace/i.test(String(n.textContent || '').trim())
+          );
+          const grid = !!document.querySelector('[role="grid"][aria-label*="Marketplace" i]');
+          const pressed = Array.from(
+            document.querySelectorAll('[role="button"][aria-pressed="true"], [role="button"][aria-current="page"]')
+          ).some((el) => /marketplace/i.test(String(el.getAttribute('aria-label') || el.textContent || '')));
+          return !!(h1 || grid || pressed || /[?&]folder=marketplace\b/i.test(href));
+        } catch (_) {
+          return false;
+        }
+      });
+      if (feedOpen) {
+        try {
+          page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() };
+        } catch (_) {}
+        logInfo('[virtusDelta][marketplace] feed_already_open_trust=1');
+        return { ok: true, already_active: true, feed_trust: true, active_before: false, active_after: true };
       }
-    });
-    if (feedOpen) {
-      try {
-        page.__virtusDeltaMarketplaceGuard = { ...guard, lastStableAt: Date.now() };
-      } catch (_) {}
-      logInfo('[virtusDelta][marketplace] feed_already_open_trust=1');
-      return { ok: true, already_active: true, feed_trust: true, active_before: false, active_after: true };
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
 
   // Clique recente: espera curta; se o DOM nao confirmar, fail-open (nao gastar o budget).
   if (lastClickAt && now - lastClickAt < 45000) {
