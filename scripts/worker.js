@@ -21071,6 +21071,17 @@ async function __deltaAttachCdpEar(nome, page) {
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
         // let: precisa mutar após StripFacebookSystemPrompt (const quebrava com TypeError).
         let texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
+        // Sensor forense 3: triagem final ingest → forensic_triagem.log (teto 10MB)
+        try {
+          __deltaTriagemEmit('ingest_processing_line', {
+            thread_key: threadKey || null,
+            op: op || null,
+            text_len: String(texto || '').length,
+            should_emit: !!__deltaShouldEmitLeadText(texto),
+            account_login: String(nome || '') || null,
+            transport: String(transport || '') || null
+          });
+        } catch {}
         if (!threadKey) {
           // Mensagem válida sem identificador (causa: missing_identifiers).
           try {
@@ -21871,6 +21882,18 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         const opcode = Number(response.opcode ?? -1);
         const payloadData = response.payloadData || '';
+        // Sensor forense 1: entrada bruta CDP (Lightspeed) → forensic_triagem.log (teto 10MB)
+        try {
+          const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
+          if (isLightspeed) {
+            __deltaTriagemEmit('raw_cdp_frame_intercepted', {
+              opcode,
+              payload_len: String(payloadData || '').length,
+              requestId,
+              account_login: String(nome || '') || null
+            });
+          }
+        } catch {}
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
         const payloadBytes = __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded);
         // Sensor A: cdp_frame_received (Lightspeed / canal rico)
@@ -21915,6 +21938,18 @@ async function __deltaAttachCdpEar(nome, page) {
           __deltaIncFrameTelemetry('telemetry_parse_errors', 1);
           events = [];
         }
+        // Sensor forense 2: saída do parser Universal (opcode 2) → forensic_triagem.log
+        try {
+          if (opcode === 2) {
+            __deltaTriagemEmit('parser_extraction_result', {
+              opcode,
+              extracted_events_count: Array.isArray(events) ? events.length : 0,
+              first_event_op: events[0] ? (events[0].operation || events[0].operacao_meta || null) : null,
+              account_login: String(nome || '') || null,
+              requestId: requestId || null
+            });
+          }
+        } catch {}
         if (!events.length) {
           __deltaMaybeDumpNoLeadFrameSample(nome, { opcode, payloadData, decoded, inner });
           __deltaEmitFrameTelemetryIfDue();
