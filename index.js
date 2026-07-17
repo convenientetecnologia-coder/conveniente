@@ -1403,9 +1403,37 @@ function __edgeHasProfileInPerfisSync(nome) {
   }
 }
 
+function __edgeIsNonRetryableDeltaSendError(error) {
+  const e = String(error || '').trim().toLowerCase();
+  return (
+    e === 'send_not_confirmed_after_enter_only' ||
+    e === 'send_not_confirmed_composer_not_empty' ||
+    e === 'composer_text_not_registered' ||
+    e === 'send_failed_nonretryable'
+  );
+}
+
+function __edgeIsDeltaReplyFinalSendStatus(status) {
+  const st = String(status || '').trim().toLowerCase();
+  return (
+    st === 'send_ok' ||
+    st === 'duplicate_done_skip' ||
+    st === 'facebook_sent' ||
+    st === 'sent_to_facebook'
+  );
+}
+
+function __edgeIsDeltaReplySoftRequeueStatus(status) {
+  const st = String(status || '').trim().toLowerCase();
+  return st === 'duplicate_inflight_skip' || st === 'queued';
+}
+
 function __edgeShouldDeadLetterDeltaReply({ rec, reason, error } = {}) {
   const retryReason = String(reason || '').trim().toLowerCase();
   const retryError = String(error || '').trim().toLowerCase();
+  if (__edgeIsNonRetryableDeltaSendError(retryError)) {
+    return { deadLetter: true, deadReason: 'send_nonretryable' };
+  }
   const nome = String(rec && rec.nome || '').trim();
   const profileMissingFromRoute = retryError === 'profile_not_assigned' || retryError.includes('profile_not_assigned_to_any_worker');
   if (!profileMissingFromRoute) return { deadLetter: false, deadReason: '' };
@@ -1499,10 +1527,11 @@ function __edgeScheduleDeltaReplyPumpRetry() {
   try { setTimeout(() => { __edgeKickDeltaReplyPump(); }, delay).unref?.(); } catch {}
 }
 
-function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error } = {}) {
+function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetry = true } = {}) {
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
     const base = (rec && typeof rec === 'object') ? rec : {};
+    const prevRetry = Math.max(0, Number(base.retry_count || 0) || 0);
     const out = {
       ...base,
       ts: Date.now(),
@@ -1512,7 +1541,7 @@ function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error } = {}) {
       thread_key: String(base.thread_key || '').trim(),
       texto_resposta: String(base.texto_resposta || '').replace(/\r/g, ''),
       client_message_id: String(base.client_message_id || base.id || '').trim() || null,
-      retry_count: Math.max(0, Number(base.retry_count || 0) || 0) + 1,
+      retry_count: burnRetry ? (prevRetry + 1) : prevRetry,
       last_retry_reason: String(reason || '').trim() || null,
       last_retry_error: String(error || '').trim() || null
     };
@@ -1633,7 +1662,8 @@ async function __edgeRunDeltaReplyPump() {
           continue;
         }
 
-        // Entrega por IPC ao worker dono do perfil (retorno rápido; execução real ocorre em background no worker/virtusDelta)
+        // Contrato de aço: ACK final em disco só após send_ok / duplicate_done (última milha Facebook).
+        // O ✓✓ (received_by_edge) já foi gravado no CT no HTTP do command-bus.
         try {
           __forensicEdgeEmit({
             account_login: String(rec.nome || '').trim() || null,
@@ -1653,23 +1683,61 @@ async function __edgeRunDeltaReplyPump() {
               texto_resposta: String(rec.texto_resposta || '').replace(/\r/g, ''),
               client_message_id: String(rec.client_message_id || rec.id || '').trim() || null
             },
-            { timeoutMs: 30000 }
+            { timeoutMs: 180000 }
           );
-          const ok = !!(r && r.ok !== false);
-          if (ok) {
+          const workerStatus = String((r && r.status) || '').trim().toLowerCase();
+          const finalOk = !!(r && r.ok === true) && __edgeIsDeltaReplyFinalSendStatus(workerStatus);
+          if (finalOk) {
             __edgeResetDeltaReplyPumpBackoff();
-            __edgeWriteAckSync(cmdId, { worker: r || null });
+            __edgeWriteAckSync(cmdId, { worker: r || null, final_status: workerStatus });
             __edgeWriteDeltaReplyCursorSync(nextOffset);
             __forensicEdgeEmit({
               account_login: String(rec.nome || '').trim() || null,
               thread_key: String(rec.thread_key || '').trim() || null,
               flow_stage: 'reverse_command_bus',
-              details: { stage: 'ipc_dispatch_ok', cmd_id: cmdId }
+              details: { stage: 'ipc_dispatch_send_ok', cmd_id: cmdId, status: workerStatus }
             });
+            try {
+              logger.info(
+                `🟢 [OUTBOX] Envio Facebook OK - Chat: ${String(rec.thread_key || '-')} | Status: ${workerStatus}`
+              );
+            } catch {}
             emitOutboxReceived(rec.thread_key);
             continue;
           }
-          const retryError = (r && r.error) ? String(r.error) : 'ipc_not_ok';
+
+          const retryError = (r && r.error)
+            ? String(r.error)
+            : (workerStatus ? workerStatus : 'ipc_not_ok');
+          const softRequeue = __edgeIsDeltaReplySoftRequeueStatus(workerStatus)
+            || String(retryError || '').trim().toLowerCase() === 'duplicate_inflight_skip';
+
+          if (softRequeue) {
+            __edgeRequeueDeltaReplyRecordSync(rec, {
+              cmdId,
+              reason: workerStatus || 'soft_requeue',
+              error: retryError,
+              burnRetry: false
+            });
+            __edgeWriteDeltaReplyCursorSync(nextOffset);
+            __forensicEdgeEmit({
+              account_login: String(rec.nome || '').trim() || null,
+              thread_key: String(rec.thread_key || '').trim() || null,
+              flow_stage: 'reverse_command_bus',
+              details: {
+                stage: 'ipc_dispatch_soft_requeue',
+                cmd_id: cmdId,
+                reason: workerStatus || 'soft_requeue',
+                error: retryError
+              }
+            });
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            if (__edgeDeferredOnceInRun.has(cmdId)) break;
+            __edgeDeferredOnceInRun.add(cmdId);
+            continue;
+          }
+
           const deadLetterDecision = __edgeShouldDeadLetterDeltaReply({
             rec,
             reason: 'ipc_not_ok',
@@ -1732,11 +1800,12 @@ async function __edgeRunDeltaReplyPump() {
             __edgeResetDeltaReplyPumpBackoff();
             continue;
           }
-          // Falha de IPC transitória: re-enfileira no final, avança cursor e segue.
+          // Falha de IPC/envio transitória: re-enfileira no final, avança cursor e segue.
           __edgeRequeueDeltaReplyRecordSync(rec, {
             cmdId,
             reason: 'ipc_not_ok',
-            error: retryError
+            error: retryError,
+            burnRetry: true
           });
           __edgeWriteDeltaReplyCursorSync(nextOffset);
           __forensicEdgeEmit({

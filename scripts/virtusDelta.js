@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-07-17-city-collect-bg-retry-v6";
+const VIRTUS_DELTA_BUILD = "2026-07-17-steel-delivery-contract-v1";
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
 
@@ -4199,20 +4199,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     if (!initial) {
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
-      if (clicked) {
-        return {
-          ok: true,
-          item_link: itemLink || null,
-          delivery_confidence: "send_button_only",
-          unconfirmed_reason: "composer_empty_send_button",
-        };
-      }
-      try { await page.keyboard.press("Enter"); } catch (_) {}
+      // Contrato de aço: sem texto no composer não há send confirmado → não mentir ok.
       return {
-        ok: true,
+        ok: false,
+        error: "composer_text_not_registered",
         item_link: itemLink || null,
-        delivery_confidence: "unconfirmed_best_effort",
-        unconfirmed_reason: "composer_empty_no_send_control",
+        delivery_confidence: "unconfirmed",
+        unconfirmed_reason: clicked ? "composer_empty_send_button" : "composer_empty_no_send_control",
       };
     }
 
@@ -4233,12 +4226,12 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     await humanPause("postSend", "post_enter_send");
 
     if (after && after.trim()) {
-      // Composer ainda tem texto: confirmação local falhou, mas seguimos best-effort.
+      // Composer ainda tem texto: envio NÃO confirmado — falha explícita (sem balão azul falso).
       try {
         __forensicEdgeEmit({
           account_login: forensicAccountLogin,
           thread_key: t,
-          flow_stage: "send_unconfirmed_best_effort",
+          flow_stage: "send_not_confirmed_composer_not_empty",
           details: {
             tag: "FORENSIC_DOM_REVERSE",
             reason: "composer_not_empty_after_send_attempts",
@@ -4248,15 +4241,16 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         });
       } catch (_) {}
       return {
-        ok: true,
+        ok: false,
+        error: "send_not_confirmed_composer_not_empty",
         item_link: itemLink || null,
-        delivery_confidence: "unconfirmed_best_effort",
+        delivery_confidence: "unconfirmed",
         unconfirmed_reason: "composer_not_empty_after_send",
         composer_preview: after.slice(0, 80),
       };
     }
 
-    return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local" };
+    return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local", status: "send_ok" };
   } finally {
     try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
   }
@@ -5135,10 +5129,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
     const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
     if (base) return `${base.replace(/\/+$/, "")}/api/attendance/confirm-delivery`;
-    // Regra rígida: sem fallback para produção pública.
-    // Se não houver URL explícita de ambiente, falha de forma visível (log forense),
-    // mantendo o envio no Facebook desacoplado (fire-and-forget).
-    return "";
+    // Primário canônico do CT de atendimentos (não subdomínio UUID).
+    return "https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery";
   }
 
   async function postJsonWithTimeout(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
@@ -5518,8 +5510,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             const looksLikeCtDomain = /:\/\/([A-Za-z0-9.-]+\.)?convenientetecnologia\.com\/?/i.test(String(url || ""));
             if (is404 && looksLikeCtDomain) {
               let reroutedSuccess = false;
+              // Ordem: canônico atendimentos → convenientetecnologia.com → subdomínio server_id (último recurso).
               const rerouteCandidates = [
                 __deriveCtConfirmCanonicalFallbackUrl(),
+                "https://convenientetecnologia.com/api/attendance/confirm-delivery",
                 __deriveCtConfirmUrlFromServerId(payload && payload.server_id),
               ].filter((v, idx, arr) => !!v && arr.indexOf(v) === idx && v !== url);
 
@@ -6102,7 +6096,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
           lastCrossThreadKey = String(t);
           lastCrossThreadSendAt = nowTs;
-          // Confirmação durável (best-effort + outbox local): acende veredito final no CT.
+          // Confirm-delivery só após send real confirmado no Messenger.
           try {
             const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
             enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
@@ -6112,60 +6106,63 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           try {
             void collectMetadataAfterCtReply(t, lastOut).catch(() => {});
           } catch (_) {}
-          return lastOut;
+          return {
+            ...(lastOut && typeof lastOut === "object" ? lastOut : {}),
+            ok: true,
+            status: "send_ok",
+          };
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
         if (isNonRetryableSendError(lastErr)) {
-          const bestEffortOut = {
-            ok: true,
-            best_effort: true,
-            delivery_confidence: "unconfirmed_best_effort",
-            unconfirmed_reason: lastErr,
+          // NUNCA promover best_effort → sent_to_facebook (balão azul falso).
+          try {
+            logInfo(
+              `[virtusDelta][reply] nonretryable_send_failed thread_key=${t} reason=${lastErr}`
+            );
+          } catch (_) {}
+          try {
+            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+            kickReverseDeliveryStatus({
+              client_message_id: cid,
+              thread_key: t,
+              status: "error_failed_to_send",
+              error: lastErr,
+            });
+          } catch (_) {}
+          return {
+            ok: false,
+            error: lastErr,
+            nonretryable: true,
+            status: "send_failed_nonretryable",
             item_link: (lastOut && lastOut.item_link) ? String(lastOut.item_link) : null,
             last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
           };
-          try {
-            logInfo(
-              `[virtusDelta][reply] nonretryable_promoted_best_effort thread_key=${t} reason=${lastErr}`
-            );
-          } catch (_) {}
-          const nowTs = Date.now();
-          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
-          lastCrossThreadKey = String(t);
-          lastCrossThreadSendAt = nowTs;
-          try {
-            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
-            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
-            kickDeliveryConfirmPump();
-          } catch (_) {}
-          return bestEffortOut;
         }
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
         if (isNonRetryableSendError(lastErr)) {
-          const bestEffortOut = {
-            ok: true,
-            best_effort: true,
-            delivery_confidence: "unconfirmed_best_effort",
-            unconfirmed_reason: lastErr,
-            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
-          };
           try {
             logInfo(
-              `[virtusDelta][reply] exception_promoted_best_effort thread_key=${t} reason=${lastErr}`
+              `[virtusDelta][reply] nonretryable_send_exception thread_key=${t} reason=${lastErr}`
             );
           } catch (_) {}
-          const nowTs = Date.now();
-          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
-          lastCrossThreadKey = String(t);
-          lastCrossThreadSendAt = nowTs;
           try {
             const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
-            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
-            kickDeliveryConfirmPump();
+            kickReverseDeliveryStatus({
+              client_message_id: cid,
+              thread_key: t,
+              status: "error_failed_to_send",
+              error: lastErr,
+            });
           } catch (_) {}
-          return bestEffortOut;
+          return {
+            ok: false,
+            error: lastErr,
+            nonretryable: true,
+            status: "send_failed_nonretryable",
+            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
+          };
         }
       }
     }
@@ -6696,7 +6693,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
           if (prior && prior.state === "inflight") {
             try { logInfo(`[virtusDelta][reply] duplicate_inflight_skip thread_key=${tk} client_message_id=${cmid}`); } catch (_) {}
-            return { ok: true, status: "duplicate_inflight_skip", client_message_id: cmid };
+            // NÃO é sucesso final — pump deve soft-requeue até send_ok / duplicate_done.
+            return { ok: false, error: "duplicate_inflight_skip", status: "duplicate_inflight_skip", client_message_id: cmid };
           }
           setReplyDispatchState(cmid, "inflight", tk);
         }
@@ -6710,17 +6708,32 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               reason: "reply_sent_success"
             });
           } catch (_) {}
-          return out;
+          return {
+            ...(out && typeof out === "object" ? out : {}),
+            ok: true,
+            status: String((out && out.status) || "send_ok").trim() || "send_ok",
+            client_message_id: cmid,
+          };
         }
 
         // Sem requeue em background: falhou no ciclo síncrono (A->B), reverte status no CT e encerra.
+        // (nonretryable já chama reverse dentro de sendDeltaReplyNow)
         try {
           const err = String(out && out.error || "").trim() || "send_failed";
-          const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
-          kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
+          const alreadyReversed = !!(out && out.nonretryable === true);
+          if (!alreadyReversed) {
+            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
+            kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
+          }
         } catch (_) {}
         if (cmid) clearReplyDispatchState(cmid);
-        return out;
+        return {
+          ...(out && typeof out === "object" ? out : {}),
+          ok: false,
+          error: String((out && out.error) || "send_failed").trim() || "send_failed",
+          status: String((out && out.status) || "send_failed").trim() || "send_failed",
+          client_message_id: cmid,
+        };
       } catch (e) {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");

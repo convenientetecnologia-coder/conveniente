@@ -10620,7 +10620,7 @@ const handlers = {
       if (cmid) {
         const ingress = __deltaReplyIngressSetForAccount(n);
         if (ingress && ingress.has(cmid)) {
-          try { logger.warn('[DELTA][HANDS] delta-reply-task dedupe_skip', { nome: n, thread_key: tk, client_message_id: cmid }); } catch {}
+          try { logger.warn('[DELTA][HANDS] delta-reply-task dedupe_inflight', { nome: n, thread_key: tk, client_message_id: cmid }); } catch {}
           try {
             __forensicEdgeEmit({
               account_login: n,
@@ -10634,7 +10634,8 @@ const handlers = {
               }
             });
           } catch {}
-          return { ok: true, status: 'duplicate_skipped', client_message_id: cmid };
+          // NÃO é sucesso final: pump deve requeue até send_ok / duplicate_done.
+          return { ok: false, error: 'duplicate_inflight_skip', status: 'duplicate_inflight_skip', client_message_id: cmid };
         }
         try { ingress && ingress.add(cmid); } catch {}
       }
@@ -10642,12 +10643,12 @@ const handlers = {
       const ctrl = controllers.get(n);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         if (cmid) __deltaReplyIngressRelease(n, cmid);
-        return { ok: false, error: 'browser_not_connected' };
+        return { ok: false, error: 'browser_not_connected', status: 'send_failed' };
       }
       const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
       if (!runner || typeof runner.enqueueDeltaReply !== 'function') {
         if (cmid) __deltaReplyIngressRelease(n, cmid);
-        return { ok: false, error: 'delta_hands_unavailable' };
+        return { ok: false, error: 'delta_hands_unavailable', status: 'send_failed' };
       }
       try { __deltaAttachCityCollectSettledHandler(runner); } catch {}
 
@@ -10672,27 +10673,40 @@ const handlers = {
         });
       } catch {}
 
-      // Regra enterprise: ACK do IPC deve ser imediato (não aguardar digitação/DOM).
-      // A execução real ocorre em background no runtime do virtusDelta (fila serial).
-      try { logger.info('[DELTA][HANDS] delta-reply-task enfileirado', { nome: n, thread_key: tk, chars: tr.length, client_message_id: cmid }); } catch {}
+      // Contrato de aço: IPC só fecha quando a mão terminou (send real ou falha explícita).
+      // O ACK rápido CT←edge continua no command-bus (persistência em disco); aqui é a última milha.
+      try { logger.info('[DELTA][HANDS] delta-reply-task await_send', { nome: n, thread_key: tk, chars: tr.length, client_message_id: cmid }); } catch {}
       try {
-        Promise.resolve()
-          .then(() => runner.enqueueDeltaReply({ thread_key: tk, texto_resposta: tr, client_message_id: cmid }))
-          .then((out) => {
-            try {
-              if (out && out.ok === true) logger.info('[DELTA][HANDS] delta-reply-task concluído', { nome: n, thread_key: tk, client_message_id: cmid });
-              else logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, out: out || null });
-            } catch {}
-            if (cmid) __deltaReplyIngressRelease(n, cmid);
-          })
-          .catch((e) => {
-            try { logger.warn('[DELTA][HANDS] delta-reply-task exception', { nome: n, thread_key: tk, client_message_id: cmid, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
-            if (cmid) __deltaReplyIngressRelease(n, cmid);
-          });
-      } catch {
+        const out = await runner.enqueueDeltaReply({
+          thread_key: tk,
+          texto_resposta: tr,
+          client_message_id: cmid
+        });
         if (cmid) __deltaReplyIngressRelease(n, cmid);
+        const st = String((out && out.status) || '').trim().toLowerCase();
+        if (out && out.ok === true) {
+          if (st === 'duplicate_inflight_skip') {
+            return { ok: false, error: 'duplicate_inflight_skip', status: 'duplicate_inflight_skip', client_message_id: cmid };
+          }
+          if (st === 'duplicate_done_skip') {
+            try { logger.info('[DELTA][HANDS] delta-reply-task duplicate_done', { nome: n, thread_key: tk, client_message_id: cmid }); } catch {}
+            return { ok: true, status: 'duplicate_done_skip', client_message_id: cmid };
+          }
+          try { logger.info('[DELTA][HANDS] delta-reply-task send_ok', { nome: n, thread_key: tk, client_message_id: cmid }); } catch {}
+          return { ok: true, status: 'send_ok', client_message_id: cmid };
+        }
+        const err = String((out && out.error) || 'send_failed').trim() || 'send_failed';
+        const failStatus = (st === 'send_failed_nonretryable' || st === 'duplicate_inflight_skip')
+          ? st
+          : 'send_failed';
+        try { logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, error: err, status: failStatus }); } catch {}
+        return { ok: false, error: err, status: failStatus, client_message_id: cmid };
+      } catch (e) {
+        if (cmid) __deltaReplyIngressRelease(n, cmid);
+        const err = (e && e.message) ? String(e.message) : String(e);
+        try { logger.warn('[DELTA][HANDS] delta-reply-task exception', { nome: n, thread_key: tk, client_message_id: cmid, error: err }); } catch {}
+        return { ok: false, error: err || 'send_failed_exception', status: 'send_failed', client_message_id: cmid };
       }
-      return { ok: true, status: 'queued', client_message_id: cmid };
     });
   },
 
