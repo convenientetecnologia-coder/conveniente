@@ -501,34 +501,34 @@ const HUMAN_TIMINGS = {
   reaction: envMs("VIRTUS_DELTA_REACTION_DELAY_MS_MIN", "VIRTUS_DELTA_REACTION_DELAY_MS_MAX", 3000, 7000),
   /** Fila de ação das mãos (dashboard + chat novo): padrão 2–10s */
   actionDispatch: envMs("VIRTUS_DELTA_ACTION_DELAY_MS_MIN", "VIRTUS_DELTA_ACTION_DELAY_MS_MAX", 2000, 10000),
-  /** Antes de clicar no filtro Marketplace */
-  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 2200, 4200),
-  /** Após ativar Marketplace — DOM lateral estabilizar */
-  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 3200, 5800),
-  /** Janela extra para carregamento real da UI antes de clicar no Marketplace */
-  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 2600, 5200),
-  /** Antes de clicar no card do cliente */
-  preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 600, 1400),
-  /** Após abrir o chat — ler contexto / banner Marketplace (VM fraca: budget dobrado) */
-  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 2400, 4800),
+  /** Antes de clicar no filtro Marketplace (x2.5 — DOM Messages precisa terminar) */
+  preMarketplace: envMs("VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_MARKETPLACE_MS_MAX", 5500, 10500),
+  /** Após ativar Marketplace — DOM lateral estabilizar (x2.5) */
+  postMarketplace: envMs("VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_MARKETPLACE_MS_MAX", 8000, 14500),
+  /** Janela extra para carregamento real da UI antes de clicar no Marketplace (x2.5) */
+  marketplaceLoad: envMs("VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MIN", "VIRTUS_DELTA_HUMAN_MARKETPLACE_LOAD_MS_MAX", 6500, 13000),
+  /** Antes de clicar no card do cliente (x3) */
+  preThreadClick: envMs("VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_THREAD_MS_MAX", 1800, 4200),
+  /** Após abrir o chat — ler contexto / banner / Aceitar (x2.5) */
+  postThreadOpen: envMs("VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_OPEN_MS_MAX", 6000, 12000),
   /** Antes de focar o composer */
-  preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 400, 850),
+  preComposer: envMs("VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_COMPOSER_MS_MAX", 900, 1800),
   /** Entre foco e primeira tecla */
-  preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 500, 1100),
+  preTyping: envMs("VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_TYPE_MS_MAX", 700, 1600),
   /** Por caractere */
   char: envMs("VIRTUS_DELTA_HUMAN_CHAR_MS_MIN", "VIRTUS_DELTA_HUMAN_CHAR_MS_MAX", 80, 130),
   /** Após Shift+Enter */
   lineBreak: envMs("VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MIN", "VIRTUS_DELTA_HUMAN_LINEBREAK_MS_MAX", 45, 110),
   /** Antes do Enter final */
-  preSend: envMs("VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MAX", 350, 900),
+  preSend: envMs("VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_PRE_SEND_MS_MAX", 500, 1200),
   /** Após envio */
-  postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 280, 550),
+  postSend: envMs("VIRTUS_DELTA_HUMAN_POST_SEND_MS_MIN", "VIRTUS_DELTA_HUMAN_POST_SEND_MS_MAX", 400, 900),
   /** delay do page.click */
-  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 180, 360),
+  click: envMs("VIRTUS_DELTA_HUMAN_CLICK_MS_MIN", "VIRTUS_DELTA_HUMAN_CLICK_MS_MAX", 220, 480),
   /** Entre scrolls no sidebar */
-  scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 200, 380),
-  /** Refresh DOM / retries */
-  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 1200, 2600),
+  scroll: envMs("VIRTUS_DELTA_HUMAN_SCROLL_MS_MIN", "VIRTUS_DELTA_HUMAN_SCROLL_MS_MAX", 350, 700),
+  /** Refresh DOM / retries (x2.5 — evita clicar Marketplace com feed incompleto) */
+  domSettle: envMs("VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MIN", "VIRTUS_DELTA_HUMAN_DOM_SETTLE_MS_MAX", 3000, 6500),
 };
 const NEW_CHAT_WARMUP_DELAY = envMs(
   "VIRTUS_DELTA_NEW_CHAT_DELAY_MS_MIN",
@@ -545,20 +545,20 @@ const CROSS_THREAD_SEND_GAP = envMs(
 );
 
 const MARKETPLACE_STABILITY_ROUNDS = Math.max(
-  2,
-  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_ROUNDS || 3) || 3
+  3,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_ROUNDS || 5) || 5
 );
 const MARKETPLACE_STABILITY_GAP_MS = Math.max(
-  800,
-  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_GAP_MS || 1800) || 1800
+  1500,
+  Number(process.env.VIRTUS_DELTA_MARKETPLACE_STABILITY_GAP_MS || 4000) || 4000
 );
 const MESSAGES_BOOT_STABILITY_ROUNDS = Math.max(
-  2,
-  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 3) || 3
+  3,
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_ROUNDS || 5) || 5
 );
 const MESSAGES_BOOT_STABILITY_GAP_MS = Math.max(
-  900,
-  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 2000) || 2000
+  1500,
+  Number(process.env.VIRTUS_DELTA_MESSAGES_BOOT_STABILITY_GAP_MS || 4500) || 4500
 );
 const DELTA_MARKETPLACE_AUTOFILTER_ENABLED =
   String(process.env.VIRTUS_DELTA_MARKETPLACE_AUTOFILTER || "1").trim() === "1";
@@ -1358,7 +1358,7 @@ async function __injectAntiSelectionCss(page, { profileName = null, reason = "" 
   }
 }
 
-async function waitMarketplaceActiveStable(page, { timeoutMs = 35000, rounds = 2 } = {}) {
+async function waitMarketplaceActiveStable(page, { timeoutMs = 60000, rounds = 3 } = {}) {
   const start = Date.now();
   let okRounds = 0;
   while (Date.now() - start < timeoutMs) {
@@ -1369,9 +1369,192 @@ async function waitMarketplaceActiveStable(page, { timeoutMs = 35000, rounds = 2
     } else {
       okRounds = 0;
     }
-    await sleep(Math.max(700, MARKETPLACE_STABILITY_GAP_MS));
+    await sleep(Math.max(1200, MARKETPLACE_STABILITY_GAP_MS));
   }
   return false;
+}
+
+/**
+ * Espera o FEED de chats do Marketplace ficar pronto (filtro ativo + rows/links).
+ * Evita clicar no card enquanto a grade ainda está montando.
+ */
+async function waitForMarketplaceFeedReady(page, { timeoutMs = 70000, minThreadLinks = 1 } = {}) {
+  const start = Date.now();
+  let lastCount = 0;
+  let stableHits = 0;
+  const need = Math.max(1, Number(minThreadLinks || 1) || 1);
+  while (Date.now() - start < timeoutMs) {
+    const snap = await page
+      .evaluate((minNeed) => {
+        try {
+          const ready = document.readyState === "complete" || document.readyState === "interactive";
+          const busy = !!document.querySelector('[aria-busy="true"]');
+          const path = String(location.pathname || "").toLowerCase();
+          const search = String(location.search || "").toLowerCase();
+          const isMessages = path.includes("/messages");
+          const folderMp = search.includes("folder=marketplace");
+          const h1s = Array.from(document.querySelectorAll("h1,[role='heading']"));
+          const hasMpHeading = h1s.some((h) =>
+            String(h.textContent || "").trim().toLowerCase() === "marketplace"
+          );
+          const links = Array.from(
+            document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]')
+          ).filter((a) => {
+            const r = a.getBoundingClientRect();
+            return r && r.width > 2 && r.height > 2;
+          });
+          const rows = document.querySelectorAll('[role="row"]').length;
+          return {
+            ok:
+              ready &&
+              !busy &&
+              isMessages &&
+              (folderMp || hasMpHeading) &&
+              links.length >= minNeed,
+            links: links.length,
+            rows,
+            folderMp,
+            hasMpHeading,
+          };
+        } catch (_) {
+          return { ok: false, links: 0, rows: 0 };
+        }
+      }, need)
+      .catch(() => ({ ok: false, links: 0, rows: 0 }));
+
+    const count = Number(snap && snap.links || 0) || 0;
+    if (snap && snap.ok) {
+      if (count === lastCount && count >= need) stableHits += 1;
+      else stableHits = 1;
+      lastCount = count;
+      if (stableHits >= 2) {
+        try {
+          logInfo(
+            `[virtusDelta][marketplace_feed] ready links=${count} rows=${Number(snap.rows || 0) || 0}`
+          );
+        } catch (_) {}
+        return { ok: true, links: count, rows: Number(snap.rows || 0) || 0 };
+      }
+    } else {
+      stableHits = 0;
+      lastCount = count;
+    }
+    await sleep(Math.max(1500, Math.floor(MARKETPLACE_STABILITY_GAP_MS * 0.75)));
+  }
+  try {
+    logInfo(`[virtusDelta][marketplace_feed] timeout links=${lastCount}`);
+  } catch (_) {}
+  return { ok: false, links: lastCount, timeout: true };
+}
+
+/**
+ * Pedido de mensagem: botão "Aceitar" bloqueia o composer.
+ * Clica Aceitar (nunca Sair/Excluir) e espera o Lexical aparecer.
+ */
+async function clickAcceptMessageRequestIfPresent(page, ctx = {}) {
+  if (!page) return { ok: false, clicked: false, reason: "no_page" };
+  const forensicAccountLogin =
+    ctx && ctx.account_login != null ? String(ctx.account_login || "").trim() : null;
+  const forensicThreadKey =
+    ctx && ctx.thread_key != null ? String(ctx.thread_key || "").trim() : null;
+
+  const hasComposer = async () => {
+    const h = await page
+      .$('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]')
+      .catch(() => null);
+    return !!h;
+  };
+
+  if (await hasComposer()) {
+    return { ok: true, clicked: false, reason: "composer_already_ready" };
+  }
+
+  let clicked = false;
+  try {
+    clicked = await page.evaluate(() => {
+      const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const isAcceptLabel = (s) => {
+        const t = norm(s);
+        return t === "aceitar" || t === "accept" || t === "accept request" || t === "aceitar solicitação";
+      };
+      const candidates = Array.from(
+        document.querySelectorAll('[role="button"][aria-label], [role="button"]')
+      );
+      for (const el of candidates) {
+        const al = el.getAttribute("aria-label") || "";
+        const txt = el.innerText || el.textContent || "";
+        if (!isAcceptLabel(al) && !isAcceptLabel(txt)) continue;
+        // Evita botões vizinhos errados
+        const blob = norm(`${al} ${txt}`);
+        if (blob.includes("sair") || blob.includes("excluir") || blob.includes("delete") || blob.includes("decline")) {
+          continue;
+        }
+        const r = el.getBoundingClientRect();
+        if (!(r && r.width > 2 && r.height > 2)) continue;
+        try {
+          el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+        } catch (_) {}
+        try {
+          el.click();
+          return true;
+        } catch (_) {
+          const host = el.closest('[role="button"]') || el;
+          try {
+            host.click();
+            return true;
+          } catch (_) {}
+        }
+      }
+      // Fallback: span "Aceitar" → botão pai
+      for (const span of document.querySelectorAll("span")) {
+        if (!isAcceptLabel(span.textContent || "")) continue;
+        const btn = span.closest('[role="button"]');
+        if (!btn) continue;
+        const r = btn.getBoundingClientRect();
+        if (!(r && r.width > 2 && r.height > 2)) continue;
+        try {
+          btn.click();
+          return true;
+        } catch (_) {}
+      }
+      return false;
+    });
+  } catch (_) {
+    clicked = false;
+  }
+
+  try {
+    __forensicEdgeEmit({
+      account_login: forensicAccountLogin,
+      thread_key: forensicThreadKey,
+      flow_stage: "message_request_accept",
+      details: {
+        tag: "FORENSIC_DOM_REVERSE",
+        clicked: !!clicked,
+        ts_ms: Date.now(),
+      },
+    });
+  } catch (_) {}
+
+  if (!clicked) {
+    return { ok: false, clicked: false, reason: "accept_button_not_found" };
+  }
+
+  await humanPause("postThreadOpen", "post_accept_message_request");
+  try {
+    await page.waitForSelector(
+      'div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]',
+      { timeout: 12000 }
+    );
+  } catch (_) {}
+
+  const ready = await hasComposer();
+  try {
+    logInfo(
+      `[virtusDelta][accept] clicked=sim composer_ready=${ready ? "sim" : "nao"} thread=${forensicThreadKey || "-"}`
+    );
+  } catch (_) {}
+  return { ok: ready, clicked: true, composer_ready: ready };
 }
 
 async function ensureMarketplaceFilterActiveCore(page) {
@@ -1416,6 +1599,8 @@ async function ensureMarketplaceFilterActiveCore(page) {
       inFlightUntil: Date.now() + 20000,
     };
   } catch (_) {}
+  // Paciência: Messages DOM precisa terminar ANTES do clique no Marketplace.
+  await waitForMessagesBootStable(page, "marketplace_pre_click_messages_boot").catch(() => false);
   await waitForMarketplaceUiStable(page, "marketplace_pre_click");
   await humanPause("preMarketplace", "pre_marketplace_click");
   const click = await clickMarketplaceFilterIfPresent(page);
@@ -1428,33 +1613,12 @@ async function ensureMarketplaceFilterActiveCore(page) {
   } catch (_) {}
   await humanPause("postMarketplace", "post_marketplace_click");
 
-  // Quando o alvo é o item "Marketplace" dentro da grade de conversas,
-  // evitamos esperas longas: aplicamos retorno rápido e deixamos o enforcer manter o estado.
-  if (click && click.strategy === "conversation_row_marketplace") {
-    const activeQuick = await isMarketplaceFilterActive(page).catch(() => false);
-    const activeAfterQuick = Boolean(activeQuick || click.selected_after_click);
-    if (activeAfterQuick) {
-      try {
-        page.__virtusDeltaMarketplaceGuard = {
-          ...(page.__virtusDeltaMarketplaceGuard || {}),
-          lastStableAt: Date.now(),
-        };
-      } catch (_) {}
-    }
-    const quickOut = {
-      ...click,
-      active_before: activeBefore,
-      active_after: activeAfterQuick,
-      quick_path: true,
-    };
-    logInfo(`[virtusDelta][marketplace] activate result=${JSON.stringify(quickOut)}`);
-    return quickOut;
-  }
-
-  let activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 35000, rounds: 2 });
+  // NUNCA “quick_path” sem validar feed: clique na row Marketplace ainda exige
+  // filtro ativo + grade de chats estável (evita loop goto/reclique).
+  let activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 60000, rounds: 3 });
   if (!activeAfter && click.changed) {
     await humanPause("domSettle", "marketplace_changed_recheck");
-    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 22000, rounds: 2 });
+    activeAfter = await waitMarketplaceActiveStable(page, { timeoutMs: 40000, rounds: 3 });
   }
   if (!activeAfter && !click.changed) {
     // Retry seguro: revalida carregamento e tenta novamente somente via seletor seguro.
@@ -1508,7 +1672,9 @@ async function ensureMarketplaceFilterActiveCore(page) {
     }
   }
 
+  let feedReady = null;
   if (activeAfter) {
+    feedReady = await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 });
     try {
       page.__virtusDeltaMarketplaceGuard = {
         ...(page.__virtusDeltaMarketplaceGuard || {}),
@@ -1518,9 +1684,22 @@ async function ensureMarketplaceFilterActiveCore(page) {
   }
 
   logInfo(
-    `[virtusDelta][marketplace] activate result=${JSON.stringify({ ...click, active_before: activeBefore, active_after: activeAfter, route_fallback: routeFallback })}`
+    `[virtusDelta][marketplace] activate result=${JSON.stringify({
+      ...click,
+      active_before: activeBefore,
+      active_after: activeAfter,
+      feed_ready: !!(feedReady && feedReady.ok),
+      feed_links: Number(feedReady && feedReady.links || 0) || 0,
+      route_fallback: routeFallback,
+    })}`
   );
-  return { ...click, active_before: activeBefore, active_after: activeAfter, route_fallback: routeFallback };
+  return {
+    ...click,
+    active_before: activeBefore,
+    active_after: activeAfter,
+    feed_ready: !!(feedReady && feedReady.ok),
+    route_fallback: routeFallback,
+  };
 }
 
 async function ensureMarketplaceFilterActive(page) {
@@ -1544,55 +1723,11 @@ async function ensureMarketplaceFilterActive(page) {
 }
 
 async function ensureMarketplaceFilterActiveFast(page) {
-  if (!page) return { ok: false, error: "no_page", quick_path: true };
-
-  const activeBefore = await isMarketplaceFilterActive(page).catch(() => false);
-  if (activeBefore) {
-    return { ok: true, already_active: true, active_before: true, active_after: true, quick_path: true };
-  }
-
-  // Guardrail anti-thrash: evita repetir clique em janela curta.
-  const guard = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
-  const now = Date.now();
-  const lastClickAt = Number(guard.lastClickAt || 0) || 0;
-  if (lastClickAt > 0 && (now - lastClickAt) < 8_000) {
-    const activeAfterGuard = await isMarketplaceFilterActive(page).catch(() => false);
-    return {
-      ok: !!activeAfterGuard,
-      guarded_recent_click: true,
-      active_before: false,
-      active_after: !!activeAfterGuard,
-      quick_path: true,
-    };
-  }
-
-  await humanPause("preMarketplace", "marketplace_fast_pre_click");
-  const click = await clickMarketplaceFilterIfPresent(page).catch(() => ({
-    ok: false,
-    changed: false,
-    reason: "click_failed",
-  }));
-  await humanPause("postMarketplace", "marketplace_fast_post_click");
-  const activeAfter = await isMarketplaceFilterActive(page).catch(() => false);
-
-  try {
-    page.__virtusDeltaMarketplaceGuard = {
-      ...(page.__virtusDeltaMarketplaceGuard || {}),
-      lastClickAt: (click && click.changed) ? Date.now() : lastClickAt,
-      lastStableAt: activeAfter ? Date.now() : Number(guard && guard.lastStableAt || 0) || 0,
-      inFlightUntil: 0,
-    };
-  } catch (_) {}
-
-  const out = {
-    ...(click && typeof click === "object" ? click : {}),
-    ok: !!activeAfter,
-    active_before: !!activeBefore,
-    active_after: !!activeAfter,
-    quick_path: true,
-  };
-  logInfo(`[virtusDelta][marketplace_fast] activate result=${JSON.stringify(out)}`);
-  return out;
+  // "Fast" legado virou caminho paciente: mesma disciplina do core
+  // (boot Messages → UI estável → clique → feed pronto). Sem atropelo.
+  if (!page) return { ok: false, error: "no_page", quick_path: false };
+  const out = await ensureMarketplaceFilterActive(page);
+  return { ...(out && typeof out === "object" ? out : {}), quick_path: false, patient_fast: true };
 }
 
 function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
@@ -1768,19 +1903,22 @@ async function forceSidebarRefreshByMessagesRoot(page) {
   return { ok: false, changed: false, strategy: "messages_root_missing" };
 }
 
-async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = true } = {}) {
+async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = false } = {}) {
   const t = String(threadKey || "").trim();
   logDelta("CITY", `🏙️ Extraindo link do item e coletando a cidade de origem no DOM...`, { threadKey: t });
 
-  // Modo seguro: não forçar Marketplace por padrão para evitar "abre e sai" no passivo.
-  const useFastMarketplace = fastMarketplace !== false;
+  // Sempre paciente: fastMarketplace=true agora também usa o core com waits completos.
   const mp = DELTA_MARKETPLACE_AUTOFILTER_ENABLED
     ? (
-      useFastMarketplace
+      fastMarketplace
         ? await ensureMarketplaceFilterActiveFast(page)
         : await ensureMarketplaceFilterActive(page)
     )
     : { ok: true, skipped: true, reason: "autofilter_disabled", active_after: false };
+
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && mp && mp.active_after) {
+    await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
+  }
 
   let cardVisible = await isThreadCardVisible(page, t);
   logInfo(
@@ -1792,8 +1930,8 @@ async function prepareDomForNetworkLead(page, threadKey, { fastMarketplace = tru
     logInfo(`[virtusDelta][dom_force] messages_root result=${JSON.stringify(root)}`);
     await humanPause("domSettle", "dom_prep_root_settle");
     if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED && !(await isMarketplaceFilterActive(page))) {
-      if (useFastMarketplace) await ensureMarketplaceFilterActiveFast(page);
-      else await ensureMarketplaceFilterActive(page);
+      await ensureMarketplaceFilterActive(page);
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
     }
     cardVisible = await isThreadCardVisible(page, t);
   }
@@ -2569,6 +2707,24 @@ async function ensureComposerFocused(page, ctx = {}) {
     handle = await page.$(sel).catch(() => null);
     if (handle) { matched = sel; break; }
   }
+  // Pedido de mensagem: sem composer → clicar Aceitar (até 2 tentativas).
+  if (!handle) {
+    for (let acceptTry = 1; acceptTry <= 2 && !handle; acceptTry++) {
+      const acc = await clickAcceptMessageRequestIfPresent(page, {
+        account_login: forensicAccountLogin,
+        thread_key: forensicThreadKey,
+      }).catch(() => null);
+      if (acc && acc.clicked) {
+        await humanPause("domSettle", `post_accept_try_${acceptTry}`);
+      } else {
+        await sleep(1200);
+      }
+      for (const sel of sels) {
+        handle = await page.$(sel).catch(() => null);
+        if (handle) { matched = sel; break; }
+      }
+    }
+  }
   if (!handle) {
     try {
       const current = await page.evaluate(() => String(location.pathname || "")).catch(() => "");
@@ -2578,7 +2734,7 @@ async function ensureComposerFocused(page, ctx = {}) {
         flow_stage: "composer_focus_lifecycle",
         details: {
           tag: "FORENSIC_DOM_REVERSE",
-          phase: "missing",
+          phase: "missing_after_accept_attempts",
           thread_key: forensicThreadKey,
           selectors_tried: sels.slice(0, 10),
           current_path: current ? String(current) : null,
@@ -2948,7 +3104,11 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
 
     for (let h = 0; h < 3; h += 1) {
       try {
-        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 7000 });
+        await clickAcceptMessageRequestIfPresent(page, {
+          account_login: forensicAccountLogin,
+          thread_key: t,
+        }).catch(() => null);
+        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 10000 });
         hydrationReady = true;
         break;
       } catch (_) {
@@ -3241,6 +3401,11 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
       stepAError: "messages_boot_not_stable"
     }).catch(() => null);
     if (rescue && rescue.ok) {
+      // Chat aberto via goto: pode pedir Aceitar antes do composer.
+      await clickAcceptMessageRequestIfPresent(page, {
+        account_login: forensicAccountLogin,
+        thread_key: t,
+      }).catch(() => null);
       return {
         ...rescue,
         recovered_from_boot_not_stable: true
@@ -3253,6 +3418,16 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     };
   }
 
+  // Antes de procurar o card: Marketplace ativo + feed estável (paciência total).
+  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+    const mpActive = await isMarketplaceFilterActive(page).catch(() => false);
+    if (!mpActive) {
+      await ensureMarketplaceFilterActive(page).catch(() => null);
+    } else {
+      await waitForMarketplaceFeedReady(page, { timeoutMs: 70000, minThreadLinks: 1 }).catch(() => null);
+    }
+  }
+
   try {
     await page.waitForFunction(
       () => {
@@ -3262,7 +3437,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
         const nonNew = hrefs.filter((h) => !h.includes("/messages/new"));
         return nonNew.length >= 1;
       },
-      { timeout: 5000 }
+      { timeout: 12000 }
     );
   } catch (_) {}
 
@@ -3278,7 +3453,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
   let stepASelector = null;
   for (const cardSelector of cardSelectors) {
     const cardElement = cardSelector === primaryCardSelector
-      ? await page.waitForSelector(cardSelector, { timeout: 3000 }).catch(() => null)
+      ? await page.waitForSelector(cardSelector, { timeout: 9000 }).catch(() => null)
       : await page.$(cardSelector).catch(() => null);
     if (!cardElement) continue;
 
@@ -3341,7 +3516,7 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
             const path = String(location.pathname || "");
             return path.includes("/messages") && path.includes(`/t/${threadId}`);
           },
-          { timeout: 1800 },
+          { timeout: 5500 },
           t
         );
         openedByNavigation = true;
@@ -3355,11 +3530,25 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     }
 
     await humanPause("postThreadOpen", "post_thread_card_click");
+    // Pedido de mensagem: Aceitar libera o composer.
+    await clickAcceptMessageRequestIfPresent(page, {
+      account_login: forensicAccountLogin,
+      thread_key: t,
+    }).catch(() => null);
     try {
-      await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 5000 });
+      await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 12000 });
     } catch (_) {
-      stepAError = "thread_open_hydration_timeout";
-      break;
+      // Segunda chance: Aceitar + esperar de novo
+      await clickAcceptMessageRequestIfPresent(page, {
+        account_login: forensicAccountLogin,
+        thread_key: t,
+      }).catch(() => null);
+      try {
+        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 10000 });
+      } catch (_) {
+        stepAError = "thread_open_hydration_timeout";
+        break;
+      }
     }
 
     try {
@@ -3453,7 +3642,11 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
             t
           );
           await humanPause("postThreadOpen", "patient_retry_post_click");
-          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 6000 }).catch(() => null);
+          await clickAcceptMessageRequestIfPresent(page, {
+            account_login: forensicAccountLogin,
+            thread_key: t,
+          }).catch(() => null);
+          await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 12000 }).catch(() => null);
           const guard = await runWrongThreadGuard(page, t, {
             forensicAccountLogin,
             stage: "patient_retry_post_click",
@@ -3575,9 +3768,11 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     })();
     const continuity = providedContinuity || await probeOpenLineContinuity(page, t);
     const canUseOpenLineFastPath = !!(continuity && continuity.is_open_line_ready === true);
-    if (fromNetworkLead && !canUseOpenLineFastPath) {
+    // Com mensagem na mão: SEMPRE preparar Marketplace com paciência
+    // (não só network lead) — evita clicar card no inbox geral / feed incompleto.
+    if (!canUseOpenLineFastPath) {
       try {
-        await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: true });
+        await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: false });
       } catch (e) {
         logInfo(`[virtusDelta][dom_prep] fail thread_key=${t} err=${e && e.message ? e.message : String(e)}`);
       }
@@ -3711,7 +3906,21 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+    try {
+      await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+    } catch (compErr) {
+      const em = String((compErr && compErr.message) || compErr || "");
+      if (em.includes("composer_missing")) {
+        await clickAcceptMessageRequestIfPresent(page, {
+          account_login: forensicAccountLogin,
+          thread_key: t,
+        }).catch(() => null);
+        await humanPause("domSettle", "composer_missing_accept_retry");
+        await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+      } else {
+        throw compErr;
+      }
+    }
     const typingGuard = await runWrongThreadGuard(page, t, {
       forensicAccountLogin,
       stage: "pre_typing_composer_signature",
@@ -3878,7 +4087,7 @@ async function openThreadAndExtractItemLink(
   if (!t) return { ok: false, error: "missing_thread_key" };
   try {
     if (fromNetworkLead) {
-      await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: true });
+      await prepareDomForNetworkLead(page, threadKey, { fastMarketplace: false });
     }
   } catch (_) {}
 
@@ -6014,6 +6223,8 @@ module.exports = {
   forceSidebarRefreshByMessagesRoot,
   ensureMarketplaceFilterActive,
   isMarketplaceFilterActive,
+  waitForMarketplaceFeedReady,
+  clickAcceptMessageRequestIfPresent,
   HUMAN_TIMINGS,
   humanPause,
 };
