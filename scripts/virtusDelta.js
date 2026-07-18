@@ -2431,6 +2431,8 @@ async function clickMarketplaceFilterIfPresent(page) {
 function canonicalizeMarketplaceItemLink(raw) {
   const input = String(raw || "").replace(/&amp;/gi, "&").trim();
   if (!input) return "";
+  if (/link\s*n[aã]o\s*coletado/i.test(input)) return "";
+  // login/?next=%2Fmarketplace%2F sem item → lixo (nunca vira link de anúncio).
   try {
     const parsed = input.startsWith("http")
       ? new URL(input)
@@ -2439,8 +2441,28 @@ function canonicalizeMarketplaceItemLink(raw) {
         : null;
     if (!parsed) return "";
     const host = String(parsed.hostname || "").toLowerCase();
-    if (host && !host.includes("facebook.com")) return "";
-    const m = String(parsed.pathname || "").match(/\/marketplace\/item\/([0-9A-Za-z_-]+)/i);
+    if (host && !(host.includes("facebook.com") || host.includes("fb.com") || host.includes("messenger.com"))) {
+      return "";
+    }
+    let pathForItem = String(parsed.pathname || "");
+    // Se veio wrapper de login, só aceita quando next= aponta pro item real.
+    if (/\/login\b/i.test(pathForItem)) {
+      const nextRaw = String(parsed.searchParams.get("next") || "").trim();
+      if (!nextRaw) return "";
+      let decoded = nextRaw;
+      try {
+        decoded = decodeURIComponent(nextRaw);
+      } catch (_) {}
+      try {
+        const nextUrl = decoded.startsWith("http")
+          ? new URL(decoded)
+          : new URL(decoded.startsWith("/") ? decoded : `/${decoded}`, "https://www.facebook.com");
+        pathForItem = String(nextUrl.pathname || "");
+      } catch (_) {
+        return "";
+      }
+    }
+    const m = pathForItem.match(/\/marketplace\/item\/([0-9A-Za-z_-]+)/i);
     if (!m || !m[1]) return "";
     const itemId = String(m[1] || "").trim();
     if (!itemId) return "";
@@ -4341,7 +4363,9 @@ function __deltaIsTerminalCityCollectError(err) {
     s === "item_link_missing" ||
     s === "item_link_missing_after_deferred_recovery" ||
     s === "delta_city_collector_unavailable" ||
-    s === "delta_city_collector_runtime_invalid"
+    s === "delta_city_collector_runtime_invalid" ||
+    // Item errado no nav: não adianta retentar o mesmo link.
+    s === "city_collector_nav_wrong_item"
   );
 }
 

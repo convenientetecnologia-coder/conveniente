@@ -298,6 +298,8 @@ function extractMarketplaceItemId(pathname) {
 function normalizeItemLink(raw) {
   const input = String(raw || "").replace(/&amp;/gi, "&").trim();
   if (!input) return "";
+  // Nunca aceitar sentinel / hub / login genérico como "link de anúncio".
+  if (/link\s*n[aã]o\s*coletado/i.test(input)) return "";
   try {
     const parsed = input.startsWith("http")
       ? new URL(input)
@@ -306,13 +308,113 @@ function normalizeItemLink(raw) {
         : null;
     if (!parsed) return "";
     const host = String(parsed.hostname || "").toLowerCase();
-    if (host && !host.includes("facebook.com")) return "";
-    const itemId = extractMarketplaceItemId(parsed.pathname);
+    if (host && !(host.includes("facebook.com") || host.includes("fb.com") || host.includes("messenger.com"))) {
+      return "";
+    }
+
+    let itemId = extractMarketplaceItemId(parsed.pathname);
+    // login/?next=%2Fmarketplace%2Fitem%2F123 → recupera o item; next=/marketplace/ sozinho → lixo.
+    if (!itemId && /\/login\b/i.test(parsed.pathname)) {
+      const nextRaw = String(parsed.searchParams.get("next") || "").trim();
+      if (nextRaw) {
+        let decoded = nextRaw;
+        try {
+          decoded = decodeURIComponent(nextRaw);
+        } catch (_) {}
+        try {
+          const nextUrl = decoded.startsWith("http")
+            ? new URL(decoded)
+            : new URL(decoded.startsWith("/") ? decoded : `/${decoded}`, "https://www.facebook.com");
+          itemId = extractMarketplaceItemId(nextUrl.pathname);
+        } catch (_) {}
+      }
+    }
     if (!itemId) return "";
     return `https://www.facebook.com/marketplace/item/${itemId}/`;
   } catch {
     return "";
   }
+}
+
+/**
+ * Depois do goto: Facebook pode hard-redirect pra login/?next=/marketplace/
+ * (sem item) — aí NÃO existe DOM do anúncio atrás do modal. Detecta e falha cedo.
+ */
+function classifyListingNavUrl(href, expectedItemId) {
+  const raw = String(href || "").trim();
+  const expectId = String(expectedItemId || "").trim();
+  if (!raw) return { ok: false, kind: "empty_url", error: "city_collector_nav_url_empty" };
+  let parsed = null;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { ok: false, kind: "invalid_url", error: "city_collector_nav_url_invalid" };
+  }
+  const path = String(parsed.pathname || "");
+  const onItemId = extractMarketplaceItemId(path);
+  if (onItemId) {
+    if (expectId && onItemId !== expectId) {
+      return {
+        ok: false,
+        kind: "wrong_item",
+        error: "city_collector_nav_wrong_item",
+        item_id: onItemId,
+        href: raw.slice(0, 300),
+      };
+    }
+    return { ok: true, kind: "item_page", item_id: onItemId, href: raw.slice(0, 300) };
+  }
+
+  if (/\/login\b/i.test(path)) {
+    const nextRaw = String(parsed.searchParams.get("next") || "").trim();
+    let decoded = nextRaw;
+    try {
+      decoded = decodeURIComponent(nextRaw);
+    } catch (_) {}
+    let nextItemId = "";
+    try {
+      if (decoded) {
+        const nextUrl = decoded.startsWith("http")
+          ? new URL(decoded)
+          : new URL(decoded.startsWith("/") ? decoded : `/${decoded}`, "https://www.facebook.com");
+        nextItemId = extractMarketplaceItemId(nextUrl.pathname);
+      }
+    } catch (_) {}
+    if (nextItemId && (!expectId || nextItemId === expectId)) {
+      // Interstitial de login ainda apontando pro item — dá pra tentar ler DOM atrás.
+      return {
+        ok: true,
+        kind: "login_interstitial_with_item",
+        item_id: nextItemId,
+        href: raw.slice(0, 300),
+        soft_login: true,
+      };
+    }
+    // Caso forense: login/?next=%2Fmarketplace%2F — página morta pra cidade.
+    return {
+      ok: false,
+      kind: "hard_login_redirect",
+      error: "city_collector_hard_login_redirect",
+      href: raw.slice(0, 300),
+      next: decoded ? String(decoded).slice(0, 180) : null,
+    };
+  }
+
+  if (/\/marketplace\/?$/i.test(path) || /\/marketplace\/?$/i.test(path.replace(/\/+$/, ""))) {
+    return {
+      ok: false,
+      kind: "marketplace_hub",
+      error: "city_collector_nav_marketplace_hub",
+      href: raw.slice(0, 300),
+    };
+  }
+
+  return {
+    ok: false,
+    kind: "unexpected_page",
+    error: "city_collector_nav_not_item_page",
+    href: raw.slice(0, 300),
+  };
 }
 
 function sanitizeCity(value) {
@@ -1560,6 +1662,45 @@ async function createCollectorRuntime() {
           await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
           await sleep(randomBetween(500, 1100));
+
+          // Guarda soberana: se o FB jogou pra login/?next=/marketplace/ (sem item),
+          // não adianta varrer DOM — não é o anúncio.
+          let navHref = "";
+          try {
+            navHref = String((typeof p.url === "function" ? p.url() : "") || "").trim();
+          } catch (_) {
+            navHref = "";
+          }
+          const navClass = classifyListingNavUrl(navHref, itemId);
+          if (!navClass.ok) {
+            try {
+              log(
+                `nav rejeitada account=${account || "n/a"} thread=${tk || "n/a"}` +
+                ` kind=${navClass.kind || "?"} href=${String(navClass.href || navHref || "").slice(0, 160)}`
+              );
+            } catch (_) {}
+            lastNavError = String(navClass.error || "city_collector_nav_not_item_page");
+            lastExtracted = {
+              cidade: null,
+              error: lastNavError,
+              login_wall: navClass.kind === "hard_login_redirect",
+              has_localizacao: false,
+              has_anunciado: false,
+              candidates_count: 0,
+              nav_kind: navClass.kind || null,
+              nav_href: String(navClass.href || navHref || "").slice(0, 300) || null,
+            };
+            // Hard login / hub: não queima attempts lentas — sai do loop.
+            if (
+              navClass.kind === "hard_login_redirect" ||
+              navClass.kind === "marketplace_hub" ||
+              navClass.kind === "wrong_item"
+            ) {
+              break;
+            }
+            continue;
+          }
+
           await waitForListingHints(p, Math.min(4000, Math.max(1800, Math.floor(navTimeoutMs / 4))));
 
           // Lê a cidade mesmo com o modal de login na frente (DOM do anúncio fica atrás).
@@ -1644,11 +1785,23 @@ async function createCollectorRuntime() {
         }
       }
 
-      const failError = lastNavError && !lastExtracted
-        ? (isChromiumLaunchFailure(lastNavError)
-          ? "city_collector_browser_launch_failed"
-          : "city_collector_navigation_failed")
-        : "city_not_found_in_listing_page";
+      const navHardError =
+        lastExtracted &&
+        typeof lastExtracted.error === "string" &&
+        /^city_collector_(hard_login_redirect|nav_marketplace_hub|nav_wrong_item|nav_not_item_page)/.test(
+          lastExtracted.error
+        )
+          ? String(lastExtracted.error)
+          : null;
+      const failError = navHardError
+        ? navHardError
+        : lastNavError && !lastExtracted
+          ? (isChromiumLaunchFailure(lastNavError)
+            ? "city_collector_browser_launch_failed"
+            : (/^city_collector_/.test(String(lastNavError || ""))
+              ? String(lastNavError)
+              : "city_collector_navigation_failed"))
+          : "city_not_found_in_listing_page";
       try {
         logTriagemCityCollectFailed({
           account_login: account,
@@ -1661,6 +1814,8 @@ async function createCollectorRuntime() {
           candidates_count: Number((lastExtracted && lastExtracted.candidates_count) || 0) || 0,
           attempts: maxAttempts,
           last_nav_error: lastNavError,
+          nav_kind: (lastExtracted && lastExtracted.nav_kind) || null,
+          nav_href: (lastExtracted && lastExtracted.nav_href) || null,
         });
       } catch (_) {}
       return {
@@ -1671,6 +1826,8 @@ async function createCollectorRuntime() {
         has_anunciado: !!(lastExtracted && lastExtracted.has_anunciado),
         candidates_count: Number((lastExtracted && lastExtracted.candidates_count) || 0) || 0,
         last_nav_error: lastNavError || null,
+        nav_kind: (lastExtracted && lastExtracted.nav_kind) || null,
+        nav_href: (lastExtracted && lastExtracted.nav_href) || null,
         queue_serial: true,
       };
       };
