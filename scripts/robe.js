@@ -470,6 +470,14 @@ function loadTotalProfilesCount() {
 function resolveCtSecretConfig() {
   const cfg = readCtConfig();
   let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || '');
+  // Mesmo fallback do worker: se ctBaseUrl foi limpo (ex.: ngrok bloqueado),
+  // ainda resolve a base canônica via notifierEndpoints.
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = normalizeCtBaseUrl(String(notifierBaseFromEndpoints() || ''));
+    } catch {}
+  }
   let secret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
   if (!base || !secret) return { ok: false, error: 'ct_config_missing' };
   base = base.replace(/\/+$/, '');

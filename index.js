@@ -3369,6 +3369,13 @@ async function __serverEventBridgeTick(reason) {
       return;
     }
 
+    let needsConfig = false;
+    try {
+      const cfgCt = readCtConfig();
+      needsConfig = !String((cfgCt && cfgCt.ctBaseUrl) || '').trim() || !String((cfgCt && cfgCt.logIngestSecret) || '').trim();
+    } catch {
+      needsConfig = true;
+    }
     const payload = {
       hostId,
       hostname: String(os.hostname() || ''),
@@ -3378,6 +3385,7 @@ async function __serverEventBridgeTick(reason) {
       quick: telemetry.quick,
       accountsAgg: telemetry.accountsAgg,
       flagsAgg: telemetry.flagsAgg,
+      needsConfig,
       ...(shouldSendDelta ? { status } : {})
     };
     const out = await __postServerEventToCt(payload);
