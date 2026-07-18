@@ -3457,16 +3457,28 @@ async function execFetchLogsQuery(cmd) {
 }
 
 /**
- * ONE-SHOT / recovery: coleta cidade a partir do item_link Marketplace
- * e devolve no details do command-bus (CT aplica + dispara grupo).
+ * Fallback cookies-only: coleta cidade a partir do item_link Marketplace.
+ * Preferir o caminho vivo (IPC delta-force-city-collect-task) no command-bus:
+ * esse abre o thread, recupera link se faltar e roda o match-duplo.
  */
 async function execDeltaForceCityCollect(cmd) {
-  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object')
+    ? cmd.payload
+    : ((cmd && cmd.data && typeof cmd.data === 'object') ? cmd.data : {});
   const itemLink = String(payload.item_link || payload.itemLink || '').trim();
   const accountLogin = String(payload.account_login || payload.accountLogin || '').trim();
   const threadKey = String(payload.thread_key || payload.threadKey || '').trim();
   const ticketId = Number(payload.ticket_id || payload.ticketId || 0) || 0;
-  if (!itemLink) return { ok: false, error: 'missing_item_link', ticket_id: ticketId || null };
+  if (!itemLink) {
+    return {
+      ok: false,
+      error: 'missing_item_link',
+      ticket_id: ticketId || null,
+      account_login: accountLogin || null,
+      thread_key: threadKey || null,
+      hint: 'use_live_browser_force_collect',
+    };
+  }
   if (!/marketplace\/item\//i.test(itemLink)) {
     return { ok: false, error: 'invalid_marketplace_item_link', ticket_id: ticketId || null };
   }

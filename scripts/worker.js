@@ -10714,6 +10714,73 @@ const handlers = {
     });
   },
 
+  /**
+   * CT urgente: phone sem cidade → abrir thread, recuperar link se faltar, collector match-duplo.
+   * Resposta síncrona no command-bus (IPC espera a mão).
+   */
+  async ['delta-force-city-collect-task']({
+    nome,
+    thread_key,
+    item_link,
+    ticket_id,
+    timeoutMs,
+    attempts,
+    link_attempts,
+  }) {
+    return lockProfileAction(nome, async () => {
+      const n = String(nome || '').trim();
+      const tk = String(thread_key || '').trim();
+      if (!n || !tk) return { ok: false, error: 'missing_nome_or_thread_key' };
+
+      const ctrl = controllers.get(n);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        return { ok: false, error: 'browser_not_connected', status: 'force_collect_failed' };
+      }
+      const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
+      if (!runner || typeof runner.enqueueForceCollectLinkAndCity !== 'function') {
+        return { ok: false, error: 'delta_hands_unavailable', status: 'force_collect_failed' };
+      }
+      try { __deltaAttachCityCollectSettledHandler(runner); } catch {}
+
+      try {
+        logger.info('[DELTA][HANDS] delta-force-city-collect-task start', {
+          nome: n,
+          thread_key: tk,
+          has_link: !!(item_link && /marketplace\/item\//i.test(String(item_link))),
+          ticket_id: Number(ticket_id || 0) || null,
+        });
+      } catch {}
+
+      try {
+        const out = await runner.enqueueForceCollectLinkAndCity({
+          thread_key: tk,
+          item_link: String(item_link || '').trim() || null,
+          ticket_id: Number(ticket_id || 0) || 0,
+          timeoutMs: Math.max(12_000, Number(timeoutMs || 20_000) || 20_000),
+          attempts: Math.max(1, Math.min(5, Number(attempts || 3) || 3)),
+          link_attempts: Math.max(1, Math.min(4, Number(link_attempts || 3) || 3)),
+        });
+        try {
+          logger.info('[DELTA][HANDS] delta-force-city-collect-task done', {
+            nome: n,
+            thread_key: tk,
+            ok: !!(out && out.ok),
+            has_city: !!(out && out.cidade),
+            link_recovered: !!(out && out.link_recovered),
+            error: (out && out.error) || null,
+          });
+        } catch {}
+        return out && typeof out === 'object'
+          ? out
+          : { ok: false, error: 'force_collect_empty_result', account_login: n, thread_key: tk };
+      } catch (e) {
+        const err = (e && e.message) ? String(e.message) : String(e);
+        try { logger.warn('[DELTA][HANDS] delta-force-city-collect-task exception', { nome: n, thread_key: tk, error: err }); } catch {}
+        return { ok: false, error: err || 'force_collect_exception', account_login: n, thread_key: tk };
+      }
+    });
+  },
+
   async invoke_human({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });

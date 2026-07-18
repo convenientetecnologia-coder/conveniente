@@ -7027,6 +7027,217 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
   }
 
+  /**
+   * Force sync (CT urgente): abre thread → recupera link se faltar → collector match-duplo.
+   * Só devolve ok com cidade canônica; link recuperado volta mesmo se cidade falhar.
+   */
+  const enqueueForceCollectLinkAndCity = ({
+    thread_key,
+    item_link,
+    timeoutMs,
+    attempts,
+    link_attempts,
+    ticket_id,
+  } = {}) => {
+    return enqueue(async () => {
+      const tk = String(thread_key || "").trim();
+      const ticketId = Number(ticket_id || 0) || 0;
+      if (!tk) {
+        return { ok: false, error: "missing_thread_key", ticket_id: ticketId || null };
+      }
+      const collectorTimeout = Math.max(12_000, Number(timeoutMs || 20_000) || 20_000);
+      const collectorAttempts = Math.max(1, Math.min(5, Number(attempts || 3) || 3));
+      const linkAttempts = Math.max(1, Math.min(4, Number(link_attempts || 3) || 3));
+      let itemLink = String(item_link || "").trim();
+      let linkRecovered = false;
+      let triedLink = false;
+      let triedCity = false;
+
+      const settleForce = (payload) => {
+        const handler = typeof cityCollectSettledHandler === "function" ? cityCollectSettledHandler : null;
+        if (!handler) return Promise.resolve(null);
+        return Promise.resolve(handler(payload)).catch(() => {});
+      };
+
+      try {
+        const prior = greetingStateByThread.get(tk) || null;
+        if ((!itemLink || !/marketplace\/item\//i.test(itemLink)) && prior && prior.itemLink) {
+          const cached = String(prior.itemLink || "").trim();
+          if (cached && /marketplace\/item\//i.test(cached)) itemLink = cached;
+        }
+      } catch (_) {}
+
+      if (!itemLink || !/marketplace\/item\//i.test(itemLink)) {
+        triedLink = true;
+        for (let i = 0; i < linkAttempts; i++) {
+          if (!running) break;
+          try {
+            const openOut = await openThreadAndExtractItemLink(page, tk, {
+              fromNetworkLead: true,
+              forensicAccountLogin: ACCOUNT_LOGIN,
+            });
+            const recovered = String((openOut && openOut.item_link) || "").trim();
+            if (recovered && /marketplace\/item\//i.test(recovered)) {
+              itemLink = recovered;
+              linkRecovered = true;
+              break;
+            }
+          } catch (_) {}
+          try {
+            await humanPause("postThreadOpen", `force_link_retry_${i + 1}`);
+          } catch (_) {}
+        }
+      }
+
+      if (!itemLink || !/marketplace\/item\//i.test(itemLink)) {
+        try {
+          greetingStateByThread.set(tk, {
+            ...(greetingStateByThread.get(tk) || {}),
+            sentAt: Number((greetingStateByThread.get(tk) || {}).sentAt || Date.now()) || Date.now(),
+            itemLink: null,
+            city: null,
+            citySource: null,
+            cityStatus: "collecting",
+            linkStatus: "collecting",
+          });
+        } catch (_) {}
+        try {
+          await settleForce({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: tk,
+            item_link: null,
+            cidade: null,
+            city_source: null,
+            city_status: "collecting",
+          });
+        } catch (_) {}
+        return {
+          ok: false,
+          error: "item_link_missing_after_force_attempts",
+          ticket_id: ticketId || null,
+          account_login: ACCOUNT_LOGIN,
+          thread_key: tk,
+          item_link: null,
+          link_recovered: false,
+          tried_link: true,
+          tried_city: false,
+        };
+      }
+
+      triedCity = true;
+      let cityOut = null;
+      try {
+        cityOut = await collectCityFromItemLinkUsingGlobalCollector({
+          itemLink,
+          threadKey: tk,
+          accountLogin: ACCOUNT_LOGIN,
+          timeoutMs: collectorTimeout,
+          attempts: collectorAttempts,
+          page,
+        });
+      } catch (e) {
+        cityOut = {
+          ok: false,
+          error: (e && e.message) ? String(e.message) : "force_city_collect_exception",
+        };
+      }
+
+      const cidade = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
+      const citySource = cidade
+        ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
+        : null;
+
+      if (cidade) {
+        try {
+          const prior = greetingStateByThread.get(tk) || {};
+          greetingStateByThread.set(tk, {
+            ...prior,
+            sentAt: Number(prior.sentAt || Date.now()) || Date.now(),
+            itemLink,
+            city: cidade,
+            citySource,
+            cityStatus: "resolved",
+            linkStatus: "resolved",
+            cityCollectBgScheduled: false,
+            linkRecoveryScheduled: false,
+          });
+        } catch (_) {}
+        try {
+          await settleForce({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: tk,
+            item_link: itemLink,
+            cidade,
+            city_source: citySource,
+            city_status: "resolved",
+            cityOut: cityOut && typeof cityOut === "object" ? cityOut : null,
+          });
+        } catch (_) {}
+        try {
+          logInfo(
+            `[virtusDelta][force_collect] OK thread_key=${tk} city=${cidade} link=${linkRecovered ? "recovered" : "given"} src=${citySource}`
+          );
+        } catch (_) {}
+        return {
+          ok: true,
+          cidade,
+          city_source: citySource,
+          ticket_id: ticketId || null,
+          account_login: ACCOUNT_LOGIN,
+          thread_key: tk,
+          item_link: itemLink,
+          link_recovered: !!linkRecovered,
+          tried_link: triedLink,
+          tried_city: true,
+          cached: !!(cityOut && cityOut.cached),
+        };
+      }
+
+      try {
+        const prior = greetingStateByThread.get(tk) || {};
+        greetingStateByThread.set(tk, {
+          ...prior,
+          sentAt: Number(prior.sentAt || Date.now()) || Date.now(),
+          itemLink,
+          city: null,
+          citySource: null,
+          cityStatus: "collecting",
+          linkStatus: "resolved",
+        });
+      } catch (_) {}
+      try {
+        await settleForce({
+          account_login: ACCOUNT_LOGIN,
+          thread_key: tk,
+          item_link: itemLink,
+          cidade: null,
+          city_source: null,
+          city_status: "collecting",
+        });
+      } catch (_) {}
+
+      return {
+        ok: false,
+        error: String((cityOut && cityOut.error) || "city_collect_failed").slice(0, 220),
+        ticket_id: ticketId || null,
+        account_login: ACCOUNT_LOGIN,
+        thread_key: tk,
+        item_link: itemLink,
+        link_recovered: !!linkRecovered,
+        tried_link: triedLink,
+        tried_city: true,
+        collector: cityOut && typeof cityOut === "object"
+          ? {
+              login_wall: !!cityOut.login_wall,
+              has_localizacao: !!cityOut.has_localizacao,
+              has_anunciado: !!cityOut.has_anunciado,
+              candidates_count: Number(cityOut.candidates_count || 0) || 0,
+            }
+          : null,
+      };
+    });
+  };
+
   const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id } = {}) => {
     return enqueue(async () => {
       try {
@@ -7129,6 +7340,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     },
     enqueueDeltaReply,
     enqueueDeltaGreetingFlow,
+    enqueueForceCollectLinkAndCity,
     stop: async () => {
       running = false;
       cityCollectSettledHandler = null;

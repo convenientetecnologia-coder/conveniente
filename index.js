@@ -2445,6 +2445,156 @@ app.post('/api/infra/command-bus', async (req, res) => {
         continue;
       }
 
+      if (t === 'delta_force_city_collect') {
+        const p = (cmd.payload && typeof cmd.payload === 'object')
+          ? cmd.payload
+          : ((cmd.data && typeof cmd.data === 'object') ? cmd.data : {});
+        const nome = String(p.account_login || p.accountLogin || cmd.nome || '').trim();
+        const thread_key = String(p.thread_key || p.threadKey || cmd.thread_key || '').trim();
+        const item_link = String(p.item_link || p.itemLink || '').trim();
+        const ticket_id = Number(p.ticket_id || p.ticketId || 0) || 0;
+        const cmdId = String(cmd && cmd.id ? cmd.id : '').trim()
+          || `delta_force_city_collect:${nome}:${thread_key}:${ticket_id || 0}`;
+        const ipcTimeoutMs = Math.max(
+          45_000,
+          Math.min(180_000, Number(p.ipc_timeout_ms || p.ipcTimeoutMs || 130_000) || 130_000)
+        );
+
+        if (!nome || !thread_key) {
+          __forensicEdgeEmit({
+            account_login: nome || null,
+            thread_key: thread_key || null,
+            flow_stage: 'reverse_command_bus',
+            details: { stage: 'delta_force_city_collect_rejected', reason: 'missing_fields' }
+          });
+          results[i] = {
+            id: cmdId,
+            type: 'delta_force_city_collect',
+            ok: false,
+            error: 'missing_account_or_thread',
+            details: null
+          };
+          continue;
+        }
+
+        let liveOut = null;
+        if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
+          try {
+            __forensicEdgeEmit({
+              account_login: nome,
+              thread_key,
+              flow_stage: 'reverse_command_bus',
+              details: {
+                stage: 'delta_force_city_collect_ipc_attempt',
+                cmd_id: cmdId,
+                has_link: !!(item_link && /marketplace\/item\//i.test(item_link)),
+                ticket_id: ticket_id || null
+              }
+            });
+            liveOut = await clusterClient.sendWorkerCommand(
+              'delta-force-city-collect-task',
+              {
+                nome,
+                thread_key,
+                item_link: item_link || null,
+                ticket_id,
+                timeoutMs: Math.max(12_000, Number(p.timeoutMs || 20_000) || 20_000),
+                attempts: Math.max(1, Math.min(5, Number(p.attempts || 3) || 3)),
+                link_attempts: Math.max(1, Math.min(4, Number(p.link_attempts || 3) || 3)),
+              },
+              { timeoutMs: ipcTimeoutMs }
+            );
+          } catch (e) {
+            liveOut = {
+              ok: false,
+              error: (e && e.message) ? String(e.message) : 'ipc_force_collect_exception',
+              account_login: nome,
+              thread_key,
+              item_link: item_link || null,
+            };
+          }
+        } else {
+          liveOut = {
+            ok: false,
+            error: 'cluster_unavailable',
+            account_login: nome,
+            thread_key,
+            item_link: item_link || null,
+          };
+        }
+
+        if (liveOut && liveOut.ok === true && String(liveOut.cidade || '').trim()) {
+          __forensicEdgeEmit({
+            account_login: nome,
+            thread_key,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'delta_force_city_collect_ok',
+              cmd_id: cmdId,
+              city: String(liveOut.cidade || '').slice(0, 80),
+              link_recovered: !!liveOut.link_recovered
+            }
+          });
+          results[i] = {
+            id: cmdId,
+            type: 'delta_force_city_collect',
+            ok: true,
+            details: liveOut,
+            error: null
+          };
+          continue;
+        }
+
+        // Fallback cookies-only só se já temos (ou recuperamos) link marketplace.
+        const fallbackLink = String(
+          (liveOut && liveOut.item_link) || item_link || ''
+        ).trim();
+        if (fallbackLink && /marketplace\/item\//i.test(fallbackLink)) {
+          cmd.payload = {
+            ...(p && typeof p === 'object' ? p : {}),
+            account_login: nome,
+            thread_key,
+            item_link: fallbackLink,
+            ticket_id,
+            timeoutMs: Math.max(12_000, Number(p.timeoutMs || 20_000) || 20_000),
+            attempts: Math.max(1, Math.min(5, Number(p.attempts || 3) || 3)),
+          };
+          __forensicEdgeEmit({
+            account_login: nome,
+            thread_key,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'delta_force_city_collect_cookies_fallback',
+              cmd_id: cmdId,
+              live_error: String((liveOut && liveOut.error) || '').slice(0, 120) || null,
+              link_from_live: !!(liveOut && liveOut.item_link)
+            }
+          });
+          normal.push(cmd);
+          normalIdx.push(i);
+          continue;
+        }
+
+        __forensicEdgeEmit({
+          account_login: nome,
+          thread_key,
+          flow_stage: 'reverse_command_bus',
+          details: {
+            stage: 'delta_force_city_collect_failed',
+            cmd_id: cmdId,
+            error: String((liveOut && liveOut.error) || 'force_collect_failed').slice(0, 160)
+          }
+        });
+        results[i] = {
+          id: cmdId,
+          type: 'delta_force_city_collect',
+          ok: false,
+          error: String((liveOut && liveOut.error) || 'force_collect_failed').slice(0, 220),
+          details: liveOut || null
+        };
+        continue;
+      }
+
       if (t === 'delta_reply_outbox_repair') {
         try {
           __edgeEnsureDeltaReplyOutboxDirsSync();
