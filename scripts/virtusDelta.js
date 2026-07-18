@@ -6430,6 +6430,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         e.includes("wrong_thread_guard_blocked") ||
         e.includes("messages_boot_not_stable") ||
         e.includes("thread_open_hydration_timeout") ||
+        e.includes("thread_open_goto_failed") ||
         e.includes("thread_card_not_found") ||
         e.includes("thread_open_failed") ||
         e.includes("url_mismatch_preventing_cross_routing")
