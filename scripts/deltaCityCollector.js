@@ -1118,9 +1118,10 @@ async function createCollectorRuntime() {
     8_000,
     Math.min(60_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_LAUNCH_TIMEOUT_MS || 25_000) || 25_000)
   );
+  // 75s default: fila serial + launch + nav sob pressão não pode virar pending cedo demais.
   const jobTimeoutMs = Math.max(
     15_000,
-    Math.min(120_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_JOB_TIMEOUT_MS || 45_000) || 45_000)
+    Math.min(120_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_JOB_TIMEOUT_MS || 75_000) || 75_000)
   );
 
   let browser = null;

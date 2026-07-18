@@ -4678,9 +4678,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   }
 
   /**
-   * Plano A soberano: com item_link válido, coleta cidade em background com N rounds.
+   * Plano A soberano: com item_link válido, coleta cidade em background com N rounds + waves.
    * - Não bloqueia reply/hands.
-   * - Mantém city_status=collecting até resolved ou falha real (rounds esgotados / terminal).
+   * - Mantém city_status=collecting até resolved ou falha real (waves esgotadas / terminal).
+   * - Com link válido: NÃO morre no 1º timeout — retenta em wave extra.
    * - Pending só no fim — nunca por outer-timeout burro do reply.
    */
   function scheduleBackgroundCityCollectFromLink({
@@ -4692,18 +4693,44 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     cityCollectorTimeoutMs,
     cityCollectorAttempts,
     reason = "bg_city_collect",
+    force = false,
   } = {}) {
     const t = String(threadKey || "").trim();
     const link = String(itemLink || "").trim();
-    if (!t || !link || !running) return false;
-    if (cityCollectBgInFlight.has(t)) return false;
+    if (!t || !link || !running) return { ok: false, scheduled: false, reason: "not_ready" };
 
     const st0 = greetingStateByThread.get(t) || null;
-    if (st0 && st0.cityStatus === "resolved" && st0.city) return false;
+    if (st0 && st0.cityStatus === "resolved" && st0.city) {
+      return { ok: true, scheduled: false, deduped: true, reason: "already_resolved" };
+    }
+    if (cityCollectBgInFlight.has(t)) {
+      // Já coletando: se force com mesmo link, só confirma; se link novo, guarda rearm.
+      if (force && st0 && String(st0.itemLink || "").trim() !== link) {
+        greetingStateByThread.set(t, {
+          ...(st0 || {}),
+          itemLink: link,
+          cityCollectBgPendingRearm: true,
+          cityCollectBgPendingRearmReason: String(reason || "link_upgrade").slice(0, 80),
+        });
+      }
+      return { ok: true, scheduled: false, deduped: true, reason: "inflight" };
+    }
 
     const maxRounds = Math.max(
       2,
-      Math.min(5, Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_ROUNDS || 3) || 3)
+      Math.min(6, Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_ROUNDS || 4) || 4)
+    );
+    const maxWaves = Math.max(
+      1,
+      Math.min(3, Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_WAVES || 2) || 2)
+    );
+    const waveGapMin = Math.max(
+      8_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_WAVE_GAP_MIN_MS || 20_000) || 20_000
+    );
+    const waveGapMax = Math.max(
+      waveGapMin,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_WAVE_GAP_MAX_MS || 45_000) || 45_000
     );
     const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
     const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
@@ -4716,6 +4743,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_BACKOFF_MAX_MS || 9000) || 9000
     );
     const nomeClienteLimpo = String(customerName || "").trim() || null;
+    const waveNow = Math.max(1, Number((st0 && st0.cityCollectBgWave) || 1) || 1);
 
     const settleToHandler = (payload) => {
       const handler = typeof cityCollectSettledHandler === "function" ? cityCollectSettledHandler : null;
@@ -4735,7 +4763,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         cityStatus: "collecting",
         linkStatus: "resolved",
         cityCollectBgScheduled: true,
+        cityCollectBgWave: waveNow,
         linkRecoveryScheduled: !!(prior && prior.linkRecoveryScheduled),
+        linkRecoveryWave: Number((prior && prior.linkRecoveryWave) || 0) || 0,
       });
     };
 
@@ -4750,7 +4780,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const runRound = (round) => {
       if (!running) {
         finishInFlight();
-        return;
+        return false;
       }
       clearCityCollectBgTimer(t);
       const delayMs = round <= 1 ? 0 : randomBetween(backoffMin, backoffMax);
@@ -4773,6 +4803,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                   reason: String(reason || "bg_city_collect").slice(0, 80),
                   round,
                   rounds_max: maxRounds,
+                  wave: waveNow,
+                  waves_max: maxWaves,
                   item_link: link,
                 },
               });
@@ -4807,6 +4839,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 cityStatus: "resolved",
                 linkStatus: "resolved",
                 cityCollectBgScheduled: false,
+                cityCollectBgWave: waveNow,
                 linkRecoveryScheduled: false,
               });
               try {
@@ -4818,6 +4851,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                     tag: "FORENSIC_DOM_REVERSE",
                     reason: String(reason || "").slice(0, 80),
                     round,
+                    wave: waveNow,
                     city_clean: lateCity,
                     city_source: lateSource,
                     item_link: link,
@@ -4842,11 +4876,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             const err =
               String((cityOut && cityOut.error) || "city_collect_failed").trim() ||
               "city_collect_failed";
-            const canRetry =
+            const canRetryRound =
               __deltaIsRetryableCityCollectError(err) &&
               round < maxRounds;
 
-            if (canRetry) {
+            if (canRetryRound) {
               try {
                 __forensicEdgeEmit({
                   account_login: ACCOUNT_LOGIN,
@@ -4857,12 +4891,83 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                     reason: String(reason || "").slice(0, 80),
                     round,
                     rounds_max: maxRounds,
+                    wave: waveNow,
+                    waves_max: maxWaves,
                     collector_error: err.slice(0, 220),
                     item_link: link,
                   },
                 });
               } catch (_) {}
               runRound(round + 1);
+              return;
+            }
+
+            // Wave soberana: com link válido + erro retryável, não aceita "pending com link".
+            const canRetryWave =
+              __deltaIsRetryableCityCollectError(err) &&
+              waveNow < maxWaves;
+
+            if (canRetryWave) {
+              const nextWave = waveNow + 1;
+              greetingStateByThread.set(t, {
+                sentAt: Number((stAfter && stAfter.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+                greetingText: String((stAfter && stAfter.greetingText) || greetingText || "").trim(),
+                itemLink: link,
+                city: null,
+                citySource: null,
+                cityStatus: "collecting",
+                linkStatus: "resolved",
+                cityCollectBgScheduled: true,
+                cityCollectBgWave: nextWave,
+                linkRecoveryScheduled: false,
+              });
+              await settleToHandler({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                item_link: link,
+                cidade: null,
+                city_source: null,
+                city_status: "collecting",
+                cityOut: { ok: false, error: err, wave_retry: nextWave },
+                customer_name: nomeClienteLimpo,
+                client_name: nomeClienteLimpo,
+                nome_cliente_limpo: nomeClienteLimpo,
+              });
+              try {
+                __forensicEdgeEmit({
+                  account_login: ACCOUNT_LOGIN,
+                  thread_key: t,
+                  flow_stage: "city_collect_bg_wave_retry",
+                  details: {
+                    tag: "FORENSIC_DOM_REVERSE",
+                    reason: String(reason || "").slice(0, 80),
+                    wave: nextWave,
+                    waves_max: maxWaves,
+                    collector_error: err.slice(0, 220),
+                    item_link: link,
+                    gap_ms_min: waveGapMin,
+                    gap_ms_max: waveGapMax,
+                  },
+                });
+              } catch (_) {}
+              cityCollectBgInFlight.delete(t);
+              const gapMs = randomBetween(waveGapMin, waveGapMax);
+              const waveTimer = setTimeout(() => {
+                cityCollectBgTimers.delete(t);
+                if (!running) return;
+                scheduleBackgroundCityCollectFromLink({
+                  threadKey: t,
+                  itemLink: link,
+                  customerName: nomeClienteLimpo,
+                  greetingText: String((stAfter && stAfter.greetingText) || greetingText || "").trim(),
+                  greetingSentAt: Number((stAfter && stAfter.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+                  cityCollectorTimeoutMs: collectorTimeout,
+                  cityCollectorAttempts: collectorAttempts,
+                  reason: `city_bg_wave_${nextWave}`,
+                  force: true,
+                });
+              }, gapMs);
+              cityCollectBgTimers.set(t, waveTimer);
               return;
             }
 
@@ -4875,6 +4980,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               cityStatus: "pending",
               linkStatus: "resolved",
               cityCollectBgScheduled: false,
+              cityCollectBgWave: waveNow,
               linkRecoveryScheduled: false,
             });
             try {
@@ -4887,6 +4993,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                   reason: String(reason || "").slice(0, 80),
                   round,
                   rounds_max: maxRounds,
+                  wave: waveNow,
+                  waves_max: maxWaves,
                   collector_error: err.slice(0, 220),
                   item_link: link,
                   terminal: __deltaIsTerminalCityCollectError(err),
@@ -4908,9 +5016,39 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               nome_cliente_limpo: nomeClienteLimpo,
             });
           } finally {
-            // Só libera in-flight se não houver próximo round agendado.
+            // Só libera in-flight se não houver próximo round/wave agendado.
             if (!cityCollectBgTimers.has(t)) {
               cityCollectBgInFlight.delete(t);
+              // Link novo chegou durante a coleta: rearma na hora.
+              try {
+                const stEnd = greetingStateByThread.get(t) || null;
+                if (
+                  stEnd &&
+                  stEnd.cityCollectBgPendingRearm &&
+                  stEnd.itemLink &&
+                  !(stEnd.cityStatus === "resolved" && stEnd.city)
+                ) {
+                  const rearmLink = String(stEnd.itemLink || "").trim();
+                  greetingStateByThread.set(t, {
+                    ...stEnd,
+                    cityCollectBgPendingRearm: false,
+                    cityCollectBgPendingRearmReason: null,
+                  });
+                  if (rearmLink) {
+                    scheduleBackgroundCityCollectFromLink({
+                      threadKey: t,
+                      itemLink: rearmLink,
+                      customerName: nomeClienteLimpo,
+                      greetingText: String(stEnd.greetingText || greetingText || "").trim(),
+                      greetingSentAt: Number(stEnd.sentAt || greetingSentAt || Date.now()) || Date.now(),
+                      cityCollectorTimeoutMs: collectorTimeout,
+                      cityCollectorAttempts: collectorAttempts,
+                      reason: String(stEnd.cityCollectBgPendingRearmReason || "pending_rearm").slice(0, 80),
+                      force: true,
+                    });
+                  }
+                }
+              } catch (_) {}
             }
           }
         })().catch(() => {
@@ -4921,7 +5059,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       return true;
     };
 
-    return runRound(1);
+    const started = runRound(1);
+    return { ok: !!started, scheduled: !!started, wave: waveNow };
   }
 
   function scheduleDeferredLinkAndCityRecovery({
@@ -4930,23 +5069,63 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     greetingSentAt,
     cityCollectorTimeoutMs,
     cityCollectorAttempts,
-  }) {
+    force = false,
+  } = {}) {
     const t = String(threadKey || "").trim();
-    if (!t || !running) return false;
+    if (!t || !running) return { ok: false, scheduled: false, reason: "not_ready" };
     const prior = greetingStateByThread.get(t) || null;
-    if (prior && prior.linkRecoveryScheduled) return false;
-    if (prior && prior.itemLink && prior.cityStatus === "resolved") return false;
+    if (prior && prior.itemLink && prior.cityStatus === "resolved" && prior.city) {
+      return { ok: true, scheduled: false, deduped: true, reason: "already_resolved" };
+    }
+    // Já tem link: não precisa recovery de link — garante collect de cidade.
+    if (prior && prior.itemLink && String(prior.itemLink).includes("marketplace/item/")) {
+      const cityOut = scheduleBackgroundCityCollectFromLink({
+        threadKey: t,
+        itemLink: String(prior.itemLink).trim(),
+        greetingText: String(greetingText || (prior && prior.greetingText) || "").trim(),
+        greetingSentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now(),
+        cityCollectorTimeoutMs,
+        cityCollectorAttempts,
+        reason: "deferred_already_has_link",
+        force: !!force,
+      });
+      return {
+        ok: !!(cityOut && cityOut.ok),
+        scheduled: !!(cityOut && cityOut.scheduled),
+        redirected_to_city: true,
+        city: cityOut,
+      };
+    }
+    if (prior && prior.linkRecoveryScheduled && !force) {
+      return { ok: true, scheduled: false, deduped: true, reason: "link_recovery_inflight" };
+    }
 
     const deferAttempts = Math.max(
       1,
-      Math.min(4, Number(process.env.VIRTUS_DELTA_LINK_DEFER_ATTEMPTS || 2) || 2)
+      Math.min(6, Number(process.env.VIRTUS_DELTA_LINK_DEFER_ATTEMPTS || 4) || 4)
     );
     const deferMin = Math.max(2500, Number(process.env.VIRTUS_DELTA_LINK_DEFER_MS_MIN || 5000) || 5000);
-    const deferMax = Math.max(deferMin, Number(process.env.VIRTUS_DELTA_LINK_DEFER_MS_MAX || 10000) || 10000);
+    const deferMax = Math.max(deferMin, Number(process.env.VIRTUS_DELTA_LINK_DEFER_MS_MAX || 12000) || 12000);
+    const maxLinkWaves = Math.max(
+      1,
+      Math.min(3, Number(process.env.VIRTUS_DELTA_LINK_DEFER_WAVES || 2) || 2)
+    );
+    const linkWaveGapMin = Math.max(
+      10_000,
+      Number(process.env.VIRTUS_DELTA_LINK_DEFER_WAVE_GAP_MIN_MS || 25_000) || 25_000
+    );
+    const linkWaveGapMax = Math.max(
+      linkWaveGapMin,
+      Number(process.env.VIRTUS_DELTA_LINK_DEFER_WAVE_GAP_MAX_MS || 55_000) || 55_000
+    );
     const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
     const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
     const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
     const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
+    const linkWaveNow = Math.max(
+      1,
+      Number((prior && prior.linkRecoveryWave) || 1) || 1
+    );
 
     greetingStateByThread.set(t, {
       sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now(),
@@ -4957,6 +5136,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       cityStatus: "collecting",
       linkStatus: "collecting",
       linkRecoveryScheduled: true,
+      linkRecoveryWave: linkWaveNow,
+      cityCollectBgWave: Number((prior && prior.cityCollectBgWave) || 0) || 0,
     });
 
     const settleToHandler = (payload) => {
@@ -4966,8 +5147,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
 
     const runAttempt = (attempt) => {
-      if (!running) return;
+      if (!running) return false;
       clearLinkRecoveryTimer(t);
+      // Backoff progressivo: tentativas tardias esperam mais (VM sob pressão).
+      const attemptFactor = Math.min(3, Math.max(1, attempt));
+      const waitMin = Math.floor(deferMin * (0.7 + 0.35 * attemptFactor));
+      const waitMax = Math.floor(deferMax * (0.7 + 0.4 * attemptFactor));
       const timer = setTimeout(() => {
         linkRecoveryTimers.delete(t);
         enqueue(async () => {
@@ -4975,6 +5160,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           const stNow = greetingStateByThread.get(t) || null;
           if (stNow && stNow.cityStatus === "resolved" && stNow.city) return;
           if (stNow && stNow.itemLink && stNow.linkStatus === "resolved" && stNow.cityStatus === "resolved") return;
+          // Link surgiu por outro caminho enquanto esperávamos: só cidade.
+          if (stNow && stNow.itemLink && String(stNow.itemLink).includes("marketplace/item/")) {
+            greetingStateByThread.set(t, {
+              ...stNow,
+              linkStatus: "resolved",
+              linkRecoveryScheduled: false,
+              cityStatus: stNow.cityStatus === "resolved" ? "resolved" : "collecting",
+            });
+            scheduleBackgroundCityCollectFromLink({
+              threadKey: t,
+              itemLink: String(stNow.itemLink).trim(),
+              greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+              greetingSentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+              cityCollectorTimeoutMs: collectorTimeout,
+              cityCollectorAttempts: collectorAttempts,
+              reason: "deferred_link_found_external",
+              force: true,
+            });
+            return;
+          }
 
           let recovered = null;
           try {
@@ -5005,6 +5210,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               account_login: ACCOUNT_LOGIN,
               attempt,
               attempts_max: deferAttempts,
+              wave: linkWaveNow,
+              waves_max: maxLinkWaves,
               item_link: recovered,
             });
           } catch (_) {}
@@ -5017,6 +5224,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 tag: "FORENSIC_DOM_REVERSE",
                 attempt,
                 attempts_max: deferAttempts,
+                wave: linkWaveNow,
+                waves_max: maxLinkWaves,
                 item_link: recovered,
               },
             });
@@ -5025,6 +5234,59 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           if (!recovered) {
             if (attempt < deferAttempts) {
               runAttempt(attempt + 1);
+              return;
+            }
+            // Wave extra de link: lentidão/VM sob pressão — não rende com 1 onda.
+            if (linkWaveNow < maxLinkWaves) {
+              const nextWave = linkWaveNow + 1;
+              greetingStateByThread.set(t, {
+                sentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()),
+                greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+                itemLink: null,
+                city: null,
+                citySource: null,
+                cityStatus: "collecting",
+                linkStatus: "collecting",
+                linkRecoveryScheduled: false,
+                linkRecoveryWave: nextWave,
+              });
+              await settleToHandler({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                item_link: null,
+                cidade: null,
+                city_source: null,
+                city_status: "collecting",
+                cityOut: { ok: false, error: "item_link_wave_retry", wave: nextWave },
+              });
+              try {
+                __forensicEdgeEmit({
+                  account_login: ACCOUNT_LOGIN,
+                  thread_key: t,
+                  flow_stage: "link_deferred_wave_retry",
+                  details: {
+                    tag: "FORENSIC_DOM_REVERSE",
+                    wave: nextWave,
+                    waves_max: maxLinkWaves,
+                    gap_ms_min: linkWaveGapMin,
+                    gap_ms_max: linkWaveGapMax,
+                  },
+                });
+              } catch (_) {}
+              const gapMs = randomBetween(linkWaveGapMin, linkWaveGapMax);
+              const waveTimer = setTimeout(() => {
+                linkRecoveryTimers.delete(t);
+                if (!running) return;
+                scheduleDeferredLinkAndCityRecovery({
+                  threadKey: t,
+                  greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
+                  greetingSentAt: Number((stNow && stNow.sentAt) || greetingSentAt || Date.now()) || Date.now(),
+                  cityCollectorTimeoutMs: collectorTimeout,
+                  cityCollectorAttempts: collectorAttempts,
+                  force: true,
+                });
+              }, gapMs);
+              linkRecoveryTimers.set(t, waveTimer);
               return;
             }
             greetingStateByThread.set(t, {
@@ -5036,6 +5298,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               cityStatus: "pending",
               linkStatus: "pending",
               linkRecoveryScheduled: false,
+              linkRecoveryWave: linkWaveNow,
             });
             await settleToHandler({
               account_login: ACCOUNT_LOGIN,
@@ -5060,6 +5323,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             cityStatus: "collecting",
             linkStatus: "resolved",
             linkRecoveryScheduled: false,
+            linkRecoveryWave: linkWaveNow,
+            cityCollectBgWave: 1,
           });
           await settleToHandler({
             account_login: ACCOUNT_LOGIN,
@@ -5070,7 +5335,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             city_status: "collecting",
             cityOut: { ok: true, deferred: true },
           });
-          scheduleBackgroundCityCollectFromLink({
+          const bg = scheduleBackgroundCityCollectFromLink({
             threadKey: t,
             itemLink: recovered,
             greetingText: String((stNow && stNow.greetingText) || greetingText || "").trim(),
@@ -5078,14 +5343,30 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             cityCollectorTimeoutMs: collectorTimeout,
             cityCollectorAttempts: collectorAttempts,
             reason: "deferred_link_hit",
+            force: true,
           });
+          if (!(bg && (bg.scheduled || bg.deduped))) {
+            try {
+              __forensicEdgeEmit({
+                account_login: ACCOUNT_LOGIN,
+                thread_key: t,
+                flow_stage: "city_bg_schedule_failed",
+                details: {
+                  tag: "FORENSIC_DOM_REVERSE",
+                  item_link: recovered,
+                  bg,
+                },
+              });
+            } catch (_) {}
+          }
         }).catch(() => {});
-      }, randomBetween(deferMin, deferMax));
+      }, randomBetween(waitMin, waitMax));
       linkRecoveryTimers.set(t, timer);
       return true;
     };
 
-    return runAttempt(1);
+    const started = runAttempt(1);
+    return { ok: !!started, scheduled: !!started, wave: linkWaveNow };
   }
 
   // ===================== Delivery Confirm (CT) =====================
@@ -5922,6 +6203,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         });
         return { ok: true, cidade: domCityNoLink, name: nomeClienteLimpo };
       }
+      // Reply/IA é o melhor momento de rearmar link (telefone já veio; link atrasou).
+      const priorPendingNoLink =
+        !!(prior && (prior.cityStatus === "pending" || prior.linkStatus === "pending"));
       try {
         scheduleDeferredLinkAndCityRecovery({
           threadKey: t,
@@ -5929,6 +6213,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           greetingSentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
           cityCollectorTimeoutMs,
           cityCollectorAttempts,
+          force: priorPendingNoLink,
         });
       } catch (_) {}
       await settleToHandler({
@@ -6015,6 +6300,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       };
     }
 
+    // Link OK (inclusive tardio pós-pending): SEMPRE rearma cidade — never leave phone+link sem cidade.
+    const forceCityRearm =
+      !!(prior && (prior.cityStatus === "pending" || prior.cityStatus === "collecting" || !prior.city));
     greetingStateByThread.set(t, {
       sentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
       greetingText: String((prior && prior.greetingText) || "").trim(),
@@ -6023,6 +6311,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       citySource: null,
       cityStatus: "collecting",
       linkStatus: "resolved",
+      // Reply/IA = nova chance soberana: zera wave pra não herdar esgotamento antigo.
+      cityCollectBgWave: 1,
     });
     await settleToHandler({
       account_login: ACCOUNT_LOGIN,
@@ -6043,7 +6333,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       greetingSentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
       cityCollectorTimeoutMs,
       cityCollectorAttempts,
-      reason: "reply_meta_bg",
+      reason: forceCityRearm ? "reply_meta_bg_rearm" : "reply_meta_bg",
+      force: true,
     });
     try {
       __forensicEdgeEmit({
@@ -6642,7 +6933,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               },
             });
           } catch (_) {}
-          scheduleBackgroundCityCollectFromLink({
+          const bgHandoff = scheduleBackgroundCityCollectFromLink({
             threadKey: t,
             itemLink: linkNow,
             customerName: nomeClienteLimpo || null,
@@ -6651,8 +6942,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             cityCollectorTimeoutMs,
             cityCollectorAttempts,
             reason: "hands_deferred_miss",
+            force: true,
           });
-          return null;
+          // Se não agendou e não está inflight: não deixar collecting mudo.
+          if (!(bgHandoff && (bgHandoff.scheduled || bgHandoff.deduped)) && !cityCollectBgInFlight.has(t)) {
+            // cai no pending abaixo
+          } else {
+            return null;
+          }
         }
 
         greetingStateByThread.set(t, {
@@ -6836,6 +7133,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       try {
         for (const tk of Array.from(linkRecoveryTimers.keys())) clearLinkRecoveryTimer(tk);
         linkRecoveryTimers.clear();
+      } catch (_) {}
+      try {
+        for (const tk of Array.from(cityCollectBgTimers.keys())) clearCityCollectBgTimer(tk);
+        cityCollectBgTimers.clear();
+        cityCollectBgInFlight.clear();
       } catch (_) {}
     },
   };

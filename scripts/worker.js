@@ -17654,7 +17654,7 @@ function __deltaHandleCityCollectSettled(payload) {
 
     const eventName = cityFields.city_status === 'resolved'
       ? (linkUpgrade || nameUpgrade ? 'lead_sovereign_patch' : 'lead_city_resolved')
-      : 'lead_city_pending';
+      : (cityFields.city_status === 'collecting' ? 'lead_city_collecting' : 'lead_city_pending');
     const queued = __deltaAppendPendingJsonlSync({
       event: eventName,
       server_id: readHostIdSync() || null,
@@ -17681,7 +17681,9 @@ function __deltaHandleCityCollectSettled(payload) {
       queue_mode: 'dispatch_ct',
       flow_stage: cityFields.city_status === 'resolved'
         ? (linkUpgrade || nameUpgrade ? 'sovereign_deferred_patch' : 'city_collect_deferred_resolved')
-        : 'city_collect_deferred_pending',
+        : (cityFields.city_status === 'collecting'
+          ? (linkUpgrade ? 'city_collect_rearm_with_link' : 'city_collect_deferred_collecting')
+          : 'city_collect_deferred_pending'),
       message_at: Date.now(),
       collector_error: cityFields.city_status === 'pending'
         ? String((p.cityOut && p.cityOut.error) || p.error || '').slice(0, 300) || null
