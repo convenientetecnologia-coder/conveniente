@@ -4117,34 +4117,9 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
 
     // Removido post_open_read_context (6–12s duplicado): composer + wrong_thread_guard bastam.
-
-    // Link do classificado: path agent hands é curto; não engessa o envio.
+    // LEI: NUNCA await collect de link/cidade ANTES do Enter.
+    // Link/cidade rodam DEPOIS do send confirmado (abaixo) + collectMetadataAfterCtReply.
     let itemLink = null;
-    if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
-      const handsPath = !!skipActionDispatch && !fromNetworkLead;
-      const itemLinkAttempts = handsPath
-        ? Math.max(1, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 2) || 2)
-        : Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
-      const readyMs = handsPath
-        ? Math.max(600, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 1500) || 1500)
-        : Math.max(1000, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 4000) || 4000);
-      try {
-        itemLink = await extractMarketplaceItemLinkWithRetry(page, {
-          attempts: itemLinkAttempts,
-          readinessTimeoutMs: readyMs,
-          forensicAccountLogin,
-          threadKey: t,
-        });
-        if (itemLink) {
-          logInfo(`[COLETOR_101_LINK] ${itemLink}`);
-          if (typeof onItemLink === "function") {
-            try {
-              onItemLink(itemLink);
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-    }
 
     try {
       await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
@@ -4304,6 +4279,33 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
         unconfirmed_reason: "composer_not_empty_after_send",
         composer_preview: after.slice(0, 80),
       };
+    }
+
+    // Send já confirmado no Messenger. Só agora tenta link (não atrasa Enter).
+    if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
+      const handsPath = !!skipActionDispatch && !fromNetworkLead;
+      const itemLinkAttempts = handsPath
+        ? Math.max(1, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 2) || 2)
+        : Math.max(2, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 4) || 4);
+      const readyMs = handsPath
+        ? Math.max(600, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 1500) || 1500)
+        : Math.max(1000, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 4000) || 4000);
+      try {
+        itemLink = await extractMarketplaceItemLinkWithRetry(page, {
+          attempts: itemLinkAttempts,
+          readinessTimeoutMs: readyMs,
+          forensicAccountLogin,
+          threadKey: t,
+        });
+        if (itemLink) {
+          logInfo(`[COLETOR_101_LINK] ${itemLink}`);
+          if (typeof onItemLink === "function") {
+            try {
+              onItemLink(itemLink);
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
     }
 
     return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local", status: "send_ok" };
