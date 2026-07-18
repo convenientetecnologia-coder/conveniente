@@ -10696,10 +10696,14 @@ const handlers = {
           return { ok: true, status: 'send_ok', client_message_id: cmid };
         }
         const err = String((out && out.error) || 'send_failed').trim() || 'send_failed';
-        const failStatus = (st === 'send_failed_nonretryable' || st === 'duplicate_inflight_skip')
-          ? st
-          : 'send_failed';
-        try { logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, error: err, status: failStatus }); } catch {}
+        // Falha de rota/hidratação: sempre retryable no outbox (nunca send_failed_nonretryable).
+        const routingFail = __deltaIsHandsRoutingFailure(err);
+        const failStatus = routingFail
+          ? 'send_failed'
+          : ((st === 'send_failed_nonretryable' || st === 'duplicate_inflight_skip')
+            ? st
+            : 'send_failed');
+        try { logger.warn('[DELTA][HANDS] delta-reply-task falhou', { nome: n, thread_key: tk, client_message_id: cmid, error: err, status: failStatus, routing: routingFail }); } catch {}
         return { ok: false, error: err, status: failStatus, client_message_id: cmid };
       } catch (e) {
         if (cmid) __deltaReplyIngressRelease(n, cmid);

@@ -6399,7 +6399,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
     // Drenagem rápida de linha aberta:
     // se a thread já está aberta/selecionada, mantém o canal e aplica pacing 2–10s.
-    const continuityProbe = await probeOpenLineContinuity(page, t).catch(() => ({ is_open_line_ready: false }));
+    let continuityProbe = await probeOpenLineContinuity(page, t).catch(() => ({ is_open_line_ready: false }));
     const openLineReady = !!(continuityProbe && continuityProbe.is_open_line_ready === true);
     const cooldownPolicy = openLineReady
       ? { minMs: 3_000, maxMs: 10_000, reason: "open_line_fast_lane" }
@@ -6408,9 +6408,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Relógio sentinela por conta; em linha aberta usa faixa 2–10s.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN, cooldownPolicy);
 
-    // Resiliência controlada: 1 retry para falhas transitórias de abertura/hidratação
-    // sem repetir comando quando erro for de confirmação final de envio.
+    // Resiliência: retry visual curto + recovery soberano de rota (goto/reopen/guard/resend).
+    // Confirmação final de envio continua nonretryable (sem balão azul falso).
     const maxRetries = Math.max(0, Math.min(2, Number(process.env.VIRTUS_DELTA_REPLY_MAX_RETRIES || 1) || 1));
+    const routingRecoveryRounds = Math.max(
+      1,
+      Math.min(5, Number(process.env.VIRTUS_DELTA_ROUTING_RECOVERY_ROUNDS || 3) || 3)
+    );
     const isNonRetryableSendError = (err) => {
       const e = String(err || "").trim();
       return (
@@ -6419,16 +6423,102 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         e === "composer_text_not_registered"
       );
     };
+    const isRoutingFailure = (err) => {
+      const e = String(err || "").trim().toLowerCase();
+      if (!e) return false;
+      return (
+        e.includes("wrong_thread_guard_blocked") ||
+        e.includes("messages_boot_not_stable") ||
+        e.includes("thread_open_hydration_timeout") ||
+        e.includes("thread_card_not_found") ||
+        e.includes("thread_open_failed") ||
+        e.includes("url_mismatch_preventing_cross_routing")
+      );
+    };
     let lastOut = null;
     let lastErr = "delta_reply_unknown_error";
+    let visualAttempt = 0;
+    let routingRound = 0;
+    const hardCap = 1 + maxRetries + routingRecoveryRounds;
 
-    for (let attempt = 1; attempt <= (maxRetries + 1); attempt++) {
+    const markSendOk = (out) => {
+      const nowTs = Date.now();
+      writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
+      lastCrossThreadKey = String(t);
+      lastCrossThreadSendAt = nowTs;
+      try {
+        const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+        enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
+        kickDeliveryConfirmPump();
+      } catch (_) {}
+      try {
+        void collectMetadataAfterCtReply(t, out).catch(() => {});
+      } catch (_) {}
+      return {
+        ...(out && typeof out === "object" ? out : {}),
+        ok: true,
+        status: "send_ok",
+      };
+    };
+
+    const markNonRetryable = (err, out) => {
+      try {
+        logInfo(`[virtusDelta][reply] nonretryable_send_failed thread_key=${t} reason=${err}`);
+      } catch (_) {}
+      try {
+        const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
+        kickReverseDeliveryStatus({
+          client_message_id: cid,
+          thread_key: t,
+          status: "error_failed_to_send",
+          error: err,
+        });
+      } catch (_) {}
+      return {
+        ok: false,
+        error: err,
+        nonretryable: true,
+        status: "send_failed_nonretryable",
+        item_link: (out && out.item_link) ? String(out.item_link) : null,
+        last_result: out && typeof out === "object" ? out : null,
+      };
+    };
+
+    for (let attempt = 1; attempt <= hardCap; attempt++) {
       if (attempt > 1) {
-        const retryWaitMs = randomBetween(1_200, 2_400);
-        logInfo(
-          `[virtusDelta][reply] retry_visual attempt=${attempt - 1}/${maxRetries} thread_key=${t} wait_ms=${retryWaitMs}`
-        );
-        await sleep(retryWaitMs);
+        const routingMode = isRoutingFailure(lastErr);
+        if (routingMode) {
+          if (routingRound >= routingRecoveryRounds) break;
+          routingRound += 1;
+          const retryWaitMs = randomBetween(2_500, 5_500);
+          logInfo(
+            `[virtusDelta][reply] routing_recovery round=${routingRound}/${routingRecoveryRounds} thread_key=${t} err=${lastErr} wait_ms=${retryWaitMs}`
+          );
+          await sleep(retryWaitMs);
+          // Invalida fast-path; goto direto na thread antes do resend.
+          continuityProbe = null;
+          try {
+            await __deltaTryOpenThreadByDirectGoto(page, t, {
+              forensicAccountLogin: ACCOUNT_LOGIN,
+              stepAError: lastErr,
+            });
+          } catch (gotoErr) {
+            try {
+              logInfo(
+                `[virtusDelta][reply] routing_recovery_goto_fail thread_key=${t} err=${gotoErr && gotoErr.message ? gotoErr.message : String(gotoErr)}`
+              );
+            } catch (_) {}
+          }
+        } else {
+          if (visualAttempt >= maxRetries) break;
+          visualAttempt += 1;
+          const retryWaitMs = randomBetween(1_200, 2_400);
+          logInfo(
+            `[virtusDelta][reply] retry_visual attempt=${visualAttempt}/${maxRetries} thread_key=${t} wait_ms=${retryWaitMs}`
+          );
+          await sleep(retryWaitMs);
+          continuityProbe = null;
+        }
       }
 
       try {
@@ -6443,86 +6533,51 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         });
         lastOut = r && typeof r === "object" ? r : { ok: true };
         if (lastOut && lastOut.ok) {
-          const nowTs = Date.now();
-          writeLastDeltaSendTimestamp(ACCOUNT_LOGIN, nowTs);
-          lastCrossThreadKey = String(t);
-          lastCrossThreadSendAt = nowTs;
-          // Confirm-delivery só após send real confirmado no Messenger.
-          try {
-            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
-            enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
-            kickDeliveryConfirmPump();
-          } catch (_) {}
-          // Após abrir+enviar (resposta do CT/IA): coleta nome/link/cidade e patcha o CT.
-          try {
-            void collectMetadataAfterCtReply(t, lastOut).catch(() => {});
-          } catch (_) {}
-          return {
-            ...(lastOut && typeof lastOut === "object" ? lastOut : {}),
-            ok: true,
-            status: "send_ok",
-          };
+          return markSendOk(lastOut);
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
         if (isNonRetryableSendError(lastErr)) {
-          // NUNCA promover best_effort → sent_to_facebook (balão azul falso).
+          return markNonRetryable(lastErr, lastOut);
+        }
+        // Routing: continua o loop (goto+resend). Soft visual: idem até maxRetries.
+        if (isRoutingFailure(lastErr)) {
           try {
-            logInfo(
-              `[virtusDelta][reply] nonretryable_send_failed thread_key=${t} reason=${lastErr}`
-            );
-          } catch (_) {}
-          try {
-            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
-            kickReverseDeliveryStatus({
-              client_message_id: cid,
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
               thread_key: t,
-              status: "error_failed_to_send",
-              error: lastErr,
+              flow_stage: "reply_routing_failure",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                error: lastErr,
+                attempt,
+                routing_round: routingRound,
+                routing_recovery_rounds: routingRecoveryRounds,
+                ts_ms: Date.now(),
+              }
             });
           } catch (_) {}
-          return {
-            ok: false,
-            error: lastErr,
-            nonretryable: true,
-            status: "send_failed_nonretryable",
-            item_link: (lastOut && lastOut.item_link) ? String(lastOut.item_link) : null,
-            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
-          };
+          continue;
         }
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
         if (isNonRetryableSendError(lastErr)) {
-          try {
-            logInfo(
-              `[virtusDelta][reply] nonretryable_send_exception thread_key=${t} reason=${lastErr}`
-            );
-          } catch (_) {}
-          try {
-            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
-            kickReverseDeliveryStatus({
-              client_message_id: cid,
-              thread_key: t,
-              status: "error_failed_to_send",
-              error: lastErr,
-            });
-          } catch (_) {}
-          return {
-            ok: false,
-            error: lastErr,
-            nonretryable: true,
-            status: "send_failed_nonretryable",
-            last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
-          };
+          return markNonRetryable(lastErr, lastOut);
         }
+        if (isRoutingFailure(lastErr)) continue;
       }
     }
 
+    // Retryable: outbox pump requeue. NÃO reverter CT aqui.
     return {
       ok: false,
       error: String(lastErr || "send_reply_failed_after_retries"),
+      status: "send_failed",
+      nonretryable: false,
       retries: maxRetries,
-      attempts: maxRetries + 1,
+      routing_rounds: routingRound,
+      routing_recovery_exhausted: isRoutingFailure(lastErr) && routingRound >= routingRecoveryRounds,
+      attempts: Math.min(hardCap, 1 + visualAttempt + routingRound),
       last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
     };
   }
@@ -7073,35 +7128,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           };
         }
 
-        // Sem requeue em background: falhou no ciclo síncrono (A->B), reverte status no CT e encerra.
-        // (nonretryable já chama reverse dentro de sendDeltaReplyNow)
-        try {
-          const err = String(out && out.error || "").trim() || "send_failed";
-          const alreadyReversed = !!(out && out.nonretryable === true);
-          if (!alreadyReversed) {
-            const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
-            kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err });
-          }
-        } catch (_) {}
+        // nonretryable já reverte CT dentro de sendDeltaReplyNow.
+        // Retryable (rota/hidratação/etc): NÃO reverter aqui — outbox requeue até send_ok
+        // ou dead-letter (aí o pump do index faz reverse final).
         if (cmid) clearReplyDispatchState(cmid);
+        const failStatus = (out && out.nonretryable === true)
+          ? "send_failed_nonretryable"
+          : (String((out && out.status) || "send_failed").trim() || "send_failed");
         return {
           ...(out && typeof out === "object" ? out : {}),
           ok: false,
           error: String((out && out.error) || "send_failed").trim() || "send_failed",
-          status: String((out && out.status) || "send_failed").trim() || "send_failed",
+          status: failStatus,
           client_message_id: cmid,
         };
       } catch (e) {
-        const tk = String(thread_key || "").trim();
-        const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
         const err = e && e.message ? String(e.message) : String(e);
-        try {
-          const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: tk, texto_resposta: tr });
-          kickReverseDeliveryStatus({ client_message_id: cid, thread_key: tk, status: "error_failed_to_send", error: err || "send_failed_exception" });
-        } catch (_) {}
+        // Exceção também é retryable via outbox — sem reverse prematuro no CT.
         if (cmid) clearReplyDispatchState(cmid);
-        return { ok: false, error: err };
+        return { ok: false, error: err || "send_failed_exception", status: "send_failed", client_message_id: cmid };
       }
     });
   };

@@ -1422,15 +1422,93 @@ function __edgeHasProfileInPerfisSync(nome) {
   }
 }
 
+/** Falha de rota/hidratação: sempre requeue no outbox (nunca dead-letter imediato). */
+function __edgeIsRoutingDeltaSendError(error) {
+  const e = String(error || '').trim().toLowerCase();
+  if (!e) return false;
+  return (
+    e.includes('wrong_thread_guard_blocked') ||
+    e.includes('messages_boot_not_stable') ||
+    e.includes('thread_open_hydration_timeout') ||
+    e.includes('thread_card_not_found') ||
+    e.includes('thread_open_failed') ||
+    e.includes('url_mismatch_preventing_cross_routing')
+  );
+}
+
 function __edgeIsNonRetryableDeltaSendError(error) {
   const e = String(error || '').trim().toLowerCase();
+  // Rota nunca é definitiva — hands/outbox ainda podem recuperar.
+  if (__edgeIsRoutingDeltaSendError(e)) return false;
   return (
     e === 'send_not_confirmed_after_enter_only' ||
     e === 'send_not_confirmed_composer_not_empty' ||
     e === 'composer_text_not_registered' ||
-    e === 'send_failed_nonretryable' ||
-    e === 'wrong_thread_guard_blocked'
+    e === 'send_failed_nonretryable'
   );
+}
+
+/** Reverse ao CT só no dead-letter final (não no meio do requeue). */
+function __edgeKickCtReverseDeliveryStatusDeadLetter({ rec, error } = {}) {
+  try {
+    const cid = String(rec && (rec.client_message_id || rec.id) || '').trim();
+    if (!cid) return;
+    const payload = {
+      server_id: String(process.env.SERVER_ID || process.env.VIRTUS_SERVER_ID || '').trim() || null,
+      account_login: String(rec && rec.nome || '').trim() || null,
+      thread_key: String(rec && rec.thread_key || '').trim() || null,
+      client_message_id: cid,
+      status: 'error_failed_to_send',
+      error: String(error || '').slice(0, 500) || null
+    };
+    const urls = [
+      'https://convenientetecnologia.com/api/attendance/reverse-delivery-status',
+      'https://atendimentos.convenientetecnologia.com/api/attendance/reverse-delivery-status'
+    ];
+    try {
+      setTimeout(() => {
+        (async () => {
+          for (let i = 0; i < urls.length; i += 1) {
+            const url = urls[i];
+            try {
+              if (typeof fetch !== 'function') return;
+              const controller = new AbortController();
+              const to = setTimeout(() => controller.abort(), 4500);
+              let res = null;
+              try {
+                res = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify(payload),
+                  signal: controller.signal
+                });
+              } finally {
+                clearTimeout(to);
+              }
+              if (res && res.ok) {
+                try {
+                  __forensicEdgeEmit({
+                    account_login: payload.account_login,
+                    thread_key: payload.thread_key,
+                    flow_stage: 'reverse_command_bus',
+                    details: {
+                      stage: 'dead_letter_reverse_delivery_ok',
+                      client_message_id: cid,
+                      url,
+                      error: payload.error
+                    }
+                  });
+                } catch {}
+                return;
+              }
+              const st = Number(res && res.status || 0) || 0;
+              if (st !== 404) return;
+            } catch {}
+          }
+        })().catch(() => {});
+      }, 0).unref?.();
+    } catch {}
+  } catch {}
 }
 
 function __edgeIsDeltaReplyFinalSendStatus(status) {
@@ -1839,6 +1917,7 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
           account_login: accountNome || null,
           thread_key: threadKey || null
         });
+        __edgeKickCtReverseDeliveryStatusDeadLetter({ rec, error: 'cluster_unavailable' });
         __edgeEmitVmDeliveryError(threadKey, 'cluster_unavailable');
         __edgeResetDeltaReplyPumpBackoff();
         return;
@@ -1941,6 +2020,10 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
           retry_count: Math.max(0, Number(rec && rec.retry_count || 0) || 0)
         }
       });
+      __edgeKickCtReverseDeliveryStatusDeadLetter({
+        rec,
+        error: retryError || 'profile_not_assigned'
+      });
       __edgeEmitVmDeliveryError(threadKey, retryError || 'ipc_not_ok');
       __edgeResetDeltaReplyPumpBackoff();
       return;
@@ -1971,6 +2054,10 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
           max_retries: retryBudgetDecision.maxRetries
         }
       });
+      __edgeKickCtReverseDeliveryStatusDeadLetter({
+        rec,
+        error: retryError || 'ipc_not_ok'
+      });
       __edgeEmitVmDeliveryError(threadKey, retryError || 'ipc_not_ok');
       __edgeResetDeltaReplyPumpBackoff();
       return;
@@ -1996,11 +2083,12 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       reason: 'ipc_error'
     });
     if (retryBudgetDecision.deadLetter) {
+      const ipcErr = e && e.message ? String(e.message) : String(e);
       __edgeWriteAckSync(cmdId, {
         ok: false,
         dead_letter: true,
         dead_reason: retryBudgetDecision.deadReason,
-        error: e && e.message ? String(e.message) : String(e),
+        error: ipcErr,
         account_login: accountNome || null,
         thread_key: threadKey || null
       });
@@ -2012,12 +2100,13 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
           stage: 'ipc_dispatch_dead_letter',
           cmd_id: cmdId,
           reason: retryBudgetDecision.deadReason,
-          error: e && e.message ? String(e.message) : String(e),
+          error: ipcErr,
           retry_count: retryBudgetDecision.nextRetryCount,
           max_retries: retryBudgetDecision.maxRetries
         }
       });
-      __edgeEmitVmDeliveryError(threadKey, e && e.message ? String(e.message) : String(e));
+      __edgeKickCtReverseDeliveryStatusDeadLetter({ rec, error: ipcErr });
+      __edgeEmitVmDeliveryError(threadKey, ipcErr);
       __edgeResetDeltaReplyPumpBackoff();
       return;
     }
