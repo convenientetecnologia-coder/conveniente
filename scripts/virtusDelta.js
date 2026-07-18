@@ -1041,8 +1041,22 @@ async function extractCityFromMarketplaceDom(page) {
             }
           });
         } catch (_) {}
-        // Trava final: só aceita se terminar em (UF). Caso contrário, considera inválido (evita lixo no CT).
-        if (/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(String(normalized || "").trim())) return normalized;
+        // Trava final: formato (UF) + nome plausível (nunca título/marketing tipo "Conseguimos Fazer O Frete Em X").
+        const normStr = String(normalized || "").trim();
+        if (/^[^()]{2,80}\s*\(\s*[A-Z]{2}\s*\)$/.test(normStr)) {
+          const cityOnly = normStr.replace(/\s*\(\s*[A-Z]{2}\s*\)\s*$/i, "").trim();
+          const cityKey = cityOnly
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toLowerCase();
+          const words = cityOnly.split(/\s+/).filter(Boolean);
+          const looksLikeAdCopy = /\b(conseguimos|podemos|fazer|frete|transporte|whatsapp|chama|chamar|disposi[cç][aã]o|an[uú]ncio|seminovo|usado|venda|vende|vendo|pre[cç]o|parcelas?|entrada)\b/i.test(
+            cityKey
+          );
+          if (words.length >= 1 && words.length <= 5 && !looksLikeAdCopy) {
+            return normalized;
+          }
+        }
       }
 
       if (attempt < (maxAttempts - 1)) {
@@ -6208,28 +6222,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
 
     if (!itemLink) {
-      // Sem link: tenta cidade no DOM do Messenger antes de ficar eternamente collecting.
-      let domCityNoLink = null;
-      try {
-        domCityNoLink = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
-      } catch (_) {
-        domCityNoLink = null;
-      }
-      if (domCityNoLink) {
-        await settleToHandler({
-          account_login: ACCOUNT_LOGIN,
-          thread_key: t,
-          item_link: null,
-          customer_name: nomeClienteLimpo,
-          client_name: nomeClienteLimpo,
-          nome_cliente_limpo: nomeClienteLimpo,
-          cidade: domCityNoLink,
-          city_status: "resolved",
-          city_source: "dom_live_fallback",
-        });
-        return { ok: true, cidade: domCityNoLink, name: nomeClienteLimpo };
-      }
-      // Reply/IA é o melhor momento de rearmar link (telefone já veio; link atrasou).
+      // Sem link: NÃO resolver cidade por regex do Messenger (lixo de título vira "sem cobertura").
+      // Match duplo (Anunciado ∩ Localização) exige página do item — fica collecting + recovery de link.
       const priorPendingNoLink =
         !!(prior && (prior.cityStatus === "pending" || prior.linkStatus === "pending"));
       try {
@@ -6280,52 +6274,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       };
     }
 
-    // Fast-path: se o DOM do Messenger já tem cidade, resolve sem fila.
-    let cityCandidate = null;
-    let citySource = null;
-    try {
-      const domCity = String(await extractCityFromMarketplaceDom(page) || "").trim() || null;
-      if (domCity) {
-        cityCandidate = domCity;
-        citySource = "dom_live_fallback";
-      }
-    } catch (_) {}
-
-    if (cityCandidate) {
-      greetingStateByThread.set(t, {
-        sentAt: Number((prior && prior.sentAt) || Date.now()) || Date.now(),
-        greetingText: String((prior && prior.greetingText) || "").trim(),
-        itemLink,
-        city: cityCandidate,
-        citySource,
-        cityStatus: "resolved",
-        linkStatus: "resolved",
-      });
-      await settleToHandler({
-        account_login: ACCOUNT_LOGIN,
-        thread_key: t,
-        item_link: itemLink,
-        customer_name: nomeClienteLimpo,
-        client_name: nomeClienteLimpo,
-        nome_cliente_limpo: nomeClienteLimpo,
-        cidade: cityCandidate,
-        city_source: citySource,
-        city_status: "resolved",
-      });
-      try {
-        logInfo(
-          `[virtusDelta][reply_meta] thread_key=${t} city=${cityCandidate} link=sim name=${nomeClienteLimpo || "-"} mode=dom_fast`
-        );
-      } catch (_) {}
-      return {
-        ok: true,
-        cidade: cityCandidate,
-        city_status: "resolved",
-        link_anuncio: itemLink,
-        nome_cliente_limpo: nomeClienteLimpo,
-      };
-    }
-
+    // LEI: com link, soberano = collector match-duplo (Anunciado ∩ Localização) com retry em BG.
+    // NUNCA resolver aqui por extractCityFromMarketplaceDom / dom_live_fallback (regex do chat).
     // Link OK (inclusive tardio pós-pending): SEMPRE rearma cidade — never leave phone+link sem cidade.
     const forceCityRearm =
       !!(prior && (prior.cityStatus === "pending" || prior.cityStatus === "collecting" || !prior.city));
@@ -6771,27 +6721,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (_) {}
     }
 
+    // Só resolve no hands se o collector global (match-duplo soberano) já devolveu cidade.
+    // Sem dom_live_fallback / cache do Messenger aqui — isso promovia título de anúncio a cidade.
     let cityCandidate = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
     let citySource = cityCandidate
       ? (String((cityOut && cityOut.city_source) || "collector_listing_page").trim() || "collector_listing_page")
       : null;
-    if (!cityCandidate) {
-      try {
-        const domCity = await extractCityFromMarketplaceDom(page);
-        const domCityCandidate = String(domCity || "").trim();
-        if (domCityCandidate) {
-          cityCandidate = domCityCandidate;
-          citySource = "dom_live_fallback";
-        }
-      } catch (_) {}
-    }
-    if (!cityCandidate) {
-      const cachedCity = String((cityCache && cityCache.value) || "").trim();
-      if (cachedCity) {
-        cityCandidate = cachedCity;
-        citySource = "dom_cache_fallback";
-      }
-    }
 
     let profileUrl = null;
     try {
