@@ -1426,6 +1426,8 @@ function __edgeHasProfileInPerfisSync(nome) {
 function __edgeIsRoutingDeltaSendError(error) {
   const e = String(error || '').trim().toLowerCase();
   if (!e) return false;
+  // Chat excluído / "conteúdo não disponível": dead-letter, sem requeue.
+  if (e.includes('thread_content_unavailable')) return false;
   return (
     e.includes('routing_recovery_exhausted') ||
     e.includes('wrong_thread_guard_blocked') ||
@@ -1440,6 +1442,7 @@ function __edgeIsRoutingDeltaSendError(error) {
 
 function __edgeIsNonRetryableDeltaSendError(error) {
   const e = String(error || '').trim().toLowerCase();
+  if (e.includes('thread_content_unavailable')) return true;
   // Rota nunca é definitiva — hands/outbox ainda podem recuperar.
   if (__edgeIsRoutingDeltaSendError(e)) return false;
   return (

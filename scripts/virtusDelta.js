@@ -3467,6 +3467,7 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
       }
     }).catch(() => false);
     if (contentUnavailable) {
+      // Chat excluído / inacessível: NÃO requeue como routing (vira abre-fecha infinito).
       try {
         __deltaLogTriagemDom({
           stage: "fallback_goto_content_unavailable",
@@ -3480,7 +3481,14 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
       } catch (_) {}
       try { await humanPause("domSettle", "fallback_goto_messages_bootstrap"); } catch (_) {}
-      continue;
+      return {
+        ok: false,
+        error: "thread_content_unavailable",
+        opened_via: "direct_goto",
+        nonretryable: true,
+        step_a_error: stepAError || null,
+        goto_url_used: gotoUrl,
+      };
     }
 
     for (let h = 0; h < 3; h += 1) {
@@ -6530,16 +6538,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       Math.min(5, Number(process.env.VIRTUS_DELTA_ROUTING_RECOVERY_ROUNDS || 3) || 3)
     );
     const isNonRetryableSendError = (err) => {
-      const e = String(err || "").trim();
+      const e = String(err || "").trim().toLowerCase();
       return (
         e === "send_not_confirmed_after_enter_only" ||
         e === "send_not_confirmed_composer_not_empty" ||
-        e === "composer_text_not_registered"
+        e === "composer_text_not_registered" ||
+        e === "thread_content_unavailable" ||
+        e.includes("thread_content_unavailable")
       );
     };
     const isRoutingFailure = (err) => {
       const e = String(err || "").trim().toLowerCase();
       if (!e) return false;
+      // Chat excluído/indisponível NÃO é rota recuperável.
+      if (e.includes("thread_content_unavailable")) return false;
       return (
         e.includes("wrong_thread_guard_blocked") ||
         e.includes("messages_boot_not_stable") ||

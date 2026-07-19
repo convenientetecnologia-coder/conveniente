@@ -87,6 +87,14 @@ mustNotInclude(
   /const isAllowedNavUrl = \(rawUrl\) => \{\s*try \{\s*const u = new URL\(String\(rawUrl \|\| ""\)\);\s*const host = String\(u\.hostname \|\| ""\)\.toLowerCase\(\);\s*if \(\!\(host === "www\.facebook\.com" \|\| host === "facebook\.com"\)\) return false;\s*return true;/
 );
 
+// 12) Conteúdo indisponível: dead-letter (não soft-requeue / continue infinito)
+mustInclude("content_unavailable_error", /error:\s*"thread_content_unavailable"/);
+mustInclude("content_unavailable_nonretryable", /e === "thread_content_unavailable"/);
+mustInclude(
+  "content_unavailable_not_routing",
+  /if \(e\.includes\("thread_content_unavailable"\)\) return false;/
+);
+
 console.log(JSON.stringify({
   file: SRC,
   bytes: src.length,

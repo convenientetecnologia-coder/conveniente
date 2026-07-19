@@ -16454,6 +16454,8 @@ function __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, { highW
 function __deltaIsHandsRoutingFailure(errorRaw) {
   const e = String(errorRaw || '').trim().toLowerCase();
   if (!e) return false;
+  // Chat excluído / indisponível: não tratar como routing (senão requeue em loop).
+  if (e.includes('thread_content_unavailable')) return false;
   return (
     e.includes('routing_recovery_exhausted') ||
     e.includes('wrong_thread_guard_blocked') ||
