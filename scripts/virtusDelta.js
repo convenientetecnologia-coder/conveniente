@@ -6383,12 +6383,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     };
   }
 
-  async function sendDeltaReplyNow({ threadKey, textoResposta, clientMessageId = null }) {
+  async function sendDeltaReplyNow({
+    threadKey,
+    textoResposta,
+    clientMessageId = null,
+    threadKeyCandidates = [],
+    __candidateHop = 0
+  }) {
     if (!running || !epochOk()) return { ok: false, error: "delta_runtime_not_ready" };
     const t = String(threadKey || "").trim();
     const msg = String(textoResposta || "").replace(/\r/g, "");
     const cmid = String(clientMessageId || "").trim() || null;
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
+    const normalizedCandidates = [
+      ...new Set(
+        [t, ...(Array.isArray(threadKeyCandidates) ? threadKeyCandidates : [])]
+          .map((v) => String(v || "").trim())
+          .filter((v) => /^\d{12,20}$/.test(v))
+      )
+    ].slice(0, 8);
+    const alternativeCandidates = normalizedCandidates.filter((v) => v !== t);
 
     // Drenagem rápida de linha aberta:
     // se a thread já está aberta/selecionada, mantém o canal e aplica pacing 2–10s.
@@ -6452,6 +6466,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         ...(out && typeof out === "object" ? out : {}),
         ok: true,
         status: "send_ok",
+        thread_key: t,
       };
     };
 
@@ -6473,6 +6488,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         error: err,
         nonretryable: true,
         status: "send_failed_nonretryable",
+        thread_key: t,
         item_link: (out && out.item_link) ? String(out.item_link) : null,
         last_result: out && typeof out === "object" ? out : null,
       };
@@ -6572,6 +6588,54 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const routingExhausted =
       isRoutingFailure(lastErr) && routingRound >= routingRecoveryRounds;
     if (routingExhausted) {
+      if (alternativeCandidates.length && __candidateHop < 6) {
+        const nextThread = String(alternativeCandidates[0] || "").trim();
+        if (nextThread) {
+          try {
+            logInfo(
+              `[virtusDelta][reply] thread_key_autocorrect_switch hop=${Number(__candidateHop + 1)} from=${t} to=${nextThread} remaining=${Math.max(0, alternativeCandidates.length - 1)}`
+            );
+          } catch (_) {}
+          try {
+            __forensicEdgeEmit({
+              account_login: ACCOUNT_LOGIN,
+              thread_key: t,
+              flow_stage: "reply_thread_key_autocorrect_switch",
+              details: {
+                tag: "FORENSIC_DOM_REVERSE",
+                from_thread_key: t,
+                to_thread_key: nextThread,
+                candidate_hop: Number(__candidateHop + 1),
+                remaining_candidates: alternativeCandidates.slice(1),
+                reason: String(lastErr || "routing_recovery_exhausted")
+              }
+            });
+          } catch (_) {}
+          try {
+            const switched = await sendDeltaReplyNow({
+              threadKey: nextThread,
+              textoResposta: msg,
+              clientMessageId: cmid,
+              threadKeyCandidates: alternativeCandidates.slice(1),
+              __candidateHop: Number(__candidateHop + 1)
+            });
+            if (switched && typeof switched === "object") {
+              return {
+                ...switched,
+                thread_key_autocorrected_from: t,
+                thread_key_autocorrected_to: nextThread,
+                thread_key_candidate_hop: Number(__candidateHop + 1)
+              };
+            }
+          } catch (switchErr) {
+            try {
+              logInfo(
+                `[virtusDelta][reply] thread_key_autocorrect_switch_fail from=${t} to=${nextThread} err=${switchErr && switchErr.message ? switchErr.message : String(switchErr)}`
+              );
+            } catch (_) {}
+          }
+        }
+      }
       return markNonRetryable(
         `routing_recovery_exhausted:${String(lastErr || "routing_failed")}`,
         lastOut
@@ -6584,6 +6648,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       error: String(lastErr || "send_reply_failed_after_retries"),
       status: "send_failed",
       nonretryable: false,
+      thread_key: t,
       retries: maxRetries,
       routing_rounds: routingRound,
       routing_recovery_exhausted: false,
@@ -7297,12 +7362,19 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     });
   };
 
-  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id } = {}) => {
+  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id, thread_key_candidates } = {}) => {
     return enqueue(async () => {
       try {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
+        const threadKeyCandidates = Array.isArray(thread_key_candidates)
+          ? [...new Set(
+              thread_key_candidates
+                .map((v) => String(v || "").trim())
+                .filter((v) => /^\d{12,20}$/.test(v))
+            )].slice(0, 8)
+          : [];
         if (cmid) {
           const prior = getReplyDispatchState(cmid);
           if (prior && prior.state === "done") {
@@ -7316,12 +7388,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
           setReplyDispatchState(cmid, "inflight", tk);
         }
-        const out = await sendDeltaReplyNow({ threadKey: tk, textoResposta: tr, clientMessageId: cmid });
+        const out = await sendDeltaReplyNow({
+          threadKey: tk,
+          textoResposta: tr,
+          clientMessageId: cmid,
+          threadKeyCandidates
+        });
         if (out && out.ok) {
-          if (cmid) setReplyDispatchState(cmid, "done", tk);
+          const sentThreadKey = String(
+            (out && (out.thread_key_autocorrected_to || out.thread_key || tk)) || tk
+          ).trim() || tk;
+          if (cmid) setReplyDispatchState(cmid, "done", sentThreadKey);
           try {
             await __deltaEnforceSidebarResetToTop(page, {
-              threadKey: tk,
+              threadKey: sentThreadKey,
               forensicAccountLogin: ACCOUNT_LOGIN,
               reason: "reply_sent_success"
             });

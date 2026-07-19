@@ -1591,9 +1591,33 @@ function __edgeComputeCmdIdFallback({ nome, thread_key, texto_resposta, client_m
   }
 }
 
-function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id } = {}) {
+function __edgeNormalizeThreadKeyCandidates(input, primaryThreadKey = '') {
+  const primary = String(primaryThreadKey || '').trim();
+  const values = Array.isArray(input)
+    ? input
+    : (typeof input === 'string' ? input.split(/[,\s|;]+/).filter(Boolean) : []);
+  const seen = new Set();
+  const out = [];
+  for (const raw of values) {
+    const v = String(raw || '').trim();
+    if (!/^\d{12,20}$/.test(v)) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  if (primary && /^\d{12,20}$/.test(primary) && !seen.has(primary)) {
+    out.unshift(primary);
+  } else if (primary && out.length) {
+    // Garante thread principal na frente quando já presente.
+    out.sort((a, b) => (a === primary ? -1 : (b === primary ? 1 : 0)));
+  }
+  return out.slice(0, 8);
+}
+
+function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id, thread_key_candidates } = {}) {
   __edgeEnsureDeltaReplyOutboxDirsSync();
   const cmdId = String(id || '').trim() || __edgeComputeCmdIdFallback({ nome, thread_key, texto_resposta, client_message_id });
+  const normalizedCandidates = __edgeNormalizeThreadKeyCandidates(thread_key_candidates, thread_key);
   const rec = {
     ts: Date.now(),
     type: 'delta_reply',
@@ -1601,7 +1625,8 @@ function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_respost
     nome: String(nome || '').trim(),
     thread_key: String(thread_key || '').trim(),
     texto_resposta: String(texto_resposta || '').replace(/\r/g, ''),
-    client_message_id: String(client_message_id || '').trim() || null
+    client_message_id: String(client_message_id || '').trim() || null,
+    ...(normalizedCandidates.length ? { thread_key_candidates: normalizedCandidates } : {})
   };
   try {
     fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(rec) + '\n', 'utf8');
@@ -1892,6 +1917,7 @@ function __edgeEmitVmDeliveryError(threadKey, errorCode) {
 async function __edgeDispatchDeltaReplySend(rec, cmdId) {
   const accountNome = String(rec && rec.nome || '').trim();
   const threadKey = String(rec && rec.thread_key || '').trim();
+  const threadKeyCandidates = __edgeNormalizeThreadKeyCandidates(rec && rec.thread_key_candidates, threadKey);
   try {
     __forensicEdgeEmit({
       account_login: accountNome || null,
@@ -1901,7 +1927,8 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
         stage: 'ipc_dispatch_attempt',
         cmd_id: cmdId,
         chars: String(rec && rec.texto_resposta || '').length,
-        parallel_in_flight: __edgeDeltaReplyAccountInFlight.size
+        parallel_in_flight: __edgeDeltaReplyAccountInFlight.size,
+        thread_key_candidates_count: threadKeyCandidates.length || 0
       }
     });
     if (!clusterClient || typeof clusterClient.sendWorkerCommand !== 'function') {
@@ -1942,7 +1969,8 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
         nome: accountNome,
         thread_key: threadKey,
         texto_resposta: String(rec && rec.texto_resposta || '').replace(/\r/g, ''),
-        client_message_id: String(rec && (rec.client_message_id || rec.id) || '').trim() || null
+        client_message_id: String(rec && (rec.client_message_id || rec.id) || '').trim() || null,
+        ...(threadKeyCandidates.length ? { thread_key_candidates: threadKeyCandidates } : {})
       },
       { timeoutMs: 180000 }
     );
@@ -2387,6 +2415,10 @@ app.post('/api/infra/command-bus', async (req, res) => {
         const nome = String(cmd.nome || '').trim();
         const thread_key = String(cmd.thread_key || '').trim();
         const texto_resposta = String(cmd.texto_resposta || '').replace(/\r/g, '');
+        const thread_key_candidates = __edgeNormalizeThreadKeyCandidates(
+          cmd.thread_key_candidates || cmd.threadKeyCandidates || cmd.candidate_thread_keys || [],
+          thread_key
+        );
         if (!nome || !thread_key || !texto_resposta) {
           __forensicEdgeEmit({
             account_login: nome || null,
@@ -2414,14 +2446,20 @@ app.post('/api/infra/command-bus', async (req, res) => {
           account_login: nome,
           thread_key,
           flow_stage: 'reverse_command_bus',
-          details: { stage: 'delta_reply_received', cmd_id: String(cmd && cmd.id || clientMessageId || '') || null, chars: texto_resposta.length }
+          details: {
+            stage: 'delta_reply_received',
+            cmd_id: String(cmd && cmd.id || clientMessageId || '') || null,
+            chars: texto_resposta.length,
+            thread_key_candidates_count: thread_key_candidates.length || 0
+          }
         });
         const cmdId = __edgeEnqueueDeltaReplyToDiskSync({
           id: String(cmd && cmd.id ? cmd.id : '').trim() || clientMessageId,
           nome,
           thread_key,
           texto_resposta,
-          client_message_id: clientMessageId
+          client_message_id: clientMessageId,
+          thread_key_candidates
         });
         try { forensicLog('EDGE_DELTA', 'delta_reply_received_by_edge', { id: cmdId, nome, thread_key, chars: texto_resposta.length }); } catch {}
         try {
@@ -2433,7 +2471,12 @@ app.post('/api/infra/command-bus', async (req, res) => {
           account_login: nome,
           thread_key,
           flow_stage: 'reverse_command_bus',
-          details: { stage: 'delta_reply_enqueued', cmd_id: cmdId, client_message_id: clientMessageId }
+          details: {
+            stage: 'delta_reply_enqueued',
+            cmd_id: cmdId,
+            client_message_id: clientMessageId,
+            thread_key_candidates_count: thread_key_candidates.length || 0
+          }
         });
         __edgeKickDeltaReplyPump();
         results[i] = {

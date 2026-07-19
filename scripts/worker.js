@@ -10610,12 +10610,19 @@ const handlers = {
 
   // FUSÃO OPERACIONAL (FASE 2/3):
   // Recebe resposta do Maestro :8088 via IPC e executa pelas MÃOS (virtusDelta) com fila serial.
-  async ['delta-reply-task']({ nome, thread_key, texto_resposta, client_message_id }) {
+  async ['delta-reply-task']({ nome, thread_key, texto_resposta, client_message_id, thread_key_candidates }) {
     return lockProfileAction(nome, async () => {
       const n = String(nome || '').trim();
       const tk = String(thread_key || '').trim();
       const tr = String(texto_resposta || '').replace(/\r/g, '');
       const cmid = String(client_message_id || '').trim() || null;
+      const threadKeyCandidates = Array.isArray(thread_key_candidates)
+        ? [...new Set(
+            thread_key_candidates
+              .map((v) => String(v || '').trim())
+              .filter((v) => /^\d{12,20}$/.test(v))
+          )].slice(0, 8)
+        : [];
       if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
       if (cmid) {
         const ingress = __deltaReplyIngressSetForAccount(n);
@@ -10666,6 +10673,7 @@ const handlers = {
             thread_key: tk,
             client_message_id: cmid,
             chars: tr.length,
+            thread_key_candidates_count: threadKeyCandidates.length || 0,
             queue_depth: (qDepth == null ? null : Number(qDepth)),
             queue_max_depth: (qMax == null ? null : Number(qMax)),
             ts_ms: Date.now(),
@@ -10675,12 +10683,21 @@ const handlers = {
 
       // Contrato de aço: IPC só fecha quando a mão terminou (send real ou falha explícita).
       // O ACK rápido CT←edge continua no command-bus (persistência em disco); aqui é a última milha.
-      try { logger.info('[DELTA][HANDS] delta-reply-task await_send', { nome: n, thread_key: tk, chars: tr.length, client_message_id: cmid }); } catch {}
+      try {
+        logger.info('[DELTA][HANDS] delta-reply-task await_send', {
+          nome: n,
+          thread_key: tk,
+          chars: tr.length,
+          client_message_id: cmid,
+          thread_key_candidates_count: threadKeyCandidates.length || 0
+        });
+      } catch {}
       try {
         const out = await runner.enqueueDeltaReply({
           thread_key: tk,
           texto_resposta: tr,
-          client_message_id: cmid
+          client_message_id: cmid,
+          thread_key_candidates: threadKeyCandidates
         });
         if (cmid) __deltaReplyIngressRelease(n, cmid);
         const st = String((out && out.status) || '').trim().toLowerCase();
@@ -18500,11 +18517,19 @@ function __deltaBuildQueueRecord(payload, {
 
 function __deltaBuildCompactQueuePayload(payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
+  const compactThreadCandidates = Array.isArray(p.thread_key_candidates)
+    ? [...new Set(
+        p.thread_key_candidates
+          .map((v) => String(v || '').trim())
+          .filter((v) => /^\d{12,20}$/.test(v))
+      )].slice(0, 8)
+    : [];
   return {
     idempotency_key: __deltaClampQueueString(p.idempotency_key, 120) || null,
     server_id: String(p.server_id || '').trim() || null,
     account_login: __deltaClampQueueString(p.account_login, 180) || null,
     thread_key: __deltaClampQueueString(p.thread_key, 220) || null,
+    ...(compactThreadCandidates.length ? { thread_key_candidates: compactThreadCandidates } : {}),
     texto_limpo: __deltaClampQueueString(p.texto_limpo, 3000) || '',
     mensagens_cliente_concatenadas: __deltaClampQueueString(
       p.mensagens_cliente_concatenadas || p.texto_limpo || '',
@@ -19512,6 +19537,13 @@ function __deltaBuildCtIngestPayload(payload) {
   const bestLink = __deltaPickBestItemLink(p.link_anuncio, p.profile_url);
   const linkAnuncio = bestLink || undefined;
   const operacaoMeta = String(p.operacao_meta || p.operation || '').trim() || undefined;
+  const threadKeyCandidates = Array.isArray(p.thread_key_candidates)
+    ? [...new Set(
+        p.thread_key_candidates
+          .map((v) => String(v || '').trim())
+          .filter((v) => /^\d{12,20}$/.test(v))
+      )].slice(0, 8)
+    : [];
   const isCityPatchOnly = operacaoMeta === 'city_patch';
   const clientNameRaw = String(
     p.client_name ||
@@ -19547,6 +19579,7 @@ function __deltaBuildCtIngestPayload(payload) {
     ...(cityStatus ? { city_status: cityStatus } : {}),
     ...(citySource ? { city_source: citySource } : {}),
     ...(linkAnuncio ? { link_anuncio: linkAnuncio } : {}),
+    ...(threadKeyCandidates.length ? { thread_key_candidates: threadKeyCandidates } : {}),
     ...(clientName ? {
       client_name: clientName,
       customer_name: String(p.customer_name || p.nome_cliente_limpo || clientName).trim() || clientName,
