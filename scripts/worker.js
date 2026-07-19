@@ -20404,6 +20404,30 @@ function __deltaExtractProfileIdsFromStrings(strings) {
   } catch {}
   return [...out];
 }
+function __deltaExtractThreadIdsFromStrings(strings) {
+  const out = new Set();
+  try {
+    const list = Array.isArray(strings) ? strings : [];
+    const regexes = [
+      /\/messages\/(?:e2ee\/)?t\/(\d{12,20})(?:[\/#?]|$)/ig,
+      /"(?:thread_key|thread_id|thread_fbid)"\s*:\s*"?(?<id>\d{12,20})"?/ig,
+      /\bthread(?:_key|_id|_fbid)\b.{0,24}?(\d{12,20})/ig,
+    ];
+    for (const raw of list) {
+      const s = String(raw || '');
+      if (!s) continue;
+      for (const re of regexes) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(s))) {
+          const id = String((m && (m[1] || (m.groups && m.groups.id))) || '').trim();
+          if (/^\d{12,20}$/.test(id)) out.add(id);
+        }
+      }
+    }
+  } catch {}
+  return [...out];
+}
 function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
   const account = String(accountUserId || '').trim();
   const senderIds = Array.isArray(opts.senderIds) ? opts.senderIds : [];
@@ -20429,15 +20453,23 @@ function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
 function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
   if (!candidates.length) return '';
+  const strongThreadIds = new Set(
+    (Array.isArray(opts.strongThreadIds) ? opts.strongThreadIds : [])
+      .map((v) => String(v || '').trim())
+      .filter((v) => /^\d{12,20}$/.test(v))
+  );
   const ranked = candidates
     .map((id, idx) => {
       const len = id.length;
-      let score = len;
-      // Marketplace thread IDs costumam ser maiores (17+), e não podem perder
-      // automaticamente para IDs de perfil (15/16) quando ambos coexistem.
-      if (len >= 17) score += 1000;
-      else if (len >= 15) score += 700;
+      let score = 0;
+      // Evidência forte (URL /messages/t/..., thread_key explícito etc.) domina.
+      if (strongThreadIds.has(id)) score += 5000;
+      // Tamanho vira apenas desempate suave, não regra rígida.
+      if (len >= 17) score += 600;
+      else if (len >= 15) score += 300;
       else score += 100;
+      // Preferência leve por ordem de aparecimento no payload.
+      score += Math.max(0, 50 - idx);
       return { id, idx, score };
     })
     .sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
@@ -20446,6 +20478,15 @@ function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
 function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
   if (!candidates.length) return '';
+  const strongThreadIds = new Set(
+    (Array.isArray(opts.strongThreadIds) ? opts.strongThreadIds : [])
+      .map((v) => String(v || '').trim())
+      .filter((v) => /^\d{12,20}$/.test(v))
+  );
+  if (strongThreadIds.size) {
+    const fromStrong = candidates.find((v) => strongThreadIds.has(v));
+    if (fromStrong) return fromStrong;
+  }
   const hi = candidates.filter((v) => v.length >= 17);
   if (hi.length) return hi[0];
   const mid = candidates.filter((v) => v.length >= 15 && v.length <= 16);
@@ -20664,12 +20705,15 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
         const strings = [];
         __deltaCollectStringCandidates(opArr, strings);
         const profileIds = __deltaExtractProfileIdsFromStrings(strings);
-        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, {
+        const strongThreadIds = __deltaExtractThreadIdsFromStrings(strings);
+        const resolverOpts = {
           excludeIds: profileIds,
-        });
+          strongThreadIds,
+        };
+        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
         const threadKey =
-          __deltaChooseStrictThreadKey(idTokens, accountUserId, { excludeIds: profileIds }) ||
-          __deltaChooseBestThreadKey(idTokens, accountUserId, { excludeIds: profileIds }) ||
+          __deltaChooseStrictThreadKey(idTokens, accountUserId, resolverOpts) ||
+          __deltaChooseBestThreadKey(idTokens, accountUserId, resolverOpts) ||
           '';
         const direct = typeof (opArr && opArr[3]) === 'string' ? __deltaDecodeEscapedText(opArr[3]).trim() : '';
         const messageText = __deltaLooksLikeHumanText(direct) ? direct : __deltaChooseBestMessageText(strings);
@@ -20692,9 +20736,11 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
         __deltaCollectStringCandidates(opArr, strings);
         const senderPreferred = __deltaExtractSenderIdFromNode(opArr);
         const profileIds = __deltaExtractProfileIdsFromStrings(strings);
+        const strongThreadIds = __deltaExtractThreadIdsFromStrings(strings);
         const resolverOpts = {
           senderIds: senderPreferred ? [senderPreferred] : [],
           excludeIds: profileIds,
+          strongThreadIds,
         };
         const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
         const threadKey =
@@ -20736,12 +20782,12 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
         const strings = [];
         __deltaCollectStringCandidates(opArr, strings);
         const profileIds = __deltaExtractProfileIdsFromStrings(strings);
-        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, {
-          excludeIds: profileIds,
-        });
+        const strongThreadIds = __deltaExtractThreadIdsFromStrings(strings);
+        const resolverOpts = { excludeIds: profileIds, strongThreadIds };
+        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
         const threadKey =
-          __deltaChooseStrictThreadKey(idTokens, accountUserId, { excludeIds: profileIds }) ||
-          __deltaChooseBestThreadKey(idTokens, accountUserId, { excludeIds: profileIds }) ||
+          __deltaChooseStrictThreadKey(idTokens, accountUserId, resolverOpts) ||
+          __deltaChooseBestThreadKey(idTokens, accountUserId, resolverOpts) ||
           '';
         const messageText = __deltaChooseBestMessageText(strings);
         pushNormalizedEvent({
