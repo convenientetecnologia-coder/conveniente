@@ -3304,6 +3304,10 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
   };
 }
 
+// Path soberano (pathname inteiro):
+//  /messages/t/ID | /messages/e2ee/t/ID | /e2ee/t/ID | /t/ID
+const __DELTA_THREAD_PATH_PREFIX_RE = "^(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)";
+
 function __deltaIsThreadKeyPathMatch(pathnameOrUrl, threadKey) {
   const t = String(threadKey || "").trim();
   if (!t) return false;
@@ -3316,10 +3320,16 @@ function __deltaIsThreadKeyPathMatch(pathnameOrUrl, threadKey) {
   // Normaliza trailing slash único.
   path = String(path || "").replace(/\/+$/, "") || "/";
   const esc = String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Path soberano (pathname inteiro):
-  //  /messages/t/ID | /messages/e2ee/t/ID | /e2ee/t/ID | /t/ID
-  const re = new RegExp(`^(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)${esc}$`, "i");
+  const re = new RegExp(`${__DELTA_THREAD_PATH_PREFIX_RE}${esc}$`, "i");
   return re.test(path);
+}
+
+/** Predicate serializável p/ page.waitForFunction / evaluate (mesmo contrato do host). */
+function __deltaBrowserThreadPathMatchPredicate(threadId, pathPrefixRe) {
+  const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
+  const esc = String(threadId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const prefix = String(pathPrefixRe || "^(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)");
+  return new RegExp(`${prefix}${esc}$`, "i").test(path);
 }
 
 function __deltaBuildThreadGotoUrlCandidates(threadKey) {
@@ -3870,12 +3880,10 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
       }
       try {
         await page.waitForFunction(
-          (threadId) => {
-            const path = String(location.pathname || "");
-            return path.includes("/messages") && path.includes(`/t/${threadId}`);
-          },
+          __deltaBrowserThreadPathMatchPredicate,
           { timeout: 5500 },
-          t
+          t,
+          __DELTA_THREAD_PATH_PREFIX_RE
         );
         openedByNavigation = true;
         break;
@@ -3993,12 +4001,10 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
         }
         try {
           await page.waitForFunction(
-            (threadId) => {
-              const path = String(location.pathname || "");
-              return path.includes("/messages") && path.includes(`/t/${threadId}`);
-            },
+            __deltaBrowserThreadPathMatchPredicate,
             { timeout: 2500 },
-            t
+            t,
+            __DELTA_THREAD_PATH_PREFIX_RE
           );
           await humanPause("postThreadOpen", "patient_retry_post_click");
           await clickAcceptMessageRequestIfPresent(page, {
@@ -4054,14 +4060,17 @@ async function probeOpenLineContinuity(page, threadKey) {
   const t = String(threadKey || "").trim();
   if (!page || !t) return { is_open_line_ready: false, reason: "missing_page_or_thread" };
   try {
-    const out = await page.evaluate((threadId) => {
+    const out = await page.evaluate((threadId, pathPrefixRe) => {
       const normHref = (href) => String(href || "").trim();
-      const path = String(location.pathname || "").trim();
-      const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
-      const urlMatchesThread = expectedRe.test(path);
+      const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
+      const esc = String(threadId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const prefix = String(pathPrefixRe || "^(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)");
+      const pathRe = new RegExp(`${prefix}${esc}$`, "i");
+      const hrefRe = new RegExp(`(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)${esc}(?:/|$)`, "i");
+      const urlMatchesThread = pathRe.test(path);
       const active = document.querySelector('a[aria-current="page"][href], [aria-current="page"] a[href]');
       const activeHref = normHref(active && active.getAttribute("href"));
-      const sidebarMatchesThread = !!(activeHref && expectedRe.test(activeHref));
+      const sidebarMatchesThread = !!(activeHref && hrefRe.test(activeHref));
       const composers = Array.from(document.querySelectorAll('div[data-lexical-editor="true"]')).filter((el) => {
         if (!el) return false;
         const r = el.getBoundingClientRect();
@@ -4074,8 +4083,9 @@ async function probeOpenLineContinuity(page, threadKey) {
         aria_current_page: !!sidebarMatchesThread,
         composer_ready: composers.length >= 1,
       };
-    }, t);
-    const ready = !!(out && out.url_matches_thread && out.aria_current_page && out.composer_ready);
+    }, t, __DELTA_THREAD_PATH_PREFIX_RE);
+    // URL certa + composer: sidebar aria-current é bônus (layouts E2EE às vezes não trazem).
+    const ready = !!(out && out.url_matches_thread && out.composer_ready && (out.aria_current_page || !out.active_sidebar_href));
     return {
       ...out,
       thread_key: t,
@@ -4107,12 +4117,15 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     const __isAlreadyOpenByUrl = () => {
       try {
         const rawUrl = String(page && page.url ? page.url() : "");
-        const m = rawUrl.match(/\/messages\/(?:e2ee\/)?t\/(\d+)(?:\/|$)/i);
+        let path = "";
+        try { path = String(new URL(rawUrl).pathname || ""); } catch (_) { path = rawUrl; }
+        path = String(path || "").replace(/\/+$/, "") || "/";
+        const m = path.match(/^(?:\/messages\/(?:e2ee\/)?t\/|\/e2ee\/t\/|\/t\/)(\d+)$/i);
         const currentThread = m && m[1] ? String(m[1]) : "";
-        if (currentThread && currentThread === String(t)) {
-          return { ok: true, current_thread: currentThread, current_path: `/messages/t/${currentThread}/`, url: rawUrl };
+        if (currentThread && currentThread === String(t) && __deltaIsThreadKeyPathMatch(rawUrl, t)) {
+          return { ok: true, current_thread: currentThread, current_path: path, url: rawUrl };
         }
-        return { ok: false, current_thread: currentThread || null, current_path: m && m[1] ? `/messages/t/${currentThread}/` : null, url: rawUrl };
+        return { ok: false, current_thread: currentThread || null, current_path: path || null, url: rawUrl };
       } catch {
         return { ok: false, current_thread: null, current_path: null, url: "" };
       }
@@ -6658,8 +6671,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
     }
 
-    // Se routing recovery esgotou: NÃO soft-requeue eterno (congela a fila da conta).
-    // Dead-letter honesto no CT; operador/rearm pode reabrir depois.
+    // Se routing recovery esgotou nesta mão: soft-requeue no outbox edge (sem reverse CT).
+    // Dead-letter final só no pump por budget; operador/rearm pode reabrir depois.
     const routingExhausted =
       isRoutingFailure(lastErr) && routingRound >= routingRecoveryRounds;
     if (routingExhausted) {
