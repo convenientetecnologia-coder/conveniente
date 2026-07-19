@@ -3236,18 +3236,9 @@ async function dismissMessengerE2eeInterstitial(_page, {
 
 async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = null, stage = "post_click", requireComposer = true } = {}) {
   const t = String(threadKey || "").trim();
-  const expectedTarget = `/messages/(?:e2ee/)?t/${t}`;
+  const expectedTarget = `(?:/messages)?/(?:e2ee/)?t/${t}`;
   const currentUrl = String(page && page.url ? page.url() : "").trim();
-  const expectedRe = new RegExp(`/messages/(?:e2ee/)?t/${String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
-  let urlMatches = false;
-  if (currentUrl) {
-    try {
-      const parsed = new URL(currentUrl);
-      urlMatches = expectedRe.test(String(parsed.pathname || ""));
-    } catch (_) {
-      urlMatches = expectedRe.test(currentUrl);
-    }
-  }
+  let urlMatches = currentUrl ? __deltaIsThreadKeyPathMatch(currentUrl, t) : false;
 
   let composerCheck = { ok: true, composer_count: null, active_sidebar_href: null };
   if (requireComposer) {
@@ -3261,10 +3252,14 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
       const composers = Array.from(document.querySelectorAll('div[data-lexical-editor="true"]')).filter(isVisible);
       const active = document.querySelector('a[aria-current="page"][href], [aria-current="page"] a[href]');
       const activeHref = String((active && active.getAttribute("href")) || "").trim();
-      const expectedHrefRe = new RegExp(`/messages/(?:e2ee/)?t/${String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`, "i");
+      const esc = String(threadId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // facebook /messages[/e2ee]/t/ID  OU  messenger.com [/e2ee]/t/ID | /t/ID
+      const expectedHrefRe = new RegExp(`(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)${esc}(?:/|$)`, "i");
       const sidebarMatchesThread = !!(activeHref && expectedHrefRe.test(activeHref));
+      // Sem aria-current: host já validou URL; composer único basta (layouts E2EE/messenger).
+      const sidebarAbsent = !activeHref;
       return {
-        ok: composers.length === 1 && sidebarMatchesThread,
+        ok: composers.length === 1 && (sidebarMatchesThread || sidebarAbsent),
         composer_count: composers.length,
         active_sidebar_href: activeHref || null
       };
@@ -3309,9 +3304,29 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
   };
 }
 
+function __deltaIsThreadKeyPathMatch(pathnameOrUrl, threadKey) {
+  const t = String(threadKey || "").trim();
+  if (!t) return false;
+  const raw = String(pathnameOrUrl || "").trim();
+  if (!raw) return false;
+  let path = raw;
+  try {
+    if (/^https?:\/\//i.test(raw)) path = String(new URL(raw).pathname || "");
+  } catch (_) {}
+  // Normaliza trailing slash único.
+  path = String(path || "").replace(/\/+$/, "") || "/";
+  const esc = String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Path soberano (pathname inteiro):
+  //  /messages/t/ID | /messages/e2ee/t/ID | /e2ee/t/ID | /t/ID
+  const re = new RegExp(`^(?:/messages/(?:e2ee/)?t/|/e2ee/t/|/t/)${esc}$`, "i");
+  return re.test(path);
+}
+
 function __deltaBuildThreadGotoUrlCandidates(threadKey) {
   const t = String(threadKey || "").trim();
-  if (!t || !/^\d{12,20}$/.test(t)) return [];
+  // Aceita qualquer thread numérico; prioridade e2ee/classic por tamanho.
+  // (Filtro 12–20 fica no despacho/candidates — aqui não pode zerar o fallback.)
+  if (!t || !/^\d+$/.test(t)) return [];
   const classic = [
     `https://www.facebook.com/messages/t/${t}/`,
     `https://www.facebook.com/messages/t/${t}`,
@@ -3391,18 +3406,10 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
     }
 
     // Se a URL final não contém o thread alvo, não vale hidratar — próximo candidato.
+    // Aceita facebook (/messages[/e2ee]/t/) e messenger.com ([/e2ee]/t/).
     try {
       const cur = String(page && page.url ? page.url() : "").trim();
-      const expectedRe = new RegExp(
-        `/messages/(?:e2ee/)?t/${String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`,
-        "i"
-      );
-      let urlOk = false;
-      try {
-        urlOk = expectedRe.test(String(new URL(cur).pathname || ""));
-      } catch (_) {
-        urlOk = expectedRe.test(cur);
-      }
+      const urlOk = __deltaIsThreadKeyPathMatch(cur, t);
       if (!urlOk) {
         try {
           __deltaLogTriagemDom({
