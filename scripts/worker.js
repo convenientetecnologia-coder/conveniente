@@ -20487,10 +20487,7 @@ function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
   return candidates;
 }
 function __deltaIsOpaqueLongThreadToken(id) {
-  // Tokens 18–20 colhidos cegamente do Lightspeed ([19,"…"]) frequentemente
-  // NÃO são o /messages/t/<id> da UI — ex.: 748… fantasma vs classic 15-digit real.
-  // Só devem vencer com evidência forte (URL / thread_key explícito).
-  // Nota: 17 dígitos continua válido (Marketplace real, ex. Felix/Keylla).
+  // 18–20 = fantasma operacional (7d: 0 sent_to_facebook). Nunca sem URL forte.
   const s = String(id || '').trim();
   return /^\d{18,20}$/.test(s);
 }
@@ -20506,21 +20503,31 @@ function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
     .map((id, idx) => {
       const len = id.length;
       let score = 0;
-      // Evidência forte (URL /messages/t/..., thread_key explícito etc.) domina.
+      // Evidência forte (URL /messages/t/..., thread_key explícito) domina.
       if (strongThreadIds.has(id)) score += 5000;
-      // 17 = marketplace/thread real comum. 15–16 = classic UI.
-      // 18–20 opaco sem URL perde (era o buraco que gravava 748…).
-      if (len === 17) score += 800;
-      else if (len >= 15 && len <= 16) score += 700;
+      // Verdade 7d: 15–16 = caminho real (~1983 fb_ok). 17 raro/0 fb_ok sem URL.
+      // 18–20 = fantasma — fora sem URL (Imperatriz/Darleny).
+      if (len >= 15 && len <= 16) score += 900;
+      else if (len === 17 && strongThreadIds.has(id)) score += 800;
+      else if (len === 17) score += 200;
       else if (len >= 12 && len <= 14) score += 300;
-      else if (__deltaIsOpaqueLongThreadToken(id) && !strongThreadIds.has(id)) score -= 400;
-      else score += 100;
-      // Preferência leve por ordem de aparecimento no payload.
+      else if (__deltaIsOpaqueLongThreadToken(id) && !strongThreadIds.has(id)) score -= 5000;
+      else if (__deltaIsOpaqueLongThreadToken(id)) score += 100;
+      else score += 50;
       score += Math.max(0, 50 - idx);
       return { id, idx, score };
     })
     .sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
-  return String((ranked[0] && ranked[0].id) || '');
+  const best = ranked[0];
+  if (!best) return '';
+  // Blindagem: nunca promover 18–20 sem URL/thread_key explícito no payload.
+  if (__deltaIsOpaqueLongThreadToken(best.id) && !strongThreadIds.has(best.id)) {
+    const fallback = ranked.find(
+      (r) => !__deltaIsOpaqueLongThreadToken(r.id) || strongThreadIds.has(r.id)
+    );
+    return String((fallback && fallback.id) || '');
+  }
+  return String(best.id || '');
 }
 function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
@@ -20534,17 +20541,17 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
     const fromStrong = candidates.find((v) => strongThreadIds.has(v));
     if (fromStrong) return fromStrong;
   }
-  // Sem URL: 17 (marketplace) > classic 15–16 > opaco 18–20 > resto.
-  // Nunca preferir 18–20 cegamente sobre classic — Imperatriz/Darleny.
-  const seventeen = candidates.filter((v) => v.length === 17);
-  if (seventeen.length) return seventeen[0];
+  // Política final (dados 7d): classic 15–16 primeiro.
+  // 17 só se não houver classic (raro; 0 fb_ok recente).
+  // 18–20 NUNCA sem evidência forte — retorna vazio (não abre fantasma).
   const classic = candidates.filter((v) => v.length >= 15 && v.length <= 16);
   if (classic.length) return classic[0];
-  const opaque = candidates.filter((v) => v.length >= 18);
-  if (opaque.length) return opaque[0];
+  const seventeen = candidates.filter((v) => v.length === 17);
+  if (seventeen.length) return seventeen[0];
   const short = candidates.filter((v) => v.length >= 12 && v.length <= 14);
   if (short.length) return short[0];
-  return candidates[0] || '';
+  // Só sobrou opaco 18–20 sem URL → não inventar thread fantasma.
+  return '';
 }
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
   const thread = String(threadKey || '');
