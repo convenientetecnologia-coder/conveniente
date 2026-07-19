@@ -3199,197 +3199,33 @@ async function computeVisibleThreadCardClickPlan(cardElement) {
 }
 
 /**
- * Modal E2EE do Messenger: "Essa conversa agora está protegida com criptografia..."
- * → botão Continuar → listbox "Seus contatos" (Meta AI + nome da conta).
- * NUNCA clicar Meta AI (abre chat lixo e trava o composer do lead).
+ * Politica operacional: NAO navegar por gate E2EE automatico.
+ * Nao clicar em "Continuar" e nao selecionar contato/nome.
+ * Se o gate aparecer, o fluxo deve falhar com guardrails normais.
  */
-async function dismissMessengerE2eeInterstitial(page, {
+async function dismissMessengerE2eeInterstitial(_page, {
   forensicAccountLogin = null,
-  preferredNames = [],
 } = {}) {
-  const prefs = [];
-  try {
-    for (const p of (Array.isArray(preferredNames) ? preferredNames : [])) {
-      const s = String(p || "").trim();
-      if (s) prefs.push(s);
-    }
-  } catch (_) {}
-  try {
-    const login = String(forensicAccountLogin || "").trim();
-    if (login) prefs.push(login);
-  } catch (_) {}
-
-  // Nome visível do perfil logado (melhor âncora que o login rio_branco-...).
-  try {
-    const liveName = await page.evaluate(() => {
-      const nodes = Array.from(
-        document.querySelectorAll('[aria-label], image[aria-label], span[dir="auto"]')
-      );
-      for (const n of nodes) {
-        const a = String(n.getAttribute("aria-label") || "").trim();
-        if (/seu perfil|your profile/i.test(a)) {
-          const m = a.replace(/seu perfil|your profile/ig, "").replace(/[–—|].*$/, "").trim();
-          if (m && m.length >= 2 && m.length <= 80) return m;
-        }
-      }
-      return null;
-    }).catch(() => null);
-    if (liveName) prefs.unshift(String(liveName).trim());
-  } catch (_) {}
-
-  const detect = await page.evaluate(() => {
-    const txt = String((document.body && document.body.innerText) || "");
-    const hasCopy =
-      /criptografia de ponta a ponta/i.test(txt) ||
-      /protegida com criptografia/i.test(txt) ||
-      /end-to-end encrypted/i.test(txt) ||
-      /encrypted end-to-end/i.test(txt);
-    const listbox = document.querySelector('[role="listbox"]');
-    const listText = String((listbox && listbox.innerText) || "");
-    const hasList =
-      !!listbox &&
-      (/seus contatos|your contacts|pesquisas sugeridas|suggested/i.test(listText) ||
-        !!listbox.querySelector('[role="option"]'));
-    return { hasCopy: !!hasCopy, hasList: !!hasList };
-  }).catch(() => ({ hasCopy: false, hasList: false }));
-
-  if (!detect || (!detect.hasCopy && !detect.hasList)) {
-    return { ok: true, skipped: true, reason: "e2ee_gate_absent" };
-  }
-
   try {
     __forensicEdgeEmit({
       account_login: forensicAccountLogin || null,
       thread_key: null,
-      flow_stage: "e2ee_gate_detected",
+      flow_stage: "e2ee_gate_policy_skip",
       details: {
         tag: "FORENSIC_DOM_REVERSE",
-        has_copy: !!detect.hasCopy,
-        has_list: !!detect.hasList,
-        prefs: prefs.slice(0, 5),
+        policy: "no_auto_continue_no_contact_pick",
         ts_ms: Date.now(),
       },
     });
   } catch (_) {}
-
-  let clickedContinuar = false;
-  if (detect.hasCopy) {
-    clickedContinuar = await page.evaluate(() => {
-      const isVisible = (el) => {
-        if (!el) return false;
-        const r = el.getBoundingClientRect();
-        const st = window.getComputedStyle(el);
-        return !!(r && r.width > 2 && r.height > 2 && st && st.visibility !== "hidden" && st.display !== "none");
-      };
-      const candidates = Array.from(document.querySelectorAll('[role="button"], button'));
-      for (const b of candidates) {
-        if (!isVisible(b)) continue;
-        const aria = String(b.getAttribute("aria-label") || "").trim();
-        const text = String(b.innerText || "").replace(/\s+/g, " ").trim();
-        const blob = `${aria} ${text}`;
-        if (/continuar como|continue as|sem restaurar|not now|agora n/i.test(blob)) continue;
-        if (/^continuar$/i.test(aria) || /^continuar$/i.test(text) || /^continue$/i.test(aria) || /^continue$/i.test(text)) {
-          try { b.click(); return true; } catch (_) {}
-        }
-      }
-      return false;
-    }).catch(() => false);
-
-    if (clickedContinuar) {
-      try { await humanPause("domSettle", "e2ee_after_continuar"); } catch (_) {}
-      try { await sleep(randomBetween(400, 900)); } catch (_) {}
-    }
-  }
-
-  const pick = await page.evaluate((preferred) => {
-    const norm = (s) =>
-      String(s || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .replace(/\s+/g, " ")
-        .trim();
-    const isVisible = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      return !!(r && r.width > 2 && r.height > 2);
-    };
-    const listboxes = Array.from(document.querySelectorAll('[role="listbox"]')).filter(isVisible);
-    if (!listboxes.length) return { ok: false, reason: "listbox_absent" };
-
-    const prefs = (Array.isArray(preferred) ? preferred : []).map(norm).filter(Boolean);
-    const options = [];
-    for (const lb of listboxes) {
-      for (const opt of Array.from(lb.querySelectorAll('[role="option"]'))) {
-        if (!isVisible(opt)) continue;
-        const label = String(opt.getAttribute("aria-label") || opt.innerText || "")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (!label) continue;
-        const n = norm(label);
-        let score = 0;
-        if (n.includes("meta ai") || n === "meta" || /^meta\b/.test(n)) score = -1000;
-        else score = 20;
-        for (const p of prefs) {
-          if (!p) continue;
-          if (n === p) score += 200;
-          else if (n.includes(p) || p.includes(n)) score += 120;
-          else {
-            const pw = p.split(" ").filter((w) => w.length > 2);
-            const hits = pw.filter((w) => n.includes(w)).length;
-            if (hits > 0) score += hits * 40;
-          }
-        }
-        options.push({ label, score, el: opt });
-      }
-    }
-    options.sort((a, b) => b.score - a.score);
-    const best = options.find((o) => o.score >= 20);
-    if (!best) {
-      return {
-        ok: false,
-        reason: "no_safe_option",
-        options: options.slice(0, 6).map((o) => ({ label: o.label, score: o.score })),
-      };
-    }
-    const clickTarget = best.el.querySelector("a") || best.el;
-    try {
-      clickTarget.click();
-      return { ok: true, picked: best.label, score: best.score };
-    } catch (e) {
-      return { ok: false, reason: "click_failed", picked: best.label };
-    }
-  }, prefs).catch((e) => ({
-    ok: false,
-    reason: (e && e.message) ? String(e.message) : "evaluate_failed",
-  }));
-
-  try {
-    __forensicEdgeEmit({
-      account_login: forensicAccountLogin || null,
-      thread_key: null,
-      flow_stage: pick && pick.ok ? "e2ee_gate_dismissed" : "e2ee_gate_dismiss_failed",
-      details: {
-        tag: "FORENSIC_DOM_REVERSE",
-        clicked_continuar: !!clickedContinuar,
-        pick: pick || null,
-        ts_ms: Date.now(),
-      },
-    });
-  } catch (_) {}
-
-  if (pick && pick.ok) {
-    try { await humanPause("domSettle", "e2ee_after_account_pick"); } catch (_) {}
-    try { await sleep(randomBetween(500, 1100)); } catch (_) {}
-  }
-
   return {
     ok: true,
-    skipped: false,
-    clicked_continuar: !!clickedContinuar,
-    picked: (pick && pick.picked) || null,
-    pick_ok: !!(pick && pick.ok),
-    pick_reason: (pick && pick.reason) || null,
+    skipped: true,
+    reason: "policy_skip_no_auto_continue",
+    clicked_continuar: false,
+    picked: null,
+    pick_ok: false,
+    pick_reason: "disabled_by_policy",
   };
 }
 
