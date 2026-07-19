@@ -20509,11 +20509,12 @@ function __deltaPickPreferredThreadKey(candidates, strongThreadIds) {
     const strong17 = seventeen.find(inStrong);
     return strong17 || seventeen[0];
   }
-  // Sem 15–16/17: 18–20 só passa sozinho (último recurso / futuro FB).
+  // 18–20: só se estiver SOZINHO (sem 15–16/17) E com link/URL forte.
+  // Sozinho sem link = bloqueado (não abre fantasma 748…).
   const opaque = list.filter((v) => __deltaIsOpaqueLongThreadToken(v));
   if (opaque.length) {
     const strongOpaque = opaque.find(inStrong);
-    return strongOpaque || opaque[0];
+    return strongOpaque || '';
   }
   const short = list.filter((v) => v.length >= 12 && v.length <= 14);
   if (short.length) {
@@ -20543,7 +20544,7 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
   // Política final:
   // 1) 15–16 sempre ganha de 17/18–20
   // 2) 17 ganha de 18–20
-  // 3) 18–20 SÓ se não existir 15–16 nem 17 no payload
+  // 3) 18–20 SÓ se sozinho (sem 15–16/17) E com link/URL forte
   return __deltaPickPreferredThreadKey(candidates, strongThreadIds);
 }
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
