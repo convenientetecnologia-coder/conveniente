@@ -1453,11 +1453,122 @@ function __edgeIsNonRetryableDeltaSendError(error) {
   );
 }
 
+/** Soft-status: navegador/conta offline — CT NÃO deve marcar error_failed_to_send. */
+const __EDGE_DEFERRED_OFFLINE_CT_URLS = Object.freeze([
+  'https://convenientetecnologia.com/api/attendance/reverse-delivery-status',
+  'https://atendimentos.convenientetecnologia.com/api/attendance/reverse-delivery-status'
+]);
+/** cmdId → { lastAttemptAt, acked } — evita spam; re-tenta se POST falhar. */
+const __edgeDeferredOfflineCtByCmd = new Map();
+/** Entre tentativas enquanto CT ainda não ACK soft. */
+const __EDGE_DEFERRED_OFFLINE_RETRY_MS = 60_000;
+/** Mesmo após ACK: reafirma soft no CT (anti buraco se status voltar a received_by_edge). */
+const __EDGE_DEFERRED_OFFLINE_REFRESH_MS = 5 * 60_000;
+/** Log “conta offline” no máximo 1x por cmd neste intervalo (anti paranoia). */
+const __EDGE_OFFLINE_LOG_THROTTLE_MS = 60_000;
+const __edgeOfflineLogAtByCmd = new Map();
+/** Quantos offline distintos refileirar por scan antes de pausar (backoff). */
+const __EDGE_OFFLINE_DEFER_PER_SCAN_CAP = Math.max(
+  4,
+  Math.min(64, Number(process.env.EDGE_OFFLINE_DEFER_PER_SCAN_CAP || 16) || 16)
+);
+
+function __edgeClearDeferredOfflineCtThrottle(cmdId) {
+  const cid = String(cmdId || '').trim();
+  if (!cid) return;
+  try { __edgeDeferredOfflineCtByCmd.delete(cid); } catch {}
+}
+
+function __edgeKickCtDeferredBrowserOffline({ rec } = {}) {
+  try {
+    const cid = String(rec && (rec.client_message_id || rec.id) || '').trim();
+    if (!cid) return;
+    const now = Date.now();
+    const prev = __edgeDeferredOfflineCtByCmd.get(cid) || null;
+    const lastAt = Number(prev && prev.lastAttemptAt || 0) || 0;
+    const minGap = (prev && prev.acked === true)
+      ? __EDGE_DEFERRED_OFFLINE_REFRESH_MS
+      : __EDGE_DEFERRED_OFFLINE_RETRY_MS;
+    if (lastAt > 0 && (now - lastAt) < minGap) return;
+    __edgeDeferredOfflineCtByCmd.set(cid, {
+      lastAttemptAt: now,
+      acked: !!(prev && prev.acked)
+    });
+    const payload = {
+      server_id: String(process.env.SERVER_ID || process.env.VIRTUS_SERVER_ID || '').trim() || null,
+      account_login: String(rec && rec.nome || '').trim() || null,
+      thread_key: String(rec && rec.thread_key || '').trim() || null,
+      client_message_id: cid,
+      status: 'deferred_browser_offline',
+      error: 'browser_offline'
+    };
+    try {
+      setTimeout(() => {
+        (async () => {
+          for (let i = 0; i < __EDGE_DEFERRED_OFFLINE_CT_URLS.length; i += 1) {
+            const url = __EDGE_DEFERRED_OFFLINE_CT_URLS[i];
+            try {
+              if (typeof fetch !== 'function') return;
+              const controller = new AbortController();
+              const to = setTimeout(() => controller.abort(), 4500);
+              let res = null;
+              try {
+                res = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify(payload),
+                  signal: controller.signal
+                });
+              } finally {
+                clearTimeout(to);
+              }
+              if (res && res.ok) {
+                let bodyOk = true;
+                try {
+                  const j = await res.json();
+                  // CT antigo / soft não aplicado: não marcar acked eterno.
+                  if (j && j.ok === false) bodyOk = false;
+                  if (j && j.soft === false) bodyOk = false;
+                } catch {
+                  // 200 sem JSON: assume ok (CT novo sempre manda soft:true).
+                }
+                if (!bodyOk) {
+                  __edgeDeferredOfflineCtByCmd.set(cid, {
+                    lastAttemptAt: Date.now(),
+                    acked: false
+                  });
+                  continue;
+                }
+                __edgeDeferredOfflineCtByCmd.set(cid, { lastAttemptAt: Date.now(), acked: true });
+                try {
+                  __forensicEdgeEmit({
+                    account_login: payload.account_login,
+                    thread_key: payload.thread_key,
+                    flow_stage: 'reverse_command_bus',
+                    details: {
+                      stage: 'deferred_browser_offline_ct_ok',
+                      client_message_id: cid,
+                      url
+                    }
+                  });
+                } catch {}
+                return;
+              }
+              // Tenta o próximo host em qualquer falha HTTP (404/5xx).
+            } catch {}
+          }
+        })().catch(() => {});
+      }, 0).unref?.();
+    } catch {}
+  } catch {}
+}
+
 /** Reverse ao CT só no dead-letter final (não no meio do requeue). */
 function __edgeKickCtReverseDeliveryStatusDeadLetter({ rec, error } = {}) {
   try {
     const cid = String(rec && (rec.client_message_id || rec.id) || '').trim();
     if (!cid) return;
+    try { __edgeClearDeferredOfflineCtThrottle(cid); } catch {}
     const payload = {
       server_id: String(process.env.SERVER_ID || process.env.VIRTUS_SERVER_ID || '').trim() || null,
       account_login: String(rec && rec.nome || '').trim() || null,
@@ -2184,6 +2295,7 @@ async function __edgeRunDeltaReplyPump() {
     __edgeClearStaleDeltaReplyAccountLocksSync();
     const __edgeDeferredOnceInRun = new Set();
     let dispatchedThisScan = 0;
+    let offlineDeferredThisScan = 0;
     while (true) {
       if (!fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) break;
       let fd = null;
@@ -2245,8 +2357,31 @@ async function __edgeRunDeltaReplyPump() {
 
         const accountNome = String(rec.nome || '').trim();
         if (accountNome && !__edgeIsProfileRuntimeReadySync(accountNome)) {
-          // Conta fechada/noite: NÃO queimar a mensagem. Refileira sem burn de retry
-          // até desired.active/trabalhando voltar (abertura de manhã).
+          // Conta fechada/noite: NÃO queimar a mensagem.
+          // CRÍTICO: refileira 1x por cmd por scan. Na 2ª vista (cópia na cauda) PARA o scan
+          // — senão while(true) multiplica o outbox e spamma log (paranoia infinita).
+          if (__edgeDeferredOnceInRun.has(cmdId)) {
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            break;
+          }
+          // Já refileirado offline há pouco: NÃO append de novo — só pausa o pump.
+          const lastOfflineReason = String(rec.last_retry_reason || '').trim();
+          const recTs = Number(rec.ts || 0) || 0;
+          const recAgeMs = recTs > 0 ? (Date.now() - recTs) : 0;
+          const offlineCoolMs = Math.max(
+            15_000,
+            Math.min(60_000, Number(__edgeDeltaReplyPumpBackoffMs || 15_000) || 15_000)
+          );
+          if (lastOfflineReason === 'profile_runtime_not_ready' && recTs > 0 && recAgeMs < offlineCoolMs) {
+            try { __edgeKickCtDeferredBrowserOffline({ rec }); } catch {}
+            __edgeDeferredOnceInRun.add(cmdId);
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            break;
+          }
+          __edgeDeferredOnceInRun.add(cmdId);
+          offlineDeferredThisScan += 1;
           __edgeRequeueDeltaReplyRecordSync(rec, {
             cmdId,
             reason: 'profile_runtime_not_ready',
@@ -2254,6 +2389,7 @@ async function __edgeRunDeltaReplyPump() {
             burnRetry: false
           });
           __edgeWriteDeltaReplyCursorSync(nextOffset);
+          try { __edgeKickCtDeferredBrowserOffline({ rec }); } catch {}
           __forensicEdgeEmit({
             account_login: accountNome || null,
             thread_key: String(rec.thread_key || '').trim() || null,
@@ -2262,16 +2398,26 @@ async function __edgeRunDeltaReplyPump() {
               stage: 'ipc_dispatch_deferred_offline',
               cmd_id: cmdId,
               reason: 'profile_runtime_not_ready_requeue',
-              burn_retry: false
+              burn_retry: false,
+              ct_soft_status: 'deferred_browser_offline'
             }
           });
           try {
-            logger.info(
-              `🟠 [OUTBOX] conta offline — refileira até abrir nome=${accountNome} cmd=${cmdId}`
-            );
+            const nowLog = Date.now();
+            const lastLog = Number(__edgeOfflineLogAtByCmd.get(cmdId) || 0) || 0;
+            if (!lastLog || (nowLog - lastLog) >= __EDGE_OFFLINE_LOG_THROTTLE_MS) {
+              __edgeOfflineLogAtByCmd.set(cmdId, nowLog);
+              logger.info(
+                `🟠 [OUTBOX] conta offline — refileira até abrir nome=${accountNome} cmd=${cmdId}`
+              );
+            }
           } catch {}
-          __edgeIncreaseDeltaReplyPumpBackoff();
-          __edgeScheduleDeltaReplyPumpRetry();
+          if (offlineDeferredThisScan >= __EDGE_OFFLINE_DEFER_PER_SCAN_CAP) {
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            break;
+          }
+          // Segue o scan: outras contas podem estar ready.
           continue;
         }
 
@@ -2318,6 +2464,8 @@ async function __edgeRunDeltaReplyPump() {
         }
 
         // Claim: avança cursor já; envio roda em paralelo sem travar as outras contas.
+        // Runtime ready: libera throttle do soft-status (se voltar offline, CT é avisado de novo).
+        try { __edgeClearDeferredOfflineCtThrottle(cmdId); } catch {}
         __edgeDeltaReplyAccountInFlight.set(accountNome || `__anon:${cmdId}`, {
           startedAt: Date.now(),
           cmdId,
