@@ -20486,6 +20486,14 @@ function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
   }
   return candidates;
 }
+function __deltaIsOpaqueLongThreadToken(id) {
+  // Tokens 18–20 colhidos cegamente do Lightspeed ([19,"…"]) frequentemente
+  // NÃO são o /messages/t/<id> da UI — ex.: 748… fantasma vs classic 15-digit real.
+  // Só devem vencer com evidência forte (URL / thread_key explícito).
+  // Nota: 17 dígitos continua válido (Marketplace real, ex. Felix/Keylla).
+  const s = String(id || '').trim();
+  return /^\d{18,20}$/.test(s);
+}
 function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
   if (!candidates.length) return '';
@@ -20500,9 +20508,12 @@ function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
       let score = 0;
       // Evidência forte (URL /messages/t/..., thread_key explícito etc.) domina.
       if (strongThreadIds.has(id)) score += 5000;
-      // Tamanho vira apenas desempate suave, não regra rígida.
-      if (len >= 17) score += 600;
-      else if (len >= 15) score += 300;
+      // 17 = marketplace/thread real comum. 15–16 = classic UI.
+      // 18–20 opaco sem URL perde (era o buraco que gravava 748…).
+      if (len === 17) score += 800;
+      else if (len >= 15 && len <= 16) score += 700;
+      else if (len >= 12 && len <= 14) score += 300;
+      else if (__deltaIsOpaqueLongThreadToken(id) && !strongThreadIds.has(id)) score -= 400;
       else score += 100;
       // Preferência leve por ordem de aparecimento no payload.
       score += Math.max(0, 50 - idx);
@@ -20523,10 +20534,16 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
     const fromStrong = candidates.find((v) => strongThreadIds.has(v));
     if (fromStrong) return fromStrong;
   }
-  const hi = candidates.filter((v) => v.length >= 17);
-  if (hi.length) return hi[0];
-  const mid = candidates.filter((v) => v.length >= 15 && v.length <= 16);
-  if (mid.length) return mid[0];
+  // Sem URL: 17 (marketplace) > classic 15–16 > opaco 18–20 > resto.
+  // Nunca preferir 18–20 cegamente sobre classic — Imperatriz/Darleny.
+  const seventeen = candidates.filter((v) => v.length === 17);
+  if (seventeen.length) return seventeen[0];
+  const classic = candidates.filter((v) => v.length >= 15 && v.length <= 16);
+  if (classic.length) return classic[0];
+  const opaque = candidates.filter((v) => v.length >= 18);
+  if (opaque.length) return opaque[0];
+  const short = candidates.filter((v) => v.length >= 12 && v.length <= 14);
+  if (short.length) return short[0];
   return candidates[0] || '';
 }
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
