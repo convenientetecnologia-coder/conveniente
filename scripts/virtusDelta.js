@@ -1198,12 +1198,17 @@ async function killGhostVirtusDeltaProcesses({ port, profileDir } = {}) {
 async function isThreadCardVisible(page, threadKey) {
   const t = String(threadKey || "").trim();
   if (!t) return false;
-  const selectors = [
+  const classic = [
     `a[href="/messages/t/${t}/"]`,
     `a[href="/messages/t/${t}"]`,
-    `a[href*="/messages/e2ee/t/${t}"]`,
     `a[href*="/messages/t/${t}"]`,
   ];
+  const e2ee = [
+    `a[href="/messages/e2ee/t/${t}/"]`,
+    `a[href="/messages/e2ee/t/${t}"]`,
+    `a[href*="/messages/e2ee/t/${t}"]`,
+  ];
+  const selectors = t.length >= 18 ? [...e2ee, ...classic] : [...classic, ...e2ee];
   for (const sel of selectors) {
     const el = await page.$(sel).catch(() => null);
     if (el) return true;
@@ -3304,23 +3309,56 @@ async function runWrongThreadGuard(page, threadKey, { forensicAccountLogin = nul
   };
 }
 
-async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
+function __deltaBuildThreadGotoUrlCandidates(threadKey) {
   const t = String(threadKey || "").trim();
-  const gotoCandidates = [
+  if (!t || !/^\d{12,20}$/.test(t)) return [];
+  const classic = [
     `https://www.facebook.com/messages/t/${t}/`,
     `https://www.facebook.com/messages/t/${t}`,
     `https://facebook.com/messages/t/${t}/`,
   ];
+  const e2ee = [
+    `https://www.facebook.com/messages/e2ee/t/${t}/`,
+    `https://www.facebook.com/messages/e2ee/t/${t}`,
+    `https://facebook.com/messages/e2ee/t/${t}/`,
+  ];
+  // IDs longos (Marketplace/E2EE ~18–20) priorizam e2ee; curtos priorizam classic.
+  // Sempre tenta as duas famílias — sem caminho único burro.
+  return t.length >= 18 ? [...e2ee, ...classic] : [...classic, ...e2ee];
+}
+
+function __deltaBuildThreadCardSelectors(threadKey) {
+  const t = String(threadKey || "").trim();
+  if (!t) return [];
+  const classic = [
+    `div[role="row"] a[href*="/messages/t/${t}"]`,
+    `div[role="row"] a[href="/messages/t/${t}/"]`,
+    `div[role="row"] a[href="/messages/t/${t}"]`,
+  ];
+  const e2ee = [
+    `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
+    `div[role="row"] a[href="/messages/e2ee/t/${t}/"]`,
+    `div[role="row"] a[href="/messages/e2ee/t/${t}"]`,
+  ];
+  return t.length >= 18 ? [...e2ee, ...classic] : [...classic, ...e2ee];
+}
+
+async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
+  const t = String(threadKey || "").trim();
+  const gotoCandidates = __deltaBuildThreadGotoUrlCandidates(t);
   try {
     __deltaLogTriagemDom({
       stage: "fallback_goto_start",
       thread_key: t,
       step_a_error: stepAError || null,
-      goto_url: gotoCandidates[0],
+      goto_url: gotoCandidates[0] || null,
+      goto_family_order: t.length >= 18 ? "e2ee_then_classic" : "classic_then_e2ee",
+      goto_candidates_count: gotoCandidates.length,
     });
   } catch (_) {}
   let lastNavErr = "";
   let hydrationReady = false;
+  let hydratedViaUrl = null;
   for (let i = 0; i < gotoCandidates.length; i += 1) {
     const gotoUrl = String(gotoCandidates[i] || "").trim();
     if (!gotoUrl) continue;
@@ -3331,6 +3369,7 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         step_a_error: stepAError || null,
         goto_url: gotoUrl,
         attempt: i + 1,
+        is_e2ee_url: gotoUrl.includes("/messages/e2ee/t/"),
       });
     } catch (_) {}
 
@@ -3350,6 +3389,34 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
       } catch (_) {}
       continue;
     }
+
+    // Se a URL final não contém o thread alvo, não vale hidratar — próximo candidato.
+    try {
+      const cur = String(page && page.url ? page.url() : "").trim();
+      const expectedRe = new RegExp(
+        `/messages/(?:e2ee/)?t/${String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`,
+        "i"
+      );
+      let urlOk = false;
+      try {
+        urlOk = expectedRe.test(String(new URL(cur).pathname || ""));
+      } catch (_) {
+        urlOk = expectedRe.test(cur);
+      }
+      if (!urlOk) {
+        try {
+          __deltaLogTriagemDom({
+            stage: "fallback_goto_url_mismatch",
+            thread_key: t,
+            step_a_error: stepAError || null,
+            goto_url: gotoUrl,
+            current_url: cur || null,
+            attempt: i + 1,
+          });
+        } catch (_) {}
+        continue;
+      }
+    } catch (_) {}
 
     const contentUnavailable = await page.evaluate(() => {
       try {
@@ -3388,6 +3455,7 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         }).catch(() => null);
         await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 10000 });
         hydrationReady = true;
+        hydratedViaUrl = gotoUrl;
         break;
       } catch (_) {
         if (h < 2) {
@@ -3446,6 +3514,8 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
       thread_key: t,
       selector: "direct_goto",
       url_final: urlFinal,
+      goto_url_used: hydratedViaUrl || null,
+      is_e2ee_url: String(hydratedViaUrl || "").includes("/messages/e2ee/t/"),
       step_a_error: stepAError || null,
     });
   } catch (_) {}
@@ -3455,6 +3525,8 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
     hydrated: true,
     opened_via: "direct_goto",
     fallback_used: true,
+    goto_url_used: hydratedViaUrl || null,
+    is_e2ee_url: String(hydratedViaUrl || "").includes("/messages/e2ee/t/"),
     step_a_error: stepAError || null
   };
 }
@@ -3724,18 +3796,14 @@ async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSt
     );
   } catch (_) {}
 
-  const primaryCardSelector = `div[role="row"] a[href*="/messages/t/${t}"]`;
-  const cardSelectors = [
-    primaryCardSelector,
-    `div[role="row"] a[href="/messages/t/${t}/"]`,
-    `div[role="row"] a[href="/messages/t/${t}"]`,
-    `div[role="row"] a[href*="/messages/e2ee/t/${t}"]`,
-  ];
+  const cardSelectors = __deltaBuildThreadCardSelectors(t);
+  const primaryCardSelector = cardSelectors[0] || `div[role="row"] a[href*="/messages/t/${t}"]`;
 
   let stepAError = "thread_card_not_found";
   let stepASelector = null;
-  for (const cardSelector of cardSelectors) {
-    const cardElement = cardSelector === primaryCardSelector
+  for (let si = 0; si < cardSelectors.length; si += 1) {
+    const cardSelector = cardSelectors[si];
+    const cardElement = si === 0
       ? await page.waitForSelector(cardSelector, { timeout: 9000 }).catch(() => null)
       : await page.$(cardSelector).catch(() => null);
     if (!cardElement) continue;
@@ -6636,10 +6704,39 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
         }
       }
-      return markNonRetryable(
-        `routing_recovery_exhausted:${String(lastErr || "routing_failed")}`,
-        lastOut
-      );
+      // Routing esgotado nesta mão: NÃO reverter CT (sem "Mensagem não enviada" prematuro).
+      // Outbox do edge requeue; dead-letter final só no pump (budget). Operador/rearm depois.
+      try {
+        logInfo(
+          `[virtusDelta][reply] routing_recovery_exhausted_soft_requeue thread_key=${t} err=${lastErr} rounds=${routingRound}`
+        );
+      } catch (_) {}
+      try {
+        __forensicEdgeEmit({
+          account_login: ACCOUNT_LOGIN,
+          thread_key: t,
+          flow_stage: "reply_routing_recovery_exhausted_soft",
+          details: {
+            tag: "FORENSIC_DOM_REVERSE",
+            error: String(lastErr || "routing_failed"),
+            routing_rounds: routingRound,
+            candidates_remaining: alternativeCandidates.length,
+            ts_ms: Date.now(),
+          }
+        });
+      } catch (_) {}
+      return {
+        ok: false,
+        error: `routing_recovery_exhausted:${String(lastErr || "routing_failed")}`,
+        status: "send_failed",
+        nonretryable: false,
+        routing_recovery_exhausted: true,
+        thread_key: t,
+        retries: maxRetries,
+        routing_rounds: routingRound,
+        attempts: Math.min(hardCap, 1 + visualAttempt + routingRound),
+        last_result: lastOut && typeof lastOut === "object" ? lastOut : null,
+      };
     }
 
     // Retryable: outbox pump requeue. NÃO reverter CT aqui.

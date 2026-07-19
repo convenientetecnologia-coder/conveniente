@@ -16455,6 +16455,7 @@ function __deltaIsHandsRoutingFailure(errorRaw) {
   const e = String(errorRaw || '').trim().toLowerCase();
   if (!e) return false;
   return (
+    e.includes('routing_recovery_exhausted') ||
     e.includes('wrong_thread_guard_blocked') ||
     e.includes('messages_boot_not_stable') ||
     e.includes('thread_open_hydration_timeout') ||
