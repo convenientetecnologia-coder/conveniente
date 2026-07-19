@@ -283,6 +283,34 @@ function logDebug(...args) {
   if (LOG_LEVEL === "debug") console.log(...args);
 }
 
+/**
+ * Contrato de navegação do firewall Delta (request interception).
+ * Permite só o que o Messenger/Facebook precisa pra abrir thread clássico e E2EE:
+ * - facebook.com / www.facebook.com
+ * - messenger.com / www.messenger.com (landing [/e2ee]/t/)
+ * - fbsbx.com / www.fbsbx.com SOMENTE /maw_proxy_page
+ *   (XCometMessengerE2EEThreadController / XCometMessengerController)
+ *
+ * Bloquear maw_proxy engessa E2EE: goto /messages/e2ee/t/... redireciona pra
+ * fbsbx e o guard abortava → thread_open_hydration_timeout.
+ * Continua proibido page.goto(?folder=marketplace) no nosso código (outro contrato).
+ */
+function __deltaIsAllowedNavigationUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ""));
+    const host = String(u.hostname || "").toLowerCase();
+    const path = String(u.pathname || "").toLowerCase();
+    if (host === "www.facebook.com" || host === "facebook.com") return true;
+    if (host === "www.messenger.com" || host === "messenger.com") return true;
+    if (host === "www.fbsbx.com" || host === "fbsbx.com") {
+      return path === "/maw_proxy_page" || path.startsWith("/maw_proxy_page/");
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
   try {
     if (!page || page.__virtusDeltaNavFirewallAttached) return;
@@ -291,16 +319,7 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
     return;
   }
 
-  const isAllowedNavUrl = (rawUrl) => {
-    try {
-      const u = new URL(String(rawUrl || ""));
-      const host = String(u.hostname || "").toLowerCase();
-      if (!(host === "www.facebook.com" || host === "facebook.com")) return false;
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const isAllowedNavUrl = __deltaIsAllowedNavigationUrl;
 
   try {
     page.setRequestInterception(true).catch(() => {});
