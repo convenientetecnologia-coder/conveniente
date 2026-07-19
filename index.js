@@ -2245,17 +2245,33 @@ async function __edgeRunDeltaReplyPump() {
 
         const accountNome = String(rec.nome || '').trim();
         if (accountNome && !__edgeIsProfileRuntimeReadySync(accountNome)) {
+          // Conta fechada/noite: NÃO queimar a mensagem. Refileira sem burn de retry
+          // até desired.active/trabalhando voltar (abertura de manhã).
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'profile_runtime_not_ready',
+            error: 'profile_runtime_not_ready',
+            burnRetry: false
+          });
           __edgeWriteDeltaReplyCursorSync(nextOffset);
           __forensicEdgeEmit({
             account_login: accountNome || null,
             thread_key: String(rec.thread_key || '').trim() || null,
             flow_stage: 'reverse_command_bus',
             details: {
-              stage: 'ipc_dispatch_skipped_offline',
+              stage: 'ipc_dispatch_deferred_offline',
               cmd_id: cmdId,
-              reason: 'profile_runtime_not_ready_no_requeue'
+              reason: 'profile_runtime_not_ready_requeue',
+              burn_retry: false
             }
           });
+          try {
+            logger.info(
+              `🟠 [OUTBOX] conta offline — refileira até abrir nome=${accountNome} cmd=${cmdId}`
+            );
+          } catch {}
+          __edgeIncreaseDeltaReplyPumpBackoff();
+          __edgeScheduleDeltaReplyPumpRetry();
           continue;
         }
 
