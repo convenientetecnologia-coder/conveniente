@@ -20487,9 +20487,40 @@ function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
   return candidates;
 }
 function __deltaIsOpaqueLongThreadToken(id) {
-  // 18–20 = fantasma operacional (7d: 0 sent_to_facebook). Nunca sem URL forte.
+  // 18–20: só válido se NÃO houver 15–16 nem 17 no mesmo payload.
   const s = String(id || '').trim();
   return /^\d{18,20}$/.test(s);
+}
+function __deltaPickPreferredThreadKey(candidates, strongThreadIds) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (!list.length) return '';
+  const strong = strongThreadIds instanceof Set ? strongThreadIds : new Set();
+  const inStrong = (id) => strong.has(id);
+
+  // Blindagem absoluta: se existir 15–16 ou 17, NUNCA escolher 18–20
+  // (mesmo que o fantasma apareça em URL e2ee / messages/t/).
+  const classic = list.filter((v) => v.length >= 15 && v.length <= 16);
+  if (classic.length) {
+    const strongClassic = classic.find(inStrong);
+    return strongClassic || classic[0];
+  }
+  const seventeen = list.filter((v) => v.length === 17);
+  if (seventeen.length) {
+    const strong17 = seventeen.find(inStrong);
+    return strong17 || seventeen[0];
+  }
+  // Sem 15–16/17: 18–20 só passa sozinho (último recurso / futuro FB).
+  const opaque = list.filter((v) => __deltaIsOpaqueLongThreadToken(v));
+  if (opaque.length) {
+    const strongOpaque = opaque.find(inStrong);
+    return strongOpaque || opaque[0];
+  }
+  const short = list.filter((v) => v.length >= 12 && v.length <= 14);
+  if (short.length) {
+    const strongShort = short.find(inStrong);
+    return strongShort || short[0];
+  }
+  return list[0] || '';
 }
 function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
@@ -20499,35 +20530,7 @@ function __deltaChooseBestThreadKey(idTokens, accountUserId, opts = {}) {
       .map((v) => String(v || '').trim())
       .filter((v) => /^\d{12,20}$/.test(v))
   );
-  const ranked = candidates
-    .map((id, idx) => {
-      const len = id.length;
-      let score = 0;
-      // Evidência forte (URL /messages/t/..., thread_key explícito) domina.
-      if (strongThreadIds.has(id)) score += 5000;
-      // Verdade 7d: 15–16 = caminho real (~1983 fb_ok). 17 raro/0 fb_ok sem URL.
-      // 18–20 = fantasma — fora sem URL (Imperatriz/Darleny).
-      if (len >= 15 && len <= 16) score += 900;
-      else if (len === 17 && strongThreadIds.has(id)) score += 800;
-      else if (len === 17) score += 200;
-      else if (len >= 12 && len <= 14) score += 300;
-      else if (__deltaIsOpaqueLongThreadToken(id) && !strongThreadIds.has(id)) score -= 5000;
-      else if (__deltaIsOpaqueLongThreadToken(id)) score += 100;
-      else score += 50;
-      score += Math.max(0, 50 - idx);
-      return { id, idx, score };
-    })
-    .sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
-  const best = ranked[0];
-  if (!best) return '';
-  // Blindagem: nunca promover 18–20 sem URL/thread_key explícito no payload.
-  if (__deltaIsOpaqueLongThreadToken(best.id) && !strongThreadIds.has(best.id)) {
-    const fallback = ranked.find(
-      (r) => !__deltaIsOpaqueLongThreadToken(r.id) || strongThreadIds.has(r.id)
-    );
-    return String((fallback && fallback.id) || '');
-  }
-  return String(best.id || '');
+  return __deltaPickPreferredThreadKey(candidates, strongThreadIds);
 }
 function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
   const candidates = __deltaBuildThreadCandidates(idTokens, accountUserId, opts);
@@ -20537,21 +20540,11 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
       .map((v) => String(v || '').trim())
       .filter((v) => /^\d{12,20}$/.test(v))
   );
-  if (strongThreadIds.size) {
-    const fromStrong = candidates.find((v) => strongThreadIds.has(v));
-    if (fromStrong) return fromStrong;
-  }
-  // Política final (dados 7d): classic 15–16 primeiro.
-  // 17 só se não houver classic (raro; 0 fb_ok recente).
-  // 18–20 NUNCA sem evidência forte — retorna vazio (não abre fantasma).
-  const classic = candidates.filter((v) => v.length >= 15 && v.length <= 16);
-  if (classic.length) return classic[0];
-  const seventeen = candidates.filter((v) => v.length === 17);
-  if (seventeen.length) return seventeen[0];
-  const short = candidates.filter((v) => v.length >= 12 && v.length <= 14);
-  if (short.length) return short[0];
-  // Só sobrou opaco 18–20 sem URL → não inventar thread fantasma.
-  return '';
+  // Política final:
+  // 1) 15–16 sempre ganha de 17/18–20
+  // 2) 17 ganha de 18–20
+  // 3) 18–20 SÓ se não existir 15–16 nem 17 no payload
+  return __deltaPickPreferredThreadKey(candidates, strongThreadIds);
 }
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
   const thread = String(threadKey || '');
