@@ -744,6 +744,20 @@
       const cfgPasswordInput = box.querySelector('#cfgPasswordInput');
       const cfgCopyLoginBtn = box.querySelector('#cfgCopyLoginBtn');
       const cfgCopyPasswordBtn = box.querySelector('#cfgCopyPasswordBtn');
+      const flashCopyFeedback = (btn, ok, successText, failText) => {
+        if (!btn) return;
+        if (!btn.dataset.idleText) btn.dataset.idleText = String(btn.textContent || '').trim();
+        try { clearTimeout(btn.__copyTimer); } catch {}
+        btn.disabled = true;
+        btn.textContent = ok ? (successText || 'Copiado!') : (failText || 'Falha ao copiar');
+        btn.style.filter = ok ? 'brightness(1.08)' : 'saturate(1.15)';
+        btn.__copyTimer = setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = btn.dataset.idleText || 'Copiar';
+          btn.style.filter = '';
+          btn.__copyTimer = null;
+        }, 1200);
+      };
       const setCredenciais = ({ login, password } = {}) => {
         const loginVal = (login == null) ? '' : String(login);
         const passVal = (password == null) ? '' : String(password);
@@ -763,12 +777,14 @@
       if (cfgCopyLoginBtn) {
         cfgCopyLoginBtn.onclick = async () => {
           const ok = await safeCopy(cfgLoginInput ? cfgLoginInput.value : '');
+          flashCopyFeedback(cfgCopyLoginBtn, ok, 'Login copiado!', 'Falha ao copiar');
           if (!ok) alert('Falha ao copiar login.');
         };
       }
       if (cfgCopyPasswordBtn) {
         cfgCopyPasswordBtn.onclick = async () => {
           const ok = await safeCopy(cfgPasswordInput ? cfgPasswordInput.value : '');
+          flashCopyFeedback(cfgCopyPasswordBtn, ok, 'Senha copiada!', 'Falha ao copiar');
           if (!ok) alert('Falha ao copiar senha.');
         };
       }
