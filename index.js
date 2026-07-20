@@ -1438,7 +1438,10 @@ function __edgeIsRoutingDeltaSendError(error) {
     e.includes('thread_open_failed') ||
     e.includes('url_mismatch_preventing_cross_routing') ||
     // Gate E2EE / Continuar (chat pessoal): composer não aparece — rotaciona fila, não dead-letter.
-    e.includes('composer_missing')
+    e.includes('composer_missing') ||
+    e.includes('thread_login_redirect') ||
+    e.includes('thread_e2ee_gate') ||
+    e.includes('candidates_exhausted')
   );
 }
 
@@ -1740,7 +1743,7 @@ function __edgeNormalizeThreadKeyCandidates(input, primaryThreadKey = '') {
     // Garante thread principal na frente quando já presente.
     out.sort((a, b) => (a === primary ? -1 : (b === primary ? 1 : 0)));
   }
-  return out.slice(0, 8);
+  return out.slice(0, 12);
 }
 
 function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id, thread_key_candidates } = {}) {

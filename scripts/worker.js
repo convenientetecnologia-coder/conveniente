@@ -10621,7 +10621,7 @@ const handlers = {
             thread_key_candidates
               .map((v) => String(v || '').trim())
               .filter((v) => /^\d{12,20}$/.test(v))
-          )].slice(0, 8)
+          )].slice(0, 12)
         : [];
       if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
       if (cmid) {
@@ -16464,7 +16464,11 @@ function __deltaIsHandsRoutingFailure(errorRaw) {
     e.includes('thread_open_goto_failed') ||
     e.includes('thread_card_not_found') ||
     e.includes('thread_open_failed') ||
-    e.includes('url_mismatch_preventing_cross_routing')
+    e.includes('url_mismatch_preventing_cross_routing') ||
+    e.includes('composer_missing') ||
+    e.includes('thread_login_redirect') ||
+    e.includes('thread_e2ee_gate') ||
+    e.includes('candidates_exhausted')
   );
 }
 
@@ -18525,7 +18529,7 @@ function __deltaBuildCompactQueuePayload(payload) {
         p.thread_key_candidates
           .map((v) => String(v || '').trim())
           .filter((v) => /^\d{12,20}$/.test(v))
-      )].slice(0, 8)
+      )].slice(0, 12)
     : [];
   return {
     idempotency_key: __deltaClampQueueString(p.idempotency_key, 120) || null,
@@ -19545,7 +19549,7 @@ function __deltaBuildCtIngestPayload(payload) {
         p.thread_key_candidates
           .map((v) => String(v || '').trim())
           .filter((v) => /^\d{12,20}$/.test(v))
-      )].slice(0, 8)
+      )].slice(0, 12)
     : [];
   const isCityPatchOnly = operacaoMeta === 'city_patch';
   const clientNameRaw = String(
@@ -20563,6 +20567,37 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
   // 4) pessoal ^1000…15 só como último recurso (visibilidade)
   return __deltaPickPreferredThreadKey(candidates, strongThreadIds);
 }
+/** Ordena todos os candidatos com a mesma política do chooser (melhor → pior). */
+function __deltaRankThreadKeyCandidates(candidates, strongThreadIds) {
+  const strong = strongThreadIds instanceof Set
+    ? strongThreadIds
+    : new Set(
+      (Array.isArray(strongThreadIds) ? strongThreadIds : [])
+        .map((v) => String(v || '').trim())
+        .filter((v) => /^\d{12,20}$/.test(v))
+    );
+  const remaining = [...new Set(
+    (Array.isArray(candidates) ? candidates : [])
+      .map((v) => String(v || '').trim())
+      .filter((v) => /^\d{12,20}$/.test(v))
+  )];
+  const ordered = [];
+  let guard = 0;
+  while (remaining.length && guard < 40) {
+    guard += 1;
+    const best = __deltaPickPreferredThreadKey(remaining, strong);
+    if (!best) {
+      // Sobraram só tokens fracos (ex. 18–20 sem URL): ainda tenta no fim.
+      for (const id of remaining) ordered.push(id);
+      break;
+    }
+    ordered.push(best);
+    const idx = remaining.indexOf(best);
+    if (idx >= 0) remaining.splice(idx, 1);
+    else break;
+  }
+  return ordered;
+}
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {
   const thread = String(threadKey || '');
   const account = String(accountUserId || '');
@@ -20780,11 +20815,11 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
           excludeIds: profileIds,
           strongThreadIds,
         };
-        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
-        const threadKey =
-          __deltaChooseStrictThreadKey(idTokens, accountUserId, resolverOpts) ||
-          __deltaChooseBestThreadKey(idTokens, accountUserId, resolverOpts) ||
-          '';
+        const threadCandidates = __deltaRankThreadKeyCandidates(
+          __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts),
+          strongThreadIds
+        ).slice(0, 12);
+        const threadKey = threadCandidates[0] || '';
         const direct = typeof (opArr && opArr[3]) === 'string' ? __deltaDecodeEscapedText(opArr[3]).trim() : '';
         const messageText = __deltaLooksLikeHumanText(direct) ? direct : __deltaChooseBestMessageText(strings);
         const senderId = __deltaChooseBestSenderId(idTokens, threadKey, accountUserId);
@@ -20812,11 +20847,11 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
           excludeIds: profileIds,
           strongThreadIds,
         };
-        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
-        const threadKey =
-          __deltaChooseStrictThreadKey(idTokens, accountUserId, resolverOpts) ||
-          __deltaChooseBestThreadKey(idTokens, accountUserId, resolverOpts) ||
-          '';
+        const threadCandidates = __deltaRankThreadKeyCandidates(
+          __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts),
+          strongThreadIds
+        ).slice(0, 12);
+        const threadKey = threadCandidates[0] || '';
         const mid = strings.find((s) => typeof s === 'string' && s.startsWith('mid.')) || '';
         const preferredText = __deltaExtractPreferredTextFromNode(opArr);
         let messageText = '';
@@ -20854,11 +20889,11 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
         const profileIds = __deltaExtractProfileIdsFromStrings(strings);
         const strongThreadIds = __deltaExtractThreadIdsFromStrings(strings);
         const resolverOpts = { excludeIds: profileIds, strongThreadIds };
-        const threadCandidates = __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts);
-        const threadKey =
-          __deltaChooseStrictThreadKey(idTokens, accountUserId, resolverOpts) ||
-          __deltaChooseBestThreadKey(idTokens, accountUserId, resolverOpts) ||
-          '';
+        const threadCandidates = __deltaRankThreadKeyCandidates(
+          __deltaBuildThreadCandidates(idTokens, accountUserId, resolverOpts),
+          strongThreadIds
+        ).slice(0, 12);
+        const threadKey = threadCandidates[0] || '';
         const messageText = __deltaChooseBestMessageText(strings);
         pushNormalizedEvent({
           operation: 'deleteThenInsertThread',

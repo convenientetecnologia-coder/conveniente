@@ -3387,9 +3387,79 @@ function __deltaBuildThreadCardSelectors(threadKey) {
   return t.length >= 18 ? [...e2ee, ...classic] : [...classic, ...e2ee];
 }
 
+/** Sinais de página = thread_key errado (pessoal / login estranho). NÃO clica Continuar. */
+async function __deltaProbeBadThreadPageSignals(page) {
+  return page.evaluate(() => {
+    try {
+      const url = String(location && location.href || "");
+      const path = String(location && location.pathname || "").toLowerCase();
+      const loginRedirect =
+        /\/login\/?/i.test(path) ||
+        /\/login\/?\?/i.test(url) ||
+        /\/login\.php/i.test(url);
+      const marketplaceLoginNext = /next=.*marketplace/i.test(url);
+      const isVisible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return !!(r && r.width > 1 && r.height > 1);
+      };
+      let composerVisible = false;
+      for (const c of Array.from(document.querySelectorAll('div[data-lexical-editor="true"]'))) {
+        if (isVisible(c)) { composerVisible = true; break; }
+      }
+      let continuarGate = false;
+      for (const el of Array.from(document.querySelectorAll('div[role="button"],button,[role="link"],span'))) {
+        if (!isVisible(el)) continue;
+        const t = String(el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
+        if (t === "continuar" || t === "continue") {
+          continuarGate = true;
+          break;
+        }
+      }
+      return {
+        login_redirect: !!(loginRedirect || marketplaceLoginNext),
+        marketplace_login_next: !!marketplaceLoginNext,
+        continuar_gate: !!(continuarGate && !composerVisible),
+        composer_visible: composerVisible,
+        url: url.slice(0, 320),
+      };
+    } catch {
+      return null;
+    }
+  }).catch(() => null);
+}
+
+function __deltaIsLikelyPersonalUserThreadKeyLocal(id) {
+  const s = String(id || "").trim();
+  return /^\d{15}$/.test(s) && /^1000/.test(s);
+}
+
+/** Mesma ordem do chooser edge: melhor primeiro; pessoal 1000… por último. */
+function __deltaRankThreadKeyCandidatesLocal(candidates) {
+  const list = [...new Set(
+    (Array.isArray(candidates) ? candidates : [])
+      .map((v) => String(v || "").trim())
+      .filter((v) => /^\d{12,20}$/.test(v))
+  )];
+  const score = (id) => {
+    const len = id.length;
+    if (__deltaIsLikelyPersonalUserThreadKeyLocal(id)) return 50;
+    if (len >= 15 && len <= 16) return 900;
+    if (len === 17) return 850;
+    if (len >= 18 && len <= 20) return 200;
+    if (len >= 12 && len <= 14) return 300;
+    return 10;
+  };
+  return list
+    .map((id, idx) => ({ id, idx, score: score(id) }))
+    .sort((a, b) => (b.score - a.score) || (a.idx - b.idx))
+    .map((x) => x.id);
+}
+
 async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
   const t = String(threadKey || "").trim();
-  const gotoCandidates = __deltaBuildThreadGotoUrlCandidates(t);
+  // Menos pressão: no máximo 2 URLs (classic/e2ee), sem varrer 6 gotos em loop.
+  const gotoCandidates = __deltaBuildThreadGotoUrlCandidates(t).slice(0, 2);
   try {
     __deltaLogTriagemDom({
       stage: "fallback_goto_start",
@@ -3406,6 +3476,11 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
   for (let i = 0; i < gotoCandidates.length; i += 1) {
     const gotoUrl = String(gotoCandidates[i] || "").trim();
     if (!gotoUrl) continue;
+    if (i > 0) {
+      try { await humanPause("domSettle", "fallback_goto_between_urls"); } catch (_) {
+        try { await sleep(randomBetween(1200, 2200)); } catch (_) {}
+      }
+    }
     try {
       __deltaLogTriagemDom({
         stage: "fallback_goto_attempt",
@@ -3432,6 +3507,53 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         });
       } catch (_) {}
       continue;
+    }
+
+    // Login/?next=marketplace (ou login estranho): link podre — aborta sem spam de goto.
+    const badSignals = await __deltaProbeBadThreadPageSignals(page);
+    if (badSignals && badSignals.login_redirect) {
+      try {
+        __deltaLogTriagemDom({
+          stage: "fallback_goto_login_redirect",
+          thread_key: t,
+          step_a_error: stepAError || null,
+          goto_url: gotoUrl,
+          current_url: badSignals.url || null,
+          attempt: i + 1,
+        });
+      } catch (_) {}
+      try {
+        await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+      } catch (_) {}
+      try { await humanPause("domSettle", "fallback_goto_login_recover_messages"); } catch (_) {}
+      return {
+        ok: false,
+        error: "thread_login_redirect",
+        opened_via: "direct_goto",
+        step_a_error: stepAError || null,
+        goto_url_used: gotoUrl,
+        current_url: badSignals.url || null,
+      };
+    }
+    if (badSignals && badSignals.continuar_gate) {
+      try {
+        __deltaLogTriagemDom({
+          stage: "fallback_goto_e2ee_gate",
+          thread_key: t,
+          step_a_error: stepAError || null,
+          goto_url: gotoUrl,
+          current_url: badSignals.url || null,
+          attempt: i + 1,
+        });
+      } catch (_) {}
+      return {
+        ok: false,
+        error: "thread_e2ee_gate_blocked",
+        opened_via: "direct_goto",
+        step_a_error: stepAError || null,
+        goto_url_used: gotoUrl,
+        current_url: badSignals.url || null,
+      };
     }
 
     // Se a URL final não contém o thread alvo, não vale hidratar — próximo candidato.
@@ -3491,22 +3613,30 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
       };
     }
 
-    for (let h = 0; h < 3; h += 1) {
+    // Hidratação: 2 tentativas, SEM reload paranoico (reload engessa o browser).
+    for (let h = 0; h < 2; h += 1) {
       try {
         await clickAcceptMessageRequestIfPresent(page, {
           account_login: forensicAccountLogin,
           thread_key: t,
         }).catch(() => null);
-        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 10000 });
+        const midSignals = await __deltaProbeBadThreadPageSignals(page);
+        if (midSignals && (midSignals.login_redirect || midSignals.continuar_gate)) {
+          return {
+            ok: false,
+            error: midSignals.login_redirect ? "thread_login_redirect" : "thread_e2ee_gate_blocked",
+            opened_via: "direct_goto",
+            step_a_error: stepAError || null,
+            goto_url_used: gotoUrl,
+          };
+        }
+        await page.waitForSelector('div[data-lexical-editor="true"]', { timeout: 8000 });
         hydrationReady = true;
         hydratedViaUrl = gotoUrl;
         break;
       } catch (_) {
-        if (h < 2) {
+        if (h < 1) {
           try { await humanPause("domSettle", "fallback_goto_hydration_retry"); } catch (_) {}
-          if (h === 0) {
-            try { await page.reload({ waitUntil: "domcontentloaded", timeout: 35000 }); } catch (_) {}
-          }
         }
       }
     }
@@ -4281,11 +4411,20 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     // Link/cidade rodam DEPOIS do send confirmado (abaixo) + collectMetadataAfterCtReply.
     let itemLink = null;
 
-    // E2EE gate (Continuar → escolher conta, nunca Meta AI) antes do composer.
+    // E2EE gate: NÃO clica Continuar (policy). Se o gate estiver presente → link podre / hop.
     try {
       await dismissMessengerE2eeInterstitial(page, {
         forensicAccountLogin: forensicAccountLogin || null,
       });
+    } catch (_) {}
+    try {
+      const gateProbe = await __deltaProbeBadThreadPageSignals(page);
+      if (gateProbe && gateProbe.login_redirect) {
+        return { ok: false, error: "thread_login_redirect", current_url: gateProbe.url || null };
+      }
+      if (gateProbe && gateProbe.continuar_gate) {
+        return { ok: false, error: "thread_e2ee_gate_blocked", current_url: gateProbe.url || null };
+      }
     } catch (_) {}
 
     try {
@@ -4293,17 +4432,25 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     } catch (compErr) {
       const em = String((compErr && compErr.message) || compErr || "");
       if (em.includes("composer_missing")) {
-        try {
-          await dismissMessengerE2eeInterstitial(page, {
-            forensicAccountLogin: forensicAccountLogin || null,
-          });
-        } catch (_) {}
+        // Uma chance só com Aceitar (Marketplace). Continuar E2EE nunca.
         await clickAcceptMessageRequestIfPresent(page, {
           account_login: forensicAccountLogin,
           thread_key: t,
         }).catch(() => null);
         await humanPause("domSettle", "composer_missing_accept_retry");
-        await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+        try {
+          const again = await __deltaProbeBadThreadPageSignals(page);
+          if (again && (again.continuar_gate || again.login_redirect)) {
+            return {
+              ok: false,
+              error: again.login_redirect ? "thread_login_redirect" : "thread_e2ee_gate_blocked",
+              current_url: again.url || null,
+            };
+          }
+          await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
+        } catch (_) {
+          return { ok: false, error: "composer_missing" };
+        }
       } else {
         throw compErr;
       }
@@ -6510,13 +6657,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const msg = String(textoResposta || "").replace(/\r/g, "");
     const cmid = String(clientMessageId || "").trim() || null;
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
-    const normalizedCandidates = [
-      ...new Set(
-        [t, ...(Array.isArray(threadKeyCandidates) ? threadKeyCandidates : [])]
-          .map((v) => String(v || "").trim())
-          .filter((v) => /^\d{12,20}$/.test(v))
-      )
-    ].slice(0, 8);
+    // Melhor primeiro; pessoal 1000… por último. Até 12 candidatos.
+    const normalizedCandidates = __deltaRankThreadKeyCandidatesLocal([
+      t,
+      ...(Array.isArray(threadKeyCandidates) ? threadKeyCandidates : []),
+    ]).slice(0, 12);
+    // Se o primário veio pior que um irmão, ainda tenta o pedido atual primeiro
+    // (já escolhido upstream); alternativas = resto ordenado sem o atual.
     const alternativeCandidates = normalizedCandidates.filter((v) => v !== t);
 
     // Drenagem rápida de linha aberta:
@@ -6530,12 +6677,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Relógio sentinela por conta; em linha aberta usa faixa 2–10s.
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN, cooldownPolicy);
 
-    // Resiliência: retry visual curto + recovery soberano de rota (goto/reopen/guard/resend).
+    // Resiliência: recovery curto + hop de candidatos (sem goto paranoico).
     // Confirmação final de envio continua nonretryable (sem balão azul falso).
     const maxRetries = Math.max(0, Math.min(2, Number(process.env.VIRTUS_DELTA_REPLY_MAX_RETRIES || 1) || 1));
+    // Default 2 (era 3): menos pressão no browser quando o link está errado.
     const routingRecoveryRounds = Math.max(
       1,
-      Math.min(5, Number(process.env.VIRTUS_DELTA_ROUTING_RECOVERY_ROUNDS || 3) || 3)
+      Math.min(3, Number(process.env.VIRTUS_DELTA_ROUTING_RECOVERY_ROUNDS || 2) || 2)
     );
     const isNonRetryableSendError = (err) => {
       const e = String(err || "").trim().toLowerCase();
@@ -6545,6 +6693,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         e === "composer_text_not_registered" ||
         e === "thread_content_unavailable" ||
         e.includes("thread_content_unavailable")
+      );
+    };
+    const isBadThreadSignal = (err) => {
+      const e = String(err || "").trim().toLowerCase();
+      if (!e) return false;
+      return (
+        e.includes("composer_missing") ||
+        e.includes("thread_login_redirect") ||
+        e.includes("thread_e2ee_gate") ||
+        e.includes("e2ee_gate_blocked")
       );
     };
     const isRoutingFailure = (err) => {
@@ -6559,7 +6717,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         e.includes("thread_open_goto_failed") ||
         e.includes("thread_card_not_found") ||
         e.includes("thread_open_failed") ||
-        e.includes("url_mismatch_preventing_cross_routing")
+        e.includes("url_mismatch_preventing_cross_routing") ||
+        isBadThreadSignal(e)
       );
     };
     let lastOut = null;
@@ -6617,20 +6776,27 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       if (attempt > 1) {
         const routingMode = isRoutingFailure(lastErr);
         if (routingMode) {
+          // Link podre ou já houve 1 recovery + há outro candidato → hop (sem goto paranoico).
+          if (alternativeCandidates.length && (isBadThreadSignal(lastErr) || routingRound >= 1)) break;
           if (routingRound >= routingRecoveryRounds) break;
           routingRound += 1;
-          const retryWaitMs = randomBetween(2_500, 5_500);
+          // Timers humanos: menos pressão no browser.
+          const retryWaitMs = randomBetween(4_500, 9_000);
           logInfo(
             `[virtusDelta][reply] routing_recovery round=${routingRound}/${routingRecoveryRounds} thread_key=${t} err=${lastErr} wait_ms=${retryWaitMs}`
           );
           await sleep(retryWaitMs);
-          // Invalida fast-path; goto direto na thread antes do resend.
+          // Invalida fast-path; no máximo 1 goto suave por round.
           continuityProbe = null;
           try {
-            await __deltaTryOpenThreadByDirectGoto(page, t, {
+            const gotoOut = await __deltaTryOpenThreadByDirectGoto(page, t, {
               forensicAccountLogin: ACCOUNT_LOGIN,
               stepAError: lastErr,
             });
+            if (gotoOut && gotoOut.ok === false && gotoOut.error) {
+              lastErr = String(gotoOut.error || lastErr);
+              if (isBadThreadSignal(lastErr) && alternativeCandidates.length) break;
+            }
           } catch (gotoErr) {
             try {
               logInfo(
@@ -6646,7 +6812,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         } else {
           if (visualAttempt >= maxRetries) break;
           visualAttempt += 1;
-          const retryWaitMs = randomBetween(1_200, 2_400);
+          const retryWaitMs = randomBetween(1_800, 3_200);
           logInfo(
             `[virtusDelta][reply] retry_visual attempt=${visualAttempt}/${maxRetries} thread_key=${t} wait_ms=${retryWaitMs}`
           );
@@ -6686,10 +6852,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 attempt,
                 routing_round: routingRound,
                 routing_recovery_rounds: routingRecoveryRounds,
+                bad_thread_signal: isBadThreadSignal(lastErr),
+                alternatives: alternativeCandidates.length,
                 ts_ms: Date.now(),
               }
             });
           } catch (_) {}
+          // Continuar / login / composer_missing / já tem irmão → hop, sem mais pressão.
+          if (alternativeCandidates.length && (isBadThreadSignal(lastErr) || routingRound >= 1)) break;
           continue;
         }
       } catch (e) {
@@ -6698,68 +6868,76 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         if (isNonRetryableSendError(lastErr)) {
           return markNonRetryable(lastErr, lastOut);
         }
-        if (isRoutingFailure(lastErr)) continue;
+        if (isRoutingFailure(lastErr)) {
+          if (alternativeCandidates.length && (isBadThreadSignal(lastErr) || routingRound >= 1)) break;
+          continue;
+        }
       }
     }
 
-    // Se routing recovery esgotou nesta mão: soft-requeue no outbox edge (sem reverse CT).
-    // Dead-letter final só no pump por budget; operador/rearm pode reabrir depois.
-    const routingExhausted =
-      isRoutingFailure(lastErr) && routingRound >= routingRecoveryRounds;
-    if (routingExhausted) {
-      if (alternativeCandidates.length && __candidateHop < 6) {
-        const nextThread = String(alternativeCandidates[0] || "").trim();
-        if (nextThread) {
+    // Hop de candidatos: melhor → próximos até esgotar. Sem clicar Continuar.
+    if (
+      alternativeCandidates.length > 0 &&
+      Number(__candidateHop || 0) < 10 &&
+      (isBadThreadSignal(lastErr) || isRoutingFailure(lastErr))
+    ) {
+      const nextThread = String(alternativeCandidates[0] || "").trim();
+      if (nextThread) {
+        const hopPauseMs = randomBetween(3_000, 6_500);
+        try {
+          logInfo(
+            `[virtusDelta][reply] thread_key_autocorrect_switch hop=${Number(__candidateHop + 1)} from=${t} to=${nextThread} remaining=${Math.max(0, alternativeCandidates.length - 1)} pause_ms=${hopPauseMs} reason=${lastErr}`
+          );
+        } catch (_) {}
+        try {
+          __forensicEdgeEmit({
+            account_login: ACCOUNT_LOGIN,
+            thread_key: t,
+            flow_stage: "reply_thread_key_autocorrect_switch",
+            details: {
+              tag: "FORENSIC_DOM_REVERSE",
+              from_thread_key: t,
+              to_thread_key: nextThread,
+              candidate_hop: Number(__candidateHop + 1),
+              remaining_candidates: alternativeCandidates.slice(1),
+              reason: String(lastErr || "routing_recovery_exhausted"),
+              pause_ms: hopPauseMs,
+            }
+          });
+        } catch (_) {}
+        try { await sleep(hopPauseMs); } catch (_) {}
+        try {
+          const switched = await sendDeltaReplyNow({
+            threadKey: nextThread,
+            textoResposta: msg,
+            clientMessageId: cmid,
+            threadKeyCandidates: alternativeCandidates.slice(1),
+            __candidateHop: Number(__candidateHop + 1)
+          });
+          if (switched && typeof switched === "object") {
+            return {
+              ...switched,
+              thread_key_autocorrected_from: t,
+              thread_key_autocorrected_to: nextThread,
+              thread_key_candidate_hop: Number(__candidateHop + 1)
+            };
+          }
+        } catch (switchErr) {
           try {
             logInfo(
-              `[virtusDelta][reply] thread_key_autocorrect_switch hop=${Number(__candidateHop + 1)} from=${t} to=${nextThread} remaining=${Math.max(0, alternativeCandidates.length - 1)}`
+              `[virtusDelta][reply] thread_key_autocorrect_switch_fail from=${t} to=${nextThread} err=${switchErr && switchErr.message ? switchErr.message : String(switchErr)}`
             );
           } catch (_) {}
-          try {
-            __forensicEdgeEmit({
-              account_login: ACCOUNT_LOGIN,
-              thread_key: t,
-              flow_stage: "reply_thread_key_autocorrect_switch",
-              details: {
-                tag: "FORENSIC_DOM_REVERSE",
-                from_thread_key: t,
-                to_thread_key: nextThread,
-                candidate_hop: Number(__candidateHop + 1),
-                remaining_candidates: alternativeCandidates.slice(1),
-                reason: String(lastErr || "routing_recovery_exhausted")
-              }
-            });
-          } catch (_) {}
-          try {
-            const switched = await sendDeltaReplyNow({
-              threadKey: nextThread,
-              textoResposta: msg,
-              clientMessageId: cmid,
-              threadKeyCandidates: alternativeCandidates.slice(1),
-              __candidateHop: Number(__candidateHop + 1)
-            });
-            if (switched && typeof switched === "object") {
-              return {
-                ...switched,
-                thread_key_autocorrected_from: t,
-                thread_key_autocorrected_to: nextThread,
-                thread_key_candidate_hop: Number(__candidateHop + 1)
-              };
-            }
-          } catch (switchErr) {
-            try {
-              logInfo(
-                `[virtusDelta][reply] thread_key_autocorrect_switch_fail from=${t} to=${nextThread} err=${switchErr && switchErr.message ? switchErr.message : String(switchErr)}`
-              );
-            } catch (_) {}
-          }
         }
       }
-      // Routing esgotado nesta mão: NÃO reverter CT (sem "Mensagem não enviada" prematuro).
-      // Outbox do edge requeue; dead-letter final só no pump (budget). Operador/rearm depois.
+    }
+
+    // Sem mais candidatos (ou hop falhou): soft-requeue no outbox (edge rotaciona fila).
+    if (isRoutingFailure(lastErr) || isBadThreadSignal(lastErr)) {
+      const exhaustedAll = alternativeCandidates.length === 0;
       try {
         logInfo(
-          `[virtusDelta][reply] routing_recovery_exhausted_soft_requeue thread_key=${t} err=${lastErr} rounds=${routingRound}`
+          `[virtusDelta][reply] routing_recovery_exhausted_soft_requeue thread_key=${t} err=${lastErr} rounds=${routingRound} hop=${__candidateHop} alternatives_left=${alternativeCandidates.length}`
         );
       } catch (_) {}
       try {
@@ -6772,13 +6950,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             error: String(lastErr || "routing_failed"),
             routing_rounds: routingRound,
             candidates_remaining: alternativeCandidates.length,
+            candidate_hop: Number(__candidateHop || 0),
+            exhausted_all_candidates: exhaustedAll,
             ts_ms: Date.now(),
           }
         });
       } catch (_) {}
       return {
         ok: false,
-        error: `routing_recovery_exhausted:${String(lastErr || "routing_failed")}`,
+        error: exhaustedAll
+          ? `candidates_exhausted:${String(lastErr || "routing_failed")}`
+          : `routing_recovery_exhausted:${String(lastErr || "routing_failed")}`,
         status: "send_failed",
         nonretryable: false,
         routing_recovery_exhausted: true,
@@ -7516,13 +7698,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
         const cmid = String(client_message_id || "").trim() || null;
-        const threadKeyCandidates = Array.isArray(thread_key_candidates)
-          ? [...new Set(
-              thread_key_candidates
-                .map((v) => String(v || "").trim())
-                .filter((v) => /^\d{12,20}$/.test(v))
-            )].slice(0, 8)
-          : [];
+        const threadKeyCandidates = __deltaRankThreadKeyCandidatesLocal(
+          Array.isArray(thread_key_candidates) ? thread_key_candidates : []
+        ).slice(0, 12);
         if (cmid) {
           const prior = getReplyDispatchState(cmid);
           if (prior && prior.state === "done") {
