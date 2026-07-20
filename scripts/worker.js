@@ -20491,35 +20491,50 @@ function __deltaIsOpaqueLongThreadToken(id) {
   const s = String(id || '').trim();
   return /^\d{18,20}$/.test(s);
 }
+/** Chat pessoal Messenger: 15 dígitos começando com 1000 (ID de usuário FB). */
+function __deltaIsLikelyPersonalUserThreadKey(id) {
+  const s = String(id || '').trim();
+  // Evidência real (Laura/Alexsandry/Flavia/Maria Dantas): pessoal = ^1000 + 15 dígitos.
+  // Marketplace costuma ser 16/17/(futuro 18). Não banir todo 15–16.
+  return /^\d{15}$/.test(s) && /^1000/.test(s);
+}
 function __deltaPickPreferredThreadKey(candidates, strongThreadIds) {
   const list = Array.isArray(candidates) ? candidates : [];
   if (!list.length) return '';
   const strong = strongThreadIds instanceof Set ? strongThreadIds : new Set();
   const inStrong = (id) => strong.has(id);
 
-  // Blindagem absoluta: se existir 15–16 ou 17, NUNCA escolher 18–20
-  // (mesmo que o fantasma apareça em URL e2ee / messages/t/).
-  const classic = list.filter((v) => v.length >= 15 && v.length <= 16);
-  if (classic.length) {
-    const strongClassic = classic.find(inStrong);
-    return strongClassic || classic[0];
+  // 1) Classic 15–16 que NÃO é pessoal ^1000… (preserva ~92% marketplace clássico).
+  const classicGood = list.filter(
+    (v) => v.length >= 15 && v.length <= 16 && !__deltaIsLikelyPersonalUserThreadKey(v)
+  );
+  if (classicGood.length) {
+    const strongClassic = classicGood.find(inStrong);
+    return strongClassic || classicGood[0];
   }
+  // 2) 17 (Marketplace) — ganha de pessoal 1000…15 e de 18–20 opaco.
   const seventeen = list.filter((v) => v.length === 17);
   if (seventeen.length) {
     const strong17 = seventeen.find(inStrong);
     return strong17 || seventeen[0];
   }
-  // 18–20: só se estiver SOZINHO (sem 15–16/17) E com link/URL forte.
+  // 3) 18–20: só se estiver SOZINHO (sem 15–16 bom / 17) E com link/URL forte.
   // Sozinho sem link = bloqueado (não abre fantasma 748…).
   const opaque = list.filter((v) => __deltaIsOpaqueLongThreadToken(v));
   if (opaque.length) {
     const strongOpaque = opaque.find(inStrong);
-    return strongOpaque || '';
+    if (strongOpaque) return strongOpaque;
   }
   const short = list.filter((v) => v.length >= 12 && v.length <= 14);
   if (short.length) {
     const strongShort = short.find(inStrong);
     return strongShort || short[0];
+  }
+  // 4) Último recurso: pessoal ^1000…15 (não engolir lead; fica visível p/ investigação).
+  const personal = list.filter((v) => __deltaIsLikelyPersonalUserThreadKey(v));
+  if (personal.length) {
+    const strongPersonal = personal.find(inStrong);
+    return strongPersonal || personal[0];
   }
   return list[0] || '';
 }
@@ -20542,9 +20557,10 @@ function __deltaChooseStrictThreadKey(idTokens, accountUserId, opts = {}) {
       .filter((v) => /^\d{12,20}$/.test(v))
   );
   // Política final:
-  // 1) 15–16 sempre ganha de 17/18–20
-  // 2) 17 ganha de 18–20
-  // 3) 18–20 SÓ se sozinho (sem 15–16/17) E com link/URL forte
+  // 1) 15–16 NÃO-pessoal (^1000…15 = chat pessoal) ganha de 17/18–20
+  // 2) 17 ganha de pessoal 1000… e de 18–20
+  // 3) 18–20 SÓ se sozinho E com link/URL forte
+  // 4) pessoal ^1000…15 só como último recurso (visibilidade)
   return __deltaPickPreferredThreadKey(candidates, strongThreadIds);
 }
 function __deltaChooseBestSenderId(idTokens, threadKey, accountUserId) {

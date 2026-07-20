@@ -1436,9 +1436,23 @@ function __edgeIsRoutingDeltaSendError(error) {
     e.includes('thread_open_goto_failed') ||
     e.includes('thread_card_not_found') ||
     e.includes('thread_open_failed') ||
-    e.includes('url_mismatch_preventing_cross_routing')
+    e.includes('url_mismatch_preventing_cross_routing') ||
+    // Gate E2EE / Continuar (chat pessoal): composer não aparece — rotaciona fila, não dead-letter.
+    e.includes('composer_missing')
   );
 }
+
+/**
+ * Cool-off após falha de rota: joga pro fim e só tenta de novo depois.
+ * Assim um chat pessoal errado NÃO monopoliza a conta enquanto há fila.
+ */
+const __EDGE_ROUTING_ROTATE_COOL_MS = Math.max(
+  15_000,
+  Math.min(
+    180_000,
+    Number(process.env.EDGE_ROUTING_ROTATE_COOL_MS || 45_000) || 45_000
+  )
+);
 
 function __edgeIsNonRetryableDeltaSendError(error) {
   const e = String(error || '').trim().toLowerCase();
@@ -1961,7 +1975,7 @@ function __edgeClampDeltaReplyCursorToFileSizeSync(size) {
   return __edgeSeekDeltaReplyCursorToTailSync(fileSize, { keepBytes: 1 * 1024 * 1024 });
 }
 
-function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetry = true } = {}) {
+function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetry = true, notBefore = null } = {}) {
   try {
     __edgeEnsureDeltaReplyOutboxDirsSync();
     const base = (rec && typeof rec === 'object') ? rec : {};
@@ -1979,6 +1993,11 @@ function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetr
       last_retry_reason: String(reason || '').trim() || null,
       last_retry_error: String(error || '').trim() || null
     };
+    const nb = Number(notBefore);
+    if (Number.isFinite(nb) && nb > Date.now()) out.not_before = Math.floor(nb);
+    else {
+      try { delete out.not_before; } catch {}
+    }
     fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(out) + '\n', 'utf8');
     return out;
   } catch {
@@ -2176,7 +2195,9 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       rec,
       reason: 'ipc_not_ok'
     });
-    if (retryBudgetDecision.deadLetter) {
+    const isRoutingFail = __edgeIsRoutingDeltaSendError(retryError);
+    // Rota/pessoal: NÃO dead-letter por budget — só rotaciona (stale/junk ainda limpa ~6h).
+    if (!isRoutingFail && retryBudgetDecision.deadLetter) {
       __edgeWriteAckSync(cmdId, {
         ok: false,
         dead_letter: true,
@@ -2206,17 +2227,29 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       __edgeResetDeltaReplyPumpBackoff();
       return;
     }
+
+    // Falha de rota (chat pessoal / Continuar / guard): fim da fila + cool-off.
+    // Não queima budget — libera a conta p/ outros leads; item volta depois do cool.
+    const rotateNotBefore = isRoutingFail ? (Date.now() + __EDGE_ROUTING_ROTATE_COOL_MS) : null;
     __edgeRequeueDeltaReplyRecordSync(rec, {
       cmdId,
-      reason: 'ipc_not_ok',
+      reason: isRoutingFail ? 'routing_rotate' : 'ipc_not_ok',
       error: retryError,
-      burnRetry: true
+      burnRetry: isRoutingFail ? false : true,
+      notBefore: rotateNotBefore
     });
     __forensicEdgeEmit({
       account_login: accountNome || null,
       thread_key: threadKey || null,
       flow_stage: 'reverse_command_bus',
-      details: { stage: 'ipc_dispatch_deferred', cmd_id: cmdId, reason: 'ipc_not_ok', error: retryError }
+      details: {
+        stage: isRoutingFail ? 'ipc_dispatch_routing_rotate' : 'ipc_dispatch_deferred',
+        cmd_id: cmdId,
+        reason: isRoutingFail ? 'routing_rotate' : 'ipc_not_ok',
+        error: retryError,
+        not_before: rotateNotBefore || null,
+        cool_ms: isRoutingFail ? __EDGE_ROUTING_ROTATE_COOL_MS : null
+      }
     });
     __edgeEmitVmDeliveryError(threadKey, retryError || 'ipc_not_ok');
     __edgeIncreaseDeltaReplyPumpBackoff();
@@ -2356,6 +2389,38 @@ async function __edgeRunDeltaReplyPump() {
         }
 
         const accountNome = String(rec.nome || '').trim();
+
+        // Cool-off de rota: item falhou abrir chat → fica no fim; não monopoliza a conta.
+        const notBeforeMs = Number(rec.not_before || 0) || 0;
+        if (notBeforeMs > Date.now()) {
+          if (__edgeDeferredOnceInRun.has(cmdId)) {
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            break;
+          }
+          __edgeDeferredOnceInRun.add(cmdId);
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'routing_rotate_wait',
+            error: String(rec.last_retry_error || 'routing_cool').trim() || 'routing_cool',
+            burnRetry: false,
+            notBefore: notBeforeMs
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          __forensicEdgeEmit({
+            account_login: accountNome || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'ipc_dispatch_routing_rotate_wait',
+              cmd_id: cmdId,
+              not_before: notBeforeMs,
+              wait_ms: Math.max(0, notBeforeMs - Date.now())
+            }
+          });
+          continue;
+        }
+
         if (accountNome && !__edgeIsProfileRuntimeReadySync(accountNome)) {
           // Conta fechada/noite: NÃO queimar a mensagem.
           // CRÍTICO: refileira 1x por cmd por scan. Na 2ª vista (cópia na cauda) PARA o scan
