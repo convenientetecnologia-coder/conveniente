@@ -649,12 +649,48 @@
       const ativo = !!perfil.active;
       const nomeAtual = perfil.nome;
       const labelAtual = perfil.label || '';
+      const safeCopy = async (txt) => {
+        const s = String(txt == null ? '' : txt);
+        if (!s) return false;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(s);
+            return true;
+          }
+        } catch {}
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = s;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return !!ok;
+        } catch {}
+        return false;
+      };
 
       box.innerHTML = `
         <h2>Configurações — ${nomeAtual}</h2>
         <div class="form-row">
           <label>Nome exibido (label)</label>
           <input type="text" id="labelInput" placeholder="Ex.: Nome do Facebook" value="${labelAtual.replace(/"/g,'&quot;')}"/>
+        </div>
+        <div class="form-row">
+          <label>Credenciais da conta</label>
+          <div style="display:grid; gap:8px;">
+            <div style="display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center;">
+              <input type="text" id="cfgLoginInput" readonly placeholder="Carregando login..." />
+              <button class="btn" type="button" id="cfgCopyLoginBtn">Copiar login</button>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center;">
+              <input type="text" id="cfgPasswordInput" readonly placeholder="Carregando senha..." />
+              <button class="btn" type="button" id="cfgCopyPasswordBtn">Copiar senha</button>
+            </div>
+          </div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Preenchido a partir do cadastro da conta (manifest/estoque).</div>
         </div>
         <div class="form-row">
           <label>Cidade (alterar)</label>
@@ -704,6 +740,38 @@
 
       let cidadesAll = [];
       let extrasSelected = [];
+      const cfgLoginInput = box.querySelector('#cfgLoginInput');
+      const cfgPasswordInput = box.querySelector('#cfgPasswordInput');
+      const cfgCopyLoginBtn = box.querySelector('#cfgCopyLoginBtn');
+      const cfgCopyPasswordBtn = box.querySelector('#cfgCopyPasswordBtn');
+      const setCredenciais = ({ login, password } = {}) => {
+        const loginVal = (login == null) ? '' : String(login);
+        const passVal = (password == null) ? '' : String(password);
+        if (cfgLoginInput) {
+          cfgLoginInput.value = loginVal;
+          cfgLoginInput.placeholder = loginVal ? '' : 'Login não informado';
+        }
+        if (cfgPasswordInput) {
+          cfgPasswordInput.value = passVal;
+          cfgPasswordInput.placeholder = passVal ? '' : 'Senha não informada';
+        }
+      };
+      setCredenciais({
+        login: perfil && perfil.login != null ? perfil.login : '',
+        password: perfil && perfil.password != null ? perfil.password : ''
+      });
+      if (cfgCopyLoginBtn) {
+        cfgCopyLoginBtn.onclick = async () => {
+          const ok = await safeCopy(cfgLoginInput ? cfgLoginInput.value : '');
+          if (!ok) alert('Falha ao copiar login.');
+        };
+      }
+      if (cfgCopyPasswordBtn) {
+        cfgCopyPasswordBtn.onclick = async () => {
+          const ok = await safeCopy(cfgPasswordInput ? cfgPasswordInput.value : '');
+          if (!ok) alert('Falha ao copiar senha.');
+        };
+      }
       function uniqueCities(arr) {
         const seen = new Set();
         const out = [];
@@ -881,6 +949,10 @@
         try {
           const r = await fetch(`/api/perfis/${encodeURIComponent(perfil.nome)}/manifest`).then(r=>r.json()).catch(()=>null);
           if (r && r.ok === true && r.manifest) {
+            setCredenciais({
+              login: r.manifest.login,
+              password: r.manifest.password
+            });
             box.querySelector('#customVirtusMsgCk').checked = !!r.manifest.customVirtusMessageEnabled;
             box.querySelector('#customVirtusMsg').value = r.manifest.customVirtusMessage || '';
             extrasSelected = uniqueCities(r.manifest.cidadesExtras || []);
