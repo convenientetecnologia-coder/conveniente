@@ -2833,9 +2833,30 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
       if (bd && bd.banned) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_banned', nome: String(nome||''), source: String(source||''), reason: String(bd.reason||'banned').slice(0,140) }); } catch {}
-        try { await setBannedFlag(nome, { reason: String(bd.reason || 'banned'), snippet: String(bd.snippet || '') }); } catch {}
-        return { ok: true, state: 'banned', reason: bd.reason || '' };
+        const banReason = String(bd.reason || 'banned');
+        const banSnippet = String(bd.snippet || '');
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_banned', nome: String(nome||''), source: String(source||''), reason: banReason.slice(0,140), openAllAsync: !!_isOpenAll }); } catch {}
+        // Open-all (modo seguro): NÃO await banflow/deactivate no slot único do nurse.
+        // Espelha captcha (fire-and-forget): desliga desired na hora e agenda o fechamento.
+        // Manual/open unitário mantém await (fluxo curto, sem fila global).
+        if (_isOpenAll) {
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d = d || {}; d.perfis = d.perfis || {};
+              const prev = d.perfis[nome] || {};
+              d.perfis[nome] = { ...prev, active: false, virtus: 'off', humanHold: false };
+              return d;
+            });
+          } catch {}
+          try { if (ctrl) ctrl.trabalhando = false; } catch {}
+          try { await stopVirtus(nome); } catch {}
+          setImmediate(() => {
+            setBannedFlag(nome, { reason: banReason, snippet: banSnippet }).catch(()=>{});
+          });
+          return { ok: true, state: 'banned_scheduled', reason: banReason };
+        }
+        try { await setBannedFlag(nome, { reason: banReason, snippet: banSnippet }); } catch {}
+        return { ok: true, state: 'banned', reason: banReason };
       }
     } catch {}
 
@@ -3157,6 +3178,13 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       // Expor estado sem engessar (humano só será invocado no final do runIdentityFlow se falhar).
       try { await setLoginRequiredFlag(nome, { reason: rr2 || rr || 'captcha', source: lr.domain || source }); } catch {}
       return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
+    }
+
+    // 2FA: marca humanHold e segue (browser fica aberto). Não engessa open-all.
+    if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_two_factor', nome: String(nome||''), source: String(source||''), reason: rr.slice(0,160) }); } catch {}
+      try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
+      return { ok: true, state: 'two_factor', reason: rr };
     }
 
     // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
@@ -14580,14 +14608,14 @@ async function nurseTick() {
               }
             } catch {}
           } catch {}
-          // 2FA => exclusão automática (não é humano, não é automação)
+          // 2FA => humanHold (setTwoFactorFlag). NÃO abortar nurseTick:
+          // return aqui engessava "Abrir Todos" (pending eternamente). Segue o próximo perfil.
           try {
             const rr0 = String(lr && lr.reason || '').toLowerCase();
             if (rr0.includes('two_factor') || rr0.includes('2fa') || rr0.includes('two factor')) {
-              try { await issues.append(nome, 'mil_action', `two_factor_detected_autodelete reason=${rr0}`); } catch {}
+              try { await issues.append(nome, 'mil_action', `two_factor_detected_continue reason=${rr0}`); } catch {}
               try { await setTwoFactorFlag(nome, { reason: rr0 || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
-              // Perfil pode ter sido deletado; sair do fluxo atual.
-              return;
+              continue;
             }
           } catch {}
           // Mantém também o flag genérico para rastreio, mas sem mascarar identidade/captcha:
