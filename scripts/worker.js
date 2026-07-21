@@ -187,12 +187,14 @@ async function _stopVirtusRunnerMaybePromise(v) {
 }
 
 function currentVirtusEngine(autoMode) {
-  // 🛡️ Default seguro: se engine ausente/nula/indefinida => legacy
+  // 🛡️ Default de fábrica: se engine ausente/nula/indefinida => delta
   try {
     const v = autoMode && autoMode.engine ? String(autoMode.engine).trim().toLowerCase() : '';
-    return v === 'delta' ? 'delta' : 'legacy';
+    if (v === 'delta') return 'delta';
+    if (v === 'legacy') return 'legacy';
+    return 'delta';
   } catch {
-    return 'legacy';
+    return 'delta';
   }
 }
 
@@ -358,11 +360,11 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   try {
     const now = Date.now();
     robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].virtusEngineRuntime = String(eng || 'legacy');
+    robeMeta[nome].virtusEngineRuntime = String(eng || 'delta');
     robeMeta[nome].virtusEngineRuntimeAt = now;
     const ctrl = controllers.get(nome);
     if (ctrl) {
-      ctrl.virtusEngineRuntime = String(eng || 'legacy');
+      ctrl.virtusEngineRuntime = String(eng || 'delta');
       ctrl.virtusEngineRuntimeAt = now;
     }
   } catch {}
@@ -370,7 +372,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     logger.info('[ENGINE_SWITCH][RESOLVE]', {
       nome,
       selected: eng,
-      source: engResolved.source || 'legacy_default',
+      source: engResolved.source || 'delta_default',
       desiredRaw: engResolved.desiredRaw || null
     });
   } catch {}
@@ -5398,7 +5400,14 @@ return false;
 }
 function ensureDesired() {
 try {
-if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
+if (!fs.existsSync(desiredPath)) {
+  writeJsonAtomic(desiredPath, {
+    perfis: {},
+    _autoMode: { engine: 'delta' },
+    autoMode: { engine: 'delta' },
+    engine: 'delta'
+  });
+}
 } catch {}
 }
 
@@ -5414,18 +5423,18 @@ function resolveDesiredVirtusEngineRuntime() {
     const normalized = String(eng || '').trim().toLowerCase();
     if (normalized === 'delta') return { engine: 'delta', source: 'desired', desiredRaw: normalized };
     if (normalized === 'legacy') return { engine: 'legacy', source: 'desired', desiredRaw: normalized };
-    return { engine: 'legacy', source: 'legacy_default', desiredRaw: normalized || null };
+    return { engine: 'delta', source: 'delta_default', desiredRaw: normalized || null };
   } catch {
-    return { engine: 'legacy', source: 'legacy_default_on_error', desiredRaw: null };
+    return { engine: 'delta', source: 'delta_default_on_error', desiredRaw: null };
   }
 }
 
 function readDesiredVirtusEngineRuntime() {
-  // Contrato rígido: qualquer valor inválido cai em legacy (fail-safe).
+  // Contrato rígido: qualquer valor inválido cai em delta (default de fábrica).
   try {
-    return resolveDesiredVirtusEngineRuntime().engine || 'legacy';
+    return resolveDesiredVirtusEngineRuntime().engine || 'delta';
   } catch {
-    return 'legacy';
+    return 'delta';
   }
 }
 

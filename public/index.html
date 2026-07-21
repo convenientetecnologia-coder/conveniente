@@ -1225,7 +1225,7 @@
           <input type="number" id="srvMemHostBase" min="256" max="16384" step="128" />
         </div>
         <div class="form-row">
-          <label>RAM — extra por bloco de 8 GB de RAM física (MB, × ceil(GB÷8))</label>
+          <label>RAM — extra por bloco de 16 GB de RAM física (MB, × ceil(GB÷16))</label>
           <input type="number" id="srvMemPer8" min="0" max="8192" step="128" />
         </div>
         <div class="form-row">
@@ -1262,8 +1262,8 @@
         <div class="form-row">
           <label>Modo diário de operação</label>
           <select id="srvDailyMode">
-            <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
             <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
+            <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
           </select>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
             <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
@@ -1283,21 +1283,21 @@
               <input type="time" id="srvDailyOpenEndTime" />
             </label>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 23:00-00:00, abrir 06:00-07:00.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00.</div>
         </div>
         <div class="form-row">
           <label>Robe — tipo de trabalho</label>
           <select id="srvRobeWorkMode">
-            <option value="v1">Robe V1</option>
             <option value="v2_auto">Robe V2 automatizado</option>
+            <option value="v1">Robe V1</option>
           </select>
           <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras da conta + extras globais. Robe V2 automatizado usa apenas as cidades globais do servidor com distribuição por Habitantes x Insight.</div>
         </div>
         <div class="form-row">
           <label>Virtus — motor de execução</label>
           <select id="srvVirtusEngine">
-            <option value="legacy">Virtus Legacy (padrão seguro)</option>
             <option value="delta">Virtus Delta (CDP + WS)</option>
+            <option value="legacy">Virtus Legacy (modo compatível)</option>
           </select>
           <div class="muted" style="margin-top:6px; font-size:12px;">Define qual motor o worker inicia para todos os perfis. Valor persistido no desired.json para troca dinâmica sem editar arquivo manual.</div>
         </div>
@@ -1462,28 +1462,28 @@
         const mem = (cfg && cfg.memory) ? cfg.memory : {};
         const net = (cfg && cfg.networkRotation) ? cfg.networkRotation : {};
         const daily = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
-        cdMinEl.value = Number(robe.cooldownMinMinutes || 25);
-        cdMaxEl.value = Number(robe.cooldownMaxMinutes || 50);
+        cdMinEl.value = Number(robe.cooldownMinMinutes || 60);
+        cdMaxEl.value = Number(robe.cooldownMaxMinutes || 120);
         if (netRotateEnabledEl) netRotateEnabledEl.value = net.enabled === true ? '1' : '0';
-        if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 60);
-        if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 120);
+        if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 300);
+        if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 420);
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
           dailyModeEl.value = (mode === 'window_close_open' || daily.enabled === true) ? 'window_close_open' : 'always_on_24h';
         }
         if (dailyCloseStartTimeEl) {
-          const hh = String(Number(daily.closeWindowStartHour || 23)).padStart(2, '0');
+          const hh = String(Number(daily.closeWindowStartHour || 1)).padStart(2, '0');
           const mm = String(Number(daily.closeWindowStartMinute || 0)).padStart(2, '0');
           dailyCloseStartTimeEl.value = `${hh}:${mm}`;
         }
         if (dailyCloseEndTimeEl) {
-          const hh = String(Number(daily.closeWindowEndHour || 0)).padStart(2, '0');
+          const hh = String(Number(daily.closeWindowEndHour || 3)).padStart(2, '0');
           const mm = String(Number(daily.closeWindowEndMinute || 0)).padStart(2, '0');
           dailyCloseEndTimeEl.value = `${hh}:${mm}`;
         }
         if (dailyOpenStartTimeEl) {
-          const hh = String(Number(daily.openWindowStartHour || 6)).padStart(2, '0');
+          const hh = String(Number(daily.openWindowStartHour || 5)).padStart(2, '0');
           const mm = String(Number(daily.openWindowStartMinute || 0)).padStart(2, '0');
           dailyOpenStartTimeEl.value = `${hh}:${mm}`;
         }
@@ -1493,13 +1493,13 @@
           dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
         workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
-        if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'legacy') === 'delta' ? 'delta' : 'legacy';
+        if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
         if (memGovExitEl) memGovExitEl.value = Number(mem.governorExitMb != null ? mem.governorExitMb : 2048);
         if (memHostBaseEl) memHostBaseEl.value = Number(mem.hostBaseMb != null ? mem.hostBaseMb : 2048);
-        if (memPer8El) memPer8El.value = Number(mem.reservePer8GbMb != null ? mem.reservePer8GbMb : 1024);
+        if (memPer8El) memPer8El.value = Number(mem.reservePer8GbMb != null ? mem.reservePer8GbMb : 768);
         if (memProvSpikeEl) memProvSpikeEl.value = Number(mem.provisionSpikeMb != null ? mem.provisionSpikeMb : 1536);
         infoEl.className = 'pill info';
         infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — RAM: lida do disco a cada tick (sem reinício).`;
@@ -1580,13 +1580,13 @@
       }
       saveBtn.onclick = async () => {
         try {
-          const cooldownMin = Math.floor(Number(cdMinEl.value || 25));
-          const cooldownMax = Math.floor(Number(cdMaxEl.value || 50));
+          const cooldownMin = Math.floor(Number(cdMinEl.value || 60));
+          const cooldownMax = Math.floor(Number(cdMaxEl.value || 120));
           const netEnabled = String((netRotateEnabledEl && netRotateEnabledEl.value) || '0') === '1';
-          const netMin = Math.floor(Number((netRotateMinEl && netRotateMinEl.value) || 60));
-          const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 120));
+          const netMin = Math.floor(Number((netRotateMinEl && netRotateMinEl.value) || 300));
+          const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 420));
           const netAttempts = Math.floor(Number((netRotateAttemptsEl && netRotateAttemptsEl.value) || 5));
-          const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'always_on_24h').trim().toLowerCase();
+          const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'window_close_open').trim().toLowerCase();
           const dailyEnabled = dailyMode === 'window_close_open';
           const dailyCloseStartRaw = String((dailyCloseStartTimeEl && dailyCloseStartTimeEl.value) || '').trim();
           const dailyCloseEndRaw = String((dailyCloseEndTimeEl && dailyCloseEndTimeEl.value) || '').trim();
@@ -1665,7 +1665,7 @@
             return;
           }
           if (reservePer8GbMb < 0 || reservePer8GbMb > 8192) {
-            await showSystemMessageModal({ title: 'RAM inválida', message: 'Extra por 8 GB: use entre 0 e 8192 MB.', tone: 'bad' });
+            await showSystemMessageModal({ title: 'RAM inválida', message: 'Extra por 16 GB: use entre 0 e 8192 MB.', tone: 'bad' });
             return;
           }
           if (provisionSpikeMb < 256 || provisionSpikeMb > 8192) {
@@ -1713,7 +1713,7 @@
                 return uniqueCities(globalCitiesSelected);
               })()
             },
-            virtusEngine: String((virtusEngineEl && virtusEngineEl.value) || 'legacy') === 'delta' ? 'delta' : 'legacy'
+            virtusEngine: String((virtusEngineEl && virtusEngineEl.value) || 'delta') === 'delta' ? 'delta' : 'legacy'
           };
           setBtnLoading(saveBtn, true, 'Salvando...');
           const r = await saveServerConfig(payload, { applyNow: false });

@@ -149,7 +149,12 @@ function ensureDesired() {
       if (fs.existsSync(old)) { fs.copyFileSync(old, desiredPath); return; }
       if (fs.existsSync(bak)) { fs.copyFileSync(bak, desiredPath); return; }
     } catch {}
-    writeJsonAtomic(desiredPath, { perfis: {} });
+    writeJsonAtomic(desiredPath, {
+      perfis: {},
+      _autoMode: { engine: 'delta' },
+      autoMode: { engine: 'delta' },
+      engine: 'delta'
+    });
   } catch {}
 }
 /** Garante perfis.json existe */

@@ -3,6 +3,7 @@
 //
 // Regras:
 // - Operação normal: manter livre (hostBaseMb + reservePer8GbMb × nós), nós = ceil(GB/16)
+//   Obs.: o nome do campo "reservePer8GbMb" é legado; no runtime atual o bloco é de 16GB.
 // - Provisão (pico cookies): manter livre (hostBaseMb + provisionSpikeMb)
 //   Valores default e limites: server_runtime_config.json → memory (dashboard Config Servidor).
 
@@ -45,7 +46,7 @@ function getReservePer8GbMB() {
   const m = getConfigMemory();
   const v = m && m.reservePer8GbMb;
   if (Number.isFinite(Number(v)) && Number(v) >= 0) return mb(Number(v));
-  return 1024;
+  return 768;
 }
 
 function getProvisionSpikeMB() {

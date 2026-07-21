@@ -52,9 +52,9 @@ module.exports = (app, workerClient, fileStore) => {
         (desired && desired.autoMode && desired.autoMode.engine) ||
         (desired && desired.engine) ||
         '';
-      return normalizeVirtusEngine(eng) || 'legacy';
+      return normalizeVirtusEngine(eng) || 'delta';
     } catch {
-      return 'legacy';
+      return 'delta';
     }
   };
   const hasServerConfigFields = (payload) => {

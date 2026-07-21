@@ -16,12 +16,12 @@ const gatewayProxy = require('./gatewayProxy');
 puppeteer.use(StealthPlugin());
 
 const DESIRED_ENGINE_PATH = path.join(__dirname, '..', 'dados', 'desired.json');
-let __desiredEngineCache = { at: 0, engine: 'legacy' };
+let __desiredEngineCache = { at: 0, engine: 'delta' };
 function readDesiredVirtusEngineRuntimeBestEffort() {
   try {
     const now = Date.now();
     if (__desiredEngineCache && __desiredEngineCache.at && (now - __desiredEngineCache.at) < 2000) {
-      return __desiredEngineCache.engine || 'legacy';
+      return __desiredEngineCache.engine || 'delta';
     }
     const raw = fs.readFileSync(DESIRED_ENGINE_PATH, 'utf8');
     const desired = raw ? JSON.parse(raw) : null;
@@ -31,11 +31,11 @@ function readDesiredVirtusEngineRuntimeBestEffort() {
       (desired && desired.engine) ||
       '';
     const normalized = String(eng || '').trim().toLowerCase();
-    const out = (normalized === 'delta') ? 'delta' : 'legacy';
+    const out = (normalized === 'legacy') ? 'legacy' : 'delta';
     __desiredEngineCache = { at: now, engine: out };
     return out;
   } catch {
-    return 'legacy';
+    return 'delta';
   }
 }
 function isDeltaMotorEnabledRuntime() {
