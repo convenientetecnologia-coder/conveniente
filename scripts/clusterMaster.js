@@ -76,10 +76,28 @@ function createCluster() {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
+    env.WORKER_SHARD_INDEX = String(idx);
     env.SHARD_PROFILES = JSON.stringify(shardNames);
     env.STATUS_FILE_NAME = `status_node_${idx + 1}.json`;
+    // Blindagem city collector: 1 Chrome de raspagem por worker (sem Code 21 cross-kill).
+    // Path dedicado — não compartilha userDataDir entre shards do mesmo host.
+    env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR = path.join(
+      __dirname,
+      '..',
+      'dados',
+      'city-collector-shards',
+      `w${idx + 1}`
+    );
 
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
+
+    try {
+      logger.info('[CLUSTER][SPAWN]', {
+        worker: idx + 1,
+        shardSize: Array.isArray(shardNames) ? shardNames.length : 0,
+        cityCollectorUserDataDir: env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR,
+      });
+    } catch {}
 
     const proc = fork(path.join(__dirname, 'worker.js'), [], {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],

@@ -106,8 +106,10 @@ function randomBetween(min, max) {
 }
 
 /**
- * Fila limitada. Para o city collector o contrato soberano e SEMPRE limit=1:
- * 1 browser + 1 page + 1 userDataDir. Concorrencia >1 no mesmo perfil = Code 21.
+ * Fila limitada. Para o city collector o contrato soberano e SEMPRE limit=1
+ * DENTRO do processo: 1 browser + 1 page + 1 userDataDir por worker.
+ * Host multi-worker: N workers => N userDataDir (city-collector-shards/wN).
+ * Concorrencia >1 no MESMO perfil = Chromium Code 21.
  */
 function createLimitedQueue(maxConcurrent = 1) {
   const limit = Math.max(1, Number(maxConcurrent || 1) || 1);
@@ -170,17 +172,28 @@ function taskkillPidTreeWin(pid) {
 /**
  * Lista PIDs chrome.exe cujo CommandLine aponta para este userDataDir.
  * Soberania: so mata o perfil do collector — nunca chrome das contas Messenger.
+ * Boundary-safe: "...\w1" nao casa "...\w12"; "...\collector" nao casa "...\collector-w2".
  */
 function listChromePidsForUserDataDirWin(userDataDir) {
   if (process.platform !== "win32") return [];
   const dir = String(userDataDir || "").trim();
   if (!dir) return [];
-  const needle = dir.replace(/\//g, "\\");
+  const needle = dir.replace(/\//g, "\\").replace(/\\+$/g, "");
   const script = [
     "$ErrorActionPreference='SilentlyContinue'",
     `$needle = ${JSON.stringify(needle)}`,
     "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" |",
-    "  Where-Object { $_.CommandLine -and ($_.CommandLine -like ('*' + $needle + '*')) } |",
+    "  Where-Object {",
+    "    if (-not $_.CommandLine) { return $false }",
+    "    $cl = [string]$_.CommandLine",
+    "    $i = $cl.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase)",
+    "    if ($i -lt 0) { return $false }",
+    "    $after = $i + $needle.Length",
+    "    if ($after -ge $cl.Length) { return $true }",
+    "    $ch = $cl[$after]",
+    "    # Fim de path / aspas / espaco — nao sufixo alfanumerico nem '-' (siblings).",
+    "    return ($ch -eq [char]'\\' -or $ch -eq [char]'/' -or $ch -eq [char]'\"' -or [char]::IsWhiteSpace($ch))",
+    "  } |",
     "  Select-Object -ExpandProperty ProcessId",
   ].join(" ");
   try {
@@ -1204,11 +1217,34 @@ async function waitForListingHints(page, timeoutMs) {
   } catch (_) {}
 }
 
+/**
+ * Resolve userDataDir do Chrome de raspagem de cidade.
+ * - Env explicita ganha.
+ * - Worker filho: city-collector-shards/wN (1 browser estavel por shard).
+ * - Master / processo unico: city-collector-shards/master.
+ */
+function resolveCityCollectorUserDataDir() {
+  const explicit = String(process.env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR || "").trim();
+  if (explicit) return explicit;
+  const shardsRoot = path.join(__dirname, "..", "dados", "city-collector-shards");
+  const isChild = String(process.env.IS_WORKER_CHILD || "").trim() === "1";
+  const shardIdxRaw = String(process.env.WORKER_SHARD_INDEX || "").trim();
+  if (isChild && /^\d+$/.test(shardIdxRaw)) {
+    return path.join(shardsRoot, `w${Number(shardIdxRaw) + 1}`);
+  }
+  const statusName = String(process.env.STATUS_FILE_NAME || "").trim();
+  const m = statusName.match(/status_node_(\d+)\.json/i);
+  if (isChild && m) {
+    return path.join(shardsRoot, `w${m[1]}`);
+  }
+  return path.join(shardsRoot, "master");
+}
+
 async function createCollectorRuntime() {
-  const userDataDir = String(
-    process.env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR ||
-      path.join(__dirname, "..", "dados", "chrome-session-delta-city-collector")
-  ).trim();
+  const userDataDir = resolveCityCollectorUserDataDir();
+  try {
+    fs.mkdirSync(userDataDir, { recursive: true });
+  } catch (_) {}
   const executablePath =
     process.env.CHROME_PATH ||
     path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
@@ -1229,7 +1265,7 @@ async function createCollectorRuntime() {
   let browser = null;
   let page = null;
   let browserPid = null;
-  // LEI: 1 browser por host. Concorrencia >1 no mesmo userDataDir = Chromium Code 21.
+  // LEI: 1 browser por worker (userDataDir isolado). Fila serial in-process.
   // Env antiga (MAX_CONCURRENCY=2) e ignorada de proposito — serial e soberano.
   const enqueue = createLimitedQueue(1);
   let launchPromise = null; // mutex de launch/relaunch
@@ -1237,6 +1273,24 @@ async function createCollectorRuntime() {
   let reclaimCount = 0;
   let lastReclaimAt = 0;
   let lastLaunchError = null;
+  try {
+    log(
+      `collector runtime boot userDataDir=${userDataDir}` +
+      ` shard=${String(process.env.WORKER_SHARD_INDEX || "master")} pid=${process.pid}`
+    );
+  } catch (_) {}
+  try {
+    logTriagemCollectorReclaim({
+      mode: "boot",
+      killed: 0,
+      locks: [],
+      reason: "runtime_boot_path",
+      launch_generation: 0,
+      user_data_dir: userDataDir,
+      worker_shard_index: process.env.WORKER_SHARD_INDEX || null,
+      pid: process.pid,
+    });
+  } catch (_) {}
   const cityCacheByItem = new Map(); // itemId -> { cidade, city_source, at }
   const cityCacheTtlMs = Math.max(
     5 * 60 * 1000,
@@ -1343,8 +1397,8 @@ async function createCollectorRuntime() {
   }
 
   /**
-   * Reclaim soberano do perfil unico do collector:
-   * 1) mata chrome zumbi desse userDataDir
+   * Reclaim soberano do perfil DESTE worker/collector:
+   * 1) mata chrome zumbi desse userDataDir (boundary-safe)
    * 2) apaga SingletonLock / DevToolsActivePort
    * 3) settle antes de relaunch
    */
@@ -1380,6 +1434,9 @@ async function createCollectorRuntime() {
         locks,
         reason: why,
         launch_generation: launchGeneration,
+        user_data_dir: userDataDir,
+        worker_shard_index: process.env.WORKER_SHARD_INDEX || null,
+        pid: process.pid,
       });
     } catch (_) {}
     return { killed, locks, mode: hard ? "hard" : "soft" };
@@ -1909,6 +1966,7 @@ async function getDeltaCityCollector() {
 
 module.exports = {
   getDeltaCityCollector,
+  resolveCityCollectorUserDataDir,
   extractCityFromLocationAnchorText,
   normalizeCityUfLabel,
   buildCityUf,
