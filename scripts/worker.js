@@ -10657,7 +10657,7 @@ const handlers = {
         ? [...new Set(
             thread_key_candidates
               .map((v) => String(v || '').trim())
-              .filter((v) => /^\d{12,20}$/.test(v))
+              .filter((v) => /^\d{12,20}$/.test(v) && !__deltaIsGarbageThreadToken(v))
           )].slice(0, 12)
         : [];
       if (!n || !tk || !tr) return { ok: false, error: 'missing_nome_or_thread_key_or_texto_resposta' };
@@ -16536,6 +16536,8 @@ function __deltaIsHandsRoutingFailure(errorRaw) {
     e.includes('composer_missing') ||
     e.includes('thread_login_redirect') ||
     e.includes('thread_e2ee_gate') ||
+    e.includes('goto_circuit_open') ||
+    e.includes('thread_key_garbage_token') ||
     e.includes('candidates_exhausted')
   );
 }
@@ -20536,6 +20538,54 @@ function __deltaExtractThreadIdsFromStrings(strings) {
   } catch {}
   return [...out];
 }
+/**
+ * Timestamp Date.now() (13 dígitos, faixa epoch-ms) que vazava no resolver LS
+ * e virava thread_key_candidate → goto fantasma no Messenger (F5 limpa).
+ * Faixa ~2017–2039: não colide com thread marketplace real (15–17).
+ */
+function __deltaIsEpochMsToken(id) {
+  const s = String(id || '').trim();
+  if (!/^\d{13}$/.test(s)) return false;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return false;
+  return n >= 1_500_000_000_000 && n <= 2_200_000_000_000;
+}
+/** User/page FB 14 dígitos ^615… (ex.: 61581393007528) — não é thread marketplace. */
+function __deltaIsLikelyFbProfileToken(id) {
+  const s = String(id || '').trim();
+  return /^\d{14}$/.test(s) && /^615/.test(s);
+}
+function __deltaGarbageThreadTokenReason(id) {
+  if (__deltaIsEpochMsToken(id)) return 'epoch_ms_timestamp';
+  if (__deltaIsLikelyFbProfileToken(id)) return 'fb_profile_615_14';
+  return '';
+}
+function __deltaIsGarbageThreadToken(id) {
+  return !!__deltaGarbageThreadTokenReason(id);
+}
+let __deltaGarbageFilterLogAt = 0;
+let __deltaGarbageFilterLogCount = 0;
+function __deltaLogGarbageFiltered(id, reason, accountUserId) {
+  __deltaGarbageFilterLogCount += 1;
+  const now = Date.now();
+  // Rate-limit: 1 a cada 5s, ou a cada 20 filtrados.
+  if ((now - __deltaGarbageFilterLogAt) < 5000 && (__deltaGarbageFilterLogCount % 20) !== 1) return;
+  __deltaGarbageFilterLogAt = now;
+  try {
+    __forensicEdgeEmit({
+      account_login: '',
+      thread_key: String(id || '').trim() || null,
+      flow_stage: 'delta_thread_key_garbage_filtered',
+      details: {
+        reason: String(reason || '').slice(0, 64),
+        id: String(id || '').trim() || null,
+        account_user_id: accountUserId ? String(accountUserId) : null,
+        filtered_total: __deltaGarbageFilterLogCount,
+        ts_ms: now,
+      },
+    });
+  } catch {}
+}
 function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
   const account = String(accountUserId || '').trim();
   const senderIds = Array.isArray(opts.senderIds) ? opts.senderIds : [];
@@ -20552,6 +20602,11 @@ function __deltaBuildThreadCandidates(idTokens, accountUserId, opts = {}) {
     if (!/^\d{12,20}$/.test(id)) continue;
     if (/^(0|1|2|3|4|5|80)$/.test(id)) continue;
     if (excluded.has(id)) continue;
+    const garbageReason = __deltaGarbageThreadTokenReason(id);
+    if (garbageReason) {
+      try { __deltaLogGarbageFiltered(id, garbageReason, account); } catch {}
+      continue;
+    }
     if (seen.has(id)) continue;
     seen.add(id);
     candidates.push(id);
