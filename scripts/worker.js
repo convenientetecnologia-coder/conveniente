@@ -13464,6 +13464,7 @@ async function nurseTick() {
 
     // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
+    // Terminais (banned / 2FA): NUNCA reforce active=true — senão briga com ban-sweep e prende open-all.
     let autoOpenEnabled = false;
     try {
       const ao = desired0 && desired0._autoOpen && typeof desired0._autoOpen === 'object' ? desired0._autoOpen : null;
@@ -13477,10 +13478,30 @@ async function nurseTick() {
           robeMeta.system.desiredEnforceActiveAt = now0;
           const perfisArr = loadPerfisJson();
           const names = Array.isArray(perfisArr) ? perfisArr.map(p => p && p.nome).filter(Boolean) : [];
+          const terminalSkip = new Set();
+          for (const nome of names) {
+            try {
+              const flags = await readAccountFlags(nome).catch(() => null);
+              if (flags && (flags.banned === true || flags.twoFactor === true)) {
+                terminalSkip.add(String(nome));
+              }
+            } catch {}
+          }
           let changed = 0;
+          let skippedTerminal = 0;
           await fileStore.withDesiredFileLockUpdate((d) => {
             d = d || {}; d.perfis = d.perfis || {};
             for (const nome of names) {
+              if (terminalSkip.has(String(nome))) {
+                skippedTerminal++;
+                // Mantém terminal fechado (coerência com ban/2FA sweep).
+                const cur = d.perfis[nome] || {};
+                if (cur.active === true) {
+                  d.perfis[nome] = { ...cur, active: false, virtus: 'off' };
+                  changed++;
+                }
+                continue;
+              }
               const cur = d.perfis[nome] || {};
               if (cur.active !== true) {
                 d.perfis[nome] = { ...cur, active: true };
@@ -13490,7 +13511,7 @@ async function nurseTick() {
             return d;
           });
           if (changed > 0) {
-            try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length }); } catch {}
+            try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length, skippedTerminal }); } catch {}
             try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch {}
           }
         }
@@ -13659,21 +13680,31 @@ async function nurseTick() {
         try { provisionAudit.append({ ts: Date.now(), event: 'open_all_finalize', ok: true, hadLock: lkActive, lockOwner: lkOwner || null }); } catch {}
       }
 
-      // Keepalive: se openAll ativo e este shard ainda tem perfis a abrir, estender TTL do lock.
+      // Keepalive: se openAll ativo e este shard ainda tem perfis ELEGÍVEIS a abrir, estender TTL do lock.
+      // Terminais (banned/2FA) NÃO contam como pending — senão o modo seguro nunca conclui.
+      // Contagem só na queue do open-all (já sem terminais) + defesa se terminal vazou.
+      // pending local=0 => não renova; quando todos os shards param de renovar, lock expira e finalize roda.
       if (oaActive && lkActive && oaOwner && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)))) {
         let pending = 0;
         let pendingNames = [];
         let ramDeniedPending = [];
         let stalledSince = 0;
         try {
-          for (const n of Object.keys(desired.perfis || {})) {
+          const q = (oa && Array.isArray(oa.queue) && oa.queue.length) ? oa.queue : Object.keys(desired.perfis || {});
+          for (const n0 of q) {
+            const n = String(n0 || '');
             if (!n) continue;
             if (SHARD_SET.size && !inShard(n)) continue;
             const want = desired.perfis[n] || {};
-            if (want.active === true && !controllers.has(n)) {
-              pending++;
-              pendingNames.push(String(n));
-            }
+            if (want.active !== true || controllers.has(n)) continue;
+            try {
+              const rm = robeMeta[n] || {};
+              if (rm.banned === true || rm.twoFactor === true) continue;
+              const flags = await readAccountFlags(n).catch(() => null);
+              if (flags && (flags.banned === true || flags.twoFactor === true)) continue;
+            } catch {}
+            pending++;
+            pendingNames.push(String(n));
           }
         } catch {}
 

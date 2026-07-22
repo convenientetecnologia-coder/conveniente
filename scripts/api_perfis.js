@@ -1717,20 +1717,39 @@ module.exports = (app, workerClient, fileStore) => {
 
       const perfisArr = fileStore.loadPerfisJson() || [];
 
-      // 1) PASSO ATÔMICO: desired.active=true para todos.
-      // Política (2026-01-28): abrir tudo NÃO usa flags antigas para decidir nada.
-      // Cada perfil, ao abrir, limpa flags não-terminais e revalida do zero (worker).
+      // Flags terminais (ban / 2FA): Abrir Todos IGNORA — não entram na fila, não recebem active=true.
+      // Flags não-terminais continuam sendo limpas/revalidadas na abertura (worker/probe).
+      const eligibleNames = [];
+      const skippedTerminal = [];
+      for (const p of perfisArr) {
+        if (!p || !p.nome) continue;
+        const nome = String(p.nome);
+        let terminal = null;
+        try {
+          const man = await manifestStore.read(nome).catch(() => null);
+          const f = (man && man.accountFlags) ? man.accountFlags : {};
+          if (f.banned === true) terminal = 'banned';
+          else if (f.twoFactor === true) terminal = 'two_factor';
+        } catch {}
+        if (terminal) skippedTerminal.push({ nome, reason: terminal });
+        else eligibleNames.push(nome);
+      }
+
+      // 1) PASSO ATÔMICO: desired.active=true só para elegíveis (não suspensas/2FA).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
         // Sequencer global de abertura (ordem do dashboard/perfis.json):
         // - um único perfil "inFlight" por vez, para o usuário acompanhar.
         // - workers coordenam via desired.json (cross-process).
-        const names = perfisArr.map(p => p && p.nome).filter(Boolean);
+        const queueDone = eligibleNames.length === 0;
         desired._openAll = {
-          active: true,
+          active: !queueDone,
           startedAt: Date.now(),
+          doneAt: queueDone ? Date.now() : undefined,
           idx: 0,
-          queue: names,
+          queue: eligibleNames.slice(),
+          skippedTerminal: skippedTerminal.slice(0, 120),
+          skippedTerminalCount: skippedTerminal.length,
           inFlight: null,
           inFlightAt: 0,
           inFlightBy: null,
@@ -1738,39 +1757,89 @@ module.exports = (app, workerClient, fileStore) => {
           lockOwner,
           by: String(op || 'bulk_open_all').slice(0, 120)
         };
-        // NOVO: ligar autopilot "Tudo aberto"
+        // Autopilot "Tudo aberto" (também respeita terminais no nurse enforce)
         desired._autoOpen = desired._autoOpen || {};
         desired._autoOpen.enabled = true;
         desired._autoOpen.changedAt = Date.now();
         desired._autoOpen.changedBy = String(op || 'bulk_open_all').slice(0, 120);
+
+        const eligibleSet = new Set(eligibleNames);
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
-          desired.perfis[nome] = {
-            ...(desired.perfis[nome] || {}),
-            active: true,
-            // Durante mapeamento, manter Virtus pausado.
-            // O probe decide quais ficam virtus='on' (ok), mas o provision_lock segura a execução até o fim.
-            virtus: 'off',
-            humanHold: false
-          };
+          if (eligibleSet.has(nome)) {
+            desired.perfis[nome] = {
+              ...(desired.perfis[nome] || {}),
+              active: true,
+              // Durante mapeamento, manter Virtus pausado.
+              // O probe decide quais ficam virtus='on' (ok), mas o provision_lock segura a execução até o fim.
+              virtus: 'off',
+              humanHold: false
+            };
+          } else {
+            // Terminal: permanece fechada; não compete com pending/keepalive do open-all.
+            desired.perfis[nome] = {
+              ...(desired.perfis[nome] || {}),
+              active: false,
+              virtus: 'off'
+            };
+          }
         }
         return desired;
       });
 
-      // LOG por perfil: bulk open
-      for (const p of perfisArr) {
+      // Se não há ninguém elegível, libera o lock imediatamente (missão concluída: nada a abrir).
+      if (eligibleNames.length === 0) {
+        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
         try {
-          await issues.append(p.nome, 'mil_action', 'bulk_open_all');
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'open_all_skip_all_terminal',
+            skippedTerminalCount: skippedTerminal.length,
+            skippedTerminal: skippedTerminal.slice(0, 60)
+          });
+        } catch {}
+        return res.json({
+          ok: true,
+          total: 0,
+          skippedTerminal: skippedTerminal.length,
+          lockOwner,
+          done: true
+        });
+      }
+
+      // LOG por perfil: bulk open (só elegíveis)
+      for (const nome of eligibleNames) {
+        try {
+          await issues.append(nome, 'mil_action', 'bulk_open_all');
         } catch {}
       }
+      for (const s of skippedTerminal) {
+        try {
+          await issues.append(s.nome, 'mil_action', `bulk_open_all_skipped_${s.reason || 'terminal'}`);
+        } catch {}
+      }
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'open_all_started',
+          total: eligibleNames.length,
+          skippedTerminalCount: skippedTerminal.length,
+          lockOwner: String(lockOwner || '')
+        });
+      } catch {}
 
       // 2) Ack rápido (ULTRA enterprise) + sequência estrita:
       // - Não manter o HTTP pendurado.
       // - NÃO iniciar activates em paralelo aqui.
       // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
       // garantindo: Messenger OK -> Robe OK/erro -> próximo.
-      return res.json({ ok: true, total: perfisArr.length, lockOwner });
+      return res.json({
+        ok: true,
+        total: eligibleNames.length,
+        skippedTerminal: skippedTerminal.length,
+        lockOwner
+      });
 
     } catch (e) {
       // Se falhou após adquirir o lock, liberar (best-effort).
