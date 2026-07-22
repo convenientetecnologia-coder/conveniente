@@ -15289,6 +15289,10 @@ try {
 const DELTA_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.jsonl');
 const DELTA_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.cursor.json');
 const DELTA_COMPACT_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.compact.lock');
+// Um único processo por host faz o pump CT (fila/cursor compartilhados).
+// Demais workers só append + kick; failover por TTL / PID morto.
+const DELTA_INGEST_PUMP_LOCK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.pump.lock');
+const DELTA_INGEST_KICK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.pump.kick');
 const DELTA_FORENSIC_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_forense.jsonl');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
 const DELTA_RESPONDED_HISTORY_FILENAME = 'chats_respondidos_delta.json';
@@ -15296,6 +15300,19 @@ const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bun
 const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.jsonl');
 const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.cursor.json');
 let __deltaIngestKickRequested = false;
+let __deltaIngestPumpLeaderFlag = false;
+let __deltaIngestBootPrunedAsLeader = false;
+const DELTA_INGEST_SINGLE_PUMP_OWNER = String(
+  process.env.DELTA_INGEST_SINGLE_PUMP_OWNER == null ? '1' : process.env.DELTA_INGEST_SINGLE_PUMP_OWNER
+).trim() !== '0';
+const DELTA_INGEST_PUMP_LEADER_STALE_MS = Math.max(
+  45_000,
+  Number(process.env.DELTA_INGEST_PUMP_LEADER_STALE_MS || 120_000) || 120_000
+);
+const DELTA_INGEST_FOLLOWER_POLL_MS = Math.max(
+  250,
+  Number(process.env.DELTA_INGEST_FOLLOWER_POLL_MS || 750) || 750
+);
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
 const DELTA_FALLBACK_CLIENT_NAME = 'Cliente sem Nome';
@@ -19652,6 +19669,9 @@ function __deltaBuildCtIngestPayload(payload) {
     timestamp_ms: ts,
     texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,
+    ...(String(p.idempotency_key || '').trim()
+      ? { idempotency_key: String(p.idempotency_key || '').trim().slice(0, 120) }
+      : {}),
     ...(cidade ? { cidade } : {}),
     ...(cityStatus ? { city_status: cityStatus } : {}),
     ...(citySource ? { city_source: citySource } : {}),
@@ -19741,6 +19761,11 @@ async function __deltaIngestTick() {
   if (__deltaIngestLoopRunning) return;
   __deltaIngestLoopRunning = true;
   try {
+    try {
+      if (DELTA_INGEST_SINGLE_PUMP_OWNER && __deltaIngestPumpLeaderFlag) {
+        __deltaWriteIngestPumpLockSync();
+      }
+    } catch {}
     const nowKick = Date.now();
     if (!__deltaDeadletterReplayLastAt || (nowKick - __deltaDeadletterReplayLastAt) > 30_000) {
       __deltaDeadletterReplayLastAt = nowKick;
@@ -20090,25 +20115,189 @@ async function __deltaIngestTick() {
   }
 }
 
+function __deltaReadIngestPumpLockSync() {
+  try {
+    if (!fs.existsSync(DELTA_INGEST_PUMP_LOCK_PATH)) return null;
+    const raw = String(fs.readFileSync(DELTA_INGEST_PUMP_LOCK_PATH, 'utf8') || '').trim();
+    const parsed = __deltaSafeJsonParse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function __deltaWriteIngestPumpLockSync() {
+  const now = Date.now();
+  const obj = {
+    ts: now,
+    pid: process.pid,
+    shard: String(process.env.WORKER_SHARD_INDEX || ''),
+    hostId: (() => { try { return String(readHostIdSync() || '').trim() || null; } catch { return null; } })(),
+    leader: true
+  };
+  try {
+    fs.mkdirSync(path.dirname(DELTA_INGEST_PUMP_LOCK_PATH), { recursive: true });
+  } catch {}
+  fs.writeFileSync(DELTA_INGEST_PUMP_LOCK_PATH, JSON.stringify(obj) + '\n', 'utf8');
+  return obj;
+}
+
+function __deltaIngestPumpLockIsStale(lock, now = Date.now()) {
+  if (!lock || typeof lock !== 'object') return true;
+  const ts = Number(lock.ts || 0) || 0;
+  if (!ts || (now - ts) > DELTA_INGEST_PUMP_LEADER_STALE_MS) return true;
+  const pid = Number(lock.pid || 0) || 0;
+  if (pid > 0 && pid !== process.pid) {
+    try {
+      if (!isPidAlive(pid)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Eleição: 1 pump por host. Heartbeat a cada loop do líder.
+ * Failover imediato se PID morto; senão TTL ( > HTTP timeout ingest ).
+ */
+function __deltaEnsureIngestPumpLeader() {
+  if (!DELTA_INGEST_SINGLE_PUMP_OWNER) {
+    __deltaIngestPumpLeaderFlag = true;
+    return true;
+  }
+  const now = Date.now();
+  try {
+    if (__deltaIngestPumpLeaderFlag) {
+      const cur = __deltaReadIngestPumpLockSync();
+      if (cur && Number(cur.pid || 0) === process.pid && !__deltaIngestPumpLockIsStale(cur, now)) {
+        try { __deltaWriteIngestPumpLockSync(); } catch {}
+        return true;
+      }
+      // Perdemos o lock (outro assumiu) — volta a follower.
+      __deltaIngestPumpLeaderFlag = false;
+    }
+
+    const existing = __deltaReadIngestPumpLockSync();
+    if (existing && !__deltaIngestPumpLockIsStale(existing, now)) {
+      if (Number(existing.pid || 0) === process.pid) {
+        __deltaIngestPumpLeaderFlag = true;
+        try { __deltaWriteIngestPumpLockSync(); } catch {}
+        return true;
+      }
+      return false;
+    }
+
+    // Stale / ausente: tenta tomar posse exclusiva.
+    try {
+      if (fs.existsSync(DELTA_INGEST_PUMP_LOCK_PATH)) {
+        try { fs.unlinkSync(DELTA_INGEST_PUMP_LOCK_PATH); } catch {}
+      }
+    } catch {}
+
+    try {
+      const fd = fs.openSync(DELTA_INGEST_PUMP_LOCK_PATH, 'wx');
+      try {
+        const obj = {
+          ts: now,
+          pid: process.pid,
+          shard: String(process.env.WORKER_SHARD_INDEX || ''),
+          hostId: (() => { try { return String(readHostIdSync() || '').trim() || null; } catch { return null; } })(),
+          leader: true
+        };
+        fs.writeFileSync(fd, JSON.stringify(obj) + '\n', 'utf8');
+      } finally {
+        try { fs.closeSync(fd); } catch {}
+      }
+      __deltaIngestPumpLeaderFlag = true;
+      try {
+        logger.info('[DELTA][INGEST] pump leader adquirido', {
+          pid: process.pid,
+          shard: String(process.env.WORKER_SHARD_INDEX || ''),
+          stale_ms: DELTA_INGEST_PUMP_LEADER_STALE_MS
+        });
+      } catch {}
+      try {
+        if (typeof forensicLog === 'function') {
+          forensicLog('DELTA', 'ingest_pump_leader_acquired', {
+            pid: process.pid,
+            shard: String(process.env.WORKER_SHARD_INDEX || '')
+          });
+        }
+      } catch {}
+      return true;
+    } catch {
+      // Corrida: outro worker venceu.
+      __deltaIngestPumpLeaderFlag = false;
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function __deltaConsumeIngestKickSync({ asLeader = false } = {}) {
+  let kicked = false;
+  if (__deltaIngestKickRequested) {
+    __deltaIngestKickRequested = false;
+    kicked = true;
+  }
+  // Só o pump leader consome o kick em disco — follower apagar fura o wake cross-process.
+  if (!asLeader) return kicked;
+  try {
+    if (fs.existsSync(DELTA_INGEST_KICK_PATH)) {
+      try { fs.unlinkSync(DELTA_INGEST_KICK_PATH); } catch {}
+      kicked = true;
+    }
+  } catch {}
+  return kicked;
+}
+
 function __deltaStartIngestLoopOnce() {
   if (__deltaStartIngestLoopOnce._started) return;
   __deltaStartIngestLoopOnce._started = true;
   try { __deltaEnsureHostIdSync(); } catch {}
-  try { __deltaPruneMainQueueDispatchOnlyOnBootSync(); } catch {}
   const loop = async () => {
-    __deltaIngestKickRequested = false;
-    try { await __deltaIngestTick(); } catch {}
+    const isLeader = __deltaEnsureIngestPumpLeader();
+    const kicked = __deltaConsumeIngestKickSync({ asLeader: !!isLeader });
+
+    if (isLeader) {
+      if (!__deltaIngestBootPrunedAsLeader) {
+        __deltaIngestBootPrunedAsLeader = true;
+        try { __deltaPruneMainQueueDispatchOnlyOnBootSync(); } catch {}
+      }
+      try { await __deltaIngestTick(); } catch {}
+      // Heartbeat pós-tick (cobre POST longo no próximo ensure).
+      try { if (__deltaIngestPumpLeaderFlag) __deltaWriteIngestPumpLockSync(); } catch {}
+    }
+
     const jitter = __deltaIngestBackoffMs <= DELTA_INGEST_SUCCESS_BACKOFF_MS
       ? 0
       : Math.floor(Math.random() * DELTA_INGEST_LOOP_JITTER_MS);
-    const waitMs = __deltaIngestKickRequested
-      ? DELTA_INGEST_LOOP_KICK_WAIT_MS
-      : Math.max(5, __deltaIngestBackoffMs + jitter);
+    let waitMs;
+    if (!isLeader) {
+      waitMs = DELTA_INGEST_FOLLOWER_POLL_MS + Math.floor(Math.random() * 120);
+    } else if (kicked || __deltaIngestKickRequested) {
+      waitMs = DELTA_INGEST_LOOP_KICK_WAIT_MS;
+    } else {
+      waitMs = Math.max(5, __deltaIngestBackoffMs + jitter);
+    }
     setTimeout(loop, waitMs).unref?.();
   };
   setTimeout(loop, 300).unref?.();
 }
-function __deltaKickIngestLoop() { __deltaIngestKickRequested = true; }
+function __deltaKickIngestLoop() {
+  __deltaIngestKickRequested = true;
+  try {
+    fs.mkdirSync(path.dirname(DELTA_INGEST_KICK_PATH), { recursive: true });
+    fs.writeFileSync(
+      DELTA_INGEST_KICK_PATH,
+      JSON.stringify({ ts: Date.now(), pid: process.pid }) + '\n',
+      'utf8'
+    );
+  } catch {}
+}
 
 function __deltaDecodeEscapedText(value) {
   if (typeof value !== 'string') return '';
