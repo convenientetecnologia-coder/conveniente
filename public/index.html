@@ -2560,6 +2560,13 @@
         }
         // REMOVIDO (enterprise): “Robe: Limite atingido” duplicava o estado final "Limite excedido".
 
+        // ------- ID documento Marketplace (1x/dia; default nao) -------
+        if (p.robeIdDocDoneToday === true) {
+          titleRow.append(buildPill('ID - sim', 'good'));
+        } else {
+          titleRow.append(buildPill('ID - nao', 'info'));
+        }
+
         // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
           titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil

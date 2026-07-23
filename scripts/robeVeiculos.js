@@ -11,6 +11,7 @@ const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
+const robePostPublishId = require('./robePostPublishId.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -2380,11 +2381,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         }
       }
 
-      // ENCERRAMENTO IMEDIATO: se ok (published OU seller dashboard), feche a aba e siga sem sleeps
+      // Publicado: mantém a aba aberta para pós-publish (upsell + ID doc 1x/dia).
       if (pubRes && pubRes.ok) {
         published = true;
-        try { await safeClosePage(page); } catch {}
-        page = null;
         break;
       }
       // Inconclusivo: aborde evidências de publicado, fallback SELLING só depois da janela!
@@ -2409,7 +2408,34 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Confirmar localização usada (após publicar — mantém)
     try { await locais.confirmUsed(cidadePerfil, localUsada); } catch {}
 
-    // Aba já foi fechada pela publicarEFechar5s; solta a referência
+    // Pós-publish: dismiss upsell + verificação ID documento (1x/dia). Nunca invalida publish_ok.
+    if (page) {
+      try {
+        const idRes = await robePostPublishId.runRobeAutoId({
+          page,
+          nome,
+          titulo,
+          deadlineAt: Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000)
+        });
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'post_publish_id',
+          ok: !!(idRes && idRes.ok),
+          skipped: !!(idRes && idRes.skipped),
+          marked: !!(idRes && idRes.marked),
+          reason: (idRes && (idRes.reason || idRes.error)) || null
+        });
+      } catch (eId) {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'post_publish_id_err',
+          err: String((eId && eId.message) || eId).slice(0, 220)
+        });
+      }
+    } else {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_id', skipped: true, reason: 'page_gone' });
+    }
+
     try { await safeClosePage(page); } catch {}
     page = null;
 

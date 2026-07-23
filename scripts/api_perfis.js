@@ -985,6 +985,26 @@ module.exports = (app, workerClient, fileStore) => {
     return res.json({ ok: true });
   });
 
+  // Verificar ID (documento Marketplace) — overlay/humano; NÃO marca ID-sim do dia
+  app.post('/api/perfis/:nome/verify-id', async (req, res) => {
+    const nome = req.params.nome;
+    logger.info('POST /api/perfis/:nome/verify-id chamada', { nome });
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch (e) {
+      logger.warn('Tentativa de verify-id em perfil inexistente ou inválido', { nome, error: e && e.message });
+      return res.json({ ok: false, error: e.message });
+    }
+    try { await issues.append(nome, 'admin_verify_id_request', `by=${op}`); } catch {}
+    try {
+      const resp = await workerClient.sendWorkerCommand('human-verify-id', { nome }, { timeoutMs: 450000 });
+      return res.json(resp);
+    } catch (e) {
+      logger.error('Erro fatal na rota verify-id', { nome, error: e && e.message }, e);
+      return res.json({ ok: false, error: (e && e.message) || 'verify_id_failed' });
+    }
+  });
+
   // Invocar humano
   app.post('/api/perfis/:nome/invoke-human', async (req, res) => {
     const nome = req.params.nome;

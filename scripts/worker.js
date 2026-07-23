@@ -232,6 +232,7 @@ const fotos        = require('./fotos.js');
 
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
+const robePostPublishId = require('./robePostPublishId.js');
 const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
@@ -1985,6 +1986,34 @@ async function _installOverlayOnPage(nome, page) {
       });
     } catch {}
 
+    // Verificar ID (documento Marketplace) — NUNCA marca robeIdDocDoneDay (só o ROBE auto marca).
+    try {
+      await page.exposeFunction('__ctHumanOverlayVerifyId', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'verify_id' }); } catch {}
+        try {
+          const r = await handlers['human-verify-id']({ nome });
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'human_overlay_action_done',
+              nome: String(nome || ''),
+              action: 'verify_id',
+              ok: !!(r && r.ok),
+              error: r && r.error ? String(r.error).slice(0, 180) : null,
+              marked: false,
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+          return r && typeof r === 'object' ? r : { ok: false, error: 'verify_id_failed' };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'verify_id', ok: false, error: msg.slice(0, 180), marked: false, durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: msg };
+        }
+      });
+    } catch {}
+
     // Canal de log do overlay (provas de clique em Copiar/Retomar/Mover/Minimizar).
     try {
       await page.exposeFunction('__ctHumanOverlayLog', async (evt) => {
@@ -2077,6 +2106,7 @@ async function _installOverlayOnPage(nome, page) {
                     <button id="copyPass">Copiar senha</button>
                     <button id="toggleScroll" title="Ativar/desativar rolagem automática nesta aba">Ativar scroll</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
+                    <button id="verifyId" title="Envia documento na 1ª ação necessária (não marca ID-sim do dia)">Verificar ID</button>
                     <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
                     <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
                     <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluídas)">Excluir conta</button>
@@ -2615,8 +2645,87 @@ async function _installOverlayOnPage(nome, page) {
               } catch {}
               try { $('resume').disabled = false; } catch {}
             });
+            const bindVerifyId = (btn) => {
+              if (!btn || btn.dataset.bound === '1') return;
+              btn.dataset.bound = '1';
+              btn.addEventListener('click', async () => {
+                try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'verify_id_click' }); } catch {}
+                try {
+                  window.__ctHumanOverlayHintSticky = {
+                    text: 'Verificando ID (documento)... pode levar alguns minutos.',
+                    until: Date.now() + 420000
+                  };
+                } catch {}
+                try { $('hint').textContent = 'Verificando ID (documento)... pode levar alguns minutos.'; } catch {}
+                try { btn.disabled = true; } catch {}
+                try {
+                  if (typeof window.__ctHumanOverlayVerifyId === 'function') {
+                    const r = await window.__ctHumanOverlayVerifyId();
+                    const msg = (r && r.ok)
+                      ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
+                      : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown'));
+                    try {
+                      window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 };
+                    } catch {}
+                    try { $('hint').textContent = msg; } catch {}
+                  } else {
+                    try { $('hint').textContent = 'Falha: binding Verificar ID indisponível. Aguarde resincronização.'; } catch {}
+                  }
+                } catch (e) {
+                  try { $('hint').textContent = 'Falha ao Verificar ID.'; } catch {}
+                }
+                try { btn.disabled = false; } catch {}
+              });
+            };
+            bindVerifyId($('verifyId'));
 
             return host;
+          }
+
+          function ensureVerifyIdButton(shadow) {
+            try {
+              if (!shadow) return;
+              let b = shadow.getElementById('verifyId');
+              if (!b) {
+                const btns = shadow.querySelector('.btns');
+                if (!btns) return;
+                b = document.createElement('button');
+                b.id = 'verifyId';
+                b.textContent = 'Verificar ID';
+                b.title = 'Envia documento na 1ª ação necessária (não marca ID-sim do dia)';
+                const robe24 = shadow.getElementById('robe24h');
+                if (robe24 && robe24.parentNode === btns) btns.insertBefore(b, robe24);
+                else btns.appendChild(b);
+              }
+              if (b.dataset.bound === '1') return;
+              b.dataset.bound = '1';
+              b.addEventListener('click', async () => {
+                try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'verify_id_click' }); } catch {}
+                try {
+                  window.__ctHumanOverlayHintSticky = {
+                    text: 'Verificando ID (documento)... pode levar alguns minutos.',
+                    until: Date.now() + 420000
+                  };
+                } catch {}
+                try { shadow.getElementById('hint').textContent = 'Verificando ID (documento)... pode levar alguns minutos.'; } catch {}
+                try { b.disabled = true; } catch {}
+                try {
+                  if (typeof window.__ctHumanOverlayVerifyId === 'function') {
+                    const r = await window.__ctHumanOverlayVerifyId();
+                    const msg = (r && r.ok)
+                      ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
+                      : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown'));
+                    try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
+                    try { shadow.getElementById('hint').textContent = msg; } catch {}
+                  } else {
+                    try { shadow.getElementById('hint').textContent = 'Falha: binding Verificar ID indisponível.'; } catch {}
+                  }
+                } catch {
+                  try { shadow.getElementById('hint').textContent = 'Falha ao Verificar ID.'; } catch {}
+                }
+                try { b.disabled = false; } catch {}
+              });
+            } catch {}
           }
 
           function render() {
@@ -2632,6 +2741,7 @@ async function _installOverlayOnPage(nome, page) {
             const shadow = h.shadowRoot;
             if (!shadow) return;
             const $ = (id) => shadow.getElementById(id);
+            try { ensureVerifyIdButton(shadow); } catch {}
             const nome = [d.nome, d.label ? `— ${d.label}` : '', d.cidade ? `(${d.cidade})` : ''].filter(Boolean).join(' ');
             $('nome').textContent = nome;
             $('reason').textContent = String(d.reason || '');
@@ -2639,6 +2749,12 @@ async function _installOverlayOnPage(nome, page) {
             $('pass').textContent = String(d.password || '');
             $('sub').textContent = `Atualizado: ${nowIso()}`;
             setScrollButtonState();
+
+            const sticky = window.__ctHumanOverlayHintSticky;
+            if (sticky && sticky.until && Date.now() < Number(sticky.until) && sticky.text) {
+              try { $('hint').textContent = String(sticky.text); } catch {}
+              return;
+            }
 
             const f = d.flags || {};
             let statusTxt = '';
@@ -11412,6 +11528,48 @@ const handlers = {
     });
   },
 
+  async ['human-verify-id']({ nome }) {
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] human-verify-id chamada', { nome });
+      const n = String(nome || '').trim();
+      if (!n) return { ok: false, error: 'nome_ausente', marked: false };
+
+      const ctrl = controllers.get(n);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        return { ok: false, error: 'browser_not_connected', marked: false };
+      }
+      if (robeMeta[n] && robeMeta[n].emExecucao) {
+        return { ok: false, error: 'robe_em_execucao', marked: false };
+      }
+
+      let page = null;
+      try {
+        page = ctrl.mainPage || null;
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+          const pages = await ctrl.browser.pages().catch(() => []);
+          page = (pages && pages[0]) || null;
+        }
+      } catch {
+        page = null;
+      }
+      if (!page) return { ok: false, error: 'no_page', marked: false };
+
+      try {
+        const r = await robePostPublishId.runHumanVerifyId({
+          page,
+          nome: n,
+          deadlineAt: Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000)
+        });
+        try { await snapshotStatusAndWrite(); } catch {}
+        return Object.assign({ marked: false }, r && typeof r === 'object' ? r : { ok: false, error: 'verify_id_failed' });
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        try { provisionAudit.append({ ts: Date.now(), event: 'human_verify_id_exception', nome: n, error: msg.slice(0, 220) }); } catch {}
+        return { ok: false, error: msg, marked: false };
+      }
+    });
+  },
+
   async invoke_human({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
@@ -12294,6 +12452,10 @@ const handlers = {
       const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
       const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
       const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
+      const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDoneDay
+        ? String(man.accountFlags.robeIdDocDoneDay)
+        : null;
+      const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
       const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
       const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
       const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -12404,6 +12566,8 @@ const handlers = {
         identityRequired,
         identitySubmitted,
         identityNextCheckAt,
+        robeIdDocDoneDay,
+        robeIdDocDoneToday,
         appealSubmitted,
         appealSubmittedAt,
         appealNextCheckAt,
@@ -12820,6 +12984,10 @@ const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || n
 const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
 const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
 const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
+const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDoneDay
+  ? String(man.accountFlags.robeIdDocDoneDay)
+  : null;
+const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
 const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
@@ -12919,6 +13087,8 @@ perfis.push({
   identityRequired,
   identitySubmitted,
   identityNextCheckAt,
+  robeIdDocDoneDay,
+  robeIdDocDoneToday,
   appealSubmitted,
   appealSubmittedAt,
   appealNextCheckAt,
