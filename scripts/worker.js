@@ -137,15 +137,54 @@ try {
 try { if (typeof rotateForensicLogs24h === 'function') rotateForensicLogs24h(); } catch {}
 
 const browserHelper = require('./browser.js');
-const legacyVirtus = require('./virtus.js');
+
+// Fase 5b: lazy-load de módulos pesados no boot "só ouvir".
+// Rollback: WORKER_LAZY_LEGACY_MODULES=0 e/ou WORKER_LAZY_DELTA_HANDS=0
+const WORKER_LAZY_LEGACY_MODULES = String(
+  process.env.WORKER_LAZY_LEGACY_MODULES == null ? '1' : process.env.WORKER_LAZY_LEGACY_MODULES
+).trim() !== '0';
+const WORKER_LAZY_DELTA_HANDS = String(
+  process.env.WORKER_LAZY_DELTA_HANDS == null ? '1' : process.env.WORKER_LAZY_DELTA_HANDS
+).trim() !== '0';
+
+let legacyVirtus = null;
+let legacyVirtusLoadError = null;
+function loadLegacyVirtusRuntime() {
+  if (legacyVirtus && typeof legacyVirtus.startVirtus === 'function') return legacyVirtus;
+  try {
+    const mod = require('./virtus.js');
+    legacyVirtus = mod;
+    legacyVirtusLoadError = null;
+    try {
+      if (typeof provisionAudit !== 'undefined' && provisionAudit && provisionAudit.append) {
+        provisionAudit.append({ ts: Date.now(), event: 'lazy_load_legacy_virtus', ok: true });
+      }
+    } catch {}
+    return legacyVirtus;
+  } catch (e) {
+    legacyVirtus = null;
+    legacyVirtusLoadError = e;
+    throw e;
+  }
+}
+function getVirtusHelper() {
+  return loadLegacyVirtusRuntime();
+}
+
 let deltaVirtus = null;
 let deltaVirtusLoadError = null;
 function loadDeltaVirtusRuntime() {
   try {
+    if (deltaVirtus && typeof deltaVirtus.startVirtusDeltaRuntime === 'function') return true;
     const mod = require('./virtusDelta.js');
     if (mod && typeof mod.startVirtusDeltaRuntime === 'function') {
       deltaVirtus = mod;
       deltaVirtusLoadError = null;
+      try {
+        if (typeof provisionAudit !== 'undefined' && provisionAudit && provisionAudit.append) {
+          provisionAudit.append({ ts: Date.now(), event: 'lazy_load_delta_hands', ok: true });
+        }
+      } catch {}
       return true;
     }
     deltaVirtus = null;
@@ -157,14 +196,39 @@ function loadDeltaVirtusRuntime() {
     return false;
   }
 }
-loadDeltaVirtusRuntime();
-// Compat: código antigo ainda referencia virtusHelper.* em alguns pontos (ex.: garantirMarketplace).
-const virtusHelper = legacyVirtus;
-const robeHelper   = require('./robe.js');
+if (!WORKER_LAZY_DELTA_HANDS) {
+  loadDeltaVirtusRuntime();
+}
+// Compat: código antigo ainda referencia virtusHelper.* (Proxy → lazy).
+const virtusHelper = new Proxy(
+  {},
+  {
+    get(_t, prop) {
+      const mod = getVirtusHelper();
+      const v = mod ? mod[prop] : undefined;
+      return typeof v === 'function' ? v.bind(mod) : v;
+    }
+  }
+);
+// robe.js já é lazy em getRobeModuleFor — sem require eager no boot.
+let reloadManagerMod = null;
+function loadReloadManager() {
+  if (reloadManagerMod) return reloadManagerMod;
+  reloadManagerMod = require('./reloadManager.js');
+  try {
+    if (typeof provisionAudit !== 'undefined' && provisionAudit && provisionAudit.append) {
+      provisionAudit.append({ ts: Date.now(), event: 'lazy_load_reload_manager', ok: true });
+    }
+  } catch {}
+  return reloadManagerMod;
+}
+if (!WORKER_LAZY_LEGACY_MODULES) {
+  try { loadLegacyVirtusRuntime(); } catch {}
+  try { loadReloadManager(); } catch {}
+}
 const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
 const fotos        = require('./fotos.js');
-const reloadManager = require('./reloadManager.js');
 
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
@@ -218,12 +282,26 @@ function isDeltaEngineActiveStrict() {
 }
 
 // ===== Delta x Robe Feature Flags (Convivencia Sequencial) =====
-// Rollout imediato (default "1"), com rollback instantaneo via env=0 sem alterar codigo.
+// Fase 4a: frota Delta idle = poll robeTickGlobal OFF por default.
+// - DELTA_ALLOW_ROBE=1 + MANUAL_PLAY=1 → robe-play / startRobeDynamic liberados
+// - DELTA_ALLOW_ROBE_GLOBAL_TICK=0 (default) → sem varredura I/O a cada 7s
+// Fase 4c: com tick OFF, auto-repost via one-shot (arm) + fallback leve só em controllers abertos.
+// Hosts com auto-post poll clássico: DELTA_ALLOW_ROBE_GLOBAL_TICK=1
+// Rollback tick: DELTA_ALLOW_ROBE_GLOBAL_TICK=1 | arm: ROBE_EVENT_ARM=0
 try {
   process.env.DELTA_ALLOW_ROBE = String(process.env.DELTA_ALLOW_ROBE || '1').trim() === '1' ? '1' : '0';
   process.env.DELTA_ALLOW_ROBE_MANUAL_PLAY = String(process.env.DELTA_ALLOW_ROBE_MANUAL_PLAY || '1').trim() === '1' ? '1' : '0';
-  process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK = String(process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK || '1').trim() === '1' ? '1' : '0';
+  process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK = String(process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK || '0').trim() === '1' ? '1' : '0';
 } catch {}
+const ROBE_EVENT_ARM = String(process.env.ROBE_EVENT_ARM == null ? '1' : process.env.ROBE_EVENT_ARM).trim() !== '0';
+const ROBE_TICK_FALLBACK_MS = Math.max(
+  15_000,
+  Math.min(600_000, Number(process.env.ROBE_TICK_FALLBACK_MS || 60_000) || 60_000)
+);
+const ROBE_GATE_CACHE_TTL_MS = Math.max(
+  5_000,
+  Math.min(120_000, Number(process.env.ROBE_GATE_CACHE_TTL_MS || 30_000) || 30_000)
+);
 function isDeltaRobeAllowed() {
   try { return String(process.env.DELTA_ALLOW_ROBE || '0').trim() === '1'; } catch { return false; }
 }
@@ -232,6 +310,9 @@ function isDeltaRobeManualPlayAllowed() {
 }
 function isDeltaRobeGlobalTickAllowed() {
   try { return String(process.env.DELTA_ALLOW_ROBE_GLOBAL_TICK || '0').trim() === '1'; } catch { return false; }
+}
+function isRobeEventArmEnabled() {
+  return !!ROBE_EVENT_ARM;
 }
 
 function shouldBypassNurseZombie(nome, source = 'nurse') {
@@ -410,7 +491,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     throw new Error('delta_selected_but_runtime_unavailable');
   }
   try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR LEGADO (Texto Fixo).', { nome }); } catch {}
-  return legacyVirtus.startVirtus(browser, nome, baseCfg);
+  return loadLegacyVirtusRuntime().startVirtus(browser, nome, baseCfg);
 }
 
 // =========================
@@ -460,6 +541,15 @@ const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
 const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
 const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
+// Fase 1 (leveza): boot host-wide (assimilação/replay) roda 1× por máquina, não N× por shard.
+const DELTA_HOST_BOOT_LEADER_LOCK = path.join(DATA_DIR, '_delta_host_boot.leader.lock');
+const DELTA_HOST_BOOT_SINGLE_OWNER = String(
+  process.env.DELTA_HOST_BOOT_SINGLE_OWNER == null ? '1' : process.env.DELTA_HOST_BOOT_SINGLE_OWNER
+).trim() !== '0';
+const DELTA_HOST_BOOT_LEADER_TTL_MS = Math.max(
+  60_000,
+  Number(process.env.DELTA_HOST_BOOT_LEADER_TTL_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)
+);
 // P0 hardening (INC-20260207-1403-01):
 // Garantia "volta a trabalhar" pós stock_provision em ambiente com shards.
 // A causa observada foi "volta parcial" quando alguns workers/shards não retomam.
@@ -549,6 +639,133 @@ function _touchGovSnapshotLeader() {
   } catch {
     return false;
   }
+}
+
+/**
+ * Eleição sync (boot): 1 worker por host executa assimilação/replay.
+ * Revalidação multi-shard (4–8 workers):
+ * - PID morto = stale (failover)
+ * - phase running → done (followers recarregam estado do disco)
+ */
+function __deltaWriteHostBootLeaderLockSync(extra = {}) {
+  try {
+    ensureDirSync(path.dirname(DELTA_HOST_BOOT_LEADER_LOCK));
+    const hostId = (() => { try { return readHostIdSync(); } catch { return ''; } })();
+    const obj = {
+      ts: Date.now(),
+      hostId: hostId || null,
+      pid: process.pid,
+      shard: String(process.env.WORKER_SHARD_INDEX || ''),
+      leader: true,
+      kind: 'delta_host_boot',
+      ...(extra && typeof extra === 'object' ? extra : {})
+    };
+    fs.writeFileSync(DELTA_HOST_BOOT_LEADER_LOCK, JSON.stringify(obj, null, 2), 'utf8');
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function __deltaHostBootLeaderLockIsStale(lock, now = Date.now()) {
+  if (!lock || typeof lock !== 'object') return true;
+  const ts = Number(lock.ts || 0) || 0;
+  if (!ts || (now - ts) > DELTA_HOST_BOOT_LEADER_TTL_MS) return true;
+  const pid = Number(lock.pid || 0) || 0;
+  if (pid > 0 && pid !== process.pid) {
+    try {
+      if (typeof isPidAlive === 'function' && !isPidAlive(pid)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+function __deltaTryBecomeHostBootLeaderSync() {
+  if (!DELTA_HOST_BOOT_SINGLE_OWNER) return true;
+  const now = Date.now();
+  try {
+    ensureDirSync(path.dirname(DELTA_HOST_BOOT_LEADER_LOCK));
+    if (fs.existsSync(DELTA_HOST_BOOT_LEADER_LOCK)) {
+      const j = _readJsonSafe(DELTA_HOST_BOOT_LEADER_LOCK, null);
+      if (j && Number(j.pid || 0) === process.pid) {
+        try { __deltaWriteHostBootLeaderLockSync({ phase: String(j.phase || 'running') }); } catch {}
+        return true;
+      }
+      if (j && !__deltaHostBootLeaderLockIsStale(j, now)) {
+        return false;
+      }
+      try { fs.unlinkSync(DELTA_HOST_BOOT_LEADER_LOCK); } catch {}
+    }
+    const fd = fs.openSync(DELTA_HOST_BOOT_LEADER_LOCK, 'wx');
+    try {
+      const hostId = (() => { try { return readHostIdSync(); } catch { return ''; } })();
+      const obj = {
+        ts: now,
+        hostId: hostId || null,
+        pid: process.pid,
+        shard: String(process.env.WORKER_SHARD_INDEX || ''),
+        leader: true,
+        kind: 'delta_host_boot',
+        phase: 'running'
+      };
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      try { fs.fsyncSync(fd); } catch {}
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function __deltaMarkHostBootLeaderDoneSync() {
+  try { __deltaWriteHostBootLeaderLockSync({ phase: 'done', doneAt: Date.now() }); } catch {}
+}
+
+function __deltaSleepSyncMs(ms) {
+  const wait = Math.max(0, Number(ms || 0) || 0);
+  if (!(wait > 0)) return;
+  try {
+    const sab = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(sab, 0, 0, wait);
+    return;
+  } catch {}
+  // Fallback sem spin CPU: Node filho dorme (Windows/Linux).
+  try {
+    require('child_process').spawnSync(
+      process.execPath,
+      ['-e', `setTimeout(()=>{},${wait})`],
+      { timeout: wait + 1500, windowsHide: true }
+    );
+    return;
+  } catch {}
+  const end = Date.now() + wait;
+  while (Date.now() < end) { /* last-resort spin */ }
+}
+
+function __deltaWaitHostBootLeaderDoneSync({ timeoutMs = null } = {}) {
+  const defaultMs = Math.max(
+    30_000,
+    Math.min(Number(DELTA_HOST_BOOT_LEADER_TTL_MS || 0) || (10 * 60 * 1000), 8 * 60 * 1000)
+  );
+  const limit = Math.max(1_000, Number(timeoutMs == null ? defaultMs : timeoutMs) || defaultMs);
+  const started = Date.now();
+  while ((Date.now() - started) < limit) {
+    try {
+      const j = _readJsonSafe(DELTA_HOST_BOOT_LEADER_LOCK, null);
+      if (j && String(j.phase || '') === 'done') {
+        return { ok: true, reason: 'done' };
+      }
+      if (j && __deltaHostBootLeaderLockIsStale(j)) {
+        return { ok: false, reason: 'leader_dead_or_stale' };
+      }
+    } catch {}
+    __deltaSleepSyncMs(120);
+  }
+  return { ok: false, reason: 'timeout' };
 }
 
 function writeStockProvisionEndMarker({ owner = null, kind = null, untilMs = 0 } = {}) {
@@ -883,11 +1100,38 @@ function __deltaReplyIngressRelease(nome, clientMessageId) {
   } catch {}
 }
 
+const __accountFlagsCache = new Map(); // nome -> { at, flags }
+const ACCOUNT_FLAGS_CACHE_MS = Math.max(
+  250,
+  Math.min(15_000, Number(process.env.ACCOUNT_FLAGS_CACHE_MS || 2500) || 2500)
+);
+
 async function readAccountFlags(nome) {
   try {
-    const m = await manifestStore.read(nome).catch(()=>null);
-    return (m && m.accountFlags) ? m.accountFlags : {};
+    const n = String(nome || '');
+    const now = Date.now();
+    const hit = __accountFlagsCache.get(n);
+    if (hit && (now - Number(hit.at || 0)) < ACCOUNT_FLAGS_CACHE_MS) {
+      return (hit.flags && typeof hit.flags === 'object') ? hit.flags : {};
+    }
+    const m = await manifestStore.read(n).catch(() => null);
+    const flags = (m && m.accountFlags) ? m.accountFlags : {};
+    __accountFlagsCache.set(n, { at: now, flags });
+    // Bound simples: evita crescimento infinito em hosts com muitos perfis históricos.
+    if (__accountFlagsCache.size > 800) {
+      const first = __accountFlagsCache.keys().next().value;
+      if (first != null) __accountFlagsCache.delete(first);
+    }
+    return flags;
   } catch { return {}; }
+}
+
+function invalidateAccountFlagsCache(nome) {
+  try {
+    const n = String(nome || '');
+    if (!n) return;
+    __accountFlagsCache.delete(n);
+  } catch {}
 }
 
 function readHostIdSync() {
@@ -4217,6 +4461,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
 }
 
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
+  try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
     try {
     const prev = await readAccountFlags(nome);
@@ -4351,6 +4596,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       delete man.accountFlags.loginRemediateFailedCount;
       return man;
     });
+    // Pós-write: invalidate obrigatório (invalidate no início + read re-cacheia o valor antigo).
+    try { invalidateAccountFlagsCache(nome); } catch {}
     if (!already) {
       await issues.append(
         nome,
@@ -4372,6 +4619,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
 // 2FA (two-factor) => manter conta no host (sem exclusão automática).
 // Regra atual: bloquear automação, entrar em modo humano e marcar flag persistente.
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
+  try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
     try {
       const prev = await readAccountFlags(nome);
@@ -4399,6 +4647,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         delete man.accountFlags.twoFactorPendingClosePids;
         return man;
       });
+      try { invalidateAccountFlagsCache(nome); } catch {}
 
       try {
         const ctrl = controllers.get(nome);
@@ -4452,6 +4701,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
 async function setMessengerPinFlag(nome, { reason = 'messenger_pin_modal', source = 'messenger' } = {}) {
   try {
+    try { invalidateAccountFlagsCache(nome); } catch {}
     const prev = await readAccountFlags(nome);
     const already = prev && prev.messengerPin === true;
     await manifestStore.update(nome, (man) => {
@@ -4463,6 +4713,7 @@ async function setMessengerPinFlag(nome, { reason = 'messenger_pin_modal', sourc
       man.accountFlags.messengerPinAt = Date.now();
       return man;
     });
+    try { invalidateAccountFlagsCache(nome); } catch {}
     if (!already) {
       await issues.append(nome, 'mil_action', `messenger_pin_detected reason=${reason||''} source=${source||''} at=${new Date().toISOString()}`);
     }
@@ -4474,6 +4725,7 @@ async function setMessengerPinFlag(nome, { reason = 'messenger_pin_modal', sourc
 
 async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
   try {
+    try { invalidateAccountFlagsCache(nome); } catch {}
     const prev = await readAccountFlags(nome);
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -4547,6 +4799,7 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       if (Object.keys(man.accountFlags).length === 0) delete man.accountFlags;
       return man;
     });
+    try { invalidateAccountFlagsCache(nome); } catch {}
     if (which.includes('loginRequired') && (prev && prev.loginRequired)) {
       await issues.append(nome, 'login_required_cleared', `at=${new Date().toISOString()}`);
     }
@@ -5589,7 +5842,10 @@ const robeMeta = {};
 
 const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __agentDebugState = { lastByKey: Object.create(null) };
+// Fase 5a: debug agent OFF por default (evita fetch/heartbeat em frota). Rollback: AGENT_DEBUG=1
+const AGENT_DEBUG = String(process.env.AGENT_DEBUG || '0').trim() === '1';
 function __agentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
+  if (!AGENT_DEBUG) return;
   try {
     const now = Date.now();
     const k = String(key || `${hypothesisId}:${location}:${message}`);
@@ -5650,42 +5906,43 @@ function memorySweep() {
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
-setInterval(() => {
-  try {
-    __agentLog(
-      'H1',
-      'worker.js:runtimeHeartbeat',
-      'runtime_structure_sizes',
-      {
-        controllersSize: controllers.size,
-        prunersSize: _pruners.size,
-        activationLocksSize: activationLocks.size,
-        profileOpLocksSize: _profileOpLocks.size,
-        openingKeys: Object.keys(opening || {}).length,
-        robeMetaKeys: Object.keys(robeMeta || {}).length,
-        healthStateSize: healthState.size,
-        profileFailuresSize: profileFailures.size
-      },
-      'runtime.heartbeat.structures',
-      55000
-    );
-  } catch {}
-}, 60 * 1000);
-// #region agent log
-__agentLog(
-  'H5',
-  'worker.js:boot',
-  'debug_instrumentation_loaded',
-  {
-    pid: process.pid,
-    platform: process.platform,
-    hostId: (typeof readHostIdSync === 'function' ? (readHostIdSync() || null) : null)
-  },
-  `debug.boot.${String(process.pid)}`,
-  0
-);
-// #endregion
-
+if (AGENT_DEBUG) {
+  setInterval(() => {
+    try {
+      __agentLog(
+        'H1',
+        'worker.js:runtimeHeartbeat',
+        'runtime_structure_sizes',
+        {
+          controllersSize: controllers.size,
+          prunersSize: _pruners.size,
+          activationLocksSize: activationLocks.size,
+          profileOpLocksSize: _profileOpLocks.size,
+          openingKeys: Object.keys(opening || {}).length,
+          robeMetaKeys: Object.keys(robeMeta || {}).length,
+          healthStateSize: healthState.size,
+          profileFailuresSize: profileFailures.size
+        },
+        'runtime.heartbeat.structures',
+        55000
+      );
+    } catch {}
+  }, 60 * 1000);
+  // #region agent log
+  __agentLog(
+    'H5',
+    'worker.js:boot',
+    'debug_instrumentation_loaded',
+    {
+      pid: process.pid,
+      platform: process.platform,
+      hostId: (typeof readHostIdSync === 'function' ? (readHostIdSync() || null) : null)
+    },
+    `debug.boot.${String(process.pid)}`,
+    0
+  );
+  // #endregion
+}
 // Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
 setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
 
@@ -5822,9 +6079,23 @@ if (_issuesAppendOrig) {
   };
 }
 
+function invalidateRobeGateCache(nome) {
+  try {
+    if (!nome || !robeMeta[nome]) return;
+    delete robeMeta[nome]._frozenNegCacheAt;
+    delete robeMeta[nome]._gateCooldownCachedAt;
+    delete robeMeta[nome].robeCooldownUntilMem;
+  } catch {}
+}
+
 function isFrozenNow(nome) {
+  // Fase 4b: mem-first + negative cache — evita N× read de manifest/perfis no poll.
   const now = Date.now();
-  const inMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
+  robeMeta[nome] = robeMeta[nome] || {};
+  const inMem = Number(robeMeta[nome].frozenUntil || 0) || 0;
+  if (inMem > now) return inMem;
+  const negAt = Number(robeMeta[nome]._frozenNegCacheAt || 0) || 0;
+  if (negAt && (now - negAt) < ROBE_GATE_CACHE_TTL_MS) return 0;
   let inDisk = 0;
   try {
     const mPath = manifestPathOf(nome);
@@ -5834,7 +6105,13 @@ function isFrozenNow(nome) {
     }
   } catch {}
   const until = Math.max(inMem, inDisk || 0);
-  return until > now ? until : 0;
+  if (until > now) {
+    robeMeta[nome].frozenUntil = until;
+    try { delete robeMeta[nome]._frozenNegCacheAt; } catch {}
+    return until;
+  }
+  robeMeta[nome]._frozenNegCacheAt = now;
+  return 0;
 }
 
 const activationLocks = new Map();
@@ -7149,9 +7426,223 @@ async function robeLastPosted(nome) {
   return ts;
 }
 
+function robeDisarmNext(nome) {
+  try {
+    const n = String(nome || '');
+    if (!n) return;
+    const t = __robeArmTimers.get(n);
+    if (t) {
+      try { clearTimeout(t); } catch {}
+      __robeArmTimers.delete(n);
+    }
+    if (robeMeta[n]) {
+      try { delete robeMeta[n].robeArmedUntil; } catch {}
+      try { delete robeMeta[n].robeArmReason; } catch {}
+    }
+  } catch {}
+}
+
+function robeScheduleFromCooldownSec(nome, cooldownSec, reason = 'cooldown') {
+  if (!isRobeEventArmEnabled()) return false;
+  const n = String(nome || '');
+  if (!n) return false;
+  const sec = Math.max(0, Number(cooldownSec || 0) || 0);
+  // Não arma due_now=0 (evita loop se ciclo abortou sem cooldown). Fallback leve cobre elegíveis.
+  if (!(sec > 0)) {
+    robeDisarmNext(n);
+    return false;
+  }
+  const dueAt = Date.now() + (sec * 1000);
+  return robeArmNext(n, dueAt, reason);
+}
+
+const __robeArmTimers = new Map(); // nome -> Timeout
+let __robeFallbackLastAt = 0;
+let __robeFallbackRunning = false;
+
+function robeArmNext(nome, dueAtMs, reason = 'cooldown') {
+  if (!isRobeEventArmEnabled()) return false;
+  const n = String(nome || '');
+  if (!n) return false;
+  robeDisarmNext(n);
+  const now = Date.now();
+  const due = Math.max(now + 250, Number(dueAtMs || 0) || (now + 250));
+  const delay = Math.min(Math.max(250, due - now) + Math.floor(Math.random() * 1200), 2147483647);
+  const handle = setTimeout(() => {
+    try { __robeArmTimers.delete(n); } catch {}
+    robeFireArmed(n, reason).catch(() => {});
+  }, delay);
+  try { handle.unref?.(); } catch {}
+  __robeArmTimers.set(n, handle);
+  robeMeta[n] = robeMeta[n] || {};
+  robeMeta[n].robeArmedUntil = due;
+  robeMeta[n].robeArmReason = String(reason || '').slice(0, 40);
+  try {
+    provisionAudit.append({
+      ts: now,
+      event: 'robe_arm_scheduled',
+      nome: n,
+      reason: String(reason || '').slice(0, 40),
+      dueAt: due,
+      delayMs: delay
+    });
+  } catch {}
+  return true;
+}
+
+async function robeFireArmed(nome, reason = 'arm_fire') {
+  const n = String(nome || '');
+  if (!n) return { ok: false, reason: 'no_nome' };
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'robe_arm_fire',
+      nome: n,
+      reason: String(reason || '').slice(0, 40)
+    });
+  } catch {}
+  return robeEnqueueAuto(n, `arm:${reason}`);
+}
+
+/**
+ * Fase 4b/4c: elegibilidade de 1 perfil (controller-first — sem varrer perfis.json inteiro).
+ */
+async function robeIsAutoEnqueueEligible(nome) {
+  const n = String(nome || '');
+  if (!n) return { ok: false, reason: 'no_nome' };
+  try {
+    if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
+      return { ok: false, reason: 'delta_robe_off' };
+    }
+  } catch {}
+  try {
+    if (provisionLock.isActive()) return { ok: false, reason: 'provision_lock' };
+  } catch {}
+  if (robeMeta[n]?.ramKilledAt && robeMeta[n].ramKillBackoff && robeMeta[n].ramKillBackoff > Date.now()) {
+    return { ok: false, reason: 'ram_backoff' };
+  }
+  const ctrl = controllers.get(n);
+  if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) {
+    return { ok: false, reason: 'not_working' };
+  }
+  if (isFrozenNow(n)) return { ok: false, reason: 'frozen' };
+  if (robeQueue.inQueue(n) || robeQueue.isActive(n)) return { ok: false, reason: 'queue_busy' };
+  try { await unfreezeCooldownIfWorking(n); } catch {}
+  const manGate = await manifestStore.read(n).catch(() => null);
+  let cooldown = await normalizeCooldown(n);
+  try {
+    robeMeta[n] = robeMeta[n] || {};
+    robeMeta[n].robeCooldownUntilMem = Number(manGate && manGate.robeCooldownUntil || 0) || 0;
+    robeMeta[n]._gateCooldownCachedAt = Date.now();
+  } catch {}
+  const nowForGate = Date.now();
+  const pauseReason = String((manGate && manGate.robePauseReason) || '').trim().toLowerCase();
+  const hasActiveCooldown = (
+    (Number(manGate && manGate.robeCooldownUntil || 0) > nowForGate) ||
+    (Number(manGate && manGate.robeCooldownRemainingMs || 0) > 0)
+  );
+  if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > nowForGate) {
+    return { ok: false, reason: 'limit_posting' };
+  }
+  if (cooldown > 0 && pauseReason === 'limit_posting' && hasActiveCooldown) {
+    return { ok: false, reason: 'limit_posting_cooldown' };
+  }
+  if (cooldown > 0) return { ok: false, reason: 'cooldown', cooldownSec: cooldown };
+  return { ok: true, reason: 'eligible' };
+}
+
+async function robeEnqueueAuto(nome, source = 'auto') {
+  const n = String(nome || '');
+  const gate = await robeIsAutoEnqueueEligible(n);
+  if (!gate.ok) return { ok: false, reason: gate.reason || 'gated' };
+  logger.info('[WORKER][robeEnqueueAuto] Enfileirando', {
+    nome: n,
+    source: String(source || '').slice(0, 40),
+    cooldown: 0,
+    inQueue: robeQueue.inQueue(n),
+    isActive: robeQueue.isActive(n)
+  });
+  const enq = robeQueue.enqueue(n, async () => {
+    await robeQueuedCycle(n, source);
+  });
+  if (enq) {
+    robeUpdateMeta(n, { emFila: true });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robe_auto_enqueued',
+        nome: n,
+        source: String(source || '').slice(0, 40)
+      });
+    } catch {}
+  }
+  return { ok: !!enq, reason: enq ? 'enqueued' : 'enqueue_false' };
+}
+
+/**
+ * Fase 4c: com GLOBAL_TICK=0, NÃO redescobre auto-post em massa.
+ * Só recupera arms vencidos/perdidos (one-shot falhou) — frota ouvinte permanece quieta
+ * até robe-play ou até um ciclo anterior armar cooldown.
+ */
+async function robeFallbackLightTick() {
+  if (!isRobeEventArmEnabled()) return { ok: false, reason: 'arm_off' };
+  if (__robeFallbackRunning) return { ok: false, reason: 'busy' };
+  const now = Date.now();
+  if (__robeFallbackLastAt && (now - __robeFallbackLastAt) < ROBE_TICK_FALLBACK_MS) {
+    return { ok: false, reason: 'throttle' };
+  }
+  __robeFallbackRunning = true;
+  __robeFallbackLastAt = now;
+  let enq = 0;
+  let armedDue = 0;
+  try {
+    try {
+      if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
+        return { ok: false, reason: 'delta_robe_off' };
+      }
+    } catch {}
+    try {
+      if (provisionLock.isActive()) return { ok: false, reason: 'provision_lock' };
+    } catch {}
+    const nomes = [];
+    try {
+      for (const nome of controllers.keys()) nomes.push(nome);
+    } catch {}
+    for (const nome of nomes) {
+      const due = Number(robeMeta[nome] && robeMeta[nome].robeArmedUntil || 0) || 0;
+      if (!due || due > (now + 500)) continue;
+      armedDue++;
+      const r = await robeEnqueueAuto(nome, 'fallback_missed_arm');
+      if (r && r.ok) enq++;
+      if (enq >= 1) break;
+    }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robe_fallback_light_tick',
+        scanned: nomes.length,
+        armedDue,
+        enqueued: enq,
+        fallbackMs: ROBE_TICK_FALLBACK_MS
+      });
+    } catch {}
+    return { ok: true, enqueued: enq, scanned: nomes.length, armedDue };
+  } catch (e) {
+    return { ok: false, reason: String((e && e.message) || e || 'err').slice(0, 80) };
+  } finally {
+    __robeFallbackRunning = false;
+  }
+}
+
 function robeUpdateMeta(nome, patch) {
   robeMeta[nome] = robeMeta[nome] || {};
   Object.assign(robeMeta[nome], patch || {});
+  // Fase 4c: cooldownSec conhecido → one-shot (não arma due_now=0; fallback cobre).
+  try {
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'cooldownSec')) {
+      robeScheduleFromCooldownSec(nome, patch.cooldownSec, 'meta_cooldown');
+    }
+  } catch {}
 }
 
 function getWorkingProfileNames() {
@@ -7947,137 +8438,8 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
   }
 }
 
-async function robeTickGlobal() {
-  // Delta opera escuta/passivo em messages + marketplace UI; Robe so cicla com feature flags de convivencia.
-  const deltaModeActive = (() => {
-    try {
-      if (readDesiredVirtusEngineRuntime() === 'delta') return true;
-    } catch {}
-    return false;
-  })();
-  const deltaAllowRobe = isDeltaRobeAllowed();
-  const deltaAllowGlobalTick = isDeltaRobeGlobalTickAllowed();
-  if (deltaModeActive && (!deltaAllowRobe || !deltaAllowGlobalTick)) {
-    try {
-      robeTickGlobal._lastDeltaSkipLogAt = robeTickGlobal._lastDeltaSkipLogAt || 0;
-      const now = Date.now();
-      const last = Number(robeTickGlobal._lastDeltaSkipLogAt || 0) || 0;
-      if (!last || (now - last) > 30000) {
-        robeTickGlobal._lastDeltaSkipLogAt = now;
-        logger.info('[DELTA_ROBE_BLOCK] robeTickGlobal ignorado: Delta ativo, evitando restart concorrente.', {
-          source: 'robeTickGlobal',
-          allowRobe: deltaAllowRobe ? 1 : 0,
-          allowGlobalTick: deltaAllowGlobalTick ? 1 : 0
-        });
-      }
-    } catch {}
-    return;
-  }
-  if (deltaModeActive && deltaAllowRobe && deltaAllowGlobalTick) {
-    try {
-      robeTickGlobal._lastDeltaAllowLogAt = robeTickGlobal._lastDeltaAllowLogAt || 0;
-      const now = Date.now();
-      const last = Number(robeTickGlobal._lastDeltaAllowLogAt || 0) || 0;
-      if (!last || (now - last) > 30000) {
-        robeTickGlobal._lastDeltaAllowLogAt = now;
-        logger.info('[DELTA_ROBE_SEMAPHORE] robeTickGlobal habilitado por feature flags.', {
-          source: 'robeTickGlobal',
-          allowRobe: 1,
-          allowGlobalTick: 1
-        });
-      }
-    } catch {}
-  }
-
-  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
-  try {
-    if (provisionLock.isActive()) {
-      try {
-        robeTickGlobal._lastProvisionLockLogAt = robeTickGlobal._lastProvisionLockLogAt || 0;
-        const now = Date.now();
-        const last = Number(robeTickGlobal._lastProvisionLockLogAt || 0) || 0;
-        if (!last || (now - last) > 60000) {
-          robeTickGlobal._lastProvisionLockLogAt = now;
-          await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
-        }
-      } catch {}
-      return;
-    }
-  } catch {}
-  // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
-  const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
-  let lightMaxEnqueue = null;
-  if (isLight) {
-    try {
-      autoMode.light = autoMode.light || {};
-      const now = Date.now();
-      const nextAt = Number(autoMode.light.nextRobeEnqueueAt || 0) || 0;
-      lightMaxEnqueue = Number(AUTO_CFG.ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || 0) || 0;
-      if (lightMaxEnqueue <= 0) {
-        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
-        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
-        if (!lastLog || (now - lastLog) > 60000) {
-          autoMode.light._lastRobeSkipLogAt = now;
-          await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} policy=max0`);
-        }
-        return;
-      }
-      if (nextAt && now < nextAt) {
-        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
-        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
-        if (!lastLog || (now - lastLog) > 60000) {
-          autoMode.light._lastRobeSkipLogAt = now;
-          await milLog('mil_action', `robeTickGlobal_throttle_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} nextAt=${nextAt}`);
-        }
-        return;
-      }
-      autoMode.light.nextRobeEnqueueAt = now + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-    } catch {}
-  }
-
-  const perfisArr = loadPerfisJson();
-  const nomesAll = perfisArr.map(p => p.nome);
-  const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
-    if (isFrozenNow(nome)) return null;
-    if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
-      return null;
-    }
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
-    const manGate = await manifestStore.read(nome).catch(()=>null);
-    // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
-    // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
-    try { await unfreezeCooldownIfWorking(nome); } catch {}
-    let cooldown = await normalizeCooldown(nome);
-    const inFila = robeQueue.inQueue(nome);
-    const exec = robeQueue.isActive(nome);
-    const nowForGate = Date.now();
-    const pauseReason = String((manGate && manGate.robePauseReason) || '').trim().toLowerCase();
-    const hasActiveCooldown = (
-      (Number(manGate && manGate.robeCooldownUntil || 0) > nowForGate) ||
-      (Number(manGate && manGate.robeCooldownRemainingMs || 0) > 0)
-    );
-    if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > nowForGate) {
-      try { await issues.append(nome, 'mil_action', 'skip_robe_enqueue_due_limit_posting_active'); } catch {}
-      return null;
-    }
-    // Modo V1 clássico: respeita apenas bloqueio hard de limit_posting ativo.
-    // Outros pauseReason não devem travar o ciclo 24/7.
-    if (cooldown > 0 && pauseReason === 'limit_posting' && hasActiveCooldown) {
-      return null;
-    }
-    return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
-  }));
-  const prontos = prontosArr.filter(Boolean);
-
-  let enqCount = 0;
-  for (const nome of prontos) {
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) continue;
-
-    logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
-
-    robeQueue.enqueue(nome, async () => {
+async function robeQueuedCycle(nome, source = 'auto') {
+  const src = String(source || 'auto').slice(0, 40);
 
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -8094,8 +8456,8 @@ async function robeTickGlobal() {
         return;
       }
 
-      try { logger.info('[WORKER][robeTickGlobal] Robe start', { nome }); } catch {}
-      try { await reportAction(nome, 'robe_start', 'Iniciando Robe via fila global'); } catch {}
+      try { logger.info('[WORKER][robeQueuedCycle] Robe start', { nome, source: src }); } catch {}
+      try { await reportAction(nome, 'robe_start', `Iniciando Robe via fila global (${src})`); } catch {}
 
       let mainPage = null;
       try {
@@ -8134,13 +8496,13 @@ async function robeTickGlobal() {
             robeMeta[nome].limitPostingThisRun = Date.now();
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
-            try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
+            try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeQueuedCycle)'); } catch {}
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
-          try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
+          try { logger.warn('[WORKER][robeQueuedCycle] Robe error', { nome, error: e && e.message || e }); } catch {}
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
@@ -8172,7 +8534,7 @@ async function robeTickGlobal() {
             ultimaPostagem: Date.now()
           });
           try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
-          try { logger.info('[WORKER][robeTickGlobal] Robe success', { nome }); } catch {}
+          try { logger.info('[WORKER][robeQueuedCycle] Robe success', { nome }); } catch {}
         } else {
           robeUpdateMeta(nome, {
             estado: 'idle',
@@ -8228,13 +8590,147 @@ async function robeTickGlobal() {
         }
 
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
-        try { logger.info('[WORKER][robeTickGlobal] Robe end', { nome }); } catch {}
+        try { logger.info('[WORKER][robeQueuedCycle] Robe end', { nome }); } catch {}
       }
-    });
+}
 
-    robeUpdateMeta(nome, { emFila: true });
-    enqCount++;
-    if (isLight && lightMaxEnqueue != null && enqCount >= lightMaxEnqueue) break;
+async function robeTickGlobal() {
+  // Fase 4a: no Delta, poll de elegibilidade só com DELTA_ALLOW_ROBE_GLOBAL_TICK=1.
+  // Default OFF evita N× reads (perfis/manifest/cooldown) a cada 7s em frota ouvinte.
+  // robe-play / startRobeDynamic NÃO passam por aqui — gated por ALLOW_ROBE + MANUAL_PLAY.
+  const deltaModeActive = (() => {
+    try {
+      if (isDeltaEngineActiveStrict()) return true;
+    } catch {}
+    try {
+      if (readDesiredVirtusEngineRuntime() === 'delta') return true;
+    } catch {}
+    return false;
+  })();
+  const deltaAllowRobe = isDeltaRobeAllowed();
+  const deltaAllowGlobalTick = isDeltaRobeGlobalTickAllowed();
+  if (deltaModeActive && (!deltaAllowRobe || !deltaAllowGlobalTick)) {
+    try {
+      robeTickGlobal._lastDeltaSkipLogAt = robeTickGlobal._lastDeltaSkipLogAt || 0;
+      const now = Date.now();
+      const last = Number(robeTickGlobal._lastDeltaSkipLogAt || 0) || 0;
+      if (!last || (now - last) > 30000) {
+        robeTickGlobal._lastDeltaSkipLogAt = now;
+        const reason = !deltaAllowRobe ? 'allow_robe_off' : 'global_tick_off';
+        logger.info('[DELTA_ROBE_BLOCK] robeTickGlobal ignorado: Delta ativo (Fase 4a idle skip).', {
+          source: 'robeTickGlobal',
+          reason,
+          allowRobe: deltaAllowRobe ? 1 : 0,
+          allowGlobalTick: deltaAllowGlobalTick ? 1 : 0
+        });
+        try {
+          provisionAudit.append({
+            ts: now,
+            event: 'robe_global_tick_skip_delta',
+            reason,
+            allowRobe: deltaAllowRobe ? 1 : 0,
+            allowGlobalTick: deltaAllowGlobalTick ? 1 : 0
+          });
+        } catch {}
+      }
+    } catch {}
+    // Fase 4c: tick poll OFF, mas arm/fallback leve cobre auto-repost (só controllers).
+    if (deltaAllowRobe && isRobeEventArmEnabled()) {
+      try { await robeFallbackLightTick(); } catch {}
+    }
+    return;
+  }
+  if (deltaModeActive && deltaAllowRobe && deltaAllowGlobalTick) {
+    try {
+      robeTickGlobal._lastDeltaAllowLogAt = robeTickGlobal._lastDeltaAllowLogAt || 0;
+      const now = Date.now();
+      const last = Number(robeTickGlobal._lastDeltaAllowLogAt || 0) || 0;
+      if (!last || (now - last) > 30000) {
+        robeTickGlobal._lastDeltaAllowLogAt = now;
+        logger.info('[DELTA_ROBE_SEMAPHORE] robeTickGlobal habilitado por feature flags.', {
+          source: 'robeTickGlobal',
+          allowRobe: 1,
+          allowGlobalTick: 1
+        });
+        try {
+          provisionAudit.append({
+            ts: now,
+            event: 'robe_global_tick_allow_delta',
+            allowRobe: 1,
+            allowGlobalTick: 1
+          });
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
+  try {
+    if (provisionLock.isActive()) {
+      try {
+        robeTickGlobal._lastProvisionLockLogAt = robeTickGlobal._lastProvisionLockLogAt || 0;
+        const now = Date.now();
+        const last = Number(robeTickGlobal._lastProvisionLockLogAt || 0) || 0;
+        if (!last || (now - last) > 60000) {
+          robeTickGlobal._lastProvisionLockLogAt = now;
+          await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
+        }
+      } catch {}
+      return;
+    }
+  } catch {}
+  // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
+  const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
+  let lightMaxEnqueue = null;
+  if (isLight) {
+    try {
+      autoMode.light = autoMode.light || {};
+      const now = Date.now();
+      const nextAt = Number(autoMode.light.nextRobeEnqueueAt || 0) || 0;
+      lightMaxEnqueue = Number(AUTO_CFG.ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || 0) || 0;
+      if (lightMaxEnqueue <= 0) {
+        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
+        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
+        if (!lastLog || (now - lastLog) > 60000) {
+          autoMode.light._lastRobeSkipLogAt = now;
+          await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} policy=max0`);
+        }
+        return;
+      }
+      if (nextAt && now < nextAt) {
+        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
+        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
+        if (!lastLog || (now - lastLog) > 60000) {
+          autoMode.light._lastRobeSkipLogAt = now;
+          await milLog('mil_action', `robeTickGlobal_throttle_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} nextAt=${nextAt}`);
+        }
+        return;
+      }
+      autoMode.light.nextRobeEnqueueAt = now + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
+    } catch {}
+  }
+
+  // Fase 4b: só controllers abertos (elegível exige browser trabalhando) — sem perfis.json×N.
+  const nomesAll = Array.from(controllers.keys());
+  const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
+    if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
+      return null;
+    }
+    if (isFrozenNow(nome)) return null;
+    const gate = await robeIsAutoEnqueueEligible(nome);
+    return (gate && gate.ok) ? nome : null;
+  }));
+  const prontos = prontosArr.filter(Boolean);
+
+  let enqCount = 0;
+  for (const nome of prontos) {
+    const r = await robeEnqueueAuto(nome, 'robeTickGlobal');
+    if (r && r.ok) {
+      enqCount++;
+      if (isLight && lightMaxEnqueue != null && enqCount >= lightMaxEnqueue) break;
+    }
   }
 
   for (const n of Object.keys(robeMeta)) {
@@ -8245,11 +8741,16 @@ async function robeTickGlobal() {
   }
 }
 
-setInterval(robeTickGlobal, 7000);
-setTimeout(robeTickGlobal, 3500);
+// Agendamento robeTick: ensureRobeTickScheduled('boot') no final do módulo (após flags Fase 5a).
 
 async function fotosGcTick() {
   try {
+    // GC de fotos é host-wide (índice compartilhado) — 1 worker líder evita contenção N×shards.
+    if (!_isGovSnapshotLeader()) {
+      _tryBecomeGovSnapshotLeader();
+      if (!_isGovSnapshotLeader()) return;
+    }
+    _touchGovSnapshotLeader();
     const res = await fotos.gcSweep();
     if (res && (res.deletedFiles || res.removedIndex || res.resetGens)) {
       logger.info('[FOTOS][GC] resultado', { deletedFiles: res.deletedFiles, removedIndex: res.removedIndex, resetGens: res.resetGens });
@@ -11327,6 +11828,8 @@ const handlers = {
           delete robeMeta[nome].pauseReason;
           delete robeMeta[nome].lastRobeBlockAt;
         }
+        try { invalidateRobeGateCache(nome); } catch {}
+        try { robeDisarmNext(nome); } catch {}
       } catch {}
 
       if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
@@ -12105,6 +12608,16 @@ const handlers = {
           failed: Number(out.failed || 0) || 0
         });
       } catch {}
+      // Fase 5a: reavalia intervals mortos após troca de engine (sem restart do processo).
+      try { ensureHealthTickScheduled(`rollover_${targetEngine}`); } catch {}
+      try { ensureRobeTickScheduled(`rollover_${targetEngine}`); } catch {}
+      try { invalidateNurseDesiredCache(); } catch {}
+      // Fase 5b: legado precisa do reloadManager; Delta continua sem.
+      try {
+        if (String(targetEngine || '') === 'legacy') {
+          loadReloadManager().startReloadManager(controllers, robeMeta);
+        }
+      } catch {}
       try { await snapshotStatusAndWrite(); } catch {}
       return out;
     } catch (e) {
@@ -12625,6 +13138,240 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
+// Fase 5a: cache curto de desired no nurse (I/O ×N workers). Invalidado no wake kick / write.
+// Rollback: NURSE_DESIRED_CACHE_MS=0
+const NURSE_DESIRED_CACHE_MS = Math.max(
+  0,
+  Math.min(10_000, Number(process.env.NURSE_DESIRED_CACHE_MS == null ? 2000 : process.env.NURSE_DESIRED_CACHE_MS) || 0)
+);
+let __nurseDesiredCache = { at: 0, value: null };
+function invalidateNurseDesiredCache() {
+  __nurseDesiredCache = { at: 0, value: null };
+}
+function readDesiredForNurse({ force = false } = {}) {
+  try {
+    const now = Date.now();
+    if (
+      !force &&
+      NURSE_DESIRED_CACHE_MS > 0 &&
+      __nurseDesiredCache.value &&
+      (now - Number(__nurseDesiredCache.at || 0)) < NURSE_DESIRED_CACHE_MS
+    ) {
+      return __nurseDesiredCache.value;
+    }
+    const v = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+    __nurseDesiredCache = { at: now, value: v };
+    return v;
+  } catch {
+    return { perfis: {} };
+  }
+}
+
+// Fase 5a: não agendar intervals mortos no Delta (health). Robe só se tick/arm precisar.
+// Rollback: DELTA_SKIP_DEAD_INTERVALS=0
+const DELTA_SKIP_DEAD_INTERVALS = String(
+  process.env.DELTA_SKIP_DEAD_INTERVALS == null ? '1' : process.env.DELTA_SKIP_DEAD_INTERVALS
+).trim() !== '0';
+let __healthTickTimer = null;
+let __healthTickBootTimer = null;
+let __robeTickTimer = null;
+let __robeTickBootTimer = null;
+
+function __deltaShouldScheduleHealthTick() {
+  if (!DELTA_SKIP_DEAD_INTERVALS) return true;
+  try {
+    if (isDeltaMotorEnabledRuntime()) return false;
+  } catch {}
+  return true;
+}
+
+function __deltaShouldScheduleRobeTick() {
+  if (!DELTA_SKIP_DEAD_INTERVALS) return true;
+  try {
+    if (!isDeltaMotorEnabledRuntime()) return true;
+  } catch {
+    return true;
+  }
+  // Delta: precisa do interval se poll clássico ON, ou arm/fallback (Fase 4c).
+  try {
+    if (isDeltaRobeGlobalTickAllowed()) return true;
+  } catch {}
+  try {
+    if (isDeltaRobeAllowed() && isRobeEventArmEnabled()) return true;
+  } catch {}
+  return false;
+}
+
+function ensureHealthTickScheduled(reason = '') {
+  const need = __deltaShouldScheduleHealthTick();
+  if (!need) {
+    try {
+      if (__healthTickTimer) { clearInterval(__healthTickTimer); __healthTickTimer = null; }
+      if (__healthTickBootTimer) { clearTimeout(__healthTickBootTimer); __healthTickBootTimer = null; }
+    } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'health_tick_unscheduled_delta',
+        reason: String(reason || '').slice(0, 40)
+      });
+    } catch {}
+    return false;
+  }
+  if (!__healthTickTimer) {
+    __healthTickTimer = setInterval(() => { healthTick().catch(() => {}); }, HEALTH_CFG.TICK_MS);
+  }
+  if (!__healthTickBootTimer) {
+    __healthTickBootTimer = setTimeout(() => { healthTick().catch(() => {}); }, 2500);
+  }
+  return true;
+}
+
+function ensureRobeTickScheduled(reason = '') {
+  const need = __deltaShouldScheduleRobeTick();
+  if (!need) {
+    try {
+      if (__robeTickTimer) { clearInterval(__robeTickTimer); __robeTickTimer = null; }
+      if (__robeTickBootTimer) { clearTimeout(__robeTickBootTimer); __robeTickBootTimer = null; }
+    } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robe_tick_unscheduled_delta',
+        reason: String(reason || '').slice(0, 40)
+      });
+    } catch {}
+    return false;
+  }
+  if (!__robeTickTimer) {
+    __robeTickTimer = setInterval(robeTickGlobal, 7000);
+  }
+  if (!__robeTickBootTimer) {
+    __robeTickBootTimer = setTimeout(robeTickGlobal, 3500);
+  }
+  return true;
+}
+
+// Fase 2b: idle skip de pageReadyBasic (DOM pesado) — default ON, rollback via env=0.
+// Só aplica no motor Delta (2b.1); legado continua avaliando sempre.
+const NURSE_DOM_IDLE_SKIP = String(process.env.NURSE_DOM_IDLE_SKIP == null ? '1' : process.env.NURSE_DOM_IDLE_SKIP).trim() !== '0';
+const NURSE_DOM_IDLE_TTL_MS = Math.max(
+  5_000,
+  Math.min(180_000, Number(process.env.NURSE_DOM_IDLE_TTL_MS || 45_000) || 45_000)
+);
+const NURSE_DOM_IDLE_GRACE_AFTER_ACTIVATE_MS = Math.max(
+  0,
+  Math.min(120_000, Number(process.env.NURSE_DOM_IDLE_GRACE_AFTER_ACTIVATE_MS || 30_000) || 30_000)
+);
+const NURSE_DOM_IDLE_SKIP_LOG_MS = Math.max(
+  5_000,
+  Math.min(300_000, Number(process.env.NURSE_DOM_IDLE_SKIP_LOG_MS || 60_000) || 60_000)
+);
+
+// Fase 3b: skip probe phantom (evaluateChatsState) no motor Delta — default ON.
+// tryFixPhantom já é bypass; isto evita evaluate DOM inútil se a aba cair em marketplace.
+const NURSE_PHANTOM_PROBE_DELTA_SKIP = String(
+  process.env.NURSE_PHANTOM_PROBE_DELTA_SKIP == null ? '1' : process.env.NURSE_PHANTOM_PROBE_DELTA_SKIP
+).trim() !== '0';
+const NURSE_PHANTOM_PROBE_SKIP_LOG_MS = Math.max(
+  5_000,
+  Math.min(300_000, Number(process.env.NURSE_PHANTOM_PROBE_SKIP_LOG_MS || 60_000) || 60_000)
+);
+
+// Fase 3c: no Delta, não registrar listeners Puppeteer só-health (alimentam healthState morto).
+// Mantém sempre o CDP ear. Rollback: WIRE_HEALTH_LISTENERS_DELTA_SKIP=0
+const WIRE_HEALTH_LISTENERS_DELTA_SKIP = String(
+  process.env.WIRE_HEALTH_LISTENERS_DELTA_SKIP == null ? '1' : process.env.WIRE_HEALTH_LISTENERS_DELTA_SKIP
+).trim() !== '0';
+const WIRE_HEALTH_SKIP_LOG_MS = Math.max(
+  5_000,
+  Math.min(300_000, Number(process.env.WIRE_HEALTH_SKIP_LOG_MS || 60_000) || 60_000)
+);
+
+// Fase 3 (fecho): formaliza no-op de block-detect no Delta idle (URL canônica /messages).
+// Nunca skipa messenger.com (virtus_block) nem robe/create (limit posting).
+// Rollback: NURSE_BLOCK_DETECT_DELTA_SKIP=0
+const NURSE_BLOCK_DETECT_DELTA_SKIP = String(
+  process.env.NURSE_BLOCK_DETECT_DELTA_SKIP == null ? '1' : process.env.NURSE_BLOCK_DETECT_DELTA_SKIP
+).trim() !== '0';
+const NURSE_BLOCK_DETECT_SKIP_LOG_MS = Math.max(
+  5_000,
+  Math.min(300_000, Number(process.env.NURSE_BLOCK_DETECT_SKIP_LOG_MS || 60_000) || 60_000)
+);
+const NURSE_FB_LIMIT_SCAN_TTL_MS = Math.max(
+  5_000,
+  Math.min(120_000, Number(process.env.NURSE_FB_LIMIT_SCAN_TTL_MS || 25_000) || 25_000)
+);
+
+/**
+ * Skip seguro do evaluate DOM no nurse (pós-ctrl, pós-guards).
+ * Nunca atrasa want.active&&!ctrl — esse path continua antes desta chamada.
+ */
+function shouldSkipNurseDomHealthIdle(nome) {
+  if (!NURSE_DOM_IDLE_SKIP) return { skip: false, reason: 'flag_off' };
+  try {
+    if (!isDeltaMotorEnabledRuntime()) return { skip: false, reason: 'not_delta' };
+  } catch {
+    return { skip: false, reason: 'delta_check_err' };
+  }
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    const strikes = Number(robeMeta[nome].zombieStrikes || 0) || 0;
+    if (strikes > 0) return { skip: false, reason: 'zombie_strikes' };
+    const now = Date.now();
+    const last = Number(robeMeta[nome].lastPageReadyAt || 0) || 0;
+    if (!last) return { skip: false, reason: 'no_last_ready' };
+    const ageMs = now - last;
+    if (ageMs > NURSE_DOM_IDLE_TTL_MS) return { skip: false, reason: 'ttl_expired', ageMs };
+    const activatedAt = Number(robeMeta[nome].activatedAt || 0) || 0;
+    if (activatedAt > 0 && (now - activatedAt) < NURSE_DOM_IDLE_GRACE_AFTER_ACTIVATE_MS) {
+      return { skip: false, reason: 'activate_grace', ageMs: now - activatedAt };
+    }
+    return { skip: true, reason: 'idle_fresh', ageMs };
+  } catch {
+    return { skip: false, reason: 'error' };
+  }
+}
+
+function markNursePageReadyOk(nome) {
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].lastPageReadyAt = Date.now();
+    robeMeta[nome].zombieStrikes = 0;
+  } catch {}
+}
+
+/**
+ * Fase 3b: no Delta, phantom probe (evaluateChatsState + tryFixPhantom) é inútil
+ * (fix já bypassado; URL canônica é facebook.com/messages).
+ */
+function shouldSkipNursePhantomProbeDelta(nome) {
+  if (!NURSE_PHANTOM_PROBE_DELTA_SKIP) return { skip: false, reason: 'flag_off' };
+  try {
+    if (!isDeltaMotorEnabledRuntime()) return { skip: false, reason: 'not_delta' };
+  } catch {
+    return { skip: false, reason: 'delta_check_err' };
+  }
+  return { skip: true, reason: 'delta_phantom_probe_skip' };
+}
+
+/**
+ * Fase 3 fecho: skip evaluate de block-detect no Delta idle.
+ * Mantém messenger.com (virtus_block) e robe/create (limit posting).
+ */
+function shouldSkipNurseBlockDetectDelta({ robeRunning = false, isCreateOrSellerRoute = false, isMessenger = false } = {}) {
+  if (!NURSE_BLOCK_DETECT_DELTA_SKIP) return { skip: false, reason: 'flag_off' };
+  try {
+    if (!isDeltaMotorEnabledRuntime()) return { skip: false, reason: 'not_delta' };
+  } catch {
+    return { skip: false, reason: 'delta_check_err' };
+  }
+  if (robeRunning) return { skip: false, reason: 'robe_running' };
+  if (isCreateOrSellerRoute) return { skip: false, reason: 'create_or_seller' };
+  if (isMessenger) return { skip: false, reason: 'messenger_url' };
+  return { skip: true, reason: 'delta_idle_non_messenger' };
+}
+
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
@@ -12915,6 +13662,7 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
     robeMeta[nome].frozenReason = String(reason || '');
     robeMeta[nome].frozenAt = robeMeta[nome].frozenAt || now;
     robeMeta[nome].frozenSetBy = setBy || 'system';
+    try { invalidateRobeGateCache(nome); } catch {}
 
     try {
       await issues.append(
@@ -13236,6 +13984,127 @@ async function autoLoginRemediateTick() {
 }
 
 let _nurseTickRunning = false;
+// Fase 2a: suppress kick enquanto o próprio nurse escreve desired (anti-storm).
+let __nurseWakeSuppressDepth = 0;
+const NURSE_WAKE_POLL_MS = Math.max(
+  250,
+  Math.min(2000, Number(process.env.NURSE_WAKE_POLL_MS || 750) || 750)
+);
+const NURSE_WAKE_DEBOUNCE_MS = Math.max(
+  250,
+  Math.min(5000, Number(process.env.NURSE_WAKE_DEBOUNCE_MS || 1200) || 1200)
+);
+let __nurseWakeLastSeenKickTs = 0;
+let __nurseWakeLastRunAt = 0;
+let __nurseWakePending = false;
+let __nurseWakePollRunning = false;
+
+try {
+  if (fileStore && typeof fileStore.setNurseWakeSuppressCheck === 'function') {
+    fileStore.setNurseWakeSuppressCheck(() => __nurseWakeSuppressDepth > 0);
+  }
+} catch {}
+
+function __nurseConsumeWakeSignal() {
+  let kicked = false;
+  let kickTs = 0;
+  let reason = '';
+  if (__nurseWakePending) {
+    __nurseWakePending = false;
+    kicked = true;
+    reason = 'pending';
+    try { invalidateNurseDesiredCache(); } catch {}
+  }
+  try {
+    const kickPath = (fileStore && fileStore.NURSE_WAKE_KICK_PATH)
+      ? fileStore.NURSE_WAKE_KICK_PATH
+      : path.join(__dirname, '..', 'dados', 'desired.nurse.kick');
+    if (fs.existsSync(kickPath)) {
+      let ts = 0;
+      let rsn = '';
+      try {
+        const raw = fs.readFileSync(kickPath, 'utf8');
+        const j = JSON.parse(String(raw || '').split(/\r?\n/)[0] || '{}');
+        ts = Number(j && j.ts || 0) || 0;
+        rsn = String((j && j.reason) || '');
+      } catch {
+        try { ts = Number(fs.statSync(kickPath).mtimeMs || 0) || 0; } catch { ts = 0; }
+      }
+      if (ts > 0 && ts > __nurseWakeLastSeenKickTs) {
+        __nurseWakeLastSeenKickTs = ts;
+        kicked = true;
+        kickTs = ts;
+        reason = rsn || reason || 'kick_file';
+        try { invalidateNurseDesiredCache(); } catch {}
+      }
+      // Janela: não apagar no consume (multi-shard). Limpa kick velho (>5min).
+      try {
+        if (ts > 0 && (Date.now() - ts) > 5 * 60 * 1000) {
+          try { fs.unlinkSync(kickPath); } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+  return { kicked, kickTs, reason };
+}
+
+async function nurseWakePollTick() {
+  if (__nurseWakePollRunning) return;
+  __nurseWakePollRunning = true;
+  let runNurse = false;
+  let wakeMeta = null;
+  try {
+    const sig = __nurseConsumeWakeSignal();
+    if (!sig.kicked) return;
+    const now = Date.now();
+    if (__nurseWakeLastRunAt && (now - __nurseWakeLastRunAt) < NURSE_WAKE_DEBOUNCE_MS) {
+      // Coalesce: mantém pendência para o próximo poll (não perde open-all).
+      __nurseWakePending = true;
+      return;
+    }
+    if (_nurseTickRunning) {
+      __nurseWakePending = true;
+      return;
+    }
+    __nurseWakeLastRunAt = now;
+    wakeMeta = {
+      ts: now,
+      reason: String(sig.reason || '').slice(0, 80),
+      kickTs: Number(sig.kickTs || 0) || 0,
+      debounceMs: NURSE_WAKE_DEBOUNCE_MS,
+      pollMs: NURSE_WAKE_POLL_MS
+    };
+    // Libera o poller ANTES do nurseTick: durante nurse longo, novos kicks
+    // ainda podem marcar __nurseWakePending (senão o poller ficava surdo).
+    runNurse = true;
+  } catch {
+    runNurse = false;
+  } finally {
+    __nurseWakePollRunning = false;
+  }
+  if (!runNurse) return;
+  try {
+    if (wakeMeta) {
+      provisionAudit.append({
+        ts: wakeMeta.ts,
+        event: 'nurse_wake_tick',
+        reason: wakeMeta.reason,
+        kickTs: wakeMeta.kickTs,
+        debounceMs: wakeMeta.debounceMs,
+        pollMs: wakeMeta.pollMs
+      });
+    }
+  } catch {}
+  try {
+    // Se outro tick ganhou a corrida no gap, não perde o sinal.
+    if (_nurseTickRunning) {
+      __nurseWakePending = true;
+      return;
+    }
+    await nurseTick();
+  } catch {}
+}
+
 // Throttle: evidência enterprise de pausa durante provisionamento (evita spam a cada 5s)
 let _provisionPauseLastLogAt = 0;
 let _provisionPauseLastOwner = null;
@@ -13439,6 +14308,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
+  __nurseWakeSuppressDepth++;
   try {
     // Ultra enterprise (safety+performance):
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
@@ -13460,7 +14330,7 @@ async function nurseTick() {
     // Open-all e abertura manual começam com controllers=0.
     // Otimização permitida: só reduzir trabalho quando NÃO existe nenhum desired.active=true e _openAll não está ativo.
     let desired0 = null;
-    try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch { desired0 = { perfis: {} }; }
+    try { desired0 = readDesiredForNurse(); } catch { desired0 = { perfis: {} }; }
 
     // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
@@ -13512,7 +14382,7 @@ async function nurseTick() {
           });
           if (changed > 0) {
             try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length, skippedTerminal }); } catch {}
-            try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch {}
+            try { invalidateNurseDesiredCache(); desired0 = readDesiredForNurse({ force: true }); } catch {}
           }
         }
       }
@@ -13564,8 +14434,8 @@ async function nurseTick() {
       } catch {}
 
       // Se NÃO há intenção de abrir, pode sair cedo (economia).
+      // (mutex/suppress: finally do nurseTick limpa _nurseTickRunning + depth)
       if (!hasOpenIntent) {
-        _nurseTickRunning = false;
         return;
       }
       // Se há intenção de abrir, continua para o fluxo completo (vai abrir).
@@ -13642,7 +14512,7 @@ async function nurseTick() {
     } catch {}
 
     const now = Date.now();
-    const desired = desired0 || readJsonFile(desiredPath, { perfis: {} });
+    const desired = desired0 || readDesiredForNurse();
 
     // ===== OPEN-ALL (sequência) — manter lock vivo e finalizar automaticamente =====
     // Modelo:
@@ -14288,6 +15158,8 @@ async function nurseTick() {
 
           robeMeta[nome].noPagesStrikes += 1;
           robeMeta[nome].lastNoPagesAt = Date.now();
+          // Sem página: invalida idle DOM skip até novo pageReadyBasic real.
+          try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
           await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
             if (killGuardActive(nome)) {
@@ -14767,7 +15639,24 @@ async function nurseTick() {
         const isCreateOrSellerRoute =
           /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
 
-        if (isMessenger) {
+        const blockSkip = shouldSkipNurseBlockDetectDelta({ robeRunning, isCreateOrSellerRoute, isMessenger });
+        if (blockSkip && blockSkip.skip) {
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const lastLog = Number(robeMeta[nome]._blockDetectSkipLogAt || 0) || 0;
+            const nowSkip = Date.now();
+            if (!lastLog || (nowSkip - lastLog) >= NURSE_BLOCK_DETECT_SKIP_LOG_MS) {
+              robeMeta[nome]._blockDetectSkipLogAt = nowSkip;
+              provisionAudit.append({
+                ts: nowSkip,
+                event: 'block_detect_skip_delta',
+                nome: String(nome || ''),
+                reason: String(blockSkip.reason || ''),
+                url: String(urlNow || '').slice(0, 180)
+              });
+            }
+          } catch {}
+        } else if (isMessenger) {
           det = await browserHelper.detectMessengerTempBlock(p0);
           det.domain = 'messenger';
         } else if (robeRunning || isCreateOrSellerRoute) {
@@ -14847,7 +15736,15 @@ async function nurseTick() {
       let anyFbBlocked = false;
       try {
         if (robeMeta[nome] && robeMeta[nome].emExecucao === true && ctrl && ctrl.browser) {
-          anyFbBlocked = await detectFbLimitInAnyPage(ctrl);
+          // Throttle multi-page scan durante robe (deep evaluate é caro).
+          const lastScan = Number(robeMeta[nome].lastFbLimitScanAt || 0) || 0;
+          const nowScan = Date.now();
+          if (lastScan && (nowScan - lastScan) < NURSE_FB_LIMIT_SCAN_TTL_MS) {
+            anyFbBlocked = false;
+          } else {
+            robeMeta[nome].lastFbLimitScanAt = nowScan;
+            anyFbBlocked = await detectFbLimitInAnyPage(ctrl);
+          }
         }
       } catch {}
       if (anyFbBlocked) {
@@ -14885,7 +15782,36 @@ async function nurseTick() {
         continue;
       }
 
-      let healthy = await pageReadyBasic(p0);
+      // Fase 2b: idle skip DOM (Delta + lastPageReadyAt fresco). NÃO refresca timestamp no skip
+      // — TTL força revalidação periódica (white-screen ainda é pego).
+      let healthy = false;
+      let domIdleSkipped = false;
+      try {
+        const idle = shouldSkipNurseDomHealthIdle(nome);
+        if (idle && idle.skip) {
+          healthy = true;
+          domIdleSkipped = true;
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const lastLog = Number(robeMeta[nome]._domIdleSkipLogAt || 0) || 0;
+            const nowSkip = Date.now();
+            if (!lastLog || (nowSkip - lastLog) >= NURSE_DOM_IDLE_SKIP_LOG_MS) {
+              robeMeta[nome]._domIdleSkipLogAt = nowSkip;
+              provisionAudit.append({
+                ts: nowSkip,
+                event: 'dom_health_idle_skip',
+                nome: String(nome || ''),
+                ageMs: Number(idle.ageMs || 0) || 0,
+                ttlMs: NURSE_DOM_IDLE_TTL_MS,
+                reason: String(idle.reason || '')
+              });
+            }
+          } catch {}
+        }
+      } catch {}
+      if (!domIdleSkipped) {
+        healthy = await pageReadyBasic(p0);
+      }
       if (!healthy) {
         if (robeMeta[nome].recoveryHysteresisUntil && robeMeta[nome].recoveryHysteresisUntil > Date.now()) {
           await appendIssueNurseDebounced(nome, 'hysteresis_skip', 'Aguardando histerese pós-recover', 'hysteresis_skip_after_recover');
@@ -14918,9 +15844,12 @@ async function nurseTick() {
         if (healthy) {
           await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
           robeMeta[nome].recoveryHysteresisUntil = Date.now() + 90000;
+          markNursePageReadyOk(nome);
         } else {
           robeMeta[nome].zombieStrikes = robeMeta[nome].zombieStrikes || 0;
           robeMeta[nome].zombieStrikes += 1;
+          // Falha recente: invalida idle skip até novo ready real.
+          try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
           await appendIssueNurseDebounced(nome, `suspect_page_zombie`, `strike=${robeMeta[nome].zombieStrikes}`, 'suspect_page_zombie');
           if (robeMeta[nome].zombieStrikes >= 2) {
             if (killGuardActive(nome)) {
@@ -14950,29 +15879,53 @@ async function nurseTick() {
           continue;
         }
       } else {
-        robeMeta[nome].zombieStrikes = 0;
+        // Ready real (evaluate) grava timestamp; skip idle NÃO refresca (TTL obriga recheck).
+        if (!domIdleSkipped) markNursePageReadyOk(nome);
+        else {
+          try { robeMeta[nome].zombieStrikes = 0; } catch {}
+        }
       }
 
       try {
         const url = p0.url ? p0.url() : '';
         if (/messenger\.com\/.*marketplace/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-          const ph = getPhantomState(nome);
-          const snap = await evaluateChatsState(p0);
-          if (isOkFromSnapshot(snap)) {
-            ph.lastOkAt = Date.now(); ph.firstSeenAt = 0;
-          } else {
-            const now = Date.now();
-            if (isPhantomFromSnapshot(snap)) {
-              if (!ph.firstSeenAt) ph.firstSeenAt = now;
-              const elapsed = now - ph.firstSeenAt;
-              const sinceOk = ph.lastOkAt ? (now - ph.lastOkAt) : Infinity;
-              if (elapsed > PHANTOM_CFG.PERSIST_MS && sinceOk > PHANTOM_CFG.INITIAL_GRACE_MS) {
-                await issues.append(nome, 'mil_action',
-                  `phantom_detected rows=${snap.rows} anchors=${snap.anchors} sk=${snap.skeletons} elapsed=${elapsed}ms`);
-                await tryFixPhantom(nome, p0);
+          // Fase 3b: Delta — não gasta evaluateChatsState (fix já é no-op).
+          const phantSkip = shouldSkipNursePhantomProbeDelta(nome);
+          if (phantSkip && phantSkip.skip) {
+            try {
+              robeMeta[nome] = robeMeta[nome] || {};
+              const lastLog = Number(robeMeta[nome]._phantomProbeSkipLogAt || 0) || 0;
+              const nowSkip = Date.now();
+              if (!lastLog || (nowSkip - lastLog) >= NURSE_PHANTOM_PROBE_SKIP_LOG_MS) {
+                robeMeta[nome]._phantomProbeSkipLogAt = nowSkip;
+                provisionAudit.append({
+                  ts: nowSkip,
+                  event: 'phantom_probe_skip_delta',
+                  nome: String(nome || ''),
+                  reason: String(phantSkip.reason || ''),
+                  url: String(url || '').slice(0, 180)
+                });
               }
-            } else if (snap.skeletons === 0) {
-              ph.firstSeenAt = 0;
+            } catch {}
+          } else {
+            const ph = getPhantomState(nome);
+            const snap = await evaluateChatsState(p0);
+            if (isOkFromSnapshot(snap)) {
+              ph.lastOkAt = Date.now(); ph.firstSeenAt = 0;
+            } else {
+              const now = Date.now();
+              if (isPhantomFromSnapshot(snap)) {
+                if (!ph.firstSeenAt) ph.firstSeenAt = now;
+                const elapsed = now - ph.firstSeenAt;
+                const sinceOk = ph.lastOkAt ? (now - ph.lastOkAt) : Infinity;
+                if (elapsed > PHANTOM_CFG.PERSIST_MS && sinceOk > PHANTOM_CFG.INITIAL_GRACE_MS) {
+                  await issues.append(nome, 'mil_action',
+                    `phantom_detected rows=${snap.rows} anchors=${snap.anchors} sk=${snap.skeletons} elapsed=${elapsed}ms`);
+                  await tryFixPhantom(nome, p0);
+                }
+              } else if (snap.skeletons === 0) {
+                ph.firstSeenAt = 0;
+              }
             }
           }
         }
@@ -15034,6 +15987,7 @@ async function nurseTick() {
       }
     }
   } finally {
+    try { __nurseWakeSuppressDepth = Math.max(0, (__nurseWakeSuppressDepth || 0) - 1); } catch { __nurseWakeSuppressDepth = 0; }
     _nurseTickRunning = false;
   }
 }
@@ -15262,6 +16216,9 @@ async function stockProvisionResumeTick() {
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+// Fase 2a: poller leve do kick open-intent (multi-shard; não apaga kick no consume).
+setInterval(() => { nurseWakePollTick().catch(()=>{}); }, NURSE_WAKE_POLL_MS);
+setTimeout(() => { nurseWakePollTick().catch(()=>{}); }, Math.min(1200, NURSE_WAKE_POLL_MS + 200));
 // Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
 setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
 setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
@@ -15274,13 +16231,13 @@ setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
 // Inicializa reloadManager após todos os sistemas estarem prontos
 try {
   if (!isDeltaMotorEnabledRuntime()) {
-    reloadManager.startReloadManager(controllers, robeMeta);
+    loadReloadManager().startReloadManager(controllers, robeMeta);
   } else {
     try { logger.info('[DELTA_BYPASS] reloadManager desativado no motor delta'); } catch {}
   }
 } catch {
   // Fail-safe: se o check falhar por qualquer motivo, mantém o comportamento legado.
-  reloadManager.startReloadManager(controllers, robeMeta);
+  try { loadReloadManager().startReloadManager(controllers, robeMeta); } catch {}
 }
 
 // =========================
@@ -15311,7 +16268,7 @@ const DELTA_INGEST_PUMP_LEADER_STALE_MS = Math.max(
 );
 const DELTA_INGEST_FOLLOWER_POLL_MS = Math.max(
   250,
-  Number(process.env.DELTA_INGEST_FOLLOWER_POLL_MS || 750) || 750
+  Math.min(15_000, Number(process.env.DELTA_INGEST_FOLLOWER_POLL_MS || 2500) || 2500)
 );
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
@@ -18363,14 +19320,125 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   try { __deltaThreadStateMap.delete(__deltaThreadStateKey(n, tk)); } catch {}
 }
 __deltaLoadThreadStateSync();
-const __deltaLegacyAssimilationSummary = __deltaAssimilateLegacyRespondedHistorySync();
-const __deltaBootReplaySummary = __deltaReplayRecentThreadsToCtOnBoot();
-const __deltaForensicBootReplaySummary = __deltaReplayForensicLeadsToCtOnBoot({
-  bootReplaySummary: __deltaBootReplaySummary
-});
+const __deltaRunHostBootWorkSync = () => {
+  const assimilation = __deltaAssimilateLegacyRespondedHistorySync();
+  const bootReplay = __deltaReplayRecentThreadsToCtOnBoot();
+  const forensicReplay = __deltaReplayForensicLeadsToCtOnBoot({
+    bootReplaySummary: bootReplay
+  });
+  return { assimilation, bootReplay, forensicReplay };
+};
+let __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
+let __deltaLegacyAssimilationSummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  scannedProfiles: 0,
+  importedThreads: 0,
+  updatedExisting: 0,
+  skippedExisting: 0,
+  parseErrors: 0,
+  filesMissing: 0,
+  error: ''
+};
+let __deltaBootReplaySummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  scanned: 0,
+  enqueued: 0,
+  enqueue_failed: 0,
+  skipped_old: 0,
+  skipped_status: 0,
+  skipped_empty: 0,
+  skipped_invalid: 0,
+  hit_max: false,
+  error: ''
+};
+let __deltaForensicBootReplaySummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  queue_lag_bytes: 0,
+  candidates: 0,
+  enqueued: 0,
+  enqueue_failed: 0,
+  files_scanned: 0,
+  lines_scanned: 0,
+  parsed_records: 0,
+  matched_records: 0,
+  missing_keys: 0,
+  skipped_old: 0,
+  skipped_op: 0,
+  read_errors: 0,
+  hit_max: false,
+  error: ''
+};
+if (__deltaHostBootLeader) {
+  try {
+    const work = __deltaRunHostBootWorkSync();
+    __deltaLegacyAssimilationSummary = work.assimilation;
+    __deltaBootReplaySummary = work.bootReplay;
+    __deltaForensicBootReplaySummary = work.forensicReplay;
+  } catch (e) {
+    try {
+      logger.warn('[DELTA][ASSIMILACAO_BOOT] leader work error', {
+        pid: process.pid,
+        error: String((e && e.message) || e || '').slice(0, 220)
+      });
+    } catch {}
+  } finally {
+    // Sempre libera followers (mesmo com erro) — evita lock eterno em phase=running.
+    __deltaMarkHostBootLeaderDoneSync();
+  }
+  try { __deltaLoadThreadStateSync(); } catch {}
+} else {
+  try {
+    logger.info('[DELTA][ASSIMILACAO_BOOT] skip follower (host boot leader unico)', {
+      pid: process.pid,
+      shard: String(process.env.WORKER_SHARD_INDEX || ''),
+      lock: path.basename(DELTA_HOST_BOOT_LEADER_LOCK)
+    });
+  } catch {}
+  const wait = __deltaWaitHostBootLeaderDoneSync();
+  if (!wait.ok && String(wait.reason || '') === 'leader_dead_or_stale') {
+    // Failover: líder morreu no meio — este follower tenta virar líder e concluir.
+    __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
+    if (__deltaHostBootLeader) {
+      try {
+        const work = __deltaRunHostBootWorkSync();
+        __deltaLegacyAssimilationSummary = work.assimilation;
+        __deltaBootReplaySummary = work.bootReplay;
+        __deltaForensicBootReplaySummary = work.forensicReplay;
+      } catch (e) {
+        try {
+          logger.warn('[DELTA][ASSIMILACAO_BOOT] failover leader work error', {
+            pid: process.pid,
+            error: String((e && e.message) || e || '').slice(0, 220)
+          });
+        } catch {}
+      } finally {
+        __deltaMarkHostBootLeaderDoneSync();
+      }
+    }
+  }
+  // Sempre recarrega estado soberano do disco após o líder terminar (ou timeout).
+  try { __deltaLoadThreadStateSync(); } catch {}
+  if (!wait.ok) {
+    try {
+      logger.warn('[DELTA][ASSIMILACAO_BOOT] follower sync incomplete', {
+        pid: process.pid,
+        shard: String(process.env.WORKER_SHARD_INDEX || ''),
+        reason: String(wait.reason || '')
+      });
+    } catch {}
+  }
+}
 try {
   logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
     ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
+    skipped: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skipped),
+    host_boot_leader: !!__deltaHostBootLeader,
     scannedProfiles: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.scannedProfiles || 0) || 0,
     importedThreads: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.importedThreads || 0) || 0,
     updatedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.updatedExisting || 0) || 0,
@@ -21487,6 +22555,16 @@ async function __deltaDetachCdpSession(nome) {
     ctrl.deltaCdpOnWsClosed = null;
     ctrl.deltaCdpOnResponseReceived = null;
     ctrl.deltaWsRouteState = null;
+    // Fase 3c.3: limpa flags de page para não early-return stale no próximo attach.
+    try {
+      const pagesToClear = [];
+      if (ctrl.deltaCdpEarPage) pagesToClear.push(ctrl.deltaCdpEarPage);
+      if (ctrl.mainPage && ctrl.mainPage !== ctrl.deltaCdpEarPage) pagesToClear.push(ctrl.mainPage);
+      for (const p of pagesToClear) {
+        try { if (p) p.__deltaCdpEarAttached = false; } catch {}
+      }
+      ctrl.deltaCdpEarPage = null;
+    } catch {}
     return true;
   } catch {
     return false;
@@ -21498,8 +22576,18 @@ async function __deltaAttachCdpEar(nome, page) {
   const earAttachTs = Date.now();
   try {
     if (page.__deltaCdpEarAttached) {
-      __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs });
-      return;
+      const ctrl0 = controllers.get(nome);
+      const sessionAlive = !!(ctrl0 && ctrl0.deltaCdpSession);
+      const samePage = !!(ctrl0 && ctrl0.deltaCdpEarPage === page);
+      // Só early-return se a sessão CDP ainda existe nesta page (anti flag stale pós-probe/detach).
+      if (sessionAlive && (samePage || !ctrl0.deltaCdpEarPage)) {
+        if (ctrl0 && !ctrl0.deltaCdpEarPage) {
+          try { ctrl0.deltaCdpEarPage = page; } catch {}
+        }
+        __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs });
+        return;
+      }
+      try { page.__deltaCdpEarAttached = false; } catch {}
     }
     page.__deltaCdpEarAttached = true;
   } catch {}
@@ -21540,16 +22628,21 @@ async function __deltaAttachCdpEar(nome, page) {
         const runtimeUid = String(runtimeUser && runtimeUser.value || '').replace(/\D/g, '');
         if (runtimeUid && runtimeUid.length >= 5) {
           const ctrl = controllers.get(nome);
-          if (ctrl) ctrl.deltaAccountUserId = runtimeUid;
+          if (ctrl) ctrl.deltaAccountUserId = String(runtimeUid);
         }
       } catch {}
     }
   } catch {}
 
   try { await __deltaDetachCdpSession(nome); } catch {}
+  // Detach limpa flags — reafirma lock nesta page antes de criar a sessão.
+  try { page.__deltaCdpEarAttached = true; } catch {}
 
   const ctrl = controllers.get(nome);
-  if (!ctrl) return;
+  if (!ctrl) {
+    try { page.__deltaCdpEarAttached = false; } catch {}
+    return;
+  }
 
   try {
     const cdp = await page.target().createCDPSession();
@@ -22591,6 +23684,8 @@ async function __deltaAttachCdpEar(nome, page) {
     };
 
     ctrl.deltaCdpSession = cdp;
+    ctrl.deltaCdpEarPage = page;
+    try { page.__deltaCdpEarAttached = true; } catch {}
     ctrl.deltaCdpOnFrame = onFrame;
     ctrl.deltaCdpOnWsCreated = onWsCreated;
     ctrl.deltaCdpOnWsHandshakeReq = onWsHandshakeReq;
@@ -22609,6 +23704,11 @@ async function __deltaAttachCdpEar(nome, page) {
   } catch (err) {
     try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
     __deltaMarkBootEarState(nome, { earAttached: false, lastError: err && err.message ? String(err.message) : String(err) });
+    try { page.__deltaCdpEarAttached = false; } catch {}
+    try {
+      const ctrlFail = controllers.get(nome);
+      if (ctrlFail && ctrlFail.deltaCdpEarPage === page) ctrlFail.deltaCdpEarPage = null;
+    } catch {}
     try {
       if (typeof forensicLog === 'function') {
         forensicLog('DELTA', 'ear_cdp_attach_failed', { nome: String(nome || ''), error: err && err.message ? String(err.message) : String(err) });
@@ -22618,42 +23718,82 @@ async function __deltaAttachCdpEar(nome, page) {
 }
 
 async function wirePageObservers(nome, page) {
-  const st = getHealth(nome);
-  try {
-    page.removeAllListeners && page.removeAllListeners('domcontentloaded');
-    page.removeAllListeners && page.removeAllListeners('framenavigated');
-    page.removeAllListeners && page.removeAllListeners('requestfinished');
-    page.removeAllListeners && page.removeAllListeners('requestfailed');
-    page.removeAllListeners && page.removeAllListeners('console');
-    page.removeAllListeners && page.removeAllListeners('pageerror');
-  } catch {}
-  page.on('domcontentloaded', async () => {
-    const st = getHealth(nome);
-    st.lastDomEventAt = Date.now();
-    try { st.lastTitle = await page.title().catch(()=>st.lastTitle); } catch {}
-    try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
-  });
-  page.on('framenavigated', (frame) => {
-    const st = getHealth(nome);
-    if (frame === page.mainFrame()) {
-      st.lastDomEventAt = Date.now();
-      try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
-    }
-  });
-  page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
-  page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
-
-  // 👂 Ouvido Delta (CDP) — somente no motor Delta.
+  if (!page) return;
   const deltaEnabledNow = (() => {
     try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; }
   })();
+  const skipHealthListeners = !!(deltaEnabledNow && WIRE_HEALTH_LISTENERS_DELTA_SKIP);
+
+  // Fase 3c.1: no Delta, não registra (nem wipe) listeners Puppeteer só-health.
+  // healthTick já é no-op — requestfinished/failed seriam custo puro.
+  if (!skipHealthListeners) {
+    try {
+      page.removeAllListeners && page.removeAllListeners('domcontentloaded');
+      page.removeAllListeners && page.removeAllListeners('framenavigated');
+      page.removeAllListeners && page.removeAllListeners('requestfinished');
+      page.removeAllListeners && page.removeAllListeners('requestfailed');
+      page.removeAllListeners && page.removeAllListeners('console');
+      page.removeAllListeners && page.removeAllListeners('pageerror');
+    } catch {}
+    page.on('domcontentloaded', async () => {
+      const st = getHealth(nome);
+      st.lastDomEventAt = Date.now();
+      try { st.lastTitle = await page.title().catch(()=>st.lastTitle); } catch {}
+      try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
+    });
+    page.on('framenavigated', (frame) => {
+      const st = getHealth(nome);
+      if (frame === page.mainFrame()) {
+        st.lastDomEventAt = Date.now();
+        try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
+      }
+    });
+    page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+    page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+    page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
+    page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
+  } else {
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      const lastLog = Number(robeMeta[nome]._wireHealthSkipLogAt || 0) || 0;
+      const nowSkip = Date.now();
+      if (!lastLog || (nowSkip - lastLog) >= WIRE_HEALTH_SKIP_LOG_MS) {
+        robeMeta[nome]._wireHealthSkipLogAt = nowSkip;
+        provisionAudit.append({
+          ts: nowSkip,
+          event: 'wire_health_listeners_skip_delta',
+          nome: String(nome || ''),
+          reason: 'delta_ear_only'
+        });
+      }
+    } catch {}
+  }
+
+  // 👂 Ouvido Delta (CDP) — somente no motor Delta.
   if (deltaEnabledNow) {
-    try { await __deltaAttachCdpEar(nome, page); } catch {}
+    // Fase 3c.2: nunca roubar ear com page de probe/temp (só mainPage, ou 1ª page se main ainda null).
+    let allowEar = true;
+    try {
+      const ctrl = controllers.get(nome);
+      const main = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
+      if (main && main !== page) {
+        allowEar = false;
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'delta_ear_skip_non_main',
+            nome: String(nome || ''),
+            reason: 'not_main_page'
+          });
+        } catch {}
+      }
+    } catch {}
+    if (allowEar) {
+      try { await __deltaAttachCdpEar(nome, page); } catch {}
+    }
   } else {
     try { await __deltaDetachCdpSession(nome); } catch {}
-    try { if (page) page.__deltaCdpEarAttached = false; } catch {}
+    try { page.__deltaCdpEarAttached = false; } catch {}
   }
 }
 
@@ -22936,8 +24076,8 @@ async function healthTick() {
     }
   }
 }
-setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
-setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
+ensureRobeTickScheduled('boot');
+ensureHealthTickScheduled('boot');
 
 // ====== LIMPEZA PERIÓDICA DE ABAS ABOUT:BLANK ÓRFÃS ======
 // Varre todos os navegadores ativos e fecha abas about:blank que estão órfãs
@@ -23027,14 +24167,18 @@ setTimeout(() => { periodicAboutBlankCleanup().catch(() => {}); }, 30000);
 
 setInterval(() => {
   const now = Date.now();
+  let desired = { perfis: {} };
+  try { desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} }; } catch { desired = { perfis: {} }; }
+  const perfis = (desired && desired.perfis) ? desired.perfis : {};
   for (const nome of Object.keys(robeMeta)) {
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now && (robeMeta[nome].frozenUntil - now > 6 * 3600 * 1000)) {
-      issues.append(nome, 'frozen_watchdog', 'Perfil congelado > 6h');
-    }
-    const desired = readJsonFile(desiredPath, { perfis: {} });
-    if (desired.perfis?.[nome]?.active === true && !controllers.has(nome)) {
-      issues.append(nome, 'stuck_activation', 'Desired ativo sem browser por >10min');
-    }
+    try {
+      if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now && (robeMeta[nome].frozenUntil - now > 6 * 3600 * 1000)) {
+        issues.append(nome, 'frozen_watchdog', 'Perfil congelado > 6h');
+      }
+      if (perfis?.[nome]?.active === true && !controllers.has(nome)) {
+        issues.append(nome, 'stuck_activation', 'Desired ativo sem browser por >10min');
+      }
+    } catch {}
   }
 }, 10 * 60 * 1000);
 

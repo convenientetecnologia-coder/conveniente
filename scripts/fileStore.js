@@ -371,7 +371,88 @@ function releaseDesiredLockFile(fd) {
     try { fs.unlinkSync(desiredLockPath); } catch {}
   }
 }
-async function withDesiredFileLockUpdate(mutator) {
+
+// === Fase 2a: nurse wake (open-intent) ===
+// Espelha o kick do ingest Delta, mas NÃO apaga no consume:
+// cada worker/shard precisa acordar (nurse é sharded).
+const NURSE_WAKE_KICK_PATH = path.join(dadosDir, 'desired.nurse.kick');
+let _nurseWakeSuppressCheck = null; // () => boolean (setado pelo worker)
+
+function setNurseWakeSuppressCheck(fn) {
+  _nurseWakeSuppressCheck = (typeof fn === 'function') ? fn : null;
+}
+
+function snapshotDesiredOpenIntent(desired) {
+  const d = (desired && typeof desired === 'object') ? desired : {};
+  const openAll = !!(d._openAll && d._openAll.active === true);
+  const autoOpen = !!(d._autoOpen && d._autoOpen.enabled === true);
+  const actives = [];
+  const perfis = (d.perfis && typeof d.perfis === 'object') ? d.perfis : {};
+  for (const n of Object.keys(perfis)) {
+    if (perfis[n] && perfis[n].active === true) actives.push(String(n));
+  }
+  actives.sort();
+  return { openAll, autoOpen, actives };
+}
+
+function desiredOpenIntentIncreased(beforeIntent, afterIntent) {
+  const a = beforeIntent || { openAll: false, autoOpen: false, actives: [] };
+  const b = afterIntent || { openAll: false, autoOpen: false, actives: [] };
+  if (!a.openAll && b.openAll) return { yes: true, reason: 'open_all_active' };
+  if (!a.autoOpen && b.autoOpen) return { yes: true, reason: 'auto_open_enabled' };
+  const beforeSet = new Set(Array.isArray(a.actives) ? a.actives : []);
+  for (const n of (Array.isArray(b.actives) ? b.actives : [])) {
+    if (!beforeSet.has(n)) return { yes: true, reason: 'active_true', nome: n };
+  }
+  return { yes: false, reason: '' };
+}
+
+function signalNurseWake(reason = 'desired_open_intent', meta = null) {
+  try {
+    if (_nurseWakeSuppressCheck && _nurseWakeSuppressCheck()) return false;
+  } catch {}
+  try {
+    if (!fs.existsSync(dadosDir)) fs.mkdirSync(dadosDir, { recursive: true });
+    // ts monotônico: evita 2 kicks no mesmo Date.now() serem ignorados (ts > lastSeen).
+    let ts = Date.now();
+    try {
+      if (fs.existsSync(NURSE_WAKE_KICK_PATH)) {
+        const raw = fs.readFileSync(NURSE_WAKE_KICK_PATH, 'utf8');
+        const prev = JSON.parse(String(raw || '').split(/\r?\n/)[0] || '{}');
+        const prevTs = Number(prev && prev.ts || 0) || 0;
+        if (prevTs >= ts) ts = prevTs + 1;
+      }
+    } catch {}
+    const payload = {
+      ts,
+      pid: process.pid,
+      reason: String(reason || 'desired_open_intent').slice(0, 80),
+      ...(meta && typeof meta === 'object' ? { meta } : {})
+    };
+    fs.writeFileSync(NURSE_WAKE_KICK_PATH, JSON.stringify(payload) + '\n', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function maybeSignalNurseWakeFromDesiredChange(beforeIntent, afterIntent, opts = null) {
+  try {
+    if (opts && opts.nurseWake === false) return false;
+    const hit = desiredOpenIntentIncreased(beforeIntent, afterIntent);
+    if (!hit || !hit.yes) return false;
+    return signalNurseWake(hit.reason, hit.nome ? { nome: hit.nome } : null);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Atualização atômica de desired.json.
+ * @param {(desired:object)=>any} mutator
+ * @param {{ nurseWake?: boolean }} [opts] nurseWake:false desliga kick mesmo com open-intent
+ */
+async function withDesiredFileLockUpdate(mutator, opts = null) {
   let fd = null;
   try {
     fd = await acquireDesiredLockFile();
@@ -394,9 +475,14 @@ async function withDesiredFileLockUpdate(mutator) {
       desired = r.value || { perfis: {} };
     }
     desired.perfis = desired.perfis || {};
+    // Snapshot ANTES do mutator (mutator costuma mutar in-place).
+    const beforeIntent = snapshotDesiredOpenIntent(desired);
     const next = await Promise.resolve(mutator(desired)) || desired;
     const okWrite = writeJsonAtomic(desiredPath, next);
     if (!okWrite) throw new Error('desired_write_failed');
+    try {
+      maybeSignalNurseWakeFromDesiredChange(beforeIntent, snapshotDesiredOpenIntent(next), opts);
+    } catch {}
     return next;
   } finally {
     releaseDesiredLockFile(fd);
@@ -1064,6 +1150,12 @@ module.exports = {
   withDesiredFileLockUpdate,
   removeDesired, // <<--------- NOVO EXPORT
   withPerfisFileLockUpdate,
+  // Fase 2a — nurse wake (open-intent kick)
+  NURSE_WAKE_KICK_PATH,
+  signalNurseWake,
+  setNurseWakeSuppressCheck,
+  snapshotDesiredOpenIntent,
+  desiredOpenIntentIncreased,
   // Redundância/forense:
   writePerfilRecord,
   loadPerfisFromRecordsBestEffort,

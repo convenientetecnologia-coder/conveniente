@@ -1198,6 +1198,24 @@ app.get('/api/infra/forensic-logs', (req, res) => {
     return res.status(500).json({ ok: false, error: 'forensic_logs_failed', message: (e && e.message) || String(e) });
   }
 });
+
+// Fase 6: Olhos de Deus — relatório agregado (audit + locks + governor + veredito).
+// Preferir puxar via CT: POST /api/forensic/olhos-deus_secret { hostId }.
+app.get('/api/infra/forensic/olhos-deus', (req, res) => {
+  try {
+    const windowMin = Math.max(5, Math.min(24 * 60, Number(req.query && req.query.windowMin || 60) || 60));
+    const nome = String(req.query && (req.query.nome || req.query.account) || '').trim();
+    const diag = require('./scripts/diag_olhos_deus.js');
+    const report = diag.buildOlhosDeusReport({ windowMin, nome, writeTxt: true });
+    return res.status(200).json(report);
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: 'olhos_deus_failed',
+      message: (e && e.message) || String(e)
+    });
+  }
+});
 // ===================== Fim Forensic Logs =====================
 
 // ===================== Infra Auth (Gate B) =====================
@@ -2982,6 +3000,30 @@ app.post('/api/infra/command-bus', async (req, res) => {
           results[i] = {
             id: cmd && cmd.id ? String(cmd.id) : null,
             type: 'fetch_forensic_logs',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+        continue;
+      }
+
+      if (t === 'olhos_deus') {
+        try {
+          const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+          const windowMin = Math.max(5, Math.min(24 * 60, Number(p.windowMin || 60) || 60));
+          const nome = String(p.nome || p.account || p.account_login || '').trim();
+          const diag = require('./scripts/diag_olhos_deus.js');
+          const report = diag.buildOlhosDeusReport({ windowMin, nome, writeTxt: true });
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'olhos_deus',
+            ok: true,
+            report
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'olhos_deus',
             ok: false,
             error: (e && e.message) ? String(e.message) : String(e)
           };
