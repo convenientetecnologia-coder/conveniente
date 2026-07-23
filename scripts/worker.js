@@ -11276,12 +11276,43 @@ const handlers = {
         });
       } catch {}
       try {
-        const out = await runner.enqueueDeltaReply({
-          thread_key: tk,
-          texto_resposta: tr,
-          client_message_id: cmid,
-          thread_key_candidates: threadKeyCandidates
-        });
+        const stKnown = __deltaGetOrCreateThreadState(n, tk);
+        const knownCity =
+          (stKnown &&
+            __deltaIsStrongCleanResolvedCity(stKnown) &&
+            String(stKnown.city || '').trim()) ||
+          '';
+        const knownCitySource = knownCity
+          ? String((stKnown && stKnown.city_source) || '').trim() || null
+          : null;
+        const knownItemLink = __deltaPickBestItemLink(stKnown && stKnown.link_anuncio) || null;
+
+        let out = null;
+        // Race open-all: epoch/virtus ainda subindo → soft-retry sem ERROR ruidoso.
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          out = await runner.enqueueDeltaReply({
+            thread_key: tk,
+            texto_resposta: tr,
+            client_message_id: cmid,
+            thread_key_candidates: threadKeyCandidates,
+            known_city: knownCity || undefined,
+            known_city_source: knownCitySource || undefined,
+            known_item_link: knownItemLink || undefined,
+          });
+          const errTry = String((out && out.error) || '').trim();
+          if (!(out && out.ok !== true && errTry === 'delta_runtime_not_ready')) break;
+          if (attempt < 3) {
+            try {
+              logger.info('[DELTA][HANDS] delta-reply-task wait_runtime', {
+                nome: n,
+                thread_key: tk,
+                client_message_id: cmid,
+                attempt: attempt + 1,
+              });
+            } catch {}
+            await new Promise((r) => setTimeout(r, 700 + attempt * 400));
+          }
+        }
         if (cmid) __deltaReplyIngressRelease(n, cmid);
         const st = String((out && out.status) || '').trim().toLowerCase();
         if (out && out.ok === true) {
@@ -16354,16 +16385,55 @@ function __deltaIsMarketplaceItemLink(raw) {
   return /(?:facebook|fb|messenger)\.com\/marketplace\/item\/[0-9A-Za-z_-]+/i.test(s);
 }
 
-/** Cidade sentinel / vazia (nao e cidade geografica). */
+/** Cidade sentinel / vazia / suja (titulo de produto colado — nao e cidade geografica). */
 function __deltaIsPendingCityLabel(raw) {
   const s = String(raw || '').trim().toLowerCase();
   if (!s) return true;
-  return (
+  if (
     s === 'cidade pendente' ||
     s === 'pendente' ||
     s === 'aguardando coletar cidade' ||
     s === 'aguardando cidade'
-  );
+  ) {
+    return true;
+  }
+  try {
+    const cityMod = require('./deltaCityCollector.js');
+    if (typeof cityMod.isDirtyCityLabel === 'function' && cityMod.isDirtyCityLabel(raw)) {
+      return true;
+    }
+  } catch (_) {}
+  // Fallback local se o modulo nao carregar
+  const compact = String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, '');
+  if (/gratis|nintendo|switch|oled|iphone|playstation|xbox|macbook|smartphone/i.test(compact)) {
+    return true;
+  }
+  return false;
+}
+
+/** Fonte fraca nunca trava overwrite (marketplace_city_link / body_*). */
+function __deltaIsWeakCitySource(source) {
+  const s = String(source || '').trim().toLowerCase();
+  if (!s) return false;
+  try {
+    const cityMod = require('./deltaCityCollector.js');
+    if (typeof cityMod.isWeakCityCandidateSource === 'function') {
+      return !!cityMod.isWeakCityCandidateSource(s);
+    }
+  } catch (_) {}
+  return s.startsWith('marketplace_city_link') || s === 'body_head' || s.startsWith('body_');
+}
+
+/** Cidade limpa + fonte forte = pode pular recollect / travar already_resolved. */
+function __deltaIsStrongCleanResolvedCity(st) {
+  const city = st && st.city != null ? String(st.city).trim() : '';
+  if (!city || __deltaIsPendingCityLabel(city)) return false;
+  if (__deltaIsWeakCitySource(st && st.city_source)) return false;
+  return true;
 }
 
 /**
@@ -18837,11 +18907,19 @@ function __deltaHandleCityCollectSettled(payload) {
       p.nome_cliente_limpo
     );
     const nameUpgrade = !!realName;
-    // Soberania: nunca rebaixar cidade ja resolvida — mas ainda patcha link/nome tardios.
+    // Soberania: cidade limpa+forte nao rebaixa. Cidade suja/fraca (marketplace_city_link) NAO trava.
     const cityAlreadyResolved =
-      existingStatus === 'resolved' && st.city && !__deltaIsPendingCityLabel(st.city);
+      existingStatus === 'resolved' && __deltaIsStrongCleanResolvedCity(st);
     if (cityAlreadyResolved && !linkUpgrade && !nameUpgrade) {
       return { ok: true, skipped: true, reason: 'already_resolved' };
+    }
+    // Estado sujo/fraco marcado resolved: limpa lock local pra dual poder gravar.
+    if (!cityAlreadyResolved && existingStatus === 'resolved' && st.city) {
+      try {
+        st.city = null;
+        st.city_source = null;
+        st.city_status = 'collecting';
+      } catch (_) {}
     }
 
     const cityFields = cityAlreadyResolved

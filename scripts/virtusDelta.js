@@ -258,9 +258,44 @@ try {
   killChromeProfileProcesses = require("./browser.js").killChromeProfileProcesses;
 } catch (_) {}
 let getDeltaCityCollector = null;
+let isCleanCityLabelFn = null;
+let isDirtyCityLabelFn = null;
+let isWeakCityCandidateSourceFn = null;
 try {
-  ({ getDeltaCityCollector } = require("./deltaCityCollector.js"));
+  ({
+    getDeltaCityCollector,
+    isCleanCityLabel: isCleanCityLabelFn,
+    isDirtyCityLabel: isDirtyCityLabelFn,
+    isWeakCityCandidateSource: isWeakCityCandidateSourceFn,
+  } = require("./deltaCityCollector.js"));
 } catch (_) {}
+
+function __deltaCityLabelIsClean(raw, source = null) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  try {
+    if (typeof isDirtyCityLabelFn === "function" && isDirtyCityLabelFn(s)) return false;
+    if (typeof isCleanCityLabelFn === "function" && !isCleanCityLabelFn(s)) return false;
+  } catch (_) {
+    const compact = s
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/\s+/g, "");
+    if (/gratis|nintendo|switch|oled|iphone|playstation|xbox/i.test(compact)) return false;
+  }
+  const src = String(source || "").trim().toLowerCase();
+  if (src) {
+    try {
+      if (typeof isWeakCityCandidateSourceFn === "function" && isWeakCityCandidateSourceFn(src)) {
+        return false;
+      }
+    } catch (_) {
+      if (src.startsWith("marketplace_city_link") || src.startsWith("body_")) return false;
+    }
+  }
+  return true;
+}
 
 const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || "info").trim().toLowerCase();
 
@@ -5231,7 +5266,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (!t || !link || !running) return { ok: false, scheduled: false, reason: "not_ready" };
 
     const st0 = greetingStateByThread.get(t) || null;
-    if (st0 && st0.cityStatus === "resolved" && st0.city) {
+    if (
+      st0 &&
+      st0.cityStatus === "resolved" &&
+      st0.city &&
+      __deltaCityLabelIsClean(st0.city, st0.citySource)
+    ) {
       return { ok: true, scheduled: false, deduped: true, reason: "already_resolved" };
     }
     if (cityCollectBgInFlight.has(t)) {
@@ -5263,7 +5303,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       waveGapMin,
       Number(process.env.VIRTUS_DELTA_CITY_COLLECT_BG_WAVE_GAP_MAX_MS || 45_000) || 45_000
     );
-    const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
+    const collectorTimeout = Math.max(12000, Number(cityCollectorTimeoutMs || 28000) || 28000);
     const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
     const backoffMin = Math.max(
       2000,
@@ -5284,7 +5324,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
     const markCollecting = () => {
       const prior = greetingStateByThread.get(t) || null;
-      if (prior && prior.cityStatus === "resolved" && prior.city) return;
+      if (
+        prior &&
+        prior.cityStatus === "resolved" &&
+        prior.city &&
+        __deltaCityLabelIsClean(prior.city, prior.citySource)
+      ) {
+        return;
+      }
       greetingStateByThread.set(t, {
         sentAt: Number(greetingSentAt || (prior && prior.sentAt) || Date.now()) || Date.now(),
         greetingText: String(greetingText || (prior && prior.greetingText) || "").trim(),
@@ -5321,7 +5368,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           try {
             if (!running) return;
             const stNow = greetingStateByThread.get(t) || null;
-            if (stNow && stNow.cityStatus === "resolved" && stNow.city) return;
+            if (
+              stNow &&
+              stNow.cityStatus === "resolved" &&
+              stNow.city &&
+              __deltaCityLabelIsClean(stNow.city, stNow.citySource)
+            ) {
+              return;
+            }
 
             markCollecting();
             try {
@@ -5354,7 +5408,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             }));
 
             const stAfter = greetingStateByThread.get(t) || null;
-            if (stAfter && stAfter.cityStatus === "resolved" && stAfter.city) return;
+            if (
+              stAfter &&
+              stAfter.cityStatus === "resolved" &&
+              stAfter.city &&
+              __deltaCityLabelIsClean(stAfter.city, stAfter.citySource)
+            ) {
+              return;
+            }
 
             const lateCity = String((cityOut && cityOut.ok && cityOut.cidade) || "").trim() || null;
             if (lateCity) {
@@ -5651,7 +5712,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     );
     const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
     const readyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
-    const collectorTimeout = Math.max(6000, Number(cityCollectorTimeoutMs || 14000) || 14000);
+    const collectorTimeout = Math.max(12000, Number(cityCollectorTimeoutMs || 28000) || 28000);
     const collectorAttempts = Math.max(1, Math.min(5, Number(cityCollectorAttempts || 3) || 3));
     const linkWaveNow = Math.max(
       1,
@@ -6669,13 +6730,20 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const t = String(threadKey || "").trim();
     if (!t || !running) return { ok: false, error: "not_ready" };
     const prior = greetingStateByThread.get(t) || null;
-    if (prior && prior.cityStatus === "resolved" && prior.city && prior.itemLink) {
+    // Só pula recollect se cidade limpa + fonte forte (dual/âncora). Suja = rearma.
+    if (
+      prior &&
+      prior.cityStatus === "resolved" &&
+      prior.city &&
+      prior.itemLink &&
+      __deltaCityLabelIsClean(prior.city, prior.citySource)
+    ) {
       return { ok: true, skipped: "already_resolved" };
     }
 
     const cityCollectorTimeoutMs = Math.max(
-      6_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 14_000) || 14_000
+      12_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 28_000) || 28_000
     );
     const cityCollectorAttempts = Math.max(
       1,
@@ -6744,7 +6812,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Link OK: reply NÃO espera / NÃO mata o collector.
     // Patch imediato collecting + link/nome; cidade resolve em background com retry.
     // (Bug forense 4/4: city_collect_reply_outer_timeout → pending com link válido.)
-    if (prior && prior.cityStatus === "resolved" && prior.city) {
+    if (
+      prior &&
+      prior.cityStatus === "resolved" &&
+      prior.city &&
+      __deltaCityLabelIsClean(prior.city, prior.citySource)
+    ) {
       await settleToHandler({
         account_login: ACCOUNT_LOGIN,
         thread_key: t,
@@ -7246,8 +7319,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Collector serial (1 browser): budget completo fica em background.
     // Hands so espera um wait curto — se veio, manda resolved; senao collecting + patch depois.
     const cityCollectorTimeoutMs = Math.max(
-      6_000,
-      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 14_000) || 14_000
+      12_000,
+      Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_TIMEOUT_MS || 28_000) || 28_000
     );
     const cityCollectorAttempts = Math.max(
       1,
@@ -7932,7 +8005,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     });
   };
 
-  const enqueueDeltaReply = ({ thread_key, texto_resposta, client_message_id, thread_key_candidates } = {}) => {
+  const enqueueDeltaReply = ({
+    thread_key,
+    texto_resposta,
+    client_message_id,
+    thread_key_candidates,
+    known_city,
+    known_city_source,
+    known_item_link,
+  } = {}) => {
     return enqueue(async () => {
       try {
         const tk = String(thread_key || "").trim();
@@ -7941,6 +8022,35 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         const threadKeyCandidates = __deltaRankThreadKeyCandidatesLocal(
           Array.isArray(thread_key_candidates) ? thread_key_candidates : []
         ).slice(0, 12);
+        // Hidrata greetingState com cidade limpa do thread-state (pós-restart / open-all).
+        // Evita re-raspagem em todo reply quando dual já resolveu.
+        try {
+          const seedCity = String(known_city || "").trim();
+          const seedSource = String(known_city_source || "").trim() || null;
+          const seedLink = String(known_item_link || "").trim() || null;
+          if (tk && seedCity && __deltaCityLabelIsClean(seedCity, seedSource)) {
+            const priorSeed = greetingStateByThread.get(tk) || null;
+            const priorClean =
+              priorSeed &&
+              priorSeed.cityStatus === "resolved" &&
+              __deltaCityLabelIsClean(priorSeed.city, priorSeed.citySource);
+            if (!priorClean) {
+              greetingStateByThread.set(tk, {
+                sentAt: Number((priorSeed && priorSeed.sentAt) || Date.now()) || Date.now(),
+                greetingText: String((priorSeed && priorSeed.greetingText) || "").trim(),
+                itemLink: seedLink || (priorSeed && priorSeed.itemLink) || null,
+                city: seedCity,
+                citySource: seedSource || "thread_state_seed",
+                cityStatus: "resolved",
+                linkStatus: seedLink || (priorSeed && priorSeed.itemLink) ? "resolved" : (priorSeed && priorSeed.linkStatus) || null,
+                cityCollectBgScheduled: false,
+                cityCollectBgWave: Number((priorSeed && priorSeed.cityCollectBgWave) || 0) || 0,
+                linkRecoveryScheduled: !!(priorSeed && priorSeed.linkRecoveryScheduled),
+                linkRecoveryWave: Number((priorSeed && priorSeed.linkRecoveryWave) || 0) || 0,
+              });
+            }
+          }
+        } catch (_) {}
         if (cmid) {
           const prior = getReplyDispatchState(cmid);
           if (prior && prior.state === "done") {

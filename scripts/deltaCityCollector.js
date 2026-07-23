@@ -179,23 +179,23 @@ function listChromePidsForUserDataDirWin(userDataDir) {
   const dir = String(userDataDir || "").trim();
   if (!dir) return [];
   const needle = dir.replace(/\//g, "\\").replace(/\\+$/g, "");
+  // Join com ';' — PowerShell exige separador de statements (espaço sozinho quebra o parse).
   const script = [
     "$ErrorActionPreference='SilentlyContinue'",
     `$needle = ${JSON.stringify(needle)}`,
-    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" |",
-    "  Where-Object {",
-    "    if (-not $_.CommandLine) { return $false }",
-    "    $cl = [string]$_.CommandLine",
-    "    $i = $cl.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase)",
-    "    if ($i -lt 0) { return $false }",
-    "    $after = $i + $needle.Length",
-    "    if ($after -ge $cl.Length) { return $true }",
-    "    $ch = $cl[$after]",
-    "    # Fim de path / aspas / espaco — nao sufixo alfanumerico nem '-' (siblings).",
-    "    return ($ch -eq [char]'\\' -or $ch -eq [char]'/' -or $ch -eq [char]'\"' -or [char]::IsWhiteSpace($ch))",
-    "  } |",
-    "  Select-Object -ExpandProperty ProcessId",
-  ].join(" ");
+    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" |" +
+      " Where-Object {" +
+      " if (-not $_.CommandLine) { return $false };" +
+      " $cl = [string]$_.CommandLine;" +
+      " $i = $cl.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase);" +
+      " if ($i -lt 0) { return $false };" +
+      " $after = $i + $needle.Length;" +
+      " if ($after -ge $cl.Length) { return $true };" +
+      " $ch = $cl[$after];" +
+      " return ($ch -eq [char]'\\' -or $ch -eq [char]'/' -or $ch -eq [char]'\"' -or [char]::IsWhiteSpace($ch))" +
+      " } |" +
+      " Select-Object -ExpandProperty ProcessId",
+  ].join("; ");
   try {
     const out = execFileSync(
       "powershell.exe",
@@ -739,6 +739,44 @@ function resolveDualIntersectionCommunion(candidates, forensicCtx = null) {
   };
 }
 
+/**
+ * Rótulo de cidade sujo (título de produto colado, marketplace_city_link lixo, etc.).
+ * Ex.: "Grátisnintendo Switch Oledsão José (SC)".
+ */
+function isDirtyCityLabel(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  const m = s.match(/^(.+?)\s*(?:\(([A-Za-z]{2})\)|,\s*([A-Za-z]{2}))\s*$/);
+  const cityPart = String((m && m[1]) || s).replace(/\s+/g, " ").trim();
+  if (!cityPart) return true;
+  if (!isPlausibleCityName(cityPart)) return true;
+  const compact = cityPart
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (CITY_PRODUCT_GLUE_RE.test(compact)) return true;
+  return false;
+}
+
+/** Cidade canônica limpa (não sentinel, não título de produto). */
+function isCleanCityLabel(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  const key = s.toLowerCase();
+  if (
+    key === "pendente" ||
+    key === "cidade pendente" ||
+    key === "aguardando coletar cidade" ||
+    key === "aguardando cidade" ||
+    key === "sem cidade" ||
+    key === "nao informado"
+  ) {
+    return false;
+  }
+  return !isDirtyCityLabel(s);
+}
+
 function isPlausibleCityName(cityRaw) {
   const city = String(cityRaw || "").replace(/\s+/g, " ").trim();
   if (!city) return false;
@@ -941,21 +979,23 @@ function candidateSourcePriority(source) {
 }
 
 async function extractCityFromListingPage(page, {
-  maxAttempts = 12,
-  retryIntervalMs = 250,
+  maxAttempts = 16,
+  retryIntervalMs = 650,
   scanLimit = 320,
-  dualExclusiveRounds = 6,
+  dualExclusiveRounds = 10,
   thread_key = null,
   account_login = null,
   item_link = null,
 } = {}) {
   if (!page) return { cidade: null, error: "city_page_missing" };
-  const attempts = Math.max(1, Math.min(24, Number(maxAttempts || 12) || 12));
-  const intervalMs = Math.max(80, Math.min(900, Number(retryIntervalMs || 250) || 250));
-  // Rodadas 1..N: SÓ dual ou âncora limpa. City-link fraco NUNCA entra aqui.
+  // Paciência soberana: Marketplace hidrata Anunciado+Localização tarde.
+  // Cap alto pra não abortar cedo com city-link/âncora parcial.
+  const attempts = Math.max(6, Math.min(30, Number(maxAttempts || 16) || 16));
+  const intervalMs = Math.max(250, Math.min(2_000, Number(retryIntervalMs || 650) || 650));
+  // Rodadas 1..N: SÓ dual A∩B. Âncora/city-link NUNCA fecham aqui.
   const dualRounds = Math.max(
-    3,
-    Math.min(attempts, Number(dualExclusiveRounds || 6) || 6)
+    6,
+    Math.min(attempts, Number(dualExclusiveRounds || 10) || 10)
   );
   const nodeLimit = Math.max(80, Math.min(500, Number(scanLimit || 320) || 320));
   const forensic = {
@@ -1057,7 +1097,7 @@ async function extractCityFromListingPage(page, {
       candidates.some((c) => /^anunciado_/i.test(String((c && c.source) || ""))) &&
       candidates.some((c) => /^loc_/i.test(String((c && c.source) || "")));
 
-    // 1) Intersecao de comunhao identica Anunciado (A) ∩ Localizacao (B)
+    // 1) Intersecao de comunhao identica Anunciado (A) ∩ Localizacao (B) — única fonte 110%.
     const communion = resolveDualIntersectionCommunion(candidates, forensic);
     if (communion && communion.cidade) {
       try {
@@ -1077,28 +1117,8 @@ async function extractCityFromListingPage(page, {
       };
     }
 
-    // 2) Via unica limpa: ancora laser em localizacao no body
-    const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
-    if (fromBodyAnchor) {
-      try {
-        logTriagemDomCityCommunion({
-          ...forensic,
-          block_a: "",
-          block_b: String(payload.bodyText || "").slice(0, 400),
-          final_extracted: fromBodyAnchor,
-        });
-      } catch (_) {}
-      return {
-        cidade: fromBodyAnchor,
-        city_source: "loc_anchor_body",
-        attempt,
-        login_wall: !!payload.loginWall,
-        dual_exclusive: attempt <= dualRounds,
-      };
-    }
-
-    // 3) Rodadas exclusivas de dual: NÃO aceita city-link / body / mapa fraco.
-    //    Espera hidratar Anunciado+Localizacao (causa clássica do dual "não fechar").
+    // 2) Rodadas exclusivas de dual: NÃO aceita âncora / city-link / body.
+    //    Fraqueza clássica: fechar cedo com loc_anchor parcial e perder Satuba/A∩B real.
     if (attempt <= dualRounds) {
       lastDiag = {
         login_wall: !!payload.loginWall,
@@ -1117,11 +1137,33 @@ async function extractCityFromListingPage(page, {
           ` thread=${forensic.thread_key || "n/a"}`
         );
       } catch (_) {}
-      const waitMs = (!hasDualBlocks)
-        ? Math.min(900, intervalMs + 200)
-        : intervalMs;
-      if (attempt < attempts) await sleep(waitMs);
+      // Backoff progressivo: DOM do Marketplace demora a pintar Anunciado+Localização.
+      const missingBlocks = !hasDualBlocks || !payload.hasAnunciado || !payload.hasLocalizacao;
+      const backoff = missingBlocks
+        ? Math.min(2_400, intervalMs + 250 + (attempt * 180))
+        : Math.min(1_600, intervalMs + (attempt * 80));
+      if (attempt < attempts) await sleep(backoff);
       continue;
+    }
+
+    // 3) Pós-dual: âncora limpa de localização (segunda melhor, ainda sem city-link).
+    const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
+    if (fromBodyAnchor) {
+      try {
+        logTriagemDomCityCommunion({
+          ...forensic,
+          block_a: "",
+          block_b: String(payload.bodyText || "").slice(0, 400),
+          final_extracted: fromBodyAnchor,
+        });
+      } catch (_) {}
+      return {
+        cidade: fromBodyAnchor,
+        city_source: "loc_anchor_body",
+        attempt,
+        login_wall: !!payload.loginWall,
+        dual_exclusive: false,
+      };
     }
 
     // 4) Pós-dual: só fontes fortes (loc_/anunciado_/map_). NUNCA marketplace_city_link/body.
@@ -1166,7 +1208,7 @@ async function extractCityFromListingPage(page, {
       phase: "post_dual_no_strong_source",
     };
     if (attempt < attempts) {
-      await sleep(intervalMs);
+      await sleep(Math.min(2_000, intervalMs + 200));
     }
   }
   return {
@@ -1283,23 +1325,43 @@ async function dismissLoginOverlayPatient(page, { rounds = 3 } = {}) {
 async function waitForListingHints(page, timeoutMs) {
   if (!page) return;
   const timeout = Math.max(400, Number(timeoutMs || 0) || 1500);
+  const started = Date.now();
   try {
+    // Preferência: Anunciado E Localização (dual pronto). Fallback: qualquer âncora.
     await page.waitForFunction(() => {
       const body = String((document.body && document.body.innerText) || "")
         .replace(/\s+/g, " ")
         .toLowerCase();
       if (!body) return false;
-      // Âncoras estáveis (miolo do tempo muda; estas palavras não)
-      if (body.includes("localiza")) return true;
-      if (body.includes("anunciado") || body.includes("listed")) return true;
-      if (body.includes("approximate location")) return true;
-      return Boolean(
-        document.querySelector(
-          'a[href*="/marketplace/"][role="link"] span, [aria-label*="localiza"], [aria-label*="location"], #login_popup_cta_form'
-        )
-      );
-    }, { timeout });
-  } catch (_) {}
+      const hasLoc =
+        body.includes("localiza") ||
+        body.includes("approximate location");
+      const hasAn =
+        body.includes("anunciado") ||
+        body.includes("listed");
+      if (hasLoc && hasAn) return true;
+      return false;
+    }, { timeout: Math.min(timeout, Math.max(2_500, Math.floor(timeout * 0.7))) });
+  } catch (_) {
+    // Fallback: aceita qualquer âncora se o dual completo não pintou a tempo.
+    const remain = Math.max(400, timeout - (Date.now() - started));
+    try {
+      await page.waitForFunction(() => {
+        const body = String((document.body && document.body.innerText) || "")
+          .replace(/\s+/g, " ")
+          .toLowerCase();
+        if (!body) return false;
+        if (body.includes("localiza")) return true;
+        if (body.includes("anunciado") || body.includes("listed")) return true;
+        if (body.includes("approximate location")) return true;
+        return Boolean(
+          document.querySelector(
+            'a[href*="/marketplace/"][role="link"] span, [aria-label*="localiza"], [aria-label*="location"], #login_popup_cta_form'
+          )
+        );
+      }, { timeout: remain });
+    } catch (_) {}
+  }
 }
 
 /**
@@ -1343,8 +1405,8 @@ async function createCollectorRuntime() {
   );
   // 75s default: fila serial + launch + nav sob pressão não pode virar pending cedo demais.
   const jobTimeoutMs = Math.max(
-    15_000,
-    Math.min(120_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_JOB_TIMEOUT_MS || 75_000) || 75_000)
+    20_000,
+    Math.min(180_000, Number(process.env.VIRTUS_DELTA_CITY_COLLECTOR_JOB_TIMEOUT_MS || 110_000) || 110_000)
   );
 
   let browser = null;
@@ -1803,7 +1865,8 @@ async function createCollectorRuntime() {
           sawLaunchFailure = false;
           await applySessionCookies(p, session_cookies);
           await p.goto(itemLink, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
-          await sleep(randomBetween(500, 1100));
+          // Settle longo: DOM do item ainda pinta Anunciado/Localização depois do domcontentloaded.
+          await sleep(randomBetween(1_200, 2_200));
 
           // Guarda soberana: se o FB jogou pra login/?next=/marketplace/ (sem item),
           // não adianta varrer DOM — não é o anúncio.
@@ -1843,7 +1906,7 @@ async function createCollectorRuntime() {
             continue;
           }
 
-          await waitForListingHints(p, Math.min(4000, Math.max(1800, Math.floor(navTimeoutMs / 4))));
+          await waitForListingHints(p, Math.min(8_000, Math.max(3_000, Math.floor(navTimeoutMs / 3))));
 
           // Lê a cidade mesmo com o modal de login na frente (DOM do anúncio fica atrás).
           const listingForensic = {
@@ -1851,34 +1914,36 @@ async function createCollectorRuntime() {
             account_login: account,
             item_link: itemLink,
           };
+          // Pass 1: paciência máxima no dual A∩B (única fonte 110%).
           let extracted = await extractCityFromListingPage(p, {
-            maxAttempts: 8,
-            retryIntervalMs: 400,
-            dualExclusiveRounds: 6,
+            maxAttempts: 16,
+            retryIntervalMs: 700,
+            dualExclusiveRounds: 12,
             scanLimit: 320,
             ...listingForensic,
           });
 
           if (!extracted || !extracted.cidade) {
             await dismissLoginOverlayPatient(p, { rounds: 3 });
-            await waitForListingHints(p, Math.min(5000, Math.max(2500, Math.floor(navTimeoutMs / 3))));
+            await waitForListingHints(p, Math.min(9_000, Math.max(4_000, Math.floor(navTimeoutMs / 2))));
             extracted = await extractCityFromListingPage(p, {
-              maxAttempts: 14,
-              retryIntervalMs: 550,
-              dualExclusiveRounds: 8,
-              scanLimit: 320,
+              maxAttempts: 18,
+              retryIntervalMs: 800,
+              dualExclusiveRounds: 14,
+              scanLimit: 360,
               ...listingForensic,
             });
           }
           if (!extracted || !extracted.cidade) {
             // Segunda passada: fecha pop-up de novo, espera hidratar e relê o DOM.
-            await dismissLoginOverlayPatient(p, { rounds: 2 });
-            await waitForListingHints(p, 3500);
+            await dismissLoginOverlayPatient(p, { rounds: 3 });
+            await sleep(randomBetween(800, 1_400));
+            await waitForListingHints(p, 6_000);
             extracted = await extractCityFromListingPage(p, {
-              maxAttempts: 10,
-              retryIntervalMs: 450,
-              dualExclusiveRounds: 7,
-              scanLimit: 320,
+              maxAttempts: 14,
+              retryIntervalMs: 750,
+              dualExclusiveRounds: 10,
+              scanLimit: 360,
               ...listingForensic,
             });
           }
@@ -2062,5 +2127,7 @@ module.exports = {
   resolveDualIntersectionCommunion,
   collectGeoHitsFromBlob,
   isPlausibleCityName,
+  isDirtyCityLabel,
+  isCleanCityLabel,
   isWeakCityCandidateSource,
 };
