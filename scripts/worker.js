@@ -13485,6 +13485,15 @@ function getControlledReopenDelayMs(reason = '') {
   const r = String(reason || '').toLowerCase();
   const controlled = String(process.env.CONTROLLED_REOPEN_ENABLED || '1').trim() !== '0';
   if (!controlled) return ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+  // Abrir Todos: delay curto (anti-flap leve) — não segura o modo seguro por 5–15min.
+  try {
+    if (isOpenAllSessionActive()) {
+      return Math.max(
+        5_000,
+        Math.min(60_000, Number(process.env.OPEN_ALL_REOPEN_DELAY_MS || 12_000) || 12_000)
+      );
+    }
+  } catch {}
   if (r === 'ramkill' || r === 'cpukill') return ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random() * 120000);
   if (r === 'virtus_block') return ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
   const minMs = _envMs('REOPEN_NON_RAM_MIN_MS', 5 * 60 * 1000);
@@ -14196,6 +14205,53 @@ const OPEN_ALL_PARTIAL_CFG = {
   stallMs: Math.max(15_000, Number(process.env.OPEN_ALL_PARTIAL_STALL_MS || 120_000) || 120_000),
   denyWindowMs: Math.max(5_000, Number(process.env.OPEN_ALL_PARTIAL_DENY_WINDOW_MS || 45_000) || 45_000)
 };
+
+/** Abrir Todos ativo no desired (modo seguro / open_all_map). */
+function isOpenAllSessionActive(desiredHint = null) {
+  try {
+    const d = desiredHint || readDesiredForNurse();
+    const oa = d && d._openAll && typeof d._openAll === 'object' ? d._openAll : null;
+    return !!(oa && oa.active === true);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Durante Abrir Todos, reopenAt longo (5–15min) engessa o "modo seguro".
+ * Nudge: zera o wait e deixa o nurse tentar agora.
+ */
+function maybeBypassReopenWaitForOpenAll(nome, desiredHint = null) {
+  const n = String(nome || '').trim();
+  if (!n) return false;
+  try {
+    const d = desiredHint || readDesiredForNurse();
+    if (!isOpenAllSessionActive(d)) return false;
+    const oa = d && d._openAll && typeof d._openAll === 'object' ? d._openAll : null;
+    const q = oa && Array.isArray(oa.queue) ? oa.queue.map((x) => String(x || '')) : [];
+    // Sem queue explícita: qualquer desired.active sob open-all. Com queue: só quem está nela.
+    if (q.length && !q.includes(n)) return false;
+    robeMeta[n] = robeMeta[n] || {};
+    const had = Number(robeMeta[n].reopenAt || 0) || 0;
+    if (!(had && had > Date.now())) return false;
+    robeMeta[n].reopenAt = null;
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'open_all_bypass_reopen_wait',
+        nome: n,
+        wasReopenAt: had,
+        remainSec: Math.max(0, Math.round((had - Date.now()) / 1000)),
+      });
+    } catch {}
+    try {
+      issues.append(n, 'mil_action', 'open_all_bypass_reopen_wait').catch(() => {});
+    } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ===== Reconciliador de estado (modo humano) =====
 // Problema real observado em produção (RM4): perfis ficam "engessados" com flags antigas
@@ -15097,7 +15153,10 @@ async function nurseTick() {
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
-          continue;
+          // Abrir Todos: não ficar "esperando 9 min" com o modo seguro travado.
+          if (!maybeBypassReopenWaitForOpenAll(nome, desired)) {
+            continue;
+          }
         }
         // Anti-reopen: banflow em andamento ou already_opening
         if (robeMeta[nome]?.banCloseInFlight === true) {
