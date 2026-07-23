@@ -4483,6 +4483,13 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     // - se a pré-condição de close falhar, NÃO deletar (marca pendente e sai)
     try {
       const flowId = newFlowId('ban');
+      // Anti-reopen: nurse/activate não abrem enquanto o banflow fecha.
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].banCloseInFlight = true;
+        robeMeta[nome].banCloseInFlightAt = Date.now();
+        robeMeta[nome].whyNotOpen = 'banned';
+      } catch {}
       // Captura stockAccountId logo no começo (antes de qualquer delete), para nunca “sumir” no CT.
       let stockAccountId = null;
       try {
@@ -4607,9 +4614,16 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
+    robeMeta[nome].whyNotOpen = 'banned';
     // Mantém coerência no runtime store também.
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
+    } catch {}
+    try {
+      if (robeMeta[nome]) {
+        delete robeMeta[nome].banCloseInFlight;
+        delete robeMeta[nome].banCloseInFlightAt;
+      }
     } catch {}
     // Sempre retorna (não propaga)
     return banResult;
@@ -6118,6 +6132,17 @@ const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
   if (opening[nome]) return { ok: false, error: 'already_opening' };
+  if (robeMeta[nome]?.banCloseInFlight === true) {
+    try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_ban_close_inflight', nome: String(nome||''), source: String(source||'') }); } catch {}
+    return { ok: false, error: 'ban_close_inflight' };
+  }
+  try {
+    const fl = await readAccountFlags(nome).catch(() => null);
+    if (fl && fl.banned === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_banned', nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: 'banned' };
+    }
+  } catch {}
 
   if (controllers.has(nome)) {
     return { ok: true, already: true };
@@ -7311,14 +7336,34 @@ async function normalizeCooldown(nome) {
       robeMeta[nome].pauseReason = man.robePauseReason || null;
     } catch {}
     if (!man) return 0;
-    const until = Number(man.robeCooldownUntil || 0);
-    const remaining = Number(man.robeCooldownRemainingMs || 0);
+    const working = !!(ctrl && ctrl.browser && ctrl.trabalhando && !ctrl.configurando && !ctrl.humanControl);
+    let until = Number(man.robeCooldownUntil || 0);
+    let remaining = Number(man.robeCooldownRemainingMs || 0);
+
+    // Conta fechada / não trabalhando: congela until → remaining (pausa o relógio).
+    if (!working && until > now) {
+      const left = until - now;
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          const u = Number(m.robeCooldownUntil || 0);
+          if (u > Date.now()) {
+            m.robeCooldownRemainingMs = u - Date.now();
+            m.robeCooldownUntil = 0;
+          }
+          return m;
+        });
+      } catch {}
+      until = 0;
+      remaining = left;
+    }
+
     const leftUntil = until > now ? (until - now) : 0;
     const leftRem = remaining > 0 ? remaining : 0;
 
     if (leftUntil > 0 && leftRem > 0 && Math.abs(leftUntil - leftRem) > 60*1000) {
       const winner = Math.max(leftUntil, leftRem);
-      if (ctrl && ctrl.trabalhando && !ctrl.humanControl) {
+      if (working) {
         await manifestStore.update(nome, m => {
           m = m || {};
           m.robeCooldownUntil = now + winner;
@@ -11542,7 +11587,8 @@ const handlers = {
             try {
               await fileStore.withDesiredFileLockUpdate((d) => {
                 d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+                // Conta suspensa/banida: NUNCA manter active=true (reabre navegador sozinho).
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off', humanHold: false };
                 return d;
               });
             } catch {}
@@ -14758,6 +14804,19 @@ async function nurseTick() {
         const flagsB = await readAccountFlags(nome).catch(()=>({}));
         if (flagsB && flagsB.banned === true) {
           robeMeta[nome] = robeMeta[nome] || {};
+          // Anti-reopen: se desired ainda estiver active (race), força off.
+          try {
+            if (want && want.active === true) {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {};
+                d.perfis = d.perfis || {};
+                const prev = d.perfis[nome] || {};
+                d.perfis[nome] = { ...prev, active: false, virtus: 'off', humanHold: false };
+                return d;
+              });
+              try { provisionAudit.append({ ts: now, event: 'ban_desired_force_off', nome: String(nome || '') }); } catch {}
+            }
+          } catch {}
           const last = Number(robeMeta[nome].banSweepLastAt || 0) || 0;
           if (!last || (now - last) > (2 * 60 * 1000)) { // no máximo 1 tentativa a cada 2min por perfil
             robeMeta[nome].banSweepLastAt = now;
@@ -15007,6 +15066,19 @@ async function nurseTick() {
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
+          continue;
+        }
+        // Anti-reopen: banflow em andamento ou already_opening
+        if (robeMeta[nome]?.banCloseInFlight === true) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_ban_close_inflight', nome: String(nome||'') }); } catch {}
+          continue;
+        }
+        if (opening[nome]) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_already_opening', nome: String(nome||'') }); } catch {}
+          continue;
+        }
+        if (robeMeta[nome]?.banned === true || robeMeta[nome]?.whyNotOpen === 'banned') {
+          try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_banned_runtime', nome: String(nome||'') }); } catch {}
           continue;
         }
 

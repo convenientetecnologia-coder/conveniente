@@ -498,6 +498,11 @@ function normalizeStateKey(value) {
 
 const CITY_NOISE_RE = /\b(enviar|mensagem|message|save|share|anunciado|listed|detalhe|detalhes|condi[cç][aã]o|condi[cç][oõ]es|razo[aá]veis|selec[cç][oõ]es|hoje|mini?atura|ver mais|facebook|localiza[cç][aã]o|location|aproximada|approximate|dias?|hours?|horas?|minutos?|weeks?|semanas?|months?|meses?|ago|classificado|usado|nova?)\b/i;
 
+// Título de produto colado no rótulo de cidade (ex: "Grátisnintendo Switch Oledsão José").
+// Compactado SEM word-boundary: no DOM o título cola no nome da cidade.
+const CITY_PRODUCT_NOISE_RE = /\b(gratis|gr[aá]tis|nintendo|switch|oled|iphone|ipad|samsung|xiaomi|motorola|playstation|xbox|kindle|airpods|macbook|notebook|console|smartphone|celular|fret[e]?|entrega|dispon[ií]vel|promocao|promo[cç][aã]o)\b/i;
+const CITY_PRODUCT_GLUE_RE = /gratis|nintendo|switch|oled|iphone|ipad|samsung|playstation|xbox|airpods|macbook|smartphone|console|disponivel|promocao/i;
+
 const GEO_COMMA_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*,\s*([A-Za-z]{2})\b/gi;
 const GEO_PAREN_RE = /\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\- ]{2,50})\s*\(\s*([A-Za-z]{2})\s*\)/gi;
 
@@ -743,11 +748,24 @@ function isPlausibleCityName(cityRaw) {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
   if (CITY_NOISE_RE.test(cityKey)) return false;
+  if (CITY_PRODUCT_NOISE_RE.test(cityKey)) return false;
   if (/\b(em|in|ha|ago)\b/.test(cityKey)) return false;
-  // Colado tipo "razoaveisjuazeiro" / "condicoesjuazeiro"
-  if (/razoaveis|condicoes|boascond/i.test(cityKey.replace(/\s+/g, ""))) return false;
+  // Colado tipo "razoaveisjuazeiro" / "condicoesjuazeiro" / "gratisnintendo...saojose"
+  const compact = cityKey.replace(/\s+/g, "");
+  if (/razoaveis|condicoes|boascond/i.test(compact)) return false;
+  if (CITY_PRODUCT_GLUE_RE.test(compact)) return false;
+  // Token único colado demais (título+cidade sem espaço): rejeita
   const words = city.split(/\s+/).filter(Boolean);
   if (words.length < 1 || words.length > 5) return false;
+  for (const w of words) {
+    const wk = String(w || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    // palavra > 18 chars sem espaço costuma ser título colado ("gratisnintendo", "oledsao")
+    if (wk.length >= 18) return false;
+    if (CITY_PRODUCT_GLUE_RE.test(wk)) return false;
+  }
   // Fragmentos tipo "do Norte" / "da Serra" sem cidade completa
   const first = String(words[0] || "")
     .normalize("NFD")
@@ -755,6 +773,12 @@ function isPlausibleCityName(cityRaw) {
     .toLowerCase();
   if (/^(do|da|de|dos|das|e|o|a|os|as)$/.test(first) && words.length <= 2) return false;
   return true;
+}
+
+/** Fonte fraca: nunca vira cidade final sozinha (precisa dual ou âncora limpa). */
+function isWeakCityCandidateSource(source) {
+  const s = String(source || "").toLowerCase();
+  return s.startsWith("marketplace_city_link") || s === "body_head" || s.startsWith("body_");
 }
 
 /** Resolve Cidade+UF a partir do miolo capturado: sufixos da direita no DOM. */
@@ -920,13 +944,19 @@ async function extractCityFromListingPage(page, {
   maxAttempts = 12,
   retryIntervalMs = 250,
   scanLimit = 320,
+  dualExclusiveRounds = 6,
   thread_key = null,
   account_login = null,
   item_link = null,
 } = {}) {
   if (!page) return { cidade: null, error: "city_page_missing" };
-  const attempts = Math.max(1, Math.min(20, Number(maxAttempts || 12) || 12));
-  const intervalMs = Math.max(80, Math.min(700, Number(retryIntervalMs || 250) || 250));
+  const attempts = Math.max(1, Math.min(24, Number(maxAttempts || 12) || 12));
+  const intervalMs = Math.max(80, Math.min(900, Number(retryIntervalMs || 250) || 250));
+  // Rodadas 1..N: SÓ dual ou âncora limpa. City-link fraco NUNCA entra aqui.
+  const dualRounds = Math.max(
+    3,
+    Math.min(attempts, Number(dualExclusiveRounds || 6) || 6)
+  );
   const nodeLimit = Math.max(80, Math.min(500, Number(scanLimit || 320) || 320));
   const forensic = {
     thread_key: String(thread_key || "").slice(0, 80) || null,
@@ -986,7 +1016,7 @@ async function extractCityFromListingPage(page, {
         try { push(el.getAttribute("aria-label") || "", "map_aria"); } catch (_) {}
       }
 
-      // Links curtos marketplace (nao cards com R$)
+      // Links curtos marketplace (nao cards com R$) — fonte FRACA (só evidencia, nunca final sozinha)
       const cityLinks = Array.from(document.querySelectorAll('a[href*="/marketplace/"][role="link"]'))
         .slice(0, Math.max(1, Number(maxNodes || 320) || 320));
       for (const el of cityLinks) {
@@ -1012,12 +1042,28 @@ async function extractCityFromListingPage(page, {
     const payload = out && typeof out === "object" ? out : { bodyText: "", candidates: [] };
     const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice() : [];
 
+    // Sinteticos: se DOM ainda nao marcou Anunciado/Loc, extrai do body para o dual fechar.
+    const bodyTxt = String(payload.bodyText || "");
+    const hasA = candidates.some((c) => /^anunciado_/i.test(String((c && c.source) || "")));
+    const hasB = candidates.some((c) => /^loc_/i.test(String((c && c.source) || "")));
+    if (!hasA && /\b(?:em|in)\s+[A-Za-zÀ-ÿ]/i.test(bodyTxt)) {
+      candidates.push({ value: bodyTxt.slice(0, 2500), source: "anunciado_body_em" });
+    }
+    if (!hasB && /localiza/i.test(bodyTxt)) {
+      candidates.push({ value: bodyTxt.slice(0, 2500), source: "loc_body_synthetic" });
+    }
+
+    const hasDualBlocks =
+      candidates.some((c) => /^anunciado_/i.test(String((c && c.source) || ""))) &&
+      candidates.some((c) => /^loc_/i.test(String((c && c.source) || "")));
+
     // 1) Intersecao de comunhao identica Anunciado (A) ∩ Localizacao (B)
     const communion = resolveDualIntersectionCommunion(candidates, forensic);
     if (communion && communion.cidade) {
       try {
         log(
           `comunhao dual cidade="${communion.cidade}" attempt=${attempt}` +
+          ` dual_round=${attempt <= dualRounds ? "yes" : "no"}` +
           ` login_wall=${payload.loginWall ? "sim" : "nao"}` +
           ` thread=${forensic.thread_key || "n/a"}`
         );
@@ -1027,10 +1073,11 @@ async function extractCityFromListingPage(page, {
         city_source: "dual_intersection_communion",
         attempt,
         login_wall: !!payload.loginWall,
+        dual_exclusive: attempt <= dualRounds,
       };
     }
 
-    // 2) Via unica: ancora laser em localizacao no body (sem strip Novo/Seminovo)
+    // 2) Via unica limpa: ancora laser em localizacao no body
     const fromBodyAnchor = extractCityFromLocationAnchorText(payload.bodyText || "");
     if (fromBodyAnchor) {
       try {
@@ -1046,41 +1093,77 @@ async function extractCityFromListingPage(page, {
         city_source: "loc_anchor_body",
         attempt,
         login_wall: !!payload.loginWall,
+        dual_exclusive: attempt <= dualRounds,
       };
     }
 
-    // 3) Demais candidatos (prioridade loc > anunciado > mapa > link)
+    // 3) Rodadas exclusivas de dual: NÃO aceita city-link / body / mapa fraco.
+    //    Espera hidratar Anunciado+Localizacao (causa clássica do dual "não fechar").
+    if (attempt <= dualRounds) {
+      lastDiag = {
+        login_wall: !!payload.loginWall,
+        has_localizacao: !!payload.hasLocalizacao,
+        has_anunciado: !!payload.hasAnunciado,
+        has_dual_blocks: hasDualBlocks,
+        candidates_count: candidates.length,
+        attempt,
+        phase: "dual_exclusive_wait",
+      };
+      try {
+        log(
+          `dual_exclusive_wait attempt=${attempt}/${dualRounds}` +
+          ` hasA=${payload.hasAnunciado ? 1 : 0} hasB=${payload.hasLocalizacao ? 1 : 0}` +
+          ` blocks=${hasDualBlocks ? 1 : 0} cands=${candidates.length}` +
+          ` thread=${forensic.thread_key || "n/a"}`
+        );
+      } catch (_) {}
+      const waitMs = (!hasDualBlocks)
+        ? Math.min(900, intervalMs + 200)
+        : intervalMs;
+      if (attempt < attempts) await sleep(waitMs);
+      continue;
+    }
+
+    // 4) Pós-dual: só fontes fortes (loc_/anunciado_/map_). NUNCA marketplace_city_link/body.
     candidates.sort((a, b) => candidateSourcePriority(a && a.source) - candidateSourcePriority(b && b.source));
 
     for (const cand of candidates) {
+      const src = String((cand && cand.source) || "");
+      if (isWeakCityCandidateSource(src)) continue;
       const v = normalizeCityUfLabel(cand && cand.value);
       if (!v) continue;
+      // Revalida anti-título mesmo após normalize
+      const cityOnly = String(v).replace(/\s*\([A-Za-z]{2}\)\s*$/, "").trim();
+      if (!isPlausibleCityName(cityOnly)) continue;
       if (payload.loginWall) {
         try {
-          log(`cidade lida atras do login wall source=${cand.source || "?"} cidade="${v}" attempt=${attempt}`);
+          log(`cidade lida atras do login wall source=${src || "?"} cidade="${v}" attempt=${attempt}`);
         } catch (_) {}
       }
       try {
         logTriagemDomCityCommunion({
           ...forensic,
-          block_a: /^anunciado_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : "",
-          block_b: /^loc_/i.test(String((cand && cand.source) || "")) ? String(cand.value || "") : String(cand.value || ""),
+          block_a: /^anunciado_/i.test(src) ? String(cand.value || "") : "",
+          block_b: /^loc_/i.test(src) ? String(cand.value || "") : String(cand.value || ""),
           final_extracted: v,
         });
       } catch (_) {}
       return {
         cidade: v,
-        city_source: String((cand && cand.source) || "collector_unknown"),
+        city_source: src || "collector_unknown",
         attempt,
         login_wall: !!payload.loginWall,
+        dual_exclusive: false,
       };
     }
     lastDiag = {
       login_wall: !!payload.loginWall,
       has_localizacao: !!payload.hasLocalizacao,
       has_anunciado: !!payload.hasAnunciado,
+      has_dual_blocks: hasDualBlocks,
       candidates_count: candidates.length,
       attempt,
+      phase: "post_dual_no_strong_source",
     };
     if (attempt < attempts) {
       await sleep(intervalMs);
@@ -1094,6 +1177,8 @@ async function extractCityFromListingPage(page, {
     has_anunciado: !!(lastDiag && lastDiag.has_anunciado),
     candidates_count: Number((lastDiag && lastDiag.candidates_count) || 0) || 0,
     attempt: Number((lastDiag && lastDiag.attempt) || attempts) || attempts,
+    dual_exclusive_rounds: dualRounds,
+    phase: (lastDiag && lastDiag.phase) || null,
   };
 }
 
@@ -1767,8 +1852,9 @@ async function createCollectorRuntime() {
             item_link: itemLink,
           };
           let extracted = await extractCityFromListingPage(p, {
-            maxAttempts: 4,
-            retryIntervalMs: 350,
+            maxAttempts: 8,
+            retryIntervalMs: 400,
+            dualExclusiveRounds: 6,
             scanLimit: 320,
             ...listingForensic,
           });
@@ -1777,8 +1863,9 @@ async function createCollectorRuntime() {
             await dismissLoginOverlayPatient(p, { rounds: 3 });
             await waitForListingHints(p, Math.min(5000, Math.max(2500, Math.floor(navTimeoutMs / 3))));
             extracted = await extractCityFromListingPage(p, {
-              maxAttempts: 12,
-              retryIntervalMs: 500,
+              maxAttempts: 14,
+              retryIntervalMs: 550,
+              dualExclusiveRounds: 8,
               scanLimit: 320,
               ...listingForensic,
             });
@@ -1786,10 +1873,11 @@ async function createCollectorRuntime() {
           if (!extracted || !extracted.cidade) {
             // Segunda passada: fecha pop-up de novo, espera hidratar e relê o DOM.
             await dismissLoginOverlayPatient(p, { rounds: 2 });
-            await waitForListingHints(p, 3000);
+            await waitForListingHints(p, 3500);
             extracted = await extractCityFromListingPage(p, {
-              maxAttempts: 8,
-              retryIntervalMs: 400,
+              maxAttempts: 10,
+              retryIntervalMs: 450,
+              dualExclusiveRounds: 7,
               scanLimit: 320,
               ...listingForensic,
             });
@@ -1973,4 +2061,6 @@ module.exports = {
   stripMarketplaceConditionNoise,
   resolveDualIntersectionCommunion,
   collectGeoHitsFromBlob,
+  isPlausibleCityName,
+  isWeakCityCandidateSource,
 };
