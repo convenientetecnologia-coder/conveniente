@@ -304,39 +304,42 @@ async function ensureSellingFeed(page, { deadlineAt } = {}) {
   if (!onSelling) {
     await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   }
-  await sleep(WAIT_FEED_SETTLE_MS);
+  // DOM do selling é bem pesado — settle gordo.
+  await sleep(Math.max(WAIT_FEED_SETTLE_MS, 14000));
   assertBudget(deadlineAt, 'selling_settle');
   return true;
 }
 
-async function scanActionNeeded(page, { mode = 'today', preferTitle = '' } = {}) {
+function dateHintsSP(now = Date.now()) {
+  const fmt = (ts, opts) => {
+    try {
+      return new Intl.DateTimeFormat('pt-BR', Object.assign({ timeZone: 'America/Sao_Paulo' }, opts)).format(new Date(ts));
+    } catch {
+      return '';
+    }
+  };
+  const dayMs = 24 * 60 * 60 * 1000;
+  return {
+    todayLabel: fmt(now, { day: 'numeric', month: 'long' }),
+    todayShort: fmt(now, { day: '2-digit', month: '2-digit' }),
+    yesterdayShort: fmt(now - dayMs, { day: '2-digit', month: '2-digit' }),
+    todayDayMonth: fmt(now, { day: 'numeric', month: 'numeric' }),
+    yesterdayDayMonth: fmt(now - dayMs, { day: 'numeric', month: 'numeric' })
+  };
+}
+
+/**
+ * Abre o classificado com "Uma ação é necessária…".
+ * DOM real (selling): NÃO usa <a href="/marketplace/item/…"> no card.
+ * Usa role=button aria-label=título + banner de ação; fallback: ⋮ → Ver classificado.
+ */
+async function openActionNeededListing(page, { mode = 'today', preferTitle = '' } = {}) {
   const prefer = String(preferTitle || '').trim();
-  const todayLabel = (() => {
-    try {
-      return new Intl.DateTimeFormat('pt-BR', {
-        timeZone: 'America/Sao_Paulo',
-        day: 'numeric',
-        month: 'long'
-      }).format(new Date());
-    } catch {
-      return '';
-    }
-  })();
-  const todayShort = (() => {
-    try {
-      return new Intl.DateTimeFormat('pt-BR', {
-        timeZone: 'America/Sao_Paulo',
-        day: '2-digit',
-        month: '2-digit'
-      }).format(new Date());
-    } catch {
-      return '';
-    }
-  })();
+  const hints = dateHintsSP();
 
   try {
     return await page.evaluate(
-      (modeIn, preferIn, todayLabelIn, todayShortIn) => {
+      (modeIn, preferIn, hintsIn) => {
         const normLocal = (s) => {
           try {
             return String(s || '')
@@ -350,66 +353,254 @@ async function scanActionNeeded(page, { mode = 'today', preferTitle = '' } = {})
           }
         };
         const actionRe =
-          /uma\s+acao\s+e\s+necessaria|acao\s+necessaria|action\s+required|se\s+requiere\s+una\s+accion/;
-        const todayHints = ['hoje', 'today', 'hoy'];
-        if (todayLabelIn) todayHints.push(normLocal(todayLabelIn));
-        if (todayShortIn) todayHints.push(normLocal(todayShortIn));
+          /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|action\s+required|se\s+requiere\s+una\s+accion/;
+        const preferN = normLocal(preferIn).slice(0, 48);
+        const dateHints = [
+          'hoje',
+          'today',
+          'hoy',
+          normLocal(hintsIn.todayLabel || ''),
+          normLocal(hintsIn.todayShort || ''),
+          normLocal(hintsIn.yesterdayShort || ''),
+          normLocal(hintsIn.todayDayMonth || ''),
+          normLocal(hintsIn.yesterdayDayMonth || '')
+        ].filter(Boolean);
 
-        const preferN = normLocal(preferIn).slice(0, 40);
-        const candidates = [];
+        const actionNodes = Array.from(
+          document.querySelectorAll('div, span, h2, h3, p, a, [role="button"]')
+        ).filter((el) => {
+          const t = normLocal(el.innerText || el.textContent || '');
+          // nó “folha” de ação: texto curto com a frase
+          if (!t || t.length > 180) return false;
+          return actionRe.test(t);
+        });
 
-        const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"], a[href*="marketplace"]'));
-        const blocks = anchors.length
-          ? anchors
-          : Array.from(document.querySelectorAll('div[role="article"], div[role="listitem"], div')).slice(0, 1200);
+        const cards = [];
+        for (const node of actionNodes) {
+          let root = node;
+          for (let i = 0; i < 14 && root && root !== document.body; i++) {
+            const txt = normLocal(root.innerText || root.textContent || '').slice(0, 1200);
+            const hasAction = actionRe.test(txt);
+            const hasMore =
+              !!root.querySelector('[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]') ||
+              /marcar como indisponivel|promover agora|anunciado em/.test(txt);
+            if (hasAction && hasMore && (root.innerText || '').length < 3500) {
+              break;
+            }
+            root = root.parentElement;
+          }
+          if (!root || root === document.body) root = node.parentElement || node;
 
-        for (const el of blocks) {
-          const txtRaw = (el.innerText || el.textContent || '').slice(0, 800);
-          const txt = normLocal(txtRaw);
-          if (!txt || !actionRe.test(txt)) continue;
-          const preferHit = preferN ? txt.includes(preferN) : false;
+          const txt = normLocal(root.innerText || root.textContent || '').slice(0, 1500);
+          const preferHit = preferN
+            ? txt.includes(preferN) ||
+              Array.from(root.querySelectorAll('[aria-label]')).some((b) =>
+                normLocal(b.getAttribute('aria-label') || '').includes(preferN)
+              )
+            : false;
           const looksToday =
-            todayHints.some((h) => h && txt.includes(h)) ||
-            /\bhoje\b/.test(txt) ||
-            /\b(ha|há)\s+\d+\s+(minuto|minutos|hora|horas)\b/.test(txt) ||
-            /\b\d+\s+(min|mins|h)\b/.test(txt) ||
+            dateHints.some((h) => h && txt.includes(h)) ||
+            /anunciado\s+em\s+\d{1,2}\/\d{1,2}/.test(txt) ||
+            /\b(ha|há)\s+[±+]?\s*(uma|1|\d+)\s+(minuto|minutos|hora|horas)\b/.test(txt) ||
             /\bagora\b/.test(txt);
-          // mode=today: exige sinal de hoje OU match do título recém-publicado
-          if (modeIn === 'today' && !looksToday && !preferHit) continue;
-          const href = el.getAttribute && el.getAttribute('href');
-          candidates.push({
-            el,
-            txt,
-            href: href || '',
-            preferHit
-          });
+
+          // mode=today: título do post OU data de hoje/ontem (virada de meia-noite) OU
+          // único card com ação (fallback).
+          if (modeIn === 'today' && !preferHit && !looksToday) {
+            // ainda guarda; filtramos depois se houver preferidos
+            cards.push({ root, txt, preferHit, looksToday, weak: true });
+          } else {
+            cards.push({ root, txt, preferHit, looksToday, weak: false });
+          }
         }
 
-        if (!candidates.length) return { found: false };
+        if (!cards.length) return { found: false, reason: 'no_action_banner' };
 
-        candidates.sort((a, b) => {
+        // Dedup por root
+        const uniq = [];
+        const seen = new Set();
+        for (const c of cards) {
+          if (seen.has(c.root)) continue;
+          seen.add(c.root);
+          uniq.push(c);
+        }
+
+        let pool = uniq.filter((c) => !c.weak);
+        if (!pool.length && modeIn === 'firstAny') pool = uniq;
+        if (!pool.length && preferN) pool = uniq.filter((c) => c.preferHit);
+        // Se só existe 1 card com ação, usar mesmo fraco (pós-publish típico).
+        if (!pool.length && uniq.length === 1) pool = uniq;
+        if (!pool.length && modeIn === 'today') {
+          // aceita cards com "anunciado em" qualquer dia recente se houver preferTitle parcial
+          pool = uniq.filter((c) => /anunciado\s+em/.test(c.txt));
+        }
+        if (!pool.length) return { found: false, reason: 'action_filtered_out', totalBanners: uniq.length };
+
+        pool.sort((a, b) => {
           if (a.preferHit !== b.preferHit) return a.preferHit ? -1 : 1;
+          if (a.looksToday !== b.looksToday) return a.looksToday ? -1 : 1;
           return 0;
         });
-        const pick = candidates[0];
+        const pick = pool[0];
         try {
-          pick.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          pick.root.scrollIntoView({ block: 'center', inline: 'nearest' });
         } catch {}
-        try {
-          pick.el.click();
-          return { found: true, clicked: true, preferHit: !!pick.preferHit };
-        } catch {
-          return { found: true, clicked: false, preferHit: !!pick.preferHit };
+
+        // 1) Clique preferencial: botão do título (aria-label), evitando Marcar/Promover/Mais opções.
+        const titleBtns = Array.from(pick.root.querySelectorAll('[role="button"][aria-label]'));
+        let titleBtn = null;
+        for (const b of titleBtns) {
+          const al = normLocal(b.getAttribute('aria-label') || '');
+          if (!al) continue;
+          if (
+            al.includes('marcar como') ||
+            al.includes('promover') ||
+            al.includes('mais opcoes') ||
+            al.includes('mais opções') ||
+            al.includes('more options') ||
+            al.includes('cliques')
+          ) {
+            continue;
+          }
+          if (preferN && al.includes(preferN)) {
+            titleBtn = b;
+            break;
+          }
+          if (!titleBtn) titleBtn = b;
         }
+        if (titleBtn) {
+          try {
+            titleBtn.click();
+            return {
+              found: true,
+              clicked: true,
+              method: 'title_button',
+              preferHit: !!pick.preferHit,
+              aria: String(titleBtn.getAttribute('aria-label') || '').slice(0, 80)
+            };
+          } catch {}
+        }
+
+        // 2) Fallback seguro: ⋮ Mais opções → Ver classificado
+        const more =
+          pick.root.querySelector('[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]') ||
+          Array.from(pick.root.querySelectorAll('[role="button"][aria-label]')).find((b) =>
+            /mais opcoes|mais opções|more options/i.test(normLocal(b.getAttribute('aria-label') || ''))
+          );
+        if (more) {
+          try {
+            more.click();
+            return {
+              found: true,
+              clicked: true,
+              method: 'more_options_opened',
+              preferHit: !!pick.preferHit,
+              needVerClassificado: true
+            };
+          } catch {}
+        }
+
+        // 3) Último recurso: clicar no próprio banner de ação
+        try {
+          const banner = Array.from(pick.root.querySelectorAll('div, span')).find((el) =>
+            actionRe.test(normLocal(el.innerText || el.textContent || '').slice(0, 120))
+          );
+          if (banner) {
+            banner.click();
+            return { found: true, clicked: true, method: 'action_banner', preferHit: !!pick.preferHit };
+          }
+        } catch {}
+
+        return { found: true, clicked: false, method: 'none', preferHit: !!pick.preferHit };
       },
       mode,
       prefer,
-      todayLabel,
-      todayShort
+      hints
     );
-  } catch {
-    return { found: false, error: 'scan_evaluate_failed' };
+  } catch (e) {
+    return { found: false, error: 'open_evaluate_failed:' + String((e && e.message) || e).slice(0, 120) };
   }
+}
+
+async function clickVerClassificadoMenu(page) {
+  await sleep(2500);
+  try {
+    const clicked = await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const items = Array.from(document.querySelectorAll('[role="menuitem"], a[role="menuitem"], a'));
+      for (const el of items) {
+        const t = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`);
+        if (t.includes('ver classificado') || t.includes('view listing') || t.includes('ver anuncio')) {
+          try {
+            el.click();
+            return true;
+          } catch {}
+        }
+        const href = el.getAttribute && el.getAttribute('href');
+        if (href && /\/marketplace\/item\//.test(href) && t.includes('ver')) {
+          try {
+            el.click();
+            return true;
+          } catch {}
+        }
+      }
+      return false;
+    });
+    return !!clicked;
+  } catch {
+    return false;
+  }
+}
+
+async function waitListingIdentityPrompt(page, { maxMs = 45000, deadlineAt } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
+    try {
+      const st = await page.evaluate(() => {
+        const normLocal = (s) => {
+          try {
+            return String(s || '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+          } catch {
+            return String(s || '').toLowerCase().trim();
+          }
+        };
+        const body = normLocal(document.body && (document.body.innerText || '') || '');
+        const btn = document.querySelector('[aria-label="Confirme sua identidade"], [aria-label*="Confirme sua identidade"]');
+        return {
+          hasBtn: !!btn,
+          hasText:
+            body.includes('confirme sua identidade') ||
+            body.includes('verifique sua identidade para publicar') ||
+            body.includes('verifique sua identidade'),
+          onItem: /\/marketplace\/item\//.test(location.pathname || '')
+        };
+      });
+      if (st && (st.hasBtn || st.hasText)) return st;
+    } catch {}
+    await sleep(2000);
+  }
+  return null;
+}
+
+/** Compat: scan antigo → agora abre o classificado. */
+async function scanActionNeeded(page, opts) {
+  return openActionNeededListing(page, opts);
 }
 
 async function findFileInputEverywhere(page) {
@@ -447,6 +638,7 @@ async function isSuccessScreen(page) {
       };
       const hit = (t) =>
         t.includes('suas informacoes foram enviadas') ||
+        t.includes('enviadas para verificacao') ||
         t.includes('your information was submitted') ||
         t.includes('your information has been submitted') ||
         t.includes('enviamos suas informacoes') ||
@@ -503,26 +695,88 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     return finishAlreadySubmitted(page, { nome, source, where: 'open' });
   }
 
-  // Confirme sua identidade → Avançar
+  // Na página do item: botão "Confirme sua identidade" (DOM real do selling/item).
+  let confirmBtn = await clickByText(
+    page,
+    ['confirme sua identidade', 'verifique sua identidade'],
+    { withinDialog: false }
+  );
+  if (!confirmBtn) {
+    try {
+      confirmBtn = await page.evaluate(() => {
+        const el =
+          document.querySelector('[aria-label="Confirme sua identidade"]') ||
+          document.querySelector('[aria-label*="Confirme sua identidade"]');
+        if (el && typeof el.click === 'function') {
+          el.click();
+          return true;
+        }
+        return false;
+      });
+    } catch {
+      confirmBtn = false;
+    }
+  }
+  logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
+  await sleep(WAIT_STEP_MS + 2000);
+  assertBudget(deadlineAt, 'wizard_after_confirm_btn');
+
+  if (await isSuccessScreen(page)) {
+    return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn' });
+  }
+
+  // Avançar (às vezes é link "A seguir: continue para a verificação…")
   let advanced = await clickByText(
     page,
-    ['avancar', 'avançar', 'continue', 'next'],
+    [
+      'avancar',
+      'avançar',
+      'continue',
+      'next',
+      'a seguir: continue',
+      'continue para a verificacao',
+      'continue para a verificação'
+    ],
     { withinDialog: true }
   );
   if (!advanced) {
-    advanced = await clickByText(page, ['avancar', 'avançar', 'continuar', 'continue'], {
-      withinDialog: false
-    });
+    advanced = await clickByText(
+      page,
+      [
+        'avancar',
+        'avançar',
+        'continuar',
+        'continue',
+        'a seguir: continue',
+        'continue para a verificacao'
+      ],
+      { withinDialog: false }
+    );
+  }
+  if (!advanced) {
+    try {
+      advanced = await page.evaluate(() => {
+        const el =
+          document.querySelector('[aria-label*="A seguir"]') ||
+          document.querySelector('[aria-label*="verificação de identidade"], [aria-label*="verificacao de identidade"]');
+        if (el && typeof el.click === 'function') {
+          el.click();
+          return true;
+        }
+        return false;
+      });
+    } catch {
+      advanced = false;
+    }
   }
   logEvt(nome, source, 'wizard_avancar', { ok: !!advanced });
-  await sleep(WAIT_STEP_MS);
+  await sleep(WAIT_STEP_MS + 2000);
   assertBudget(deadlineAt, 'wizard_after_avancar');
 
   // Atalho crítico: Avançar → direto "Suas informações foram enviadas..."
-  // (ID já feito por humano/outro fluxo). Considerar concluído.
   {
     const early = await waitForSuccessScreen(page, {
-      maxMs: 20000,
+      maxMs: 25000,
       deadlineAt
     });
     if (early) {
@@ -536,13 +790,12 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   });
   if (!cont) cont = await clickByText(page, ['continuar', 'continue'], { withinDialog: false });
   logEvt(nome, source, 'wizard_continuar', { ok: !!cont });
-  await sleep(WAIT_STEP_MS);
+  await sleep(WAIT_STEP_MS + 1500);
   assertBudget(deadlineAt, 'wizard_after_continuar');
 
-  // Mesmo atalho após Continuar (FB às vezes salta etapas).
   {
     const early2 = await waitForSuccessScreen(page, {
-      maxMs: 12000,
+      maxMs: 15000,
       deadlineAt
     });
     if (early2) {
@@ -664,31 +917,83 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     await ensureSellingFeed(page, { deadlineAt: workDeadline });
     assertBudget(workDeadline, 'auto_after_selling');
 
+    // Calma extrema: achar banner → clicar título (ou ⋮ → Ver classificado) → esperar prompt.
     const scanStart = Date.now();
     let scan = { found: false };
-    while (Date.now() - scanStart < 45000 && deadlineLeft(workDeadline) > 0) {
-      scan = await scanActionNeeded(page, { mode: 'today', preferTitle: titulo || '' });
-      if (scan && scan.found) break;
-      try {
-        await page.evaluate(() => {
-          try {
-            window.scrollBy(0, 400);
-          } catch {}
-        });
-      } catch {}
-      await sleep(2500);
+    let openedOk = false;
+    while (Date.now() - scanStart < 90000 && deadlineLeft(workDeadline) > 0) {
+      scan = await openActionNeededListing(page, { mode: 'today', preferTitle: titulo || '' });
+      logEvt(nome, source, 'open_attempt', {
+        found: !!(scan && scan.found),
+        method: (scan && scan.method) || null,
+        reason: (scan && scan.reason) || null,
+        preferHit: !!(scan && scan.preferHit)
+      });
+      if (scan && scan.found) {
+        await sleep(4000);
+        if (scan.needVerClassificado || scan.method === 'more_options_opened') {
+          const ver = await clickVerClassificadoMenu(page);
+          logEvt(nome, source, 'ver_classificado', { ok: !!ver });
+          await sleep(5000);
+        }
+        const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt: workDeadline });
+        if (prompt) {
+          openedOk = true;
+          break;
+        }
+        // Título pode ter aberto painel sem navegar — tenta menu ⋮ como plano B.
+        if (scan.method === 'title_button') {
+          const again = await openActionNeededListing(page, { mode: 'today', preferTitle: titulo || '' });
+          if (again && again.found) {
+            // força menu
+            try {
+              await page.evaluate(() => {
+                const more = document.querySelector(
+                  '[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]'
+                );
+                if (more) more.click();
+              });
+            } catch {}
+            await sleep(2500);
+            await clickVerClassificadoMenu(page);
+            await sleep(5000);
+            const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt: workDeadline });
+            if (prompt2) {
+              openedOk = true;
+              break;
+            }
+          }
+        }
+      }
+      // Scroll leve só se não achou — evita varrer a lista inteira à toa.
+      if (!scan || !scan.found) {
+        try {
+          await page.evaluate(() => {
+            try {
+              window.scrollBy(0, 280);
+            } catch {}
+          });
+        } catch {}
+        await sleep(3500);
+      } else {
+        await sleep(2500);
+        break;
+      }
     }
 
-    if (!scan || !scan.found) {
+    if (!openedOk && !(scan && scan.found)) {
       logEvt(nome, source, 'no_action_needed_today', { durationMs: Date.now() - startedAt });
       return { ok: true, skipped: true, reason: 'no_action_needed_today' };
     }
-
-    if (!scan.clicked) {
-      await sleep(2000);
-    } else {
-      await sleep(WAIT_STEP_MS);
+    if (!openedOk) {
+      logEvt(nome, source, 'open_listing_failed', {
+        method: (scan && scan.method) || null,
+        durationMs: Date.now() - startedAt
+      });
+      return { ok: false, error: 'open_listing_failed' };
     }
+
+    await sleep(WAIT_STEP_MS);
 
     const wiz = await runIdDocWizard(page, {
       idPath: ID_PNG_PATH,
@@ -738,22 +1043,67 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
 
     const scanStart = Date.now();
     let scan = { found: false };
-    while (Date.now() - scanStart < 45000 && deadlineLeft(workDeadline) > 0) {
-      scan = await scanActionNeeded(page, { mode: 'firstAny', preferTitle: '' });
-      if (scan && scan.found) break;
-      try {
-        await page.evaluate(() => {
+    let openedOk = false;
+    while (Date.now() - scanStart < 90000 && deadlineLeft(workDeadline) > 0) {
+      scan = await openActionNeededListing(page, { mode: 'firstAny', preferTitle: '' });
+      logEvt(nome, source, 'open_attempt', {
+        found: !!(scan && scan.found),
+        method: (scan && scan.method) || null,
+        reason: (scan && scan.reason) || null
+      });
+      if (scan && scan.found) {
+        await sleep(4000);
+        if (scan.needVerClassificado || scan.method === 'more_options_opened') {
+          const ver = await clickVerClassificadoMenu(page);
+          logEvt(nome, source, 'ver_classificado', { ok: !!ver });
+          await sleep(5000);
+        }
+        const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt: workDeadline });
+        if (prompt) {
+          openedOk = true;
+          break;
+        }
+        if (scan.method === 'title_button') {
           try {
-            window.scrollBy(0, 400);
+            await page.evaluate(() => {
+              const more = document.querySelector(
+                '[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]'
+              );
+              if (more) more.click();
+            });
           } catch {}
-        });
-      } catch {}
-      await sleep(2500);
+          await sleep(2500);
+          await clickVerClassificadoMenu(page);
+          await sleep(5000);
+          const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt: workDeadline });
+          if (prompt2) {
+            openedOk = true;
+            break;
+          }
+        }
+      }
+      if (!scan || !scan.found) {
+        try {
+          await page.evaluate(() => {
+            try {
+              window.scrollBy(0, 280);
+            } catch {}
+          });
+        } catch {}
+        await sleep(3500);
+      } else {
+        await sleep(2500);
+        break;
+      }
     }
 
-    if (!scan || !scan.found) {
-      logEvt(nome, source, 'human_no_action', { durationMs: Date.now() - startedAt });
-      return { ok: false, error: 'no_action_needed' };
+    if (!openedOk) {
+      logEvt(nome, source, 'human_no_action', {
+        durationMs: Date.now() - startedAt,
+        found: !!(scan && scan.found),
+        method: (scan && scan.method) || null
+      });
+      return { ok: false, error: (scan && scan.found) ? 'open_listing_failed' : 'no_action_needed' };
     }
 
     await sleep(WAIT_STEP_MS);
@@ -793,6 +1143,9 @@ module.exports = {
   dismissTurbineUpsell,
   ensureSellingFeed,
   scanActionNeeded,
+  openActionNeededListing,
+  clickVerClassificadoMenu,
+  waitListingIdentityPrompt,
   runIdDocWizard,
   runRobeAutoId,
   runHumanVerifyId
