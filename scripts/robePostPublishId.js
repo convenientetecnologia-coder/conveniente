@@ -8,6 +8,9 @@
  * - Só runRobeAutoId marca robeIdDocDoneDay após wizard ok.
  * - runHumanVerifyId NUNCA marca a flag.
  * - Falha/timeout NUNCA invalida publish_ok (caller engole erros).
+ * - Auto: se ID - sim → encerra na hora (sem selling/scan).
+ * - Auto: se ID - nao → olha banner no TOPO do selling (sem scroll-hunt);
+ *   tem ação → faz wizard; não tem → skip rápido e fecha o fluxo.
  */
 
 const fs = require('fs');
@@ -29,6 +32,10 @@ const WAIT_AFTER_UPLOAD_MS = 7000;
 const POLL_SUCCESS_MS = 180000;
 const POLL_AFTER_REFRESH_MS = 60000;
 const NAV_TIMEOUT_MS = 60000;
+/** Banner “ação necessária” fica no topo — sem caça por scroll. */
+const TOP_SCAN_ATTEMPTS_AUTO = 3;
+const TOP_SCAN_ATTEMPTS_HUMAN = 4;
+const TOP_SCAN_GAP_MS = 3500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
 
@@ -1186,6 +1193,88 @@ async function finishAlreadySubmitted(page, { nome, source, where, deadlineAt } 
   return { ok: true, alreadySubmitted: true };
 }
 
+async function scrollSellingToTop(page) {
+  try {
+    await page.evaluate(() => {
+      try {
+        window.scrollTo(0, 0);
+        const main =
+          document.querySelector('[role="main"]') ||
+          document.scrollingElement ||
+          document.documentElement;
+        if (main && typeof main.scrollTo === 'function') main.scrollTo(0, 0);
+      } catch {}
+    });
+  } catch {}
+}
+
+/**
+ * Abre o classificado com “ação necessária” se o banner estiver no topo do selling.
+ * Sem scroll-hunt: poucas leituras calmas no topo; se não houver banner, encerra.
+ */
+async function tryOpenActionNeededAtTop(
+  page,
+  { nome, source, mode = 'today', preferTitle = '', attempts = TOP_SCAN_ATTEMPTS_AUTO, deadlineAt } = {}
+) {
+  let scan = { found: false };
+  let openedOk = false;
+
+  for (let i = 0; i < attempts && deadlineLeft(deadlineAt) > 0; i++) {
+    await scrollSellingToTop(page);
+    if (i > 0) await sleep(TOP_SCAN_GAP_MS);
+
+    scan = await openActionNeededListing(page, { mode, preferTitle: preferTitle || '' });
+    logEvt(nome, source, 'open_attempt', {
+      found: !!(scan && scan.found),
+      method: (scan && scan.method) || null,
+      reason: (scan && scan.reason) || null,
+      preferHit: !!(scan && scan.preferHit),
+      attempt: i + 1,
+      attempts,
+      topOnly: true
+    });
+
+    if (!(scan && scan.found)) continue;
+
+    await sleep(4000);
+    if (scan.needVerClassificado || scan.method === 'more_options_opened') {
+      const ver = await clickVerClassificadoMenu(page);
+      logEvt(nome, source, 'ver_classificado', { ok: !!ver });
+      await sleep(5000);
+    }
+
+    const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt });
+    if (prompt) {
+      openedOk = true;
+      break;
+    }
+
+    // Título pode ter aberto painel sem navegar — plano B: ⋮ → Ver classificado
+    if (scan.method === 'title_button') {
+      try {
+        await page.evaluate(() => {
+          const more = document.querySelector(
+            '[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]'
+          );
+          if (more) more.click();
+        });
+      } catch {}
+      await sleep(2500);
+      await clickVerClassificadoMenu(page);
+      await sleep(5000);
+      const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt });
+      if (prompt2) {
+        openedOk = true;
+        break;
+      }
+    }
+    // Banner existia mas não abriu o prompt — não fica caçando mais cards abaixo.
+    break;
+  }
+
+  return { openedOk, scan };
+}
+
 async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   assertBudget(deadlineAt, 'wizard_start');
 
@@ -1429,6 +1518,13 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       return { ok: true, skipped: true, reason: 'page_gone' };
     }
 
+    // ID - sim: encerra na hora. Sem selling, sem scan, sem scroll.
+    const done = await isDoneToday(nome);
+    if (done) {
+      logEvt(nome, source, 'skip_already_done_today', { durationMs: Date.now() - startedAt });
+      return { ok: true, skipped: true, reason: 'already_done_today' };
+    }
+
     await sleep(WAIT_POST_SETTLE_MS);
     try {
       await dismissTurbineUpsell(page, { deadlineAt: Math.min(hardDeadline, Date.now() + 20000) });
@@ -1436,15 +1532,7 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       logEvt(nome, source, 'dismiss_err', { error: String((e && e.message) || e).slice(0, 160) });
     }
 
-    const done = await isDoneToday(nome);
-    if (done) {
-      logEvt(nome, source, 'skip_already_done_today', { durationMs: Date.now() - startedAt });
-      return { ok: true, skipped: true, reason: 'already_done_today' };
-    }
-
-    // Budget gordo para o restante.
-    // Nota: id.png só é obrigatório se o FB pedir upload; se Avançar já cair na tela final,
-    // marcamos sim mesmo sem arquivo (ID já feito antes).
+    // Budget gordo para o restante (só se ID - nao).
     const workDeadline = Math.min(hardDeadline, Date.now() + BUDGET_TOTAL_MS);
 
     if (!(await pageAlive(page))) {
@@ -1455,72 +1543,21 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     await ensureSellingFeed(page, { deadlineAt: workDeadline });
     assertBudget(workDeadline, 'auto_after_selling');
 
-    // Calma extrema: achar banner → clicar título (ou ⋮ → Ver classificado) → esperar prompt.
-    const scanStart = Date.now();
-    let scan = { found: false };
-    let openedOk = false;
-    while (Date.now() - scanStart < 90000 && deadlineLeft(workDeadline) > 0) {
-      scan = await openActionNeededListing(page, { mode: 'today', preferTitle: titulo || '' });
-      logEvt(nome, source, 'open_attempt', {
-        found: !!(scan && scan.found),
-        method: (scan && scan.method) || null,
-        reason: (scan && scan.reason) || null,
-        preferHit: !!(scan && scan.preferHit)
-      });
-      if (scan && scan.found) {
-        await sleep(4000);
-        if (scan.needVerClassificado || scan.method === 'more_options_opened') {
-          const ver = await clickVerClassificadoMenu(page);
-          logEvt(nome, source, 'ver_classificado', { ok: !!ver });
-          await sleep(5000);
-        }
-        const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt: workDeadline });
-        if (prompt) {
-          openedOk = true;
-          break;
-        }
-        // Título pode ter aberto painel sem navegar — tenta menu ⋮ como plano B.
-        if (scan.method === 'title_button') {
-          const again = await openActionNeededListing(page, { mode: 'today', preferTitle: titulo || '' });
-          if (again && again.found) {
-            // força menu
-            try {
-              await page.evaluate(() => {
-                const more = document.querySelector(
-                  '[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]'
-                );
-                if (more) more.click();
-              });
-            } catch {}
-            await sleep(2500);
-            await clickVerClassificadoMenu(page);
-            await sleep(5000);
-            const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt: workDeadline });
-            if (prompt2) {
-              openedOk = true;
-              break;
-            }
-          }
-        }
-      }
-      // Scroll leve só se não achou — evita varrer a lista inteira à toa.
-      if (!scan || !scan.found) {
-        try {
-          await page.evaluate(() => {
-            try {
-              window.scrollBy(0, 280);
-            } catch {}
-          });
-        } catch {}
-        await sleep(3500);
-      } else {
-        await sleep(2500);
-        break;
-      }
-    }
+    // ID - nao: banner no topo. Sem scroll-hunt.
+    const { openedOk, scan } = await tryOpenActionNeededAtTop(page, {
+      nome,
+      source,
+      mode: 'today',
+      preferTitle: titulo || '',
+      attempts: TOP_SCAN_ATTEMPTS_AUTO,
+      deadlineAt: workDeadline
+    });
 
     if (!openedOk && !(scan && scan.found)) {
-      logEvt(nome, source, 'no_action_needed_today', { durationMs: Date.now() - startedAt });
+      logEvt(nome, source, 'no_action_needed_today', {
+        durationMs: Date.now() - startedAt,
+        topOnly: true
+      });
       return { ok: true, skipped: true, reason: 'no_action_needed_today' };
     }
     if (!openedOk) {
@@ -1579,67 +1616,22 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
 
     await ensureSellingFeed(page, { deadlineAt: workDeadline });
 
-    const scanStart = Date.now();
-    let scan = { found: false };
-    let openedOk = false;
-    while (Date.now() - scanStart < 90000 && deadlineLeft(workDeadline) > 0) {
-      scan = await openActionNeededListing(page, { mode: 'firstAny', preferTitle: '' });
-      logEvt(nome, source, 'open_attempt', {
-        found: !!(scan && scan.found),
-        method: (scan && scan.method) || null,
-        reason: (scan && scan.reason) || null
-      });
-      if (scan && scan.found) {
-        await sleep(4000);
-        if (scan.needVerClassificado || scan.method === 'more_options_opened') {
-          const ver = await clickVerClassificadoMenu(page);
-          logEvt(nome, source, 'ver_classificado', { ok: !!ver });
-          await sleep(5000);
-        }
-        const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt: workDeadline });
-        if (prompt) {
-          openedOk = true;
-          break;
-        }
-        if (scan.method === 'title_button') {
-          try {
-            await page.evaluate(() => {
-              const more = document.querySelector(
-                '[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]'
-              );
-              if (more) more.click();
-            });
-          } catch {}
-          await sleep(2500);
-          await clickVerClassificadoMenu(page);
-          await sleep(5000);
-          const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt: workDeadline });
-          if (prompt2) {
-            openedOk = true;
-            break;
-          }
-        }
-      }
-      if (!scan || !scan.found) {
-        try {
-          await page.evaluate(() => {
-            try {
-              window.scrollBy(0, 280);
-            } catch {}
-          });
-        } catch {}
-        await sleep(3500);
-      } else {
-        await sleep(2500);
-        break;
-      }
-    }
+    // Humano força o fluxo, mas banner também fica no topo — sem scroll-hunt.
+    const { openedOk, scan } = await tryOpenActionNeededAtTop(page, {
+      nome,
+      source,
+      mode: 'firstAny',
+      preferTitle: '',
+      attempts: TOP_SCAN_ATTEMPTS_HUMAN,
+      deadlineAt: workDeadline
+    });
 
     if (!openedOk) {
       logEvt(nome, source, 'human_no_action', {
         durationMs: Date.now() - startedAt,
         found: !!(scan && scan.found),
-        method: (scan && scan.method) || null
+        method: (scan && scan.method) || null,
+        topOnly: true
       });
       return { ok: false, error: (scan && scan.found) ? 'open_listing_failed' : 'no_action_needed' };
     }
