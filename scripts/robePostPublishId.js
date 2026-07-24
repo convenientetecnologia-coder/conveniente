@@ -10,7 +10,10 @@
  * - Falha/timeout NUNCA invalida publish_ok (caller engole erros).
  * - Auto: se ID - sim → encerra na hora (sem selling/scan).
  * - Auto: se ID - nao → olha banner no TOPO do selling (sem scroll-hunt);
- *   tem ação → faz wizard; não tem → skip rápido e fecha o fluxo.
+ *   tem ação → só segue se "Anunciado em" for HOJE (America/Sao_Paulo);
+ *   anúncio de dia anterior → skip (falso positivo / já tratado ontem);
+ *   sem banner → skip rápido e fecha o fluxo.
+ * - Humano (Verificar ID): pode abrir qualquer ação (firstAny); NÃO marca flag.
  */
 
 const fs = require('fs');
@@ -648,6 +651,10 @@ async function ensureSellingFeed(page, { deadlineAt } = {}) {
   return true;
 }
 
+/**
+ * Partes de data de hoje em America/Sao_Paulo (para comparar "Anunciado em DD/MM").
+ * NÃO inclui ontem — ontem é stale de propósito (anti falso-positivo).
+ */
 function dateHintsSP(now = Date.now()) {
   const fmt = (ts, opts) => {
     try {
@@ -656,20 +663,98 @@ function dateHintsSP(now = Date.now()) {
       return '';
     }
   };
-  const dayMs = 24 * 60 * 60 * 1000;
+  let todayDay = 0;
+  let todayMonth = 0;
+  let todayYear = 0;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Sao_Paulo',
+      day: 'numeric',
+      month: 'numeric',
+      year: 'numeric'
+    }).formatToParts(new Date(now));
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? Number(p.value) || 0 : 0;
+    };
+    todayDay = get('day');
+    todayMonth = get('month');
+    todayYear = get('year');
+  } catch {
+    const d = new Date(now);
+    todayDay = d.getDate();
+    todayMonth = d.getMonth() + 1;
+    todayYear = d.getFullYear();
+  }
   return {
+    todayDay,
+    todayMonth,
+    todayYear,
     todayLabel: fmt(now, { day: 'numeric', month: 'long' }),
-    todayShort: fmt(now, { day: '2-digit', month: '2-digit' }),
-    yesterdayShort: fmt(now - dayMs, { day: '2-digit', month: '2-digit' }),
-    todayDayMonth: fmt(now, { day: 'numeric', month: 'numeric' }),
-    yesterdayDayMonth: fmt(now - dayMs, { day: 'numeric', month: 'numeric' })
+    todayShort: `${String(todayDay).padStart(2, '0')}/${String(todayMonth).padStart(2, '0')}`,
+    todayDayMonth: `${todayDay}/${todayMonth}`
   };
+}
+
+/**
+ * Classifica se o texto do card é anúncio de HOJE (SP).
+ * Retorno: true | false | null (null = data não determinada).
+ * Exportada para forense/teste — mesma regra do evaluate no browser.
+ */
+function classifyListedToday(text, hintsIn) {
+  const hints = hintsIn || dateHintsSP();
+  const t = norm(text);
+  if (!t) return null;
+
+  // Explícito: "Anunciado em 23/07" / "Listed on 7/23"
+  const mPt = t.match(/anunciado\s+em\s+(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})(?:\s*[\/\-\.]\s*(\d{2,4}))?/);
+  if (mPt) {
+    const day = parseInt(mPt[1], 10);
+    const month = parseInt(mPt[2], 10);
+    return day === Number(hints.todayDay) && month === Number(hints.todayMonth);
+  }
+  const mEn = t.match(/listed\s+on\s+(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})(?:\s*[\/\-\.]\s*(\d{2,4}))?/);
+  if (mEn) {
+    // EN costuma ser M/D; se day>12 assume D/M
+    let a = parseInt(mEn[1], 10);
+    let b = parseInt(mEn[2], 10);
+    let day = a;
+    let month = b;
+    if (a <= 12 && b > 12) {
+      month = a;
+      day = b;
+    } else if (a > 12) {
+      day = a;
+      month = b;
+    } else {
+      // ambíguo M/D vs D/M: aceita se bater em qualquer ordem com hoje
+      const hit =
+        (a === Number(hints.todayMonth) && b === Number(hints.todayDay)) ||
+        (a === Number(hints.todayDay) && b === Number(hints.todayMonth));
+      return hit;
+    }
+    return day === Number(hints.todayDay) && month === Number(hints.todayMonth);
+  }
+
+  if (/\banunciado\s+ontem\b|\blisted\s+yesterday\b|\banunciado\s+ayer\b/.test(t)) return false;
+  if (/\b(ha|há)\s+\d+\s+dias?\b|\b\d+\s+dias?\s+atras\b|\b\d+\s+days?\s+ago\b/.test(t)) return false;
+
+  if (/\banunciado\s+hoje\b|\blisted\s+today\b|\banunciado\s+hoy\b/.test(t)) return true;
+  // Relativo curto = hoje (minutos/horas). NÃO dias.
+  if (/\b(ha|há)\s+(uma|um|1|\d+)\s+(minuto|minutos|hora|horas)\b/.test(t)) return true;
+  if (/\b(a\s+minute|an?\s+hour|\d+\s+(minutes?|hours?))\s+ago\b/.test(t)) return true;
+  if (/\banunciado\s+agora\b|\blisted\s+just\s+now\b|\bagora\s+mesmo\b/.test(t)) return true;
+
+  return null;
 }
 
 /**
  * Abre o classificado com "Uma ação é necessária…".
  * DOM real (selling): NÃO usa <a href="/marketplace/item/…"> no card.
  * Usa role=button aria-label=título + banner de ação; fallback: ⋮ → Ver classificado.
+ *
+ * mode=today (auto): só cards com data de HOJE (ou preferTitle sem data conflitante).
+ * mode=firstAny (humano): qualquer ação; ainda reporta listedToday.
  */
 async function openActionNeededListing(page, { mode = 'today', preferTitle = '' } = {}) {
   const prefer = String(preferTitle || '').trim();
@@ -690,25 +775,58 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
             return String(s || '').toLowerCase().trim();
           }
         };
+
+        const classifyListedTodayLocal = (text) => {
+          const t = normLocal(text);
+          if (!t) return null;
+          const mPt = t.match(/anunciado\s+em\s+(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})(?:\s*[\/\-\.]\s*(\d{2,4}))?/);
+          if (mPt) {
+            const day = parseInt(mPt[1], 10);
+            const month = parseInt(mPt[2], 10);
+            return day === Number(hintsIn.todayDay) && month === Number(hintsIn.todayMonth);
+          }
+          const mEn = t.match(/listed\s+on\s+(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})(?:\s*[\/\-\.]\s*(\d{2,4}))?/);
+          if (mEn) {
+            const a = parseInt(mEn[1], 10);
+            const b = parseInt(mEn[2], 10);
+            if (a <= 12 && b > 12) {
+              return b === Number(hintsIn.todayDay) && a === Number(hintsIn.todayMonth);
+            }
+            if (a > 12) {
+              return a === Number(hintsIn.todayDay) && b === Number(hintsIn.todayMonth);
+            }
+            return (
+              (a === Number(hintsIn.todayMonth) && b === Number(hintsIn.todayDay)) ||
+              (a === Number(hintsIn.todayDay) && b === Number(hintsIn.todayMonth))
+            );
+          }
+          if (/\banunciado\s+ontem\b|\blisted\s+yesterday\b|\banunciado\s+ayer\b/.test(t)) return false;
+          if (/\b(ha|há)\s+\d+\s+dias?\b|\b\d+\s+dias?\s+atras\b|\b\d+\s+days?\s+ago\b/.test(t)) return false;
+          if (/\banunciado\s+hoje\b|\blisted\s+today\b|\banunciado\s+hoy\b/.test(t)) return true;
+          if (/\b(ha|há)\s+(uma|um|1|\d+)\s+(minuto|minutos|hora|horas)\b/.test(t)) return true;
+          if (/\b(a\s+minute|an?\s+hour|\d+\s+(minutes?|hours?))\s+ago\b/.test(t)) return true;
+          if (/\banunciado\s+agora\b|\blisted\s+just\s+now\b|\bagora\s+mesmo\b/.test(t)) return true;
+          return null;
+        };
+
+        const extractListedLabel = (text) => {
+          const t = String(text || '');
+          const m =
+            t.match(/Anunciado em\s+\d{1,2}\s*[\/\-\.]\s*\d{1,2}(?:\s*[\/\-\.]\s*\d{2,4})?/i) ||
+            t.match(/Listed on\s+\d{1,2}\s*[\/\-\.]\s*\d{1,2}/i) ||
+            t.match(/anunciado\s+(hoje|ontem|agora|hoy)/i) ||
+            t.match(/há\s+\d+\s+(minuto|minutos|hora|horas|dias?)/i);
+          return m ? String(m[0]).slice(0, 40) : null;
+        };
+
         const actionRe =
           /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|action\s+required|se\s+requiere\s+una\s+accion/;
         const preferN = normLocal(preferIn).slice(0, 48);
-        const dateHints = [
-          'hoje',
-          'today',
-          'hoy',
-          normLocal(hintsIn.todayLabel || ''),
-          normLocal(hintsIn.todayShort || ''),
-          normLocal(hintsIn.yesterdayShort || ''),
-          normLocal(hintsIn.todayDayMonth || ''),
-          normLocal(hintsIn.yesterdayDayMonth || '')
-        ].filter(Boolean);
 
         const actionNodes = Array.from(
           document.querySelectorAll('div, span, h2, h3, p, a, [role="button"]')
         ).filter((el) => {
           const t = normLocal(el.innerText || el.textContent || '');
-          // nó “folha” de ação: texto curto com a frase
           if (!t || t.length > 180) return false;
           return actionRe.test(t);
         });
@@ -721,7 +839,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
             const hasAction = actionRe.test(txt);
             const hasMore =
               !!root.querySelector('[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]') ||
-              /marcar como indisponivel|promover agora|anunciado em/.test(txt);
+              /marcar como indisponivel|promover agora|anunciado em|turbinar classificado/.test(txt);
             if (hasAction && hasMore && (root.innerText || '').length < 3500) {
               break;
             }
@@ -729,32 +847,36 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           }
           if (!root || root === document.body) root = node.parentElement || node;
 
-          const txt = normLocal(root.innerText || root.textContent || '').slice(0, 1500);
+          const rawTxt = String(root.innerText || root.textContent || '').slice(0, 1500);
+          const txt = normLocal(rawTxt);
           const preferHit = preferN
             ? txt.includes(preferN) ||
               Array.from(root.querySelectorAll('[aria-label]')).some((b) =>
                 normLocal(b.getAttribute('aria-label') || '').includes(preferN)
               )
             : false;
-          const looksToday =
-            dateHints.some((h) => h && txt.includes(h)) ||
-            /anunciado\s+em\s+\d{1,2}\/\d{1,2}/.test(txt) ||
-            /\b(ha|há)\s+[±+]?\s*(uma|1|\d+)\s+(minuto|minutos|hora|horas)\b/.test(txt) ||
-            /\bagora\b/.test(txt);
 
-          // mode=today: título do post OU data de hoje/ontem (virada de meia-noite) OU
-          // único card com ação (fallback).
-          if (modeIn === 'today' && !preferHit && !looksToday) {
-            // ainda guarda; filtramos depois se houver preferidos
-            cards.push({ root, txt, preferHit, looksToday, weak: true });
-          } else {
-            cards.push({ root, txt, preferHit, looksToday, weak: false });
-          }
+          const listedToday = classifyListedTodayLocal(rawTxt);
+          const listedLabel = extractListedLabel(rawTxt);
+          // stale = data explícita de outro dia
+          const stale = listedToday === false;
+          // elegível auto: hoje confirmado, OU (título do post recém-publicado sem data conflitante)
+          const eligibleToday =
+            listedToday === true || (preferHit && listedToday !== false);
+
+          cards.push({
+            root,
+            txt,
+            preferHit,
+            listedToday,
+            listedLabel,
+            stale,
+            weak: !eligibleToday
+          });
         }
 
         if (!cards.length) return { found: false, reason: 'no_action_banner' };
 
-        // Dedup por root
         const uniq = [];
         const seen = new Set();
         for (const c of cards) {
@@ -763,26 +885,58 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           uniq.push(c);
         }
 
-        let pool = uniq.filter((c) => !c.weak);
-        if (!pool.length && modeIn === 'firstAny') pool = uniq;
-        if (!pool.length && preferN) pool = uniq.filter((c) => c.preferHit);
-        // Se só existe 1 card com ação, usar mesmo fraco (pós-publish típico).
-        if (!pool.length && uniq.length === 1) pool = uniq;
-        if (!pool.length && modeIn === 'today') {
-          // aceita cards com "anunciado em" qualquer dia recente se houver preferTitle parcial
-          pool = uniq.filter((c) => /anunciado\s+em/.test(c.txt));
+        const staleCount = uniq.filter((c) => c.stale).length;
+        let pool = [];
+        if (modeIn === 'firstAny') {
+          // Humano: qualquer ação (ainda prioriza hoje / prefer).
+          pool = uniq.slice();
+        } else {
+          // Auto: só hoje (ou preferTitle sem data stale).
+          pool = uniq.filter((c) => !c.weak && !c.stale);
         }
-        if (!pool.length) return { found: false, reason: 'action_filtered_out', totalBanners: uniq.length };
+
+        if (!pool.length) {
+          if (staleCount > 0) {
+            const sample = uniq
+              .filter((c) => c.stale)
+              .slice(0, 3)
+              .map((c) => c.listedLabel || 'stale');
+            return {
+              found: false,
+              reason: 'action_stale_not_today',
+              staleCount,
+              totalBanners: uniq.length,
+              listedLabel: sample[0] || null,
+              listedToday: false,
+              sampleStale: sample
+            };
+          }
+          return {
+            found: false,
+            reason: 'action_filtered_out',
+            totalBanners: uniq.length,
+            listedToday: null
+          };
+        }
 
         pool.sort((a, b) => {
           if (a.preferHit !== b.preferHit) return a.preferHit ? -1 : 1;
-          if (a.looksToday !== b.looksToday) return a.looksToday ? -1 : 1;
+          const aToday = a.listedToday === true ? 1 : 0;
+          const bToday = b.listedToday === true ? 1 : 0;
+          if (aToday !== bToday) return bToday - aToday;
           return 0;
         });
         const pick = pool[0];
         try {
           pick.root.scrollIntoView({ block: 'center', inline: 'nearest' });
         } catch {}
+
+        const meta = {
+          preferHit: !!pick.preferHit,
+          listedToday: pick.listedToday,
+          listedLabel: pick.listedLabel || null,
+          todayHint: `${hintsIn.todayDay}/${hintsIn.todayMonth}`
+        };
 
         // 1) Clique preferencial: botão do título (aria-label), evitando Marcar/Promover/Mais opções.
         const titleBtns = Array.from(pick.root.querySelectorAll('[role="button"][aria-label]'));
@@ -793,6 +947,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           if (
             al.includes('marcar como') ||
             al.includes('promover') ||
+            al.includes('turbinar') ||
             al.includes('mais opcoes') ||
             al.includes('mais opções') ||
             al.includes('more options') ||
@@ -813,8 +968,8 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
               found: true,
               clicked: true,
               method: 'title_button',
-              preferHit: !!pick.preferHit,
-              aria: String(titleBtn.getAttribute('aria-label') || '').slice(0, 80)
+              aria: String(titleBtn.getAttribute('aria-label') || '').slice(0, 80),
+              ...meta
             };
           } catch {}
         }
@@ -832,8 +987,8 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
               found: true,
               clicked: true,
               method: 'more_options_opened',
-              preferHit: !!pick.preferHit,
-              needVerClassificado: true
+              needVerClassificado: true,
+              ...meta
             };
           } catch {}
         }
@@ -845,11 +1000,11 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           );
           if (banner) {
             banner.click();
-            return { found: true, clicked: true, method: 'action_banner', preferHit: !!pick.preferHit };
+            return { found: true, clicked: true, method: 'action_banner', ...meta };
           }
         } catch {}
 
-        return { found: true, clicked: false, method: 'none', preferHit: !!pick.preferHit };
+        return { found: true, clicked: false, method: 'none', ...meta };
       },
       mode,
       prefer,
@@ -1229,10 +1384,20 @@ async function tryOpenActionNeededAtTop(
       method: (scan && scan.method) || null,
       reason: (scan && scan.reason) || null,
       preferHit: !!(scan && scan.preferHit),
+      listedToday: scan && Object.prototype.hasOwnProperty.call(scan, 'listedToday')
+        ? scan.listedToday
+        : null,
+      listedLabel: (scan && scan.listedLabel) || null,
+      staleCount: Number(scan && scan.staleCount || 0) || 0,
       attempt: i + 1,
       attempts,
       topOnly: true
     });
+
+    // Ação existe mas anúncio NÃO é de hoje → não abre, não faz wizard.
+    if (scan && scan.reason === 'action_stale_not_today') {
+      return { openedOk: false, scan };
+    }
 
     if (!(scan && scan.found)) continue;
 
@@ -1554,11 +1719,20 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     });
 
     if (!openedOk && !(scan && scan.found)) {
-      logEvt(nome, source, 'no_action_needed_today', {
+      const stale = scan && scan.reason === 'action_stale_not_today';
+      logEvt(nome, source, stale ? 'action_stale_not_today' : 'no_action_needed_today', {
         durationMs: Date.now() - startedAt,
-        topOnly: true
+        topOnly: true,
+        listedLabel: (scan && scan.listedLabel) || null,
+        staleCount: Number(scan && scan.staleCount || 0) || 0,
+        listedToday: false
       });
-      return { ok: true, skipped: true, reason: 'no_action_needed_today' };
+      return {
+        ok: true,
+        skipped: true,
+        reason: stale ? 'action_stale_not_today' : 'no_action_needed_today',
+        listedLabel: (scan && scan.listedLabel) || null
+      };
     }
     if (!openedOk) {
       logEvt(nome, source, 'open_listing_failed', {
@@ -1670,6 +1844,8 @@ module.exports = {
   markDoneToday,
   getIdPngPath,
   idPngExists,
+  dateHintsSP,
+  classifyListedToday,
   dismissTurbineUpsell,
   ensureSellingFeed,
   scanActionNeeded,
