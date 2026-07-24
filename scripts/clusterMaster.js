@@ -569,9 +569,10 @@ function createCluster() {
       if (type === 'robes-release-all') {
         const enqueued = results.reduce((s, r) => s + (Number(r && r.enqueued || 0) || 0), 0);
         const cleared = results.reduce((s, r) => s + (Number(r && r.cleared || 0) || 0), 0);
+        const awaitingKept = results.reduce((s, r) => s + (Number(r && r.awaitingKept || 0) || 0), 0);
         return allOk
-          ? { ok: true, enqueued, cleared, nodes: results.length, results }
-          : { ok: false, error: 'partial_fail', enqueued, cleared, results };
+          ? { ok: true, enqueued, cleared, awaitingKept, nodes: results.length, results }
+          : { ok: false, error: 'partial_fail', enqueued, cleared, awaitingKept, results };
       }
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }

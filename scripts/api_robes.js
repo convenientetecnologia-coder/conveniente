@@ -27,6 +27,9 @@ module.exports = (app, workerClient, fileStore) => {
             man.robeCooldownUntil = now + plus24;
             man.robeCooldownRemainingMs = 0;
             man.robePauseReason = 'manual';
+            if (man.robeAwaitingEnqueue) delete man.robeAwaitingEnqueue;
+            if (man.robeAwaitingEnqueueAt) delete man.robeAwaitingEnqueueAt;
+            if (man.robeAwaitingEnqueueReason) delete man.robeAwaitingEnqueueReason;
             return man;
           });
           total++;
@@ -54,6 +57,7 @@ module.exports = (app, workerClient, fileStore) => {
   });
 
   // Robe Release/Play global — libera cooldown E enfileira elegíveis (fila Robe).
+  // Contas fechadas ficam robeAwaitingEnqueue=true → entram na fila no próximo start_work.
   // Nota: com Delta + DELTA_ALLOW_ROBE_GLOBAL_TICK=0, só zerar cooldown deixava "Robe: Pronto"
   // sem nunca entrar na fila — o worker precisa enfileirar explicitamente.
   app.post('/api/robes/release-all', async (req, res) => {
@@ -70,6 +74,9 @@ module.exports = (app, workerClient, fileStore) => {
             man.robeCooldownUntil = Date.now();
             man.robeCooldownRemainingMs = 0;
             if (man.robePauseReason) delete man.robePauseReason;
+            man.robeAwaitingEnqueue = true;
+            man.robeAwaitingEnqueueAt = Date.now();
+            man.robeAwaitingEnqueueReason = 'release_all';
             return man;
           });
           total++;
@@ -93,19 +100,21 @@ module.exports = (app, workerClient, fileStore) => {
         workerResult = { ok: false, error: (e && e.message) || String(e) };
       }
       const enqueued = Number(workerResult && workerResult.enqueued || 0) || 0;
+      const awaitingKept = Number(workerResult && workerResult.awaitingKept || 0) || 0;
       if (failed > 0 || (fails && fails.length)) {
-        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued });
+        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued, awaitingKept });
         res.json({
           ok: false,
           error: `Failure in ${failed} perfil(s)`,
           fails,
           total,
           enqueued,
+          awaitingKept,
           worker: workerResult
         });
       } else {
-        logger.info('Robe release all executado', { total, enqueued, workerOk: !!(workerResult && workerResult.ok) });
-        res.json({ ok: true, total, enqueued, worker: workerResult });
+        logger.info('Robe release all executado', { total, enqueued, awaitingKept, workerOk: !!(workerResult && workerResult.ok) });
+        res.json({ ok: true, total, enqueued, awaitingKept, worker: workerResult });
       }
     } catch (e) {
       logger.error('Erro em /api/robes/release-all', {}, e);

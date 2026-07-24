@@ -1938,8 +1938,16 @@ async function _installOverlayOnPage(nome, page) {
             man.robeCooldownUntil = now + plus24;
             man.robeCooldownRemainingMs = 0;
             man.robePauseReason = 'manual';
+            if (man.robeAwaitingEnqueue) delete man.robeAwaitingEnqueue;
+            if (man.robeAwaitingEnqueueAt) delete man.robeAwaitingEnqueueAt;
+            if (man.robeAwaitingEnqueueReason) delete man.robeAwaitingEnqueueReason;
             return man;
           });
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            delete robeMeta[nome].robeAwaitingEnqueue;
+            delete robeMeta[nome].robeAwaitingEnqueueReason;
+          } catch {}
           try { issues.append(nome, 'admin_robe24h_request', 'by=human_overlay'); } catch {}
           try { await syncHumanOverlay(nome); } catch {}
           try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'robe_24h', ok: true, error: null, durationMs: Date.now() - startedAt }); } catch {}
@@ -7712,6 +7720,107 @@ async function robeIsAutoEnqueueEligible(nome) {
   return { ok: true, reason: 'eligible' };
 }
 
+async function robeSetAwaitingEnqueue(nome, awaiting, reason = '') {
+  const n = String(nome || '');
+  if (!n) return false;
+  try {
+    robeMeta[n] = robeMeta[n] || {};
+    if (awaiting) {
+      robeMeta[n].robeAwaitingEnqueue = true;
+      robeMeta[n].robeAwaitingEnqueueReason = String(reason || '').slice(0, 40);
+    } else {
+      delete robeMeta[n].robeAwaitingEnqueue;
+      delete robeMeta[n].robeAwaitingEnqueueReason;
+    }
+  } catch {}
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      if (awaiting) {
+        m.robeAwaitingEnqueue = true;
+        m.robeAwaitingEnqueueAt = Date.now();
+        if (reason) m.robeAwaitingEnqueueReason = String(reason || '').slice(0, 40);
+      } else {
+        if (m.robeAwaitingEnqueue) delete m.robeAwaitingEnqueue;
+        if (m.robeAwaitingEnqueueAt) delete m.robeAwaitingEnqueueAt;
+        if (m.robeAwaitingEnqueueReason) delete m.robeAwaitingEnqueueReason;
+      }
+      return m;
+    });
+  } catch {}
+  return true;
+}
+
+async function robeIsAwaitingEnqueue(nome) {
+  const n = String(nome || '');
+  if (!n) return false;
+  try {
+    if (robeMeta[n] && robeMeta[n].robeAwaitingEnqueue === true) return true;
+  } catch {}
+  try {
+    const man = await manifestStore.read(n).catch(() => null);
+    return !!(man && man.robeAwaitingEnqueue === true);
+  } catch {}
+  return false;
+}
+
+/**
+ * Pós-Liberar Robe: contas fechadas ficam "Pronto" sem fila (gate not_working).
+ * Quando Virtus sobe (start_work), enfileira se ainda estiver awaiting.
+ */
+async function robeTryEnqueueIfAwaiting(nome, source = 'start_work') {
+  const n = String(nome || '');
+  if (!n) return { ok: false, reason: 'no_nome' };
+  const awaiting = await robeIsAwaitingEnqueue(n);
+  if (!awaiting) return { ok: false, reason: 'not_awaiting' };
+  const r = await robeEnqueueAuto(n, String(source || 'start_work_awaiting').slice(0, 40));
+  if (r && r.ok) {
+    try { await robeSetAwaitingEnqueue(n, false); } catch {}
+    try {
+      logger.info('[WORKER][robeTryEnqueueIfAwaiting] enqueued', {
+        nome: n,
+        source: String(source || '').slice(0, 40)
+      });
+    } catch {}
+  } else {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robe_awaiting_enqueue_deferred',
+        nome: n,
+        source: String(source || '').slice(0, 40),
+        reason: String((r && r.reason) || 'gated').slice(0, 60)
+      });
+    } catch {}
+  }
+  return r;
+}
+
+function scheduleRobeEnqueueAfterStartWork(nome) {
+  const n = String(nome || '');
+  if (!n) return;
+  // Com GLOBAL_TICK=0 não há varredura em massa: o momento em que a conta
+  // fica trabalhando é o gatilho certo para "Robe: Pronto" entrar na fila.
+  // Preferência: awaiting (pós-Liberar). Fallback: tenta enqueue se elegível.
+  setTimeout(() => {
+    (async () => {
+      try {
+        const awaiting = await robeIsAwaitingEnqueue(n);
+        if (awaiting) {
+          const r = await robeTryEnqueueIfAwaiting(n, 'start_work');
+          if (r && r.ok) return;
+        }
+        const r2 = await robeEnqueueAuto(n, 'start_work');
+        if (r2 && r2.ok) {
+          try {
+            logger.info('[WORKER][scheduleRobeEnqueueAfterStartWork] enqueued', { nome: n });
+          } catch {}
+        }
+      } catch {}
+    })().catch(() => {});
+  }, 800);
+}
+
 async function robeEnqueueAuto(nome, source = 'auto') {
   const n = String(nome || '');
   const gate = await robeIsAutoEnqueueEligible(n);
@@ -7728,6 +7837,7 @@ async function robeEnqueueAuto(nome, source = 'auto') {
   });
   if (enq) {
     robeUpdateMeta(n, { emFila: true });
+    try { await robeSetAwaitingEnqueue(n, false); } catch {}
     try {
       provisionAudit.append({
         ts: Date.now(),
@@ -9306,6 +9416,7 @@ async function start_work({ nome, operator }) {
     } catch {}
     if (ctrl.trabalhando && ctrl.virtus) {
       logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
+      try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
       return { ok: true };
     }
     // Idempotência enterprise: em corridas pós-reopen pode surgir trabalhando=true
@@ -9316,6 +9427,7 @@ async function start_work({ nome, operator }) {
         ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch });
         try { await snapshotStatusAndWrite(); } catch {}
         logger.info('[HANDLER] start_work ok (reconciled trabalhando without virtus)', { nome });
+        try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
         return { ok: true, reconciled: 'trabalhando_without_virtus' };
       } catch {
         // Se não conseguiu anexar, volta para o fluxo normal abaixo.
@@ -9324,6 +9436,7 @@ async function start_work({ nome, operator }) {
     }
     if (ctrl._virtusStarting) {
       logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
+      try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
       return { ok: true };
     }
 
@@ -9429,6 +9542,7 @@ async function start_work({ nome, operator }) {
 
       await snapshotStatusAndWrite();
       logger.info('[HANDLER] start_work ok', { nome });
+      try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
       return { ok: true };
     } catch (e) {
       logger.error('[HANDLER] start_work erro', { nome, error: e && e.message }, e);
@@ -12283,15 +12397,26 @@ const handlers = {
           m.robeCooldownUntil = Date.now();
           m.robeCooldownRemainingMs = 0;
           if (m.robePauseReason) delete m.robePauseReason;
+          // Contas fechadas: fica "Pronto" até abrir + start_work → enfileira.
+          m.robeAwaitingEnqueue = true;
+          m.robeAwaitingEnqueueAt = Date.now();
+          m.robeAwaitingEnqueueReason = 'release_all';
           return m;
         });
+        try {
+          robeMeta[p.nome] = robeMeta[p.nome] || {};
+          robeMeta[p.nome].robeAwaitingEnqueue = true;
+          robeMeta[p.nome].robeAwaitingEnqueueReason = 'release_all';
+        } catch {}
         cleared++;
       } catch {}
     }
 
     // Com Delta + GLOBAL_TICK=0, limpar cooldown NÃO enfileira sozinho.
-    // "Liberar Robe" é ação explícita do operador → enfileira elegíveis (mesmo gate do auto).
+    // "Liberar Robe" é ação explícita do operador → enfileira elegíveis agora;
+    // os not_working ficam awaiting e entram na fila no próximo start_work.
     let enqueued = 0;
+    let awaitingKept = 0;
     const skipped = [];
     const candidates = new Set();
     try {
@@ -12303,10 +12428,20 @@ const handlers = {
     for (const nome of candidates) {
       try {
         const r = await robeEnqueueAuto(nome, 'release_all');
-        if (r && r.ok) enqueued++;
-        else skipped.push({ nome, reason: String((r && r.reason) || 'skip').slice(0, 60) });
+        if (r && r.ok) {
+          enqueued++;
+        } else {
+          const reason = String((r && r.reason) || 'skip').slice(0, 60);
+          skipped.push({ nome, reason });
+          if (reason === 'not_working' || reason === 'queue_busy') awaitingKept++;
+          else if (reason !== 'not_awaiting') {
+            // Outros gates (frozen, limit, etc.): mantém awaiting para quando liberar.
+            awaitingKept++;
+          }
+        }
       } catch (e) {
         skipped.push({ nome, reason: String((e && e.message) || e).slice(0, 60) });
+        awaitingKept++;
       }
     }
 
@@ -12314,6 +12449,7 @@ const handlers = {
     logger.info('[HANDLER] robes-release-all ok', {
       cleared,
       enqueued,
+      awaitingKept,
       skipped: skipped.length,
       sampleSkip: skipped.slice(0, 8)
     });
@@ -12323,11 +12459,12 @@ const handlers = {
         event: 'robes_release_all_done',
         cleared,
         enqueued,
+        awaitingKept,
         skippedCount: skipped.length,
         skippedSample: skipped.slice(0, 40)
       });
     } catch {}
-    return { ok: true, cleared, enqueued, skipped };
+    return { ok: true, cleared, enqueued, awaitingKept, skipped };
   },
 
   async ['network-rotation-pause-runtime']({ reason } = {}) {
