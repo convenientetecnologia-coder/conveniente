@@ -11732,6 +11732,14 @@ const handlers = {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
+      const withTimeout = (p, ms, label) => {
+        let t;
+        const to = new Promise((_, rej) => {
+          t = setTimeout(() => rej(new Error(label || 'invoke_human_timeout')), Math.max(500, Number(ms) || 5000));
+        });
+        return Promise.race([Promise.resolve(p).finally(() => clearTimeout(t)), to]);
+      };
+
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
@@ -11740,10 +11748,14 @@ const handlers = {
 
       const robes = robeMeta[nome] || {};
       if (robes.emExecucao) {
-        const waitTimeout = 180 * 1000;
+        // Cap: não segurar lockProfileAction por 3min (bloqueava Fechar). Humano tem prioridade.
+        const waitTimeout = 45 * 1000;
         const started = Date.now();
         while ((robeMeta[nome] && robeMeta[nome].emExecucao) && (Date.now() - started < waitTimeout)) {
           await new Promise(r => setTimeout(r, 600));
+        }
+        if (robeMeta[nome] && robeMeta[nome].emExecucao) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_robe_wait_timeout', nome: String(nome || '') }); } catch {}
         }
       }
 
@@ -11788,11 +11800,53 @@ const handlers = {
 
       try { await stopVirtus(nome); } catch {}
 
-      await browserHelper.invocarHumano(ctrl.browser, nome);
+      let skipNavigation = false;
+      try {
+        const flags = await readAccountFlags(nome).catch(() => ({}));
+        const rr = String((flags && (flags.loginReason || flags.captchaCheckpointReason || flags.reason)) || '').toLowerCase();
+        skipNavigation = !!(
+          (flags && flags.captchaCheckpoint === true) ||
+          rr.includes('captcha') ||
+          rr.includes('checkpoint') ||
+          rr.includes('persona')
+        );
+      } catch {}
+
+      try {
+        const nav = await withTimeout(
+          browserHelper.invocarHumano(ctrl.browser, nome, { skipNavigation }),
+          28000,
+          'invoke_human_nav_timeout'
+        );
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'invoke_human_nav_done',
+            nome: String(nome || ''),
+            skipNavigation: !!skipNavigation,
+            skippedNav: !!(nav && nav.skippedNav),
+            reason: nav && nav.reason ? String(nav.reason).slice(0, 80) : null
+          });
+        } catch {}
+      } catch (e) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'invoke_human_nav_timeout',
+            nome: String(nome || ''),
+            error: String((e && e.message) || e).slice(0, 160),
+            skipNavigation: !!skipNavigation
+          });
+        } catch {}
+      }
 
       try { freezeCooldownIfNotWorking(nome); } catch {}
       try {
-        await ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' });
+        await withTimeout(
+          ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' }),
+          20000,
+          'invoke_human_overlay_timeout'
+        );
         try { await issues.append(nome, 'invoke_human_overlay_ok', 'ok'); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_ok', nome: String(nome || '') }); } catch {}
       } catch (e) {

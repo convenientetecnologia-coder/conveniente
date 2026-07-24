@@ -1023,7 +1023,8 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_invoke_human_request', `by=${op}`);
     try {
-      const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
+      // Handler limita nav/overlay; margem para wait de Robe (cap 45s) + IPC.
+      const resp = await workerClient.sendWorkerCommand('invoke_human', { nome }, { timeoutMs: 120000 });
       logger.info('Comando invoke_human disparado', { nome });
       return res.json(resp);
     } catch (e) {

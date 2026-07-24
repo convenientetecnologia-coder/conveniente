@@ -5,7 +5,8 @@ const logger = require('./logger.js');
 
 // ========== FLOOD/REENTRADA/FILA PROTECTION ADDED ==========
 // Proteção: Evita flood de comandos “open”/“activate”/“startWork”. Garantido que só 1 em andamento por perfil ou globalmente.
-const inflightOp = new Map(); // Key: type+name ou type (se global)
+const inflightOp = new Map(); // Key: type+name ou type (se global) -> Promise
+const inflightOpType = new Map(); // Key -> last command type holding the profile lock
 const pLimitImport = require('p-limit');
 const pLimit = pLimitImport.default || pLimitImport;
 const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
@@ -125,10 +126,39 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     opKey = `${type}`;
   }
 
-  // 2. Lock por opKey — se já existe, retorna a mesma promise (não reenvia)
+  // 2) Lock por opKey:
+  // - Mesmo tipo em flood: reusa a promise (anti-duplo-clique).
+  // - Tipos distintos (ex.: invoke_human vs deactivate): SERIALIZA de verdade —
+  //   nunca devolver o resultado do Invocar como se fosse o Fechar.
   if (inflightOp.has(opKey)) {
-    debugLogCommand(type, payload, inflightOp.size, '[LOCKED flood]');
-    return inflightOp.get(opKey);
+    const prev = inflightOp.get(opKey);
+    const prevType = inflightOpType.get(opKey) || '';
+    const sameType = String(prevType || '') === String(type || '');
+    const mustSerializeDistinct =
+      !sameType &&
+      (type === 'deactivate' ||
+        prevType === 'deactivate' ||
+        type === 'invoke_human' ||
+        prevType === 'invoke_human' ||
+        type === 'activate' ||
+        prevType === 'activate');
+    if (!mustSerializeDistinct) {
+      debugLogCommand(type, payload, inflightOp.size, '[LOCKED flood]');
+      return prev;
+    }
+    debugLogCommand(type, payload, inflightOp.size, `[SERIALIZE after ${prevType || 'unknown'}]`);
+    const chained = Promise.resolve(prev)
+      .catch(() => ({ ok: false, error: 'prev_op_failed' }))
+      .then(() => sendWorkerCommand(type, payload, opts));
+    inflightOp.set(opKey, chained);
+    inflightOpType.set(opKey, type);
+    chained.finally(() => {
+      if (inflightOp.get(opKey) === chained) {
+        inflightOp.delete(opKey);
+        inflightOpType.delete(opKey);
+      }
+    });
+    return chained;
   }
 
   // Fila e limitação máxima global
@@ -168,7 +198,10 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
             try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
             clearTimeout(timerId);
             // Remover o lock/fila/controle agora!
-            inflightOp.delete(opKey);
+            if (inflightOp.get(opKey) === raced) {
+              inflightOp.delete(opKey);
+              inflightOpType.delete(opKey);
+            }
 
             // Supervisor 429 — retry público
             if (
@@ -190,7 +223,10 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
           done = true;
           try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
           clearTimeout(timerId);
-          inflightOp.delete(opKey);
+          if (inflightOp.get(opKey) === raced) {
+            inflightOp.delete(opKey);
+            inflightOpType.delete(opKey);
+          }
           resolve({ ok: false, error: 'Erro ao processar resposta do worker.' });
         }
       };
@@ -203,7 +239,10 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
         if (done) return;
         done = true;
         try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
-        inflightOp.delete(opKey);
+        if (inflightOp.get(opKey) === raced) {
+          inflightOp.delete(opKey);
+          inflightOpType.delete(opKey);
+        }
         resolve({ ok: false, error: 'worker morreu ou está indisponível ao enviar a mensagem.' });
         return;
       }
@@ -212,7 +251,10 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
         if (done) return;
         done = true;
         try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
-        inflightOp.delete(opKey);
+        if (inflightOp.get(opKey) === raced) {
+          inflightOp.delete(opKey);
+          inflightOpType.delete(opKey);
+        }
         logger.warn(`[WORKER][TIMEOUT] Timeout aguardando resposta do worker`, { msgId, pid: childAtSend && childAtSend.pid });
         resolve({ ok: false, error: 'Timeout aguardando resposta do worker.' });
       }, timeoutMs);
@@ -222,10 +264,16 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   // PATCH aplicado: aplicando timeout na espera de slot da fila global
   const raced = withQueueTimeout(holderPromise, queueWaitMs);
   inflightOp.set(opKey, raced);
+  inflightOpType.set(opKey, type);
 
   // DEBUG LOG comando enviado
   debugLogCommand(type, payload, globalCommandPool.activeCount, '[ENQUED]');
-  raced.finally(() => { if (inflightOp.has(opKey)) inflightOp.delete(opKey); });
+  raced.finally(() => {
+    if (inflightOp.get(opKey) === raced) {
+      inflightOp.delete(opKey);
+      inflightOpType.delete(opKey);
+    }
+  });
   return raced;
 }
 

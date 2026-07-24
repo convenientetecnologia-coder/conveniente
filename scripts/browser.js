@@ -3024,38 +3024,53 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 // ===============
 // invocarHumano USA A LEITURA correta do manifest se precisar
 // Desabilitado por padrão: abrir interface/painel automático só pode via opt-in, frontend ou chamada manual/intencional.
-async function invocarHumano(browser, nome) {
+async function invocarHumano(browser, nome, opts = {}) {
+  const withTimeout = (p, ms) => {
+    let t;
+    const to = new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error('invocarHumano_timeout')), Math.max(500, Number(ms) || 5000));
+    });
+    return Promise.race([Promise.resolve(p).finally(() => clearTimeout(t)), to]);
+  };
   try {
-    const pages = await browser.pages();
+    const pages = await withTimeout(browser.pages(), 8000).catch(() => []);
     const page = pages && pages[0];
-    if (!page) return;
-    // Traz foco ao navegador
-    await bringWindowToFront(page);
-    // Enterprise: se já está em login/checkpoint/appeal/recover, NÃO navegar.
-    // O humano precisa ver a tela problemática atual.
+    if (!page) return { ok: false, skippedNav: true, reason: 'no_page' };
+    // CDP/bringToFront pode pendurar em página cativa — nunca bloquear invoke eterno.
+    try { await withTimeout(bringWindowToFront(page), 5000); } catch {}
+    // Enterprise: login/checkpoint/appeal/recover/captcha → NÃO navegar (humano vê a tela atual).
     let u0 = '';
     try { u0 = (typeof page.url === 'function') ? (page.url() || '') : ''; } catch {}
     const u = String(u0 || '').toLowerCase();
+    let title = '';
+    try {
+      title = String(await withTimeout(page.title(), 3000).catch(() => '') || '').toLowerCase();
+    } catch {}
+    const skipNav = opts && opts.skipNavigation === true;
     const isProblemUrl =
+      skipNav ||
       u.includes('/login') ||
       u.includes('/checkpoint') ||
       u.includes('/recover') ||
       u.includes('/help/contact') ||
-      u.includes('/appeal');
+      u.includes('/appeal') ||
+      u.includes('captcha') ||
+      /persona|checkpoint|security.?check|confirm.?identity/i.test(title);
 
     if (!isProblemUrl) {
-    // Vai para o painel vendedor Marketplace
-    const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
-    try {
-      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    } catch (e) {
-      try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
+      const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
+      try {
+        await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      } catch (e) {
+        try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
       }
+      try { await withTimeout(bringWindowToFront(page), 5000); } catch {}
+      return { ok: true, skippedNav: false };
     }
-    // Garante focus de novo pós-navegação (opcional: repetir)
-    await bringWindowToFront(page);
+    return { ok: true, skippedNav: true, reason: skipNav ? 'flag_skip' : 'problem_url' };
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][invocarHumano] erro: ' + ((e && e.message) || e)); } } catch {}
+    return { ok: false, error: String((e && e.message) || e).slice(0, 160) };
   }
 }
 
