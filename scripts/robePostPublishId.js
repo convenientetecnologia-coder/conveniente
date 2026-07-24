@@ -265,10 +265,11 @@ async function detectIdWizardScreen(page) {
         return 'success';
       }
       if (hasFile || body.includes('carregue uma foto do seu documento')) return 'upload_photo';
+      // doc_type: exige o título da lista (não basta “carteira…” solto no body)
       if (
         body.includes('escolha um tipo de documento') ||
-        body.includes('carteira de habilitacao') ||
-        body.includes('carteira de habilitação')
+        (body.includes('carteira de habilitacao') &&
+          !!document.querySelector('[role="radio"], [role="listbox"]'))
       ) {
         return 'doc_type';
       }
@@ -284,7 +285,6 @@ async function detectIdWizardScreen(page) {
         body.includes('verificação de identidade') ||
         hasAria(/^continuar$/)
       ) {
-        // Tela intermediária pós-Avançar (Continuar) — sem botão Carregar ainda.
         if (!hasAria(/carregar documento/)) return 'continuar';
       }
       if (
@@ -313,9 +313,10 @@ async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } =
   return detectIdWizardScreen(page);
 }
 
-async function selectDocTypeCnh(page) {
+/** Probe forense da lista de documentos (radios). */
+async function probeDocTypeRadios(page) {
   try {
-    return !!(await page.evaluate(() => {
+    return await page.evaluate(() => {
       const normLocal = (s) => {
         try {
           return String(s || '')
@@ -328,30 +329,210 @@ async function selectDocTypeCnh(page) {
           return String(s || '').toLowerCase().trim();
         }
       };
-      const hit = (t) =>
+      const radios = Array.from(document.querySelectorAll('[role="radio"]'));
+      return {
+        radioCount: radios.length,
+        items: radios.slice(0, 12).map((el) => {
+          const txt = normLocal(el.innerText || el.textContent || '').slice(0, 80);
+          return {
+            txt,
+            checked: el.getAttribute('aria-checked') === 'true',
+            selected:
+              el.getAttribute('aria-selected') === 'true' ||
+              (el.closest('[role="option"]') &&
+                el.closest('[role="option"]').getAttribute('aria-selected') === 'true')
+          };
+        }),
+        cnhChecked: radios.some((el) => {
+          const t = normLocal(el.innerText || el.textContent || '');
+          const isCnh =
+            t.includes('carteira de habilitacao') ||
+            t.includes('driver license') ||
+            t.includes("driver's license");
+          if (!isCnh) return false;
+          const opt = el.closest('[role="option"]');
+          return (
+            el.getAttribute('aria-checked') === 'true' ||
+            (opt && opt.getAttribute('aria-selected') === 'true')
+          );
+        }),
+        avancarEnabled: (() => {
+          const nodes = Array.from(
+            document.querySelectorAll('button,[role="button"],a,[role="link"],div[tabindex="0"]')
+          );
+          for (const el of nodes) {
+            const label = normLocal(
+              `${el.getAttribute('aria-label') || ''} ${el.innerText || ''}`
+            );
+            if (!(label === 'avancar' || label.includes('avancar'))) continue;
+            const disabled =
+              el.getAttribute('aria-disabled') === 'true' ||
+              el.getAttribute('disabled') != null ||
+              String(el.getAttribute('tabindex') || '') === '-1';
+            return !disabled;
+          }
+          return false;
+        })()
+      };
+    });
+  } catch (e) {
+    return { radioCount: 0, items: [], cnhChecked: false, avancarEnabled: false, error: String((e && e.message) || e) };
+  }
+}
+
+/**
+ * Seleciona CNH de verdade: só [role=radio], verifica aria-checked.
+ * Clique solto em option/div gerava falso positivo (ok=true) com Avançar apagado.
+ */
+async function selectDocTypeCnh(page) {
+  const out = { clicked: false, verified: false, method: null, label: null };
+  try {
+    const evalClick = await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const isCnh = (t) =>
         t.includes('carteira de habilitacao') ||
-        t.includes('carteira de habilitação') ||
         t.includes('driver license') ||
         t.includes("driver's license") ||
-        t === 'cnh';
-      const radios = Array.from(
-        document.querySelectorAll('[role="radio"], [role="option"], div[tabindex="0"]')
-      );
+        t.includes('drivers license');
+      const radios = Array.from(document.querySelectorAll('[role="radio"]'));
       for (const el of radios) {
         const label = normLocal(
           `${el.getAttribute('aria-label') || ''} ${el.innerText || ''} ${el.textContent || ''}`
         );
-        if (!hit(label)) continue;
+        if (!isCnh(label)) continue;
         try {
-          el.click();
-          return true;
+          el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        } catch {}
+        // Sequência de ponteiro — FB lista controlada por React
+        try {
+          const opts = { bubbles: true, cancelable: true, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+        } catch {
+          try {
+            el.click();
+          } catch {}
+        }
+        const checked = el.getAttribute('aria-checked') === 'true';
+        const opt = el.closest('[role="option"]');
+        const selected = opt && opt.getAttribute('aria-selected') === 'true';
+        return {
+          clicked: true,
+          verified: !!(checked || selected),
+          label: label.slice(0, 80),
+          checked,
+          selected: !!selected
+        };
+      }
+      return { clicked: false, verified: false, label: null };
+    });
+    Object.assign(out, evalClick || {});
+    out.method = 'radio_pointer';
+
+    if (out.clicked && !out.verified) {
+      // Fallback Puppeteer: click no handle do radio CNH
+      const handle = await page.evaluateHandle(() => {
+        const normLocal = (s) => {
+          try {
+            return String(s || '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+          } catch {
+            return String(s || '').toLowerCase().trim();
+          }
+        };
+        const isCnh = (t) =>
+          t.includes('carteira de habilitacao') ||
+          t.includes('driver license') ||
+          t.includes("driver's license");
+        return (
+          Array.from(document.querySelectorAll('[role="radio"]')).find((el) =>
+            isCnh(normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || ''}`))
+          ) || null
+        );
+      });
+      const el = handle && handle.asElement && handle.asElement();
+      if (el) {
+        try {
+          await el.click({ delay: 40 });
+          out.method = 'puppeteer_handle_click';
+        } catch {}
+        try {
+          const box = await el.boundingBox();
+          if (box) {
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 30 });
+            out.method = 'puppeteer_mouse';
+          }
         } catch {}
       }
-      return false;
-    }));
-  } catch {
-    return false;
+      try {
+        if (handle) await handle.dispose();
+      } catch {}
+      await sleep(800);
+      const probe = await probeDocTypeRadios(page);
+      out.verified = !!(probe && probe.cnhChecked);
+    }
+
+    if (out.clicked) {
+      await sleep(600);
+      const probe2 = await probeDocTypeRadios(page);
+      out.verified = !!(probe2 && probe2.cnhChecked) || !!out.verified;
+      out.avancarEnabled = !!(probe2 && probe2.avancarEnabled);
+      out.radioCount = probe2 && probe2.radioCount;
+    }
+  } catch (e) {
+    out.error = String((e && e.message) || e).slice(0, 160);
   }
+  return out;
+}
+
+async function waitCnhSelected(page, { maxMs = 90000, deadlineAt } = {}) {
+  const start = Date.now();
+  let last = null;
+  while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
+    const probe = await probeDocTypeRadios(page);
+    last = probe;
+    if (probe && probe.radioCount === 0) {
+      await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
+      await sleep(2000);
+      continue;
+    }
+    if (probe && probe.cnhChecked && probe.avancarEnabled) {
+      return { ok: true, probe };
+    }
+    const sel = await selectDocTypeCnh(page);
+    last = Object.assign({}, probe || {}, sel || {});
+    if (sel && sel.verified) {
+      // Avançar pode habilitar com atraso curto
+      for (let i = 0; i < 8; i++) {
+        await sleep(700);
+        const p2 = await probeDocTypeRadios(page);
+        last = p2;
+        if (p2 && p2.cnhChecked && p2.avancarEnabled) return { ok: true, probe: p2, sel };
+        if (p2 && p2.cnhChecked) return { ok: true, probe: p2, sel, avancarPending: true };
+      }
+    }
+    await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
+    await sleep(2000);
+  }
+  return { ok: false, probe: last };
 }
 
 async function dismissTurbineUpsell(page, { deadlineAt } = {}) {
@@ -978,34 +1159,29 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   // 5) Escolha tipo: Carteira de habilitação (radio) → Avançar fica clicável
   if (screen === 'doc_type' || screen === 'unknown') {
-    let cnh = false;
-    const cnhStart = Date.now();
-    while (!cnh && Date.now() - cnhStart < 90000 && deadlineLeft(deadlineAt) > 0) {
-      cnh = await selectDocTypeCnh(page);
-      if (!cnh) {
-        cnh = await clickByText(
-          page,
-          [
-            'carteira de habilitacao',
-            'carteira de habilitação',
-            'driver license',
-            "driver's license",
-            'cnh'
-          ],
-          { withinDialog: false }
-        );
-      }
-      if (cnh) break;
-      // Lista curta: "Ver mais" pode revelar CNH.
-      await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
-      await sleep(2500);
-    }
-    logEvt(nome, source, 'wizard_cnh', { ok: !!cnh });
-    if (!cnh) return { ok: false, error: 'cnh_not_selected' };
+    const before = await probeDocTypeRadios(page);
+    logEvt(nome, source, 'wizard_cnh_probe', {
+      radioCount: before && before.radioCount,
+      cnhChecked: !!(before && before.cnhChecked),
+      avancarEnabled: !!(before && before.avancarEnabled),
+      items: (before && before.items) || []
+    });
+
+    const cnhWait = await waitCnhSelected(page, { maxMs: 120000, deadlineAt });
+    const cnhOk = !!(cnhWait && cnhWait.ok);
+    logEvt(nome, source, 'wizard_cnh', {
+      ok: cnhOk,
+      verified: cnhOk,
+      cnhChecked: !!(cnhWait && cnhWait.probe && cnhWait.probe.cnhChecked),
+      avancarEnabled: !!(cnhWait && cnhWait.probe && cnhWait.probe.avancarEnabled),
+      radioCount: cnhWait && cnhWait.probe && cnhWait.probe.radioCount,
+      items: (cnhWait && cnhWait.probe && cnhWait.probe.items) || []
+    });
+    if (!cnhOk) return { ok: false, error: 'cnh_not_selected' };
     await sleep(WAIT_STEP_MS);
     assertBudget(deadlineAt, 'wizard_after_cnh');
 
-    // 6) Avançar pós-CNH (faltava — sem isso o input de arquivo nunca aparece)
+    // 6) Avançar pós-CNH — só faz sentido com radio verificado
     const advDoc = await waitClickByText(page, ['avancar', 'avançar', 'next'], {
       maxMs: 90000,
       deadlineAt,
