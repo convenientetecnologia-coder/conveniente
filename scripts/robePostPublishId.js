@@ -264,6 +264,15 @@ async function detectIdWizardScreen(page) {
       ) {
         return 'success';
       }
+      // Pós-Enviar: “Confirmação de identidade em andamento” + Pronto
+      if (
+        body.includes('confirmacao de identidade em andamento') ||
+        body.includes('normalmente analisamos suas informacoes') ||
+        (body.includes('em andamento') && body.includes('48 horas')) ||
+        (hasAria(/^pronto$/) && body.includes('em andamento'))
+      ) {
+        return 'pending_review';
+      }
       if (hasFile || body.includes('carregue uma foto do seu documento')) return 'upload_photo';
       // doc_type: exige o título da lista (não basta “carteira…” solto no body)
       if (
@@ -307,7 +316,7 @@ async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } =
   while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
     const scr = await detectIdWizardScreen(page);
     if (want.has(scr)) return scr;
-    if (scr === 'success') return scr;
+    if (scr === 'success' || scr === 'pending_review') return scr;
     await sleep(2000);
   }
   return detectIdWizardScreen(page);
@@ -943,7 +952,50 @@ async function findFileInputEverywhere(page) {
   return null;
 }
 
-async function isSuccessScreen(page) {
+async function isPendingReviewScreen(page) {
+  try {
+    return !!(await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const hit = (t) =>
+        t.includes('confirmacao de identidade em andamento') ||
+        t.includes('confirmação de identidade em andamento') ||
+        t.includes('identity confirmation in progress') ||
+        t.includes('normalmente analisamos suas informacoes') ||
+        t.includes('normalmente analisamos suas informações') ||
+        (t.includes('em andamento') && t.includes('48 horas'));
+      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
+      if (hit(body)) return true;
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
+      for (const d of dialogs) {
+        const t = normLocal(d.innerText || d.textContent || '');
+        if (hit(t)) return true;
+      }
+      // Botão Pronto no dialog de identidade = variante pós-envio
+      const pronto = Array.from(document.querySelectorAll('[aria-label],button,[role="button"]')).some((el) => {
+        const al = normLocal(el.getAttribute('aria-label') || '');
+        const tx = normLocal(el.innerText || '');
+        return al === 'pronto' || tx === 'pronto';
+      });
+      if (pronto && (body.includes('confirmacao de identidade') || body.includes('em andamento'))) return true;
+      return false;
+    }));
+  } catch {
+    return false;
+  }
+}
+
+async function isClassicSubmittedScreen(page) {
   try {
     return !!(await page.evaluate(() => {
       const normLocal = (s) => {
@@ -979,6 +1031,12 @@ async function isSuccessScreen(page) {
   }
 }
 
+/** Sucesso pós-envio: tela clássica OU “em andamento” (Pronto). */
+async function isSuccessScreen(page) {
+  if (await isPendingReviewScreen(page)) return true;
+  return isClassicSubmittedScreen(page);
+}
+
 async function waitForSuccessScreen(page, { maxMs, deadlineAt }) {
   const start = Date.now();
   while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
@@ -988,8 +1046,64 @@ async function waitForSuccessScreen(page, { maxMs, deadlineAt }) {
   return false;
 }
 
-async function closeSuccessDialog(page) {
-  const clicked = await clickByText(page, ['fechar', 'close', 'concluido', 'ok'], { withinDialog: true });
+async function clickProntoIfPresent(page, { maxMs = 30000, deadlineAt } = {}) {
+  if (!(await isPendingReviewScreen(page))) return false;
+  const ok = await waitClickByText(page, ['pronto', 'done'], {
+    maxMs,
+    deadlineAt,
+    withinDialog: true,
+    exact: true,
+    settleMs: WAIT_STEP_MS
+  });
+  if (!ok) {
+    // Fallback: aria-label exato no dialog
+    try {
+      const clicked = await page.evaluate(() => {
+        const el =
+          document.querySelector('[aria-label="Pronto"]') ||
+          document.querySelector('[aria-label="Done"]');
+        if (el && typeof el.click === 'function') {
+          el.click();
+          return true;
+        }
+        return false;
+      });
+      if (clicked) await sleep(WAIT_STEP_MS);
+      return !!clicked;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function closeSuccessDialog(page, { deadlineAt } = {}) {
+  // Variante nova: “em andamento” → Pronto → depois Fechar
+  const pronto = await clickProntoIfPresent(page, {
+    maxMs: 45000,
+    deadlineAt: deadlineAt || Date.now() + 45000
+  });
+  if (pronto) {
+    // Após Pronto, esperar a tela com Fechar (calma — FB pesado)
+    const start = Date.now();
+    while (Date.now() - start < 60000) {
+      const classic = await isClassicSubmittedScreen(page);
+      const hasFechar = await clickByText(page, ['fechar', 'close'], { withinDialog: true });
+      if (hasFechar) {
+        await sleep(1500);
+        return true;
+      }
+      if (classic) break;
+      await sleep(2000);
+    }
+  }
+
+  let clicked = await clickByText(page, ['fechar', 'close', 'concluido', 'ok'], {
+    withinDialog: true
+  });
+  if (!clicked) {
+    clicked = await clickByText(page, ['fechar', 'close', 'pronto'], { withinDialog: false, exact: true });
+  }
   if (clicked) {
     await sleep(1500);
     return true;
@@ -1001,9 +1115,74 @@ async function closeSuccessDialog(page) {
   return true;
 }
 
-async function finishAlreadySubmitted(page, { nome, source, where } = {}) {
+/**
+ * Pós-Enviar: espera 1–120s+ → (Pronto se “em andamento”) → Fechar.
+ */
+async function finishAfterEnviar(page, { nome, source, deadlineAt } = {}) {
+  let success = await waitForSuccessScreen(page, { maxMs: POLL_SUCCESS_MS, deadlineAt });
+  if (!success && deadlineLeft(deadlineAt) > 15000) {
+    logEvt(nome, source, 'wizard_refresh_retry', {});
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    } catch {}
+    await sleep(WAIT_FEED_SETTLE_MS);
+    success = await waitForSuccessScreen(page, { maxMs: POLL_AFTER_REFRESH_MS, deadlineAt });
+  }
+  if (!success) return { ok: false, error: 'success_screen_timeout' };
+
+  const pending = await isPendingReviewScreen(page);
+  logEvt(nome, source, 'wizard_post_enviar_screen', {
+    pending,
+    classic: await isClassicSubmittedScreen(page)
+  });
+
+  if (pending) {
+    const pronto = await clickProntoIfPresent(page, { maxMs: 60000, deadlineAt });
+    logEvt(nome, source, 'wizard_pronto', { ok: !!pronto });
+    if (!pronto) return { ok: false, error: 'pronto_not_clicked' };
+    // Após Pronto: tela final com Fechar
+    const fecharStart = Date.now();
+    let closed = false;
+    while (Date.now() - fecharStart < 90000 && deadlineLeft(deadlineAt) > 0) {
+      closed = await clickByText(page, ['fechar', 'close'], { withinDialog: true });
+      if (!closed) closed = await clickByText(page, ['fechar', 'close'], { withinDialog: false, exact: true });
+      if (closed) break;
+      // Às vezes ainda “Suas informações…” sem Fechar imediato
+      if (await isClassicSubmittedScreen(page)) {
+        await sleep(2000);
+        continue;
+      }
+      await sleep(2000);
+    }
+    logEvt(nome, source, 'wizard_fechar', { ok: !!closed });
+    if (closed) await sleep(1500);
+    else {
+      // Último recurso: Escape não invalida o envio já feito
+      try {
+        await page.keyboard.press('Escape');
+      } catch {}
+      await sleep(1000);
+    }
+  } else {
+    await closeSuccessDialog(page, { deadlineAt });
+    logEvt(nome, source, 'wizard_fechar', { ok: true, via: 'classic' });
+  }
+
+  return { ok: true };
+}
+
+async function finishAlreadySubmitted(page, { nome, source, where, deadlineAt } = {}) {
   logEvt(nome, source, 'already_submitted_after_' + String(where || 'step'), { ok: true });
-  await closeSuccessDialog(page);
+  // Mesmo atalho: pode ser “em andamento” (Pronto) ou clássico (Fechar)
+  if (await isPendingReviewScreen(page)) {
+    const pronto = await clickProntoIfPresent(page, {
+      maxMs: 45000,
+      deadlineAt: deadlineAt || Date.now() + 45000
+    });
+    logEvt(nome, source, 'wizard_pronto', { ok: !!pronto, alreadySubmitted: true });
+    await sleep(WAIT_STEP_MS);
+  }
+  await closeSuccessDialog(page, { deadlineAt: deadlineAt || Date.now() + 60000 });
   return { ok: true, alreadySubmitted: true };
 }
 
@@ -1014,7 +1193,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   // Já pode estar na tela final (ID feito antes).
   if (await isSuccessScreen(page)) {
-    return finishAlreadySubmitted(page, { nome, source, where: 'open' });
+    return finishAlreadySubmitted(page, { nome, source, where: 'open', deadlineAt });
   }
 
   let screen = await detectIdWizardScreen(page);
@@ -1047,7 +1226,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
     assertBudget(deadlineAt, 'wizard_after_confirm_btn');
     if (await isSuccessScreen(page)) {
-      return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn' });
+      return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn', deadlineAt });
     }
     screen = await detectIdWizardScreen(page);
   }
@@ -1094,8 +1273,8 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         maxMs: 45000,
         deadlineAt
       });
-      if (earlyScr === 'success') {
-        return finishAlreadySubmitted(page, { nome, source, where: 'avancar' });
+      if (earlyScr === 'success' || earlyScr === 'pending_review') {
+        return finishAlreadySubmitted(page, { nome, source, where: 'avancar', deadlineAt });
       }
       screen = earlyScr;
     }
@@ -1116,8 +1295,8 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
       maxMs: cont ? 60000 : 20000,
       deadlineAt
     });
-    if (screen === 'success') {
-      return finishAlreadySubmitted(page, { nome, source, where: 'continuar' });
+    if (screen === 'success' || screen === 'pending_review') {
+      return finishAlreadySubmitted(page, { nome, source, where: 'continuar', deadlineAt });
     }
     // Sem avançar de tela: falha explícita (não queimar budget no passo seguinte).
     if (!cont && screen !== 'carregar_doc' && screen !== 'doc_type' && screen !== 'upload_photo') {
@@ -1229,19 +1408,12 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   logEvt(nome, source, 'wizard_enviar', { ok: !!sent });
   if (!sent) return { ok: false, error: 'enviar_not_clicked' };
 
-  // 9) Esperar tela final (1–120s+); se bugada, refresh como no contrato forense
-  let success = await waitForSuccessScreen(page, { maxMs: POLL_SUCCESS_MS, deadlineAt });
-  if (!success && deadlineLeft(deadlineAt) > 15000) {
-    logEvt(nome, source, 'wizard_refresh_retry', {});
-    try {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-    } catch {}
-    await sleep(WAIT_FEED_SETTLE_MS);
-    success = await waitForSuccessScreen(page, { maxMs: POLL_AFTER_REFRESH_MS, deadlineAt });
+  // 9) Pós-Enviar: 1–120s → (em andamento → Pronto) → Fechar
+  const finished = await finishAfterEnviar(page, { nome, source, deadlineAt });
+  if (!(finished && finished.ok)) {
+    return { ok: false, error: (finished && finished.error) || 'post_enviar_failed' };
   }
-  if (!success) return { ok: false, error: 'success_screen_timeout' };
 
-  await closeSuccessDialog(page);
   logEvt(nome, source, 'wizard_success', { ok: true });
   return { ok: true };
 }
