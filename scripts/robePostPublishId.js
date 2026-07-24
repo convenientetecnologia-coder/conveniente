@@ -153,14 +153,14 @@ async function pageAlive(page) {
   }
 }
 
-async function clickByText(page, patterns, { withinDialog = false } = {}) {
+async function clickByText(page, patterns, { withinDialog = false, exact = false } = {}) {
   const pats = (Array.isArray(patterns) ? patterns : [patterns])
     .map((p) => norm(p))
     .filter(Boolean);
   if (!pats.length) return false;
   try {
     return await page.evaluate(
-      (patsIn, withinDialogIn) => {
+      (patsIn, withinDialogIn, exactIn) => {
         const normLocal = (s) => {
           try {
             return String(s || '')
@@ -173,41 +173,182 @@ async function clickByText(page, patterns, { withinDialog = false } = {}) {
             return String(s || '').toLowerCase().trim();
           }
         };
-        const roots = [];
-        if (withinDialogIn) {
-          document
-            .querySelectorAll('div[role="dialog"], [aria-modal="true"]')
-            .forEach((d) => roots.push(d));
-        }
-        if (!roots.length) roots.push(document);
-        const selectors = 'button,[role="button"],a,div[tabindex="0"],span[role="button"]';
-        for (const root of roots) {
+        const isDisabled = (el) =>
+          el.getAttribute('aria-disabled') === 'true' ||
+          el.getAttribute('disabled') != null ||
+          String(el.getAttribute('tabindex') || '') === '-1' ||
+          (typeof el.closest === 'function' && !!el.closest('[aria-disabled="true"]'));
+        const tryClickIn = (root) => {
+          const selectors =
+            'button,[role="button"],a,[role="link"],[role="radio"],div[tabindex="0"],span[role="button"],[role="option"]';
           const nodes = Array.from(root.querySelectorAll(selectors));
           for (const el of nodes) {
-            const label = normLocal(
-              `${el.getAttribute('aria-label') || ''} ${el.innerText || ''} ${el.textContent || ''}`
-            );
+            if (isDisabled(el)) continue;
+            const aria = normLocal(el.getAttribute('aria-label') || '');
+            const txt = normLocal(el.innerText || el.textContent || '');
+            const label = `${aria} ${txt}`.trim();
             if (!label) continue;
-            const disabled =
-              el.getAttribute('aria-disabled') === 'true' ||
-              el.getAttribute('disabled') != null ||
-              String(el.getAttribute('tabindex') || '') === '-1';
-            if (disabled) continue;
             for (const p of patsIn) {
-              if (label === p || label.includes(p)) {
-                try {
-                  el.click();
-                  return true;
-                } catch {}
-              }
+              const hit = exactIn
+                ? aria === p || txt === p || label === p
+                : aria === p || txt === p || aria.includes(p) || txt.includes(p) || label.includes(p);
+              if (!hit) continue;
+              try {
+                el.click();
+                return true;
+              } catch {}
             }
           }
+          return false;
+        };
+        // Checkpoint de identidade é página cheia (não dialog). Se withinDialog achar
+        // dialogs irrelevantes e falhar, cai no document — sem engessar o fluxo.
+        if (withinDialogIn) {
+          const dialogs = Array.from(
+            document.querySelectorAll('div[role="dialog"], [aria-modal="true"]')
+          );
+          for (const d of dialogs) {
+            if (tryClickIn(d)) return true;
+          }
         }
-        return false;
+        return tryClickIn(document);
       },
       pats,
-      !!withinDialog
+      !!withinDialog,
+      !!exact
     );
+  } catch {
+    return false;
+  }
+}
+
+/** Espera calma até conseguir clicar (páginas de checkpoint são pesadas). */
+async function waitClickByText(page, patterns, { maxMs = 90000, deadlineAt, withinDialog = false, exact = false, settleMs = WAIT_STEP_MS } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
+    const ok = await clickByText(page, patterns, { withinDialog, exact });
+    if (ok) {
+      await sleep(settleMs);
+      return true;
+    }
+    await sleep(2000);
+  }
+  return false;
+}
+
+async function detectIdWizardScreen(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
+      const hasAria = (re) =>
+        !!Array.from(document.querySelectorAll('[aria-label]')).find((el) =>
+          re.test(normLocal(el.getAttribute('aria-label') || ''))
+        );
+      const hasFile = !!document.querySelector('input[type="file"]');
+      if (
+        body.includes('suas informacoes foram enviadas') ||
+        body.includes('enviadas para verificacao') ||
+        body.includes('your information was submitted')
+      ) {
+        return 'success';
+      }
+      if (hasFile || body.includes('carregue uma foto do seu documento')) return 'upload_photo';
+      if (
+        body.includes('escolha um tipo de documento') ||
+        body.includes('carteira de habilitacao') ||
+        body.includes('carteira de habilitação')
+      ) {
+        return 'doc_type';
+      }
+      if (
+        hasAria(/carregar documento de identidade/) ||
+        body.includes('carregar seu documento de identidade') ||
+        body.includes('carregar documento de identidade')
+      ) {
+        return 'carregar_doc';
+      }
+      if (
+        body.includes('verificacao de identidade') ||
+        body.includes('verificação de identidade') ||
+        hasAria(/^continuar$/)
+      ) {
+        // Tela intermediária pós-Avançar (Continuar) — sem botão Carregar ainda.
+        if (!hasAria(/carregar documento/)) return 'continuar';
+      }
+      if (
+        hasAria(/confirme sua identidade/) ||
+        body.includes('confirme sua identidade') ||
+        body.includes('verifique sua identidade')
+      ) {
+        return 'confirm';
+      }
+      return 'unknown';
+    });
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } = {}) {
+  const want = new Set(Array.isArray(wanted) ? wanted : [wanted]);
+  const start = Date.now();
+  while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
+    const scr = await detectIdWizardScreen(page);
+    if (want.has(scr)) return scr;
+    if (scr === 'success') return scr;
+    await sleep(2000);
+  }
+  return detectIdWizardScreen(page);
+}
+
+async function selectDocTypeCnh(page) {
+  try {
+    return !!(await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const hit = (t) =>
+        t.includes('carteira de habilitacao') ||
+        t.includes('carteira de habilitação') ||
+        t.includes('driver license') ||
+        t.includes("driver's license") ||
+        t === 'cnh';
+      const radios = Array.from(
+        document.querySelectorAll('[role="radio"], [role="option"], div[tabindex="0"]')
+      );
+      for (const el of radios) {
+        const label = normLocal(
+          `${el.getAttribute('aria-label') || ''} ${el.innerText || ''} ${el.textContent || ''}`
+        );
+        if (!hit(label)) continue;
+        try {
+          el.click();
+          return true;
+        } catch {}
+      }
+      return false;
+    }));
   } catch {
     return false;
   }
@@ -695,156 +836,199 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     return finishAlreadySubmitted(page, { nome, source, where: 'open' });
   }
 
-  // Na página do item: botão "Confirme sua identidade" (DOM real do selling/item).
-  let confirmBtn = await clickByText(
-    page,
-    ['confirme sua identidade', 'verifique sua identidade'],
-    { withinDialog: false }
-  );
-  if (!confirmBtn) {
-    try {
-      confirmBtn = await page.evaluate(() => {
-        const el =
-          document.querySelector('[aria-label="Confirme sua identidade"]') ||
-          document.querySelector('[aria-label*="Confirme sua identidade"]');
-        if (el && typeof el.click === 'function') {
-          el.click();
-          return true;
-        }
-        return false;
-      });
-    } catch {
-      confirmBtn = false;
+  let screen = await detectIdWizardScreen(page);
+  logEvt(nome, source, 'wizard_screen', { screen });
+
+  // 1) Confirme sua identidade (página do item / selling)
+  if (screen === 'confirm' || screen === 'unknown') {
+    let confirmBtn = await waitClickByText(
+      page,
+      ['confirme sua identidade', 'verifique sua identidade'],
+      { maxMs: 60000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 2000 }
+    );
+    if (!confirmBtn) {
+      try {
+        confirmBtn = await page.evaluate(() => {
+          const el =
+            document.querySelector('[aria-label="Confirme sua identidade"]') ||
+            document.querySelector('[aria-label*="Confirme sua identidade"]');
+          if (el && typeof el.click === 'function') {
+            el.click();
+            return true;
+          }
+          return false;
+        });
+        if (confirmBtn) await sleep(WAIT_STEP_MS + 2000);
+      } catch {
+        confirmBtn = false;
+      }
     }
+    logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
+    assertBudget(deadlineAt, 'wizard_after_confirm_btn');
+    if (await isSuccessScreen(page)) {
+      return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn' });
+    }
+    screen = await detectIdWizardScreen(page);
   }
-  logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
-  await sleep(WAIT_STEP_MS + 2000);
-  assertBudget(deadlineAt, 'wizard_after_confirm_btn');
 
-  if (await isSuccessScreen(page)) {
-    return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn' });
-  }
-
-  // Avançar (às vezes é link "A seguir: continue para a verificação…")
-  let advanced = await clickByText(
-    page,
-    [
-      'avancar',
-      'avançar',
-      'continue',
-      'next',
-      'a seguir: continue',
-      'continue para a verificacao',
-      'continue para a verificação'
-    ],
-    { withinDialog: true }
-  );
-  if (!advanced) {
-    advanced = await clickByText(
+  // 2) Avançar / "A seguir: continue para a verificação…"
+  if (screen !== 'continuar' && screen !== 'carregar_doc' && screen !== 'doc_type' && screen !== 'upload_photo' && screen !== 'success') {
+    let advanced = await waitClickByText(
       page,
       [
+        'a seguir: continue para a verificacao',
+        'a seguir: continue para a verificação',
+        'continue para a verificacao',
+        'continue para a verificação',
         'avancar',
-        'avançar',
-        'continuar',
-        'continue',
-        'a seguir: continue',
-        'continue para a verificacao'
+        'avançar'
       ],
-      { withinDialog: false }
+      { maxMs: 90000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
     );
-  }
-  if (!advanced) {
-    try {
-      advanced = await page.evaluate(() => {
-        const el =
-          document.querySelector('[aria-label*="A seguir"]') ||
-          document.querySelector('[aria-label*="verificação de identidade"], [aria-label*="verificacao de identidade"]');
-        if (el && typeof el.click === 'function') {
-          el.click();
-          return true;
-        }
-        return false;
+    if (!advanced) {
+      try {
+        advanced = await page.evaluate(() => {
+          const el =
+            document.querySelector('[aria-label*="A seguir"]') ||
+            document.querySelector(
+              '[aria-label*="verificação de identidade"], [aria-label*="verificacao de identidade"]'
+            );
+          if (el && typeof el.click === 'function') {
+            el.click();
+            return true;
+          }
+          return false;
+        });
+        if (advanced) await sleep(WAIT_STEP_MS + 3000);
+      } catch {
+        advanced = false;
+      }
+    }
+    logEvt(nome, source, 'wizard_avancar', { ok: !!advanced });
+    assertBudget(deadlineAt, 'wizard_after_avancar');
+
+    // Atalho: às vezes Avançar → direto "Suas informações foram enviadas..."
+    {
+      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc'], {
+        maxMs: 45000,
+        deadlineAt
       });
-    } catch {
-      advanced = false;
-    }
-  }
-  logEvt(nome, source, 'wizard_avancar', { ok: !!advanced });
-  await sleep(WAIT_STEP_MS + 2000);
-  assertBudget(deadlineAt, 'wizard_after_avancar');
-
-  // Atalho crítico: Avançar → direto "Suas informações foram enviadas..."
-  {
-    const early = await waitForSuccessScreen(page, {
-      maxMs: 25000,
-      deadlineAt
-    });
-    if (early) {
-      return finishAlreadySubmitted(page, { nome, source, where: 'avancar' });
+      if (earlyScr === 'success') {
+        return finishAlreadySubmitted(page, { nome, source, where: 'avancar' });
+      }
+      screen = earlyScr;
     }
   }
 
-  // Continuar
-  let cont = await clickByText(page, ['continuar', 'continue', 'avancar', 'avançar'], {
-    withinDialog: true
-  });
-  if (!cont) cont = await clickByText(page, ['continuar', 'continue'], { withinDialog: false });
-  logEvt(nome, source, 'wizard_continuar', { ok: !!cont });
-  await sleep(WAIT_STEP_MS + 1500);
-  assertBudget(deadlineAt, 'wizard_after_continuar');
-
-  {
-    const early2 = await waitForSuccessScreen(page, {
-      maxMs: 15000,
+  // 3) Continuar (tela "Verificação de identidade")
+  if (screen === 'continuar' || screen === 'unknown') {
+    const cont = await waitClickByText(page, ['continuar', 'continue'], {
+      maxMs: 90000,
+      deadlineAt,
+      withinDialog: false,
+      exact: true,
+      settleMs: WAIT_STEP_MS + 3000
+    });
+    logEvt(nome, source, 'wizard_continuar', { ok: !!cont });
+    assertBudget(deadlineAt, 'wizard_after_continuar');
+    screen = await waitForWizardScreen(page, ['success', 'carregar_doc', 'doc_type'], {
+      maxMs: cont ? 60000 : 20000,
       deadlineAt
     });
-    if (early2) {
+    if (screen === 'success') {
       return finishAlreadySubmitted(page, { nome, source, where: 'continuar' });
     }
+    // Sem avançar de tela: falha explícita (não queimar budget no passo seguinte).
+    if (!cont && screen !== 'carregar_doc' && screen !== 'doc_type' && screen !== 'upload_photo') {
+      return { ok: false, error: 'continuar_not_clicked' };
+    }
   }
 
-  // A partir daqui precisa do documento.
+  // A partir daqui precisa do documento físico.
   if (!idPath || !fs.existsSync(idPath)) {
     return { ok: false, error: 'id_png_missing' };
   }
 
-  // Carteira de habilitação
-  let cnh = await clickByText(
-    page,
-    [
-      'carteira de habilitacao',
-      'carteira de habilitação',
-      'driver license',
-      "driver's license",
-      'drivers license',
-      'cnh'
-    ],
-    { withinDialog: true }
-  );
-  if (!cnh) {
-    cnh = await clickByText(
+  // 4) CRÍTICO (faltava): "Carregar documento de identidade"
+  if (screen === 'carregar_doc' || screen === 'unknown' || screen === 'continuar') {
+    const loadDoc = await waitClickByText(
       page,
-      ['carteira de habilitacao', 'carteira de habilitação', 'driver license', 'cnh'],
-      { withinDialog: false }
+      [
+        'carregar documento de identidade',
+        'carregar seu documento de identidade',
+        'upload identity document',
+        'upload your id'
+      ],
+      { maxMs: 120000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
     );
+    logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loadDoc, screenBefore: screen });
+    if (!loadDoc) {
+      // Se já estamos em doc_type/upload, ok; senão falha explícita.
+      screen = await detectIdWizardScreen(page);
+      if (screen !== 'doc_type' && screen !== 'upload_photo') {
+        return { ok: false, error: 'carregar_documento_not_clicked' };
+      }
+    } else {
+      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo'], {
+        maxMs: 90000,
+        deadlineAt
+      });
+    }
   }
-  logEvt(nome, source, 'wizard_cnh', { ok: !!cnh });
-  await sleep(WAIT_STEP_MS);
-  assertBudget(deadlineAt, 'wizard_after_cnh');
 
-  // File input + upload
+  // 5) Escolha tipo: Carteira de habilitação (radio) → Avançar fica clicável
+  if (screen === 'doc_type' || screen === 'unknown') {
+    let cnh = false;
+    const cnhStart = Date.now();
+    while (!cnh && Date.now() - cnhStart < 90000 && deadlineLeft(deadlineAt) > 0) {
+      cnh = await selectDocTypeCnh(page);
+      if (!cnh) {
+        cnh = await clickByText(
+          page,
+          [
+            'carteira de habilitacao',
+            'carteira de habilitação',
+            'driver license',
+            "driver's license",
+            'cnh'
+          ],
+          { withinDialog: false }
+        );
+      }
+      if (cnh) break;
+      // Lista curta: "Ver mais" pode revelar CNH.
+      await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
+      await sleep(2500);
+    }
+    logEvt(nome, source, 'wizard_cnh', { ok: !!cnh });
+    if (!cnh) return { ok: false, error: 'cnh_not_selected' };
+    await sleep(WAIT_STEP_MS);
+    assertBudget(deadlineAt, 'wizard_after_cnh');
+
+    // 6) Avançar pós-CNH (faltava — sem isso o input de arquivo nunca aparece)
+    const advDoc = await waitClickByText(page, ['avancar', 'avançar', 'next'], {
+      maxMs: 90000,
+      deadlineAt,
+      withinDialog: false,
+      settleMs: WAIT_STEP_MS + 3000
+    });
+    logEvt(nome, source, 'wizard_avancar_pos_cnh', { ok: !!advDoc });
+    if (!advDoc) return { ok: false, error: 'avancar_pos_cnh_not_clicked' };
+    screen = await waitForWizardScreen(page, ['upload_photo'], { maxMs: 90000, deadlineAt });
+  }
+
+  // 7) Upload id.png via input[type=file] (mesmo padrão do ROBE de fotos)
   let input = null;
   const findStart = Date.now();
-  while (!input && Date.now() - findStart < 30000 && deadlineLeft(deadlineAt) > 0) {
+  while (!input && Date.now() - findStart < 120000 && deadlineLeft(deadlineAt) > 0) {
     input = await findFileInputEverywhere(page);
     if (input) break;
-    // tenta clicar em área de upload
-    await clickByText(
-      page,
-      ['adicionar arquivo', 'enviar arquivo', 'upload', 'escolher arquivo', 'selecionar arquivo', 'add file'],
-      { withinDialog: true }
-    );
-    await sleep(2000);
+    // UI mostra botão "Carregar" — clicar ajuda a montar o input em alguns builds.
+    await clickByText(page, ['carregar', 'upload', 'adicionar arquivo', 'escolher arquivo'], {
+      withinDialog: false,
+      exact: false
+    });
+    await sleep(2500);
   }
   if (!input) {
     return { ok: false, error: 'file_input_not_found' };
@@ -858,12 +1042,18 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   await sleep(WAIT_AFTER_UPLOAD_MS);
   assertBudget(deadlineAt, 'wizard_after_upload');
 
-  // Enviar
-  let sent = await clickByText(page, ['enviar', 'submit', 'send'], { withinDialog: true });
-  if (!sent) sent = await clickByText(page, ['enviar', 'submit', 'send'], { withinDialog: false });
+  // 8) Enviar (fica azul só depois do arquivo)
+  const sent = await waitClickByText(page, ['enviar', 'submit', 'send'], {
+    maxMs: 90000,
+    deadlineAt,
+    withinDialog: false,
+    exact: true,
+    settleMs: 3000
+  });
   logEvt(nome, source, 'wizard_enviar', { ok: !!sent });
   if (!sent) return { ok: false, error: 'enviar_not_clicked' };
 
+  // 9) Esperar tela final (1–120s+); se bugada, refresh como no contrato forense
   let success = await waitForSuccessScreen(page, { maxMs: POLL_SUCCESS_MS, deadlineAt });
   if (!success && deadlineLeft(deadlineAt) > 15000) {
     logEvt(nome, source, 'wizard_refresh_retry', {});
