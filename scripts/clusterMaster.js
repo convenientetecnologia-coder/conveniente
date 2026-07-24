@@ -566,6 +566,13 @@ function createCluster() {
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
       const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
       const allOk = results.every(r => r && r.ok !== false);
+      if (type === 'robes-release-all') {
+        const enqueued = results.reduce((s, r) => s + (Number(r && r.enqueued || 0) || 0), 0);
+        const cleared = results.reduce((s, r) => s + (Number(r && r.cleared || 0) || 0), 0);
+        return allOk
+          ? { ok: true, enqueued, cleared, nodes: results.length, results }
+          : { ok: false, error: 'partial_fail', enqueued, cleared, results };
+      }
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
     // para comandos por perfil, assegura roteamento

@@ -12269,21 +12269,65 @@ const handlers = {
   async ['robes-release-all']() {
     logger.info('[HANDLER] robes-release-all chamada');
     const perfisArr = loadPerfisJson();
+    let cleared = 0;
     for (const p of perfisArr) {
+      if (!p || !p.nome) continue;
       try {
         robeMeta[p.nome] = robeMeta[p.nome] || {};
         delete robeMeta[p.nome].pauseReason;
         delete robeMeta[p.nome].lastRobeBlockAt;
-        await manifestStore.update(p.nome, m => {
+        delete robeMeta[p.nome].robeCooldownUntilMem;
+        await manifestStore.update(p.nome, (m) => {
           m = m || {};
+          // Libera cooldown de verdade (API também zera; worker é a fonte de verdade da fila).
+          m.robeCooldownUntil = Date.now();
+          m.robeCooldownRemainingMs = 0;
           if (m.robePauseReason) delete m.robePauseReason;
           return m;
         });
+        cleared++;
       } catch {}
     }
+
+    // Com Delta + GLOBAL_TICK=0, limpar cooldown NÃO enfileira sozinho.
+    // "Liberar Robe" é ação explícita do operador → enfileira elegíveis (mesmo gate do auto).
+    let enqueued = 0;
+    const skipped = [];
+    const candidates = new Set();
+    try {
+      for (const nome of controllers.keys()) candidates.add(String(nome));
+    } catch {}
+    for (const p of perfisArr) {
+      if (p && p.nome) candidates.add(String(p.nome));
+    }
+    for (const nome of candidates) {
+      try {
+        const r = await robeEnqueueAuto(nome, 'release_all');
+        if (r && r.ok) enqueued++;
+        else skipped.push({ nome, reason: String((r && r.reason) || 'skip').slice(0, 60) });
+      } catch (e) {
+        skipped.push({ nome, reason: String((e && e.message) || e).slice(0, 60) });
+      }
+    }
+
     await snapshotStatusAndWrite();
-    logger.info('[HANDLER] robes-release-all ok');
-    return { ok: true };
+    logger.info('[HANDLER] robes-release-all ok', {
+      cleared,
+      enqueued,
+      skipped: skipped.length,
+      sampleSkip: skipped.slice(0, 8)
+    });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'robes_release_all_done',
+        cleared,
+        enqueued,
+        skippedCount: skipped.length,
+        skippedSample: skipped.slice(0, 40)
+      });
+    } catch {}
+    return { ok: true, cleared, enqueued, skipped };
   },
 
   async ['network-rotation-pause-runtime']({ reason } = {}) {

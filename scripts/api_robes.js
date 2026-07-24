@@ -53,7 +53,9 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  // Robe Release/Play global — libera todos Robe
+  // Robe Release/Play global — libera cooldown E enfileira elegíveis (fila Robe).
+  // Nota: com Delta + DELTA_ALLOW_ROBE_GLOBAL_TICK=0, só zerar cooldown deixava "Robe: Pronto"
+  // sem nunca entrar na fila — o worker precisa enfileirar explicitamente.
   app.post('/api/robes/release-all', async (req, res) => {
     logger.info('[ROTA POST /api/robes/release-all] chamada');
     try {
@@ -61,9 +63,6 @@ module.exports = (app, workerClient, fileStore) => {
       let total = 0, failed = 0, fails = [];
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
-
-        // --- Patch cirúrgico: REMOVE checagem e bloqueio "limit_posting" ---
-        // O bloco que limitava a liberação global de perfis em penalidade limit_posting foi removido aqui.
 
         try {
           await manifestStore.update(p.nome, man => {
@@ -84,21 +83,29 @@ module.exports = (app, workerClient, fileStore) => {
           }
         }
       }
-      // *** NOVO: chama o comando workerClient para limpar robeMeta.pauseReason e lastRobeBlockAt do lado do worker ***
-      try { 
-        await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 20000 }); 
+      let workerResult = null;
+      try {
+        workerResult = await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 90000 });
       } catch(e) {
-        // log, mas não bloqueia o fluxo
         if (issues && typeof issues.append === "function") {
           issues.append('system', 'robes_release_all_worker_sync_error', `error=${e && e.message || String(e)}`);
         }
+        workerResult = { ok: false, error: (e && e.message) || String(e) };
       }
+      const enqueued = Number(workerResult && workerResult.enqueued || 0) || 0;
       if (failed > 0 || (fails && fails.length)) {
-        logger.warn('Falha em /api/robes/release-all', { failed, fails });
-        res.json({ ok: false, error: `Failure in ${failed} perfil(s) or skipped limit_posting: ${fails && fails.length ? fails.join(', ') : ''}`, fails });
+        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued });
+        res.json({
+          ok: false,
+          error: `Failure in ${failed} perfil(s)`,
+          fails,
+          total,
+          enqueued,
+          worker: workerResult
+        });
       } else {
-        logger.info('Robe release all executado', { total });
-        res.json({ ok: true, total });
+        logger.info('Robe release all executado', { total, enqueued, workerOk: !!(workerResult && workerResult.ok) });
+        res.json({ ok: true, total, enqueued, worker: workerResult });
       }
     } catch (e) {
       logger.error('Erro em /api/robes/release-all', {}, e);
