@@ -17,9 +17,6 @@ Thumbs.db
 .env
 .env.*
 
-# Documento sensível de verificação Marketplace (não versionar)
-dados/id.png
-
 # Runtime local (cada servidor tem o seu estado)
 dados/.telemetry_hostid
 dados/status.json
