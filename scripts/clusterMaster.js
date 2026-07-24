@@ -564,15 +564,39 @@ function createCluster() {
       return out;
     }
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
-      const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
+      const timeoutMs = type === 'robes-release-all'
+        ? Math.max(Number(opts && opts.timeoutMs || 0) || 0, 120000)
+        : (opts && opts.timeoutMs);
+      const sendOpts = Object.assign({}, opts || {}, timeoutMs ? { timeoutMs } : {});
+      const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, sendOpts)));
       const allOk = results.every(r => r && r.ok !== false);
       if (type === 'robes-release-all') {
         const enqueued = results.reduce((s, r) => s + (Number(r && r.enqueued || 0) || 0), 0);
         const cleared = results.reduce((s, r) => s + (Number(r && r.cleared || 0) || 0), 0);
         const awaitingKept = results.reduce((s, r) => s + (Number(r && r.awaitingKept || 0) || 0), 0);
+        const stillPronto = [];
+        for (const r of results) {
+          if (r && Array.isArray(r.stillPronto)) stillPronto.push(...r.stillPronto);
+        }
+        try {
+          logger.info('[CLUSTER] robes-release-all aggregate', {
+            enqueued,
+            cleared,
+            awaitingKept,
+            stillPronto: stillPronto.length,
+            nodes: results.map((r, i) => ({
+              node: i + 1,
+              ok: !!(r && r.ok !== false),
+              enqueued: Number(r && r.enqueued || 0) || 0,
+              working: Number(r && r.working || 0) || 0,
+              stillPronto: Array.isArray(r && r.stillPronto) ? r.stillPronto.length : null,
+              error: r && r.error ? String(r.error).slice(0, 80) : null
+            }))
+          });
+        } catch {}
         return allOk
-          ? { ok: true, enqueued, cleared, awaitingKept, nodes: results.length, results }
-          : { ok: false, error: 'partial_fail', enqueued, cleared, awaitingKept, results };
+          ? { ok: true, enqueued, cleared, awaitingKept, stillPronto, nodes: results.length, results }
+          : { ok: false, error: 'partial_fail', enqueued, cleared, awaitingKept, stillPronto, results };
       }
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }

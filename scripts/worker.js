@@ -7675,9 +7675,11 @@ async function robeFireArmed(nome, reason = 'arm_fire') {
 
 /**
  * Fase 4b/4c: elegibilidade de 1 perfil (controller-first — sem varrer perfis.json inteiro).
+ * opts.forceRelease: Liberar Robe — ignora cooldown (acabou de zerar); ainda exige browser trabalhando.
  */
-async function robeIsAutoEnqueueEligible(nome) {
+async function robeIsAutoEnqueueEligible(nome, opts = {}) {
   const n = String(nome || '');
+  const forceRelease = !!(opts && opts.forceRelease);
   if (!n) return { ok: false, reason: 'no_nome' };
   try {
     if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
@@ -7691,7 +7693,16 @@ async function robeIsAutoEnqueueEligible(nome) {
     return { ok: false, reason: 'ram_backoff' };
   }
   const ctrl = controllers.get(n);
-  if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) {
+  // Virtus Online no painel = ctrl.virtus; Liberar aceita trabalhanco OU virtus
+  // (evita falso not_working com UI "Virtus Online" + Robe Pronto).
+  const working = !!(
+    ctrl &&
+    ctrl.browser &&
+    (ctrl.trabalhando || ctrl.virtus) &&
+    !ctrl.configurando &&
+    !ctrl.humanControl
+  );
+  if (!working) {
     return { ok: false, reason: 'not_working' };
   }
   if (isFrozenNow(n)) return { ok: false, reason: 'frozen' };
@@ -7716,8 +7727,12 @@ async function robeIsAutoEnqueueEligible(nome) {
   if (cooldown > 0 && pauseReason === 'limit_posting' && hasActiveCooldown) {
     return { ok: false, reason: 'limit_posting_cooldown' };
   }
-  if (cooldown > 0) return { ok: false, reason: 'cooldown', cooldownSec: cooldown };
-  return { ok: true, reason: 'eligible' };
+  // Liberar Robe: operador zerou cooldown — não deixar corrida unfreeze/normalize
+  // recriar cooldown e deixar conta em "Pronto" fora da fila.
+  if (!forceRelease && cooldown > 0) {
+    return { ok: false, reason: 'cooldown', cooldownSec: cooldown };
+  }
+  return { ok: true, reason: forceRelease ? 'eligible_force_release' : 'eligible' };
 }
 
 async function robeSetAwaitingEnqueue(nome, awaiting, reason = '') {
@@ -7823,14 +7838,22 @@ function scheduleRobeEnqueueAfterStartWork(nome) {
 
 async function robeEnqueueAuto(nome, source = 'auto') {
   const n = String(nome || '');
-  const gate = await robeIsAutoEnqueueEligible(n);
+  const src = String(source || 'auto').slice(0, 40);
+  const forceRelease =
+    src === 'release_all' ||
+    src === 'release_all_retry' ||
+    src === 'release_all_sweep' ||
+    src.startsWith('release_all');
+  const gate = await robeIsAutoEnqueueEligible(n, { forceRelease });
   if (!gate.ok) return { ok: false, reason: gate.reason || 'gated' };
   logger.info('[WORKER][robeEnqueueAuto] Enfileirando', {
     nome: n,
-    source: String(source || '').slice(0, 40),
+    source: src,
+    forceRelease: !!forceRelease,
     cooldown: 0,
     inQueue: robeQueue.inQueue(n),
-    isActive: robeQueue.isActive(n)
+    isActive: robeQueue.isActive(n),
+    shard: process.env.WORKER_SHARD_INDEX || null
   });
   const enq = robeQueue.enqueue(n, async () => {
     await robeQueuedCycle(n, source);
@@ -7843,7 +7866,10 @@ async function robeEnqueueAuto(nome, source = 'auto') {
         ts: Date.now(),
         event: 'robe_auto_enqueued',
         nome: n,
-        source: String(source || '').slice(0, 40)
+        source: src,
+        forceRelease: !!forceRelease,
+        shard: process.env.WORKER_SHARD_INDEX || null,
+        pid: process.pid
       });
     } catch {}
   }
@@ -12381,8 +12407,13 @@ const handlers = {
   },
 
   async ['robes-release-all']() {
-    logger.info('[HANDLER] robes-release-all chamada');
-    const perfisArr = loadPerfisJson();
+    const shardIdx = process.env.WORKER_SHARD_INDEX || '?';
+    logger.info('[HANDLER] robes-release-all chamada', {
+      shard: shardIdx,
+      pid: process.pid,
+      controllers: controllers.size
+    });
+    const perfisArr = loadPerfisJson(); // já filtrado pelo SHARD_SET deste worker
     let cleared = 0;
     for (const p of perfisArr) {
       if (!p || !p.nome) continue;
@@ -12393,18 +12424,15 @@ const handlers = {
         delete robeMeta[p.nome].robeCooldownUntilMem;
         await manifestStore.update(p.nome, (m) => {
           m = m || {};
-          // Libera cooldown de verdade (API também zera; worker é a fonte de verdade da fila).
           m.robeCooldownUntil = Date.now();
           m.robeCooldownRemainingMs = 0;
           if (m.robePauseReason) delete m.robePauseReason;
-          // Contas fechadas: fica "Pronto" até abrir + start_work → enfileira.
           m.robeAwaitingEnqueue = true;
           m.robeAwaitingEnqueueAt = Date.now();
           m.robeAwaitingEnqueueReason = 'release_all';
           return m;
         });
         try {
-          robeMeta[p.nome] = robeMeta[p.nome] || {};
           robeMeta[p.nome].robeAwaitingEnqueue = true;
           robeMeta[p.nome].robeAwaitingEnqueueReason = 'release_all';
         } catch {}
@@ -12412,59 +12440,109 @@ const handlers = {
       } catch {}
     }
 
-    // Com Delta + GLOBAL_TICK=0, limpar cooldown NÃO enfileira sozinho.
-    // "Liberar Robe" é ação explícita do operador → enfileira elegíveis agora;
-    // os not_working ficam awaiting e entram na fila no próximo start_work.
+    // Só tenta enfileirar quem este worker controla (controllers).
+    // forceRelease ignora cooldown residual de corrida com unfreeze/normalize.
     let enqueued = 0;
     let awaitingKept = 0;
     const skipped = [];
-    const candidates = new Set();
+    const workingNames = [];
     try {
-      for (const nome of controllers.keys()) candidates.add(String(nome));
-    } catch {}
-    for (const p of perfisArr) {
-      if (p && p.nome) candidates.add(String(p.nome));
-    }
-    for (const nome of candidates) {
-      try {
-        const r = await robeEnqueueAuto(nome, 'release_all');
-        if (r && r.ok) {
-          enqueued++;
-        } else {
-          const reason = String((r && r.reason) || 'skip').slice(0, 60);
-          skipped.push({ nome, reason });
-          if (reason === 'not_working' || reason === 'queue_busy') awaitingKept++;
-          else if (reason !== 'not_awaiting') {
-            // Outros gates (frozen, limit, etc.): mantém awaiting para quando liberar.
-            awaitingKept++;
-          }
-        }
-      } catch (e) {
-        skipped.push({ nome, reason: String((e && e.message) || e).slice(0, 60) });
-        awaitingKept++;
+      for (const nome of controllers.keys()) {
+        if (SHARD_SET.size && !inShard(nome)) continue;
+        workingNames.push(String(nome));
       }
+    } catch {}
+
+    async function passEnqueue(names, sourceTag) {
+      let got = 0;
+      for (const nome of names) {
+        try {
+          if (robeQueue.inQueue(nome) || robeQueue.isActive(nome)) continue;
+          const r = await robeEnqueueAuto(nome, sourceTag);
+          if (r && r.ok) got++;
+          else {
+            const reason = String((r && r.reason) || 'skip').slice(0, 60);
+            skipped.push({ nome, reason, pass: sourceTag });
+            if (reason === 'not_working' || reason === 'queue_busy') awaitingKept++;
+            else awaitingKept++;
+          }
+        } catch (e) {
+          skipped.push({ nome, reason: String((e && e.message) || e).slice(0, 60), pass: sourceTag });
+          awaitingKept++;
+        }
+      }
+      return got;
+    }
+
+    enqueued += await passEnqueue(workingNames, 'release_all');
+
+    // 2ª passada: pega quem ficou Pronto por corrida (cooldown/not_working transitório).
+    const retryNames = [];
+    for (const nome of workingNames) {
+      if (robeQueue.inQueue(nome) || robeQueue.isActive(nome)) continue;
+      retryNames.push(nome);
+    }
+    if (retryNames.length) {
+      await sleep(400);
+      // Reafirma cooldown zerado antes do retry.
+      for (const nome of retryNames) {
+        try {
+          await manifestStore.update(nome, (m) => {
+            m = m || {};
+            m.robeCooldownUntil = Date.now();
+            m.robeCooldownRemainingMs = 0;
+            if (m.robePauseReason && m.robePauseReason !== 'limit_posting') delete m.robePauseReason;
+            return m;
+          });
+          try { delete robeMeta[nome].robeCooldownUntilMem; } catch {}
+        } catch {}
+      }
+      enqueued += await passEnqueue(retryNames, 'release_all_retry');
     }
 
     await snapshotStatusAndWrite();
+    const stillPronto = [];
+    for (const nome of workingNames) {
+      if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) stillPronto.push(nome);
+    }
     logger.info('[HANDLER] robes-release-all ok', {
+      shard: shardIdx,
+      pid: process.pid,
       cleared,
       enqueued,
+      working: workingNames.length,
+      stillPronto: stillPronto.length,
+      stillSample: stillPronto.slice(0, 12),
       awaitingKept,
       skipped: skipped.length,
-      sampleSkip: skipped.slice(0, 8)
+      sampleSkip: skipped.slice(0, 12)
     });
     try {
       provisionAudit.append({
         ts: Date.now(),
         event: 'robes_release_all_done',
+        shard: shardIdx,
+        pid: process.pid,
         cleared,
         enqueued,
+        working: workingNames.length,
+        stillPronto: stillPronto.slice(0, 40),
         awaitingKept,
         skippedCount: skipped.length,
         skippedSample: skipped.slice(0, 40)
       });
     } catch {}
-    return { ok: true, cleared, enqueued, awaitingKept, skipped };
+    return {
+      ok: true,
+      cleared,
+      enqueued,
+      awaitingKept,
+      working: workingNames.length,
+      stillPronto,
+      skipped,
+      shard: shardIdx,
+      pid: process.pid
+    };
   },
 
   async ['network-rotation-pause-runtime']({ reason } = {}) {

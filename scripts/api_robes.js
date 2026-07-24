@@ -92,7 +92,7 @@ module.exports = (app, workerClient, fileStore) => {
       }
       let workerResult = null;
       try {
-        workerResult = await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 90000 });
+        workerResult = await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 120000 });
       } catch(e) {
         if (issues && typeof issues.append === "function") {
           issues.append('system', 'robes_release_all_worker_sync_error', `error=${e && e.message || String(e)}`);
@@ -101,8 +101,11 @@ module.exports = (app, workerClient, fileStore) => {
       }
       const enqueued = Number(workerResult && workerResult.enqueued || 0) || 0;
       const awaitingKept = Number(workerResult && workerResult.awaitingKept || 0) || 0;
+      const stillPronto = Array.isArray(workerResult && workerResult.stillPronto)
+        ? workerResult.stillPronto
+        : [];
       if (failed > 0 || (fails && fails.length)) {
-        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued, awaitingKept });
+        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued, awaitingKept, stillPronto: stillPronto.length });
         res.json({
           ok: false,
           error: `Failure in ${failed} perfil(s)`,
@@ -110,11 +113,27 @@ module.exports = (app, workerClient, fileStore) => {
           total,
           enqueued,
           awaitingKept,
+          stillPronto,
           worker: workerResult
         });
       } else {
-        logger.info('Robe release all executado', { total, enqueued, awaitingKept, workerOk: !!(workerResult && workerResult.ok) });
-        res.json({ ok: true, total, enqueued, awaitingKept, worker: workerResult });
+        logger.info('Robe release all executado', {
+          total,
+          enqueued,
+          awaitingKept,
+          stillPronto: stillPronto.length,
+          stillSample: stillPronto.slice(0, 12),
+          workerOk: !!(workerResult && workerResult.ok),
+          nodes: workerResult && workerResult.results
+            ? workerResult.results.map((r, i) => ({
+              node: i + 1,
+              enqueued: Number(r && r.enqueued || 0) || 0,
+              working: Number(r && r.working || 0) || 0,
+              still: Array.isArray(r && r.stillPronto) ? r.stillPronto.length : null
+            }))
+            : null
+        });
+        res.json({ ok: true, total, enqueued, awaitingKept, stillPronto, worker: workerResult });
       }
     } catch (e) {
       logger.error('Erro em /api/robes/release-all', {}, e);
