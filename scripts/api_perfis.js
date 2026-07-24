@@ -668,13 +668,19 @@ module.exports = (app, workerClient, fileStore) => {
     const policy = (allowPolicy && reqPolicy) ? reqPolicy : null;
     const reason = (allowPolicy && reqReason) ? reqReason : 'admin';
 
-    // Default (admin): desativa declarativo (active:false, virtus:off).
+    // Default (admin): desativa declarativo (active:false, virtus:off, humanHold:false).
+    // Espelha Abrir/Abrir todos (que já zeram humanHold): Fechar = morto e limpo.
     // preserveDesired (stock_provision): NÃO altera desired; apenas fecha runtime via worker.
     if (policy !== 'preserveDesired') {
       try {
         await fileStore.withDesiredFileLockUpdate(desired => {
           desired.perfis = desired.perfis || {};
-          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+          desired.perfis[nome] = {
+            ...(desired.perfis[nome] || {}),
+            active: false,
+            virtus: 'off',
+            humanHold: false
+          };
           return desired;
         });
       } catch (e) {
@@ -1383,7 +1389,12 @@ module.exports = (app, workerClient, fileStore) => {
         try {
           await fileStore.withDesiredFileLockUpdate(desired => {
             desired.perfis = desired.perfis || {};
-            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+            desired.perfis[nome] = {
+              ...(desired.perfis[nome] || {}),
+              active: false,
+              virtus: 'off',
+              humanHold: false
+            };
             return desired;
           });
         } catch (e) {
@@ -1940,7 +1951,7 @@ module.exports = (app, workerClient, fileStore) => {
       } catch {}
       opsState.begin('close_all', { total: perfisArr.length, done: 0, ok: 0, fail: 0, current: null });
 
-      // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
+      // 1) PASSO ATÔMICO: seta active:false, virtus:'off', humanHold:false em todos (Fechar = limpo).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
         // Se houver sessão open-all pendurada, encerrar aqui (close_all tem prioridade).
@@ -1963,7 +1974,8 @@ module.exports = (app, workerClient, fileStore) => {
           desired.perfis[nome] = {
             ...(desired.perfis[nome] || {}),
             active: false,
-            virtus: 'off'
+            virtus: 'off',
+            humanHold: false
           };
         }
         return desired;

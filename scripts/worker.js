@@ -9668,6 +9668,24 @@ const handlers = {
   const strictCloseRequired =
     !preserve &&
     /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
+  // Admin/close explícito: espelha API — humanHold não sobrevive ao Fechar (preserveDesired mantém papel).
+  if (!preserve) {
+    try {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {};
+        d.perfis = d.perfis || {};
+        const prev = d.perfis[nome] || {};
+        if (prev.humanHold === true) {
+          d.perfis[nome] = { ...prev, humanHold: false };
+        }
+        return d;
+      });
+    } catch {}
+    try {
+      const cHold = controllers.get(nome);
+      if (cHold) cHold.humanControl = false;
+    } catch {}
+  }
   if (preserve && String(reason || '').trim() === 'nurse_zombie' && shouldBypassNurseZombie(nome, 'deactivate.handler')) {
     return { ok: true, skipped: true, deltaBypass: true, reason: 'delta_nurse_bypass' };
   }
@@ -15533,19 +15551,51 @@ async function nurseTick() {
       } catch {}
 
       if (want.humanHold === true) {
-        // Overlay deve aparecer e se manter (retry periódico com debounce).
-        try {
-          if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+        // humanHold COM Chrome vivo: não atropelar o humano (overlay + skip automação).
+        // humanHold SEM Chrome: cache órfão (regra 2026-01) — limpar hold e não bloquear
+        // keepalive reopen se desired.active ainda pede aberto. Contas saudáveis sem hold: intactas.
+        const humanHoldLive = !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.());
+        if (humanHoldLive) {
+          try {
             robeMeta[nome] = robeMeta[nome] || {};
             const last = Number(robeMeta[nome].overlayNurseLastAt || 0) || 0;
             if (!last || (now - last) > 45_000) {
               robeMeta[nome].overlayNurseLastAt = now;
               await syncHumanOverlay(nome).catch(()=>{});
             }
+          } catch {}
+          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+          continue;
+        }
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            const prev = d.perfis[nome] || {};
+            if (prev.humanHold === true) {
+              d.perfis[nome] = { ...prev, humanHold: false };
+            }
+            return d;
+          });
+        } catch {}
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          const lastOrphan = Number(robeMeta[nome].orphanHoldLogAt || 0) || 0;
+          if (!lastOrphan || (now - lastOrphan) > 60_000) {
+            robeMeta[nome].orphanHoldLogAt = now;
+            provisionAudit.append({
+              ts: now,
+              event: 'nurse_orphan_human_hold_cleared',
+              nome: String(nome || ''),
+              active: want.active === true,
+              willReopen: want.active === true
+            });
           }
         } catch {}
-        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
-        continue;
+        if (want.active !== true) {
+          continue;
+        }
+        // active=true: fall through → nurse_restart / activateOnce
       }
 
       {
