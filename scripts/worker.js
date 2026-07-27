@@ -385,6 +385,12 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     return { ok: false, error: 'no_main_page', renewedCount: 0 };
   }
 
+  // Teto duro: evita conta presa eternamente no último passo (auto nunca segue).
+  const HARD_MS = mode === 'auto' ? (12 * 60 * 1000) : (15 * 60 * 1000);
+  const renewGen = (Number(ctrl.renewGeneration || 0) || 0) + 1;
+  ctrl.renewGeneration = renewGen;
+  const deadlineAt = Date.now() + HARD_MS;
+
   let armedHold = false;
   try {
     // Ordem known-good (igual invoke_human): armar hold ANTES de stopVirtus
@@ -406,11 +412,44 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       page,
       nome: n,
       mode,
+      deadlineAt,
+      isAborted: () => {
+        try {
+          const c = controllers.get(n);
+          return !c || Number(c.renewGeneration || 0) !== renewGen || c.renewInFlight !== true;
+        } catch {
+          return true;
+        }
+      },
       onProgress: null,
       onAudit: (evt) => {
         try { provisionAudit.append({ ts: Date.now(), ...evt }); } catch {}
+        try {
+          const stage = String((evt && evt.event) || '');
+          if (/^renew_listings_|^renew_confirm_/.test(stage)) {
+            logger.info('[RENEW][audit]', {
+              nome: n,
+              event: stage,
+              reason: evt && evt.reason ? String(evt.reason).slice(0, 80) : null,
+              renewedCount: evt && evt.renewedCount != null ? evt.renewedCount : null,
+              error: evt && evt.error ? String(evt.error).slice(0, 120) : null
+            });
+          }
+        } catch {}
       }
     });
+    if (r && r.error === 'renew_hard_timeout') {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'renew_listings_hard_timeout',
+          nome: n,
+          mode: String(mode || ''),
+          hardMs: HARD_MS
+        });
+      } catch {}
+      try { logger.warn('[RENEW] hard_timeout', { nome: n, mode, hardMs: HARD_MS }); } catch {}
+    }
 
     const count = Math.max(0, Number(r && r.renewedCount) || 0);
     // Só sobrescreve a pill quando houve renovação real (não zera a última contagem se FB não tinha renováveis).
@@ -2845,6 +2884,12 @@ async function _installOverlayOnPage(nome, page) {
               try { $('hint').textContent = ok ? 'Senha copiada.' : 'Falha ao copiar senha.'; } catch {}
             });
             $('renewListings')?.addEventListener('click', async () => {
+              // Guard síncrono: impede double-click enfileirar 2º renew (fantasma no botão Renovar).
+              if (window.__ctRenewBusy === true) {
+                try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'renew_listings_click_ignored_busy' }); } catch {}
+                return;
+              }
+              window.__ctRenewBusy = true;
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'renew_listings_click' }); } catch {}
               try { stopOverlayAutoScroll('renew_listings'); } catch {}
               try { $('hint').textContent = 'Renovando classificados... (pode levar alguns minutos)'; } catch {}
@@ -2857,10 +2902,17 @@ async function _installOverlayOnPage(nome, page) {
                     try {
                       $('hint').textContent = (r.reason === 'none_renewable')
                         ? 'Nenhum classificado renovável neste momento.'
-                        : (`Renovação concluída: ${n} classificado(s).`);
+                        : (r.error === 'renew_already_in_flight')
+                          ? 'Renovação já em andamento.'
+                          : (`Renovação concluída: ${n} classificado(s).`);
                     } catch {}
                   } else {
-                    try { $('hint').textContent = 'Falha ao renovar: ' + String((r && r.error) ? r.error : 'unknown'); } catch {}
+                    const err = String((r && r.error) ? r.error : 'unknown');
+                    try {
+                      $('hint').textContent = (err === 'renew_already_in_flight')
+                        ? 'Renovação já em andamento — aguarde terminar.'
+                        : ('Falha ao renovar: ' + err);
+                    } catch {}
                   }
                 } else {
                   try { $('hint').textContent = 'Falha: binding renovar indisponível. Aguarde resincronização.'; } catch {}
@@ -2868,6 +2920,7 @@ async function _installOverlayOnPage(nome, page) {
               } catch (e) {
                 try { $('hint').textContent = 'Falha ao renovar classificados.'; } catch {}
               }
+              try { window.__ctRenewBusy = false; } catch {}
               try { $('renewListings').disabled = false; } catch {}
             });
             $('hide')?.addEventListener('click', () => {
@@ -12213,37 +12266,73 @@ const handlers = {
   async ['renew-listings']({ nome, mode, closeAfter }) {
     const n = String(nome || '').trim();
     if (!n) return { ok: false, error: 'nome_ausente', renewedCount: 0 };
-    return lockProfileAction(n, async () => {
-      const m = String(mode || 'manual').trim().toLowerCase() === 'auto' ? 'auto' : 'manual';
+    // Rejeita ANTES do lock: lockProfileAction serializa e rodaria um 2º renew
+    // depois do 1º — exatamente o fantasma de clicar Renovar de novo.
+    const ctrlEarly = controllers.get(n);
+    if (ctrlEarly && (ctrlEarly.renewInFlight === true || ctrlEarly.renewGate === true)) {
       try {
         provisionAudit.append({
           ts: Date.now(),
-          event: 'renew_listings_handler_begin',
+          event: 'renew_listings_rejected_busy',
           nome: n,
-          mode: m,
-          closeAfter: !!closeAfter
+          renewInFlight: !!(ctrlEarly && ctrlEarly.renewInFlight),
+          renewGate: !!(ctrlEarly && ctrlEarly.renewGate)
         });
       } catch {}
-      const r = await runRenewListingsForProfile(n, {
-        mode: m,
-        closeAfter: m === 'auto' && closeAfter === true
+      return { ok: false, error: 'renew_already_in_flight', renewedCount: 0 };
+    }
+    if (ctrlEarly) ctrlEarly.renewGate = true;
+    try {
+      return await lockProfileAction(n, async () => {
+        const m = String(mode || 'manual').trim().toLowerCase() === 'auto' ? 'auto' : 'manual';
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_listings_handler_begin',
+            nome: n,
+            mode: m,
+            closeAfter: !!closeAfter
+          });
+        } catch {}
+        try {
+          logger.info('[RENEW][handler] begin', { nome: n, mode: m, closeAfter: !!closeAfter });
+        } catch {}
+        const r = await runRenewListingsForProfile(n, {
+          mode: m,
+          closeAfter: m === 'auto' && closeAfter === true
+        });
+        try {
+          logger.info('[RENEW][handler] done', {
+            nome: n,
+            mode: m,
+            ok: !!(r && r.ok),
+            renewedCount: Number(r && r.renewedCount || 0) || 0,
+            reason: r && r.reason ? String(r.reason) : null,
+            error: r && r.error ? String(r.error).slice(0, 120) : null
+          });
+        } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_listings_handler_done',
+            nome: n,
+            mode: m,
+            ok: !!(r && r.ok),
+            skipped: !!(r && r.skipped),
+            renewedCount: Number(r && r.renewedCount || 0) || 0,
+            reason: r && r.reason ? String(r.reason) : null,
+            error: r && r.error ? String(r.error).slice(0, 180) : null
+          });
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        return r;
       });
+    } finally {
       try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'renew_listings_handler_done',
-          nome: n,
-          mode: m,
-          ok: !!(r && r.ok),
-          skipped: !!(r && r.skipped),
-          renewedCount: Number(r && r.renewedCount || 0) || 0,
-          reason: r && r.reason ? String(r.reason) : null,
-          error: r && r.error ? String(r.error).slice(0, 180) : null
-        });
+        const c = controllers.get(n);
+        if (c) c.renewGate = false;
       } catch {}
-      try { await snapshotStatusAndWrite(); } catch {}
-      return r;
-    });
+    }
   },
 
   /**

@@ -623,20 +623,142 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
   return { ok: true, count: 0, reason: 'none_renewable_timeout', sawHeader };
 }
 
-async function clickRenewConfirm(page, { onProgress } = {}) {
+async function isRenewDialogOpen(page) {
+  const hit = await findTextPresent(page, [
+    'Renovar classificados',
+    'Renew listings',
+    'Renew your listings',
+    'serao renovados',
+    'will be renewed'
+  ]);
+  return !!(hit && hit.ok);
+}
+
+/**
+ * Após 1 clique em Renovar: espera a tela/dialog sumir OU já estar de volta no Selling.
+ * Sai cedo (não fica 90s parado). Nunca reclica.
+ */
+async function waitRenewDialogClosed(page, { timeoutMs = 45000 } = {}) {
+  const t0 = now();
+  while (now() - t0 < timeoutMs) {
+    // Já voltou ao Selling? Fecha rápido.
+    let onSell = false;
+    try {
+      const url = String(page.url() || '').toLowerCase();
+      if (url.includes('/marketplace/you/selling') || url.includes('/marketplace/you/dashboard')) onSell = true;
+    } catch {}
+    if (!onSell) {
+      onSell = !!(await safeEvaluate(
+        page,
+        () => /marketplace\/(you\/selling|you\/dashboard)/.test(String(location.pathname || ''))
+      ));
+    }
+    const open = await isRenewDialogOpen(page);
+    if (onSell && !open) return { ok: true, via: 'selling' };
+    if (!open) {
+      // Confirma que o botão exact "Renovar" também sumiu.
+      const stillBtn = await safeEvaluate(page, () => {
+        const norm = (s) => {
+          try {
+            return String(s || '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+          } catch {
+            return String(s || '').toLowerCase().trim();
+          }
+        };
+        const nodes = document.querySelectorAll('[role="button"],button');
+        for (const el of nodes) {
+          if (!el) continue;
+          let aria = '';
+          let txt = '';
+          try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
+          try { txt = norm(el.innerText || el.textContent || '').slice(0, 40); } catch {}
+          if (aria === 'renovar' || aria === 'renew' || txt === 'renovar' || txt === 'renew') return true;
+        }
+        return false;
+      });
+      if (!stillBtn) return { ok: true, via: 'dialog_gone' };
+    }
+    await sleep(500);
+  }
+  return { ok: false, reason: 'dialog_close_timeout' };
+}
+
+/**
+ * Clique one-shot em Renovar.
+ * - NUNCA aborta o clique por hard-timeout do scroll (fase confirm tem budget próprio).
+ * - No máximo 1 clique real; depois só espera fechar (rápido) — nunca reclica sem parar.
+ * - NÃO conclui “ok” se o dialog piscou sem ter clicado (buraco de burrice).
+ */
+async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null } = {}) {
   await progress(page, onProgress, 'click_renew', 'Clicando em Renovar...');
-  for (let i = 0; i < 25; i++) {
+  let clicked = false;
+  let clickMeta = null;
+  const audit = (event, data = {}) => {
+    try {
+      if (typeof onAudit === 'function') onAudit(event, data);
+    } catch {}
+  };
+  // Só generation/stale — NÃO deadline global do scroll.
+  const stale = () => {
+    try {
+      return typeof isStale === 'function' && !!isStale();
+    } catch {
+      return false;
+    }
+  };
+  // Budget local: achar botão + 1 clique + fechar dialog (não infinito, não 12min).
+  const findDeadline = now() + 180000; // 3 min pra achar/clicar
+  const tFind0 = now();
+
+  while (now() < findDeadline) {
+    if (stale()) {
+      audit('renew_confirm_fail', { reason: 'stale', clicked });
+      return { ok: false, reason: 'stale', clicked };
+    }
+
+    // Já clicamos: nunca reclicar — só aguardar fechamento (cap curto).
+    if (clicked) {
+      const closed = await waitRenewDialogClosed(page, { timeoutMs: 45000 });
+      audit('renew_confirm_done', {
+        reason: (closed && closed.ok) ? (closed.via || 'clicked_and_closed') : 'clicked_close_timeout',
+        clicked: true
+      });
+      return { ok: true, reason: (closed && closed.ok) ? 'clicked_and_closed' : 'clicked_close_timeout', clicked: true };
+    }
+
     const hit = await clickByLabels(page, ['Renovar', 'Renew'], {
       roleHints: ['button'],
-      timeoutMs: 2500,
+      timeoutMs: 2200,
       requireEnabled: true,
       exactOnly: true,
       excludeSubstrings: ['marketplace', 'classificado', 'listing', 'listings']
     });
     if (hit && hit.ok) {
-      await sleep(SETTLE_MS);
-      return { ok: true };
+      clicked = true;
+      clickMeta = { via: hit.via || null, aria: hit.aria || null, txt: hit.txt || null };
+      audit('renew_confirm_clicked', { ...clickMeta, findMs: now() - tFind0 });
+      await progress(page, onProgress, 'click_renew_wait', 'Renovar clicado — aguardando Facebook fechar a tela...');
+      // Um único wait curto; sem loop de reclique.
+      const closed = await waitRenewDialogClosed(page, { timeoutMs: 45000 });
+      if (stale()) {
+        audit('renew_confirm_done', { reason: 'clicked_then_stale', clicked: true });
+        return { ok: true, reason: 'clicked_then_stale', clicked: true };
+      }
+      if (closed && closed.ok) {
+        audit('renew_confirm_done', { reason: 'clicked_and_closed', via: closed.via || null, clicked: true });
+        return { ok: true, reason: 'clicked_and_closed', clicked: true };
+      }
+      audit('renew_confirm_done', { reason: 'clicked_close_timeout', clicked: true });
+      return { ok: true, reason: 'clicked_close_timeout', clicked: true };
     }
+
+    // Header pode piscar — NÃO trate dialog "sumiu" como sucesso sem clique.
+    // Continua procurando o botão até achar ou estourar findDeadline.
     try {
       await page.evaluate(() => {
         try {
@@ -645,8 +767,14 @@ async function clickRenewConfirm(page, { onProgress } = {}) {
         } catch {}
       });
     } catch {}
-    await sleep(600);
+    await sleep(500);
   }
+
+  if (clicked) {
+    audit('renew_confirm_done', { reason: 'clicked_loop_end', clicked: true });
+    return { ok: true, reason: 'clicked_loop_end', clicked: true };
+  }
+  audit('renew_confirm_fail', { reason: 'renew_button_not_found', findMs: now() - tFind0 });
   return { ok: false, reason: 'renew_button_not_found' };
 }
 
@@ -705,12 +833,25 @@ async function runMarketplaceRenewListings({
   nome = '',
   mode = 'manual',
   onProgress = null,
-  onAudit = null
+  onAudit = null,
+  deadlineAt = 0,
+  isAborted = null
 } = {}) {
   const audit = (event, data = {}) => {
     try {
       if (typeof onAudit === 'function') onAudit({ event, nome: String(nome || ''), mode, ...data });
     } catch {}
+  };
+  const aborted = () => {
+    try {
+      if (typeof isAborted === 'function' && isAborted()) return true;
+    } catch {}
+    const dl = Number(deadlineAt || 0) || 0;
+    return !!(dl > 0 && now() > dl);
+  };
+  const abortResult = () => {
+    audit('renew_listings_fail', { stage: 'abort', reason: 'renew_hard_timeout_or_aborted' });
+    return { ok: false, error: 'renew_hard_timeout', renewedCount: 0, reason: 'hard_timeout' };
   };
 
   if (!page) {
@@ -721,7 +862,9 @@ async function runMarketplaceRenewListings({
   audit('renew_listings_begin', { startedAt });
 
   try {
+    if (aborted()) return abortResult();
     await ensureSelling(page, { onProgress });
+    if (aborted()) return abortResult();
 
     const alreadyManage = await labelPresent(page, ['Selecionar tudo', 'Select all'], { requireEnabled: false });
     if (!alreadyManage) {
@@ -750,9 +893,11 @@ async function runMarketplaceRenewListings({
     } else {
       await sleep(1500);
     }
+    if (aborted()) return abortResult();
 
     const scrolled = await scrollToAgeThreshold(page, { onProgress });
     audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason });
+    if (aborted()) return abortResult();
 
     await progress(page, onProgress, 'scroll_top', 'Subindo ao topo...');
     await scrollToTop(page);
@@ -773,6 +918,7 @@ async function runMarketplaceRenewListings({
     const actionsReady = await (async () => {
       const tWait = now();
       while (now() - tWait < ACTIONS_MENU_WAIT_MS) {
+        if (aborted()) return false;
         const snap = await safeEvaluate(page, () => {
           const norm = (s) => {
             try {
@@ -805,6 +951,7 @@ async function runMarketplaceRenewListings({
       }
       return false;
     })();
+    if (aborted()) return abortResult();
     if (!actionsReady) {
       // Ainda tenta clicar Ações — FB às vezes não marca aria corretamente.
       await sleep(Math.max(SETTLE_MS, 5000));
@@ -827,6 +974,7 @@ async function runMarketplaceRenewListings({
       { timeoutMs: ACTIONS_MENU_WAIT_MS, requireEnabled: false, pollMs: 800 }
     );
     if (!menuReady) await sleep(2500);
+    if (aborted()) return abortResult();
 
     await progress(page, onProgress, 'renew_mp', 'Clicando em Renovar no Marketplace...');
     const renewMp = await clickByLabels(
@@ -843,6 +991,7 @@ async function runMarketplaceRenewListings({
     const renewHeader = await (async () => {
       const tH = now();
       while (now() - tH < 45000) {
+        if (aborted()) return false;
         const ok = await findTextPresent(page, [
           'Renovar classificados',
           'Renew listings',
@@ -856,6 +1005,7 @@ async function runMarketplaceRenewListings({
       return false;
     })();
     if (!renewHeader) await sleep(SETTLE_MS);
+    if (aborted()) return abortResult();
 
     const stable = await waitRenewScreenStable(page, { onProgress, timeoutMs: RENEW_SCREEN_WAIT_MS });
     const count = Number(stable && stable.count) || 0;
@@ -868,16 +1018,43 @@ async function runMarketplaceRenewListings({
       } catch {}
       return { ok: true, renewedCount: 0, reason: 'none_renewable' };
     }
+    // Aqui JÁ temos count>0 na tela Renovar: NÃO abortar por deadline do scroll.
+    // Só generation/stale (controller morto / renew cancelado).
+    try {
+      if (typeof isAborted === 'function' && isAborted()) return abortResult();
+    } catch {}
 
-    const clicked = await clickRenewConfirm(page, { onProgress });
+    // Fase confirm: budget próprio (achar+clicar ≤3min, fechar ≤45s). Zero reclique.
+    const clicked = await clickRenewConfirm(page, {
+      onProgress,
+      onAudit: audit,
+      isStale: () => {
+        try {
+          return typeof isAborted === 'function' && !!isAborted();
+        } catch {
+          return false;
+        }
+      }
+    });
     if (!clicked || !clicked.ok) {
+      if (clicked && (clicked.reason === 'stale' || clicked.reason === 'aborted')) return abortResult();
       audit('renew_listings_fail', { stage: 'confirm', reason: clicked && clicked.reason, count });
       return { ok: false, error: 'renew_confirm_failed', renewedCount: 0, pendingCount: count };
     }
+    audit('renew_listings_confirm', {
+      reason: clicked && clicked.reason,
+      clicked: !!(clicked && clicked.clicked),
+      count
+    });
 
-    await waitBackToSelling(page, { onProgress, timeoutMs: 90000 });
+    // Pós-clique: volta ao Selling rápido (já pode estar lá). Não aborta sucesso por deadline.
+    await waitBackToSelling(page, { onProgress, timeoutMs: 45000 });
     await progress(page, onProgress, 'done', `Renovados: ${count} classificado(s).`);
-    audit('renew_listings_ok', { renewedCount: count, durationMs: now() - startedAt });
+    audit('renew_listings_ok', {
+      renewedCount: count,
+      confirmReason: clicked && clicked.reason,
+      durationMs: now() - startedAt
+    });
     return { ok: true, renewedCount: count, reason: 'renewed' };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
