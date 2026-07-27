@@ -459,6 +459,22 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
 
     let closedOk = false;
     if (closeAfter && mode === 'auto') {
+      // Grace final: mesmo após hold do motor, dá tempo da rede FB com host carregado.
+      try {
+        const graceMs = 12000 + Math.floor(Math.random() * 8001);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_then_close_grace_before_deactivate',
+            nome: n,
+            graceMs,
+            renewOk: !!(r && r.ok),
+            renewedCount: count
+          });
+        } catch {}
+        try { logger.info('[RENEW] grace_before_close', { nome: n, graceMs, renewOk: !!(r && r.ok), count }); } catch {}
+        await new Promise((res) => setTimeout(res, graceMs));
+      } catch {}
       try {
         const dr = await handlers.deactivate({ nome: n, reason: 'renew_then_close' });
         closedOk = !!(dr && dr.ok);

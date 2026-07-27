@@ -17,15 +17,24 @@ const ACTIONS_MENU_WAIT_MS = 120000;
 const SELECT_ALL_WAIT_MS = 120000;
 const NAV_TIMEOUT_MS = 45000;
 const SETTLE_MS = 8000;
-// Após VOLTAR ao Selling (tela mudou): hold humano antes de liberar close. Nunca contar durante o "travado".
-const POST_RENEW_HOLD_MS_MIN = 15000;
-const POST_RENEW_HOLD_MS_MAX = 30000;
-// Dialog/tela sumindo em <2.5s após o clique = quase certamente Cancelar/dismiss, não renew real.
-const POST_RENEW_TOO_FAST_MS = 2500;
-// Espera pós-clique Renovar: FB trava a tela enquanto processa o batch (pode ser 20–120s+).
-const POST_RENEW_PROCESS_BASE_MS = 180000;
-const POST_RENEW_PROCESS_PER_ITEM_MS = 300;
-const POST_RENEW_PROCESS_CAP_MS = 12 * 60 * 1000;
+// Após confirmar que saiu da tela Renovar: hold no Selling antes de liberar close.
+const POST_RENEW_HOLD_MS_MIN = 25000;
+const POST_RENEW_HOLD_MS_MAX = 45000;
+// Piso ABSOLUTO após clicar Renovar — nunca declarar "pronto" antes disso (UI pode mentir).
+const POST_RENEW_MIN_PROCESS_BASE_MS = 30000;
+const POST_RENEW_MIN_PROCESS_PER_ITEM_MS = 120;
+const POST_RENEW_MIN_PROCESS_CAP_MS = 4 * 60 * 1000;
+// Tela Renovar precisa ficar AUSENTE este tempo seguido (anti flicker / loading).
+const POST_RENEW_DISMISS_STABLE_MS = 6000;
+// Dialog/tela sumindo em <N após o clique = Cancelar/dismiss suspeito.
+const POST_RENEW_TOO_FAST_MS = 8000;
+// Teto de espera pela tela sumir (além do piso mínimo).
+const POST_RENEW_PROCESS_BASE_MS = 240000;
+const POST_RENEW_PROCESS_PER_ITEM_MS = 400;
+const POST_RENEW_PROCESS_CAP_MS = 15 * 60 * 1000;
+// Grace extra no worker antes do deactivate (renew-then-close) — rede lenta / muitos browsers.
+const POST_RENEW_CLOSE_GRACE_MS_MIN = 12000;
+const POST_RENEW_CLOSE_GRACE_MS_MAX = 20000;
 // Tela Renovar: FB contabiliza devagar — nunca aceitar "ready" antes deste piso.
 const RENEW_READY_MIN_ELAPSED_MS = 12000;
 // Count+botão enabled precisa ficar estável este tempo (não sobe mais).
@@ -56,6 +65,15 @@ function postRenewProcessTimeoutMs(expectedCount) {
   return Math.min(
     POST_RENEW_PROCESS_CAP_MS,
     POST_RENEW_PROCESS_BASE_MS + n * POST_RENEW_PROCESS_PER_ITEM_MS
+  );
+}
+
+/** Tempo mínimo de parede após o clique — independente da UI. */
+function postRenewMinProcessMs(expectedCount) {
+  const n = Math.max(0, Number(expectedCount || 0) || 0);
+  return Math.min(
+    POST_RENEW_MIN_PROCESS_CAP_MS,
+    POST_RENEW_MIN_PROCESS_BASE_MS + n * POST_RENEW_MIN_PROCESS_PER_ITEM_MS
   );
 }
 
@@ -660,85 +678,157 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
   return { ok: true, count: 0, reason: 'none_renewable_timeout', sawHeader };
 }
 
+/**
+ * Tela/modal "Renovar classificados" ainda ativa?
+ * NÃO usar chrome do Selling (Gerenciar/Selecionar) — eles ficam no DOM ATRÁS do modal.
+ */
+async function isRenewScreenActive(page) {
+  const snap = await safeEvaluate(page, () => {
+    const norm = (s) => {
+      try {
+        return String(s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+      } catch {
+        return String(s || '').toLowerCase().trim();
+      }
+    };
+    const markers = (t) => {
+      const n = norm(t);
+      if (!n) return false;
+      return (
+        n.includes('renovar classificados') ||
+        n.includes('renew listings') ||
+        n.includes('renew your listings') ||
+        n.includes('serao renovados') ||
+        n.includes('will be renewed') ||
+        n.includes('classificados serao renovados')
+      );
+    };
+    const roots = Array.from(
+      document.querySelectorAll('[role="dialog"],[aria-modal="true"],div[role="alertdialog"]')
+    );
+    for (const root of roots) {
+      if (!root) continue;
+      let txt = '';
+      try {
+        txt = String(root.innerText || root.textContent || '').slice(0, 4000);
+      } catch {
+        txt = '';
+      }
+      if (markers(txt)) return { active: true, via: 'dialog_markers' };
+
+      // Rodapé Cancelar + Renovar (mesmo sem header visível / loading).
+      let hasCancel = false;
+      let hasRenew = false;
+      try {
+        const nodes = root.querySelectorAll('[role="button"],button');
+        for (const el of nodes) {
+          if (!el) continue;
+          let aria = '';
+          let t = '';
+          try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
+          try { t = norm(el.innerText || '').slice(0, 40); } catch {}
+          if (aria === 'cancelar' || aria === 'cancel' || t === 'cancelar' || t === 'cancel') hasCancel = true;
+          if (aria === 'renovar' || aria === 'renew' || t === 'renovar' || t === 'renew') hasRenew = true;
+        }
+      } catch {}
+      if (hasCancel && hasRenew) return { active: true, via: 'dialog_footer_pair' };
+    }
+
+    // Full-page renew (sem dialog role claro).
+    let body = '';
+    try {
+      body = String(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 12000);
+    } catch {
+      body = '';
+    }
+    if (markers(body)) {
+      // Se o texto existe mas NÃO há dialog, ainda é a tela Renovar (FB full page).
+      // Selling puro também pode ter "Renovar" em menus — exige marcador de batch.
+      const n = norm(body);
+      if (
+        n.includes('renovar classificados') ||
+        n.includes('renew listings') ||
+        n.includes('serao renovados') ||
+        n.includes('will be renewed')
+      ) {
+        return { active: true, via: 'body_markers' };
+      }
+    }
+    return { active: false };
+  });
+  return !!(snap && snap.active);
+}
+
 async function isRenewDialogOpen(page) {
-  const hit = await findTextPresent(page, [
-    'Renovar classificados',
-    'Renew listings',
-    'Renew your listings',
-    'serao renovados',
-    'will be renewed'
-  ]);
-  return !!(hit && hit.ok);
+  return await isRenewScreenActive(page);
 }
 
 /**
- * Após 1 clique em Renovar: espera a tela "Renovar classificados" sair de verdade.
- * URL já é Selling por baixo do modal — NÃO usar URL sozinha.
- * Sucesso = header da tela Renovar sumiu + chrome do Selling visível (Gerenciar / Selecionar tudo).
+ * Após clicar Renovar: NÃO aceitar "Selling chrome" (fica atrás do modal).
+ * Contrato:
+ *  1) piso mínimo de parede (minProcessMs) — UI pode fechar cedo; rede ainda processa
+ *  2) tela Renovar ausente de forma ESTÁVEL (POST_RENEW_DISMISS_STABLE_MS)
+ *  3) só então libera o hold no Selling
  */
-async function waitRenewDialogClosed(page, { timeoutMs = 180000, onProgress = null } = {}) {
+async function waitRenewDialogClosed(page, {
+  timeoutMs = 240000,
+  minProcessMs = POST_RENEW_MIN_PROCESS_BASE_MS,
+  onProgress = null,
+  isStale = null
+} = {}) {
   const t0 = now();
   let lastHintAt = 0;
-  while (now() - t0 < timeoutMs) {
-    const open = await isRenewDialogOpen(page);
-    if (!open) {
-      // Confirma: botão exact habilitado "Renovar" do rodapé sumiu (não ghost).
-      const stillRenewFooter = await safeEvaluate(page, () => {
-        const norm = (s) => {
-          try {
-            return String(s || '')
-              .normalize('NFD')
-              .replace(/[\u0300-\u036f]/g, '')
-              .toLowerCase()
-              .replace(/\s+/g, ' ')
-              .trim();
-          } catch {
-            return String(s || '').toLowerCase().trim();
-          }
-        };
-        const nodes = document.querySelectorAll('[role="button"],button');
-        for (const el of nodes) {
-          if (!el) continue;
-          try {
-            if (String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') continue;
-            if (String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') continue;
-            if (String(el.getAttribute('tabindex') || '') === '-1') continue;
-          } catch {}
-          let aria = '';
-          let txt = '';
-          try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
-          try { txt = norm(el.innerText || '').slice(0, 40); } catch {}
-          if (aria === 'renovar' || aria === 'renew' || txt === 'renovar' || txt === 'renew') return true;
-        }
-        return false;
-      });
-      if (!stillRenewFooter) {
-        // Chrome Selling de volta (por baixo do modal ou após fechar).
-        const sellingChrome = await labelPresent(
-          page,
-          ['Gerenciar classificados', 'Manage listings', 'Selecionar tudo', 'Select all'],
-          { requireEnabled: false }
-        );
-        if (sellingChrome) return { ok: true, via: 'selling_chrome' };
-        // Header sumiu e botão Renovar sumiu — aceita mesmo sem chrome ainda (FB lento).
-        return { ok: true, via: 'dialog_gone' };
-      }
-    }
-    const elapsed = now() - t0;
-    if (onProgress && elapsed - lastHintAt >= 5000) {
-      lastHintAt = elapsed;
+  let goneSince = 0;
+  const minMs = Math.max(POST_RENEW_TOO_FAST_MS, Number(minProcessMs) || POST_RENEW_MIN_PROCESS_BASE_MS);
+  const hardCap = Math.max(timeoutMs, minMs + POST_RENEW_DISMISS_STABLE_MS + 5000);
+
+  while (now() - t0 < hardCap) {
+    if (typeof isStale === 'function') {
       try {
-        await progress(
-          page,
-          onProgress,
-          'click_renew_wait',
-          `Facebook processando renovação... (${Math.round(elapsed / 1000)}s)`
-        );
+        if (isStale()) return { ok: false, reason: 'stale' };
       } catch {}
     }
-    await sleep(700);
+
+    const elapsed = now() - t0;
+    const active = await isRenewScreenActive(page);
+
+    if (active) {
+      goneSince = 0;
+    } else {
+      if (!goneSince) goneSince = now();
+      const goneFor = now() - goneSince;
+      // Só aceita dismiss depois do piso mínimo E estabilidade sem a tela Renovar.
+      if (elapsed >= minMs && goneFor >= POST_RENEW_DISMISS_STABLE_MS) {
+        return {
+          ok: true,
+          via: 'renew_screen_gone_stable',
+          elapsedMs: elapsed,
+          goneForMs: goneFor,
+          minProcessMs: minMs
+        };
+      }
+    }
+
+    if (onProgress && elapsed - lastHintAt >= 4000) {
+      lastHintAt = elapsed;
+      const remainMin = Math.max(0, minMs - elapsed);
+      const msg = active
+        ? `Facebook processando renovação... (${Math.round(elapsed / 1000)}s)`
+        : remainMin > 0
+          ? `Tela saiu — piso mínimo ainda ${Math.ceil(remainMin / 1000)}s (rede)...`
+          : `Confirmando saída estável da tela Renovar... (${Math.round((now() - (goneSince || now())) / 1000)}s)`;
+      try {
+        await progress(page, onProgress, 'click_renew_wait', msg);
+      } catch {}
+    }
+    await sleep(800);
   }
-  return { ok: false, reason: 'dialog_close_timeout' };
+  return { ok: false, reason: 'dialog_close_timeout', elapsedMs: now() - t0 };
 }
 
 /**
@@ -1066,9 +1156,9 @@ async function clickRenewConfirmInDialog(page) {
 /**
  * Clique one-shot em Renovar (dialog).
  * - Nunca Cancelar / nunca ghost (tabindex=-1 / aria-disabled).
- * - Espera a tela Renovar SUMIR (FB pode travar 20–120s+).
- * - Se sumir rápido demais → falha (falso positivo Cancelar).
- * - Hold 15–30s SÓ DEPOIS de voltar ao Selling.
+ * - Piso mínimo de parede após o clique (UI pode fechar cedo; rede ainda processa).
+ * - Tela Renovar precisa sumir de forma estável.
+ * - Hold 25–45s SÓ DEPOIS disso (no Selling).
  */
 async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, expectedCount = 0 } = {}) {
   await progress(page, onProgress, 'click_renew', 'Clicando em Renovar (rodapé real, não Cancelar)...');
@@ -1089,6 +1179,7 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
   const tFind0 = now();
   const expectN = Math.max(0, Number(expectedCount || 0) || 0);
   const processTimeoutMs = postRenewProcessTimeoutMs(expectN);
+  const minProcessMs = postRenewMinProcessMs(expectN);
 
   while (now() < findDeadline) {
     if (stale()) {
@@ -1114,22 +1205,30 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         rejectedGhost: hit.rejectedGhost != null ? hit.rejectedGhost : null,
         expectedCount: expectN,
         processTimeoutMs,
+        minProcessMs,
         findMs: tClick - tFind0
       });
       await progress(
         page,
         onProgress,
         'click_renew_wait',
-        'Renovar clicado — aguardando Facebook processar (pode travar a tela)...'
+        `Renovar clicado — piso mínimo ${Math.ceil(minProcessMs / 1000)}s + espera a tela sair...`
       );
 
       const closed = await waitRenewDialogClosed(page, {
         timeoutMs: processTimeoutMs,
-        onProgress
+        minProcessMs,
+        onProgress,
+        isStale: stale
       });
       const elapsed = now() - tClick;
 
-      // Batch grande fechando em <2.5s = Cancelar/dismiss (falso positivo clássico).
+      if (closed && closed.reason === 'stale') {
+        audit('renew_confirm_fail', { reason: 'stale', clicked: true, elapsedMs: elapsed });
+        return { ok: false, reason: 'stale', clicked: true, elapsedMs: elapsed };
+      }
+
+      // Fechou a UI rápido demais (antes do piso) = Cancelar/dismiss.
       if (closed && closed.ok && elapsed < POST_RENEW_TOO_FAST_MS && expectN >= 5) {
         audit('renew_confirm_fail', {
           reason: 'dialog_closed_too_fast_suspect_cancel',
@@ -1150,7 +1249,8 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
           reason: 'renew_process_timeout',
           elapsedMs: elapsed,
           expectedCount: expectN,
-          processTimeoutMs
+          processTimeoutMs,
+          minProcessMs
         });
         return {
           ok: false,
@@ -1165,13 +1265,13 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         return { ok: true, reason: 'clicked_then_stale', clicked: true };
       }
 
-      // Hold SÓ depois da tela mudar / voltar ao Selling — nunca durante o "travado".
+      // Hold SÓ depois: piso mínimo + tela Renovar sumida estável.
       const holdMs = randInt(POST_RENEW_HOLD_MS_MIN, POST_RENEW_HOLD_MS_MAX);
       await progress(
         page,
         onProgress,
         'click_renew_hold',
-        `De volta ao Selling — segurando ${Math.ceil(holdMs / 1000)}s (garantir envio)...`
+        `Selling estável — segurando ${Math.ceil(holdMs / 1000)}s antes de liberar close...`
       );
       await sleep(holdMs);
 
@@ -1181,9 +1281,11 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         clicked: true,
         elapsedMs: now() - tClick,
         processMs: elapsed,
-        heldMs: holdMs
+        minProcessMs,
+        heldMs: holdMs,
+        goneForMs: closed.goneForMs != null ? closed.goneForMs : null
       });
-      return { ok: true, reason: 'clicked_and_closed', clicked: true, heldMs: holdMs };
+      return { ok: true, reason: 'clicked_and_closed', clicked: true, heldMs: holdMs, processMs: elapsed };
     }
 
     // Ainda não achou Renovar real — scroll leve e tenta de novo.
@@ -1205,7 +1307,6 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
   }
 
   if (clicked) {
-    // Não deveria chegar aqui: sucesso/falha já retornam no ramo do clique.
     audit('renew_confirm_fail', { reason: 'clicked_loop_end_unexpected', clicked: true });
     return { ok: false, reason: 'clicked_loop_end_unexpected', clicked: true };
   }
