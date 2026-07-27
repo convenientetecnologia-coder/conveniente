@@ -385,8 +385,8 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     return { ok: false, error: 'no_main_page', renewedCount: 0 };
   }
 
-  // Teto duro: evita conta presa eternamente no último passo (auto nunca segue).
-  const HARD_MS = mode === 'auto' ? (12 * 60 * 1000) : (15 * 60 * 1000);
+  // Teto duro: scroll + contabilizar + processar batch (FB pode travar 1–3min no Renovar).
+  const HARD_MS = mode === 'auto' ? (20 * 60 * 1000) : (25 * 60 * 1000);
   const renewGen = (Number(ctrl.renewGeneration || 0) || 0) + 1;
   ctrl.renewGeneration = renewGen;
   const deadlineAt = Date.now() + HARD_MS;

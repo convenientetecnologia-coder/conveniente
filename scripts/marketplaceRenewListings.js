@@ -17,10 +17,15 @@ const ACTIONS_MENU_WAIT_MS = 120000;
 const SELECT_ALL_WAIT_MS = 120000;
 const NAV_TIMEOUT_MS = 45000;
 const SETTLE_MS = 8000;
-// Após clicar Renovar de verdade: FB precisa enviar o batch. Nunca liberar/fechar antes disso.
-const POST_RENEW_HOLD_MS = 15000;
-// Dialog sumindo em <2.5s após o clique = quase certamente Cancelar/dismiss, não renew real.
+// Após VOLTAR ao Selling (tela mudou): hold humano antes de liberar close. Nunca contar durante o "travado".
+const POST_RENEW_HOLD_MS_MIN = 15000;
+const POST_RENEW_HOLD_MS_MAX = 30000;
+// Dialog/tela sumindo em <2.5s após o clique = quase certamente Cancelar/dismiss, não renew real.
 const POST_RENEW_TOO_FAST_MS = 2500;
+// Espera pós-clique Renovar: FB trava a tela enquanto processa o batch (pode ser 20–120s+).
+const POST_RENEW_PROCESS_BASE_MS = 180000;
+const POST_RENEW_PROCESS_PER_ITEM_MS = 300;
+const POST_RENEW_PROCESS_CAP_MS = 12 * 60 * 1000;
 // Tela Renovar: FB contabiliza devagar — nunca aceitar "ready" antes deste piso.
 const RENEW_READY_MIN_ELAPSED_MS = 12000;
 // Count+botão enabled precisa ficar estável este tempo (não sobe mais).
@@ -33,6 +38,25 @@ function sleep(ms) {
 
 function now() {
   return Date.now();
+}
+
+function randInt(min, max) {
+  const a = Math.min(Number(min) || 0, Number(max) || 0);
+  const b = Math.max(Number(min) || 0, Number(max) || 0);
+  return a + Math.floor(Math.random() * (b - a + 1));
+}
+
+/** Pausa humana aleatória entre ações (anti-atropelo). */
+async function humanPause(minMs, maxMs) {
+  await sleep(randInt(minMs, maxMs));
+}
+
+function postRenewProcessTimeoutMs(expectedCount) {
+  const n = Math.max(0, Number(expectedCount || 0) || 0);
+  return Math.min(
+    POST_RENEW_PROCESS_CAP_MS,
+    POST_RENEW_PROCESS_BASE_MS + n * POST_RENEW_PROCESS_PER_ITEM_MS
+  );
 }
 
 function normalizeTxt(s) {
@@ -561,8 +585,17 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
         try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
         try { txt = norm(el.innerText || el.textContent || '').slice(0, 40); } catch {}
         if (aria !== 'renovar' && txt !== 'renovar' && aria !== 'renew' && txt !== 'renew') continue;
-        const disabled =
-          el.disabled === true || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+        // Ignora ghost FB (aria-disabled / aria-hidden / tabindex=-1).
+        let disabled = false;
+        try {
+          disabled =
+            el.disabled === true ||
+            String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true' ||
+            String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true' ||
+            String(el.getAttribute('tabindex') || '') === '-1';
+        } catch {
+          disabled = true;
+        }
         renewBtn = { enabled: !disabled };
         if (!disabled) break;
       }
@@ -639,29 +672,18 @@ async function isRenewDialogOpen(page) {
 }
 
 /**
- * Após 1 clique em Renovar: espera a tela/dialog sumir OU já estar de volta no Selling.
- * Sai cedo (não fica 90s parado). Nunca reclica.
+ * Após 1 clique em Renovar: espera a tela "Renovar classificados" sair de verdade.
+ * URL já é Selling por baixo do modal — NÃO usar URL sozinha.
+ * Sucesso = header da tela Renovar sumiu + chrome do Selling visível (Gerenciar / Selecionar tudo).
  */
-async function waitRenewDialogClosed(page, { timeoutMs = 45000 } = {}) {
+async function waitRenewDialogClosed(page, { timeoutMs = 180000, onProgress = null } = {}) {
   const t0 = now();
+  let lastHintAt = 0;
   while (now() - t0 < timeoutMs) {
-    // Já voltou ao Selling? Fecha rápido.
-    let onSell = false;
-    try {
-      const url = String(page.url() || '').toLowerCase();
-      if (url.includes('/marketplace/you/selling') || url.includes('/marketplace/you/dashboard')) onSell = true;
-    } catch {}
-    if (!onSell) {
-      onSell = !!(await safeEvaluate(
-        page,
-        () => /marketplace\/(you\/selling|you\/dashboard)/.test(String(location.pathname || ''))
-      ));
-    }
     const open = await isRenewDialogOpen(page);
-    if (onSell && !open) return { ok: true, via: 'selling' };
     if (!open) {
-      // Confirma que o botão exact "Renovar" também sumiu.
-      const stillBtn = await safeEvaluate(page, () => {
+      // Confirma: botão exact habilitado "Renovar" do rodapé sumiu (não ghost).
+      const stillRenewFooter = await safeEvaluate(page, () => {
         const norm = (s) => {
           try {
             return String(s || '')
@@ -677,27 +699,52 @@ async function waitRenewDialogClosed(page, { timeoutMs = 45000 } = {}) {
         const nodes = document.querySelectorAll('[role="button"],button');
         for (const el of nodes) {
           if (!el) continue;
+          try {
+            if (String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') continue;
+            if (String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') continue;
+            if (String(el.getAttribute('tabindex') || '') === '-1') continue;
+          } catch {}
           let aria = '';
           let txt = '';
           try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
-          try { txt = norm(el.innerText || el.textContent || '').slice(0, 40); } catch {}
+          try { txt = norm(el.innerText || '').slice(0, 40); } catch {}
           if (aria === 'renovar' || aria === 'renew' || txt === 'renovar' || txt === 'renew') return true;
         }
         return false;
       });
-      if (!stillBtn) return { ok: true, via: 'dialog_gone' };
+      if (!stillRenewFooter) {
+        // Chrome Selling de volta (por baixo do modal ou após fechar).
+        const sellingChrome = await labelPresent(
+          page,
+          ['Gerenciar classificados', 'Manage listings', 'Selecionar tudo', 'Select all'],
+          { requireEnabled: false }
+        );
+        if (sellingChrome) return { ok: true, via: 'selling_chrome' };
+        // Header sumiu e botão Renovar sumiu — aceita mesmo sem chrome ainda (FB lento).
+        return { ok: true, via: 'dialog_gone' };
+      }
     }
-    await sleep(500);
+    const elapsed = now() - t0;
+    if (onProgress && elapsed - lastHintAt >= 5000) {
+      lastHintAt = elapsed;
+      try {
+        await progress(
+          page,
+          onProgress,
+          'click_renew_wait',
+          `Facebook processando renovação... (${Math.round(elapsed / 1000)}s)`
+        );
+      } catch {}
+    }
+    await sleep(700);
   }
   return { ok: false, reason: 'dialog_close_timeout' };
 }
 
 /**
- * Clique dedicado no botão Renovar do dialog (rodapé).
- * - Escopo: [role=dialog] / aria-modal
- * - Nunca clica Cancelar/Cancel
- * - Prefere o botão mais embaixo e à direita (primário FB)
- * - Rola o dialog até o fim antes de clicar
+ * Clique dedicado no botão Renovar REAL do rodapé (nunca Cancelar, nunca ghost).
+ * DOM FB: ghost = aria-disabled + aria-hidden + tabindex=-1; real = tabindex=0.
+ * Preferência: mais à direita / mais embaixo; clique via mouse (coords).
  */
 async function clickRenewConfirmInDialog(page) {
   // 1) Rola o dialog/modal até o rodapé (botões Cancelar | Renovar).
@@ -735,10 +782,10 @@ async function clickRenewConfirmInDialog(page) {
       } catch {}
     });
   } catch {}
-  await sleep(600);
+  await humanPause(700, 1400);
 
-  // 2) Clique estrito: só Renovar/Renew exact, nunca Cancelar.
-  const hit = await safeEvaluate(page, () => {
+  // 2) Localiza só o Renovar real e devolve coordenadas de clique.
+  const found = await safeEvaluate(page, () => {
     const norm = (s) => {
       try {
         return String(s || '')
@@ -751,11 +798,13 @@ async function clickRenewConfirmInDialog(page) {
         return String(s || '').toLowerCase().trim();
       }
     };
-    const isDisabled = (el) => {
+    const isGhostOrDisabled = (el) => {
       try {
         if (!el) return true;
         if (el.disabled === true) return true;
         if (String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true;
+        if (String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true;
+        if (String(el.getAttribute('tabindex') || '') === '-1') return true;
         if (/\bdisabled\b/i.test(String(el.className || ''))) return true;
         return false;
       } catch {
@@ -789,6 +838,7 @@ async function clickRenewConfirmInDialog(page) {
         if (!el) continue;
         let aria = '';
         let txt = '';
+        let tab = '';
         try {
           aria = String(el.getAttribute('aria-label') || '');
         } catch {}
@@ -796,15 +846,18 @@ async function clickRenewConfirmInDialog(page) {
           // Só texto próprio (evita pai que concatena Cancelar+Renovar).
           txt = String(el.innerText || '').slice(0, 80);
         } catch {}
+        try {
+          tab = String(el.getAttribute('tabindex') || '');
+        } catch {}
         const nAria = norm(aria);
         const nTxt = norm(txt);
         if (isCancel(nAria) || isCancel(nTxt)) {
-          rejected.push({ why: 'cancel', aria: aria.slice(0, 40), txt: txt.slice(0, 40) });
+          rejected.push({ why: 'cancel', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
           continue;
         }
         if (!isRenewExact(nAria) && !isRenewExact(nTxt)) continue;
-        if (isDisabled(el)) {
-          rejected.push({ why: 'disabled', aria: aria.slice(0, 40), txt: txt.slice(0, 40) });
+        if (isGhostOrDisabled(el)) {
+          rejected.push({ why: 'ghost_or_disabled', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
           continue;
         }
         let rect = { bottom: 0, right: 0, width: 0, height: 0, top: 0, left: 0 };
@@ -819,15 +872,20 @@ async function clickRenewConfirmInDialog(page) {
             left: Number(r.left || 0)
           };
         } catch {}
-        // Botão invisível / fora de viewport útil — ainda pode ser candidato após scroll.
+        if (!(rect.width > 2 && rect.height > 2)) {
+          rejected.push({ why: 'zero_size', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
+          continue;
+        }
         candidates.push({
-          el,
           aria: aria.slice(0, 80),
           txt: txt.slice(0, 80),
+          tab,
           bottom: rect.bottom,
           right: rect.right,
           width: rect.width,
-          height: rect.height
+          height: rect.height,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2
         });
       }
     }
@@ -836,58 +894,184 @@ async function clickRenewConfirmInDialog(page) {
       return {
         ok: false,
         reason: 'renew_btn_not_in_dialog',
-        rejected: rejected.slice(0, 8),
+        rejected: rejected.slice(0, 12),
         roots: roots.length
       };
     }
 
-    // Primário FB: mais embaixo (rodapé), depois mais à direita.
-    candidates.sort((a, b) => (b.bottom - a.bottom) || (b.right - a.right));
+    // Primário FB: mais à direita (Renovar), depois mais embaixo.
+    candidates.sort((a, b) => (b.right - a.right) || (b.bottom - a.bottom));
     const best = candidates[0];
     try {
-      best.el.scrollIntoView({ block: 'center', inline: 'nearest' });
-    } catch {}
-    try {
-      best.el.click();
-      return {
-        ok: true,
-        via: 'click',
-        aria: best.aria,
-        txt: best.txt,
-        bottom: best.bottom,
-        right: best.right,
-        candidates: candidates.length,
-        rejectedCancel: rejected.filter((x) => x.why === 'cancel').length
-      };
-    } catch {
-      try {
-        best.el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-        return {
-          ok: true,
-          via: 'dispatch',
-          aria: best.aria,
-          txt: best.txt,
-          bottom: best.bottom,
-          right: best.right,
-          candidates: candidates.length
-        };
-      } catch {
-        return { ok: false, reason: 'click_threw' };
+      // scrollIntoView do elemento real via hit-test no ponto.
+      const el = document.elementFromPoint(best.x, best.y);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
       }
-    }
+    } catch {}
+    // Recalcula centro após scroll (mesmo critério: real, direita).
+    let x = best.x;
+    let y = best.y;
+    try {
+      const again = [];
+      const nodes = document.querySelectorAll('[role="button"],button');
+      for (const el of nodes) {
+        if (!el) continue;
+        if (isGhostOrDisabled(el)) continue;
+        let aria = '';
+        let txt = '';
+        try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
+        try { txt = norm(el.innerText || '').slice(0, 80); } catch {}
+        if (isCancel(aria) || isCancel(txt)) continue;
+        if (!isRenewExact(aria) && !isRenewExact(txt)) continue;
+        const r = el.getBoundingClientRect();
+        if (!(r.width > 2 && r.height > 2)) continue;
+        again.push({
+          x: r.left + r.width / 2,
+          y: r.top + r.height / 2,
+          bottom: r.bottom,
+          right: r.right,
+          aria: aria.slice(0, 80),
+          txt: txt.slice(0, 80)
+        });
+      }
+      if (again.length) {
+        again.sort((a, b) => (b.right - a.right) || (b.bottom - a.bottom));
+        const pick = again[0];
+        x = pick.x;
+        y = pick.y;
+        best.bottom = pick.bottom;
+        best.right = pick.right;
+        best.aria = pick.aria;
+        best.txt = pick.txt;
+      }
+    } catch {}
+
+    return {
+      ok: true,
+      x,
+      y,
+      aria: best.aria,
+      txt: best.txt,
+      tab: best.tab,
+      bottom: best.bottom,
+      right: best.right,
+      candidates: candidates.length,
+      rejectedCancel: rejected.filter((z) => z.why === 'cancel').length,
+      rejectedGhost: rejected.filter((z) => z.why === 'ghost_or_disabled').length
+    };
   });
 
-  return hit && typeof hit === 'object' ? hit : { ok: false, reason: 'evaluate_null' };
+  if (!found || !found.ok) {
+    return found && typeof found === 'object' ? found : { ok: false, reason: 'evaluate_null' };
+  }
+
+  const x = Number(found.x);
+  const y = Number(found.y);
+  if (!(Number.isFinite(x) && Number.isFinite(y))) {
+    return { ok: false, reason: 'bad_coords', found };
+  }
+
+  // 3) Clique humano no ponto do Renovar real (nunca .click() em ghost).
+  try {
+    await page.mouse.move(x, y, { steps: randInt(8, 16) });
+  } catch {}
+  await humanPause(280, 700);
+  try {
+    await page.mouse.click(x, y, { delay: randInt(55, 160) });
+  } catch {
+    // Fallback: click DOM no elementFromPoint (ainda com filtros).
+    const fb = await safeEvaluate(page, (px, py) => {
+      const norm = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      let el = null;
+      try {
+        el = document.elementFromPoint(px, py);
+      } catch {}
+      let cur = el;
+      for (let i = 0; i < 8 && cur; i++) {
+        try {
+          const role = String(cur.getAttribute && cur.getAttribute('role') || '').toLowerCase();
+          const tag = String(cur.tagName || '').toLowerCase();
+          if (role === 'button' || tag === 'button') {
+            const aria = norm(cur.getAttribute('aria-label') || '');
+            const txt = norm(cur.innerText || '').slice(0, 40);
+            if (aria === 'cancelar' || txt === 'cancelar' || aria === 'cancel' || txt === 'cancel') {
+              return { ok: false, reason: 'hit_cancel' };
+            }
+            if (String(cur.getAttribute('aria-disabled') || '').toLowerCase() === 'true') {
+              return { ok: false, reason: 'hit_disabled' };
+            }
+            if (String(cur.getAttribute('tabindex') || '') === '-1') {
+              return { ok: false, reason: 'hit_ghost_tabindex' };
+            }
+            if (aria === 'renovar' || aria === 'renew' || txt === 'renovar' || txt === 'renew') {
+              cur.click();
+              return { ok: true, via: 'elementFromPoint' };
+            }
+          }
+        } catch {}
+        try {
+          cur = cur.parentElement;
+        } catch {
+          break;
+        }
+      }
+      return { ok: false, reason: 'elementFromPoint_miss' };
+    }, x, y);
+    if (!(fb && fb.ok)) {
+      return { ok: false, reason: (fb && fb.reason) || 'mouse_click_failed', x, y };
+    }
+    return {
+      ok: true,
+      via: 'elementFromPoint',
+      aria: found.aria,
+      txt: found.txt,
+      bottom: found.bottom,
+      right: found.right,
+      candidates: found.candidates,
+      rejectedCancel: found.rejectedCancel,
+      rejectedGhost: found.rejectedGhost,
+      x,
+      y
+    };
+  }
+
+  return {
+    ok: true,
+    via: 'mouse',
+    aria: found.aria,
+    txt: found.txt,
+    tab: found.tab || null,
+    bottom: found.bottom,
+    right: found.right,
+    candidates: found.candidates,
+    rejectedCancel: found.rejectedCancel,
+    rejectedGhost: found.rejectedGhost,
+    x,
+    y
+  };
 }
 
 /**
  * Clique one-shot em Renovar (dialog).
- * - Nunca Cancelar.
- * - Se dialog fechar rápido demais → falha (falso positivo clássico).
- * - Hold mínimo POST_RENEW_HOLD_MS antes de liberar (close-all não mata o batch).
+ * - Nunca Cancelar / nunca ghost (tabindex=-1 / aria-disabled).
+ * - Espera a tela Renovar SUMIR (FB pode travar 20–120s+).
+ * - Se sumir rápido demais → falha (falso positivo Cancelar).
+ * - Hold 15–30s SÓ DEPOIS de voltar ao Selling.
  */
 async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, expectedCount = 0 } = {}) {
-  await progress(page, onProgress, 'click_renew', 'Clicando em Renovar (rodapé do dialog)...');
+  await progress(page, onProgress, 'click_renew', 'Clicando em Renovar (rodapé real, não Cancelar)...');
   let clicked = false;
   const audit = (event, data = {}) => {
     try {
@@ -904,6 +1088,7 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
   const findDeadline = now() + 180000;
   const tFind0 = now();
   const expectN = Math.max(0, Number(expectedCount || 0) || 0);
+  const processTimeoutMs = postRenewProcessTimeoutMs(expectN);
 
   while (now() < findDeadline) {
     if (stale()) {
@@ -919,21 +1104,29 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         via: hit.via || null,
         aria: hit.aria || null,
         txt: hit.txt || null,
+        tab: hit.tab || null,
         bottom: hit.bottom != null ? hit.bottom : null,
         right: hit.right != null ? hit.right : null,
+        x: hit.x != null ? hit.x : null,
+        y: hit.y != null ? hit.y : null,
         candidates: hit.candidates != null ? hit.candidates : null,
         rejectedCancel: hit.rejectedCancel != null ? hit.rejectedCancel : null,
+        rejectedGhost: hit.rejectedGhost != null ? hit.rejectedGhost : null,
         expectedCount: expectN,
+        processTimeoutMs,
         findMs: tClick - tFind0
       });
       await progress(
         page,
         onProgress,
         'click_renew_wait',
-        'Renovar clicado — aguardando Facebook processar (não fechar ainda)...'
+        'Renovar clicado — aguardando Facebook processar (pode travar a tela)...'
       );
 
-      const closed = await waitRenewDialogClosed(page, { timeoutMs: 90000 });
+      const closed = await waitRenewDialogClosed(page, {
+        timeoutMs: processTimeoutMs,
+        onProgress
+      });
       const elapsed = now() - tClick;
 
       // Batch grande fechando em <2.5s = Cancelar/dismiss (falso positivo clássico).
@@ -952,40 +1145,48 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         };
       }
 
-      const remainHold = Math.max(0, POST_RENEW_HOLD_MS - (now() - tClick));
-      if (remainHold > 0) {
-        await progress(
-          page,
-          onProgress,
-          'click_renew_hold',
-          `Segurando ${Math.ceil(remainHold / 1000)}s após Renovar (anti close precoce)...`
-        );
-        await sleep(remainHold);
+      if (!(closed && closed.ok)) {
+        audit('renew_confirm_fail', {
+          reason: 'renew_process_timeout',
+          elapsedMs: elapsed,
+          expectedCount: expectN,
+          processTimeoutMs
+        });
+        return {
+          ok: false,
+          reason: 'renew_process_timeout',
+          clicked: true,
+          elapsedMs: elapsed
+        };
       }
 
       if (stale()) {
-        audit('renew_confirm_done', { reason: 'clicked_then_stale', clicked: true, elapsedMs: now() - tClick });
+        audit('renew_confirm_done', { reason: 'clicked_then_stale', clicked: true, elapsedMs: elapsed });
         return { ok: true, reason: 'clicked_then_stale', clicked: true };
       }
-      if (closed && closed.ok) {
-        audit('renew_confirm_done', {
-          reason: 'clicked_and_closed',
-          via: closed.via || null,
-          clicked: true,
-          elapsedMs: now() - tClick,
-          heldMs: POST_RENEW_HOLD_MS
-        });
-        return { ok: true, reason: 'clicked_and_closed', clicked: true };
-      }
+
+      // Hold SÓ depois da tela mudar / voltar ao Selling — nunca durante o "travado".
+      const holdMs = randInt(POST_RENEW_HOLD_MS_MIN, POST_RENEW_HOLD_MS_MAX);
+      await progress(
+        page,
+        onProgress,
+        'click_renew_hold',
+        `De volta ao Selling — segurando ${Math.ceil(holdMs / 1000)}s (garantir envio)...`
+      );
+      await sleep(holdMs);
+
       audit('renew_confirm_done', {
-        reason: 'clicked_close_timeout',
+        reason: 'clicked_and_closed',
+        via: closed.via || null,
         clicked: true,
         elapsedMs: now() - tClick,
-        heldMs: POST_RENEW_HOLD_MS
+        processMs: elapsed,
+        heldMs: holdMs
       });
-      return { ok: true, reason: 'clicked_close_timeout', clicked: true };
+      return { ok: true, reason: 'clicked_and_closed', clicked: true, heldMs: holdMs };
     }
 
+    // Ainda não achou Renovar real — scroll leve e tenta de novo.
     try {
       await page.evaluate(() => {
         try {
@@ -1000,12 +1201,13 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
         } catch {}
       });
     } catch {}
-    await sleep(700);
+    await humanPause(800, 1400);
   }
 
   if (clicked) {
-    audit('renew_confirm_done', { reason: 'clicked_loop_end', clicked: true });
-    return { ok: true, reason: 'clicked_loop_end', clicked: true };
+    // Não deveria chegar aqui: sucesso/falha já retornam no ramo do clique.
+    audit('renew_confirm_fail', { reason: 'clicked_loop_end_unexpected', clicked: true });
+    return { ok: false, reason: 'clicked_loop_end_unexpected', clicked: true };
   }
   audit('renew_confirm_fail', { reason: 'renew_button_not_found', findMs: now() - tFind0 });
   return { ok: false, reason: 'renew_button_not_found' };
@@ -1132,9 +1334,15 @@ async function runMarketplaceRenewListings({
     audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason });
     if (aborted()) return abortResult();
 
+    // Ritmo humano pós-scroll: sobe → seleciona → ações → renovar (sem atropelo).
+    await progress(page, onProgress, 'human_pace', 'Pausa humana antes de subir ao topo...');
+    await humanPause(2500, 4500);
+
     await progress(page, onProgress, 'scroll_top', 'Subindo ao topo...');
     await scrollToTop(page);
+    await humanPause(1200, 2200);
     await scrollToTop(page);
+    await humanPause(2000, 3800);
 
     await progress(page, onProgress, 'select_all', 'Selecionando tudo...');
     const selectAll = await clickByLabels(page, ['Selecionar tudo', 'Select all'], {
@@ -1146,6 +1354,7 @@ async function runMarketplaceRenewListings({
       audit('renew_listings_fail', { stage: 'select_all', reason: 'select_all_not_found' });
       return { ok: false, error: 'select_all_not_found', renewedCount: 0 };
     }
+    await humanPause(2200, 4000);
     // Seleção de muitos anúncios pode demorar — espera Ações ficar habilitado (até 120s).
     await progress(page, onProgress, 'select_wait', 'Aguardando seleção estabilizar...');
     const actionsReady = await (async () => {
@@ -1189,6 +1398,7 @@ async function runMarketplaceRenewListings({
       // Ainda tenta clicar Ações — FB às vezes não marca aria corretamente.
       await sleep(Math.max(SETTLE_MS, 5000));
     }
+    await humanPause(1800, 3200);
     await progress(page, onProgress, 'actions', 'Abrindo Ações...');
     const actions = await clickByLabels(page, ['Ações', 'Actions'], {
       roleHints: ['button'],
@@ -1207,8 +1417,10 @@ async function runMarketplaceRenewListings({
       { timeoutMs: ACTIONS_MENU_WAIT_MS, requireEnabled: false, pollMs: 800 }
     );
     if (!menuReady) await sleep(2500);
+    else await humanPause(1600, 3000);
     if (aborted()) return abortResult();
 
+    await humanPause(1800, 3500);
     await progress(page, onProgress, 'renew_mp', 'Clicando em Renovar no Marketplace...');
     const renewMp = await clickByLabels(
       page,
@@ -1257,7 +1469,10 @@ async function runMarketplaceRenewListings({
       if (typeof isAborted === 'function' && isAborted()) return abortResult();
     } catch {}
 
-    // Fase confirm: budget próprio (achar+clicar ≤3min, fechar ≤45s). Zero reclique.
+    // Pausa humana antes do clique final Renovar (rodapé).
+    await humanPause(2000, 4000);
+
+    // Fase confirm: achar+clicar Renovar real; espera tela mudar (pode travar muito); hold 15–30s no Selling.
     const clicked = await clickRenewConfirm(page, {
       onProgress,
       onAudit: audit,
@@ -1291,8 +1506,9 @@ async function runMarketplaceRenewListings({
       count
     });
 
-    // Pós-clique: volta ao Selling rápido (já pode estar lá). Não aborta sucesso por deadline.
-    await waitBackToSelling(page, { onProgress, timeoutMs: 45000 });
+    // Pós-clique: hold 15–30s já rodou DENTRO de clickRenewConfirm (após tela mudar).
+    // Aqui só confirma Selling chrome (best-effort curto).
+    await waitBackToSelling(page, { onProgress, timeoutMs: 30000 });
     await progress(page, onProgress, 'done', `Renovados: ${count} classificado(s).`);
     audit('renew_listings_ok', {
       renewedCount: count,
