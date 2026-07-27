@@ -17,6 +17,11 @@ const ACTIONS_MENU_WAIT_MS = 120000;
 const SELECT_ALL_WAIT_MS = 120000;
 const NAV_TIMEOUT_MS = 45000;
 const SETTLE_MS = 8000;
+// Tela Renovar: FB contabiliza devagar — nunca aceitar "ready" antes deste piso.
+const RENEW_READY_MIN_ELAPSED_MS = 12000;
+// Count+botão enabled precisa ficar estável este tempo (não sobe mais).
+const RENEW_READY_STABLE_MS = 6000;
+const MANAGE_MODE_WAIT_MS = 60000;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
@@ -211,6 +216,63 @@ async function findTextPresent(page, patterns) {
   }, wanted);
 }
 
+async function labelPresent(page, labels, { requireEnabled = false, exactOnly = false } = {}) {
+  const wanted = (Array.isArray(labels) ? labels : [labels]).map((x) => normalizeTxt(x)).filter(Boolean);
+  if (!wanted.length) return false;
+  const hit = await safeEvaluate(
+    page,
+    ({ wanted, requireEnabled, exactOnly }) => {
+      const norm = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const matches = (txt) => {
+        const n = norm(txt);
+        if (!n) return false;
+        if (exactOnly) return wanted.some((w) => n === w);
+        return wanted.some((w) => n === w || n.includes(w));
+      };
+      const nodes = document.querySelectorAll(
+        '[role="button"],[role="menuitem"],button,a[role="link"],div[role="button"],span[role="button"]'
+      );
+      for (const el of nodes) {
+        if (!el) continue;
+        let aria = '';
+        let txt = '';
+        try { aria = String(el.getAttribute('aria-label') || ''); } catch {}
+        try { txt = String(el.innerText || el.textContent || '').slice(0, 200); } catch {}
+        if (!matches(aria) && !matches(txt)) continue;
+        if (requireEnabled) {
+          const disabled =
+            el.disabled === true || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+          if (disabled) continue;
+        }
+        return true;
+      }
+      return false;
+    },
+    { wanted, requireEnabled: !!requireEnabled, exactOnly: !!exactOnly }
+  );
+  return !!hit;
+}
+
+async function waitForLabel(page, labels, { timeoutMs = 30000, requireEnabled = false, exactOnly = false, pollMs = 700 } = {}) {
+  const t0 = now();
+  while (now() - t0 < timeoutMs) {
+    if (await labelPresent(page, labels, { requireEnabled, exactOnly })) return true;
+    await sleep(pollMs);
+  }
+  return false;
+}
+
 async function ensureSelling(page, { onProgress } = {}) {
   await progress(page, onProgress, 'goto_selling', 'Abrindo Seus classificados (Selling)...');
   let onSelling = false;
@@ -224,7 +286,14 @@ async function ensureSelling(page, { onProgress } = {}) {
   if (!onSelling) {
     await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   }
-  await sleep(SETTLE_MS);
+  // Espera readiness real: botão Gerenciar (ou já em manage mode com Selecionar tudo).
+  const ready = await waitForLabel(
+    page,
+    ['Gerenciar classificados', 'Manage listings', 'Manage your listings', 'Selecionar tudo', 'Select all'],
+    { timeoutMs: 45000, requireEnabled: false, pollMs: 800 }
+  );
+  if (!ready) await sleep(SETTLE_MS);
+  else await sleep(1500);
   return true;
 }
 
@@ -398,33 +467,53 @@ async function scrollToAgeThreshold(page, { onProgress } = {}) {
 }
 
 async function scrollToTop(page) {
-  try {
-    await page.evaluate(() => {
+  const t0 = now();
+  while (now() - t0 < 20000) {
+    const top = await safeEvaluate(page, () => {
       try {
         window.scrollTo(0, 0);
         const main =
           document.querySelector('[role="main"]') ||
           document.scrollingElement ||
-          document.documentElement;
+          document.documentElement ||
+          document.body;
         if (main && typeof main.scrollTo === 'function') main.scrollTo(0, 0);
         if (main) main.scrollTop = 0;
-      } catch {}
+        const se = document.scrollingElement || document.documentElement;
+        return Math.min(
+          Number((main && main.scrollTop) || 0),
+          Number((se && se.scrollTop) || 0),
+          Number(window.scrollY || 0)
+        );
+      } catch {
+        return 0;
+      }
     });
-  } catch {}
-  await sleep(2000);
+    if (Number(top || 0) <= 5) {
+      await sleep(800);
+      return { ok: true, top: Number(top || 0) };
+    }
+    await sleep(500);
+  }
+  await sleep(1000);
+  return { ok: true, top: null, reason: 'scroll_top_budget' };
 }
 
 /**
  * Espera a tela "Renovar classificados" estabilizar e extrai contagem.
- * Ignora falso "nenhum" nos primeiros segundos — FB contabiliza até ~120s.
+ * Contrato FB: pode mostrar "nenhum" falso no início; contabiliza 1–120s.
+ * Ready só depois de:
+ *  - piso mínimo RENEW_READY_MIN_ELAPSED_MS
+ *  - count>0 + botão Renovar enabled estáveis por RENEW_READY_STABLE_MS (count não sobe)
  */
 async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREEN_WAIT_MS } = {}) {
   await progress(page, onProgress, 'renew_screen', 'Aguardando Facebook contabilizar renováveis...');
   const t0 = now();
   let lastCount = null;
-  let stableHits = 0;
+  let stableSince = 0;
   let sawHeader = false;
-  let bestReadyCount = 0;
+  let bestStableCount = 0;
+  let bestStableAt = 0;
 
   while (now() - t0 < timeoutMs) {
     const snap = await safeEvaluate(page, () => {
@@ -452,7 +541,6 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
         n.includes('renew listings') ||
         n.includes('renew your listings');
       let count = null;
-      // "X classificados serão renovados" / "X listings will be renewed"
       const m1 = n.match(/(\d+)\s+classificados?\s+serao\s+renovados/);
       const m2 = n.match(/(\d+)\s+listings?\s+will\s+be\s+renewed/);
       const m3 = n.match(/serao\s+renovados[^\d]*(\d+)/);
@@ -460,58 +548,59 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
       else if (m2) count = Number(m2[1]);
       else if (m3) count = Number(m3[1]);
 
-      const noneEarly =
-        /nao ha nenhum classificado|nenhum classificado para renovar|no listings? to renew|nothing to renew/.test(n) &&
-        count == null;
-
-      // Botão Renovar habilitado (texto/aria exatamente "renovar"/"renew")
       let renewBtn = null;
       const nodes = document.querySelectorAll('[role="button"],button');
       for (const el of nodes) {
         if (!el) continue;
         let aria = '';
         let txt = '';
-        try {
-          aria = norm(el.getAttribute('aria-label') || '');
-        } catch {}
-        try {
-          txt = norm(el.innerText || el.textContent || '').slice(0, 40);
-        } catch {}
+        try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
+        try { txt = norm(el.innerText || el.textContent || '').slice(0, 40); } catch {}
         if (aria !== 'renovar' && txt !== 'renovar' && aria !== 'renew' && txt !== 'renew') continue;
         const disabled =
           el.disabled === true || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
-        renewBtn = { enabled: !disabled, aria: aria.slice(0, 40), txt: txt.slice(0, 40) };
+        renewBtn = { enabled: !disabled };
         if (!disabled) break;
       }
-      return { hasHeader, count, noneEarly, renewBtn };
+      return { hasHeader, count, renewBtn };
     });
 
+    const elapsed = now() - t0;
     if (snap && snap.hasHeader) sawHeader = true;
 
-    if (snap && Number.isFinite(snap.count) && snap.count > 0 && snap.renewBtn && snap.renewBtn.enabled) {
-      bestReadyCount = Math.max(bestReadyCount, snap.count);
-      if (lastCount === snap.count) stableHits += 1;
-      else {
-        lastCount = snap.count;
-        stableHits = 1;
-      }
-      if (stableHits >= 2) {
-        await progress(
-          page,
-          onProgress,
-          'renew_ready',
-          `Prontos para renovar: ${snap.count} classificado(s).`
-        );
-        return { ok: true, count: snap.count, reason: 'ready' };
-      }
-    } else if (snap && snap.renewBtn && snap.renewBtn.enabled && Number.isFinite(snap.count) && snap.count > 0) {
-      lastCount = snap.count;
-      bestReadyCount = Math.max(bestReadyCount, snap.count);
-    }
+    const readyNow =
+      snap &&
+      Number.isFinite(snap.count) &&
+      snap.count > 0 &&
+      snap.renewBtn &&
+      snap.renewBtn.enabled === true;
 
-    const elapsed = now() - t0;
-    if (elapsed >= timeoutMs - 500 && sawHeader && !(snap && snap.count > 0 && snap.renewBtn && snap.renewBtn.enabled)) {
-      break;
+    if (readyNow) {
+      if (lastCount === snap.count) {
+        if (!stableSince) stableSince = now();
+      } else {
+        // Count mudou (subiu/desceu) — FB ainda contabilizando; reinicia estabilidade.
+        lastCount = snap.count;
+        stableSince = now();
+      }
+      const stableFor = stableSince ? (now() - stableSince) : 0;
+      if (stableFor >= RENEW_READY_STABLE_MS) {
+        bestStableCount = Math.max(bestStableCount, snap.count);
+        bestStableAt = now();
+        if (elapsed >= RENEW_READY_MIN_ELAPSED_MS) {
+          await progress(
+            page,
+            onProgress,
+            'renew_ready',
+            `Prontos para renovar: ${snap.count} classificado(s) (estável ${Math.round(stableFor / 1000)}s).`
+          );
+          return { ok: true, count: snap.count, reason: 'ready' };
+        }
+      }
+    } else {
+      // Sem ready: se count sumiu/botão disabled, zera estabilidade corrente.
+      stableSince = 0;
+      if (!(snap && Number.isFinite(snap.count) && snap.count > 0)) lastCount = null;
     }
 
     if (elapsed % 8000 < 1100) {
@@ -519,25 +608,23 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
         page,
         onProgress,
         'renew_screen',
-        `Contabilizando renováveis... (${Math.round(elapsed / 1000)}s)`
+        `Contabilizando renováveis... (${Math.round(elapsed / 1000)}s)` +
+          (lastCount ? ` count=${lastCount}` : '')
       );
     }
     await sleep(1000);
   }
 
-  // Se viu count+botão habilitado mas não estabilizou 2 ticks, ainda assim usa o melhor count.
-  if (bestReadyCount > 0) {
-    return { ok: true, count: bestReadyCount, reason: 'ready_best_effort' };
+  // Timeout: só aceita best-effort se a estabilidade durou de verdade perto do fim.
+  if (bestStableCount > 0 && bestStableAt && (now() - bestStableAt) <= (RENEW_READY_STABLE_MS + 2000)) {
+    return { ok: true, count: bestStableCount, reason: 'ready_stable_timeout' };
   }
 
-  // Timeout: nenhum renovável clicável
-  return { ok: true, count: 0, reason: 'none_renewable_timeout' };
+  return { ok: true, count: 0, reason: 'none_renewable_timeout', sawHeader };
 }
 
 async function clickRenewConfirm(page, { onProgress } = {}) {
   await progress(page, onProgress, 'click_renew', 'Clicando em Renovar...');
-  // Scroll leve até achar o botão — match EXATO "Renovar"/"Renew"
-  // (nunca "Renovar no Marketplace" / "Renovar classificados").
   for (let i = 0; i < 25; i++) {
     const hit = await clickByLabels(page, ['Renovar', 'Renew'], {
       roleHints: ['button'],
@@ -563,24 +650,42 @@ async function clickRenewConfirm(page, { onProgress } = {}) {
   return { ok: false, reason: 'renew_button_not_found' };
 }
 
-async function waitBackToSelling(page, { timeoutMs = 90000 } = {}) {
+async function waitBackToSelling(page, { onProgress, timeoutMs = 90000 } = {}) {
+  await progress(page, onProgress, 'back_selling', 'Aguardando retorno ao Selling...');
   const t0 = now();
   while (now() - t0 < timeoutMs) {
+    let onSell = false;
     try {
       const url = String(page.url() || '').toLowerCase();
-      if (url.includes('/marketplace/you/selling')) return { ok: true };
+      if (url.includes('/marketplace/you/selling')) onSell = true;
     } catch {}
-    const onSell = await safeEvaluate(
-      page,
-      () => /marketplace\/(you\/selling|you\/dashboard)/.test(String(location.pathname || ''))
-    );
-    if (onSell) return { ok: true };
+    if (!onSell) {
+      onSell = !!(await safeEvaluate(
+        page,
+        () => /marketplace\/(you\/selling|you\/dashboard)/.test(String(location.pathname || ''))
+      ));
+    }
+    if (onSell) {
+      // Settle real: Gerenciar ou Selecionar tudo visível.
+      const settled = await waitForLabel(
+        page,
+        ['Gerenciar classificados', 'Manage listings', 'Selecionar tudo', 'Select all'],
+        { timeoutMs: 15000, requireEnabled: false, pollMs: 700 }
+      );
+      if (settled) return { ok: true };
+      // Já está na URL selling — aceita após pequeno settle.
+      await sleep(2500);
+      return { ok: true, via: 'url_settle' };
+    }
     await sleep(1000);
   }
-  // Best-effort: force goto selling
   try {
     await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-    await sleep(3000);
+    await waitForLabel(
+      page,
+      ['Gerenciar classificados', 'Manage listings', 'Selecionar tudo', 'Select all'],
+      { timeoutMs: 20000, requireEnabled: false, pollMs: 800 }
+    );
     return { ok: true, via: 'goto' };
   } catch {
     return { ok: false, reason: 'not_back_selling' };
@@ -618,24 +723,39 @@ async function runMarketplaceRenewListings({
   try {
     await ensureSelling(page, { onProgress });
 
-    await progress(page, onProgress, 'manage', 'Clicando em Gerenciar classificados...');
-    const manage = await clickByLabels(
-      page,
-      ['Gerenciar classificados', 'Manage listings', 'Manage your listings'],
-      { roleHints: ['button'], timeoutMs: 45000, requireEnabled: true }
-    );
-    if (!manage || !manage.ok) {
-      audit('renew_listings_fail', { stage: 'manage', reason: 'manage_not_found' });
-      return { ok: false, error: 'manage_listings_not_found', renewedCount: 0 };
+    const alreadyManage = await labelPresent(page, ['Selecionar tudo', 'Select all'], { requireEnabled: false });
+    if (!alreadyManage) {
+      await progress(page, onProgress, 'manage', 'Clicando em Gerenciar classificados...');
+      const manage = await clickByLabels(
+        page,
+        ['Gerenciar classificados', 'Manage listings', 'Manage your listings'],
+        { roleHints: ['button'], timeoutMs: 45000, requireEnabled: true }
+      );
+      if (!manage || !manage.ok) {
+        audit('renew_listings_fail', { stage: 'manage', reason: 'manage_not_found' });
+        return { ok: false, error: 'manage_listings_not_found', renewedCount: 0 };
+      }
+    } else {
+      await progress(page, onProgress, 'manage', 'Já em modo Gerenciar classificados.');
     }
-    await sleep(SETTLE_MS);
+    // Ready real do modo gerenciar (não sleep cego): espera Selecionar tudo.
+    await progress(page, onProgress, 'manage_settle', 'Aguardando modo Gerenciar carregar...');
+    const manageReady = await waitForLabel(page, ['Selecionar tudo', 'Select all'], {
+      timeoutMs: MANAGE_MODE_WAIT_MS,
+      requireEnabled: false,
+      pollMs: 800
+    });
+    if (!manageReady) {
+      await sleep(SETTLE_MS);
+    } else {
+      await sleep(1500);
+    }
 
     const scrolled = await scrollToAgeThreshold(page, { onProgress });
     audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason });
 
     await progress(page, onProgress, 'scroll_top', 'Subindo ao topo...');
     await scrollToTop(page);
-    await sleep(1500);
     await scrollToTop(page);
 
     await progress(page, onProgress, 'select_all', 'Selecionando tudo...');
@@ -699,7 +819,14 @@ async function runMarketplaceRenewListings({
       audit('renew_listings_fail', { stage: 'actions', reason: 'actions_not_found' });
       return { ok: false, error: 'actions_not_found', renewedCount: 0 };
     }
-    await sleep(2000);
+    // Espera menu abrir (item Renovar no Marketplace) — até 120s, FB lento.
+    await progress(page, onProgress, 'actions_menu', 'Aguardando menu Ações...');
+    const menuReady = await waitForLabel(
+      page,
+      ['Renovar no Marketplace', 'Renew in Marketplace', 'Renew on Marketplace'],
+      { timeoutMs: ACTIONS_MENU_WAIT_MS, requireEnabled: false, pollMs: 800 }
+    );
+    if (!menuReady) await sleep(2500);
 
     await progress(page, onProgress, 'renew_mp', 'Clicando em Renovar no Marketplace...');
     const renewMp = await clickByLabels(
@@ -711,7 +838,24 @@ async function runMarketplaceRenewListings({
       audit('renew_listings_fail', { stage: 'renew_marketplace', reason: 'menu_item_not_found' });
       return { ok: false, error: 'renew_marketplace_not_found', renewedCount: 0 };
     }
-    await sleep(SETTLE_MS);
+    // Espera header da tela Renovar (não só sleep cego).
+    await progress(page, onProgress, 'renew_open', 'Aguardando tela Renovar classificados...');
+    const renewHeader = await (async () => {
+      const tH = now();
+      while (now() - tH < 45000) {
+        const ok = await findTextPresent(page, [
+          'Renovar classificados',
+          'Renew listings',
+          'Renew your listings',
+          'serao renovados',
+          'will be renewed'
+        ]);
+        if (ok && ok.ok) return true;
+        await sleep(800);
+      }
+      return false;
+    })();
+    if (!renewHeader) await sleep(SETTLE_MS);
 
     const stable = await waitRenewScreenStable(page, { onProgress, timeoutMs: RENEW_SCREEN_WAIT_MS });
     const count = Number(stable && stable.count) || 0;
@@ -731,7 +875,7 @@ async function runMarketplaceRenewListings({
       return { ok: false, error: 'renew_confirm_failed', renewedCount: 0, pendingCount: count };
     }
 
-    await waitBackToSelling(page, { timeoutMs: 90000 });
+    await waitBackToSelling(page, { onProgress, timeoutMs: 90000 });
     await progress(page, onProgress, 'done', `Renovados: ${count} classificado(s).`);
     audit('renew_listings_ok', { renewedCount: count, durationMs: now() - startedAt });
     return { ok: true, renewedCount: count, reason: 'renewed' };

@@ -418,16 +418,29 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       try { await persistRenovadosLastCount(n, count); } catch {}
     }
 
+    let closedOk = false;
     if (closeAfter && mode === 'auto') {
       try {
-        await handlers.deactivate({ nome: n, reason: 'renew_then_close' });
+        const dr = await handlers.deactivate({ nome: n, reason: 'renew_then_close' });
+        closedOk = !!(dr && dr.ok);
+        if (!closedOk) {
+          return {
+            ok: !!(r && r.ok),
+            renewedCount: count,
+            reason: r && r.reason,
+            error: r && r.error,
+            closeError: (dr && dr.error) ? String(dr.error) : 'deactivate_failed',
+            closedOk: false
+          };
+        }
       } catch (e) {
         return {
           ok: !!(r && r.ok),
           renewedCount: count,
           reason: r && r.reason,
           error: r && r.error,
-          closeError: (e && e.message) ? String(e.message) : String(e)
+          closeError: (e && e.message) ? String(e.message) : String(e),
+          closedOk: false
         };
       }
     }
@@ -437,18 +450,35 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       renewedCount: count,
       reason: r && r.reason ? String(r.reason) : null,
       error: r && r.error ? String(r.error) : null,
-      skipped: false
+      skipped: false,
+      closedOk: closeAfter && mode === 'auto' ? closedOk : undefined
     };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e), renewedCount: 0 };
   } finally {
     try { ctrl.renewInFlight = false; } catch {}
-    // Manual: mantém hold do operador. Auto: limpa flag de page (desired.humanHold nunca foi setado).
+    // Manual: mantém hold do operador.
+    // Auto: só limpa hold se browser já fechou OU deactivate ok; se browser vivo e close falhou, mantém anti-yank.
     if (mode === 'auto' && armedHold) {
       try {
-        // Só limpa se operador não estiver em human hold.
-        if (!(ctrl.humanControl === true)) {
-          await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done' });
+        if (ctrl.humanControl === true) {
+          // noop — humano
+        } else {
+          const stillLive = !!(ctrl.browser && ctrl.browser.isConnected && ctrl.browser.isConnected());
+          if (!stillLive) {
+            await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done_closed' });
+          } else if (!(closeAfter === true)) {
+            await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done_keep_open' });
+          } else {
+            // closeAfter pediu fechar mas browser ainda vivo: mantém hold até close-all residual.
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'renew_auto_hold_kept_browser_alive',
+                nome: n
+              });
+            } catch {}
+          }
         }
       } catch {}
     }
@@ -12283,13 +12313,16 @@ const handlers = {
       });
     } catch {}
     return {
-      ok: true,
+      ok: renewedFail === 0 || names.length === 0,
       total: names.length,
       renewedOk,
       renewedFail,
       renewedNone,
       skipped,
-      results
+      results,
+      error: renewedFail > 0 && renewedOk === 0 && renewedNone === 0 && skipped === 0
+        ? 'renew_shard_all_failed'
+        : null
     };
   },
 
