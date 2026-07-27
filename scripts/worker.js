@@ -8034,7 +8034,24 @@ async function robeFireArmed(nome, reason = 'arm_fire') {
       reason: String(reason || '').slice(0, 40)
     });
   } catch {}
-  return robeEnqueueAuto(n, `arm:${reason}`);
+  const r = await robeEnqueueAuto(n, `arm:${reason}`);
+  // Cooldown zerou com browser fechado / não trabalhando: marca awaiting —
+  // quando Virtus subir (nurse/open-all/start_work) o kick enfileira.
+  if (!r || !r.ok) {
+    const why = String((r && r.reason) || 'gated');
+    if (why === 'not_working' || why === 'frozen' || why === 'provision_lock' || why === 'renew_in_flight') {
+      try { await robeSetAwaitingEnqueue(n, true, `arm_${why}`.slice(0, 40)); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'robe_arm_deferred_awaiting',
+          nome: n,
+          reason: why.slice(0, 60)
+        });
+      } catch {}
+    }
+  }
+  return r;
 }
 
 /**
@@ -8181,9 +8198,9 @@ async function robeTryEnqueueIfAwaiting(nome, source = 'start_work') {
 function scheduleRobeEnqueueAfterStartWork(nome) {
   const n = String(nome || '');
   if (!n) return;
-  // Com GLOBAL_TICK=0 não há varredura em massa: o momento em que a conta
-  // fica trabalhando é o gatilho certo para "Robe: Pronto" entrar na fila.
-  // Preferência: awaiting (pós-Liberar). Fallback: tenta enqueue se elegível.
+  // Contrato Fase 4c (GLOBAL_TICK=0): o instante em que a conta fica trabalhando
+  // é o gatilho canônico para "Robe: Pronto" entrar na fila.
+  // Chamado por start_work E por nurse/open-all/resume (mesma porta — sem remendo paralelo).
   setTimeout(() => {
     (async () => {
       try {
@@ -8244,9 +8261,10 @@ async function robeEnqueueAuto(nome, source = 'auto') {
 }
 
 /**
- * Fase 4c: com GLOBAL_TICK=0, NÃO redescobre auto-post em massa.
- * Só recupera arms vencidos/perdidos (one-shot falhou) — frota ouvinte permanece quieta
- * até robe-play ou até um ciclo anterior armar cooldown.
+ * Fase 4c: com GLOBAL_TICK=0, NÃO varre perfis.json.
+ * Só controllers abertos, ≤1 enqueue/tick:
+ *  1) arms vencidos (one-shot perdido)
+ *  2) Pronto (cooldown 0) + trabalhando fora da fila — blindagem open-all / tick OFF
  */
 async function robeFallbackLightTick() {
   if (!isRobeEventArmEnabled()) return { ok: false, reason: 'arm_off' };
@@ -8259,6 +8277,8 @@ async function robeFallbackLightTick() {
   __robeFallbackLastAt = now;
   let enq = 0;
   let armedDue = 0;
+  let prontoCandidates = 0;
+  let recoverSource = null;
   try {
     try {
       if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
@@ -8272,25 +8292,76 @@ async function robeFallbackLightTick() {
     try {
       for (const nome of controllers.keys()) nomes.push(nome);
     } catch {}
+
+    // Pass 1: arm one-shot vencido
     for (const nome of nomes) {
       const due = Number(robeMeta[nome] && robeMeta[nome].robeArmedUntil || 0) || 0;
       if (!due || due > (now + 500)) continue;
       armedDue++;
       const r = await robeEnqueueAuto(nome, 'fallback_missed_arm');
-      if (r && r.ok) enq++;
-      if (enq >= 1) break;
+      if (r && r.ok) {
+        enq++;
+        recoverSource = 'missed_arm';
+        break;
+      }
+      if (r && String(r.reason || '') === 'not_working') {
+        try { await robeSetAwaitingEnqueue(nome, true, 'fallback_arm_not_working'); } catch {}
+      }
     }
+
+    // Pass 2: Pronto engessado (cooldown 0, Virtus/trabalhando, fora da fila)
+    if (enq < 1) {
+      for (const nome of nomes) {
+        try {
+          if (robeQueue.inQueue(nome) || robeQueue.isActive(nome)) continue;
+          const ctrl = controllers.get(nome);
+          if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+          if (ctrl.humanControl === true || ctrl.configurando === true) continue;
+          if (!(ctrl.trabalhando || ctrl.virtus)) continue;
+          const due = Number(robeMeta[nome] && robeMeta[nome].robeArmedUntil || 0) || 0;
+          if (due > (now + 500)) continue; // ainda armado no futuro — deixa o timer
+          let left = 0;
+          try { left = Number(robeCooldownLeft(nome) || 0) || 0; } catch { left = 0; }
+          if (left > 0) continue;
+          prontoCandidates++;
+          const r = await robeEnqueueAuto(nome, 'fallback_pronto_recover');
+          if (r && r.ok) {
+            enq++;
+            recoverSource = 'pronto_recover';
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'robe_pronto_recovered',
+                nome: String(nome),
+                source: 'fallback_pronto_recover'
+              });
+            } catch {}
+            break;
+          }
+        } catch {}
+      }
+    }
+
     try {
       provisionAudit.append({
         ts: Date.now(),
         event: 'robe_fallback_light_tick',
         scanned: nomes.length,
         armedDue,
+        prontoCandidates,
         enqueued: enq,
+        recoverSource,
         fallbackMs: ROBE_TICK_FALLBACK_MS
       });
     } catch {}
-    return { ok: true, enqueued: enq, scanned: nomes.length, armedDue };
+    return {
+      ok: true,
+      enqueued: enq,
+      scanned: nomes.length,
+      armedDue,
+      prontoCandidates,
+      recoverSource
+    };
   } catch (e) {
     return { ok: false, reason: String((e && e.message) || e || 'err').slice(0, 80) };
   } finally {
@@ -9222,6 +9293,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
               ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
+              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
             } catch {
               ctrl.virtus = null;
               ctrl.trabalhando = false;
@@ -9242,6 +9314,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
               }
               ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
+              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
             } catch (e) {
               ctrl.virtus = null;
               ctrl.trabalhando = false;
@@ -10805,6 +10878,7 @@ const handlers = {
               ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch });
               ctrl.trabalhando = true;
               try { unfreezeCooldownIfWorking(nome); } catch {}
+              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
             }
           }
         } catch {}
@@ -12768,6 +12842,7 @@ const handlers = {
         if (automationAllowed(ctrl)) {
           ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl.trabalhando = true;
+          try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
         }
         try { unfreezeCooldownIfWorking(nome); } catch {}
       } else {
@@ -12986,6 +13061,7 @@ const handlers = {
                   ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
+                  try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
                 } catch {
                   ctrl.virtus = null;
                   ctrl.trabalhando = false;
@@ -13006,6 +13082,7 @@ const handlers = {
                   }
                   ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
+                  try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
                 } catch (e) {
                   ctrl.virtus = null;
                   ctrl.trabalhando = false;
@@ -17223,6 +17300,9 @@ async function nurseTick() {
             try { await stopVirtus(nome); } catch {}
           }
         } catch {}
+        // Gatilho Robe: open-all/finalize liga virtus=on SEM passar por start_work.
+        // Com GLOBAL_TICK=0, esse é o momento em que Pronto precisa entrar na fila.
+        const wasWorking = !!(ctrl.trabalhando === true && ctrl.virtus);
         try {
           ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
@@ -17238,6 +17318,9 @@ async function nurseTick() {
               }
             }
           } catch {}
+          if (!wasWorking && ctrl.trabalhando === true) {
+            try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
+          }
         } catch (e) {
           try {
             const now = Date.now();
