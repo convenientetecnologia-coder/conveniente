@@ -2027,6 +2027,159 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ====== Renovar classificados + fechar (modo diário renew_window_close_open) ======
+  app.post('/api/perfis/renew-then-close', async (req, res) => {
+    const lockOwner = `renew_then_close:${Date.now()}`;
+    const by = String(req.headers && (req.headers['x-operator'] || req.headers['X-Operator']) || 'daily_window_scheduler');
+    try {
+      try {
+        provisionAudit.append({
+          event: 'renew_then_close_api_called',
+          by,
+          lockOwner,
+          ip: (req && (req.ip || (req.socket && req.socket.remoteAddress))) ? String(req.ip || req.socket.remoteAddress) : null
+        });
+      } catch {}
+
+      try {
+        try { provisionLock.release({ force: true }); } catch {}
+        const lk = provisionLock.tryAcquire({
+          owner: lockOwner,
+          ttlMs: 4 * 60 * 60 * 1000,
+          meta: { kind: 'renew_then_close', by: String(by || '').slice(0, 120) }
+        });
+        if (!lk || !lk.ok) {
+          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+          return res.json({ ok: false, error: `renew_then_close_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+        }
+      } catch (e) {
+        return res.json({ ok: false, error: `renew_then_close_lock_error ${(e && e.message) || String(e)}` });
+      }
+
+      opsState.begin('renew_then_close', { total: 0, done: 0, ok: 0, fail: 0, current: 'renew_shard' });
+
+      // 1) Broadcast: cada worker renova (1 conta por vez) e fecha após renovar.
+      let shardResult = null;
+      try {
+        shardResult = await workerClient.sendWorkerCommand(
+          'renew-listings-shard',
+          { closeAfter: true },
+          { timeoutMs: 4 * 60 * 60 * 1000 }
+        );
+      } catch (e) {
+        shardResult = { ok: false, error: (e && e.message) || String(e) };
+      }
+
+      const renewedOk = Number(shardResult && shardResult.renewedOk || 0) || 0;
+      const renewedFail = Number(shardResult && shardResult.renewedFail || 0) || 0;
+      const renewedNone = Number(shardResult && shardResult.renewedNone || 0) || 0;
+      const skipped = Number(shardResult && shardResult.skipped || 0) || 0;
+
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'renew_then_close_shard_result',
+          by,
+          lockOwner,
+          ok: !!(shardResult && shardResult.ok !== false),
+          renewedOk,
+          renewedFail,
+          renewedNone,
+          skipped,
+          error: shardResult && shardResult.error ? String(shardResult.error).slice(0, 180) : null
+        });
+      } catch {}
+
+      // 2) Close-all residual (desired limpo + browsers remanescentes / skipped humano).
+      opsState.update('renew_then_close', { current: 'close_all' });
+      let closeOk = 0;
+      let closeFail = 0;
+      const perfisArr = fileStore.loadPerfisJson() || [];
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        if (desired._openAll && desired._openAll.active === true) {
+          desired._openAll = {
+            ...(desired._openAll || {}),
+            active: false,
+            cancelledAt: Date.now(),
+            cancelledReason: 'renew_then_close'
+          };
+        }
+        desired._autoOpen = desired._autoOpen || {};
+        desired._autoOpen.enabled = false;
+        desired._autoOpen.changedAt = Date.now();
+        desired._autoOpen.changedBy = String(by || 'renew_then_close').slice(0, 120);
+        for (const p of perfisArr) {
+          if (!p || !p.nome) continue;
+          const nome = p.nome;
+          desired.perfis[nome] = {
+            ...(desired.perfis[nome] || {}),
+            active: false,
+            virtus: 'off',
+            humanHold: false
+          };
+        }
+        return desired;
+      });
+
+      for (const p of perfisArr) {
+        const nome = p && p.nome;
+        if (!nome) continue;
+        opsState.update('renew_then_close', { current: nome });
+        let okDeactivate = false;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const r = await workerClient.sendWorkerCommand(
+              'deactivate',
+              { nome, reason: 'renew_then_close_final' },
+              { timeoutMs: 90000 }
+            );
+            okDeactivate = !!(r && r.ok);
+            if (okDeactivate) break;
+          } catch {}
+          await new Promise(r => setTimeout(r, 800));
+        }
+        if (okDeactivate) closeOk++; else closeFail++;
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      const ok =
+        !!(shardResult && shardResult.ok !== false) &&
+        (renewedFail === 0 || (renewedOk + renewedNone + skipped) > 0);
+      opsState.finish('renew_then_close', {
+        success: ok,
+        renewedOk,
+        renewedFail,
+        renewedNone,
+        skipped,
+        closedOk: closeOk,
+        closedFail: closeFail,
+        current: null
+      });
+      return res.json({
+        ok,
+        renewedOk,
+        renewedFail,
+        renewedNone,
+        skipped,
+        closedOk: closeOk,
+        closedFail: closeFail,
+        shard: shardResult && typeof shardResult === 'object'
+          ? {
+              total: Number(shardResult.total || 0) || 0,
+              results: Array.isArray(shardResult.results) ? shardResult.results.slice(0, 300) : []
+            }
+          : null,
+        error: ok ? null : ((shardResult && shardResult.error) ? String(shardResult.error) : 'renew_then_close_partial_fail')
+      });
+    } catch (e) {
+      try { opsState.finish('renew_then_close', { success: false, error: (e && e.message) || String(e), current: null }); } catch {}
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    } finally {
+      try { provisionLock.release({ owner: lockOwner }); } catch {}
+    }
+  });
+
   // ====== PATCH — trocar cidade do perfil (atômico + apply em runtime) ======
   app.patch('/api/perfis/:nome/cidade', async (req, res) => {
     const nome = req.params.nome;

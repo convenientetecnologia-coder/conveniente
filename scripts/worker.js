@@ -233,6 +233,7 @@ const fotos        = require('./fotos.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const robePostPublishId = require('./robePostPublishId.js');
+const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
@@ -295,6 +296,7 @@ function isProfileHumanHeld(nome) {
   try {
     const ctrl = controllers.get(n);
     if (ctrl && ctrl.humanControl === true) return true;
+    if (ctrl && ctrl.renewInFlight === true) return true;
   } catch {}
   try {
     // Fonte declarativa: desired.perfis[nome].humanHold (mesmo se humanControl já foi limpo).
@@ -305,6 +307,152 @@ function isProfileHumanHeld(nome) {
     if (row && row.humanHold === true) return true;
   } catch {}
   return false;
+}
+
+async function persistRenovadosLastCount(nome, count) {
+  const n = String(nome || '').trim();
+  const c = Math.max(0, Math.floor(Number(count) || 0));
+  if (!n) return { ok: false };
+  try {
+    await manifestStore.update(n, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.renovadosLastCount = c;
+      man.accountFlags.renovadosAt = Date.now();
+      return man;
+    });
+    try { __accountFlagsCache.delete(n); } catch {}
+    return { ok: true, count: c };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+/**
+ * Executa renovação em uma conta aberta.
+ * mode=manual: não fecha browser, mantém humanHold.
+ * mode=auto: arma hold só na page (anti-enforcer), renovar, depois caller fecha.
+ */
+async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = false } = {}) {
+  const n = String(nome || '').trim();
+  const ctrl = controllers.get(n);
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+    return { ok: false, error: 'browser_not_connected', renewedCount: 0 };
+  }
+  if (ctrl.renewInFlight === true) {
+    return { ok: false, error: 'renew_already_in_flight', renewedCount: 0 };
+  }
+
+  // Auto: não atropelar humano invocado.
+  if (mode === 'auto') {
+    try {
+      if (ctrl.humanControl === true) {
+        return { ok: true, skipped: true, reason: 'human_control', renewedCount: 0 };
+      }
+      const desired = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} });
+      if (desired && desired.perfis && desired.perfis[n] && desired.perfis[n].humanHold === true) {
+        return { ok: true, skipped: true, reason: 'human_hold', renewedCount: 0 };
+      }
+    } catch {}
+  }
+
+  // Exclusão mútua com Robe: espera ciclo em voo (mesma mainPage).
+  try {
+    const waitTimeout = mode === 'auto' ? 90 * 1000 : 45 * 1000;
+    const started = Date.now();
+    while ((robeMeta[n] && robeMeta[n].emExecucao) && (Date.now() - started < waitTimeout)) {
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    if (robeMeta[n] && robeMeta[n].emExecucao) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'renew_listings_robe_wait_timeout',
+          nome: n,
+          mode: String(mode || '')
+        });
+      } catch {}
+      if (mode === 'auto') {
+        return { ok: true, skipped: true, reason: 'robe_in_flight', renewedCount: 0 };
+      }
+    }
+  } catch {}
+
+  ctrl.renewInFlight = true;
+  const page = ctrl.mainPage || null;
+  if (!page) {
+    ctrl.renewInFlight = false;
+    return { ok: false, error: 'no_main_page', renewedCount: 0 };
+  }
+
+  let armedHold = false;
+  try {
+    // Ordem known-good (igual invoke_human): armar hold ANTES de stopVirtus
+    // para fechar orphan do marketplace_enforcer.
+    try {
+      await syncDeltaHumanHoldBrowserGuard(n, true, { reason: mode === 'auto' ? 'renew_auto' : 'renew_manual' });
+      armedHold = true;
+    } catch {}
+    try {
+      await fileStore.withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[n] = { ...(desired.perfis[n] || {}), virtus: 'off' };
+        return desired;
+      });
+    } catch {}
+    try { await stopVirtus(n); } catch {}
+
+    const r = await marketplaceRenewListings.runMarketplaceRenewListings({
+      page,
+      nome: n,
+      mode,
+      onProgress: null,
+      onAudit: (evt) => {
+        try { provisionAudit.append({ ts: Date.now(), ...evt }); } catch {}
+      }
+    });
+
+    const count = Math.max(0, Number(r && r.renewedCount) || 0);
+    // Só sobrescreve a pill quando houve renovação real (não zera a última contagem se FB não tinha renováveis).
+    if (r && r.ok && count > 0) {
+      try { await persistRenovadosLastCount(n, count); } catch {}
+    }
+
+    if (closeAfter && mode === 'auto') {
+      try {
+        await handlers.deactivate({ nome: n, reason: 'renew_then_close' });
+      } catch (e) {
+        return {
+          ok: !!(r && r.ok),
+          renewedCount: count,
+          reason: r && r.reason,
+          error: r && r.error,
+          closeError: (e && e.message) ? String(e.message) : String(e)
+        };
+      }
+    }
+
+    return {
+      ok: !!(r && r.ok),
+      renewedCount: count,
+      reason: r && r.reason ? String(r.reason) : null,
+      error: r && r.error ? String(r.error) : null,
+      skipped: false
+    };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), renewedCount: 0 };
+  } finally {
+    try { ctrl.renewInFlight = false; } catch {}
+    // Manual: mantém hold do operador. Auto: limpa flag de page (desired.humanHold nunca foi setado).
+    if (mode === 'auto' && armedHold) {
+      try {
+        // Só limpa se operador não estiver em human hold.
+        if (!(ctrl.humanControl === true)) {
+          await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done' });
+        }
+      } catch {}
+    }
+  }
 }
 
 function currentVirtusEngine(autoMode) {
@@ -2080,6 +2228,45 @@ async function _installOverlayOnPage(nome, page) {
       });
     } catch {}
 
+    // Renovar classificados — motor Node completo (Gerenciar → Renovar), sem fechar browser.
+    try {
+      await page.exposeFunction('__ctHumanOverlayRenewListings', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'renew_listings' }); } catch {}
+        try {
+          const r = await handlers['renew-listings']({ nome, mode: 'manual', closeAfter: false });
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'human_overlay_action_done',
+              nome: String(nome || ''),
+              action: 'renew_listings',
+              ok: !!(r && r.ok),
+              renewedCount: Number(r && r.renewedCount || 0) || 0,
+              reason: r && r.reason ? String(r.reason) : null,
+              error: r && r.error ? String(r.error).slice(0, 180) : null,
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+          return r && typeof r === 'object' ? r : { ok: false, error: 'renew_listings_failed', renewedCount: 0 };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'human_overlay_action_done',
+              nome: String(nome || ''),
+              action: 'renew_listings',
+              ok: false,
+              error: msg.slice(0, 180),
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+          return { ok: false, error: msg, renewedCount: 0 };
+        }
+      });
+    } catch {}
+
     // Canal de log do overlay (provas de clique em Copiar/Retomar/Mover/Minimizar).
     try {
       await page.exposeFunction('__ctHumanOverlayLog', async (evt) => {
@@ -2170,7 +2357,7 @@ async function _installOverlayOnPage(nome, page) {
                   <div class="btns">
                     <button id="copyLogin">Copiar login</button>
                     <button id="copyPass">Copiar senha</button>
-                    <button id="toggleScroll" title="Ativar/desativar rolagem automática nesta aba">Ativar scroll</button>
+                    <button id="renewListings" title="Gerenciar classificados → scroll → selecionar → renovar (não fecha o navegador)">Renovar classificado</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
                     <button id="verifyId" title="Envia documento na 1ª ação necessária (não marca ID-sim do dia)">Verificar ID</button>
                     <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
@@ -2627,9 +2814,31 @@ async function _installOverlayOnPage(nome, page) {
               const ok = await copyText(d.password || '');
               try { $('hint').textContent = ok ? 'Senha copiada.' : 'Falha ao copiar senha.'; } catch {}
             });
-            $('toggleScroll')?.addEventListener('click', async () => {
-              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'scroll_toggle_click' }); } catch {}
-              toggleOverlayAutoScroll();
+            $('renewListings')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'renew_listings_click' }); } catch {}
+              try { stopOverlayAutoScroll('renew_listings'); } catch {}
+              try { $('hint').textContent = 'Renovando classificados... (pode levar alguns minutos)'; } catch {}
+              try { $('renewListings').disabled = true; } catch {}
+              try {
+                if (typeof window.__ctHumanOverlayRenewListings === 'function') {
+                  const r = await window.__ctHumanOverlayRenewListings();
+                  if (r && r.ok) {
+                    const n = Number(r.renewedCount || 0) || 0;
+                    try {
+                      $('hint').textContent = (r.reason === 'none_renewable')
+                        ? 'Nenhum classificado renovável neste momento.'
+                        : (`Renovação concluída: ${n} classificado(s).`);
+                    } catch {}
+                  } else {
+                    try { $('hint').textContent = 'Falha ao renovar: ' + String((r && r.error) ? r.error : 'unknown'); } catch {}
+                  }
+                } else {
+                  try { $('hint').textContent = 'Falha: binding renovar indisponível. Aguarde resincronização.'; } catch {}
+                }
+              } catch (e) {
+                try { $('hint').textContent = 'Falha ao renovar classificados.'; } catch {}
+              }
+              try { $('renewListings').disabled = false; } catch {}
             });
             $('hide')?.addEventListener('click', () => {
               try { stopOverlayAutoScroll('hide'); } catch {}
@@ -7765,6 +7974,9 @@ async function robeIsAutoEnqueueEligible(nome, opts = {}) {
     return { ok: false, reason: 'ram_backoff' };
   }
   const ctrl = controllers.get(n);
+  try {
+    if (ctrl && ctrl.renewInFlight === true) return { ok: false, reason: 'renew_in_flight' };
+  } catch {}
   // Virtus Online no painel = ctrl.virtus; Liberar aceita trabalhanco OU virtus
   // (evita falso not_working com UI "Virtus Online" + Robe Pronto).
   const working = !!(
@@ -11967,6 +12179,120 @@ const handlers = {
     });
   },
 
+  /** Renovar classificados (1 conta). Manual = overlay; auto = nightly. */
+  async ['renew-listings']({ nome, mode, closeAfter }) {
+    const n = String(nome || '').trim();
+    if (!n) return { ok: false, error: 'nome_ausente', renewedCount: 0 };
+    return lockProfileAction(n, async () => {
+      const m = String(mode || 'manual').trim().toLowerCase() === 'auto' ? 'auto' : 'manual';
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'renew_listings_handler_begin',
+          nome: n,
+          mode: m,
+          closeAfter: !!closeAfter
+        });
+      } catch {}
+      const r = await runRenewListingsForProfile(n, {
+        mode: m,
+        closeAfter: m === 'auto' && closeAfter === true
+      });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'renew_listings_handler_done',
+          nome: n,
+          mode: m,
+          ok: !!(r && r.ok),
+          skipped: !!(r && r.skipped),
+          renewedCount: Number(r && r.renewedCount || 0) || 0,
+          reason: r && r.reason ? String(r.reason) : null,
+          error: r && r.error ? String(r.error).slice(0, 180) : null
+        });
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return r;
+    });
+  },
+
+  /**
+   * Processa renovação de TODAS as contas abertas neste shard (1 por vez).
+   * Cluster: master faz broadcast; single-worker: 1 chamada.
+   */
+  async ['renew-listings-shard']({ closeAfter } = {}) {
+    const doClose = closeAfter !== false;
+    const names = [];
+    try {
+      for (const [nome, ctrl] of controllers.entries()) {
+        if (!nome) continue;
+        if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+        names.push(String(nome));
+      }
+    } catch {}
+    names.sort();
+    const results = [];
+    let renewedOk = 0;
+    let renewedFail = 0;
+    let renewedNone = 0;
+    let skipped = 0;
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'renew_listings_shard_begin',
+        total: names.length,
+        names: names.slice(0, 200),
+        closeAfter: doClose,
+        pid: process.pid
+      });
+    } catch {}
+
+    for (const nome of names) {
+      try {
+        const r = await lockProfileAction(nome, async () => {
+          return runRenewListingsForProfile(nome, { mode: 'auto', closeAfter: doClose });
+        });
+        results.push({ nome, ...(r && typeof r === 'object' ? r : { ok: false, error: 'no_result' }) });
+        if (r && r.skipped) skipped += 1;
+        else if (r && r.ok && Number(r.renewedCount || 0) > 0) renewedOk += 1;
+        else if (r && r.ok && (r.reason === 'none_renewable' || Number(r.renewedCount || 0) === 0)) renewedNone += 1;
+        else renewedFail += 1;
+      } catch (e) {
+        renewedFail += 1;
+        results.push({
+          nome,
+          ok: false,
+          error: (e && e.message) ? String(e.message).slice(0, 180) : String(e)
+        });
+      }
+      // Respiro entre contas (FB / Chrome)
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    try { await snapshotStatusAndWrite(); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'renew_listings_shard_done',
+        total: names.length,
+        renewedOk,
+        renewedFail,
+        renewedNone,
+        skipped,
+        pid: process.pid
+      });
+    } catch {}
+    return {
+      ok: true,
+      total: names.length,
+      renewedOk,
+      renewedFail,
+      renewedNone,
+      skipped,
+      results
+    };
+  },
+
   async ['human-resume']({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
@@ -12895,6 +13221,15 @@ const handlers = {
         ? String(man.accountFlags.robeIdDocDoneDay)
         : null;
       const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
+      const renovadosLastCount = (() => {
+        try {
+          const n = Number(man && man.accountFlags && man.accountFlags.renovadosLastCount);
+          return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+        } catch { return 0; }
+      })();
+      const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
+        ? Number(man.accountFlags.renovadosAt) || null
+        : null;
       const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
       const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
       const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -13007,6 +13342,8 @@ const handlers = {
         identityNextCheckAt,
         robeIdDocDoneDay,
         robeIdDocDoneToday,
+        renovadosLastCount,
+        renovadosAt,
         appealSubmitted,
         appealSubmittedAt,
         appealNextCheckAt,
@@ -13427,6 +13764,15 @@ const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDo
   ? String(man.accountFlags.robeIdDocDoneDay)
   : null;
 const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
+const renovadosLastCount = (() => {
+  try {
+    const n = Number(man && man.accountFlags && man.accountFlags.renovadosLastCount);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  } catch { return 0; }
+})();
+const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
+  ? Number(man.accountFlags.renovadosAt) || null
+  : null;
 const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
@@ -13528,6 +13874,8 @@ perfis.push({
   identityNextCheckAt,
   robeIdDocDoneDay,
   robeIdDocDoneToday,
+  renovadosLastCount,
+  renovadosAt,
   appealSubmitted,
   appealSubmittedAt,
   appealNextCheckAt,
@@ -15197,8 +15545,9 @@ async function nurseTick() {
         const shouldPauseVirtus =
           kind === 'open_all_map' ||
           kind === 'close_all' ||
+          kind === 'renew_then_close' ||
           // compat retroativa (locks antigos sem meta.kind)
-          (!kind && owner && /^(open_all_map:|close_all:)/i.test(owner));
+          (!kind && owner && /^(open_all_map:|close_all:|renew_then_close:)/i.test(owner));
 
         if (!shouldPauseVirtus) {
           // Não pausar virtus para outros locks (ex.: stock_provision).
@@ -16149,6 +16498,7 @@ async function nurseTick() {
                   !!(wantNow && wantNow.active === true) &&
                   !!ctrlNow &&
                   ctrlNow.humanControl !== true &&
+                  ctrlNow.renewInFlight !== true &&
                   ctrlNow.configurando !== true &&
                   ctrlNow.trabalhando !== true;
                 if (shouldHealVirtusOff) {

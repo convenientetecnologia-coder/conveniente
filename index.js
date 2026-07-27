@@ -3493,7 +3493,8 @@ function __buildServerEventTelemetry(status) {
     login_cookies_failed: 0,
     appeal_submitted: 0,
     // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
-    id_sim: 0
+    id_sim: 0,
+    renovados: 0
   };
 
   for (const p of perfis) {
@@ -3512,6 +3513,7 @@ function __buildServerEventTelemetry(status) {
     if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
     if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
     if (p.robeIdDocDoneToday === true) flagsAgg.id_sim++;
+    if (Number(p.renovadosLastCount || 0) > 0) flagsAgg.renovados++;
   }
   accountsAgg.lr_total = ['captcha', 'login', 'session', 'two_factor', 'identity', 'consent', 'login_other']
     .reduce((acc, k) => acc + (Number(accountsAgg[k] || 0) || 0), 0);

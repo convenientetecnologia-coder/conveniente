@@ -10,8 +10,29 @@ const path = require("path");
 const LOCK_PATH = path.join(__dirname, "..", "dados", "provision_lock.json");
 // Hard safety: mesmo que alguém grave um lock inválido (sem untilMs),
 // não pode virar "lock infinito" e bloquear Robe/Virtus por horas.
-const HARD_MAX_TTL_MS = 60 * 60 * 1000; // 60min
-// Hardening: lock pode incluir pid (auto-recover pós-crash).
+const HARD_MAX_TTL_MS = 60 * 60 * 1000; // 60min (default)
+// Operações longas noturnas (renovar centenas de classificados + close) precisam de teto maior.
+const HARD_MAX_TTL_BY_KIND = {
+  renew_then_close: 4 * 60 * 60 * 1000,
+  close_all: 2 * 60 * 60 * 1000,
+  open_all_map: 2 * 60 * 60 * 1000
+};
+
+function _maxTtlForKind(kind) {
+  try {
+    const k = String(kind || "").trim().toLowerCase();
+    if (k && HARD_MAX_TTL_BY_KIND[k]) return HARD_MAX_TTL_BY_KIND[k];
+  } catch {}
+  return HARD_MAX_TTL_MS;
+}
+
+function _kindFromLock(lock) {
+  try {
+    return String((lock && lock.meta && lock.meta.kind) || "").trim().toLowerCase();
+  } catch {
+    return "";
+  }
+}// Hardening: lock pode incluir pid (auto-recover pós-crash).
 // IMPORTANTE: compat com lock antigo (sem pid) DEVE ser mantida para evitar "desencontro" entre versões
 // (um lado cria lock sem pid e o outro invalidaria e liberaria no meio do provision).
 // Portanto, por padrão NÃO exigimos pid; apenas usamos pid quando existir.
@@ -60,12 +81,14 @@ function get() {
 
   // Se o arquivo existe, mas está inválido/corrompido (ex.: sem untilMs),
   // trate como expirado e limpe imediatamente.
+  const kind = _kindFromLock(cur);
+  const hardMax = _maxTtlForKind(kind);
   const invalid =
     !owner ||
     since <= 0 ||
     until <= 0 ||
     until <= since ||
-    (until - since) > HARD_MAX_TTL_MS ||
+    (until - since) > hardMax ||
     (REQUIRE_PID && (!pid || pid <= 0));
 
   // Auto-recover: se tem pid mas o processo morreu (crash), não pode bloquear o sistema.
@@ -122,9 +145,11 @@ function tryAcquire({ owner, ttlMs = 9 * 60 * 1000, meta } = {}) {
         if (wantUntil > curUntil) {
           const next = { ...(cur.lock || {}) };
           next.untilMs = wantUntil;
-          // hard safety (não permite TTL infinito)
-          if (next.sinceMs && next.untilMs && (next.untilMs - next.sinceMs) > HARD_MAX_TTL_MS) {
-            next.untilMs = next.sinceMs + HARD_MAX_TTL_MS;
+          // hard safety (não permite TTL infinito); teto por kind
+          const kind = _kindFromLock(next) || _kindFromLock({ meta }) || "";
+          const hardMax = _maxTtlForKind(kind);
+          if (next.sinceMs && next.untilMs && (next.untilMs - next.sinceMs) > hardMax) {
+            next.untilMs = next.sinceMs + hardMax;
           }
           _writeJsonAtomic(LOCK_PATH, next);
           return { ok: true, lock: next, reentrant: true, extended: true };
@@ -135,10 +160,13 @@ function tryAcquire({ owner, ttlMs = 9 * 60 * 1000, meta } = {}) {
     return { ok: false, error: "busy", lock: cur.lock };
   }
   const t = Math.max(10_000, Number(ttlMs) || 0);
+  const kind = String((meta && meta.kind) || "").trim().toLowerCase();
+  const hardMax = _maxTtlForKind(kind);
+  const sinceMs = now();
   const lock = {
     owner: o,
-    sinceMs: now(),
-    untilMs: now() + t,
+    sinceMs,
+    untilMs: sinceMs + Math.min(t, hardMax),
     // pid do processo que adquiriu o lock (auto-recover pós-crash)
     pid: process.pid,
     meta: (meta && typeof meta === "object") ? { ...meta, pid: process.pid } : { pid: process.pid }

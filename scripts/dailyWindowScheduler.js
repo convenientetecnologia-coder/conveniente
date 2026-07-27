@@ -158,7 +158,59 @@ async function waitAllClosed({ timeoutMs = 8 * 60 * 1000 } = {}) {
   return { ok: activeRemaining.length === 0, activeRemaining };
 }
 
-async function runCloseRoutine() {
+async function runCloseRoutine({ renewFirst = false } = {}) {
+  if (renewFirst) {
+    // Renova classificados nos browsers abertos (1 conta/worker), depois fecha.
+    // Timeout generoso: FB lento + dezenas/centenas de anúncios por conta.
+    const renew = await httpJson(
+      `http://127.0.0.1:${localPort}/api/perfis/renew-then-close`,
+      {},
+      4 * 60 * 60 * 1000
+    );
+    if (!renew || renew.ok !== true) {
+      // Mesmo se renew falhar parcialmente, ainda tenta fechar tudo (dormir).
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_renew_then_close_result",
+          ok: false,
+          error: (renew && renew.error) ? String(renew.error) : "renew_then_close_failed",
+          renewedOk: Number(renew && renew.renewedOk || 0) || 0,
+          renewedFail: Number(renew && renew.renewedFail || 0) || 0,
+          renewedNone: Number(renew && renew.renewedNone || 0) || 0
+        });
+      } catch {}
+    } else {
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_renew_then_close_result",
+          ok: true,
+          renewedOk: Number(renew.renewedOk || 0) || 0,
+          renewedFail: Number(renew.renewedFail || 0) || 0,
+          renewedNone: Number(renew.renewedNone || 0) || 0,
+          closedOk: Number(renew.closedOk || 0) || 0
+        });
+      } catch {}
+    }
+    // renew-then-close já dispara close-all no final; ainda assim verificamos.
+    let verifyRenew = await waitAllClosed({});
+    if (!verifyRenew.ok) {
+      await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, { origin: "daily_window_renew_retry" }, 20 * 60 * 1000);
+      verifyRenew = await waitAllClosed({});
+    }
+    if (!verifyRenew.ok) {
+      return {
+        ok: false,
+        error: "close_all_not_fully_closed_after_renew",
+        activeRemaining: verifyRenew.activeRemaining,
+        renew
+      };
+    }
+    saveState({ lastCloseAt: now(), lastError: null });
+    return { ok: true, renewFirst: true, renew };
+  }
+
   const first = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, {}, 20 * 60 * 1000);
   if (!first || first.ok !== true) {
     return { ok: false, error: (first && first.error) ? String(first.error) : "close_all_failed" };
@@ -314,7 +366,8 @@ async function tick() {
     const cfg = serverConfig.readServerConfigEffective({});
     const dw = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
     const mode = String(dw.executionMode || "").trim().toLowerCase();
-    const windowModeEnabled = (mode === "window_close_open") && dw.enabled === true;
+    const windowModeEnabled =
+      (mode === "window_close_open" || mode === "renew_window_close_open") && dw.enabled === true;
     if (!windowModeEnabled) {
       const cur = state || loadState();
       if (Number(cur.nextCloseAt || 0) > 0 || Number(cur.nextOpenAt || 0) > 0 || String(cur.scheduleSignature || "").length) {
@@ -368,7 +421,8 @@ async function tick() {
 
     if (dueClose) {
       saveState({ inProgress: true });
-      const rr = await runCloseRoutine();
+      const renewFirst = mode === "renew_window_close_open";
+      const rr = await runCloseRoutine({ renewFirst });
       const nextCloseAt = computeNextRandomAtFromWindow({
         nowTs: now(),
         startMin: meta.closeWindowStartMin,
@@ -385,6 +439,7 @@ async function tick() {
           ts: now(),
           event: "daily_window_close",
           ok: !!(rr && rr.ok === true),
+          renewFirst: !!renewFirst,
           error: rr && rr.error ? String(rr.error) : null,
           nextCloseAt
         });

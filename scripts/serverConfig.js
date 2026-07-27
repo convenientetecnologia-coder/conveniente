@@ -337,7 +337,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const openWindowEndHour = clamp(Math.floor(toNum(daily.openWindowEndHour, DEFAULTS.dailyWindow.openWindowEndHour)), 0, 23);
   const openWindowEndMinute = clamp(Math.floor(toNum(daily.openWindowEndMinute, DEFAULTS.dailyWindow.openWindowEndMinute)), 0, 59);
   const executionModeRaw = String(daily.executionMode || "").trim().toLowerCase();
-  const executionMode = (executionModeRaw === "window_close_open") ? "window_close_open" : "always_on_24h";
+  let executionMode = "always_on_24h";
+  if (executionModeRaw === "window_close_open") executionMode = "window_close_open";
+  else if (executionModeRaw === "renew_window_close_open") executionMode = "renew_window_close_open";
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -406,7 +408,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       modemPassword
     },
     dailyWindow: {
-      enabled: daily.enabled === true || executionMode === "window_close_open",
+      enabled: daily.enabled === true || executionMode === "window_close_open" || executionMode === "renew_window_close_open",
       executionMode,
       closeWindowStartHour,
       closeWindowStartMinute,
@@ -556,7 +558,7 @@ function validateServerConfigPayload(payload) {
     }
     if (daily.executionMode !== undefined) {
       const mode = String(daily.executionMode || "").trim().toLowerCase();
-      if (!["always_on_24h", "window_close_open"].includes(mode)) {
+      if (!["always_on_24h", "window_close_open", "renew_window_close_open"].includes(mode)) {
         errors.push("dailyWindow.executionMode_invalido");
       }
     }

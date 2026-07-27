@@ -405,6 +405,33 @@ function createCluster() {
         merged.resumedNames = Array.from(new Set(merged.resumedNames.filter(Boolean)));
         return merged;
       }
+      if (type === 'renew-listings-shard') {
+        // Broadcast: cada worker renova as contas abertas do seu shard (1 por vez).
+        const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
+        const merged = {
+          ok: results.every(r => r && r.ok !== false),
+          results: [],
+          total: 0,
+          renewedOk: 0,
+          renewedFail: 0,
+          renewedNone: 0,
+          skipped: 0
+        };
+        for (const r of results) {
+          if (!r || typeof r !== 'object') continue;
+          merged.total += Number(r.total || 0) || 0;
+          merged.renewedOk += Number(r.renewedOk || 0) || 0;
+          merged.renewedFail += Number(r.renewedFail || 0) || 0;
+          merged.renewedNone += Number(r.renewedNone || 0) || 0;
+          merged.skipped += Number(r.skipped || 0) || 0;
+          if (Array.isArray(r.results)) merged.results.push(...r.results);
+        }
+        if (!merged.ok && results.length) {
+          const firstErr = results.find(r => r && r.ok === false);
+          if (firstErr && firstErr.error) merged.error = String(firstErr.error);
+        }
+        return merged;
+      }
     }
     if (type === 'get-status' && !nome) {
       const allPerfis = fileStore.loadPerfisJson() || [];

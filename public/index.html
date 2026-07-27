@@ -1263,6 +1263,7 @@
           <label>Modo diário de operação</label>
           <select id="srvDailyMode">
             <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
+            <option value="renew_window_close_open">Renovar e fechar/abrir por janela aleatória</option>
             <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
           </select>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
@@ -1283,7 +1284,7 @@
               <input type="time" id="srvDailyOpenEndTime" />
             </label>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. No modo Renovar, na hora de fechar o sistema renova os classificados e só então fecha os navegadores.</div>
         </div>
         <div class="form-row">
           <label>Robe — tipo de trabalho</label>
@@ -1470,7 +1471,9 @@
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
-          dailyModeEl.value = (mode === 'window_close_open' || daily.enabled === true) ? 'window_close_open' : 'always_on_24h';
+          if (mode === 'renew_window_close_open') dailyModeEl.value = 'renew_window_close_open';
+          else if (mode === 'window_close_open' || daily.enabled === true) dailyModeEl.value = 'window_close_open';
+          else dailyModeEl.value = 'always_on_24h';
         }
         if (dailyCloseStartTimeEl) {
           const hh = String(Number(daily.closeWindowStartHour || 1)).padStart(2, '0');
@@ -1587,7 +1590,7 @@
           const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 420));
           const netAttempts = Math.floor(Number((netRotateAttemptsEl && netRotateAttemptsEl.value) || 5));
           const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'window_close_open').trim().toLowerCase();
-          const dailyEnabled = dailyMode === 'window_close_open';
+          const dailyEnabled = (dailyMode === 'window_close_open' || dailyMode === 'renew_window_close_open');
           const dailyCloseStartRaw = String((dailyCloseStartTimeEl && dailyCloseStartTimeEl.value) || '').trim();
           const dailyCloseEndRaw = String((dailyCloseEndTimeEl && dailyCloseEndTimeEl.value) || '').trim();
           const dailyOpenStartRaw = String((dailyOpenStartTimeEl && dailyOpenStartTimeEl.value) || '').trim();
@@ -1693,7 +1696,9 @@
             },
             dailyWindow: {
               enabled: dailyEnabled,
-              executionMode: dailyMode === 'window_close_open' ? 'window_close_open' : 'always_on_24h',
+              executionMode: (dailyMode === 'renew_window_close_open')
+                ? 'renew_window_close_open'
+                : (dailyMode === 'window_close_open' ? 'window_close_open' : 'always_on_24h'),
               closeWindowStartHour: closeStartHm.h,
               closeWindowStartMinute: closeStartHm.m,
               closeWindowEndHour: closeEndHm.h,
@@ -2565,6 +2570,12 @@
           titleRow.append(buildPill('ID - sim', 'good'));
         } else {
           titleRow.append(buildPill('ID - nao', 'info'));
+        }
+
+        // ------- Última renovação de classificados -------
+        {
+          const n = Math.floor(Number(p.renovadosLastCount || 0) || 0);
+          if (n > 0) titleRow.append(buildPill('Renovados - ' + n, 'good'));
         }
 
         // ------- COOLDOWN (ADICIONAL) -------

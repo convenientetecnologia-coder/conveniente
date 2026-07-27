@@ -108,6 +108,7 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     'invoke_human',
     'human-resume',
     'human-verify-id',
+    'renew-listings',
     'robe-play',
     'apply-city',
     'unfreeze'
