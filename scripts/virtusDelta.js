@@ -1962,12 +1962,37 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
 
   let stopped = false;
   let inFlight = false;
+  let kickTimer = null;
+
+  const isHumanBrowserHold = () => {
+    try {
+      return !!(page && page.__virtusDeltaHumanHold === true);
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const clearOutsideTimers = (guard = {}) => {
+    try {
+      page.__virtusDeltaMarketplaceGuard = {
+        ...guard,
+        marketplaceInactiveSince: 0,
+        outsideMessagesSince: 0,
+      };
+    } catch (_) {}
+  };
 
   const tick = async () => {
     if (stopped || inFlight) return;
     inFlight = true;
     try {
       if (page && page.__virtusDeltaReplyInFlight) {
+        return;
+      }
+      // Humano invocado: browser é do operador. Nunca puxar de volta para /messages.
+      // Flag na page sobrevive a orphan de setInterval se stopVirtus falhar/atrasar.
+      if (isHumanBrowserHold()) {
+        clearOutsideTimers((page && page.__virtusDeltaMarketplaceGuard) || {});
         return;
       }
       const currentUrl = String(page.url ? page.url() : "").toLowerCase();
@@ -1979,13 +2004,7 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
       // Reativar filtro aqui rouba a aba do reply e cria o loop visto nos logs
       // (activate → active_after=false → reactivate em todas as contas).
       if (__isMessengerThreadUrl(currentUrl)) {
-        try {
-          page.__virtusDeltaMarketplaceGuard = {
-            ...guard,
-            marketplaceInactiveSince: 0,
-            outsideMessagesSince: 0,
-          };
-        } catch (_) {}
+        clearOutsideTimers(guard);
         return;
       }
 
@@ -2005,6 +2024,11 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
         } catch (_) {}
         const outsideFor = now - outsideSince;
         if (outsideFor < DELTA_MARKETPLACE_RETURN_TO_MESSAGES_MS) return;
+        // Re-checa hold imediatamente antes do goto (invoke pode ter armado no meio do tick).
+        if (isHumanBrowserHold() || stopped) {
+          clearOutsideTimers((page && page.__virtusDeltaMarketplaceGuard) || {});
+          return;
+        }
         logInfo(
           `[virtusDelta][marketplace_enforcer] scope=${scope} action=return_messages reason=outside_messages outside_for_ms=${outsideFor} url=${currentUrl}`
         );
@@ -2080,7 +2104,8 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
     tick().catch(() => {});
   }, DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS);
   timer.unref?.();
-  setTimeout(() => tick().catch(() => {}), 2500).unref?.();
+  kickTimer = setTimeout(() => tick().catch(() => {}), 2500);
+  try { kickTimer.unref?.(); } catch (_) {}
   logInfo(
     `[virtusDelta][marketplace_enforcer] scope=${scope} status=armed interval_ms=${DELTA_MARKETPLACE_ENFORCER_INTERVAL_MS} fail_cooldown_ms=${DELTA_MARKETPLACE_ENFORCER_FAIL_COOLDOWN_MS}`
   );
@@ -2089,6 +2114,8 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
     stop: () => {
       stopped = true;
       try { clearInterval(timer); } catch (_) {}
+      try { if (kickTimer) clearTimeout(kickTimer); } catch (_) {}
+      kickTimer = null;
     },
   };
 }

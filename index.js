@@ -1674,7 +1674,30 @@ function __edgeIsDeltaReplyFinalSendStatus(status) {
 
 function __edgeIsDeltaReplySoftRequeueStatus(status) {
   const st = String(status || '').trim().toLowerCase();
-  return st === 'duplicate_inflight_skip' || st === 'queued';
+  return (
+    st === 'duplicate_inflight_skip' ||
+    st === 'queued' ||
+    st === 'human_control' ||
+    st === 'human_hold'
+  );
+}
+
+/** Conta com humano no volante: outbox não deve disparar IPC de digitação. */
+function __edgeIsProfileHumanHeldSync(nome) {
+  const target = String(nome || '').trim();
+  if (!target) return false;
+  try {
+    const desired = __readJsonFileSafe(path.join(__dirname, 'dados', 'desired.json')) || {};
+    const d = (desired.perfis && desired.perfis[target]) || desired[target] || null;
+    if (d && d.humanHold === true) return true;
+  } catch {}
+  try {
+    const st = __readJsonFileSafe(path.join(__dirname, 'dados', 'status.json'));
+    const perfis = (st && Array.isArray(st.perfis)) ? st.perfis : [];
+    const p = perfis.find((x) => String(x && x.nome || '').trim() === target);
+    if (p && (p.humanControl === true || p.humanHold === true)) return true;
+  } catch {}
+  return false;
 }
 
 function __edgeShouldDeadLetterDeltaReply({ rec, reason, error } = {}) {
@@ -2504,6 +2527,45 @@ async function __edgeRunDeltaReplyPump() {
             break;
           }
           // Segue o scan: outras contas podem estar ready.
+          continue;
+        }
+
+        // Humano invocado: browser do operador — não disparar digitação; refileira soft.
+        if (accountNome && __edgeIsProfileHumanHeldSync(accountNome)) {
+          if (__edgeDeferredOnceInRun.has(cmdId)) {
+            __edgeIncreaseDeltaReplyPumpBackoff();
+            __edgeScheduleDeltaReplyPumpRetry();
+            break;
+          }
+          __edgeDeferredOnceInRun.add(cmdId);
+          __edgeRequeueDeltaReplyRecordSync(rec, {
+            cmdId,
+            reason: 'human_control',
+            error: 'human_control',
+            burnRetry: false
+          });
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          __forensicEdgeEmit({
+            account_login: accountNome || null,
+            thread_key: String(rec.thread_key || '').trim() || null,
+            flow_stage: 'reverse_command_bus',
+            details: {
+              stage: 'ipc_dispatch_deferred_human_hold',
+              cmd_id: cmdId,
+              reason: 'human_control',
+              burn_retry: false
+            }
+          });
+          try {
+            const nowLog = Date.now();
+            const lastLog = Number(__edgeOfflineLogAtByCmd.get(cmdId) || 0) || 0;
+            if (!lastLog || (nowLog - lastLog) >= __EDGE_OFFLINE_LOG_THROTTLE_MS) {
+              __edgeOfflineLogAtByCmd.set(cmdId, nowLog);
+              logger.info(
+                `🟠 [OUTBOX] humano invocado — refileira nome=${accountNome} cmd=${cmdId}`
+              );
+            }
+          } catch {}
           continue;
         }
 

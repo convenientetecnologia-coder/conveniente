@@ -251,6 +251,62 @@ async function _stopVirtusRunnerMaybePromise(v) {
   return false;
 }
 
+/**
+ * Contrato Invocar humano ↔ Retomar:
+ * - hold=true: browser do operador; marketplace_enforcer NÃO pode goto /messages.
+ * - hold=false: automação reassume; limpa timers de "fora do inbox" para não yankar no 1º tick.
+ * Flag fica na page (sobrevive a orphan de setInterval se stopVirtus falhar).
+ */
+async function syncDeltaHumanHoldBrowserGuard(nome, hold, { reason = '' } = {}) {
+  const on = !!hold;
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, reason: 'no_browser' };
+  const mark = (page) => {
+    if (!page) return;
+    try { page.__virtusDeltaHumanHold = on; } catch {}
+    try {
+      const g = (page && page.__virtusDeltaMarketplaceGuard) ? page.__virtusDeltaMarketplaceGuard : {};
+      page.__virtusDeltaMarketplaceGuard = {
+        ...g,
+        outsideMessagesSince: 0,
+        marketplaceInactiveSince: 0,
+      };
+    } catch {}
+  };
+  try { mark(ctrl.mainPage); } catch {}
+  try {
+    const pages = await ctrl.browser.pages().catch(() => []);
+    for (const p of (pages || [])) mark(p);
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: on ? 'delta_human_hold_browser_armed' : 'delta_human_hold_browser_cleared',
+      nome: String(nome || ''),
+      reason: String(reason || '').slice(0, 80),
+    });
+  } catch {}
+  return { ok: true, hold: on };
+}
+
+function isProfileHumanHeld(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return false;
+  try {
+    const ctrl = controllers.get(n);
+    if (ctrl && ctrl.humanControl === true) return true;
+  } catch {}
+  try {
+    // Fonte declarativa: desired.perfis[nome].humanHold (mesmo se humanControl já foi limpo).
+    const desired = (typeof fileStore.readJsonSafe === 'function')
+      ? fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} })
+      : null;
+    const row = desired && desired.perfis && desired.perfis[n] ? desired.perfis[n] : null;
+    if (row && row.humanHold === true) return true;
+  } catch {}
+  return false;
+}
+
 function currentVirtusEngine(autoMode) {
   // 🛡️ Default de fábrica: se engine ausente/nula/indefinida => delta
   try {
@@ -1514,6 +1570,8 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
     if (ctrl) {
       ctrl.trabalhando = false;
       ctrl.humanControl = true;
+      // Armar flag na page ANTES do stop/nav — fecha orphan do marketplace_enforcer.
+      try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: String(reason || 'enter_human_mode') }); } catch {}
       try { await stopVirtus(nome); } catch {}
       try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
       // Bring-to-front/human prompt (best-effort)
@@ -2908,6 +2966,20 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
           if (t.type() !== 'page') return;
           const pg = await t.page().catch(()=>null);
           if (!pg) return;
+          try {
+            const cNow = controllers.get(nome);
+            if (cNow && cNow.humanControl === true) {
+              pg.__virtusDeltaHumanHold = true;
+              try {
+                const g = pg.__virtusDeltaMarketplaceGuard || {};
+                pg.__virtusDeltaMarketplaceGuard = {
+                  ...g,
+                  outsideMessagesSince: 0,
+                  marketplaceInactiveSince: 0,
+                };
+              } catch {}
+            }
+          } catch {}
           await syncHumanOverlay(nome);
         } catch {}
       });
@@ -9094,6 +9166,12 @@ if (ctrl.browser) {
   ctrl.browser._fenceEpochMap = ctrl.browser._fenceEpochMap || {};
   ctrl.browser._fenceEpochMap[nome] = ctrl.virtusEpoch;
 }
+// Se ainda em humano, reforça flag na page (orphan de enforcer lê isso).
+try {
+  if (ctrl.humanControl === true) {
+    await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'stopVirtus_human_reinforce' });
+  }
+} catch {}
 try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
 }
@@ -10554,8 +10632,14 @@ const handlers = {
           const ctrl = controllers.get(nome);
           if (ctrl) {
             ctrl.trabalhando = false;
-            if (shouldInvoke) ctrl.humanControl = true;
+            if (shouldInvoke) {
+              ctrl.humanControl = true;
+              try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: `fail_fast:${why.slice(0, 60)}` }); } catch {}
+            }
             try { await stopVirtus(nome); } catch {}
+            if (shouldInvoke) {
+              try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'fail_fast_post_stop' }); } catch {}
+            }
           }
         } catch {}
 
@@ -11509,6 +11593,19 @@ const handlers = {
         if (cmid) __deltaReplyIngressRelease(n, cmid);
         return { ok: false, error: 'browser_not_connected', status: 'send_failed' };
       }
+      // Humano no volante: não digitar / não bootar runtime. Soft-requeue no outbox.
+      if (isProfileHumanHeld(n)) {
+        if (cmid) __deltaReplyIngressRelease(n, cmid);
+        try {
+          logger.info('[DELTA][HANDS] delta-reply-task skipped_human_hold', {
+            nome: n,
+            thread_key: tk,
+            client_message_id: cmid,
+            humanControl: !!(ctrl && ctrl.humanControl),
+          });
+        } catch {}
+        return { ok: false, error: 'human_control', status: 'human_control' };
+      }
       const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
       if (!runner || typeof runner.enqueueDeltaReply !== 'function') {
         if (cmid) __deltaReplyIngressRelease(n, cmid);
@@ -11640,6 +11737,9 @@ const handlers = {
       const ctrl = controllers.get(n);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         return { ok: false, error: 'browser_not_connected', status: 'force_collect_failed' };
+      }
+      if (isProfileHumanHeld(n)) {
+        return { ok: false, error: 'human_control', status: 'human_control' };
       }
       const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
       if (!runner || typeof runner.enqueueForceCollectLinkAndCity !== 'function') {
@@ -11778,6 +11878,10 @@ const handlers = {
         });
       } catch {}
 
+      // Crítico: armar hold na page ANTES de stopVirtus/nav Selling.
+      // marketplace_enforcer lê page.__virtusDeltaHumanHold e não goto /messages.
+      try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'invoke_human' }); } catch {}
+
       try {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].reopenAt = null;
@@ -11799,6 +11903,8 @@ const handlers = {
       guard[nome] = Date.now() + 246060*1000;
 
       try { await stopVirtus(nome); } catch {}
+      // Re-stamp após stop (páginas podem ter mudado; orphan timer ainda lê a flag).
+      try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'invoke_human_post_stop' }); } catch {}
 
       let skipNavigation = false;
       try {
@@ -11909,6 +12015,8 @@ const handlers = {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
+      // Libera browser para o motor: limpa flag + timers de "fora do inbox" antes de qualquer nav/boot.
+      try { await syncDeltaHumanHoldBrowserGuard(nome, false, { reason: 'human_resume' }); } catch {}
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
       try { await syncHumanOverlay(nome); } catch {}
       // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
@@ -19401,6 +19509,17 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
+    // Nunca bootar/usar mãos com humano invocado (browser do operador).
+    if (isProfileHumanHeld(nome)) {
+      try {
+        logger.info('[DELTA][UNIFIED_BOOT] skipped_human_hold', {
+          nome: String(nome || ''),
+          need: String(need || ''),
+          humanControl: !!(ctrl && ctrl.humanControl),
+        });
+      } catch {}
+      return null;
+    }
     const needMode = String(need || '').trim().toLowerCase();
     const isReplyNeed = needMode === 'reply';
     const requiredFn = isReplyNeed ? 'enqueueDeltaReply' : 'enqueueDeltaGreetingFlow';
@@ -19435,9 +19554,20 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     }
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') return null;
 
+    // Re-checa hold imediatamente antes de boot (invoke pode ter entrado durante o await acima).
+    if (isProfileHumanHeld(nome)) return null;
+
     const bypassInterlockForReply = !!isReplyNeed;
     const bootInterlockEnabled = String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0';
     const bootInterlockHoldMs = Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000);
+
+    // Evita orphan: se há runner antigo (mesmo sem requiredFn), para antes de sobrescrever.
+    try {
+      if (ctrl.virtus) {
+        await _stopVirtusRunnerMaybePromise(ctrl.virtus);
+        ctrl.virtus = null;
+      }
+    } catch {}
 
     // Regra rígida (Gemini): Fluxo 1 e Fluxo 2 DEVEM usar a mesma fila serial em ctrl.virtus.
     ctrl.virtus = deltaVirtus.startVirtusDeltaRuntime(ctrl.browser, nome, {
@@ -19452,6 +19582,13 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
       bootInterlockIsEarReady: bypassInterlockForReply ? null : () => __deltaIsBootEarReady(nome),
     });
     const booted = await resolveRunner(ctrl.virtus);
+    // Se humano entrou durante o boot, mata o runtime recém-criado e entrega null.
+    if (isProfileHumanHeld(nome)) {
+      try { await _stopVirtusRunnerMaybePromise(ctrl.virtus); } catch {}
+      try { ctrl.virtus = null; } catch {}
+      try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'unified_boot_aborted_human_hold' }); } catch {}
+      return null;
+    }
     if (booted && typeof booted[requiredFn] === 'function') {
       try { __deltaAttachCityCollectSettledHandler(booted); } catch {}
       try {
