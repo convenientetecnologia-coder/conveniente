@@ -2058,6 +2058,45 @@ module.exports = (app, workerClient, fileStore) => {
 
       opsState.begin('renew_then_close', { total: 0, done: 0, ok: 0, fail: 0, current: 'renew_shard' });
 
+      // 0) ANTES do shard: desliga autopilot / open-all (igual close_all).
+      // Sem isso o nurse faz desired_enforce_active e REABRE cada browser que o renew acabou de fechar.
+      // NÃO zera active de todos aqui: browsers ainda abertos precisam renovar (shard usa controllers).
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          if (desired._openAll && desired._openAll.active === true) {
+            desired._openAll = {
+              ...(desired._openAll || {}),
+              active: false,
+              cancelledAt: Date.now(),
+              cancelledReason: 'renew_then_close_begin'
+            };
+          }
+          desired._autoOpen = desired._autoOpen || {};
+          desired._autoOpen.enabled = false;
+          desired._autoOpen.changedAt = Date.now();
+          desired._autoOpen.changedBy = String(by || 'renew_then_close').slice(0, 120);
+          return desired;
+        });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_then_close_autopilot_off_before_shard',
+            by,
+            lockOwner
+          });
+        } catch {}
+      } catch (e) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_then_close_autopilot_off_failed',
+            by,
+            error: (e && e.message) ? String(e.message).slice(0, 180) : String(e)
+          });
+        } catch {}
+      }
+
       // 1) Broadcast: cada worker renova (1 conta por vez) e fecha após renovar.
       let shardResult = null;
       try {

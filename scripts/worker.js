@@ -385,8 +385,8 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     return { ok: false, error: 'no_main_page', renewedCount: 0 };
   }
 
-  // Teto duro: scroll + contabilizar + processar batch (FB pode travar 1–3min no Renovar).
-  const HARD_MS = mode === 'auto' ? (20 * 60 * 1000) : (25 * 60 * 1000);
+  // Teto duro: scroll + contabilizar + piso pós-clique + hold + grace close.
+  const HARD_MS = mode === 'auto' ? (30 * 60 * 1000) : (35 * 60 * 1000);
   const renewGen = (Number(ctrl.renewGeneration || 0) || 0) + 1;
   ctrl.renewGeneration = renewGen;
   const deadlineAt = Date.now() + HARD_MS;
@@ -6735,8 +6735,10 @@ async function activateOnce(nome, source = '', operator = '') {
         const shouldBlockOpen =
           kind === 'stock_provision' ||
           kind === 'close_all' ||
+          kind === 'renew_then_close' ||
           (owner && /^stock_provision:/i.test(owner)) ||
           (owner && /^close_all:/i.test(owner)) ||
+          (owner && /^renew_then_close:/i.test(owner)) ||
           (owner && /^admin_configure:/i.test(owner));
 
         if (shouldBlockOpen && !provisionLock.ownerMatchesOperator(cur.lock, op)) {
@@ -10465,6 +10467,12 @@ const handlers = {
     } catch (e) {
       try { await issues.append('system','persist_failed', `${nome}|deactivate_desired_write`); } catch {}
     }
+    // Hard close: nunca deixar reopenAt agendado (renew-then-close / close_all / painel).
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].reopenAt = null;
+      robeMeta[nome].closingReason = String(reason || 'deactivate').slice(0, 120);
+    } catch {}
   } else {
     const d = readJsonFile(desiredPath, { perfis: {} });
     const isHold = d.perfis?.[nome]?.humanHold === true;
@@ -15647,6 +15655,21 @@ async function nurseTick() {
     } catch {}
     try {
       if (autoOpenEnabled) {
+        // Durante close_all / renew_then_close: NUNCA reforce active=true (senão reabre o que acabou de fechar).
+        let suppressEnforce = false;
+        try {
+          const lk = provisionLock.get ? provisionLock.get() : null;
+          if (lk && lk.active && lk.lock) {
+            const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+            const kind = (lk.lock && lk.lock.meta && lk.lock.meta.kind) ? String(lk.lock.meta.kind) : '';
+            suppressEnforce =
+              kind === 'close_all' ||
+              kind === 'renew_then_close' ||
+              (owner && /^close_all:/i.test(owner)) ||
+              (owner && /^renew_then_close:/i.test(owner));
+          }
+        } catch {}
+        if (!suppressEnforce) {
         robeMeta.system = robeMeta.system || {};
         const last = Number(robeMeta.system.desiredEnforceActiveAt || 0) || 0;
         if (!last || (now0 - last) > 60_000) {
@@ -15689,6 +15712,15 @@ async function nurseTick() {
             try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length, skippedTerminal }); } catch {}
             try { invalidateNurseDesiredCache(); desired0 = readDesiredForNurse({ force: true }); } catch {}
           }
+        }
+        } else {
+          try {
+            provisionAudit.append({
+              ts: now0,
+              event: 'desired_enforce_active_suppressed',
+              reason: 'provision_lock_close_or_renew'
+            });
+          } catch {}
         }
       }
     } catch {}
@@ -16353,6 +16385,22 @@ async function nurseTick() {
 
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
+
+        // Live recheck: desired0 do tick pode estar stale após deactivate (reopen fantasma).
+        try {
+          const live = readDesiredForNurse({ force: true });
+          const liveWant = live && live.perfis && live.perfis[nome] ? live.perfis[nome] : null;
+          if (!(liveWant && liveWant.active === true)) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'nurse_open_skip_stale_desired_inactive',
+                nome: String(nome || '')
+              });
+            } catch {}
+            continue;
+          }
+        } catch {}
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
           continue;
