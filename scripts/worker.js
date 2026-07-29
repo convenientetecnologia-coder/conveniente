@@ -605,8 +605,36 @@ function isRobeEventArmEnabled() {
   return !!ROBE_EVENT_ARM;
 }
 
+// Hard no_pages sustentado: browser sem abas por tempo longo NÃO é falso positivo de carga.
+// Bypass aqui engessava recover (strikes infinitos + about:blank órfãs no Chrome).
+const DELTA_NO_PAGES_HARD_MS = Math.max(
+  10_000,
+  Math.min(120_000, Number(process.env.DELTA_NO_PAGES_HARD_MS || 20_000) || 20_000)
+);
+
 function shouldBypassNurseZombie(nome, source = 'nurse') {
   if (!isDeltaEngineActiveStrict()) return false;
+  const src = String(source || 'nurse');
+  if (src === 'nurse.no_pages') {
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      const firstAt = Number(robeMeta[nome].lastNoPagesAt || 0) || 0;
+      const age = firstAt ? (Date.now() - firstAt) : 0;
+      if (age >= DELTA_NO_PAGES_HARD_MS) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'delta_nurse_hard_no_pages_allow_kill',
+            nome: String(nome || ''),
+            source: src,
+            ageMs: age,
+            hardMs: DELTA_NO_PAGES_HARD_MS
+          });
+        } catch {}
+        return false;
+      }
+    } catch {}
+  }
   try {
     robeMeta[nome] = robeMeta[nome] || {};
     const now = Date.now();
@@ -616,7 +644,7 @@ function shouldBypassNurseZombie(nome, source = 'nurse') {
       try {
         logger.info('[DELTA_NURSE_BYPASS] Bloqueado disparo de quarentena por nurse_zombie no modo Delta.', {
           nome,
-          source: String(source || '')
+          source: src
         });
       } catch {}
       try {
@@ -624,14 +652,14 @@ function shouldBypassNurseZombie(nome, source = 'nurse') {
           ts: now,
           event: 'delta_nurse_bypass',
           nome: String(nome || ''),
-          source: String(source || ''),
+          source: src,
           reason: 'nurse_zombie'
         });
       } catch {}
     }
   } catch {}
   try {
-    const ev = `delta_nurse_bypass:${String(source || 'nurse')}`;
+    const ev = `delta_nurse_bypass:${src}`;
     global.lastDeltaEvent = ev;
     global.lastDeltaEventAt = Date.now();
     if (nome) {
@@ -8406,10 +8434,50 @@ function getWorkingProfileNames() {
   return nomes;
 }
 
+function __pickKeepPage(stablePages, mainPage) {
+  try {
+    const pages = Array.isArray(stablePages) ? stablePages : [];
+    if (mainPage && pages.includes(mainPage)) return mainPage;
+    const nonBlank = pages.find((pg) => {
+      try {
+        const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
+        return !!u && u !== 'about:blank';
+      } catch {
+        return false;
+      }
+    });
+    return nonBlank || pages[0] || null;
+  } catch {
+    return (Array.isArray(stablePages) && stablePages[0]) || null;
+  }
+}
+
+function __pageAgeMs(browser, page) {
+  try {
+    const t = page && typeof page.target === 'function' ? page.target() : null;
+    const tid = t && t._targetId ? String(t._targetId) : null;
+    if (!tid) return null;
+    const birth = browser && browser._pageBirth && browser._pageBirth[tid];
+    const n = Number(birth || 0) || 0;
+    if (!n) return null;
+    return Math.max(0, Date.now() - n);
+  } catch {
+    return null;
+  }
+}
+
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
-    const pages = await browser.pages();
+    let pages = [];
+    try {
+      pages = await Promise.race([
+        browser.pages().catch(() => []),
+        new Promise((resolve) => setTimeout(() => resolve([]), 4000))
+      ]);
+    } catch {
+      pages = [];
+    }
     let closed = 0;
 
     const ctrl = controllers.get(nome);
@@ -8418,61 +8486,63 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
     const inVirtusSwap = !!(browser && browser._virtusSwapUntil && Number(browser._virtusSwapUntil[nome] || 0) > Date.now());
+    const protectedCtx = !!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap);
+    const blankMaxAgeMs = Math.max(
+      15_000,
+      Math.min(120_000, Number(process.env.ABOUTBLANK_MAX_AGE_MS || 45000) || 45000)
+    );
 
-    if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
-      const stablePages = Array.isArray(pages) ? pages : [];
-      // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
-      const keepPage = (() => {
-        try {
-          if (mainPage && stablePages.includes(mainPage)) return mainPage;
-          const nonBlank = stablePages.find((pg) => {
-            try {
-              const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
-              return !!u && u !== 'about:blank';
-            } catch {
-              return false;
-            }
-          });
-          return nonBlank || stablePages[0] || null;
-        } catch {
-          return stablePages[0] || null;
+    const stablePages = Array.isArray(pages) ? pages : [];
+    // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
+    const keepPage = __pickKeepPage(stablePages, mainPage);
+
+    // 1) about:blank — contrato anti-fantasma:
+    //    - fora de proteção: fecha já
+    //    - sob Robe/config/human/sendLock: só órfãs com idade >= maxAge (não mata goto create em andamento)
+    for (const p of stablePages) {
+      try {
+        if (keepPage && p === keepPage) continue;
+        let url = '';
+        try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+        if (!(!url || url === 'about:blank')) continue;
+        if (protectedCtx) {
+          const age = __pageAgeMs(browser, p);
+          if (age == null || age < blankMaxAgeMs) continue;
         }
-      })();
-      for (const p of stablePages) {
-        try {
-          if (keepPage && p === keepPage) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-          if (!url || url === 'about:blank') {
-            await p.close({ runBeforeUnload: false }).catch(()=>{});
-            closed++;
-          }
-        } catch {}
-      }
+        await Promise.race([
+          p.close({ runBeforeUnload: false }).catch(() => {}),
+          new Promise((r) => setTimeout(r, 2500))
+        ]);
+        closed++;
+      } catch {}
     }
 
-    if (!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap)) {
-      const again = await browser.pages();
+    // 2) Prune amplo (abas reais extras) só fora de proteção
+    if (!protectedCtx) {
+      let again = [];
+      try {
+        again = await Promise.race([
+          browser.pages().catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), 4000))
+        ]);
+      } catch {
+        again = [];
+      }
       const stableAgain = Array.isArray(again) ? again : [];
-      const keepPage = (() => {
-        try {
-          if (mainPage && stableAgain.includes(mainPage)) return mainPage;
-          const nonBlank = stableAgain.find((pg) => {
-            try {
-              const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
-              return !!u && u !== 'about:blank';
-            } catch {
-              return false;
-            }
-          });
-          return nonBlank || stableAgain[0] || null;
-        } catch {
-          return stableAgain[0] || null;
-        }
-      })();
+      const keep2 = __pickKeepPage(stableAgain, mainPage);
       for (const p of stableAgain) {
-        if (keepPage && p === keepPage) continue;
-        await p.close({ runBeforeUnload: false }).catch(()=>{});
-        closed++;
+        try {
+          if (keep2 && p === keep2) continue;
+          let url = '';
+          try { url = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
+          // Nunca mata create/item/vehicle no prune amplo
+          if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
+          await Promise.race([
+            p.close({ runBeforeUnload: false }).catch(() => {}),
+            new Promise((r) => setTimeout(r, 2500))
+          ]);
+          closed++;
+        } catch {}
       }
     }
 
@@ -9203,7 +9273,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
       if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
 
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-        robeUpdateMeta(nome, { estado: 'erro' });
+        robeUpdateMeta(nome, { estado: 'erro', emExecucao: false });
         try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         return;
@@ -9298,11 +9368,17 @@ async function robeQueuedCycle(nome, source = 'auto') {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+        try {
+          if (ctrl && ctrl.browser && ctrl.browser._suppressBlankKillUntil) {
+            delete ctrl.browser._suppressBlankKillUntil[nome];
+          }
+        } catch {}
+        // Contrato: libera emExecucao ANTES do prune para about:blank fechar na hora (não ficar preso em protectedCtx).
+        robeUpdateMeta(nome, { emExecucao: false });
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-          robeUpdateMeta(nome, { emExecucao: false });
           if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
             try {
               if (deltaSequentialResumeRequired) {
@@ -9321,8 +9397,6 @@ async function robeQueuedCycle(nome, source = 'auto') {
           return;
         }
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-
-        robeUpdateMeta(nome, { emExecucao: false });
 
         if (virtusWasRunning || deltaSequentialResumeRequired) {
           if (automationAllowed(ctrl)) {
@@ -12950,7 +13024,7 @@ const handlers = {
           if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
 
           if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-            robeUpdateMeta(nome, { estado: 'erro' });
+            robeUpdateMeta(nome, { estado: 'erro', emExecucao: false });
             try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
@@ -13072,11 +13146,17 @@ const handlers = {
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           } finally {
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            try {
+              if (ctrl && ctrl.browser && ctrl.browser._suppressBlankKillUntil) {
+                delete ctrl.browser._suppressBlankKillUntil[nome];
+              }
+            } catch {}
+            // Contrato: libera emExecucao ANTES do prune para about:blank fechar na hora.
+            robeUpdateMeta(nome, { emExecucao: false });
             if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
               await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-              robeUpdateMeta(nome, { emExecucao: false });
               if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
                 try {
                   if (deltaSequentialResumeRequired) {
@@ -13095,8 +13175,6 @@ const handlers = {
               return;
             }
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-
-            robeUpdateMeta(nome, { emExecucao: false });
 
             if (virtusWasRunning || deltaSequentialResumeRequired) {
               if (automationAllowed(ctrl)) {
@@ -16572,7 +16650,11 @@ async function nurseTick() {
           } catch {}
 
           robeMeta[nome].noPagesStrikes += 1;
-          robeMeta[nome].lastNoPagesAt = Date.now();
+          // Contrato: lastNoPagesAt = início da sequência sem páginas (NÃO resetar a cada strike).
+          // Bug antigo: gravava Date.now() a cada strike → (now - last) >= 5000 nunca ficava true → kill morto.
+          if (!robeMeta[nome].lastNoPagesAt) {
+            robeMeta[nome].lastNoPagesAt = Date.now();
+          }
           // Sem página: invalida idle DOM skip até novo pageReadyBasic real.
           try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
           await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
@@ -16593,18 +16675,21 @@ async function nurseTick() {
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
             if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
               robeMeta[nome].noPagesStrikes = 0;
+              robeMeta[nome].lastNoPagesAt = 0;
               continue;
             }
             await registerFailure(nome, 'no_pages', 'external');
             const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             if (!(dres && dres.skipped)) setKillGuard(nome);
             robeMeta[nome].noPagesStrikes = 0;
+            robeMeta[nome].lastNoPagesAt = 0;
             continue;
           }
           continue;
         }
       } else {
         robeMeta[nome].noPagesStrikes = 0;
+        robeMeta[nome].lastNoPagesAt = 0;
       }
 
       const p0 = pages[0];
@@ -25585,52 +25670,57 @@ async function periodicAboutBlankCleanup() {
   try {
     const issues = require('./issues.js');
     let totalClosed = 0;
+    const blankMaxAgeMs = Math.max(
+      15_000,
+      Math.min(120_000, Number(process.env.ABOUTBLANK_MAX_AGE_MS || 45000) || 45000)
+    );
 
     for (const [nome, ctrl] of controllers.entries()) {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
-        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
         const inHuman = ctrl.humanControl === true;
+        const protectedCtx = !!(inRobe || sendLockActive || inConfig || inHuman);
 
-        if (inRobe || sendLockActive || inConfig || inHuman) continue;
-
-        // Varre todas as páginas procurando about:blank órfãs
-        const pages = await ctrl.browser.pages().catch(() => []);
+        const pages = await Promise.race([
+          ctrl.browser.pages().catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), 4000))
+        ]);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
-        
-        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
+
+        // Se há create item, não limpa abas reais — mas about:blank órfãs (idade) ainda podem sair.
         const hasCreateItem = pages.some(pg => {
           try {
             const u = pg.url ? pg.url() : '';
             return /facebook\.com\/marketplace\/create\/item/i.test(u);
           } catch { return false; }
         });
-        
-        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
-        if (hasCreateItem) continue;
 
         let closed = 0;
 
         for (const p of pages) {
           try {
-            // Nunca fecha a página principal
             if (p === mainPage) continue;
             if (!mainPage && p === pages[0]) continue;
 
-            // Verifica se é about:blank
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
             if (!url || url !== 'about:blank') continue;
 
-            // Fecha a aba about:blank órfã
-            // (já verificamos que não há Robe ativo e não há create item)
-            await p.close({ runBeforeUnload: false }).catch(() => {});
+            if (protectedCtx || hasCreateItem) {
+              const age = __pageAgeMs(ctrl.browser, p);
+              if (age == null || age < blankMaxAgeMs) continue;
+            }
+
+            await Promise.race([
+              p.close({ runBeforeUnload: false }).catch(() => {}),
+              new Promise((r) => setTimeout(r, 2500))
+            ]);
             closed++;
           } catch {}
         }

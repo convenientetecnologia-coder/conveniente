@@ -2542,25 +2542,84 @@ async function preencherLocalizacao(page, cidade) {
   throw new Error('Localização não ficou válida após múltiplas tentativas.');
 }
 
-// Fechamento seguro da aba (anti-trava)
+// Fechamento seguro da aba (anti-trava + anti-fantasma about:blank)
 async function safeClosePage(page) {
   if (!page) return;
   try {
-    await page.evaluate(() => {
-      try { window.onbeforeunload = null; } catch {}
-      try {
-        window.addEventListener('beforeunload', (e) => {
-          e.stopImmediatePropagation();
-        }, true);
-      } catch {}
-    }).catch(()=>{});
+    if (typeof page.isClosed === 'function' && page.isClosed()) return;
   } catch {}
+  // 1) Neutraliza beforeunload SEM navegar para about:blank.
+  //    goto(about:blank) antes do close deixava fantasma quando CDP travava no close.
   try {
-    const client = await page.target().createCDPSession();
-    await client.send('Page.stopLoading').catch(()=>{});
+    await Promise.race([
+      page.evaluate(() => {
+        try { window.onbeforeunload = null; } catch {}
+        try {
+          window.addEventListener('beforeunload', (e) => {
+            try { e.stopImmediatePropagation(); } catch {}
+          }, true);
+        } catch {}
+      }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 800))
+    ]);
   } catch {}
-  try { await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 1200 }).catch(()=>{}); } catch {}
-  try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+  // 2) stopLoading best-effort com teto (CDP morto não pode segurar o Robe)
+  try {
+    const client = await Promise.race([
+      page.target().createCDPSession(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('cdp_timeout')), 1500))
+    ]);
+    await Promise.race([
+      client.send('Page.stopLoading').catch(() => {}),
+      new Promise((r) => setTimeout(r, 800))
+    ]);
+  } catch {}
+  // 3) close direto
+  try {
+    await Promise.race([
+      page.close({ runBeforeUnload: false }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 2500))
+    ]);
+  } catch {}
+}
+
+/** Fecha about:blank extras (não toca na main / keepPage). Usado após falha de open create. */
+async function sweepAboutBlankPages(browser, { keepPage = null, nome = '' } = {}) {
+  if (!browser) return 0;
+  let closed = 0;
+  try {
+    const pages = await Promise.race([
+      browser.pages().catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve([]), 3000))
+    ]);
+    for (const p of (pages || [])) {
+      try {
+        if (keepPage && p === keepPage) continue;
+        try {
+          if (typeof p.isClosed === 'function' && p.isClosed()) continue;
+        } catch {}
+        let u = '';
+        try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
+        if (u && u !== 'about:blank') continue;
+        await Promise.race([
+          p.close({ runBeforeUnload: false }).catch(() => {}),
+          new Promise((r) => setTimeout(r, 2000))
+        ]);
+        closed++;
+      } catch {}
+    }
+    if (closed > 0) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'dbg_robe_sweep_about_blank',
+          nome: String(nome || ''),
+          closed: Number(closed || 0)
+        });
+      } catch {}
+    }
+  } catch {}
+  return closed;
 }
 
 async function findFileInputInFrame(frame) {
@@ -3059,7 +3118,11 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
       // #endregion
       try { await safeClosePage(p); } catch {}
-      if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
+      // Em falha desta tentativa, libera suppress cedo para o killer poder limpar residual.
+      try {
+        if (browser && browser._suppressBlankKillUntil) delete browser._suppressBlankKillUntil[nome];
+      } catch {}
+      if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out|Network\.enable|Protocol error/i.test(msg)) {
         try {
           const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
           if (gatewayResolved && gatewayResolved.enabled === true) {
@@ -3076,21 +3139,39 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
           }
         } catch {}
         if (attempt < 3) {
+          // Reativa suppress só para a próxima tentativa (goto create)
+          try {
+            const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
+            guard[nome] = Date.now() + 20000;
+          } catch {}
           await new Promise(r => setTimeout(r, 600 * attempt));
           continue;
         }
       }
       if (e && e.ROBE_PROBE_FAILED === true) {
+        try {
+          const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
+          guard[nome] = Date.now() + 20000;
+        } catch {}
         await new Promise(r => setTimeout(r, 350));
         continue; // retry da ação sem classificar como login_required
       }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
+        try {
+          const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
+          guard[nome] = Date.now() + 20000;
+        } catch {}
         await new Promise(r => setTimeout(r, 300));
         continue; // retry
       }
+      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       throw e;
     }
   }
+  try {
+    if (browser && browser._suppressBlankKillUntil) delete browser._suppressBlankKillUntil[nome];
+  } catch {}
+  try { await sweepAboutBlankPages(browser, { nome }); } catch {}
   stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
   throw new Error('nav_create_timeout');
 }
@@ -4141,6 +4222,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     if (page) {
       try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
     }
+    // Varredura final anti-fantasma (retries de create que sobraram)
+    try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
     logger.info(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
