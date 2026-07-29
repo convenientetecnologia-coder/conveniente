@@ -164,12 +164,76 @@ function normalizeFotosSizeSubdir(size) {
   return null;
 }
 
+/**
+ * Garante Desktop/fotos e subpastas p/m/g (cria vazias se faltarem).
+ * Usado ao ativar Robe V3 e antes de picks com size.
+ */
+function ensurePmgDirs() {
+  const baseDir = resolveFotosDir();
+  const created = [];
+  const errors = [];
+  try {
+    if (!fs.existsSync(baseDir)) {
+      fs.mkdirSync(baseDir, { recursive: true });
+      created.push('.');
+    }
+  } catch (e) {
+    errors.push({ path: baseDir, error: (e && e.message) || String(e) });
+  }
+  for (const sub of ['p', 'm', 'g']) {
+    const d = path.join(baseDir, sub);
+    try {
+      if (!fs.existsSync(d)) {
+        fs.mkdirSync(d, { recursive: true });
+        created.push(sub);
+      }
+    } catch (e) {
+      errors.push({ path: d, error: (e && e.message) || String(e) });
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    baseDir,
+    created,
+    errors,
+    dirs: {
+      p: path.join(baseDir, 'p'),
+      m: path.join(baseDir, 'm'),
+      g: path.join(baseDir, 'g')
+    }
+  };
+}
+
+/**
+ * Cascata V3: tamanho pedido → raiz fotos → outros tamanhos → só então aborta.
+ * P: p → root → m → g
+ * M: m → root → g → p
+ * G: g → root → m → p
+ * Sem size (V1/V2): só root.
+ */
+function buildV3PhotoScopeChain(preferredSize) {
+  const pref = normalizeFotosSizeSubdir(preferredSize);
+  if (!pref) return [null];
+  const others = {
+    p: ['m', 'g'],
+    m: ['g', 'p'],
+    g: ['m', 'p']
+  };
+  return [pref, null].concat(others[pref] || []);
+}
+
 function listAllPhotosSortedByMtimeAsc(opts = {}) {
   const baseDir = resolveFotosDir();
   const sub = normalizeFotosSizeSubdir(opts && opts.size);
+  // opts.size === false ou { rootOnly: true } via sub null lista só a raiz (arquivos, sem entrar em p/m/g)
   const dir = sub ? path.join(baseDir, sub) : baseDir;
   if (!fs.existsSync(dir)) return [];
-  const list = fs.readdirSync(dir).filter(isImageFile);
+  let list = [];
+  try {
+    list = fs.readdirSync(dir).filter(isImageFile);
+  } catch {
+    return [];
+  }
   const enriched = list.map(name => {
     const key = sub ? path.join(sub, name).replace(/\\/g, '/') : name;
     const abs = path.join(dir, name);
@@ -179,6 +243,10 @@ function listAllPhotosSortedByMtimeAsc(opts = {}) {
   }).filter(x => !!x.stat);
   enriched.sort((a, b) => (a.stat.mtimeMs || 0) - (b.stat.mtimeMs || 0));
   return enriched;
+}
+
+function scopeLabel(scope) {
+  return scope == null ? 'root' : String(scope);
 }
 
 // ------------------------ SHA e META helpers ------------------------
@@ -222,55 +290,70 @@ function sameGeneration(rec, stat, absPath) {
  *     Se a foto do disco mudou (mesmo nome, outro arquivo), zera postedBy (trata como “nova”).
  *     Se o arquivo sumiu, remove entrada do índice.
  *
+ * V3 (opts.size = P|M|G):
+ *   1) pasta do tamanho pedido
+ *   2) raiz Desktop/fotos
+ *   3) outras pastas (P→M→G / M→G→P / G→M→P)
+ *   4) só então no-photo-available
+ *   Pastas p/m/g são criadas automaticamente se faltarem.
+ *
  * @param {string} nomeConta
- * @param {string[]} workingNames - lista atual de contas trabalhando (para futuros critérios; aqui não é obrigatório)
- * @param {{ size?: string }} [opts] - V3: size P|M|G → Desktop/fotos/{p,m,g} (falha se pasta ausente)
- * @returns {Promise<{ok:true,file:string,absPath:string}|{ok:false,error:string}>}
+ * @param {string[]} workingNames
+ * @param {{ size?: string }} [opts]
+ * @returns {Promise<{ok:true,file:string,absPath:string,size?:string|null,usedScope?:string,fallback?:boolean}|{ok:false,error:string}>}
  */
 async function pickPhotoForAccount(nomeConta, workingNames = [], opts = undefined) {
   nomeConta = canonName(nomeConta);
   workingNames = canonNames(workingNames);
-  const sizeSub = normalizeFotosSizeSubdir(opts && opts.size);
+  const requestedSize = normalizeFotosSizeSubdir(opts && opts.size);
+  const scopeChain = buildV3PhotoScopeChain(requestedSize);
 
   return _serialize(async () => {
     const lockFd = await acquireIndexLock();
     try {
       const baseDir = resolveFotosDir();
-      if (!fs.existsSync(baseDir)) return { ok: false, error: 'fotos_dir_missing' };
-      const dir = sizeSub ? path.join(baseDir, sizeSub) : baseDir;
-      if (sizeSub && !fs.existsSync(dir)) {
-        return { ok: false, error: `fotos_subdir_missing:${sizeSub}` };
+      if (!fs.existsSync(baseDir)) {
+        try { fs.mkdirSync(baseDir, { recursive: true }); } catch {}
       }
+      if (!fs.existsSync(baseDir)) return { ok: false, error: 'fotos_dir_missing' };
+
+      // V3: cria p/m/g vazias se faltarem (nunca falha só por pasta ausente).
+      if (requestedSize) {
+        try { ensurePmgDirs(); } catch {}
+      }
+
       let idx = loadIndex();
 
-      // [item 1] Antes de começar: Varra TODOS os arquivos do índice e, se houver uma reserva deste nomeConta em qualquer rec, devolva imediatamente (idempotência total)
+      // Idempotência: reutiliza reserva existente desta conta.
+      // V3 (com size): aceita reserva em qualquer escopo da cascata (retry após fallback).
+      // V1/V2: só raiz (não reutiliza chaves p/m/g).
       {
         let toRemove = [];
         for (const [k, rec] of Object.entries(idx)) {
-          if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
-            // Em modo size, só reutiliza reserva da mesma subpasta.
-            if (sizeSub) {
-              const prefix = `${sizeSub}/`;
-              if (!String(k).startsWith(prefix) && !String(k).startsWith(`${sizeSub}\\`)) continue;
-            } else {
-              // V1/V2: não reutilizar chaves de subpasta p/m/g
-              if (/^[pmg][\\/]/i.test(String(k))) continue;
-            }
-            // Verifique se o arquivo ainda existe:
-            const abs = path.join(baseDir, k);
-            if (fs.existsSync(abs)) {
-              try {
-                logger.info('[FOTOS][pickPhotoForAccount] reserva existente reutilizada', { conta: nomeConta, file: k, size: sizeSub || null });
-              } catch {}
-              return { ok: true, file: k, absPath: abs, size: sizeSub || null };
-            } else {
-              // O arquivo não existe mais, limpe a reserva e continue
-              delete rec.reservedBy[nomeConta];
-              toRemove.push(k);
-            }
+          if (!(rec && rec.reservedBy && rec.reservedBy[nomeConta])) continue;
+          const isPmgKey = /^[pmg][\\/]/i.test(String(k));
+          if (!requestedSize && isPmgKey) continue;
+          const abs = path.join(baseDir, k);
+          if (fs.existsSync(abs)) {
+            try {
+              logger.info('[FOTOS][pickPhotoForAccount] reserva existente reutilizada', {
+                conta: nomeConta,
+                file: k,
+                requestedSize: requestedSize || null
+              });
+            } catch {}
+            return {
+              ok: true,
+              file: k,
+              absPath: abs,
+              size: requestedSize || null,
+              usedScope: isPmgKey ? String(k).slice(0, 1).toLowerCase() : 'root',
+              fallback: !!(requestedSize && (!isPmgKey || String(k).slice(0, 1).toLowerCase() !== requestedSize))
+            };
           }
+          delete rec.reservedBy[nomeConta];
+          toRemove.push(k);
         }
-        // remove registros sumidos se houver
         let removed = false;
         for (const key of toRemove) {
           if (!fs.existsSync(path.join(baseDir, key))) {
@@ -281,24 +364,32 @@ async function pickPhotoForAccount(nomeConta, workingNames = [], opts = undefine
         if (removed) saveIndex(idx);
       }
 
-      const all = listAllPhotosSortedByMtimeAsc(sizeSub ? { size: sizeSub } : {});
-      let changed = false;
-      const stats = { total: all.length, skippedPosted: 0, skippedReservedOther: 0, picked: 0, size: sizeSub || null };
+      const cascadeStats = [];
 
-      for (const item of all) {
-        const { name, abs, stat } = item;
-        let rec = idx[name];
+      for (const scope of scopeChain) {
+        const all = listAllPhotosSortedByMtimeAsc(scope ? { size: scope } : {});
+        const stats = {
+          scope: scopeLabel(scope),
+          total: all.length,
+          skippedPosted: 0,
+          skippedReservedOther: 0,
+          picked: 0
+        };
+        let changed = false;
 
-        if (!rec) {
-          rec = idx[name] = { postedBy: [], reservedBy: {} };
-          try {
-            await applyStatToRec(rec, stat, abs);
-          } catch (e) {
-            logger.warn('[FOTOS][pickPhotoForAccount] Erro ao aplicar stat em novo arquivo', { arquivo: abs, error: e && e.message || e });
-          }
-          changed = true;
-        } else {
-          if (!sameGeneration(rec, stat, abs)) {
+        for (const item of all) {
+          const { name, abs, stat } = item;
+          let rec = idx[name];
+
+          if (!rec) {
+            rec = idx[name] = { postedBy: [], reservedBy: {} };
+            try {
+              await applyStatToRec(rec, stat, abs);
+            } catch (e) {
+              logger.warn('[FOTOS][pickPhotoForAccount] Erro ao aplicar stat em novo arquivo', { arquivo: abs, error: e && e.message || e });
+            }
+            changed = true;
+          } else if (!sameGeneration(rec, stat, abs)) {
             rec.postedBy = [];
             rec.reservedBy = {};
             try {
@@ -309,56 +400,75 @@ async function pickPhotoForAccount(nomeConta, workingNames = [], opts = undefine
             rec.deletePending = false;
             changed = true;
           }
+
+          if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+          if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
+
+          if (rec.reservedBy[nomeConta]) {
+            cascadeStats.push(stats);
+            return {
+              ok: true,
+              file: name,
+              absPath: abs,
+              size: requestedSize || null,
+              usedScope: scopeLabel(scope),
+              fallback: !!(requestedSize && scope !== requestedSize)
+            };
+          }
+          if (rec.postedBy.map(canonName).includes(nomeConta)) { stats.skippedPosted++; continue; }
+          if (Object.keys(rec.reservedBy).length > 0) { stats.skippedReservedOther++; continue; }
+
+          rec.reservedBy[nomeConta] = { ts: Date.now() };
+          saveIndex(idx);
+          stats.picked++;
+          cascadeStats.push(stats);
+          const isFallback = !!(requestedSize && scope !== requestedSize);
+          try {
+            logger.info('[FOTOS][pickPhotoForAccount] foto reservada', {
+              conta: nomeConta,
+              file: name,
+              requestedSize: requestedSize || null,
+              usedScope: scopeLabel(scope),
+              fallback: isFallback,
+              cascade: cascadeStats
+            });
+          } catch {}
+          return {
+            ok: true,
+            file: name,
+            absPath: abs,
+            size: requestedSize || null,
+            usedScope: scopeLabel(scope),
+            fallback: isFallback
+          };
         }
 
-        if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
-        if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
-
-        // ------------- ALTERAÇÃO NA ORDEM DAS CHECAGENS (item 1) -----------
-        // 1. Se já reservado por esta conta: continue servindo esta foto (idempotente)
-        if (rec.reservedBy[nomeConta]) {
-          return { ok: true, file: name, absPath: abs, size: sizeSub || null };
+        // Limpeza de índice só no escopo atual
+        let removed = false;
+        for (const key of Object.keys(idx)) {
+          if (scope) {
+            const prefix = `${scope}/`;
+            if (!String(key).startsWith(prefix) && !String(key).startsWith(`${scope}\\`)) continue;
+          } else if (/^[pmg][\\/]/i.test(String(key))) {
+            continue;
+          }
+          const abs = path.join(baseDir, key);
+          if (!fs.existsSync(abs)) {
+            delete idx[key];
+            removed = true;
+          }
         }
-
-        // 2. Depois: Se já postada por esta conta, pule
-        if (rec.postedBy.map(canonName).includes(nomeConta)) { stats.skippedPosted++; continue; }
-
-        // 3. Depois: Se reservado por OUTRA conta, pule
-        if (Object.keys(rec.reservedBy).length > 0) { stats.skippedReservedOther++; continue; }
-
-        // Reserva AGORA e COMMITA (NÃO marca postedBy aqui).
-        // Motivo: postedBy deve representar postagem/uso confirmado (via markPostedAndMaybeDelete),
-        // senão retentativas/erros técnicos podem "esgotar" foto por conta sem ter postado de fato.
-        rec.reservedBy[nomeConta] = { ts: Date.now() };
-        saveIndex(idx);
-
-        stats.picked++;
-        try {
-          logger.info('[FOTOS][pickPhotoForAccount] foto reservada', { conta: nomeConta, file: name, stats });
-        } catch {}
-        return { ok: true, file: name, absPath: abs, size: sizeSub || null };
+        if (removed || changed) saveIndex(idx);
+        cascadeStats.push(stats);
       }
-
-      // Limpa entradas do índice que não existem mais no disco
-      // (mantém comportamento original; varre só chaves do escopo atual quando size)
-      let removed = false;
-      for (const key of Object.keys(idx)) {
-        if (sizeSub) {
-          const prefix = `${sizeSub}/`;
-          if (!String(key).startsWith(prefix) && !String(key).startsWith(`${sizeSub}\\`)) continue;
-        } else if (/^[pmg][\\/]/i.test(String(key))) {
-          continue;
-        }
-        const abs = path.join(baseDir, key);
-        if (!fs.existsSync(abs)) {
-          delete idx[key];
-          removed = true;
-        }
-      }
-      if (removed || changed) saveIndex(idx);
 
       try {
-        logger.warn('[FOTOS][pickPhotoForAccount] no-photo-available', { conta: nomeConta, stats, indexSize: Object.keys(idx || {}).length });
+        logger.warn('[FOTOS][pickPhotoForAccount] no-photo-available', {
+          conta: nomeConta,
+          requestedSize: requestedSize || null,
+          cascade: cascadeStats,
+          indexSize: Object.keys(idx || {}).length
+        });
       } catch {}
       return { ok: false, error: 'no-photo-available' };
     } catch (e) {
@@ -664,6 +774,8 @@ async function clearAccountHistory(nomeConta) {
 
 module.exports = {
   resolveFotosDir,
+  ensurePmgDirs,
+  buildV3PhotoScopeChain,
   pickPhotoForAccount,
   markPostedAndMaybeDelete,
   releaseReservation,

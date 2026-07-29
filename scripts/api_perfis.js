@@ -246,6 +246,24 @@ module.exports = (app, workerClient, fileStore) => {
         try {
           if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return null;
           if (!effective || !effective.robe || !['v2_auto', 'v3_pmg'].includes(String(effective.robe.workMode || ''))) return null;
+          // V3: cria pastas p/m/g imediatamente ao salvar (mesmo sem worker).
+          if (String(effective.robe.workMode) === 'v3_pmg') {
+            try {
+              const fotosMod = require('./fotos.js');
+              if (fotosMod && typeof fotosMod.ensurePmgDirs === 'function') {
+                const ensured = fotosMod.ensurePmgDirs();
+                try {
+                  logger.info('[API][server-config] ensurePmgDirs on v3 save', {
+                    created: (ensured && ensured.created) || [],
+                    ok: !!(ensured && ensured.ok),
+                    baseDir: ensured && ensured.baseDir
+                  });
+                } catch {}
+              }
+            } catch (eEns) {
+              try { logger.warn('[API][server-config] ensurePmgDirs failed', { error: (eEns && eEns.message) || String(eEns) }); } catch {}
+            }
+          }
           return await workerClient.sendWorkerCommand('robe-v2-warmup', {
             reason: 'server_config_saved',
             force: true

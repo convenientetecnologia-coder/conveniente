@@ -952,6 +952,11 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
   const workMode = String(robeCfg.workMode || 'v1').trim().toLowerCase();
   const isV3 = workMode === 'v3_pmg';
+  if (isV3) {
+    try {
+      if (fotos && typeof fotos.ensurePmgDirs === 'function') fotos.ensurePmgDirs();
+    } catch {}
+  }
   const tuning = (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : {};
   const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
   if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
@@ -1205,6 +1210,21 @@ async function pickPostingCityForRunV2() {
 
 async function robeV2WarmupNow({ reason = 'manual', force = false } = {}) {
   try {
+    // V3: garante pastas Desktop/fotos/{p,m,g} antes de gerar a fila.
+    try {
+      const cfg = serverConfig.readServerConfigEffective();
+      const wm = String(cfg && cfg.robe && cfg.robe.workMode || '').trim().toLowerCase();
+      if (wm === 'v3_pmg' && fotos && typeof fotos.ensurePmgDirs === 'function') {
+        const ensured = fotos.ensurePmgDirs();
+        try {
+          logger.info('[ROBE][v3] ensurePmgDirs no warmup', {
+            reason: String(reason || '').slice(0, 80),
+            created: (ensured && ensured.created) || [],
+            ok: !!(ensured && ensured.ok)
+          });
+        } catch {}
+      }
+    } catch {}
     if (force) {
       await withRobeV2QueueLock((state) => {
         state.queue = [];
@@ -3554,8 +3574,31 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     fotoPath = pick.absPath;
     fotoNome = pick.file;
     // #region agent log
-    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_photo_prepicked', nome: String(nome || ''), attId: String(attId || ''), file: String(fotoNome || ''), durMs: Number(Date.now() - photoPickStartedAt) }); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'dbg_robe_photo_prepicked',
+        nome: String(nome || ''),
+        attId: String(attId || ''),
+        file: String(fotoNome || ''),
+        requestedSize: postingSize || null,
+        usedScope: pick.usedScope || null,
+        fallback: !!pick.fallback,
+        durMs: Number(Date.now() - photoPickStartedAt)
+      });
+    } catch {}
     // #endregion
+    if (postingSize && pick.fallback) {
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'photo_fallback_used',
+          requestedSize: postingSize,
+          usedScope: pick.usedScope || null,
+          file: fotoNome
+        });
+      } catch {}
+    }
 
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     await installCreatePageGraphqlRateGuard(page, nome, attId);
