@@ -158,15 +158,24 @@ function saveIndex(idx) {
 }
 
 // ------------------------ Leitura de fotos do diretório ------------------------
-function listAllPhotosSortedByMtimeAsc() {
-  const dir = resolveFotosDir();
+function normalizeFotosSizeSubdir(size) {
+  const s = String(size || '').trim().toUpperCase();
+  if (s === 'P' || s === 'M' || s === 'G') return s.toLowerCase();
+  return null;
+}
+
+function listAllPhotosSortedByMtimeAsc(opts = {}) {
+  const baseDir = resolveFotosDir();
+  const sub = normalizeFotosSizeSubdir(opts && opts.size);
+  const dir = sub ? path.join(baseDir, sub) : baseDir;
   if (!fs.existsSync(dir)) return [];
   const list = fs.readdirSync(dir).filter(isImageFile);
   const enriched = list.map(name => {
+    const key = sub ? path.join(sub, name).replace(/\\/g, '/') : name;
     const abs = path.join(dir, name);
     let st = null;
     try { st = fs.statSync(abs); } catch { st = null; }
-    return { name, abs, stat: st };
+    return { name: key, abs, stat: st };
   }).filter(x => !!x.stat);
   enriched.sort((a, b) => (a.stat.mtimeMs || 0) - (b.stat.mtimeMs || 0));
   return enriched;
@@ -215,17 +224,23 @@ function sameGeneration(rec, stat, absPath) {
  *
  * @param {string} nomeConta
  * @param {string[]} workingNames - lista atual de contas trabalhando (para futuros critérios; aqui não é obrigatório)
+ * @param {{ size?: string }} [opts] - V3: size P|M|G → Desktop/fotos/{p,m,g} (falha se pasta ausente)
  * @returns {Promise<{ok:true,file:string,absPath:string}|{ok:false,error:string}>}
  */
-async function pickPhotoForAccount(nomeConta, workingNames = []) {
+async function pickPhotoForAccount(nomeConta, workingNames = [], opts = undefined) {
   nomeConta = canonName(nomeConta);
   workingNames = canonNames(workingNames);
+  const sizeSub = normalizeFotosSizeSubdir(opts && opts.size);
 
   return _serialize(async () => {
     const lockFd = await acquireIndexLock();
     try {
-      const dir = resolveFotosDir();
-      if (!fs.existsSync(dir)) return { ok: false, error: 'fotos_dir_missing' };
+      const baseDir = resolveFotosDir();
+      if (!fs.existsSync(baseDir)) return { ok: false, error: 'fotos_dir_missing' };
+      const dir = sizeSub ? path.join(baseDir, sizeSub) : baseDir;
+      if (sizeSub && !fs.existsSync(dir)) {
+        return { ok: false, error: `fotos_subdir_missing:${sizeSub}` };
+      }
       let idx = loadIndex();
 
       // [item 1] Antes de começar: Varra TODOS os arquivos do índice e, se houver uma reserva deste nomeConta em qualquer rec, devolva imediatamente (idempotência total)
@@ -233,13 +248,21 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         let toRemove = [];
         for (const [k, rec] of Object.entries(idx)) {
           if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
+            // Em modo size, só reutiliza reserva da mesma subpasta.
+            if (sizeSub) {
+              const prefix = `${sizeSub}/`;
+              if (!String(k).startsWith(prefix) && !String(k).startsWith(`${sizeSub}\\`)) continue;
+            } else {
+              // V1/V2: não reutilizar chaves de subpasta p/m/g
+              if (/^[pmg][\\/]/i.test(String(k))) continue;
+            }
             // Verifique se o arquivo ainda existe:
-            const abs = path.join(dir, k);
+            const abs = path.join(baseDir, k);
             if (fs.existsSync(abs)) {
               try {
-                logger.info('[FOTOS][pickPhotoForAccount] reserva existente reutilizada', { conta: nomeConta, file: k });
+                logger.info('[FOTOS][pickPhotoForAccount] reserva existente reutilizada', { conta: nomeConta, file: k, size: sizeSub || null });
               } catch {}
-              return { ok: true, file: k, absPath: abs };
+              return { ok: true, file: k, absPath: abs, size: sizeSub || null };
             } else {
               // O arquivo não existe mais, limpe a reserva e continue
               delete rec.reservedBy[nomeConta];
@@ -250,7 +273,7 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         // remove registros sumidos se houver
         let removed = false;
         for (const key of toRemove) {
-          if (!fs.existsSync(path.join(dir, key))) {
+          if (!fs.existsSync(path.join(baseDir, key))) {
             delete idx[key];
             removed = true;
           }
@@ -258,9 +281,9 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         if (removed) saveIndex(idx);
       }
 
-      const all = listAllPhotosSortedByMtimeAsc();
+      const all = listAllPhotosSortedByMtimeAsc(sizeSub ? { size: sizeSub } : {});
       let changed = false;
-      const stats = { total: all.length, skippedPosted: 0, skippedReservedOther: 0, picked: 0 };
+      const stats = { total: all.length, skippedPosted: 0, skippedReservedOther: 0, picked: 0, size: sizeSub || null };
 
       for (const item of all) {
         const { name, abs, stat } = item;
@@ -294,7 +317,7 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         // ------------- ALTERAÇÃO NA ORDEM DAS CHECAGENS (item 1) -----------
         // 1. Se já reservado por esta conta: continue servindo esta foto (idempotente)
         if (rec.reservedBy[nomeConta]) {
-          return { ok: true, file: name, absPath: abs };
+          return { ok: true, file: name, absPath: abs, size: sizeSub || null };
         }
 
         // 2. Depois: Se já postada por esta conta, pule
@@ -313,13 +336,20 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         try {
           logger.info('[FOTOS][pickPhotoForAccount] foto reservada', { conta: nomeConta, file: name, stats });
         } catch {}
-        return { ok: true, file: name, absPath: abs };
+        return { ok: true, file: name, absPath: abs, size: sizeSub || null };
       }
 
       // Limpa entradas do índice que não existem mais no disco
+      // (mantém comportamento original; varre só chaves do escopo atual quando size)
       let removed = false;
       for (const key of Object.keys(idx)) {
-        const abs = path.join(dir, key);
+        if (sizeSub) {
+          const prefix = `${sizeSub}/`;
+          if (!String(key).startsWith(prefix) && !String(key).startsWith(`${sizeSub}\\`)) continue;
+        } else if (/^[pmg][\\/]/i.test(String(key))) {
+          continue;
+        }
+        const abs = path.join(baseDir, key);
         if (!fs.existsSync(abs)) {
           delete idx[key];
           removed = true;

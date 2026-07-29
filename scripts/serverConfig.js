@@ -272,7 +272,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
   const workModeRaw = String(robe.workMode || DEFAULTS.robe.workMode).trim().toLowerCase();
-  const workMode = (workModeRaw === "v2_auto") ? "v2_auto" : "v1";
+  const workMode = (workModeRaw === "v3_pmg")
+    ? "v3_pmg"
+    : ((workModeRaw === "v2_auto") ? "v2_auto" : "v1");
   const v2Alpha = Number(clamp(toNum(v2.alpha, DEFAULTS.robe.v2Tuning.alpha), 0, 0.6).toFixed(4));
   const v2Beta = Number(clamp(toNum(v2.beta, DEFAULTS.robe.v2Tuning.beta), 0.05, 6.0).toFixed(4));
   const v2MinBoost = Number(clamp(toNum(v2.minBoost, DEFAULTS.robe.v2Tuning.minBoost), 0.01, 2.0).toFixed(4));
@@ -477,7 +479,7 @@ function validateServerConfigPayload(payload) {
     }
     if (robe.workMode !== undefined) {
       const wm = String(robe.workMode || "").trim().toLowerCase();
-      if (!["v1", "v2_auto"].includes(wm)) {
+      if (!["v1", "v2_auto", "v3_pmg"].includes(wm)) {
         errors.push("robe.workMode_invalido");
       }
     }

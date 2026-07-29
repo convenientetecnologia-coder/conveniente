@@ -506,11 +506,41 @@ function defaultRobeV2QueueState() {
   };
 }
 
+function normalizeRobeQueueRawItem(x) {
+  if (typeof x === 'string') {
+    const city = String(x || '').trim();
+    return city || null;
+  }
+  if (x && typeof x === 'object') {
+    const city = String(x.city || x.cidade || '').trim();
+    if (!city) return null;
+    const sizeRaw = String(x.size || x.tamanho || '').trim().toUpperCase();
+    const size = (sizeRaw === 'P' || sizeRaw === 'M' || sizeRaw === 'G') ? sizeRaw : null;
+    return { city, size };
+  }
+  return null;
+}
+
+function robeQueueItemToSlot(item) {
+  const n = normalizeRobeQueueRawItem(item);
+  if (!n) return { city: '', size: null };
+  if (typeof n === 'string') return { city: n, size: null };
+  return { city: String(n.city || '').trim(), size: n.size || null };
+}
+
+function formatRobeQueueItemLabel(item) {
+  const slot = robeQueueItemToSlot(item);
+  if (!slot.city) return '';
+  return slot.size ? `${slot.city} [${slot.size}]` : slot.city;
+}
+
 function readRobeV2QueueState() {
   const d = defaultRobeV2QueueState();
   const raw = readJsonSafe(ROBE_V2_QUEUE_PATH, d);
   if (!raw || typeof raw !== 'object') return d;
-  const q = Array.isArray(raw.queue) ? raw.queue.map((x) => String(x || '').trim()).filter(Boolean) : [];
+  const q = Array.isArray(raw.queue)
+    ? raw.queue.map(normalizeRobeQueueRawItem).filter(Boolean)
+    : [];
   const f = (raw.failures && typeof raw.failures === 'object') ? raw.failures : {};
   return {
     ...d,
@@ -750,6 +780,132 @@ function buildRobeV2ShuffledQueue(countsByCity, { antiStreakPenalty = 0.35 } = {
   return queue;
 }
 
+/**
+ * Aloca L postagens em P/M/G com pesos efetivos (fixo 40/30/30).
+ * Largest remainder; desempate P > M > G.
+ * Gabarito: cenários A–G do plano Robe V3 PMG.
+ */
+function allocatePmgSlots(L, pmg) {
+  const target = Math.max(0, Math.floor(Number(L || 0) || 0));
+  const p = Math.max(0, Number(pmg && pmg.p || 0) || 0);
+  const m = Math.max(0, Number(pmg && pmg.m || 0) || 0);
+  const g = Math.max(0, Number(pmg && pmg.g || 0) || 0);
+  const fixo = Math.max(0, Number(pmg && pmg.fixo || 0) || 0);
+  let wP = p + (fixo * 0.40);
+  let wM = m + (fixo * 0.30);
+  let wG = g + (fixo * 0.30);
+  let W = wP + wM + wG;
+  if (!(W > 0)) {
+    wP = 0.40;
+    wM = 0.30;
+    wG = 0.30;
+    W = 1;
+  }
+  if (target <= 0) {
+    return {
+      ok: true,
+      nP: 0, nM: 0, nG: 0,
+      weights: { wP, wM, wG, W },
+      pmg: { p, m, g, fixo }
+    };
+  }
+  const rawP = target * wP / W;
+  const rawM = target * wM / W;
+  const rawG = target * wG / W;
+  let nP = Math.floor(rawP);
+  let nM = Math.floor(rawM);
+  let nG = Math.floor(rawG);
+  let resto = target - (nP + nM + nG);
+  const fracs = [
+    { size: 'P', frac: rawP - nP },
+    { size: 'M', frac: rawM - nM },
+    { size: 'G', frac: rawG - nG }
+  ].sort((a, b) => {
+    if (b.frac !== a.frac) return b.frac - a.frac;
+    const ord = { P: 0, M: 1, G: 2 };
+    return ord[a.size] - ord[b.size];
+  });
+  for (let i = 0; i < resto; i++) {
+    const s = fracs[i % fracs.length].size;
+    if (s === 'P') nP += 1;
+    else if (s === 'M') nM += 1;
+    else nG += 1;
+  }
+  return {
+    ok: true,
+    nP, nM, nG,
+    weights: { wP, wM, wG, W },
+    pmg: { p, m, g, fixo }
+  };
+}
+
+function buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty = 0.35 } = {}) {
+  // slotsByCity: { city: { P:n, M:n, G:n } }
+  const rem = {};
+  let total = 0;
+  for (const [city, sizes] of Object.entries(slotsByCity || {})) {
+    const p = Math.max(0, Number(sizes && sizes.P || 0) || 0);
+    const m = Math.max(0, Number(sizes && sizes.M || 0) || 0);
+    const g = Math.max(0, Number(sizes && sizes.G || 0) || 0);
+    const cityTotal = p + m + g;
+    if (!cityTotal) continue;
+    rem[city] = { P: p, M: m, G: g, total: cityTotal };
+    total += cityTotal;
+  }
+  const queue = [];
+  let prevCity = '';
+  let prevSize = '';
+  while (total > 0) {
+    const cities = Object.keys(rem).filter((c) => rem[c].total > 0);
+    if (!cities.length) break;
+    let sumCity = 0;
+    const weightedCities = cities.map((city) => {
+      const base = rem[city].total;
+      const penalty = (city === prevCity && cities.length > 1)
+        ? Math.max(0.01, Math.min(1, Number(antiStreakPenalty) || 0.35))
+        : 1;
+      const w = Math.max(0.0001, base * penalty);
+      sumCity += w;
+      return { city, w };
+    });
+    let pickC = Math.random() * sumCity;
+    let chosenCity = weightedCities[weightedCities.length - 1].city;
+    for (const row of weightedCities) {
+      pickC -= row.w;
+      if (pickC <= 0) {
+        chosenCity = row.city;
+        break;
+      }
+    }
+    const bucket = rem[chosenCity];
+    const sizeCandidates = ['P', 'M', 'G'].filter((s) => bucket[s] > 0);
+    let sumSize = 0;
+    const weightedSizes = sizeCandidates.map((size) => {
+      const base = bucket[size];
+      const penalty = (chosenCity === prevCity && size === prevSize && sizeCandidates.length > 1) ? 0.55 : 1;
+      const w = Math.max(0.0001, base * penalty);
+      sumSize += w;
+      return { size, w };
+    });
+    let pickS = Math.random() * sumSize;
+    let chosenSize = weightedSizes[weightedSizes.length - 1].size;
+    for (const row of weightedSizes) {
+      pickS -= row.w;
+      if (pickS <= 0) {
+        chosenSize = row.size;
+        break;
+      }
+    }
+    queue.push({ city: chosenCity, size: chosenSize });
+    bucket[chosenSize] -= 1;
+    bucket.total -= 1;
+    total -= 1;
+    prevCity = chosenCity;
+    prevSize = chosenSize;
+  }
+  return queue;
+}
+
 async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
   const ct = resolveCtSecretConfig();
   if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
@@ -794,6 +950,8 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
 async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const workMode = String(robeCfg.workMode || 'v1').trim().toLowerCase();
+  const isV3 = workMode === 'v3_pmg';
   const tuning = (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : {};
   const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
   if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
@@ -820,7 +978,39 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   if (signal === 0) return { ok: false, error: 'stats_no_signal_all' };
   const calc = computeRobeV2Counts({ cities, statsByCity: statsByCity, targetN: plan.targetN, tuning });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
-  const queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
+
+  let queue = [];
+  let rowsOut = Array.isArray(calc.rows) ? calc.rows.slice() : [];
+  if (isV3) {
+    const slotsByCity = {};
+    rowsOut = rowsOut.map((r) => {
+      const city = String(r.city || '').trim();
+      const L = Math.max(0, Number(r.count || 0) || 0);
+      const st = (statsByCity && statsByCity[city]) ? statsByCity[city] : null;
+      const pmgRaw = (st && st.pmg && typeof st.pmg === 'object') ? st.pmg : null;
+      const motoristas = st ? (Number(st.motoristas || 0) || 0) : (Number(r.motoristas || 0) || 0);
+      const pmg = pmgRaw || { p: 0, m: 0, g: 0, fixo: motoristas };
+      const alloc = allocatePmgSlots(L, pmg);
+      if (city && L > 0) {
+        slotsByCity[city] = { P: alloc.nP, M: alloc.nM, G: alloc.nG };
+      }
+      return {
+        ...r,
+        motoristas,
+        pmg: {
+          p: alloc.pmg.p,
+          m: alloc.pmg.m,
+          g: alloc.pmg.g,
+          fixo: alloc.pmg.fixo
+        },
+        slots: { P: alloc.nP, M: alloc.nM, G: alloc.nG },
+        weights: alloc.weights
+      };
+    });
+    queue = buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
+  } else {
+    queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
+  }
   if (!queue.length) return { ok: false, error: 'empty_queue_generated' };
   const now = Date.now();
   const pr = Number(tuning.prefetchRatio);
@@ -836,6 +1026,7 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       requestId: stats.requestId || null,
       generatedAt: now,
       citiesCount: cities.length,
+      queueMode: isV3 ? 'v3_pmg' : 'v2_auto',
       configSig: JSON.stringify({
         workMode: String(robeCfg.workMode || 'v1'),
         cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
@@ -848,7 +1039,7 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       targetN: plan.targetN,
       missingCities: stats.missingCities || [],
       params: calc.params || null,
-      rows: calc.rows
+      rows: rowsOut
     },
     planGeneratedAt: now,
     planValidUntil: now + ROBE_V2_REGEN_COOLDOWN_MS,
@@ -907,6 +1098,7 @@ async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false }
             citiesCount: Number(block.meta && block.meta.citiesCount || 0) || null,
             reason: String(block.meta && block.meta.reason || reason || '').slice(0, 120) || null,
             requestId: (block.meta && block.meta.requestId) ? String(block.meta.requestId) : null,
+            queueMode: (block.meta && block.meta.queueMode) ? String(block.meta.queueMode) : null,
             params: (block.meta && block.meta.params) ? block.meta.params : null,
             rows: Array.isArray(block.meta && block.meta.rows) ? block.meta.rows : null
           };
@@ -942,7 +1134,7 @@ async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false }
   return { ok: true, queued: true };
 }
 
-async function pickPostingCityForRunV2() {
+async function pickPostingSlotForRunV2() {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
   const cfgCities = normalizeCityList(robeCfg.cidadesExtrasGlobais);
@@ -955,10 +1147,26 @@ async function pickPostingCityForRunV2() {
     // senão cada consumo detecta "configMismatch", zera a fila e força regeneração.
     v2Tuning: (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : null
   });
-  let chosen = '';
+  let chosen = { city: '', size: null };
   let queueAfter = 0;
   let threshold = 20;
   let expiredPlan = false;
+  const takeOne = (state) => {
+    const q = Array.isArray(state.queue) ? state.queue : [];
+    if (q.length > 0) {
+      const raw = q.shift();
+      const slot = robeQueueItemToSlot(raw);
+      if (slot.city) {
+        chosen = slot;
+        state.consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0) + 1;
+      }
+    }
+    state.queue = q;
+    queueAfter = q.length;
+    threshold = Math.max(1, Number(state.prefetchThreshold || 20) || 20);
+    expiredPlan = Number(state.planValidUntil || 0) > 0 && Number(state.planValidUntil || 0) <= Date.now();
+    return state;
+  };
   await withRobeV2QueueLock((state) => {
     const stateSig = String(state && state.meta && state.meta.configSig || '');
     if (stateSig && stateSig !== expectedSig) {
@@ -971,33 +1179,13 @@ async function pickPostingCityForRunV2() {
         configMismatch: true
       };
     }
-    const q = Array.isArray(state.queue) ? state.queue : [];
-    if (q.length > 0) {
-      chosen = String(q.shift() || '').trim();
-      if (chosen) state.consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0) + 1;
-    }
-    state.queue = q;
-    queueAfter = q.length;
-    threshold = Math.max(1, Number(state.prefetchThreshold || 20) || 20);
-    expiredPlan = Number(state.planValidUntil || 0) > 0 && Number(state.planValidUntil || 0) <= Date.now();
-    return state;
+    return takeOne(state);
   });
-  if (!chosen) {
+  if (!chosen.city) {
     await scheduleRobeV2Regeneration({ reason: 'empty_queue_blocking', wait: true });
-    await withRobeV2QueueLock((state) => {
-      const q = Array.isArray(state.queue) ? state.queue : [];
-      if (q.length > 0) {
-        chosen = String(q.shift() || '').trim();
-        if (chosen) state.consumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0) + 1;
-      }
-      state.queue = q;
-      queueAfter = q.length;
-      threshold = Math.max(1, Number(state.prefetchThreshold || 20) || 20);
-      expiredPlan = Number(state.planValidUntil || 0) > 0 && Number(state.planValidUntil || 0) <= Date.now();
-      return state;
-    });
+    await withRobeV2QueueLock((state) => takeOne(state));
   }
-  if (!chosen) {
+  if (!chosen.city) {
     const st = readRobeV2QueueState();
     const failCount = Math.max(0, Number(st && st.failures && st.failures.count || 0) || 0);
     const backoffUntil = Math.max(0, Number(st && st.failures && st.failures.backoffUntil || 0) || 0);
@@ -1008,6 +1196,11 @@ async function pickPostingCityForRunV2() {
     scheduleRobeV2Regeneration({ reason: queueAfter <= threshold ? 'prefetch_low_queue' : 'plan_expired', wait: false }).catch(() => {});
   }
   return chosen;
+}
+
+async function pickPostingCityForRunV2() {
+  const slot = await pickPostingSlotForRunV2();
+  return slot && slot.city ? String(slot.city) : '';
 }
 
 async function robeV2WarmupNow({ reason = 'manual', force = false } = {}) {
@@ -1598,9 +1791,9 @@ async function pickPostingCityForRun(nome) {
     const cfg = serverConfig.readServerConfigEffective();
     workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
   } catch {}
-  if (workMode === 'v2_auto') {
+  if (workMode === 'v2_auto' || workMode === 'v3_pmg') {
     const city = await pickPostingCityForRunV2();
-    if (!city) throw new Error('robe_v2_city_unavailable');
+    if (!city) throw new Error(workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable');
     return city;
   }
   let chosen = 'São Paulo';
@@ -3310,8 +3503,33 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = resolvePatchCoordsForProfile(nome, manifest || {});
     // Pré-seleciona foto antes de abrir/create para reduzir janela de degradação entre recovery e upload.
+    // V3 PMG: consome slot {city,size} ANTES da foto (pasta Desktop/fotos/{p,m,g}).
+    let robeWorkModeEarly = 'v1';
+    try {
+      const cfgEarly = serverConfig.readServerConfigEffective();
+      robeWorkModeEarly = String(cfgEarly && cfgEarly.robe && cfgEarly.robe.workMode || 'v1').trim().toLowerCase();
+    } catch {}
+    let postingSize = null;
+    if (robeWorkModeEarly === 'v3_pmg') {
+      try {
+        const slot = await pickPostingSlotForRunV2();
+        cidadePerfil = slot && slot.city ? String(slot.city) : null;
+        postingSize = slot && slot.size ? String(slot.size).toUpperCase() : null;
+        if (!cidadePerfil || !postingSize) throw new Error('robe_v3_slot_unavailable');
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'posting_slot_selected_v3',
+          city: cidadePerfil,
+          size: postingSize
+        });
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_slot_pick_failed', error: msg });
+        throw new Error(`robe_v3_city_unavailable:${msg}`);
+      }
+    }
     const photoPickStartedAt = Date.now();
-    let pick = await fotos.pickPhotoForAccount(nome, workingNames);
+    let pick = await fotos.pickPhotoForAccount(nome, workingNames, postingSize ? { size: postingSize } : undefined);
     // Auto-heal: se a conta entrou em "sem foto" apesar do pool existir, limpar histórico dela no índice e tentar 1x.
     // Isso evita travar operação por inconsistência do registry (ex.: consumo indevido por falhas antigas).
     if (!pick.ok && pick.error === 'no-photo-available') {
@@ -3327,7 +3545,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
           });
         } catch {}
       } catch {}
-      pick = await fotos.pickPhotoForAccount(nome, workingNames);
+      pick = await fotos.pickPhotoForAccount(nome, workingNames, postingSize ? { size: postingSize } : undefined);
     }
     if (!pick.ok) {
       const reason = pick.error || 'no-photo-available';
@@ -3648,21 +3866,31 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       robeWorkMode = String(cfgNow && cfgNow.robe && cfgNow.robe.workMode || 'v1').trim().toLowerCase();
     } catch {}
     let cityPickErr = null;
-    try {
-      cidadePerfil = await pickPostingCityForRun(nome);
-    } catch (e) {
-      cityPickErr = (e && e.message) ? String(e.message) : String(e);
-      stepLog.appendJSONL(nome, 'robe', {
-        attempt: attId,
-        step: 'posting_city_pick_failed',
-        error: cityPickErr
-      });
+    // V3 já consumiu o slot no início (antes da foto) — não puxar de novo da fila.
+    if (robeWorkMode !== 'v3_pmg' || !cidadePerfil) {
+      try {
+        cidadePerfil = await pickPostingCityForRun(nome);
+      } catch (e) {
+        cityPickErr = (e && e.message) ? String(e.message) : String(e);
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'posting_city_pick_failed',
+          error: cityPickErr
+        });
+      }
     }
-    if (!cidadePerfil && robeWorkMode === 'v2_auto') {
-      throw new Error(`robe_v2_city_unavailable${cityPickErr ? `:${cityPickErr}` : ''}`);
+    if (!cidadePerfil && (robeWorkMode === 'v2_auto' || robeWorkMode === 'v3_pmg')) {
+      throw new Error(
+        `${robeWorkMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable'}${cityPickErr ? `:${cityPickErr}` : ''}`
+      );
     }
     if (!cidadePerfil) cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'posting_city_selected',
+      value: cidadePerfil,
+      size: postingSize || null
+    });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
     localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
@@ -3891,6 +4119,9 @@ module.exports = {
   startRobe,
   robeQueueFilter,
   robeV2WarmupNow,
-  // Exportado para permitir que Robe de veículos consuma a fila V2 também.
-  pickPostingCityForRunV2
+  // Exportado para permitir que Robe de veículos consuma a fila V2/V3 também.
+  pickPostingCityForRunV2,
+  pickPostingSlotForRunV2,
+  allocatePmgSlots,
+  formatRobeQueueItemLabel
 };

@@ -941,14 +941,15 @@ async function pickPostingCityForRun(nome) {
     const cfg = serverConfig.readServerConfigEffective();
     workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
   } catch {}
-  if (workMode === 'v2_auto') {
-    // Em V2, a cidade vem da fila global do servidor (não do ciclo por conta).
+  if (workMode === 'v2_auto' || workMode === 'v3_pmg') {
+    // Em V2/V3, a cidade vem da fila global do servidor (não do ciclo por conta).
+    // V3: o tamanho da fila é ignorado aqui — robe veículos usa fotosveiculos por modelo.
     const robeMod = require('./robe.js');
     if (!robeMod || typeof robeMod.pickPostingCityForRunV2 !== 'function') {
       throw new Error('robe_v2_picker_unavailable');
     }
     const city = await robeMod.pickPostingCityForRunV2();
-    if (!city) throw new Error('robe_v2_city_unavailable');
+    if (!city) throw new Error(workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable');
     return city;
   }
   let chosen = 'São Paulo';

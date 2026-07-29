@@ -245,7 +245,7 @@ module.exports = (app, workerClient, fileStore) => {
       const tryWarmupV2 = async () => {
         try {
           if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return null;
-          if (!effective || !effective.robe || effective.robe.workMode !== 'v2_auto') return null;
+          if (!effective || !effective.robe || !['v2_auto', 'v3_pmg'].includes(String(effective.robe.workMode || ''))) return null;
           return await workerClient.sendWorkerCommand('robe-v2-warmup', {
             reason: 'server_config_saved',
             force: true

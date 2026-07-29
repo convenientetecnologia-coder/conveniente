@@ -775,12 +775,24 @@ function buildQuickSnapshot(status) {
   const avatarUrl = process.env.OPERATOR_AVATAR || '';
   const humanId = `${username}@${computerName}`;
 
-  // NOVO: fotosCount — leitura do diretório de fotos
+  // NOVO: fotosCount — leitura do diretório de fotos (raiz + subpastas p/m/g do V3)
   let fotosCount = 0;
   try {
     const dir = fotos.resolveFotosDir();
     const list = fsSync.readdirSync(dir, { withFileTypes: true });
-    fotosCount = list.filter(ent => ent.isFile() && isImage(ent.name)).length;
+    for (const ent of list) {
+      if (ent.isFile() && isImage(ent.name)) {
+        fotosCount += 1;
+        continue;
+      }
+      if (!ent.isDirectory()) continue;
+      const sub = String(ent.name || '').trim().toLowerCase();
+      if (sub !== 'p' && sub !== 'm' && sub !== 'g') continue;
+      try {
+        const subList = fsSync.readdirSync(path.join(dir, ent.name), { withFileTypes: true });
+        fotosCount += subList.filter(e => e.isFile() && isImage(e.name)).length;
+      } catch {}
+    }
   } catch {}
 
   return {

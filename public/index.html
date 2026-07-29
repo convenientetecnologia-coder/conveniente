@@ -1289,10 +1289,11 @@
         <div class="form-row">
           <label>Robe — tipo de trabalho</label>
           <select id="srvRobeWorkMode">
+            <option value="v3_pmg">Robe V3 PMG (cidades + fotos P/M/G)</option>
             <option value="v2_auto">Robe V2 automatizado</option>
             <option value="v1">Robe V1</option>
           </select>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras da conta + extras globais. Robe V2 automatizado usa apenas as cidades globais do servidor com distribuição por Habitantes x Insight.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras. Robe V2 usa cidades globais (Habitantes × Insight). Robe V3 = V2 + distribuição de fotos em Desktop/fotos/p|m|g conforme PMG dos motoristas (fixo 40/30/30).</div>
         </div>
         <div class="form-row">
           <label>Virtus — motor de execução</label>
@@ -1495,7 +1496,8 @@
           const mm = String(Number(daily.openWindowEndMinute || 0)).padStart(2, '0');
           dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
-        workModeEl.value = String(robe.workMode || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1';
+        const wm = String(robe.workMode || 'v1');
+        workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
@@ -1711,7 +1713,11 @@
             robe: {
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
-              workMode: String((workModeEl && workModeEl.value) || 'v1') === 'v2_auto' ? 'v2_auto' : 'v1',
+              workMode: (() => {
+                const wm = String((workModeEl && workModeEl.value) || 'v1');
+                if (wm === 'v3_pmg' || wm === 'v2_auto') return wm;
+                return 'v1';
+              })(),
               photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted'),
               cidadesExtrasGlobais: (() => {
                 syncGlobalSelectedFromChecks();
@@ -3402,7 +3408,7 @@
       const overlay = document.createElement('div'); overlay.className = 'modal-ov';
       const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth = '980px';
       box.innerHTML = `
-        <h2>Postagens (Robe V2)</h2>
+        <h2 id="robePostingsTitle">Postagens</h2>
         <div id="robePostingsInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando...</div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
           <div class="pill info" id="robePostingsPillMode"><span class="dot"></span>Modo: —</div>
@@ -3442,6 +3448,7 @@
       overlay.append(box);
       document.body.append(overlay);
 
+      const titleEl = box.querySelector('#robePostingsTitle');
       const infoEl = box.querySelector('#robePostingsInfo');
       const pillMode = box.querySelector('#robePostingsPillMode');
       const pillTotal = box.querySelector('#robePostingsPillTotal');
@@ -3462,10 +3469,11 @@
       const pageLimit = 800;
       let queueTotal = 0;
       let loading = false;
+      let currentWorkMode = 'v1';
 
       function renderCounts(lastBlock) {
         if (!lastBlock) {
-          countsEl.innerHTML = `<div class="muted">Nenhum bloco V2 gerado ainda. (Robe V2 precisa rodar/gerar a fila.)</div>`;
+          countsEl.innerHTML = `<div class="muted">Nenhum bloco gerado ainda. (Robe V2/V3 precisa rodar/gerar a fila.)</div>`;
           paramsEl.textContent = 'Parâmetros: —';
           return;
         }
@@ -3492,11 +3500,30 @@
           countsEl.innerHTML = `<div class="muted">Sem detalhes do último bloco (rows vazias).</div>`;
           return;
         }
+        const isV3 = currentWorkMode === 'v3_pmg' || String(lastBlock.queueMode || '') === 'v3_pmg'
+          || rows.some(r => r && (r.slots || r.pmg));
         const sorted = rows.slice(0).sort((a, b) => (Number(b.count||0)||0) - (Number(a.count||0)||0));
         const lines = sorted.map(r => {
           const city = String(r.city || '').trim() || '—';
           const count = fmtInt(r.count);
-          return `<div><b>${city}</b>: ${count}</div>`;
+          if (!isV3) {
+            return `<div><b>${escapeHtml(city)}</b>: ${count}</div>`;
+          }
+          const mot = fmtInt(r.motoristas);
+          const pmg = (r.pmg && typeof r.pmg === 'object') ? r.pmg : {};
+          const slots = (r.slots && typeof r.slots === 'object') ? r.slots : {};
+          const pCnt = fmtInt(pmg.p);
+          const mCnt = fmtInt(pmg.m);
+          const gCnt = fmtInt(pmg.g);
+          const fixo = fmtInt(pmg.fixo);
+          const sP = fmtInt(slots.P != null ? slots.P : slots.p);
+          const sM = fmtInt(slots.M != null ? slots.M : slots.m);
+          const sG = fmtInt(slots.G != null ? slots.G : slots.g);
+          return `<div style="margin-bottom:8px; line-height:1.55;">
+            <div><b>${escapeHtml(city)}</b>: <b>${count}</b> localizações</div>
+            <div class="muted" style="margin-left:8px;">Motoristas: ${mot} · PMG: P${pCnt} M${mCnt} G${gCnt} · Fixos: ${fixo}</div>
+            <div class="muted" style="margin-left:8px;">Slots do bloco: P${sP} · M${sM} · G${sG}</div>
+          </div>`;
         }).join('');
         countsEl.innerHTML = lines;
       }
@@ -3532,12 +3559,19 @@
             infoEl.innerHTML = `<span class="dot"></span>OK | ts=${tsLabel}`;
           }
 
-          pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${String(data.workMode || 'v1')}</b>`;
+          currentWorkMode = String(data.workMode || 'v1');
+          if (titleEl) {
+            titleEl.textContent = currentWorkMode === 'v3_pmg'
+              ? 'Postagens (Robe V3)'
+              : (currentWorkMode === 'v2_auto' ? 'Postagens (Robe V2)' : 'Postagens');
+          }
+          pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${escapeHtml(currentWorkMode)}</b>`;
           queueTotal = Number(data.queueTotal || 0) || 0;
           const consumedTotal = Math.max(0, Number(data.consumedTotal || 0) || 0);
           pillConsumed.innerHTML = `<span class="dot"></span>Consumidas (total): <b>${fmtInt(consumedTotal)}</b>`;
 
           const lb = data.lastBlock || null;
+          if (lb && data.meta && data.meta.queueMode && !lb.queueMode) lb.queueMode = data.meta.queueMode;
           if (!lb) {
             pillTotal.innerHTML = `<span class="dot"></span>Total (último bloco): —`;
             pillRemain.innerHTML = `<span class="dot"></span>Restantes (último bloco): —`;
