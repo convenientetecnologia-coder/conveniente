@@ -64,11 +64,34 @@ function saveState(patch) {
 /**
  * Decide se a conta deve ser excluída nesta limpeza.
  * Allowlist positiva — nunca “loginRequired genérico”.
+ *
+ * Ordem (militar):
+ * 1) banned / 2FA → delete
+ * 2) motivos explicitamente recuperáveis → keep (mesmo com captchaCheckpoint=true)
+ * 3) captcha/checkpoint bloqueante → delete
+ * 4) resto (login_form/session/login_other/identity/consent/...) → keep
  */
+function isExplicitlyRecoverableReason(reason) {
+  const r = String(reason || '').trim().toLowerCase();
+  if (!r) return false;
+  if (r.includes('checkpoint_back_to_facebook') || r.includes('back_to_facebook')) return true;
+  if (r === 'non_lr_automation_paused' || r.includes('non_lr_automation_paused')) return true;
+  if (r.includes('password_reset')) return true;
+  if (r.includes('hacked_review')) return true;
+  if (r.includes('appeal')) return true;
+  if (r.includes('identity')) return true;
+  if (r === 'login_form' || r.includes('login_form')) return true;
+  if (r.includes('session')) return true;
+  if (r === 'login_other' || r.includes('login_other')) return true;
+  if (r.includes('consent')) return true;
+  return false;
+}
+
 function classifyTerminalDelete(flags) {
   const f = (flags && typeof flags === 'object') ? flags : {};
   const loginReason = String(f.loginReason || '').trim().toLowerCase();
   const captchaReason = String(f.captchaCheckpointReason || '').trim().toLowerCase();
+  const combined = captchaReason || loginReason;
 
   if (f.banned === true) {
     return { delete: true, category: 'banned', detail: String(f.bannedReason || 'banned').slice(0, 120) };
@@ -83,27 +106,33 @@ function classifyTerminalDelete(flags) {
     return { delete: true, category: 'two_factor', detail: `login_reason:${loginReason}`.slice(0, 120) };
   }
 
-  // Checkpoint recuperável: NÃO excluir
-  if (
-    captchaReason.includes('checkpoint_back_to_facebook') ||
-    loginReason.includes('checkpoint_back_to_facebook')
-  ) {
-    return { delete: false, category: 'checkpoint_recoverable', detail: 'checkpoint_back_to_facebook' };
+  // Recuperáveis: NÃO excluir (mesmo se captchaCheckpoint ficou sujo por substring "checkpoint")
+  if (isExplicitlyRecoverableReason(captchaReason) || isExplicitlyRecoverableReason(loginReason)) {
+    return {
+      delete: false,
+      category: 'recoverable',
+      detail: String(combined || 'recoverable').slice(0, 120)
+    };
   }
 
   const captchaBlockingReasons = [
     'captcha_persona',
     'captcha_persona_pre_screen',
-    'checkpoint_captcha'
+    'checkpoint_captcha',
+    'captcha_checkpoint'
   ];
 
   if (f.captchaCheckpoint === true) {
-    const r = captchaReason || loginReason;
-    if (!r || captchaBlockingReasons.some((x) => r.includes(x)) || r.includes('captcha') || r.includes('checkpoint')) {
-      // já bloqueamos back_to_facebook acima
-      if (!String(r).includes('back_to_facebook')) {
-        return { delete: true, category: 'captcha', detail: `captchaCheckpoint:${r || 'flag'}`.slice(0, 120) };
-      }
+    const r = combined;
+    // Flag sem motivo = terminal (setCaptchaCheckpointFlag só sobe em fluxo bloqueante).
+    // Motivo com captcha/checkpoint (já filtrado recuperável acima) = terminal.
+    if (
+      !r ||
+      captchaBlockingReasons.some((x) => r === x || r.includes(x)) ||
+      r.includes('captcha') ||
+      r.includes('checkpoint')
+    ) {
+      return { delete: true, category: 'captcha', detail: `captchaCheckpoint:${r || 'flag'}`.slice(0, 120) };
     }
   }
 
@@ -190,65 +219,80 @@ async function runDailyTerminalCleanup({
     });
   } catch {}
 
+  // Claim 1×/dia ANTES do loop: se crashar no meio, não re-roda (evita double-delete)
+  // e também não “perde o dia” por throw após o scan.
+  saveState({
+    lastTerminalCleanupDay: day,
+    lastTerminalCleanupAt: now(),
+    lastDeleted: 0,
+    lastFailed: 0,
+    lastScanned: perfis.length,
+    lastCandidates: candidates.length,
+    lastByCategory: { banned: 0, two_factor: 0, captcha: 0 },
+    lastClaimedAt: now()
+  });
+
   let deleted = 0;
   let failed = 0;
   const byCategory = { banned: 0, two_factor: 0, captcha: 0 };
   const failures = [];
 
-  for (const c of candidates) {
-    try {
-      const r = await httpDeletePerfil({
-        localPort,
-        nome: c.nome,
-        by: `daily_terminal_cleanup:${c.category}`
-      });
-      if (r && r.ok === true) {
-        deleted += 1;
-        if (byCategory[c.category] != null) byCategory[c.category] += 1;
-        try {
-          provisionAudit.append({
-            ts: now(),
-            event: 'daily_terminal_cleanup_deleted',
-            by: String(by || '').slice(0, 120),
-            day,
-            nome: c.nome,
-            category: c.category,
-            detail: c.detail,
-            alreadyDeleted: !!(r && r.alreadyDeleted)
-          });
-        } catch {}
-      } else {
+  try {
+    for (const c of candidates) {
+      try {
+        const r = await httpDeletePerfil({
+          localPort,
+          nome: c.nome,
+          by: `daily_terminal_cleanup:${c.category}`
+        });
+        if (r && r.ok === true) {
+          deleted += 1;
+          if (byCategory[c.category] != null) byCategory[c.category] += 1;
+          try {
+            provisionAudit.append({
+              ts: now(),
+              event: 'daily_terminal_cleanup_deleted',
+              by: String(by || '').slice(0, 120),
+              day,
+              nome: c.nome,
+              category: c.category,
+              detail: c.detail,
+              alreadyDeleted: !!(r && r.alreadyDeleted)
+            });
+          } catch {}
+        } else {
+          failed += 1;
+          const err = String((r && r.error) || 'delete_failed').slice(0, 180);
+          if (failures.length < 20) failures.push({ nome: c.nome, error: err, category: c.category });
+          try {
+            provisionAudit.append({
+              ts: now(),
+              event: 'daily_terminal_cleanup_delete_failed',
+              by: String(by || '').slice(0, 120),
+              day,
+              nome: c.nome,
+              category: c.category,
+              error: err
+            });
+          } catch {}
+        }
+      } catch (e) {
         failed += 1;
-        const err = String((r && r.error) || 'delete_failed').slice(0, 180);
+        const err = String((e && e.message) || e).slice(0, 180);
         if (failures.length < 20) failures.push({ nome: c.nome, error: err, category: c.category });
-        try {
-          provisionAudit.append({
-            ts: now(),
-            event: 'daily_terminal_cleanup_delete_failed',
-            by: String(by || '').slice(0, 120),
-            day,
-            nome: c.nome,
-            category: c.category,
-            error: err
-          });
-        } catch {}
       }
-    } catch (e) {
-      failed += 1;
-      const err = String((e && e.message) || e).slice(0, 180);
-      if (failures.length < 20) failures.push({ nome: c.nome, error: err, category: c.category });
     }
+  } finally {
+    saveState({
+      lastTerminalCleanupDay: day,
+      lastTerminalCleanupAt: now(),
+      lastDeleted: deleted,
+      lastFailed: failed,
+      lastScanned: perfis.length,
+      lastCandidates: candidates.length,
+      lastByCategory: byCategory
+    });
   }
-
-  saveState({
-    lastTerminalCleanupDay: day,
-    lastTerminalCleanupAt: now(),
-    lastDeleted: deleted,
-    lastFailed: failed,
-    lastScanned: perfis.length,
-    lastCandidates: candidates.length,
-    lastByCategory: byCategory
-  });
 
   try {
     provisionAudit.append({
