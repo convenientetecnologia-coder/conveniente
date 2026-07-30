@@ -37,6 +37,8 @@ const provisionLock = require('./provisionLock.js');
 const serverConfig = require('./serverConfig.js');
 const networkRotation = require('./networkRotation.js');
 
+const renewMetrics = require('./renewMetrics.js');
+
 module.exports = (app, workerClient, fileStore) => {
   const normalizeVirtusEngine = (v) => {
     const s = String(v || '').trim().toLowerCase();
@@ -2074,9 +2076,44 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: `renew_then_close_lock_error ${(e && e.message) || String(e)}` });
       }
 
-      opsState.begin('renew_then_close', { total: 0, done: 0, ok: 0, fail: 0, current: 'renew_shard' });
+      opsState.begin('renew_then_close', { total: 0, done: 0, ok: 0, fail: 0, current: 'reset_renovados' });
 
-      // 0) ANTES do shard: desliga autopilot / open-all (igual close_all).
+      // 0a) ZERA renovados/qtd deste servidor ANTES de começar a renovar (ciclo limpo).
+      let resetRenovados = null;
+      try {
+        resetRenovados = await renewMetrics.resetAllRenovadosFlags({
+          fileStore,
+          by: String(by || 'renew_then_close').slice(0, 120)
+        });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_then_close_renovados_reset',
+            by,
+            lockOwner,
+            ok: !!(resetRenovados && resetRenovados.ok),
+            cleared: Number(resetRenovados && resetRenovados.cleared || 0) || 0,
+            failed: Number(resetRenovados && resetRenovados.failed || 0) || 0,
+            total: Number(resetRenovados && resetRenovados.total || 0) || 0,
+            errors: Array.isArray(resetRenovados && resetRenovados.errors) ? resetRenovados.errors.slice(0, 8) : []
+          });
+        } catch {}
+      } catch (e) {
+        resetRenovados = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'renew_then_close_renovados_reset_failed',
+            by,
+            lockOwner,
+            error: String((e && e.message) || e).slice(0, 180)
+          });
+        } catch {}
+      }
+
+      opsState.update('renew_then_close', { current: 'renew_shard' });
+
+      // 0b) ANTES do shard: desliga autopilot / open-all (igual close_all).
       // Sem isso o nurse faz desired_enforce_active e REABRE cada browser que o renew acabou de fechar.
       // NÃO zera active de todos aqui: browsers ainda abertos precisam renovar (shard usa controllers).
       try {
@@ -2221,6 +2258,14 @@ module.exports = (app, workerClient, fileStore) => {
         skipped,
         closedOk: closeOk,
         closedFail: closeFail,
+        renovadosReset: resetRenovados && typeof resetRenovados === 'object'
+          ? {
+              ok: !!resetRenovados.ok,
+              cleared: Number(resetRenovados.cleared || 0) || 0,
+              failed: Number(resetRenovados.failed || 0) || 0,
+              total: Number(resetRenovados.total || 0) || 0
+            }
+          : null,
         shard: shardResult && typeof shardResult === 'object'
           ? {
               total: Number(shardResult.total || 0) || 0,
