@@ -6,6 +6,7 @@
  * - enabled=false → não faz nada
  * - enabled=true → 1 horário random na janela, 1×/dia (America/Sao_Paulo)
  * - NÃO acoplado a renovar/fechar/abrir
+ * - Save do operador (Sim/Não/janela) SEMPRE reseta claim do dia — comando explícito
  *
  * Tick leve (30s): só compara nextAt; trabalho pesado só quando due.
  */
@@ -90,7 +91,7 @@ function computeNextRandomAtFromWindow({ nowTs, startMin, endMin, skipCurrentInt
 
 function buildDefaultState() {
   return {
-    version: 2,
+    version: 3,
     updatedAt: now(),
     nextCleanupAt: 0,
     scheduleSignature: '',
@@ -114,6 +115,89 @@ function saveState(patch = null) {
   return next;
 }
 
+function tcConfigSignature(tc) {
+  const t = (tc && typeof tc === 'object') ? tc : {};
+  const startMin = hmToMin(t.windowStartHour, t.windowStartMinute);
+  const endMin = hmToMin(t.windowEndHour, t.windowEndMinute);
+  return `${t.enabled === true ? 'on' : 'off'}|${startMin}|${endMin}|v3`;
+}
+
+function terminalAccountCleanupConfigChanged(prevTc, nextTc) {
+  return tcConfigSignature(prevTc) !== tcConfigSignature(nextTc);
+}
+
+function clearDailyCleanupDayClaim({ reason = 'operator_config_change' } = {}) {
+  try {
+    const day = todayKeySaoPaulo();
+    const st = readJsonSafe(dailyTerminalCleanup.STATE_PATH, {}) || {};
+    if (String(st.lastTerminalCleanupDay || '') !== day) return false;
+    writeJsonAtomic(dailyTerminalCleanup.STATE_PATH, {
+      ...st,
+      lastTerminalCleanupDay: null,
+      lastTerminalCleanupAt: 0,
+      clearedBy: String(reason || 'operator_config_change').slice(0, 120),
+      clearedAt: now(),
+      updatedAt: now()
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Comando do operador (UI salvou Sim/Não/janela): zera 1×/dia e força novo agendamento.
+ * Sem isso, "já rodou hoje" engole reconfiguração deliberada.
+ */
+function resetOnOperatorConfigChange({
+  by = 'ui_server_config',
+  reason = 'terminal_account_cleanup_config_changed',
+  previousTc = null,
+  nextTc = null
+} = {}) {
+  const day = todayKeySaoPaulo();
+  const clearedDailyClaim = clearDailyCleanupDayClaim({ reason: 'operator_config_change' });
+  const next = saveState({
+    nextCleanupAt: 0,
+    scheduleSignature: '',
+    lastRunDay: null,
+    lastRunSource: null,
+    lastRunAt: 0,
+    lastError: null,
+    inProgress: false,
+    lastOperatorResetAt: now(),
+    lastOperatorResetBy: String(by || 'ui_server_config').slice(0, 120),
+    lastOperatorResetReason: String(reason || 'terminal_account_cleanup_config_changed').slice(0, 120)
+  });
+  try {
+    provisionAudit.append({
+      ts: now(),
+      event: 'terminal_account_cleanup_operator_reset',
+      day,
+      by: String(by || 'ui_server_config').slice(0, 120),
+      reason: String(reason || 'terminal_account_cleanup_config_changed').slice(0, 120),
+      clearedDailyClaim: !!clearedDailyClaim,
+      previous: previousTc ? {
+        enabled: previousTc.enabled === true,
+        windowStartHour: previousTc.windowStartHour,
+        windowStartMinute: previousTc.windowStartMinute,
+        windowEndHour: previousTc.windowEndHour,
+        windowEndMinute: previousTc.windowEndMinute
+      } : null,
+      next: nextTc ? {
+        enabled: nextTc.enabled === true,
+        windowStartHour: nextTc.windowStartHour,
+        windowStartMinute: nextTc.windowStartMinute,
+        windowEndHour: nextTc.windowEndHour,
+        windowEndMinute: nextTc.windowEndMinute
+      } : null
+    });
+  } catch {}
+  // Reagenda na hora se já estiver enabled (não espera o próximo tick de 30s).
+  try { tick().catch(() => {}); } catch {}
+  return { ok: true, day, clearedDailyClaim, state: next };
+}
+
 async function tick() {
   if (inFlight) return;
   inFlight = true;
@@ -124,13 +208,31 @@ async function tick() {
 
     if (!enabled) {
       const cur = loadState();
-      if (Number(cur.nextCleanupAt || 0) > 0 || String(cur.scheduleSignature || '').length || cur.inProgress === true) {
+      // Não: zera agenda E claim do dia — reativar Sim no mesmo dia não herda "já feito".
+      if (
+        Number(cur.nextCleanupAt || 0) > 0 ||
+        String(cur.scheduleSignature || '').length ||
+        cur.inProgress === true ||
+        cur.lastRunDay ||
+        cur.lastRunSource
+      ) {
         saveState({
           nextCleanupAt: 0,
           scheduleSignature: '',
           inProgress: false,
-          lastError: null
+          lastError: null,
+          lastRunDay: null,
+          lastRunSource: null,
+          lastRunAt: 0
         });
+        clearDailyCleanupDayClaim({ reason: 'terminal_account_cleanup_disabled' });
+        try {
+          provisionAudit.append({
+            ts: now(),
+            event: 'terminal_account_cleanup_disabled_claim_cleared',
+            day: todayKeySaoPaulo()
+          });
+        } catch {}
       }
       return;
     }
@@ -139,8 +241,8 @@ async function tick() {
     const day = todayKeySaoPaulo(nowTs);
     const startMin = hmToMin(tc.windowStartHour, tc.windowStartMinute);
     const endMin = hmToMin(tc.windowEndHour, tc.windowEndMinute);
-    // v2: 1×/dia só conta run REAL deste scheduler (nunca herda claim antigo do open).
-    const signature = `${startMin}|${endMin}|on|v2`;
+    // v3: qualquer mudança de config do operador reseta claim (signature inclui on/off via path separado).
+    const signature = `${startMin}|${endMin}|on|v3`;
     let cur = loadState();
 
     if (cur.inProgress === true) {
@@ -155,30 +257,29 @@ async function tick() {
       } catch {}
     }
 
-    // Claim legado (daily_window_open / sync antigo) NÃO bloqueia esta janela.
     // Só run com lastRunSource=scheduler conta como 1×/dia.
+    // Mudança de config do operador zera isso via resetOnOperatorConfigChange / changedSchedule.
     const schedulerDoneToday =
       String(cur.lastRunDay || '') === day &&
       String(cur.lastRunSource || '') === 'scheduler';
 
     const changedSchedule = String(cur.scheduleSignature || '') !== signature;
     if (changedSchedule) {
-      // Mudança de janela/config: limpa claim fantasma (lastRunDay sem lastRunSource=scheduler).
-      // Ex.: sync antigo do daily_window_open das 05:14 que engolia a janela da tarde.
-      const clearGhost =
-        String(cur.lastRunDay || '') === day &&
-        String(cur.lastRunSource || '') !== 'scheduler';
-      const doneToday = schedulerDoneToday;
+      // Comando do usuário (janela/Sim): SEMPRE reseta claim do dia e agenda na nova janela.
+      clearDailyCleanupDayClaim({ reason: 'schedule_signature_changed' });
       const nextCleanupAt = computeNextRandomAtFromWindow({
         nowTs,
         startMin,
         endMin,
-        skipCurrentInterval: doneToday
+        skipCurrentInterval: false
       });
       cur = saveState({
         nextCleanupAt,
         scheduleSignature: signature,
-        ...(clearGhost ? { lastRunDay: null, lastRunSource: null, lastRunAt: 0 } : {})
+        lastRunDay: null,
+        lastRunSource: null,
+        lastRunAt: 0,
+        lastError: null
       });
       try {
         provisionAudit.append({
@@ -187,8 +288,8 @@ async function tick() {
           day,
           nextCleanupAt,
           signature,
-          skipCurrentInterval: !!doneToday,
-          clearedGhostClaim: !!clearGhost
+          skipCurrentInterval: false,
+          operatorConfigReset: true
         });
       } catch {}
     } else if (!Number(cur.nextCleanupAt) || Number(cur.nextCleanupAt) < (nowTs - 60 * 1000)) {
@@ -325,5 +426,8 @@ function startTerminalAccountCleanupScheduler({ port } = {}) {
 
 module.exports = {
   startTerminalAccountCleanupScheduler,
+  resetOnOperatorConfigChange,
+  terminalAccountCleanupConfigChanged,
+  tcConfigSignature,
   SCHED_STATE_PATH
 };

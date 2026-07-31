@@ -35,6 +35,7 @@ const manifestStore = require('./manifestStore.js');
 const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
 const serverConfig = require('./serverConfig.js');
+const terminalAccountCleanupScheduler = require('./terminalAccountCleanupScheduler.js');
 const networkRotation = require('./networkRotation.js');
 
 const renewMetrics = require('./renewMetrics.js');
@@ -187,8 +188,39 @@ module.exports = (app, workerClient, fileStore) => {
         });
       } catch {}
       if (hasConfigFields) {
+        const previousTc = (() => {
+          try {
+            const prev = serverConfig.readServerConfigEffective({});
+            return (prev && prev.terminalAccountCleanup) ? prev.terminalAccountCleanup : null;
+          } catch {
+            return null;
+          }
+        })();
         const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
         if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+        try {
+          const nextTc = (wr.saved && wr.saved.terminalAccountCleanup)
+            ? wr.saved.terminalAccountCleanup
+            : null;
+          if (
+            nextTc &&
+            typeof terminalAccountCleanupScheduler.terminalAccountCleanupConfigChanged === 'function' &&
+            terminalAccountCleanupScheduler.terminalAccountCleanupConfigChanged(previousTc, nextTc)
+          ) {
+            terminalAccountCleanupScheduler.resetOnOperatorConfigChange({
+              by: operator,
+              reason: 'ui_server_config_save',
+              previousTc,
+              nextTc
+            });
+          }
+        } catch (eReset) {
+          try {
+            logger.warn('[SERVER_CONFIG] falha ao resetar claim limpeza ban/captcha', {
+              error: (eReset && eReset.message) || String(eReset)
+            });
+          } catch {}
+        }
       } else if (!requestedVirtusEngine) {
         return res.json({ ok: false, error: 'payload_sem_campos_reconhecidos' });
       }
