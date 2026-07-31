@@ -81,6 +81,7 @@ function isExplicitlyRecoverableReason(reason) {
   if (r.includes('appeal')) return true;
   if (r.includes('identity')) return true;
   if (r === 'login_form' || r.includes('login_form')) return true;
+  if (r === 'aymh_continue' || r.includes('aymh_continue')) return true;
   if (r.includes('session')) return true;
   if (r === 'login_other' || r.includes('login_other')) return true;
   if (r.includes('consent')) return true;

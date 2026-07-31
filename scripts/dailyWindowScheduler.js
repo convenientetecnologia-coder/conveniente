@@ -42,13 +42,37 @@ function writeJsonAtomic(fp, obj) {
   fs.renameSync(tmp, fp);
 }
 
+function todayKeySaoPaulo(ts = Date.now()) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date(ts));
+  } catch {
+    const d = new Date(ts);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+}
+
 function buildDefaultState() {
   return {
-    version: 1,
+    version: 2,
     updatedAt: now(),
     inProgress: false,
+    inProgressKind: null, // "close" | "open" | null
     lastCloseAt: 0,
     lastOpenAt: 0,
+    // Idempotência diária (America/Sao_Paulo): 1 close/renew e 1 open por dia civil.
+    // Claim ANTES da rotina — restart no meio NÃO re-dispara nem re-zera renovados.
+    lastCloseDay: null,
+    lastOpenDay: null,
+    closeClaimedAt: 0,
+    openClaimedAt: 0,
     nextCloseAt: 0,
     nextOpenAt: 0,
     scheduleSignature: "",
@@ -160,6 +184,34 @@ async function waitAllClosed({ timeoutMs = 8 * 60 * 1000 } = {}) {
   return { ok: activeRemaining.length === 0, activeRemaining };
 }
 
+async function runCloseAllOnly({ origin = "daily_window_close_only" } = {}) {
+  const first = await httpJson(
+    `http://127.0.0.1:${localPort}/api/perfis/close-all`,
+    { origin: String(origin || "daily_window_close_only").slice(0, 80) },
+    20 * 60 * 1000
+  );
+  if (!first || first.ok !== true) {
+    return { ok: false, error: (first && first.error) ? String(first.error) : "close_all_failed" };
+  }
+  let verify = await waitAllClosed({});
+  if (!verify.ok) {
+    await httpJson(
+      `http://127.0.0.1:${localPort}/api/perfis/close-all`,
+      { origin: `${String(origin || "daily_window").slice(0, 60)}_retry` },
+      20 * 60 * 1000
+    );
+    verify = await waitAllClosed({});
+  }
+  if (!verify.ok) {
+    return {
+      ok: false,
+      error: "close_all_not_fully_closed",
+      activeRemaining: verify.activeRemaining
+    };
+  }
+  return { ok: true };
+}
+
 async function runCloseRoutine({ renewFirst = false } = {}) {
   if (renewFirst) {
     // Renova classificados nos browsers abertos (1 conta/worker), depois fecha.
@@ -169,6 +221,20 @@ async function runCloseRoutine({ renewFirst = false } = {}) {
       {},
       4 * 60 * 60 * 1000
     );
+    const renewErr = renew && renew.error ? String(renew.error) : "";
+    // Outro renew-then-close ativo: NÃO atropelar com close-all (mataria o ciclo dono do lock).
+    if (renewErr && /renew_then_close_lock_busy|lock_busy/i.test(renewErr)) {
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_renew_then_close_result",
+          ok: false,
+          error: renewErr.slice(0, 180),
+          skippedCloseAll: true
+        });
+      } catch {}
+      return { ok: false, error: "renew_then_close_lock_busy", renew };
+    }
     if (!renew || renew.ok !== true) {
       // Mesmo se renew falhar parcialmente, ainda tenta fechar tudo (dormir).
       try {
@@ -213,23 +279,8 @@ async function runCloseRoutine({ renewFirst = false } = {}) {
     return { ok: true, renewFirst: true, renew };
   }
 
-  const first = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, {}, 20 * 60 * 1000);
-  if (!first || first.ok !== true) {
-    return { ok: false, error: (first && first.error) ? String(first.error) : "close_all_failed" };
-  }
-  let verify = await waitAllClosed({});
-  if (!verify.ok) {
-    // Segunda passada para contas remanescentes (best-effort robusto).
-    await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, { origin: "daily_window_retry" }, 20 * 60 * 1000);
-    verify = await waitAllClosed({});
-  }
-  if (!verify.ok) {
-    return {
-      ok: false,
-      error: "close_all_not_fully_closed",
-      activeRemaining: verify.activeRemaining
-    };
-  }
+  const closeOnly = await runCloseAllOnly({ origin: "daily_window_close" });
+  if (!closeOnly.ok) return closeOnly;
   saveState({ lastCloseAt: now(), lastError: null });
   return { ok: true };
 }
@@ -373,25 +424,82 @@ async function tick() {
     if (!windowModeEnabled) {
       const cur = state || loadState();
       if (Number(cur.nextCloseAt || 0) > 0 || Number(cur.nextOpenAt || 0) > 0 || String(cur.scheduleSignature || "").length) {
-        saveState({ nextCloseAt: 0, nextOpenAt: 0, scheduleSignature: "", inProgress: false });
+        saveState({ nextCloseAt: 0, nextOpenAt: 0, scheduleSignature: "", inProgress: false, inProgressKind: null });
       }
       return;
     }
 
     const nowTs = now();
+    const day = todayKeySaoPaulo(nowTs);
     const meta = getDailyWindowMeta(dw);
-    const cur = state || loadState();
+    // Sempre relê do disco: restart / outro processo podem ter claimado o dia.
+    const cur = loadState();
+    state = cur;
+
+    // Migração suave v1→v2: se já fechou/abriu hoje (last*At) mas sem day-key, claima o dia
+    // para NÃO re-disparar após deploy/restart no mesmo dia civil SP.
+    let migrated = false;
+    if (!cur.lastCloseDay && Number(cur.lastCloseAt || 0) > 0) {
+      const closeDay = todayKeySaoPaulo(Number(cur.lastCloseAt));
+      if (closeDay === day) {
+        cur.lastCloseDay = closeDay;
+        migrated = true;
+      }
+    }
+    if (!cur.lastOpenDay && Number(cur.lastOpenAt || 0) > 0) {
+      const openDay = todayKeySaoPaulo(Number(cur.lastOpenAt));
+      if (openDay === day) {
+        cur.lastOpenDay = openDay;
+        migrated = true;
+      }
+    }
+    if (migrated) {
+      saveState({
+        lastCloseDay: cur.lastCloseDay || null,
+        lastOpenDay: cur.lastOpenDay || null,
+        version: 2
+      });
+    }
+
+    // Crash recovery: inProgress em disco sem processo vivo — limpa flag.
+    // NÃO reexecuta close/open do dia se lastCloseDay/lastOpenDay já claimados.
+    if (cur.inProgress === true) {
+      const hadKind = cur.inProgressKind || null;
+      const hadCloseDay = cur.lastCloseDay || null;
+      const hadOpenDay = cur.lastOpenDay || null;
+      saveState({ inProgress: false, inProgressKind: null });
+      cur.inProgress = false;
+      cur.inProgressKind = null;
+      try {
+        provisionAudit.append({
+          ts: nowTs,
+          event: "daily_window_stale_in_progress_cleared",
+          day,
+          hadKind,
+          lastCloseDay: hadCloseDay,
+          lastOpenDay: hadOpenDay
+        });
+      } catch {}
+    }
+
+    const closeDoneToday = String(cur.lastCloseDay || "") === day;
+    const openDoneToday = String(cur.lastOpenDay || "") === day;
+
     const changedSchedule = String(cur.scheduleSignature || "") !== String(meta.signature || "");
     if (changedSchedule) {
+      // Mudança de janela na config: reagenda horários, MAS preserva lastCloseDay/lastOpenDay
+      // (não pode reabrir o ciclo do dia só porque o operador mexeu 1 minuto na janela).
       cur.nextCloseAt = computeNextRandomAtFromWindow({
         nowTs,
         startMin: meta.closeWindowStartMin,
-        endMin: meta.closeWindowEndMin
+        endMin: meta.closeWindowEndMin,
+        skipCurrentInterval: closeDoneToday
       });
       cur.nextOpenAt = computeNextRandomAtFromWindow({
         nowTs,
         startMin: meta.openWindowStartMin,
-        endMin: meta.openWindowEndMin
+        endMin: meta.openWindowEndMin,
+        skipCurrentInterval: openDoneToday
       });
       cur.scheduleSignature = meta.signature;
       saveState({
@@ -400,11 +508,14 @@ async function tick() {
         scheduleSignature: cur.scheduleSignature
       });
     } else {
+      // next* no passado: NÃO sortear de novo na mesma janela se o dia já foi claimado
+      // (era o buraco do restart do index.js → 2º/3º renew-then-close zerando renovados).
       if (!Number(cur.nextCloseAt) || Number(cur.nextCloseAt) < (nowTs - 60 * 1000)) {
         cur.nextCloseAt = computeNextRandomAtFromWindow({
           nowTs,
           startMin: meta.closeWindowStartMin,
-          endMin: meta.closeWindowEndMin
+          endMin: meta.closeWindowEndMin,
+          skipCurrentInterval: closeDoneToday
         });
         saveState({ nextCloseAt: cur.nextCloseAt });
       }
@@ -412,7 +523,8 @@ async function tick() {
         cur.nextOpenAt = computeNextRandomAtFromWindow({
           nowTs,
           startMin: meta.openWindowStartMin,
-          endMin: meta.openWindowEndMin
+          endMin: meta.openWindowEndMin,
+          skipCurrentInterval: openDoneToday
         });
         saveState({ nextOpenAt: cur.nextOpenAt });
       }
@@ -422,7 +534,87 @@ async function tick() {
     const dueOpen = Number(cur.nextOpenAt || 0) > 0 && nowTs >= Number(cur.nextOpenAt || 0);
 
     if (dueClose) {
-      saveState({ inProgress: true });
+      // Já rodou close/renew hoje (claim em disco) → nunca re-zera renovados.
+      // Se restou browser aberto (crash no meio), só close-all residual SEM renew/reset.
+      if (closeDoneToday) {
+        let residual = null;
+        try {
+          const active = await listActiveNames();
+          if (active.length) {
+            residual = await runCloseAllOnly({ origin: "daily_window_close_residual_same_day" });
+          } else {
+            residual = { ok: true, skipped: true };
+          }
+        } catch (e) {
+          residual = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+        }
+        const nextCloseAt = computeNextRandomAtFromWindow({
+          nowTs: now(),
+          startMin: meta.closeWindowStartMin,
+          endMin: meta.closeWindowEndMin,
+          skipCurrentInterval: true
+        });
+        saveState({
+          inProgress: false,
+          inProgressKind: null,
+          nextCloseAt,
+          lastError: residual && residual.ok === false
+            ? ((residual && residual.error) ? residual.error : "close_residual_failed")
+            : null
+        });
+        try {
+          provisionAudit.append({
+            ts: now(),
+            event: "daily_window_close_skip_already_done",
+            day,
+            residualOk: !!(residual && residual.ok),
+            residualSkipped: !!(residual && residual.skipped),
+            residualError: residual && residual.error ? String(residual.error).slice(0, 180) : null,
+            nextCloseAt
+          });
+        } catch {}
+        return;
+      }
+
+      // Claim 1×/dia ANTES da rotina (espelha daily_terminal_cleanup).
+      // Re-check em disco: outro processo pode ter claimado entre o load e aqui.
+      {
+        const again = loadState();
+        if (String(again.lastCloseDay || "") === day) {
+          const nextCloseAt = computeNextRandomAtFromWindow({
+            nowTs: now(),
+            startMin: meta.closeWindowStartMin,
+            endMin: meta.closeWindowEndMin,
+            skipCurrentInterval: true
+          });
+          saveState({ nextCloseAt, inProgress: false, inProgressKind: null });
+          try {
+            provisionAudit.append({
+              ts: now(),
+              event: "daily_window_close_skip_race_claimed",
+              day,
+              nextCloseAt
+            });
+          } catch {}
+          return;
+        }
+      }
+      saveState({
+        inProgress: true,
+        inProgressKind: "close",
+        lastCloseDay: day,
+        closeClaimedAt: now()
+      });
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_close_day_claimed",
+          day,
+          mode,
+          renewFirst: mode === "renew_window_close_open"
+        });
+      } catch {}
+
       const renewFirst = mode === "renew_window_close_open";
       const rr = await runCloseRoutine({ renewFirst });
       const nextCloseAt = computeNextRandomAtFromWindow({
@@ -433,7 +625,9 @@ async function tick() {
       });
       saveState({
         inProgress: false,
+        inProgressKind: null,
         nextCloseAt,
+        lastCloseAt: rr && rr.ok === true ? now() : (Number((state || {}).lastCloseAt || 0) || 0),
         lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "close_unknown_error")
       });
       try {
@@ -442,6 +636,7 @@ async function tick() {
           event: "daily_window_close",
           ok: !!(rr && rr.ok === true),
           renewFirst: !!renewFirst,
+          day,
           error: rr && rr.error ? String(rr.error) : null,
           nextCloseAt
         });
@@ -450,7 +645,63 @@ async function tick() {
       return;
     }
     if (dueOpen) {
-      saveState({ inProgress: true });
+      if (openDoneToday) {
+        const nextOpenAt = computeNextRandomAtFromWindow({
+          nowTs: now(),
+          startMin: meta.openWindowStartMin,
+          endMin: meta.openWindowEndMin,
+          skipCurrentInterval: true
+        });
+        saveState({
+          inProgress: false,
+          inProgressKind: null,
+          nextOpenAt
+        });
+        try {
+          provisionAudit.append({
+            ts: now(),
+            event: "daily_window_open_skip_already_done",
+            day,
+            nextOpenAt
+          });
+        } catch {}
+        return;
+      }
+
+      {
+        const again = loadState();
+        if (String(again.lastOpenDay || "") === day) {
+          const nextOpenAt = computeNextRandomAtFromWindow({
+            nowTs: now(),
+            startMin: meta.openWindowStartMin,
+            endMin: meta.openWindowEndMin,
+            skipCurrentInterval: true
+          });
+          saveState({ nextOpenAt, inProgress: false, inProgressKind: null });
+          try {
+            provisionAudit.append({
+              ts: now(),
+              event: "daily_window_open_skip_race_claimed",
+              day,
+              nextOpenAt
+            });
+          } catch {}
+          return;
+        }
+      }
+      saveState({
+        inProgress: true,
+        inProgressKind: "open",
+        lastOpenDay: day,
+        openClaimedAt: now()
+      });
+      try {
+        provisionAudit.append({
+          ts: now(),
+          event: "daily_window_open_day_claimed",
+          day
+        });
+      } catch {}
 
       // Limpeza terminal APENAS no abrir automático da config (não no botão Abrir tudo).
       let cleanup = null;
@@ -494,6 +745,7 @@ async function tick() {
       });
       saveState({
         inProgress: false,
+        inProgressKind: null,
         nextOpenAt,
         lastOpenAt: now(),
         lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "open_unknown_error"),
@@ -510,6 +762,7 @@ async function tick() {
           event: "daily_window_open",
           ok: !!(rr && rr.ok === true),
           error: rr && rr.error ? String(rr.error) : null,
+          day,
           nextOpenAt,
           verifyEnabled: !!(rr && rr.verifyEnabled),
           requireWorking: !!(rr && rr.requireWorking),
@@ -525,7 +778,7 @@ async function tick() {
       if (!rr.ok) logger.warn("[DAILY-WINDOW] open falhou", rr || {});
     }
   } catch (e) {
-    try { saveState({ inProgress: false, lastError: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+    try { saveState({ inProgress: false, inProgressKind: null, lastError: (e && e.message) ? String(e.message) : String(e) }); } catch {}
   } finally {
     inFlight = false;
   }
@@ -548,6 +801,7 @@ function stopDailyWindowScheduler() {
 
 module.exports = {
   startDailyWindowScheduler,
-  stopDailyWindowScheduler
+  stopDailyWindowScheduler,
+  todayKeySaoPaulo
 };
 

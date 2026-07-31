@@ -3826,6 +3826,43 @@ async function detectLoginRequired(page) {
         } catch {}
         return false;
       })();
+      // AYMH / seletor de perfil salvo (gate de login REAL):
+      // Contrato leve: Continuar + "Usar outro perfil" — SEM comparar nome do botão com nome do card/pill
+      // (nome na UI ≠ nome do perfil no CT → match de nome = falso positivo).
+      // NÃO confundir com "Continuar como <Nome>" (sessão já autenticada).
+      const hasUsarOutroPerfil =
+        bodyTxt.includes('usar outro perfil') ||
+        bodyTxt.includes('use another profile');
+      const hasCriarNovaConta =
+        bodyTxt.includes('criar nova conta') ||
+        bodyTxt.includes('create new account');
+      const hasAymhEntryPoint =
+        !!document.querySelector('a[href*="entry_point=aymh"], a[href*="entry_point%3Daymh"]') ||
+        /entry_point=aymh/i.test(href0);
+      // Botão Continuar do chooser (rótulo livre) — só presença do CTA, zero match de identidade.
+      const hasContinuarChooserBtn = (() => {
+        try {
+          const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1200);
+          for (const el of candidates) {
+            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+            const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (/^continuar\s+como\b/.test(aria) || /^continue\s+as\b/.test(aria)) continue;
+            if (/^continuar\s+como\b/.test(txt) || /^continue\s+as\b/.test(txt)) continue;
+            if (aria === 'continuar' || txt === 'continuar' || aria === 'continue' || txt === 'continue') return true;
+            // "Continuar …" / "Continue …" no aria (sem validar o texto após Continuar)
+            if (/^continuar(\s|$)/.test(aria) || /^continue(\s|$)/.test(aria)) return true;
+            if (/^continuar(\s|$)/.test(txt) || /^continue(\s|$)/.test(txt)) return true;
+          }
+        } catch {}
+        return false;
+      })();
+      // Sinal seguro e mínimo: chooser AYMH = Usar outro perfil + Continuar, ainda sem inputs de login.
+      // Criar nova conta / entry_point=aymh reforçam, mas NÃO são obrigatórios (nem match de nome).
+      const isAymhContinue =
+        !hasEmailInput &&
+        !hasPassInput &&
+        hasUsarOutroPerfil &&
+        hasContinuarChooserBtn;
       const hasHumanConfirmText =
         bodyTxt.includes('confirme que voce e humano para usar sua conta') ||
         bodyTxt.includes('confirme que voce e humano') && bodyTxt.includes('para usar sua conta') ||
@@ -3967,7 +4004,14 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasLoginUiHints, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, hasContinueBtn, href0, path0, title0 };
+      return {
+        hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasLoginUiHints, hasPersonaText, hasCheckpointText,
+        hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints,
+        bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked,
+        hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText,
+        hasCaptchaImg, hasCaptchaInput, hasContinueBtn, isAymhContinue, hasUsarOutroPerfil,
+        hasCriarNovaConta, hasContinuarChooserBtn, hasAymhEntryPoint, href0, path0, title0
+      };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3975,6 +4019,8 @@ async function detectLoginRequired(page) {
     const strongLoginPath = /\/(login|checkpoint|recover|two_step_verification|security)/i.test(path);
     const hasRoyal = !!(v && v.hasRoyal);
     const hasInputs = !!(v && v.hasInputs);
+    const hasEmailInput = !!(v && v.hasEmailInput);
+    const hasPassInput = !!(v && v.hasPassInput);
     const hasPersonaText = !!(v && v.hasPersonaText);
     const hasLoginUiHints = !!(v && v.hasLoginUiHints);
     const hasCheckpointText = !!(v && v.hasCheckpointText);
@@ -3994,6 +4040,7 @@ async function detectLoginRequired(page) {
     const hasCaptchaImg = !!(v && v.hasCaptchaImg);
     const hasCaptchaInput = !!(v && v.hasCaptchaInput);
     const hasContinueBtn = !!(v && v.hasContinueBtn);
+    const isAymhContinue = !!(v && v.isAymhContinue);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -4058,16 +4105,65 @@ async function detectLoginRequired(page) {
       };
     }
 
-    // Bug/erro do Messenger: "Esta página não está disponível"
-    // Não é login_form/captcha; requer checagem ativa no worker (FB create -> SMS cliff?).
+    // Bug/erro do Messenger: "Esta página não está disponível".
+    // Blindagem anti-FP (forense MAE1 31/07): feed/Marketplace pode conter a frase no body
+    // sem ser tela de erro → NÃO marcar LR em superfície saudável de Marketplace/Messages.
     if (hasPageNotAvailable) {
+      const pathNorm = String(path || '').toLowerCase();
+      const urlLooksMarketplace = /\/marketplace\b/i.test(hrefNorm) || /\/marketplace\b/i.test(pathNorm);
+      const urlLooksMessagesThread =
+        /\/messages\/t\//i.test(hrefNorm) ||
+        /\/messages\/t\//i.test(pathNorm) ||
+        (/messenger\.com\/t\//i.test(hrefNorm));
+      const titleLooksError =
+        titleNorm.includes('nao esta disponivel') ||
+        titleNorm.includes("isn't available") ||
+        titleNorm.includes('is not available') ||
+        titleNorm.includes('page not available');
+      const isMessengerDomain = domain === 'messenger' || /messenger\.com/i.test(hrefNorm);
+      // Marketplace app_tab / feed saudável: ignora body-match (FP comprovado).
+      const suppressFpOnHealthySurface =
+        (urlLooksMarketplace || urlLooksMessagesThread) &&
+        !titleLooksError &&
+        !isAymhContinue &&
+        !hasInputs &&
+        !hasRoyal;
+      if (!suppressFpOnHealthySurface && (isMessengerDomain || titleLooksError || (!urlLooksMarketplace && !urlLooksMessagesThread))) {
+        return {
+          loginRequired: true,
+          reason: 'messenger_page_not_available',
+          domain,
+          url: (v && v.href0) ? String(v.href0) : href,
+          title,
+          evidence: {
+            hasPageNotAvailable,
+            path,
+            suppressFpOnHealthySurface: false,
+            urlLooksMarketplace,
+            urlLooksMessagesThread,
+            titleLooksError
+          }
+        };
+      }
+    }
+
+    // AYMH / seletor de perfil: Continuar + Usar outro perfil (sem match de nome).
+    // Nurse clica Continuar 1x → se cair em email/senha, o fluxo clássico login_form assume.
+    if (isAymhContinue) {
       return {
         loginRequired: true,
-        reason: 'messenger_page_not_available',
+        reason: 'aymh_continue',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasPageNotAvailable, path }
+        evidence: {
+          isAymhContinue: true,
+          hasUsarOutroPerfil: !!(v && v.hasUsarOutroPerfil),
+          hasCriarNovaConta: !!(v && v.hasCriarNovaConta),
+          hasContinuarChooserBtn: !!(v && v.hasContinuarChooserBtn),
+          hasAymhEntryPoint: !!(v && v.hasAymhEntryPoint),
+          path
+        }
       };
     }
 
@@ -4170,14 +4266,15 @@ async function detectLoginRequired(page) {
     // Messenger é especial:
     // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
     // então não dá para exigir strongLoginPath/title como no Facebook.
-    if (domain === 'messenger' && hasInputs && (hasRoyal || hasLoginUiHints || looksLikeLoggedOutTitle || looksLikeLoginUrl)) {
+    // Aceita também superfície só-senha (pós Continuar AYMH).
+    if (domain === 'messenger' && (hasInputs || (hasPassInput && (hasRoyal || hasLoginUiHints))) && (hasRoyal || hasLoginUiHints || looksLikeLoggedOutTitle || looksLikeLoginUrl)) {
       return {
         loginRequired: true,
         reason: 'login_form',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+        evidence: { hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -4186,14 +4283,15 @@ async function detectLoginRequired(page) {
     // - checkpoint/captcha também exige rota/sinais de checkpoint
     // IMPORTANT: em algumas telas, o form aparece em rotas como /marketplace ou /index.php (logged-out),
     // então não podemos depender apenas do path.
-    if (hasInputs && (hasRoyal || hasLoginUiHints) && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle || hasLoginUiHints)) {
+    // Password-only (hasPassInput sem email) conta quando há royal/hints/URL de login — típico pós Continuar AYMH.
+    if ((hasInputs || (hasPassInput && (hasRoyal || hasLoginUiHints || looksLikeLoginUrl || strongLoginPath))) && (hasRoyal || hasLoginUiHints) && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle || hasLoginUiHints)) {
       return {
         loginRequired: true,
         reason: 'login_form',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+        evidence: { hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
     // Identidade (selfie/vídeo) deve ser reconhecida mesmo fora de /checkpoint.
@@ -5107,6 +5205,95 @@ async function _maybeClickUseAnotherProfile(page) {
   return false;
 }
 
+/**
+ * AYMH chooser: clica UMA vez em Continuar (sem match de nome / sem "Continuar como").
+ * Objetivo: avançar para a próxima página (muitas vezes email/senha clássico).
+ * Não clica "Usar outro perfil" — isso muda de conta; Continuar segue o perfil salvo.
+ */
+async function tryClickAymhContinuar(page) {
+  try {
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      return { ok: false, error: 'page_closed' };
+    }
+    const r = await page.evaluate(() => {
+      function norm(s) {
+        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        catch { return String(s || '').toLowerCase(); }
+      }
+      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+      const hasUsarOutroPerfil =
+        bodyTxt.includes('usar outro perfil') || bodyTxt.includes('use another profile');
+      const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
+      const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
+      if (!hasUsarOutroPerfil) return { ok: false, error: 'not_aymh_chooser' };
+      if (hasEmail || hasPass) return { ok: false, error: 'already_has_login_inputs' };
+
+      const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
+      let best = null;
+      for (const el of candidates) {
+        const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+        const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^continuar\s+como\b/.test(aria) || /^continue\s+as\b/.test(aria)) continue;
+        if (/^continuar\s+como\b/.test(txt) || /^continue\s+as\b/.test(txt)) continue;
+        const isContinuar =
+          aria === 'continuar' || txt === 'continuar' || aria === 'continue' || txt === 'continue' ||
+          /^continuar(\s|$)/.test(aria) || /^continue(\s|$)/.test(aria) ||
+          /^continuar(\s|$)/.test(txt) || /^continue(\s|$)/.test(txt);
+        if (!isContinuar) continue;
+        const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled') === 'true';
+        const tabIndex = el.getAttribute && el.getAttribute('tabindex') === '-1';
+        if (ariaDisabled || tabIndex) continue;
+        const r0 = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (!r0 || r0.width < 2 || r0.height < 2) continue;
+        best = el;
+        // Preferência: aria "Continuar …" (botão principal do card) sobre txt genérico
+        if (aria && /^continuar(\s|$)/.test(aria)) break;
+      }
+      if (!best) return { ok: false, error: 'continuar_not_found' };
+      try { best.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+      const rect = best.getBoundingClientRect ? best.getBoundingClientRect() : null;
+      return {
+        ok: true,
+        x: rect ? (rect.left + rect.width / 2) : null,
+        y: rect ? (rect.top + rect.height / 2) : null,
+        label: (best.getAttribute && best.getAttribute('aria-label')) || ''
+      };
+    }).catch((e) => ({ ok: false, error: (e && e.message) || 'evaluate_failed' }));
+
+    if (!(r && r.ok)) {
+      return { ok: false, error: (r && r.error) ? String(r.error) : 'click_failed' };
+    }
+    // Um clique só: mouse real quando há coords; senão fallback DOM click.
+    if (typeof r.x === 'number' && typeof r.y === 'number') {
+      try { await page.mouse.click(r.x, r.y, { delay: 28 }).catch(() => {}); } catch {}
+    } else {
+      try {
+        await page.evaluate(() => {
+          function norm(s) {
+            try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+            catch { return String(s || '').toLowerCase(); }
+          }
+          const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
+          for (const el of candidates) {
+            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+            const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (/^continuar\s+como\b/.test(aria) || /^continue\s+as\b/.test(aria)) continue;
+            if (aria === 'continuar' || txt === 'continuar' || /^continuar(\s|$)/.test(aria) || /^continuar(\s|$)/.test(txt)) {
+              try { el.click(); } catch {}
+              return true;
+            }
+          }
+          return false;
+        });
+      } catch {}
+    }
+    await sleep(1200);
+    return { ok: true, label: r.label || '' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : 'tryClickAymhContinuar_failed' };
+  }
+}
+
 async function _maybeClickCloseX(page) {
   try {
     const did = await page.evaluate(() => {
@@ -5128,29 +5315,68 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
   const pass = String(password || '').trim();
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
 
-  // 1) tentar “destravar” telas comuns (continuar como / modal) para cair no formulário
+  // 1) destravar telas comuns — ordem inteligente:
+  //    - se já tem form → NÃO clica "Usar outro perfil" (evita sair do fluxo certo)
+  //    - se chooser AYMH (Continuar + Usar outro perfil) → clica Continuar (perfil salvo)
+  //    - após Continuar: espera curta pelos inputs (anti-race SPA) ANTES de Usar outro perfil
+  //    - só então, se ainda sem inputs, tenta "Usar outro perfil" (form em branco)
   await _maybeClickCloseX(page);
-  await _maybeClickUseAnotherProfile(page);
+  const readLoginSurface = async () => {
+    try {
+      return await page.evaluate(() => {
+        const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
+        const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
+        return { hasEmail, hasPass };
+      });
+    } catch {
+      return { hasEmail: false, hasPass: false };
+    }
+  };
+  try {
+    let surface = await readLoginSurface();
+    if (!(surface.hasEmail || surface.hasPass)) {
+      const adv = await tryClickAymhContinuar(page).catch(() => null);
+      if (adv && adv.ok) {
+        // Janela pós-Continuar: FB pode demorar a montar senha/email — não pular pra Usar outro perfil.
+        const deadline = Date.now() + 2800;
+        while (Date.now() < deadline) {
+          await sleep(350);
+          surface = await readLoginSurface();
+          if (surface.hasEmail || surface.hasPass) break;
+        }
+      }
+      surface = await readLoginSurface();
+      if (!(surface.hasEmail || surface.hasPass)) {
+        await _maybeClickUseAnotherProfile(page);
+        await sleep(700);
+      }
+    }
+  } catch {
+    // Sem fallback agressivo pra Usar outro perfil em erro transitório.
+  }
 
-  // 2) preencher formulário (FB / Messenger)
+  // 2) preencher formulário (FB / Messenger) — email opcional (AYMH pós-Continuar = só senha)
   try {
     await page.waitForTimeout(600);
   } catch {}
 
   try {
     // aguarda inputs aparecerem (evita “atropelo” de render)
-    await page.waitForSelector('input[name="email"], input#email', { timeout: 12000 }).catch(()=>{});
-    await page.waitForSelector('input[name="pass"], input#pass', { timeout: 12000 }).catch(()=>{});
+    await page.waitForSelector('input[name="pass"], input#pass, input[type="password"]', { timeout: 12000 }).catch(()=>{});
+    await page.waitForSelector('input[name="email"], input#email', { timeout: 2500 }).catch(()=>{});
 
     // limpa e digita com pequeno delay humano
     await page.evaluate(() => {
       const e = document.querySelector('input[name="email"], input#email');
-      const p = document.querySelector('input[name="pass"], input#pass');
+      const p = document.querySelector('input[name="pass"], input#pass, input[type="password"]');
       if (e) e.value = '';
       if (p) p.value = '';
     }).catch(()=>{});
-    await page.type('input[name="email"], input#email', email, { delay: 28 }).catch(()=>{});
-    await page.type('input[name="pass"], input#pass', pass, { delay: 28 }).catch(()=>{});
+    const hasEmailSel = await page.$('input[name="email"], input#email').catch(() => null);
+    if (hasEmailSel) {
+      await page.type('input[name="email"], input#email', email, { delay: 28 }).catch(()=>{});
+    }
+    await page.type('input[name="pass"], input#pass, input[type="password"]', pass, { delay: 28 }).catch(()=>{});
   } catch (e) {
     return { ok: false, error: (e && e.message) || 'type_failed' };
   }
@@ -5366,6 +5592,7 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
+  tryClickAymhContinuar,
   // ==== CAPTCHA/CONFIRME-HUMANO (SEM OCR IMPLEMENTADO):
   clickContinueByLabel,
   waitForContinueEnabled,

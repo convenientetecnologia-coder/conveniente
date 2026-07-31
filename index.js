@@ -3461,7 +3461,7 @@ function __classifyAccountState(perfil, robeRec) {
   if (banned) return 'banned';
   if (loginRequired) {
     if (reason.includes('captcha') || reason.includes('checkpoint')) return 'captcha';
-    if (reason === 'login_form') return 'login';
+    if (reason === 'login_form' || reason === 'aymh_continue' || reason.includes('aymh_continue')) return 'login';
     if (reason.includes('session')) return 'session';
     if (reason.includes('2fa') || reason.includes('two_factor')) return 'two_factor';
     if (reason.includes('identity')) return 'identity';

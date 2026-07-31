@@ -2062,7 +2062,9 @@ module.exports = (app, workerClient, fileStore) => {
       } catch {}
 
       try {
-        try { provisionLock.release({ force: true }); } catch {}
+        // NÃO force-release: isso era o buraco que permitia 2º/3º ciclo atropelar o 1º
+        // e re-zerar renovados no meio da madrugada (forense 31/07).
+        // Lock morto (pid morto / TTL) já é limpo por provisionLock.get().
         const lk = provisionLock.tryAcquire({
           owner: lockOwner,
           ttlMs: 4 * 60 * 60 * 1000,
@@ -2070,7 +2072,23 @@ module.exports = (app, workerClient, fileStore) => {
         });
         if (!lk || !lk.ok) {
           const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
-          return res.json({ ok: false, error: `renew_then_close_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+          const curKind = lk && lk.lock && lk.lock.meta && lk.lock.meta.kind
+            ? String(lk.lock.meta.kind)
+            : '';
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'renew_then_close_lock_busy',
+              by,
+              lockOwner,
+              busyOwner: curOwner || null,
+              busyKind: curKind || null
+            });
+          } catch {}
+          return res.json({
+            ok: false,
+            error: `renew_then_close_lock_busy${curOwner ? ` owner=${curOwner}` : ''}`
+          });
         }
       } catch (e) {
         return res.json({ ok: false, error: `renew_then_close_lock_error ${(e && e.message) || String(e)}` });

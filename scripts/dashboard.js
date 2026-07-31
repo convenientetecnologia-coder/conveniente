@@ -853,7 +853,7 @@ function buildPollLightTelemetry(status) {
       kind = "banned";
     } else if (loginRequired) {
       if (reason.includes("captcha") || reason.includes("checkpoint")) kind = "captcha";
-      else if (reason === "login_form") kind = "login";
+      else if (reason === "login_form" || reason === "aymh_continue" || reason.includes("aymh_continue")) kind = "login";
       else if (reason.includes("session")) kind = "session";
       else if (reason.includes("2fa") || reason.includes("two_factor")) kind = "two_factor";
       else if (reason.includes("identity")) kind = "identity";

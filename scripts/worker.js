@@ -16725,7 +16725,7 @@ async function nurseTick() {
           if (s.includes('identity')) return 5;
           if (s.includes('captcha')) return 4;
           if (s.includes('checkpoint')) return 3;
-          if (s.includes('login_form')) return 2;
+          if (s.includes('login_form') || s.includes('aymh_continue')) return 2;
           return 1;
         };
         let lr = null;
@@ -16807,6 +16807,7 @@ async function nurseTick() {
               if (!s) return false;
               return (
                 s.includes('login_form') ||
+                s.includes('aymh_continue') ||
                 s.includes('captcha') ||
                 s.includes('checkpoint') ||
                 s.includes('two_factor') ||
@@ -16818,9 +16819,15 @@ async function nurseTick() {
                 s.includes('messenger_pin')
               );
             };
-            // Menos rígido e mais robusto: limpar probe_failed preso quando Messenger está comprovadamente limpo
+            // Sessão saudável: Messenger limpo OU Marketplace limpo (forense: LR preso sem aba Messenger).
+            const hasMarketplaceClear = Array.isArray(scan) && scan.some((p) => {
+              const u = String((p && p.u) || '');
+              return /\/marketplace\b/i.test(u) && p && p.lr === false && !isHardReason(p.reason);
+            });
+            const hasHealthySurfaceClear = hasMessengerClear || hasMarketplaceClear;
+            // Menos rígido e mais robusto: limpar LR stale quando superfície saudável comprovada
             // e não há nenhum sinal forte de bloqueio nas abas escaneadas.
-            const scanAllClear = scanHasPages && hasMessengerClear && scan.every(p => p && p.lr === false && !isHardReason(p.reason));
+            const scanAllClear = scanHasPages && hasHealthySurfaceClear && scan.every(p => p && p.lr === false && !isHardReason(p.reason));
             if (scanAllClear) {
               const flags = await readAccountFlags(nome).catch(()=>null);
               // Auto-heal de "virtus off" órfão:
@@ -16876,12 +16883,13 @@ async function nurseTick() {
               const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
               const reasonNorm0 = String(reason0 || '').toLowerCase();
               // Auto-clear enterprise (stale LR):
-              // além de probe_failed, também pode limpar login_form preso quando
-              // o scan prova Messenger limpo + nenhuma aba com bloqueio real.
+              // limpa motivos clearable quando scan prova superfície saudável
+              // (Messenger OK e/ou Marketplace OK) + nenhuma aba com bloqueio real.
               const isClearableStaleReason =
                 !reasonNorm0 ||
                 reasonNorm0 === 'probe_failed' ||
                 reasonNorm0 === 'login_form' ||
+                reasonNorm0 === 'aymh_continue' ||
                 reasonNorm0 === 'checkpoint_interstitial' ||
                 reasonNorm0 === 'messenger_page_not_available';
               if (flags && flags.loginRequired === true && isClearableStaleReason) {
@@ -17039,7 +17047,108 @@ async function nurseTick() {
                   title: lr.title || ''
                 });
               } catch {}
-            } else if (rr.includes('login_form')) {
+            } else if (rr.includes('aymh_continue') || rr === 'aymh') {
+              // Fluxo leve e inteligente (sem match de nome):
+              // 1) clica Continuar 1x — debounce SÓ após click ok (não queima 8min em falha)
+              // 2) reclassifica na mesma tick (login_form / captcha / clear / ainda chooser)
+              // 3) login_form → auto-login clássico; chooser preso → LR humano
+              try {
+                const pg = (lrPage || p0);
+                robeMeta[nome] = robeMeta[nome] || {};
+                const nowA = Date.now();
+                const lastClick = Number(robeMeta[nome].lastAymhContinuarClickAt || 0) || 0;
+                const canClick = !lastClick || (nowA - lastClick) > (8 * 60 * 1000);
+                let handledBeyondChooser = false;
+                let clickOk = false;
+                if (pg && canClick && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+                  const clicked = await browserHelper.tryClickAymhContinuar(pg).catch(() => null);
+                  clickOk = !!(clicked && clicked.ok);
+                  // Debounce só consome janela quando o Continuar de fato clicou.
+                  if (clickOk) robeMeta[nome].lastAymhContinuarClickAt = nowA;
+                  try {
+                    await issues.append(
+                      nome,
+                      'mil_action',
+                      `aymh_continuar_click ok=${clickOk} err=${String((clicked && clicked.error) || '').slice(0, 60)}`
+                    );
+                  } catch {}
+                  if (clickOk) {
+                    try { await new Promise((r) => setTimeout(r, 1600)); } catch {}
+                    const lr2 = await browserHelper.detectLoginRequired(pg).catch(() => null);
+                    const rr2 = String((lr2 && lr2.reason) || '').toLowerCase();
+                    const src2 = String((lr2 && lr2.domain) || lr.domain || '');
+
+                    // Pós-Continuar: sessão limpa → limpa LR stale na mesma tick (não deixa aymh preso).
+                    if (lr2 && lr2.loginRequired === false) {
+                      handledBeyondChooser = true;
+                      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+                      try { await issues.append(nome, 'mil_action', `aymh_continuar_cleared_lr post=${String(rr2 || 'none').slice(0, 60)}`); } catch {}
+                    } else if (lr2 && lr2.loginRequired) {
+                      if (rr2 === 'login_form' || (rr2.includes('login_form') && !rr2.includes('aymh'))) {
+                        handledBeyondChooser = true;
+                        try { await setLoginRequiredFlag(nome, { reason: 'login_form', source: src2 }); } catch {}
+                        try {
+                          const flags = await readAccountFlags(nome).catch(() => ({}));
+                          if (flags && flags.loginRemediateFailed === true) {
+                            try { await issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true) after_aymh_continuar'); } catch {}
+                          } else {
+                            const okQueue = queueAutoLoginRemediate(nome, {
+                              reason: 'login_form',
+                              source: src2,
+                              immediate: true
+                            });
+                            if (okQueue) {
+                              try { await issues.append(nome, 'mil_action', 'auto_login_remediate_queued after_aymh_continuar'); } catch {}
+                            }
+                          }
+                        } catch {}
+                      } else if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+                        handledBeyondChooser = true;
+                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'captcha_checkpoint', source: src2 }); } catch {}
+                        try {
+                          await setCaptchaCheckpointFlag(nome, {
+                            reason: rr2 || 'captcha_checkpoint',
+                            source: src2,
+                            url: lr2.url || '',
+                            title: lr2.title || ''
+                          });
+                        } catch {}
+                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass captcha reason=${String(rr2).slice(0, 80)}`); } catch {}
+                      } else if (rr2.includes('two_factor') || rr2.includes('2fa') || rr2.includes('two factor')) {
+                        handledBeyondChooser = true;
+                        try { await setTwoFactorFlag(nome, { reason: rr2 || 'two_factor', snippet: String(lr2.title || '') }); } catch {}
+                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass two_factor reason=${String(rr2).slice(0, 80)}`); } catch {}
+                      } else if (rr2.includes('identity_submitted')) {
+                        handledBeyondChooser = true;
+                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'identity_submitted', source: src2 }); } catch {}
+                        try { await setIdentitySubmittedFlag(nome, { source: src2, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+                        try { await issues.append(nome, 'mil_action', 'aymh_continuar_reclass identity_submitted'); } catch {}
+                      } else if (rr2.includes('identity')) {
+                        handledBeyondChooser = true;
+                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'identity_confirm', source: src2 }); } catch {}
+                        try { await setIdentityRequiredFlag(nome, { source: src2, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+                        try { await issues.append(nome, 'mil_action', 'aymh_continuar_reclass identity'); } catch {}
+                      } else if (rr2.includes('aymh_continue') || rr2 === 'aymh') {
+                        // Continuar não tirou do chooser → humano (flag aymh já setada).
+                        handledBeyondChooser = false;
+                      } else {
+                        // Outro LR real: atualiza reason (não deixa aymh mentir).
+                        handledBeyondChooser = true;
+                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: src2 }); } catch {}
+                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass reason=${String(rr2).slice(0, 80)}`); } catch {}
+                      }
+                    }
+                  }
+                }
+                if (!handledBeyondChooser) {
+                  const pend = canClick && !clickOk ? 'aymh_continue_retry_next_tick' : 'aymh_continue_human_only';
+                  try { await issues.append(nome, 'mil_action', `${pend} reason=${String(rr).slice(0, 80)}`); } catch {}
+                }
+              } catch {
+                try { await issues.append(nome, 'mil_action', `aymh_continue_human_only reason=${String(rr).slice(0, 80)}`); } catch {}
+              }
+            } else if (rr === 'login_form' || (rr.includes('login_form') && !rr.includes('aymh'))) {
+              // Auto-login SOMENTE formulário clássico email/senha.
               // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
               try {
                 const flags = await readAccountFlags(nome).catch(()=>({}));
