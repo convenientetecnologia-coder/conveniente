@@ -11095,13 +11095,40 @@ const handlers = {
       };
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
+        const whyLow = why.toLowerCase();
+        // Se a UI atual é AYMH, não sobrescrever reason com busy_timeout — humano only.
+        let liveAymh = false;
+        try {
+          const c0 = controllers.get(nome);
+          const pages0 = (c0 && c0.browser) ? await c0.browser.pages().catch(() => []) : [];
+          for (const pg0 of (pages0 || []).slice(0, 8)) {
+            const lr0 = await browserHelper.detectLoginRequired(pg0).catch(() => null);
+            const r0 = String((lr0 && lr0.reason) || '').toLowerCase();
+            if (lr0 && lr0.loginRequired && (r0.includes('aymh_continue') || r0 === 'aymh')) {
+              liveAymh = true;
+              break;
+            }
+          }
+        } catch {}
+        if (liveAymh) {
+          try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: 'login_remediate' }); } catch {}
+          try { await clearIdentityFlags(nome); } catch {}
+          try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
+          try {
+            const cA = controllers.get(nome);
+            if (cA) await enterHumanMode(nome, cA, { reason: `aymh_continue:fail_fast:${why.slice(0, 60)}` });
+          } catch {}
+          try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: `aymh_continue:${why.slice(0, 140)}` }); } catch {}
+          try { await snapshotStatusAndWrite(); } catch {}
+          return;
+        }
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh/.test(String(why || '').toLowerCase());
+        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh/.test(whyLow);
         // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -11179,9 +11206,10 @@ const handlers = {
           } catch {}
         } catch {}
       };
-      // Importante: `pausedVirtus` precisa estar acessível no `finally` global para garantir resume
-      // mesmo em returns antecipados (evita queda massiva de working após quiesce).
+      // Importante: `pausedVirtus` e `prevConfigurando` precisam estar acessíveis no `finally`
+      // (const dentro do try → ReferenceError no finally → configurando ficava TRUE para sempre).
       let pausedVirtus = []; // [{ nome, wasWorking }]
+      let prevConfigurando = false;
       try {
       // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
       if (overrideHumanHold) {
@@ -11236,7 +11264,7 @@ const handlers = {
       // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
       // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
       // (Antes: configurando virava false logo após configureProfile e o bootstrap capava para 2 abas.)
-      const prevConfigurando = !!ctrl.configurando;
+      prevConfigurando = !!ctrl.configurando;
       ctrl.configurando = true;
 
       // 2) Ultra enterprise: quiescência determinística antes de injetar cookies
@@ -11254,6 +11282,23 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         pushStep({ step: 'quiesce_failed', error: msg });
         try { provisionLock.release({ owner: op }); } catch {}
+        // Durante a espera a UI pode ter virado AYMH — aborta humano only (sem failFast busy_timeout).
+        try {
+          const pagesQ = await ctrl.browser.pages().catch(() => []);
+          for (const pgQ of (pagesQ || []).slice(0, 8)) {
+            const lrQ = await browserHelper.detectLoginRequired(pgQ).catch(() => null);
+            const rq = String((lrQ && lrQ.reason) || '').toLowerCase();
+            if (lrQ && lrQ.loginRequired && (rq.includes('aymh_continue') || rq === 'aymh')) {
+              pushStep({ step: 'aymh_continue_abort_after_quiesce_fail', reason: rq.slice(0, 80) });
+              try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrQ.domain || 'login_remediate' }); } catch {}
+              try { await clearIdentityFlags(nome); } catch {}
+              try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
+              try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:quiesce_failed' }); } catch {}
+              try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_after_quiesce_fail'); } catch {}
+              return { ok: false, error: 'aymh_continue', steps, pausedVirtus };
+            }
+          }
+        } catch {}
         // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
         await failFastToHuman(msg);
         return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
@@ -11989,10 +12034,16 @@ const handlers = {
       return out;
       } finally {
         // Reset flags de config SEMPRE (evita ficar "travado" em modo configurando).
+        // prevConfigurando é let no escopo externo — nunca ReferenceError silencioso aqui.
         try {
           const c2 = controllers.get(nome);
           if (c2) c2.configurando = prevConfigurando ? true : false;
-        } catch {}
+        } catch {
+          try {
+            const c3 = controllers.get(nome);
+            if (c3) c3.configurando = false;
+          } catch {}
+        }
         // 7) libera lock global sempre (mesmo com returns/erros)
         // IMPORTANTE: liberar ANTES do resume para `automationAllowed()` não bloquear re-start do Virtus.
         try { provisionLock.release({ owner: op }); } catch {}
@@ -15709,6 +15760,26 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       });
     } catch {}
 
+    // AYMH (Continuar + Usar outro perfil): LR + humano. ZERO cookies/auto-login.
+    // Forense MAE1: reconcile via só setLoginRequiredFlag → conta presa sem humano.
+    if (rr.includes('aymh_continue') || rr === 'aymh') {
+      try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lr.domain || source }); } catch {}
+      try { await clearIdentityFlags(nome); } catch {}
+      try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        const lastHum = Number(robeMeta[nome].lastAymhHumanInvokeAt || 0) || 0;
+        const alreadyHold = !!(ctrl && ctrl.humanControl === true);
+        const canInvoke = !alreadyHold && (!lastHum || (now - lastHum) > (30 * 60 * 1000));
+        if (canInvoke) {
+          robeMeta[nome].lastAymhHumanInvokeAt = now;
+          await enterHumanMode(nome, ctrl, { reason: `aymh_continue:reconcile:${String(source || '').slice(0, 40)}` });
+          try { provisionAudit.append({ ts: now, event: 'human_reconcile_aymh_enter_human', nome: String(nome||''), source: String(source||'') }); } catch {}
+        }
+      } catch {}
+      return { ok: true, state: 'aymh_continue_human', reason: rr };
+    }
+
     if (rr.includes('identity_submitted')) {
       try { await setIdentitySubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, state: 'identity_submitted' };
@@ -15724,7 +15795,8 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     }
 
     // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
-    if (rr.includes('login_form') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
+    // Blindagem: nunca agendar se reason carregar aymh (defesa em profundidade).
+    if (rr.includes('login_form') && !rr.includes('aymh') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
       const lastSch = Number(robeMeta[nome].humanReconcileLastScheduleAt || 0) || 0;
       if (!lastSch || (now - lastSch) >= HUMAN_RECONCILE_CFG.minIntervalScheduleMs) {
         robeMeta[nome].humanReconcileLastScheduleAt = now;
@@ -16215,9 +16287,18 @@ async function nurseTick() {
       // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
       try {
         const flagsR = await readAccountFlags(nome).catch(()=>({}));
+        const lrReasonR = String((flagsR && flagsR.loginReason) || '').toLowerCase();
+        const needsReconAymh =
+          !!(flagsR && flagsR.loginRequired === true) &&
+          (lrReasonR.includes('aymh_continue') || lrReasonR === 'aymh');
         const needsRecon =
           (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) &&
-          (ctrl.humanControl === true || want.humanHold === true || (flagsR && flagsR.loginRemediateFailed === true));
+          (
+            ctrl.humanControl === true ||
+            want.humanHold === true ||
+            (flagsR && flagsR.loginRemediateFailed === true) ||
+            needsReconAymh
+          );
         if (needsRecon) {
           await reconcileHumanState(nome, ctrl, { source: 'nurse' }).catch(()=>null);
         }
@@ -16325,32 +16406,60 @@ async function nurseTick() {
       try {
         const flagsIR = await readAccountFlags(nome).catch(()=>({}));
         if (flagsIR && flagsIR.identityRequired === true) {
-          // P0: Se o navegador NÃO está aberto, não podemos "assistir" identidade.
-          // Regra do humano: se desired.active=true, o navegador precisa abrir mesmo em identityRequired.
-          if (!ctrl && want && want.active === true) {
-            try { provisionAudit.append({ ts: now, event: 'nurse_identity_required_no_ctrl_allow_open', nome: String(nome||'') }); } catch {}
-            // NÃO continue aqui: deixa cair no bloco normal de abertura (want.active && !ctrl).
-          } else {
+          // Forense MAE1: identityRequired stale + UI real em AYMH → continue engessava e nunca invocava humano.
+          let liveAymhOverride = false;
+          let liveIdentityStill = false;
           try {
-            if (ctrl) {
-              ctrl.trabalhando = false;
-              await stopVirtus(nome).catch(()=>{});
-              // Debounce do assist (não spammar cliques)
-              robeMeta[nome] = robeMeta[nome] || {};
-              const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
-              if (!last || (now - last) > 30_000) {
-                robeMeta[nome].identityAssistLastAt = now;
-                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-                const pg = pages && pages[0];
-                if (pg) {
-                  await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
+            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+              const pagesIR = await ctrl.browser.pages().catch(() => []);
+              for (const pgIR of (pagesIR || []).slice(0, 8)) {
+                let uIR = '';
+                try { uIR = (typeof pgIR.url === 'function') ? String(pgIR.url() || '') : ''; } catch {}
+                if (!/(facebook|messenger)\.com/i.test(uIR)) continue;
+                const detIR = await browserHelper.detectLoginRequired(pgIR).catch(() => null);
+                const rIR = String((detIR && detIR.reason) || '').toLowerCase();
+                if (detIR && detIR.loginRequired) {
+                  if (rIR.includes('aymh_continue') || rIR === 'aymh') liveAymhOverride = true;
+                  if (rIR.includes('identity')) liveIdentityStill = true;
                 }
               }
-              await snapshotStatusAndWrite().catch(()=>{});
             }
           } catch {}
-          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_identity_required', 'nurse_identity_required');
-          continue;
+          const aymhWinsOverStaleIdentity = liveAymhOverride && !liveIdentityStill;
+          if (aymhWinsOverStaleIdentity) {
+            try { await clearIdentityFlags(nome); } catch {}
+            try {
+              provisionAudit.append({
+                ts: now,
+                event: 'identity_stale_cleared_for_aymh',
+                nome: String(nome || ''),
+                source: 'nurse_identity_required'
+              });
+            } catch {}
+            // Fall through: nurse LR scan / reconcile tratam AYMH → enterHumanMode.
+          } else if (!ctrl && want && want.active === true) {
+            // P0: browser fechado + desired.active → permitir abertura (não continue).
+            try { provisionAudit.append({ ts: now, event: 'nurse_identity_required_no_ctrl_allow_open', nome: String(nome||'') }); } catch {}
+          } else {
+            try {
+              if (ctrl) {
+                ctrl.trabalhando = false;
+                await stopVirtus(nome).catch(()=>{});
+                robeMeta[nome] = robeMeta[nome] || {};
+                const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
+                if (!last || (now - last) > 30_000) {
+                  robeMeta[nome].identityAssistLastAt = now;
+                  const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                  const pg = pages && pages[0];
+                  if (pg) {
+                    await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
+                  }
+                }
+                await snapshotStatusAndWrite().catch(()=>{});
+              }
+            } catch {}
+            await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_identity_required', 'nurse_identity_required');
+            continue;
           }
         }
       } catch {}

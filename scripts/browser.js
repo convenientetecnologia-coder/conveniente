@@ -4040,7 +4040,13 @@ async function detectLoginRequired(page) {
     const hasCaptchaImg = !!(v && v.hasCaptchaImg);
     const hasCaptchaInput = !!(v && v.hasCaptchaInput);
     const hasContinueBtn = !!(v && v.hasContinueBtn);
-    const isAymhContinue = !!(v && v.isAymhContinue);
+    const hasUsarOutroPerfil = !!(v && v.hasUsarOutroPerfil);
+    const hasContinuarChooserBtn = !!(v && v.hasContinuarChooserBtn);
+    // Chooser AYMH vence login_form mesmo com input de senha já pintado no DOM
+    // (race / residual pós-render). Contrato: Usar outro perfil + Continuar = humano only.
+    const isAymhContinue =
+      !!(v && v.isAymhContinue) ||
+      (hasUsarOutroPerfil && hasContinuarChooserBtn);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
