@@ -3142,6 +3142,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #endregion
       return p; // sucesso
     } catch (e) {
+      // Terminal/semântico: manter aba create aberta (evidência + humano / remediação).
+      if (e && (e.ROBE_MARKETPLACE_DISABLED === true || e.ROBE_LOGIN_REQUIRED === true)) {
+        throw e;
+      }
       lastError = e;
       const msg = (e && e.message) ? e.message : String(e);
       // #region agent log
@@ -3559,6 +3563,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
+  // MKT Desativado / login_required: sobe throw semântico; NÃO fecha aba create.
+  let preserveCreatePageForHuman = false;
   let fotoNome = null;
   let fotoPath = null;
   let fotoUploaded = false;
@@ -4172,6 +4178,19 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       // Nada mais além de já ter pausado/logado/fechado
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
+    // Contrato ops: MKT Desativado / login_required sobem para o worker
+    // (flag + humano / remediação). NÃO engolir como robe_error genérico.
+    if (e && (e.ROBE_MARKETPLACE_DISABLED === true || e.ROBE_LOGIN_REQUIRED === true)) {
+      preserveCreatePageForHuman = true;
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: e.ROBE_MARKETPLACE_DISABLED === true ? 'marketplace_disabled' : 'login_required',
+          reason: String((e && e.message) || '').slice(0, 220)
+        });
+      } catch {}
+      throw e;
+    }
 
     const errMsg = (e && e.message) ? e.message : String(e);
     stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
@@ -4240,34 +4259,42 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 25–50min. NUNCA penalidade/backoff especial.
-    // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
-    try {
-      if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
-        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
-        await manifestStore.update(nome, m => {
-          m.robeCooldownUntil = Date.now() + pause;
-          return m;
-        });
+    // MKT/login: preservar aba create; não aplicar cooldown técnico; throw segue após finally.
+    if (preserveCreatePageForHuman) {
+      try {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
+      } catch {}
+      logger.info(`[ROBE][startRobe] FIM: preserve_create_page (humano/remediação)`, { nome });
+    } else {
+      // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 25–50min. NUNCA penalidade/backoff especial.
+      // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
+      try {
+        if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
+          const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
+          await manifestStore.update(nome, m => {
+            m.robeCooldownUntil = Date.now() + pause;
+            return m;
+          });
+        }
+      } catch (err) {
+        stepLogArr.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
       }
-    } catch (err) {
-      stepLogArr.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
+
+      // OPCIONAL RECOMENDADO: logging do beforeunload dialog
+      try {
+        if (sawBeforeUnloadDialog)
+          await logIssue(nome, 'robe_error', 'beforeunload dialog detectado; fechamento forçado');
+      } catch {}
+
+      if (page) {
+        try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
+      }
+      // Varredura final anti-fantasma (retries de create que sobraram)
+      try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
+
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
+      logger.info(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
     }
-
-    // OPCIONAL RECOMENDADO: logging do beforeunload dialog
-    try { 
-      if (sawBeforeUnloadDialog) 
-        await logIssue(nome, 'robe_error', 'beforeunload dialog detectado; fechamento forçado'); 
-    } catch {}
-
-    if (page) {
-      try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
-    }
-    // Varredura final anti-fantasma (retries de create que sobraram)
-    try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
-
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
-    logger.info(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
   }
 
   return { ok: published, log: stepLogArr };

@@ -1437,6 +1437,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       }
       return p; // sucesso
     } catch (e) {
+      // Terminal/semântico: manter aba create aberta (evidência + humano).
+      if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+        throw e;
+      }
       lastError = e;
       const msg = (e && e.message) ? e.message : String(e);
       try { await safeClosePage(p); } catch {}
@@ -2110,6 +2114,7 @@ async function preencherDescricaoVeiculo(page, modeloKey) {
  */
 async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let limitPostingHit = false;
+  let preserveCreatePageForHuman = false;
   let page = null;
   let published = false;
   let sawBeforeUnloadDialog = false;
@@ -2525,6 +2530,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       // Nada mais além de já ter pausado/logado/fechado
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
+    if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+      preserveCreatePageForHuman = true;
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'marketplace_disabled',
+          reason: String((e && e.message) || '').slice(0, 220)
+        });
+      } catch {}
+      throw e;
+    }
 
     const errMsg = (e && e.message) ? e.message : String(e);
     stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
@@ -2577,32 +2593,39 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
-    // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
-    try {
-      if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
-        const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
-        await manifestStore.update(nome, m => {
-          m.robeCooldownUntil = Date.now() + pause;
-          return m;
-        });
+    if (preserveCreatePageForHuman) {
+      try {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
+      } catch {}
+      logger.info(`[ROBE][startRobe] FIM (veículos): preserve_create_page (humano)`, { nome });
+    } else {
+      // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
+      // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
+      try {
+        if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
+          const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
+          await manifestStore.update(nome, m => {
+            m.robeCooldownUntil = Date.now() + pause;
+            return m;
+          });
+        }
+      } catch (err) {
+        stepLogArr.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
       }
-    } catch (err) {
-      stepLogArr.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
+
+      // OPCIONAL RECOMENDADO: logging do beforeunload dialog
+      try {
+        if (sawBeforeUnloadDialog)
+          await logIssue(nome, 'robe_error', 'beforeunload dialog detectado; fechamento forçado');
+      } catch {}
+
+      if (page) {
+        try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
+      }
+
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
+      logger.info(`[ROBE][startRobe] FIM (veículos): ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
     }
-
-    // OPCIONAL RECOMENDADO: logging do beforeunload dialog
-    try { 
-      if (sawBeforeUnloadDialog) 
-        await logIssue(nome, 'robe_error', 'beforeunload dialog detectado; fechamento forçado'); 
-    } catch {}
-
-    if (page) {
-      try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
-    }
-
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
-    logger.info(`[ROBE][startRobe] FIM (veículos): ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
   }
 
   return { ok: published, log: stepLogArr };

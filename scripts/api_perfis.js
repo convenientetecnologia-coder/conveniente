@@ -1814,6 +1814,8 @@ module.exports = (app, workerClient, fileStore) => {
           const f = (man && man.accountFlags) ? man.accountFlags : {};
           if (f.banned === true) terminal = 'banned';
           else if (f.twoFactor === true) terminal = 'two_factor';
+          else if (f.marketplaceDisabled === true) terminal = 'marketplace_disabled';
+          else if (f.captchaCheckpoint === true) terminal = 'captcha_checkpoint';
         } catch {}
         if (terminal) skippedTerminal.push({ nome, reason: terminal });
         else eligibleNames.push(nome);

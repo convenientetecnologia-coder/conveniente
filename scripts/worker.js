@@ -6799,9 +6799,23 @@ async function activateOnce(nome, source = '', operator = '') {
   }
   try {
     const fl = await readAccountFlags(nome).catch(() => null);
+    // Terminais com humano: não reabrir via nurse/auto (browser já deve estar aberto + hold).
+    // Limpeza diária fecha+exclui; open-all também filtra estes.
     if (fl && fl.banned === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_banned', nome: String(nome||''), source: String(source||'') }); } catch {}
       return { ok: false, error: 'banned' };
+    }
+    if (fl && fl.twoFactor === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_two_factor', nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: 'two_factor' };
+    }
+    if (fl && fl.marketplaceDisabled === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_marketplace_disabled', nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: 'marketplace_disabled' };
+    }
+    if (fl && fl.captchaCheckpoint === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_captcha_checkpoint', nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: 'captcha_checkpoint' };
     }
   } catch {}
 
@@ -8264,6 +8278,13 @@ async function robeIsAutoEnqueueEligible(nome, opts = {}) {
   if (!working) {
     return { ok: false, reason: 'not_working' };
   }
+  try {
+    const fl = await readAccountFlags(n).catch(() => null);
+    if (fl && fl.banned === true) return { ok: false, reason: 'banned' };
+    if (fl && fl.twoFactor === true) return { ok: false, reason: 'two_factor' };
+    if (fl && fl.marketplaceDisabled === true) return { ok: false, reason: 'marketplace_disabled' };
+    if (fl && fl.captchaCheckpoint === true) return { ok: false, reason: 'captcha_checkpoint' };
+  } catch {}
   if (isFrozenNow(n)) return { ok: false, reason: 'frozen' };
   if (robeQueue.inQueue(n) || robeQueue.isActive(n)) return { ok: false, reason: 'queue_busy' };
   try { await unfreezeCooldownIfWorking(n); } catch {}
@@ -9380,11 +9401,35 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_return', nome: String(nome || ''), ok: !!(res && res.ok), error: (res && res.error) ? String(res.error) : null }); } catch {}
     // #endregion
+    // Cinto: se módulo antigo engolir semântico em {ok:false}, reconstrói throw para handlers.
+    if (res && res.ok === false && res.error) {
+      const errTxt = String(res.error || '');
+      if (/ROBE_MARKETPLACE_DISABLED/i.test(errTxt)) {
+        const e = new Error(errTxt);
+        e.ROBE_MARKETPLACE_DISABLED = true;
+        e.marketplaceDisabledReason = errTxt.split(':').slice(1).join(':') || 'cannot_buy_or_sell';
+        e.marketplaceDisabledSource = 'startRobeDynamic_res';
+        throw e;
+      }
+      if (/ROBE_LOGIN_REQUIRED/i.test(errTxt)) {
+        const e = new Error(errTxt);
+        e.ROBE_LOGIN_REQUIRED = true;
+        e.loginReason = errTxt.split(':').slice(1).join(':') || 'login_required';
+        e.loginSource = 'startRobeDynamic_res';
+        throw e;
+      }
+    }
     return res;
   } catch (e) {
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
     // #endregion
+    const semantic =
+      (e && e.ROBE_MARKETPLACE_DISABLED === true) ||
+      (e && e.ROBE_LOGIN_REQUIRED === true) ||
+      (e && e.LIMIT_POSTING === true) ||
+      /LIMIT_POSTING_ABORT/i.test(String((e && e.message) || ''));
+    if (semantic) throw e;
     await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão configurado no servidor será aplicado pelo módulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
@@ -9443,6 +9488,58 @@ async function robeQueuedCycle(nome, source = 'auto') {
         try {
           res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow, photoDeletePolicy);
         } catch (e) {
+          if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+            const rr = String(e.marketplaceDisabledReason || 'cannot_buy_or_sell');
+            const sn = String(e.marketplaceDisabledSnippet || '');
+            const ss = String(e.marketplaceDisabledSource || 'robe_create');
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'robe_marketplace_disabled_detected',
+                nome: String(nome || ''),
+                reason: rr,
+                source: ss,
+                via: 'robeQueuedCycle'
+              });
+            } catch {}
+            try {
+              await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+            } catch {}
+            try {
+              await reportAction(nome, 'marketplace_disabled', `Robe fila: MKT Desativado (${rr}); humano invocado.`);
+            } catch {}
+            robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            return;
+          }
+          if (e && e.ROBE_LOGIN_REQUIRED === true) {
+            const rr = String(e.loginReason || 'login_required');
+            const ss = String(e.loginSource || 'facebook');
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'robe_login_required_detected',
+                nome: String(nome || ''),
+                reason: rr,
+                source: ss,
+                via: 'robeQueuedCycle'
+              });
+            } catch {}
+            try { await setLoginRequiredFlag(nome, { reason: rr, source: ss }); } catch {}
+            setTimeout(() => {
+              try {
+                handlers.login_remediate({
+                  nome,
+                  operator: `robe_queue_login_required:${nome}:${Date.now()}`,
+                  options: { overrideHumanHold: true }
+                }).catch(() => {});
+              } catch {}
+            }, 0);
+            try { await reportAction(nome, 'robe_login_required', `Robe fila: login_required (${rr}); remediação agendada.`); } catch {}
+            robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            return;
+          }
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
@@ -10051,6 +10148,29 @@ async function start_work({ nome, operator }) {
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'two_factor', reason: String(flags.twoFactorReason||flags.reason||'two_factor').slice(0,120) }); } catch {}
         try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
         return { ok: false, error: 'two_factor' };
+      }
+      if (flags && flags.marketplaceDisabled === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'marketplace_disabled', reason: String(flags.marketplaceDisabledReason||'cannot_buy_or_sell').slice(0,120) }); } catch {}
+        try {
+          await setMarketplaceDisabledFlag(nome, {
+            reason: String(flags.marketplaceDisabledReason || 'cannot_buy_or_sell'),
+            snippet: String(flags.marketplaceDisabledText || ''),
+            source: 'start_work_flags'
+          });
+        } catch {}
+        return { ok: false, error: 'marketplace_disabled' };
+      }
+      if (flags && flags.captchaCheckpoint === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'captcha_checkpoint', reason: String(flags.captchaCheckpointReason||'captcha').slice(0,120) }); } catch {}
+        try {
+          await setCaptchaCheckpointFlag(nome, {
+            reason: String(flags.captchaCheckpointReason || 'captcha'),
+            source: 'start_work_flags',
+            url: String(flags.captchaCheckpointUrl || ''),
+            title: String(flags.captchaCheckpointTitle || '')
+          });
+        } catch {}
+        return { ok: false, error: 'captcha_checkpoint' };
       }
       if (flags && flags.loginRequired === true) {
         const rr = String(flags.loginReason || 'login_required').slice(0, 120);
@@ -14347,7 +14467,7 @@ const problem = man
     (man.accountFlags && man.accountFlags.messengerPin === true) ||
     (man.accountFlags && man.accountFlags.appealSubmitted === true)
   )
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 // Estoque (CT): vínculo determinístico do perfil do servidor com a conta do estoque.
@@ -16033,7 +16153,10 @@ async function nurseTick() {
 
     // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
-    // Terminais (banned / 2FA): NUNCA reforce active=true — senão briga com ban-sweep e prende open-all.
+    // Terminais (ban/2FA/MKT/captcha): contrato ops 2026-07 = humano + browser aberto.
+    // - NÃO forçar active=false (fecharia intenção / brigaria com enterHumanMode)
+    // - NÃO forçar active=true (não reabrir terminal em massa; activateOnce já bloqueia)
+    // - Garantir virtus=off + humanHold=true
     let autoOpenEnabled = false;
     try {
       const ao = desired0 && desired0._autoOpen && typeof desired0._autoOpen === 'object' ? desired0._autoOpen : null;
@@ -16066,7 +16189,13 @@ async function nurseTick() {
           for (const nome of names) {
             try {
               const flags = await readAccountFlags(nome).catch(() => null);
-              if (flags && (flags.banned === true || flags.twoFactor === true)) {
+              if (
+                flags &&
+                (flags.banned === true ||
+                  flags.twoFactor === true ||
+                  flags.marketplaceDisabled === true ||
+                  flags.captchaCheckpoint === true)
+              ) {
                 terminalSkip.add(String(nome));
               }
             } catch {}
@@ -16078,10 +16207,12 @@ async function nurseTick() {
             for (const nome of names) {
               if (terminalSkip.has(String(nome))) {
                 skippedTerminal++;
-                // Mantém terminal fechado (coerência com ban/2FA sweep).
                 const cur = d.perfis[nome] || {};
-                if (cur.active === true) {
-                  d.perfis[nome] = { ...cur, active: false, virtus: 'off' };
+                // Preserva active (se true, browser humano fica; se false, não reabre).
+                const needVirtusOff = String(cur.virtus || '') !== 'off';
+                const needHold = cur.humanHold !== true;
+                if (needVirtusOff || needHold) {
+                  d.perfis[nome] = { ...cur, virtus: 'off', humanHold: true };
                   changed++;
                 }
                 continue;
@@ -16133,17 +16264,37 @@ async function nurseTick() {
           for (const nome of Object.keys((desired0 && desired0.perfis) || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
-              // Ban já marcado => tentar excluir (best-effort, idempotente)
+              // Terminais: reafirmar human hold (NÃO fecha; exclusão só na limpeza diária).
               if (flags && flags.banned === true) {
                 try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
                 continue;
               }
-              // 2FA já marcado => tentar excluir
               if (flags && flags.twoFactor === true) {
                 try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
                 continue;
               }
-              // Compat retroativa: loginRequired+reason two_factor => excluir
+              if (flags && flags.marketplaceDisabled === true) {
+                try {
+                  await setMarketplaceDisabledFlag(nome, {
+                    reason: String(flags.marketplaceDisabledReason || 'cannot_buy_or_sell'),
+                    snippet: String(flags.marketplaceDisabledText || ''),
+                    source: 'nurse_zero_ctrl_sweep'
+                  });
+                } catch {}
+                continue;
+              }
+              if (flags && flags.captchaCheckpoint === true) {
+                try {
+                  await setCaptchaCheckpointFlag(nome, {
+                    reason: String(flags.captchaCheckpointReason || 'captcha'),
+                    source: 'nurse_zero_ctrl_sweep',
+                    url: String(flags.captchaCheckpointUrl || ''),
+                    title: String(flags.captchaCheckpointTitle || '')
+                  });
+                } catch {}
+                continue;
+              }
+              // Compat retroativa: loginRequired+reason two_factor => human hold 2FA
               if (flags && flags.loginRequired === true) {
                 const rr = String(flags.loginReason || '').toLowerCase();
                 if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
@@ -16735,6 +16886,7 @@ async function nurseTick() {
         // humanHold COM Chrome vivo: não atropelar o humano (overlay + skip automação).
         // humanHold SEM Chrome: cache órfão (regra 2026-01) — limpar hold e não bloquear
         // keepalive reopen se desired.active ainda pede aberto. Contas saudáveis sem hold: intactas.
+        // EXCEÇÃO ops 2026-07: terminais (ban/2FA/MKT/captcha) mantêm humanHold até limpeza diária.
         const humanHoldLive = !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.());
         if (humanHoldLive) {
           try {
@@ -16746,6 +16898,28 @@ async function nurseTick() {
             }
           } catch {}
           await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+          continue;
+        }
+        let terminalHumanHold = false;
+        try {
+          const flTerm = await readAccountFlags(nome).catch(() => null);
+          terminalHumanHold = !!(
+            flTerm &&
+            (flTerm.banned === true ||
+              flTerm.twoFactor === true ||
+              flTerm.marketplaceDisabled === true ||
+              flTerm.captchaCheckpoint === true)
+          );
+        } catch {}
+        if (terminalHumanHold) {
+          try {
+            provisionAudit.append({
+              ts: now,
+              event: 'nurse_terminal_human_hold_keep_no_ctrl',
+              nome: String(nome || ''),
+              active: want.active === true
+            });
+          } catch {}
           continue;
         }
         try {
@@ -16843,9 +17017,30 @@ async function nurseTick() {
           try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_already_opening', nome: String(nome||'') }); } catch {}
           continue;
         }
-        if (robeMeta[nome]?.banned === true || robeMeta[nome]?.whyNotOpen === 'banned') {
-          try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_banned_runtime', nome: String(nome||'') }); } catch {}
-          continue;
+        {
+          const why = String(robeMeta[nome]?.whyNotOpen || '');
+          const terminalHold =
+            robeMeta[nome]?.banned === true ||
+            robeMeta[nome]?.marketplaceDisabled === true ||
+            robeMeta[nome]?.twoFactor === true ||
+            why === 'banned' ||
+            why === 'banned_human_hold' ||
+            why === 'marketplace_disabled_human_hold' ||
+            why === 'two_factor_human_hold' ||
+            why === 'captcha_checkpoint';
+          if (terminalHold) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'nurse_open_skip_terminal_human_hold',
+                nome: String(nome || ''),
+                why: why || null,
+                banned: !!(robeMeta[nome] && robeMeta[nome].banned),
+                marketplaceDisabled: !!(robeMeta[nome] && robeMeta[nome].marketplaceDisabled)
+              });
+            } catch {}
+            continue;
+          }
         }
 
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) {
