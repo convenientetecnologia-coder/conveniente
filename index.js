@@ -963,6 +963,7 @@ const fileStore = require('./scripts/fileStore.js');
 const supervisor = require('./scripts/supervisor.js');
 const networkRotation = require('./scripts/networkRotation.js');
 const dailyWindowScheduler = require('./scripts/dailyWindowScheduler.js');
+const terminalAccountCleanupScheduler = require('./scripts/terminalAccountCleanupScheduler.js');
 
 // Dashboard monitor
 const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
@@ -3993,6 +3994,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     startServerEventBridge();
     networkRotation.startNetworkRotationScheduler({ port: PORT });
     dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
+    terminalAccountCleanupScheduler.startTerminalAccountCleanupScheduler({ port: PORT });
 
     // Outbox gordo = esteira morta. Arquiva e zera; CT redispara o pendente das contas abertas.
     try {

@@ -156,6 +156,15 @@ const DEFAULTS = Object.freeze({
     openWindowStartMinute: 0,
     openWindowEndHour: 7,
     openWindowEndMinute: 0
+  },
+  // Limpeza ban/2FA/captcha: INDEPENDENTE do renovar/fechar/abrir.
+  // Default off = zero regressão na migração (antes rodava acoplada ao abrir).
+  terminalAccountCleanup: {
+    enabled: false,
+    windowStartHour: 0,
+    windowStartMinute: 0,
+    windowEndHour: 1,
+    windowEndMinute: 0
   }
 });
 
@@ -243,6 +252,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
+  const termClean = (r.terminalAccountCleanup && typeof r.terminalAccountCleanup === "object")
+    ? r.terminalAccountCleanup
+    : {};
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
@@ -420,6 +432,25 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       openWindowStartMinute,
       openWindowEndHour,
       openWindowEndMinute
+    },
+    terminalAccountCleanup: {
+      enabled: termClean.enabled === true,
+      windowStartHour: clamp(Math.floor(toNum(
+        termClean.windowStartHour,
+        DEFAULTS.terminalAccountCleanup.windowStartHour
+      )), 0, 23),
+      windowStartMinute: clamp(Math.floor(toNum(
+        termClean.windowStartMinute,
+        DEFAULTS.terminalAccountCleanup.windowStartMinute
+      )), 0, 59),
+      windowEndHour: clamp(Math.floor(toNum(
+        termClean.windowEndHour,
+        DEFAULTS.terminalAccountCleanup.windowEndHour
+      )), 0, 23),
+      windowEndMinute: clamp(Math.floor(toNum(
+        termClean.windowEndMinute,
+        DEFAULTS.terminalAccountCleanup.windowEndMinute
+      )), 0, 59)
     }
   };
 
@@ -439,7 +470,12 @@ function validateServerConfigPayload(payload) {
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
   const daily = (p.dailyWindow && typeof p.dailyWindow === "object") ? p.dailyWindow : null;
-  if (!cap && !robe && !mem && !net && !daily) return { ok: false, error: "payload_sem_campos_reconhecidos" };
+  const termClean = (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === "object")
+    ? p.terminalAccountCleanup
+    : null;
+  if (!cap && !robe && !mem && !net && !daily && !termClean) {
+    return { ok: false, error: "payload_sem_campos_reconhecidos" };
+  }
 
   const errors = [];
   if (cap) {
@@ -577,6 +613,20 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (termClean) {
+    if (termClean.enabled !== undefined && typeof termClean.enabled !== "boolean") {
+      errors.push("terminalAccountCleanup.enabled_invalido");
+    }
+    const intFields = [
+      "windowStartHour", "windowStartMinute", "windowEndHour", "windowEndMinute"
+    ];
+    for (const f of intFields) {
+      if (termClean[f] !== undefined) {
+        const n = toNum(termClean[f], NaN);
+        if (!Number.isFinite(n)) errors.push(`terminalAccountCleanup.${f}_invalido`);
+      }
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
@@ -586,7 +636,12 @@ function validateServerConfigPayload(payload) {
     robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) },
     memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) },
     networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) },
-    dailyWindow: { ...DEFAULTS.dailyWindow, ...((readServerConfigRaw() || {}).dailyWindow || {}), ...(daily || {}) }
+    dailyWindow: { ...DEFAULTS.dailyWindow, ...((readServerConfigRaw() || {}).dailyWindow || {}), ...(daily || {}) },
+    terminalAccountCleanup: {
+      ...DEFAULTS.terminalAccountCleanup,
+      ...((readServerConfigRaw() || {}).terminalAccountCleanup || {}),
+      ...(termClean || {})
+    }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
@@ -603,6 +658,18 @@ function validateServerConfigPayload(payload) {
   }
   if (openDur < 1 || openDur > 720) {
     return { ok: false, error: "validation_failed", details: ["dailyWindow.open_window_invalida"] };
+  }
+  const tcStart = hmToMin(
+    normalized.terminalAccountCleanup.windowStartHour,
+    normalized.terminalAccountCleanup.windowStartMinute
+  );
+  const tcEnd = hmToMin(
+    normalized.terminalAccountCleanup.windowEndHour,
+    normalized.terminalAccountCleanup.windowEndMinute
+  );
+  const tcDur = windowDurationMinutes(tcStart, tcEnd);
+  if (tcDur < 1 || tcDur > 720) {
+    return { ok: false, error: "validation_failed", details: ["terminalAccountCleanup.window_invalida"] };
   }
   return { ok: true, normalized };
 }
@@ -670,6 +737,13 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       openWindowStartMinute: v.normalized.dailyWindow.openWindowStartMinute,
       openWindowEndHour: v.normalized.dailyWindow.openWindowEndHour,
       openWindowEndMinute: v.normalized.dailyWindow.openWindowEndMinute
+    },
+    terminalAccountCleanup: {
+      enabled: v.normalized.terminalAccountCleanup.enabled === true,
+      windowStartHour: v.normalized.terminalAccountCleanup.windowStartHour,
+      windowStartMinute: v.normalized.terminalAccountCleanup.windowStartMinute,
+      windowEndHour: v.normalized.terminalAccountCleanup.windowEndHour,
+      windowEndMinute: v.normalized.terminalAccountCleanup.windowEndMinute
     }
   };
   try {

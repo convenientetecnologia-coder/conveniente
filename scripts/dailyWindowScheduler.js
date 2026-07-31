@@ -5,9 +5,6 @@ const path = require("path");
 const serverConfig = require("./serverConfig.js");
 const logger = require("./logger.js");
 const provisionAudit = require("./provisionAudit.js");
-const fileStore = require("./fileStore.js");
-const dailyTerminalCleanup = require("./dailyTerminalCleanup.js");
-
 const LOOP_MS = 30000;
 const STATE_PATH = path.join(__dirname, "..", "dados", "daily_window_scheduler_state.json");
 const OPEN_VERIFY_ENABLED = !/^(0|false|no|off)$/i.test(String(process.env.DAILY_WINDOW_OPEN_VERIFY_ENABLED || "1").trim());
@@ -703,39 +700,8 @@ async function tick() {
         });
       } catch {}
 
-      // Limpeza terminal APENAS no abrir automático da config (não no botão Abrir tudo).
-      let cleanup = null;
-      try {
-        cleanup = await dailyTerminalCleanup.runDailyTerminalCleanup({
-          fileStore,
-          localPort,
-          by: "daily_window_open"
-        });
-      } catch (e) {
-        cleanup = {
-          ok: false,
-          error: (e && e.message) ? String(e.message) : String(e)
-        };
-        try {
-          provisionAudit.append({
-            ts: now(),
-            event: "daily_terminal_cleanup_exception",
-            error: String((e && e.message) || e).slice(0, 180)
-          });
-        } catch {}
-      }
-      try {
-        provisionAudit.append({
-          ts: now(),
-          event: "daily_window_open_after_terminal_cleanup",
-          cleanupOk: !!(cleanup && cleanup.ok),
-          cleanupSkipped: !!(cleanup && cleanup.skipped),
-          deleted: Number(cleanup && cleanup.deleted || 0) || 0,
-          failed: Number(cleanup && cleanup.failed || 0) || 0,
-          day: cleanup && cleanup.day ? String(cleanup.day) : null
-        });
-      } catch {}
-
+      // Limpeza ban/captcha/2FA NÃO roda mais aqui — ver terminalAccountCleanupScheduler
+      // (config própria no Config do Servidor).
       const rr = await runOpenRoutine();
       const nextOpenAt = computeNextRandomAtFromWindow({
         nowTs: now(),
@@ -748,13 +714,7 @@ async function tick() {
         inProgressKind: null,
         nextOpenAt,
         lastOpenAt: now(),
-        lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "open_unknown_error"),
-        lastTerminalCleanup: cleanup && typeof cleanup === "object" ? {
-          day: cleanup.day || null,
-          skipped: !!cleanup.skipped,
-          deleted: Number(cleanup.deleted || 0) || 0,
-          failed: Number(cleanup.failed || 0) || 0
-        } : null
+        lastError: rr && rr.ok === true ? null : ((rr && rr.error) ? rr.error : "open_unknown_error")
       });
       try {
         provisionAudit.append({
@@ -769,10 +729,7 @@ async function tick() {
           attempt: Number(rr && rr.attempt || 0) || 0,
           active: Number(rr && rr.active || 0) || 0,
           working: Number(rr && rr.working || 0) || 0,
-          elapsedMs: Number(rr && rr.elapsedMs || 0) || 0,
-          terminalCleanupDeleted: Number(cleanup && cleanup.deleted || 0) || 0,
-          terminalCleanupFailed: Number(cleanup && cleanup.failed || 0) || 0,
-          terminalCleanupSkipped: !!(cleanup && cleanup.skipped)
+          elapsedMs: Number(rr && rr.elapsedMs || 0) || 0
         });
       } catch {}
       if (!rr.ok) logger.warn("[DAILY-WINDOW] open falhou", rr || {});

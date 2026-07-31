@@ -1284,7 +1284,25 @@
               <input type="time" id="srvDailyOpenEndTime" />
             </label>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. No modo Renovar, na hora de fechar o sistema renova os classificados e só então fecha os navegadores.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. No modo Renovar, na hora de fechar o sistema renova os classificados e só então fecha os navegadores. A limpeza de ban/captcha NÃO roda aqui — use a config abaixo.</div>
+        </div>
+        <div class="form-row">
+          <label>Excluir contas ban / captcha (e 2FA)</label>
+          <select id="srvTerminalCleanupEnabled">
+            <option value="0">Não</option>
+            <option value="1">Sim</option>
+          </select>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Janela: início
+              <input type="time" id="srvTerminalCleanupStartTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Janela: fim
+              <input type="time" id="srvTerminalCleanupEndTime" />
+            </label>
+          </div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia (ban, captcha bloqueante e 2FA). Não afeta login/AYMH/identity.</div>
         </div>
         <div class="form-row">
           <label>Robe — tipo de trabalho</label>
@@ -1342,6 +1360,9 @@
       const dailyCloseEndTimeEl = box.querySelector('#srvDailyCloseEndTime');
       const dailyOpenStartTimeEl = box.querySelector('#srvDailyOpenStartTime');
       const dailyOpenEndTimeEl = box.querySelector('#srvDailyOpenEndTime');
+      const terminalCleanupEnabledEl = box.querySelector('#srvTerminalCleanupEnabled');
+      const terminalCleanupStartTimeEl = box.querySelector('#srvTerminalCleanupStartTime');
+      const terminalCleanupEndTimeEl = box.querySelector('#srvTerminalCleanupEndTime');
       const memGovEnterEl = box.querySelector('#srvMemGovEnter');
       const memGovExitEl = box.querySelector('#srvMemGovExit');
       const memHostBaseEl = box.querySelector('#srvMemHostBase');
@@ -1496,6 +1517,20 @@
           const mm = String(Number(daily.openWindowEndMinute || 0)).padStart(2, '0');
           dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
+        const termClean = (cfg && cfg.terminalAccountCleanup) ? cfg.terminalAccountCleanup : {};
+        if (terminalCleanupEnabledEl) {
+          terminalCleanupEnabledEl.value = termClean.enabled === true ? '1' : '0';
+        }
+        if (terminalCleanupStartTimeEl) {
+          const hh = String(Number(termClean.windowStartHour != null ? termClean.windowStartHour : 0)).padStart(2, '0');
+          const mm = String(Number(termClean.windowStartMinute != null ? termClean.windowStartMinute : 0)).padStart(2, '0');
+          terminalCleanupStartTimeEl.value = `${hh}:${mm}`;
+        }
+        if (terminalCleanupEndTimeEl) {
+          const hh = String(Number(termClean.windowEndHour != null ? termClean.windowEndHour : 1)).padStart(2, '0');
+          const mm = String(Number(termClean.windowEndMinute != null ? termClean.windowEndMinute : 0)).padStart(2, '0');
+          terminalCleanupEndTimeEl.value = `${hh}:${mm}`;
+        }
         const wm = String(robe.workMode || 'v1');
         workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
@@ -1597,6 +1632,9 @@
           const dailyCloseEndRaw = String((dailyCloseEndTimeEl && dailyCloseEndTimeEl.value) || '').trim();
           const dailyOpenStartRaw = String((dailyOpenStartTimeEl && dailyOpenStartTimeEl.value) || '').trim();
           const dailyOpenEndRaw = String((dailyOpenEndTimeEl && dailyOpenEndTimeEl.value) || '').trim();
+          const terminalCleanupEnabled = String((terminalCleanupEnabledEl && terminalCleanupEnabledEl.value) || '0') === '1';
+          const terminalCleanupStartRaw = String((terminalCleanupStartTimeEl && terminalCleanupStartTimeEl.value) || '').trim();
+          const terminalCleanupEndRaw = String((terminalCleanupEndTimeEl && terminalCleanupEndTimeEl.value) || '').trim();
           if (!Number.isFinite(cooldownMin) || !Number.isFinite(cooldownMax) || cooldownMin < 1 || cooldownMax < 1 || cooldownMin > 1440 || cooldownMax > 1440 || cooldownMax < cooldownMin) {
             await showSystemMessageModal({
               title: 'Configuração inválida',
@@ -1632,6 +1670,8 @@
           const closeEndHm = parseHm(dailyCloseEndRaw);
           const openStartHm = parseHm(dailyOpenStartRaw);
           const openEndHm = parseHm(dailyOpenEndRaw);
+          const terminalCleanupStartHm = parseHm(terminalCleanupStartRaw);
+          const terminalCleanupEndHm = parseHm(terminalCleanupEndRaw);
           if (!closeStartHm || !closeEndHm || !openStartHm || !openEndHm) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
@@ -1640,14 +1680,31 @@
             });
             return;
           }
+          if (!terminalCleanupStartHm || !terminalCleanupEndHm) {
+            await showSystemMessageModal({
+              title: 'Janela de limpeza inválida',
+              message: 'Defina horários válidos (HH:MM) para a janela de excluir ban/captcha.',
+              tone: 'bad'
+            });
+            return;
+          }
           const hmToMin = ({ h, m }) => (h * 60) + m;
           const windowDuration = (startMin, endMin) => (endMin > startMin) ? (endMin - startMin) : ((24 * 60 - startMin) + endMin);
           const closeDur = windowDuration(hmToMin(closeStartHm), hmToMin(closeEndHm));
           const openDur = windowDuration(hmToMin(openStartHm), hmToMin(openEndHm));
+          const terminalCleanupDur = windowDuration(hmToMin(terminalCleanupStartHm), hmToMin(terminalCleanupEndHm));
           if (closeDur < 1 || closeDur > (12 * 60) || openDur < 1 || openDur > (12 * 60)) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
               message: 'Cada janela (fechar/abrir) deve ter duração entre 1 minuto e 12 horas.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (terminalCleanupDur < 1 || terminalCleanupDur > (12 * 60)) {
+            await showSystemMessageModal({
+              title: 'Janela de limpeza inválida',
+              message: 'A janela de excluir ban/captcha deve ter duração entre 1 minuto e 12 horas.',
               tone: 'bad'
             });
             return;
@@ -1709,6 +1766,13 @@
               openWindowStartMinute: openStartHm.m,
               openWindowEndHour: openEndHm.h,
               openWindowEndMinute: openEndHm.m
+            },
+            terminalAccountCleanup: {
+              enabled: terminalCleanupEnabled,
+              windowStartHour: terminalCleanupStartHm.h,
+              windowStartMinute: terminalCleanupStartHm.m,
+              windowEndHour: terminalCleanupEndHm.h,
+              windowEndMinute: terminalCleanupEndHm.m
             },
             robe: {
               cooldownMinMinutes: cooldownMin,

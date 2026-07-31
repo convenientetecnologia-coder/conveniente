@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * Limpeza diária de contas TERMINAIS no ABRIR automático da config (dueOpen).
- * NÃO deve ser chamada pelo botão Abrir tudo / open-all-24h manual.
+ * Limpeza diária de contas TERMINAIS (ban / 2FA / captcha bloqueante).
+ * Acionada pelo terminalAccountCleanupScheduler (config própria no servidor).
+ * NÃO acoplada a renovar/fechar/abrir. NÃO deve ser chamada pelo botão Abrir tudo.
  *
  * Allowlist positiva:
  * - banned
