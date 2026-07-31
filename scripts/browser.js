@@ -5475,41 +5475,50 @@ async function collectFreshCookies(browser) {
  * Texto canônico PT: "Você não pode comprar ou vender itens no Facebook"
  */
 async function detectMarketplaceDisabled(page) {
-  try {
-    const href = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
-    if (!/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(href)) {
-      return { disabled: false };
-    }
-    const v = await page.evaluate(() => {
-      function norm(s) {
-        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-        catch { return String(s || '').toLowerCase(); }
+  async function probeOnce() {
+    try {
+      const href = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
+      if (!/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(href)) {
+        return { disabled: false };
       }
-      const nodes = Array.from(document.querySelectorAll('span,div,h1,h2')).slice(0, 2500);
-      const texts = nodes.map((el) => (el.innerText || el.textContent || '')).filter(Boolean);
-      const tnorm = texts.map(norm);
-      const buySell =
-        tnorm.some((t) => t.includes('voce nao pode comprar ou vender itens')) ||
-        tnorm.some((t) => t.includes('you can\'t buy or sell items') || t.includes('you cannot buy or sell items')) ||
-        tnorm.some((t) => t.includes('no puedes comprar ni vender articulos') || t.includes('no puedes comprar o vender'));
-      if (!buySell) return { hit: false, snippet: '' };
-      const community =
-        tnorm.some((t) => t.includes('padroes da comunidade') || t.includes('community standards') || t.includes('estandares de la comunidad'));
-      const snippet =
-        texts.find((s) => /comprar ou vender|buy or sell|comprar ni vender|comprar o vender/i.test(String(s || ''))) ||
-        texts.slice(0, 20).join(' | ').slice(0, 420);
-      return { hit: true, community: !!community, snippet: String(snippet || '').slice(0, 420) };
-    });
-    if (v && v.hit) {
-      return {
-        disabled: true,
-        reason: 'cannot_buy_or_sell',
-        snippet: v.snippet || '',
-        communityStandards: !!v.community
-      };
-    }
-  } catch {}
-  return { disabled: false };
+      const v = await page.evaluate(() => {
+        function norm(s) {
+          try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+          catch { return String(s || '').toLowerCase(); }
+        }
+        const nodes = Array.from(document.querySelectorAll('span,div,h1,h2')).slice(0, 2500);
+        const texts = nodes.map((el) => (el.innerText || el.textContent || '')).filter(Boolean);
+        const tnorm = texts.map(norm);
+        const buySell =
+          tnorm.some((t) => t.includes('voce nao pode comprar ou vender itens')) ||
+          tnorm.some((t) => t.includes('voce nao pode comprar ou vender')) ||
+          tnorm.some((t) => t.includes('you can\'t buy or sell items') || t.includes('you cannot buy or sell items')) ||
+          tnorm.some((t) => t.includes('no puedes comprar ni vender articulos') || t.includes('no puedes comprar o vender'));
+        if (!buySell) return { hit: false, snippet: '' };
+        const community =
+          tnorm.some((t) => t.includes('padroes da comunidade') || t.includes('community standards') || t.includes('estandares de la comunidad'));
+        const snippet =
+          texts.find((s) => /comprar ou vender|buy or sell|comprar ni vender|comprar o vender/i.test(String(s || ''))) ||
+          texts.slice(0, 20).join(' | ').slice(0, 420);
+        return { hit: true, community: !!community, snippet: String(snippet || '').slice(0, 420) };
+      });
+      if (v && v.hit) {
+        return {
+          disabled: true,
+          reason: 'cannot_buy_or_sell',
+          snippet: v.snippet || '',
+          communityStandards: !!v.community
+        };
+      }
+    } catch {}
+    return { disabled: false };
+  }
+  // 1ª leitura + 1 retry curto (DOM do create às vezes atrasa o texto).
+  let out = await probeOnce();
+  if (out && out.disabled === true) return out;
+  try { await new Promise((r) => setTimeout(r, 900)); } catch {}
+  out = await probeOnce();
+  return out || { disabled: false };
 }
 
 async function detectAccountSuspended(page) {

@@ -9499,14 +9499,34 @@ async function robeQueuedCycle(nome, source = 'auto') {
                 nome: String(nome || ''),
                 reason: rr,
                 source: ss,
-                via: 'robeQueuedCycle'
+                via: 'robeQueuedCycle',
+                policy: 'close_create_human_on_main'
               });
             } catch {}
+            let mktApply = { ok: false, error: 'unknown' };
             try {
-              await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+              mktApply = await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+            } catch (errMkt) {
+              mktApply = { ok: false, error: (errMkt && errMkt.message) ? String(errMkt.message) : String(errMkt) };
+            }
+            if (!(mktApply && mktApply.ok === true)) {
+              virtusWasRunning = false;
+              deltaSequentialResumeRequired = false;
+              try { await reportAction(nome, 'robe_error', `Falha ao marcar MKT Desativado: ${String((mktApply && mktApply.error) || 'unknown')}`); } catch {}
+              robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
+              try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+              return;
+            }
+            // Humano na aba 0 (main): create já foi fechada pelo Robe.
+            try {
+              const mp = ctrl.mainPage || (await ctrl.browser.pages().catch(() => []))[0] || null;
+              if (mp && typeof mp.bringToFront === 'function') await mp.bringToFront().catch(() => {});
             } catch {}
+            // Não religar Virtus no finally após MKT.
+            virtusWasRunning = false;
+            deltaSequentialResumeRequired = false;
             try {
-              await reportAction(nome, 'marketplace_disabled', `Robe fila: MKT Desativado (${rr}); humano invocado.`);
+              await reportAction(nome, 'marketplace_disabled', `Robe fila: MKT Desativado (${rr}); create fechada; humano na aba 0.`);
             } catch {}
             robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
@@ -13401,14 +13421,33 @@ const handlers = {
                     event: 'robe_marketplace_disabled_detected',
                     nome: String(nome || ''),
                     reason: rr,
-                    source: ss
+                    source: ss,
+                    via: 'robe-play',
+                    policy: 'close_create_human_on_main'
                   });
                 } catch {}
+                let mktApply = { ok: false, error: 'unknown' };
                 try {
-                  await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+                  mktApply = await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+                } catch (errMkt) {
+                  mktApply = { ok: false, error: (errMkt && errMkt.message) ? String(errMkt.message) : String(errMkt) };
+                }
+                if (!(mktApply && mktApply.ok === true)) {
+                  virtusWasRunning = false;
+                  deltaSequentialResumeRequired = false;
+                  try { await reportAction(nome, 'robe_error', `Falha ao marcar MKT Desativado: ${String((mktApply && mktApply.error) || 'unknown')}`); } catch {}
+                  robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
+                  try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+                  return;
+                }
+                try {
+                  const mp = ctrl.mainPage || (await ctrl.browser.pages().catch(() => []))[0] || null;
+                  if (mp && typeof mp.bringToFront === 'function') await mp.bringToFront().catch(() => {});
                 } catch {}
+                virtusWasRunning = false;
+                deltaSequentialResumeRequired = false;
                 try {
-                  await reportAction(nome, 'marketplace_disabled', `Robe: MKT Desativado (${rr}); humano invocado.`);
+                  await reportAction(nome, 'marketplace_disabled', `Robe: MKT Desativado (${rr}); create fechada; humano na aba 0.`);
                 } catch {}
                 robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
                 try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
@@ -16444,9 +16483,10 @@ async function nurseTick() {
             if (want.active !== true || controllers.has(n)) continue;
             try {
               const rm = robeMeta[n] || {};
-              if (rm.banned === true || rm.twoFactor === true) continue;
+              if (rm.banned === true || rm.twoFactor === true || rm.marketplaceDisabled === true) continue;
+              if (rm.whyNotOpen === 'captcha_checkpoint' || rm.whyNotOpen === 'marketplace_disabled_human_hold') continue;
               const flags = await readAccountFlags(n).catch(() => null);
-              if (flags && (flags.banned === true || flags.twoFactor === true)) continue;
+              if (flags && (flags.banned === true || flags.twoFactor === true || flags.marketplaceDisabled === true || flags.captchaCheckpoint === true)) continue;
             } catch {}
             pending++;
             pendingNames.push(String(n));

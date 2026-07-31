@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
-const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectMarketplaceDisabled } = require('./browser.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectMarketplaceDisabled, detectLoginRequired } = require('./browser.js');
 const provisionAudit = require('./provisionAudit.js');
 
 function makeRobeMarketplaceDisabledError(det = {}) {
@@ -14,6 +14,21 @@ function makeRobeMarketplaceDisabledError(det = {}) {
   e.marketplaceDisabledReason = reason;
   e.marketplaceDisabledSnippet = snippet;
   e.marketplaceDisabledSource = 'robe_create_vehicle';
+  return e;
+}
+function makeRobeLoginRequiredError(det = {}) {
+  const reason = String((det && det.reason) || 'login_required');
+  const source = String((det && det.domain) || 'facebook');
+  const e = new Error(`ROBE_LOGIN_REQUIRED:${reason}`);
+  e.ROBE_LOGIN_REQUIRED = true;
+  e.loginReason = reason;
+  e.loginSource = source;
+  return e;
+}
+
+function makeRobeProbeFailedError(where = 'robe_action') {
+  const e = new Error(`ROBE_PROBE_FAILED:${where}`);
+  e.ROBE_PROBE_FAILED = true;
   return e;
 }
 const fotosV = require('./fotosVeiculos.js');       // autoridade central de fotos (VEÍCULOS)
@@ -1427,18 +1442,49 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
               nome: String(nome || ''),
               attempt: Number(attempt || 0),
               reason: String(md.reason || ''),
-              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+              url: (typeof p.url === 'function') ? String(p.url() || '') : '',
+              closeCreateTab: true
             });
           } catch {}
+          try { await safeClosePage(p); } catch {}
           throw makeRobeMarketplaceDisabledError(md);
         }
       } catch (e) {
         if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
       }
+      // Guardrail: create/vehicle redirecionado para fluxo de login precisa subir semântica.
+      try {
+        const lrNow = await detectLoginRequired(p).catch(() => ({ loginRequired: false }));
+        if (lrNow && lrNow.loginRequired === true) {
+          const rr = String((lrNow && lrNow.reason) || '').toLowerCase();
+          if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
+            if (attempt < 3) throw makeRobeProbeFailedError('open_create_vehicle_retry');
+            throw makeRobeProbeFailedError('open_create_vehicle_abort');
+          }
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'dbg_robe_v_open_create_login_required',
+              nome: String(nome || ''),
+              attempt: Number(attempt || 0),
+              reason: String(lrNow.reason || ''),
+              source: String(lrNow.domain || ''),
+              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+            });
+          } catch {}
+          throw makeRobeLoginRequiredError(lrNow);
+        }
+      } catch (e) {
+        if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
+      }
       return p; // sucesso
     } catch (e) {
-      // Terminal/semântico: manter aba create aberta (evidência + humano).
+      // MKT: fecha aba create (economia) → throw → humano na aba 0.
       if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+        try { await safeClosePage(p); } catch {}
+        throw e;
+      }
+      if (e && e.ROBE_LOGIN_REQUIRED === true) {
         throw e;
       }
       lastError = e;
@@ -1464,6 +1510,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
           await new Promise(r => setTimeout(r, 600 * attempt));
           continue;
         }
+      }
+      if (e && e.ROBE_PROBE_FAILED === true) {
+        await new Promise(r => setTimeout(r, 350));
+        continue; // retry da ação sem classificar como login_required
       }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
         await new Promise(r => setTimeout(r, 300));
@@ -2115,6 +2165,7 @@ async function preencherDescricaoVeiculo(page, modeloKey) {
 async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let limitPostingHit = false;
   let preserveCreatePageForHuman = false;
+  let marketplaceDisabledAbort = false;
   let page = null;
   let published = false;
   let sawBeforeUnloadDialog = false;
@@ -2212,11 +2263,38 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     try {
       const md = await detectMarketplaceDisabled(page).catch(() => ({ disabled: false }));
       if (md && md.disabled === true) {
-        logger.warn('[ROBE_V] Marketplace desativado detectado — humano + flag', { nome, attId });
+        logger.warn('[ROBE_V] Marketplace desativado — fecha create + humano aba0', { nome, attId });
+        try { await safeClosePage(page); } catch {}
+        page = null;
         throw makeRobeMarketplaceDisabledError(md);
       }
     } catch (e) {
       if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
+    }
+
+    // Última checagem semântica: veículo também pode cair em login_required antes do form real.
+    try {
+      const lrNow = await detectLoginRequired(page).catch(() => ({ loginRequired: false }));
+      if (lrNow && lrNow.loginRequired === true) {
+        const rr = String((lrNow && lrNow.reason) || '').toLowerCase();
+        if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
+          throw makeRobeProbeFailedError('vehicle_body_probe_failed');
+        }
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'dbg_robe_v_body_login_required_detected',
+            nome: String(nome || ''),
+            attId: String(attId || ''),
+            reason: String(lrNow.reason || ''),
+            source: String(lrNow.domain || ''),
+            url: (typeof page.url === 'function') ? String(page.url() || '') : ''
+          });
+        } catch {}
+        throw makeRobeLoginRequiredError(lrNow);
+      }
+    } catch (e) {
+      if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
     }
 
     const bloqueioLimite = await page.evaluate(() => {
@@ -2531,11 +2609,24 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
     if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+      marketplaceDisabledAbort = true;
+      try { if (page) await safeClosePage(page); } catch {}
+      page = null;
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'marketplace_disabled_close_create',
+          reason: String((e && e.message) || '').slice(0, 220)
+        });
+      } catch {}
+      throw e;
+    }
+    if (e && e.ROBE_LOGIN_REQUIRED === true) {
       preserveCreatePageForHuman = true;
       try {
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
-          step: 'marketplace_disabled',
+          step: 'login_required',
           reason: String((e && e.message) || '').slice(0, 220)
         });
       } catch {}
@@ -2597,7 +2688,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
       } catch {}
-      logger.info(`[ROBE][startRobe] FIM (veículos): preserve_create_page (humano)`, { nome });
+      logger.info(`[ROBE][startRobe] FIM (veículos): preserve_create_page`, { nome });
+    } else if (marketplaceDisabledAbort) {
+      try { if (page) await safeClosePage(page); } catch {}
+      page = null;
+      try {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_marketplace_disabled', success: false });
+      } catch {}
+      logger.info(`[ROBE][startRobe] FIM (veículos): marketplace_disabled (create fechada → humano aba0)`, { nome });
     } else {
       // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
       // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).

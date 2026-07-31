@@ -3083,6 +3083,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
       // MKT Desativado (URL-gated create) — antes de LR/compose
+      // Contrato: fecha aba create (economia) → throw → worker marca pill + humano na aba 0.
       try {
         const md = await detectMarketplaceDisabled(p).catch(() => ({ disabled: false }));
         if (md && md.disabled === true) {
@@ -3093,9 +3094,11 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
               nome: String(nome || ''),
               attempt: Number(attempt || 0),
               reason: String(md.reason || ''),
-              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+              url: (typeof p.url === 'function') ? String(p.url() || '') : '',
+              closeCreateTab: true
             });
           } catch {}
+          try { await safeClosePage(p); } catch {}
           throw makeRobeMarketplaceDisabledError(md);
         }
       } catch (e) {
@@ -3142,8 +3145,12 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #endregion
       return p; // sucesso
     } catch (e) {
-      // Terminal/semântico: manter aba create aberta (evidência + humano / remediação).
-      if (e && (e.ROBE_MARKETPLACE_DISABLED === true || e.ROBE_LOGIN_REQUIRED === true)) {
+      // MKT: aba create já fechada acima (ou fecha aqui se sobrou). Login: mantém aba p/ remediação.
+      if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+        try { await safeClosePage(p); } catch {}
+        throw e;
+      }
+      if (e && e.ROBE_LOGIN_REQUIRED === true) {
         throw e;
       }
       lastError = e;
@@ -3563,8 +3570,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
-  // MKT Desativado / login_required: sobe throw semântico; NÃO fecha aba create.
+  // login_required: preserva aba create p/ remediação.
+  // MKT Desativado: FECHA aba create (economia) e sobe throw → humano na aba 0.
   let preserveCreatePageForHuman = false;
+  let marketplaceDisabledAbort = false;
   let fotoNome = null;
   let fotoPath = null;
   let fotoUploaded = false;
@@ -3739,10 +3748,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     if (!hasBody) throw new Error('create_body_not_available');
 
     // MKT Desativado (após body) — permanente, não confundir com "Limite atingido"
+    // Fecha aba 1 create → throw → worker invoca humano na aba 0.
     try {
       const md = await detectMarketplaceDisabled(page).catch(() => ({ disabled: false }));
       if (md && md.disabled === true) {
-        logger.warn('[ROBE] Marketplace desativado detectado — humano + flag', { nome, attId });
+        logger.warn('[ROBE] Marketplace desativado detectado — fecha create + humano aba0', { nome, attId });
+        try { await safeClosePage(page); } catch {}
+        page = null;
         throw makeRobeMarketplaceDisabledError(md);
       }
     } catch (e) {
@@ -4178,14 +4190,26 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       // Nada mais além de já ter pausado/logado/fechado
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
-    // Contrato ops: MKT Desativado / login_required sobem para o worker
-    // (flag + humano / remediação). NÃO engolir como robe_error genérico.
-    if (e && (e.ROBE_MARKETPLACE_DISABLED === true || e.ROBE_LOGIN_REQUIRED === true)) {
+    // Contrato ops: MKT / login_required sobem pro worker. NÃO engolir como robe_error.
+    if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+      marketplaceDisabledAbort = true;
+      try { if (page) await safeClosePage(page); } catch {}
+      page = null;
+      try {
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'marketplace_disabled_close_create',
+          reason: String((e && e.message) || '').slice(0, 220)
+        });
+      } catch {}
+      throw e;
+    }
+    if (e && e.ROBE_LOGIN_REQUIRED === true) {
       preserveCreatePageForHuman = true;
       try {
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
-          step: e.ROBE_MARKETPLACE_DISABLED === true ? 'marketplace_disabled' : 'login_required',
+          step: 'login_required',
           reason: String((e && e.message) || '').slice(0, 220)
         });
       } catch {}
@@ -4259,12 +4283,20 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
-    // MKT/login: preservar aba create; não aplicar cooldown técnico; throw segue após finally.
+    // login_required: preserva aba create. MKT: create já fechada; sem cooldown técnico.
     if (preserveCreatePageForHuman) {
       try {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
       } catch {}
-      logger.info(`[ROBE][startRobe] FIM: preserve_create_page (humano/remediação)`, { nome });
+      logger.info(`[ROBE][startRobe] FIM: preserve_create_page (remediação)`, { nome });
+    } else if (marketplaceDisabledAbort) {
+      try { if (page) await safeClosePage(page); } catch {}
+      page = null;
+      try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
+      try {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_marketplace_disabled', success: false });
+      } catch {}
+      logger.info(`[ROBE][startRobe] FIM: marketplace_disabled (create fechada → humano aba0)`, { nome });
     } else {
       // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 25–50min. NUNCA penalidade/backoff especial.
       // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
