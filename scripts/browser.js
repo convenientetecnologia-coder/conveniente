@@ -4148,7 +4148,7 @@ async function detectLoginRequired(page) {
     }
 
     // AYMH / seletor de perfil: Continuar + Usar outro perfil (sem match de nome).
-    // Nurse clica Continuar 1x → se cair em email/senha, o fluxo clássico login_form assume.
+    // Contrato: só marcar LR + humano. NÃO clicar Continuar / NÃO cookies / NÃO auto-login.
     if (isAymhContinue) {
       return {
         loginRequired: true,
@@ -5315,47 +5315,31 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
   const pass = String(password || '').trim();
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
 
-  // 1) destravar telas comuns — ordem inteligente:
-  //    - se já tem form → NÃO clica "Usar outro perfil" (evita sair do fluxo certo)
-  //    - se chooser AYMH (Continuar + Usar outro perfil) → clica Continuar (perfil salvo)
-  //    - após Continuar: espera curta pelos inputs (anti-race SPA) ANTES de Usar outro perfil
-  //    - só então, se ainda sem inputs, tenta "Usar outro perfil" (form em branco)
+  // 1) destravar telas comuns:
+  //    - AYMH (Continuar + Usar outro perfil) = NÃO clicar Continuar (contrato humano-only)
+  //    - se já tem form → NÃO clica "Usar outro perfil"
+  //    - senão, "Usar outro perfil" só para cair no form em branco clássico
   await _maybeClickCloseX(page);
-  const readLoginSurface = async () => {
-    try {
-      return await page.evaluate(() => {
-        const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
-        const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
-        return { hasEmail, hasPass };
-      });
-    } catch {
-      return { hasEmail: false, hasPass: false };
-    }
-  };
   try {
-    let surface = await readLoginSurface();
-    if (!(surface.hasEmail || surface.hasPass)) {
-      const adv = await tryClickAymhContinuar(page).catch(() => null);
-      if (adv && adv.ok) {
-        // Janela pós-Continuar: FB pode demorar a montar senha/email — não pular pra Usar outro perfil.
-        const deadline = Date.now() + 2800;
-        while (Date.now() < deadline) {
-          await sleep(350);
-          surface = await readLoginSurface();
-          if (surface.hasEmail || surface.hasPass) break;
-        }
-      }
-      surface = await readLoginSurface();
-      if (!(surface.hasEmail || surface.hasPass)) {
-        await _maybeClickUseAnotherProfile(page);
-        await sleep(700);
-      }
+    const aymh = await detectLoginRequired(page).catch(() => null);
+    const aymhReason = String((aymh && aymh.reason) || '').toLowerCase();
+    if (aymh && aymh.loginRequired && (aymhReason.includes('aymh_continue') || aymhReason === 'aymh')) {
+      return { ok: false, error: 'aymh_continue_human_only' };
     }
-  } catch {
-    // Sem fallback agressivo pra Usar outro perfil em erro transitório.
-  }
+  } catch {}
+  try {
+    const surface = await page.evaluate(() => {
+      const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
+      const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
+      return { hasEmail, hasPass };
+    }).catch(() => ({ hasEmail: false, hasPass: false }));
+    if (!(surface && (surface.hasEmail || surface.hasPass))) {
+      await _maybeClickUseAnotherProfile(page);
+      await sleep(700);
+    }
+  } catch {}
 
-  // 2) preencher formulário (FB / Messenger) — email opcional (AYMH pós-Continuar = só senha)
+  // 2) preencher formulário (FB / Messenger) — email opcional se a página só pedir senha
   try {
     await page.waitForTimeout(600);
   } catch {}

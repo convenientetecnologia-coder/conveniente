@@ -3861,6 +3861,14 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await setLoginRequiredFlag(nome, { reason: rr2 || 'captcha', source: lr2.domain || source }); } catch {}
             return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
           }
+          if (rr2.includes('aymh_continue') || rr2 === 'aymh') {
+            try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lr2.domain || source }); } catch {}
+            try {
+              const c = controllers.get(nome);
+              if (c) await enterHumanMode(nome, c, { reason: `aymh_continue:bootstrap:${String(source || '').slice(0, 40)}` });
+            } catch {}
+            return { ok: true, state: 'aymh_continue_human', reason: rr2 };
+          }
           // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
           return { ok: true, state: 'login_required', reason: rr2 };
@@ -10648,6 +10656,7 @@ const handlers = {
         if (s.includes('identity')) return 5;
         if (s.includes('captcha')) return 4;
         if (s.includes('checkpoint')) return 3;
+        if (s.includes('aymh_continue') || s === 'aymh') return 3;
         if (s.includes('appeal')) return 2;
         if (s.includes('login_form')) return 1;
         return 0;
@@ -10773,6 +10782,13 @@ const handlers = {
             await setAppealSubmittedFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
             try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_appeal_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
             return { ok: false, error: 'appeal_submitted' };
+          }
+          if (rr.includes('aymh_continue') || rr === 'aymh') {
+            // AYMH: NÃO tentar Continuar/login/senha aqui — só LR + humano.
+            try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: best.domain || 'configure' }); } catch {}
+            try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:configure' }); } catch {}
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_aymh_continue', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
+            return { ok: false, error: 'aymh_continue' };
           }
 
           // Fallback: tentar login/senha (mesmo padrão do login_remediate)
@@ -11085,7 +11101,7 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity/.test(String(why || '').toLowerCase());
+        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh/.test(String(why || '').toLowerCase());
         // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -11198,6 +11214,24 @@ const handlers = {
         try { provisionLock.release({ owner: op }); } catch {}
         return { ok: false, error: 'browser_not_connected', steps };
       }
+
+      // Blindagem AYMH: Continuar + Usar outro perfil = humano only.
+      // Abort ANTES de quiesce/pausar Virtus dos outros e ANTES de injetar cookies.
+      try {
+        const pagesAymh = await ctrl.browser.pages().catch(() => []);
+        for (const pgA of (pagesAymh || []).slice(0, 8)) {
+          const lrA = await browserHelper.detectLoginRequired(pgA).catch(() => null);
+          const ra = String((lrA && lrA.reason) || '').toLowerCase();
+          if (lrA && lrA.loginRequired && (ra.includes('aymh_continue') || ra === 'aymh')) {
+            pushStep({ step: 'aymh_continue_abort_no_inject', reason: ra.slice(0, 80) });
+            try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrA.domain || 'login_remediate' }); } catch {}
+            try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:login_remediate_abort' }); } catch {}
+            try { provisionLock.release({ owner: op }); } catch {}
+            try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_human_only'); } catch {}
+            return { ok: false, error: 'aymh_continue', steps };
+          }
+        }
+      } catch {}
 
       // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
       // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
@@ -15124,6 +15158,14 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
   try {
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
+    // Blindagem: AYMH (Continuar + Usar outro perfil) NUNCA entra em cookies/auto-login.
+    const reasonNorm = String(reason || '').toLowerCase();
+    if (reasonNorm.includes('aymh_continue') || reasonNorm === 'aymh' || reasonNorm.includes('aymh')) {
+      try {
+        issues.append(nome, 'mil_action', `auto_login_remediate_suppressed: aymh_human_only reason=${reasonNorm.slice(0, 80)}`).catch(()=>{});
+      } catch {}
+      return false;
+    }
     robeMeta[nome] = robeMeta[nome] || {};
     const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
     const now = Date.now();
@@ -15233,6 +15275,19 @@ async function autoLoginRemediateTick() {
     if (!lrFlag || !queued) {
       continue;
     }
+    // AYMH = humano only: nunca roda cookies/login automático mesmo se ficou enfileirado por engano.
+    try {
+      const lrReason0 = String((flags && flags.loginReason) || '').toLowerCase();
+      if (lrReason0.includes('aymh_continue') || lrReason0 === 'aymh' || lrReason0.includes('aymh')) {
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
+          robeMeta[nome].autoLoginRemediate.queued = false;
+        } catch {}
+        try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(aymh_human_only)').catch(()=>{}); } catch {}
+        continue;
+      }
+    } catch {}
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
     if (lrFailed) {
       try {
@@ -17048,101 +17103,22 @@ async function nurseTick() {
                 });
               } catch {}
             } else if (rr.includes('aymh_continue') || rr === 'aymh') {
-              // Fluxo leve e inteligente (sem match de nome):
-              // 1) clica Continuar 1x — debounce SÓ após click ok (não queima 8min em falha)
-              // 2) reclassifica na mesma tick (login_form / captcha / clear / ainda chooser)
-              // 3) login_form → auto-login clássico; chooser preso → LR humano
+              // Contrato: Continuar + Usar outro perfil = LR + invocar humano.
+              // ZERO clique Continuar, ZERO cookies, ZERO auto-login
+              // (evita checkpoint 'verifique que voce e um robo' e pausa global inutil).
               try {
-                const pg = (lrPage || p0);
                 robeMeta[nome] = robeMeta[nome] || {};
                 const nowA = Date.now();
-                const lastClick = Number(robeMeta[nome].lastAymhContinuarClickAt || 0) || 0;
-                const canClick = !lastClick || (nowA - lastClick) > (8 * 60 * 1000);
-                let handledBeyondChooser = false;
-                let clickOk = false;
-                if (pg && canClick && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                  const clicked = await browserHelper.tryClickAymhContinuar(pg).catch(() => null);
-                  clickOk = !!(clicked && clicked.ok);
-                  // Debounce só consome janela quando o Continuar de fato clicou.
-                  if (clickOk) robeMeta[nome].lastAymhContinuarClickAt = nowA;
-                  try {
-                    await issues.append(
-                      nome,
-                      'mil_action',
-                      `aymh_continuar_click ok=${clickOk} err=${String((clicked && clicked.error) || '').slice(0, 60)}`
-                    );
-                  } catch {}
-                  if (clickOk) {
-                    try { await new Promise((r) => setTimeout(r, 1600)); } catch {}
-                    const lr2 = await browserHelper.detectLoginRequired(pg).catch(() => null);
-                    const rr2 = String((lr2 && lr2.reason) || '').toLowerCase();
-                    const src2 = String((lr2 && lr2.domain) || lr.domain || '');
-
-                    // Pós-Continuar: sessão limpa → limpa LR stale na mesma tick (não deixa aymh preso).
-                    if (lr2 && lr2.loginRequired === false) {
-                      handledBeyondChooser = true;
-                      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
-                      try { await issues.append(nome, 'mil_action', `aymh_continuar_cleared_lr post=${String(rr2 || 'none').slice(0, 60)}`); } catch {}
-                    } else if (lr2 && lr2.loginRequired) {
-                      if (rr2 === 'login_form' || (rr2.includes('login_form') && !rr2.includes('aymh'))) {
-                        handledBeyondChooser = true;
-                        try { await setLoginRequiredFlag(nome, { reason: 'login_form', source: src2 }); } catch {}
-                        try {
-                          const flags = await readAccountFlags(nome).catch(() => ({}));
-                          if (flags && flags.loginRemediateFailed === true) {
-                            try { await issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true) after_aymh_continuar'); } catch {}
-                          } else {
-                            const okQueue = queueAutoLoginRemediate(nome, {
-                              reason: 'login_form',
-                              source: src2,
-                              immediate: true
-                            });
-                            if (okQueue) {
-                              try { await issues.append(nome, 'mil_action', 'auto_login_remediate_queued after_aymh_continuar'); } catch {}
-                            }
-                          }
-                        } catch {}
-                      } else if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
-                        handledBeyondChooser = true;
-                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'captcha_checkpoint', source: src2 }); } catch {}
-                        try {
-                          await setCaptchaCheckpointFlag(nome, {
-                            reason: rr2 || 'captcha_checkpoint',
-                            source: src2,
-                            url: lr2.url || '',
-                            title: lr2.title || ''
-                          });
-                        } catch {}
-                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass captcha reason=${String(rr2).slice(0, 80)}`); } catch {}
-                      } else if (rr2.includes('two_factor') || rr2.includes('2fa') || rr2.includes('two factor')) {
-                        handledBeyondChooser = true;
-                        try { await setTwoFactorFlag(nome, { reason: rr2 || 'two_factor', snippet: String(lr2.title || '') }); } catch {}
-                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass two_factor reason=${String(rr2).slice(0, 80)}`); } catch {}
-                      } else if (rr2.includes('identity_submitted')) {
-                        handledBeyondChooser = true;
-                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'identity_submitted', source: src2 }); } catch {}
-                        try { await setIdentitySubmittedFlag(nome, { source: src2, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-                        try { await issues.append(nome, 'mil_action', 'aymh_continuar_reclass identity_submitted'); } catch {}
-                      } else if (rr2.includes('identity')) {
-                        handledBeyondChooser = true;
-                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || 'identity_confirm', source: src2 }); } catch {}
-                        try { await setIdentityRequiredFlag(nome, { source: src2, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-                        try { await issues.append(nome, 'mil_action', 'aymh_continuar_reclass identity'); } catch {}
-                      } else if (rr2.includes('aymh_continue') || rr2 === 'aymh') {
-                        // Continuar não tirou do chooser → humano (flag aymh já setada).
-                        handledBeyondChooser = false;
-                      } else {
-                        // Outro LR real: atualiza reason (não deixa aymh mentir).
-                        handledBeyondChooser = true;
-                        try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: src2 }); } catch {}
-                        try { await issues.append(nome, 'mil_action', `aymh_continuar_reclass reason=${String(rr2).slice(0, 80)}`); } catch {}
-                      }
-                    }
-                  }
-                }
-                if (!handledBeyondChooser) {
-                  const pend = canClick && !clickOk ? 'aymh_continue_retry_next_tick' : 'aymh_continue_human_only';
-                  try { await issues.append(nome, 'mil_action', `${pend} reason=${String(rr).slice(0, 80)}`); } catch {}
+                const lastHum = Number(robeMeta[nome].lastAymhHumanInvokeAt || 0) || 0;
+                const wantNow = want || ((desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {});
+                const alreadyHold = !!(wantNow && wantNow.humanHold === true) || !!(ctrl && ctrl.humanControl === true);
+                const canInvoke = !alreadyHold && (!lastHum || (nowA - lastHum) > (30 * 60 * 1000));
+                if (canInvoke) {
+                  robeMeta[nome].lastAymhHumanInvokeAt = nowA;
+                  await enterHumanMode(nome, ctrl, { reason: `aymh_continue:${String(rr).slice(0, 80)}` });
+                  try { await issues.append(nome, 'mil_action', 'aymh_continue_human_invoked'); } catch {}
+                } else {
+                  try { await issues.append(nome, 'mil_action', 'aymh_continue_human_only already_hold_or_debounce'); } catch {}
                 }
               } catch {
                 try { await issues.append(nome, 'mil_action', `aymh_continue_human_only reason=${String(rr).slice(0, 80)}`); } catch {}
