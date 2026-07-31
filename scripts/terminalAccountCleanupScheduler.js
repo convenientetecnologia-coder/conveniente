@@ -90,11 +90,12 @@ function computeNextRandomAtFromWindow({ nowTs, startMin, endMin, skipCurrentInt
 
 function buildDefaultState() {
   return {
-    version: 1,
+    version: 2,
     updatedAt: now(),
     nextCleanupAt: 0,
     scheduleSignature: '',
     lastRunDay: null,
+    lastRunSource: null, // só 'scheduler' conta como 1×/dia
     lastRunAt: 0,
     lastError: null,
     inProgress: false
@@ -138,19 +139,9 @@ async function tick() {
     const day = todayKeySaoPaulo(nowTs);
     const startMin = hmToMin(tc.windowStartHour, tc.windowStartMinute);
     const endMin = hmToMin(tc.windowEndHour, tc.windowEndMinute);
-    const signature = `${startMin}|${endMin}|on`;
+    // v2: 1×/dia só conta run REAL deste scheduler (nunca herda claim antigo do open).
+    const signature = `${startMin}|${endMin}|on|v2`;
     let cur = loadState();
-
-    // Cleanup module claim (lastTerminalCleanupDay) é a fonte de verdade 1×/dia.
-    // Espelha no scheduler para pular janela atual após run.
-    let doneToday = false;
-    try {
-      const cleanSt = readJsonSafe(dailyTerminalCleanup.STATE_PATH, {}) || {};
-      doneToday = String(cleanSt.lastTerminalCleanupDay || '') === day;
-      if (doneToday && String(cur.lastRunDay || '') !== day) {
-        cur = saveState({ lastRunDay: day, lastRunAt: Number(cleanSt.lastTerminalCleanupAt || nowTs) || nowTs });
-      }
-    } catch {}
 
     if (cur.inProgress === true) {
       saveState({ inProgress: false });
@@ -164,8 +155,20 @@ async function tick() {
       } catch {}
     }
 
+    // Claim legado (daily_window_open / sync antigo) NÃO bloqueia esta janela.
+    // Só run com lastRunSource=scheduler conta como 1×/dia.
+    const schedulerDoneToday =
+      String(cur.lastRunDay || '') === day &&
+      String(cur.lastRunSource || '') === 'scheduler';
+
     const changedSchedule = String(cur.scheduleSignature || '') !== signature;
     if (changedSchedule) {
+      // Mudança de janela/config: limpa claim fantasma (lastRunDay sem lastRunSource=scheduler).
+      // Ex.: sync antigo do daily_window_open das 05:14 que engolia a janela da tarde.
+      const clearGhost =
+        String(cur.lastRunDay || '') === day &&
+        String(cur.lastRunSource || '') !== 'scheduler';
+      const doneToday = schedulerDoneToday;
       const nextCleanupAt = computeNextRandomAtFromWindow({
         nowTs,
         startMin,
@@ -174,7 +177,8 @@ async function tick() {
       });
       cur = saveState({
         nextCleanupAt,
-        scheduleSignature: signature
+        scheduleSignature: signature,
+        ...(clearGhost ? { lastRunDay: null, lastRunSource: null, lastRunAt: 0 } : {})
       });
       try {
         provisionAudit.append({
@@ -183,7 +187,8 @@ async function tick() {
           day,
           nextCleanupAt,
           signature,
-          skipCurrentInterval: !!doneToday
+          skipCurrentInterval: !!doneToday,
+          clearedGhostClaim: !!clearGhost
         });
       } catch {}
     } else if (!Number(cur.nextCleanupAt) || Number(cur.nextCleanupAt) < (nowTs - 60 * 1000)) {
@@ -191,7 +196,7 @@ async function tick() {
         nowTs,
         startMin,
         endMin,
-        skipCurrentInterval: doneToday
+        skipCurrentInterval: schedulerDoneToday
       });
       cur = saveState({ nextCleanupAt });
     }
@@ -199,7 +204,13 @@ async function tick() {
     const due = Number(cur.nextCleanupAt || 0) > 0 && nowTs >= Number(cur.nextCleanupAt || 0);
     if (!due) return;
 
-    if (doneToday) {
+    // Releitura: após reschedule acima o estado pode ter mudado.
+    cur = loadState();
+    const doneTodayNow =
+      String(cur.lastRunDay || '') === day &&
+      String(cur.lastRunSource || '') === 'scheduler';
+
+    if (doneTodayNow) {
       const nextCleanupAt = computeNextRandomAtFromWindow({
         nowTs: now(),
         startMin,
@@ -234,10 +245,12 @@ async function tick() {
 
     let result = null;
     try {
+      // force: claim legado do open (daily_terminal_cleanup_state) não pode engolir a janela.
       result = await dailyTerminalCleanup.runDailyTerminalCleanup({
         fileStore,
         localPort,
-        by: 'terminal_account_cleanup_scheduler'
+        by: 'terminal_account_cleanup_scheduler',
+        force: true
       });
     } catch (e) {
       result = {
@@ -256,6 +269,7 @@ async function tick() {
       inProgress: false,
       nextCleanupAt,
       lastRunDay: day,
+      lastRunSource: 'scheduler',
       lastRunAt: now(),
       lastError: (result && result.ok === true)
         ? null
