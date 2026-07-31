@@ -1903,7 +1903,18 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       return { ok: false, skipped: true, reason: 'human_control' };
     }
     if (isNonLrAutomationPaused()) {
-      try { await setCaptchaCheckpointFlag(nome, { reason: 'non_lr_automation_paused', source: String(source || '').slice(0, 80) }); } catch {}
+      // NÃO sobrescrever captchaCheckpointReason com "non_lr_automation_paused":
+      // isso mascarava captcha_persona e a limpeza ban/captcha engolia a conta (KEEP falso).
+      // Se já há flag/motivo de captcha, preserva; senão marca captcha_checkpoint limpo.
+      try {
+        const prevFlags = await readAccountFlags(nome).catch(() => null);
+        const prevReason = String((prevFlags && prevFlags.captchaCheckpointReason) || '').trim();
+        const preserve = /captcha|checkpoint/i.test(prevReason);
+        await setCaptchaCheckpointFlag(nome, {
+          reason: preserve ? prevReason : 'captcha_checkpoint',
+          source: String(source || '').slice(0, 80)
+        });
+      } catch {}
       await enforcePausedNonLrState(nome, { kind: 'captcha_checkpoint', source });
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_paused_by_policy', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
       return { ok: false, pausedByPolicy: true, error: 'non_lr_automation_paused' };

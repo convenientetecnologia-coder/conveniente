@@ -1,16 +1,17 @@
 'use strict';
 
 /**
- * Limpeza diária de contas TERMINAIS (ban / 2FA / captcha bloqueante).
+ * Limpeza diária de contas TERMINAIS (ban / 2FA / captcha / checkpoint).
  * Acionada pelo terminalAccountCleanupScheduler (config própria no servidor).
  * NÃO acoplada a renovar/fechar/abrir. NÃO deve ser chamada pelo botão Abrir tudo.
  *
- * Allowlist positiva:
+ * Allowlist positiva (DELETE):
  * - banned
- * - twoFactor
- * - captcha/checkpoint BLOQUEANTE
+ * - twoFactor / 2FA
+ * - captcha / checkpoint (flag ou motivo) — inclusive se houver mascara de política (non_lr)
  *
- * Nunca exclui: login_form, session, login_other, identity, consent, checkpoint recuperável.
+ * Nunca exclui: login requerido genérico (login_form, session, aymh, login_other,
+ * identity, consent, appeal, password_reset, hacked_review).
  */
 
 const fs = require('fs');
@@ -66,27 +67,52 @@ function saveState(patch) {
  * Decide se a conta deve ser excluída nesta limpeza.
  * Allowlist positiva — nunca “loginRequired genérico”.
  *
- * Ordem (militar):
- * 1) banned / 2FA → delete
- * 2) motivos explicitamente recuperáveis → keep (mesmo com captchaCheckpoint=true)
- * 3) captcha/checkpoint bloqueante → delete
- * 4) resto (login_form/session/login_other/identity/consent/...) → keep
+ * Ordem (militar — NÃO inverter):
+ * 1) banned → delete
+ * 2) 2FA → delete
+ * 3) captcha / checkpoint (flag OU motivo) → delete
+ *    (política non_lr NÃO pode mascarar captcha real)
+ * 4) login requerido genérico / estados de login recuperáveis → keep
+ * 5) resto → keep
  */
-function isExplicitlyRecoverableReason(reason) {
+
+/** Motivos de LOGIN (não-terminal). Nunca inclui captcha/checkpoint/2fa/ban. */
+function isLoginOnlyKeepReason(reason) {
   const r = String(reason || '').trim().toLowerCase();
   if (!r) return false;
-  if (r.includes('checkpoint_back_to_facebook') || r.includes('back_to_facebook')) return true;
-  if (r === 'non_lr_automation_paused' || r.includes('non_lr_automation_paused')) return true;
+  // Política de host — ruído, NÃO é motivo de keep por si só.
+  if (r === 'non_lr_automation_paused' || r.includes('non_lr_automation_paused')) return false;
   if (r.includes('password_reset')) return true;
   if (r.includes('hacked_review')) return true;
   if (r.includes('appeal')) return true;
   if (r.includes('identity')) return true;
   if (r === 'login_form' || r.includes('login_form')) return true;
   if (r === 'aymh_continue' || r.includes('aymh_continue')) return true;
+  // session expirada = login; se vier "session"+"checkpoint/captcha", o detector de captcha vence antes.
   if (r.includes('session')) return true;
   if (r === 'login_other' || r.includes('login_other')) return true;
   if (r.includes('consent')) return true;
   return false;
+}
+
+function isCaptchaOrCheckpointReason(reason) {
+  const r = String(reason || '').trim().toLowerCase();
+  if (!r) return false;
+  // Qualquer captcha/checkpoint é terminal (inclui checkpoint_back_to_facebook).
+  if (r.includes('captcha')) return true;
+  if (r.includes('checkpoint')) return true;
+  return false;
+}
+
+function isTwoFactorReason(reason) {
+  const r = String(reason || '').trim().toLowerCase();
+  if (!r) return false;
+  return r.includes('two_factor') || r.includes('2fa') || r.includes('two factor');
+}
+
+/** @deprecated nome antigo — mantido p/ imports; equivale a login-only keep. */
+function isExplicitlyRecoverableReason(reason) {
+  return isLoginOnlyKeepReason(reason);
 }
 
 function classifyTerminalDelete(flags) {
@@ -95,56 +121,60 @@ function classifyTerminalDelete(flags) {
   const captchaReason = String(f.captchaCheckpointReason || '').trim().toLowerCase();
   const combined = captchaReason || loginReason;
 
+  // 1) BAN
   if (f.banned === true) {
     return { delete: true, category: 'banned', detail: String(f.bannedReason || 'banned').slice(0, 120) };
   }
 
+  // 2) 2FA
   if (f.twoFactor === true) {
     return { delete: true, category: 'two_factor', detail: String(f.twoFactorReason || 'two_factor').slice(0, 120) };
   }
-
-  // Legado: 2FA só via loginReason
-  if (f.loginRequired === true && (loginReason.includes('two_factor') || loginReason.includes('2fa'))) {
+  if (f.loginRequired === true && isTwoFactorReason(loginReason)) {
     return { delete: true, category: 'two_factor', detail: `login_reason:${loginReason}`.slice(0, 120) };
   }
 
-  // Recuperáveis: NÃO excluir (mesmo se captchaCheckpoint ficou sujo por substring "checkpoint")
-  if (isExplicitlyRecoverableReason(captchaReason) || isExplicitlyRecoverableReason(loginReason)) {
+  // 3) CAPTCHA / CHECKPOINT — SEMPRE delete. Vence mascara non_lr / qualquer keep de login.
+  if (f.captchaCheckpoint === true) {
     return {
-      delete: false,
-      category: 'recoverable',
-      detail: String(combined || 'recoverable').slice(0, 120)
+      delete: true,
+      category: 'captcha',
+      detail: `captchaCheckpoint:${combined || 'flag'}`.slice(0, 120)
+    };
+  }
+  if (isCaptchaOrCheckpointReason(captchaReason)) {
+    return {
+      delete: true,
+      category: 'captcha',
+      detail: `captcha_reason:${captchaReason}`.slice(0, 120)
+    };
+  }
+  if (isCaptchaOrCheckpointReason(loginReason)) {
+    return {
+      delete: true,
+      category: 'captcha',
+      detail: `login_reason:${loginReason}`.slice(0, 120)
     };
   }
 
-  const captchaBlockingReasons = [
-    'captcha_persona',
-    'captcha_persona_pre_screen',
-    'checkpoint_captcha',
-    'captcha_checkpoint'
-  ];
-
-  if (f.captchaCheckpoint === true) {
-    const r = combined;
-    // Flag sem motivo = terminal (setCaptchaCheckpointFlag só sobe em fluxo bloqueante).
-    // Motivo com captcha/checkpoint (já filtrado recuperável acima) = terminal.
-    if (
-      !r ||
-      captchaBlockingReasons.some((x) => r === x || r.includes(x)) ||
-      r.includes('captcha') ||
-      r.includes('checkpoint')
-    ) {
-      return { delete: true, category: 'captcha', detail: `captchaCheckpoint:${r || 'flag'}`.slice(0, 120) };
-    }
-  }
-
+  // 4) Login requerido genérico → NÃO excluir
   if (f.loginRequired === true) {
-    if (captchaBlockingReasons.some((x) => loginReason === x || loginReason.includes(x))) {
-      return { delete: true, category: 'captcha', detail: `login_reason:${loginReason}`.slice(0, 120) };
+    if (isLoginOnlyKeepReason(loginReason) || !loginReason) {
+      return {
+        delete: false,
+        category: 'login_required_keep',
+        detail: String(loginReason || 'login_required').slice(0, 120)
+      };
     }
-    // login_form / session / login_other / identity / consent → NÃO
+    // Motivo de login desconhecido (sem captcha/2fa/ban) → keep seguro
+    return {
+      delete: false,
+      category: 'login_required_keep',
+      detail: String(loginReason || 'login_required_unknown').slice(0, 120)
+    };
   }
 
+  // 5) Resto
   return { delete: false, category: 'keep', detail: null };
 }
 
