@@ -3460,6 +3460,9 @@ function __classifyAccountState(perfil, robeRec) {
   const loginRequired = p.loginRequired === true;
   const reason = String(p.loginReason || '').trim().toLowerCase();
   if (banned) return 'banned';
+  if (p.marketplaceDisabled === true) return 'marketplace_disabled';
+  if (p.twoFactor === true) return 'two_factor';
+  if (p.captchaCheckpoint === true) return 'captcha';
   if (loginRequired) {
     if (reason.includes('captcha') || reason.includes('checkpoint')) return 'captcha';
     if (reason === 'login_form' || reason === 'aymh_continue' || reason.includes('aymh_continue')) return 'login';

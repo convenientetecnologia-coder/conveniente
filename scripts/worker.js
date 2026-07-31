@@ -1773,6 +1773,7 @@ function _overlayReasonFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
+    if (flags.marketplaceDisabled === true) return `marketplace_disabled:${flags.marketplaceDisabledReason || ''}`.trim();
     if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
     if (flags.captchaCheckpoint === true) return `captcha_checkpoint:${flags.captchaCheckpointReason || ''}`.trim();
     if (flags.identitySubmitted === true) return 'identity_submitted';
@@ -1785,12 +1786,13 @@ function _overlayReasonFromFlags(flags) {
   } catch { return 'human_mode'; }
 }
 
-// IMPORTANT (debug-mode / ultra enterprise):
-// setCaptchaCheckpointFlag NÃO deve invocar humano automaticamente.
-// Ela só registra flags persistentes (evidência do estado). A decisão de entrar em modo humano
-// deve ser do "flow" (ex.: após N tentativas) para evitar "paranoia".
+// Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
+// Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  let already = false;
   try {
+    const prev = await readAccountFlags(nome).catch(() => null);
+    already = !!(prev && prev.captchaCheckpoint === true);
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
@@ -1809,6 +1811,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       delete man.accountFlags.loginRemediateFailedCount;
       return man;
     });
+    try { invalidateAccountFlagsCache(nome); } catch {}
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].whyNotOpen = 'captcha_checkpoint';
     delete robeMeta[nome].loginRemediateFailed;
@@ -1817,6 +1820,29 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 
   // UA+FP telemetry (captcha/checkpoint)
   try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
+
+  // Invoca humano (idempotente se já em hold)
+  try {
+    let alreadyHold = false;
+    try {
+      const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+      alreadyHold = !!(d.perfis && d.perfis[nome] && d.perfis[nome].humanHold === true);
+    } catch {}
+    if (!already || !alreadyHold) {
+      const ctrl = controllers.get(nome);
+      if (ctrl) {
+        await enterHumanMode(nome, ctrl, { reason: `captcha_checkpoint:${String(reason || '').slice(0, 100)}` });
+      } else {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+          return d;
+        });
+      }
+    }
+  } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
@@ -3171,7 +3197,8 @@ async function _installOverlayOnPage(nome, page) {
 
             const f = d.flags || {};
             let statusTxt = '';
-            if (f.banned) statusTxt = 'Conta suspensa/banida';
+            if (f.banned) statusTxt = 'Conta suspensa/banida (Humano)';
+            else if (f.marketplaceDisabled) statusTxt = 'MKT Desativado (Humano)';
             else if (f.twoFactor) statusTxt = '2FA requerido (Humano)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
@@ -3623,18 +3650,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         const banReason = String(bd.reason || 'banned');
         const banSnippet = String(bd.snippet || '');
         try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_banned', nome: String(nome||''), source: String(source||''), reason: banReason.slice(0,140), openAllAsync: !!_isOpenAll }); } catch {}
-        // Open-all (modo seguro): NÃO await banflow/deactivate no slot único do nurse.
-        // Espelha captcha (fire-and-forget): desliga desired na hora e agenda o fechamento.
-        // Manual/open unitário mantém await (fluxo curto, sem fila global).
+        // Open-all: NÃO fecha browser. Agenda setBannedFlag (flag + humano).
+        // Manual/open unitário await o mesmo fluxo.
         if (_isOpenAll) {
-          try {
-            await fileStore.withDesiredFileLockUpdate((d) => {
-              d = d || {}; d.perfis = d.perfis || {};
-              const prev = d.perfis[nome] || {};
-              d.perfis[nome] = { ...prev, active: false, virtus: 'off', humanHold: false };
-              return d;
-            });
-          } catch {}
           try { if (ctrl) ctrl.trabalhando = false; } catch {}
           try { await stopVirtus(nome); } catch {}
           setImmediate(() => {
@@ -5014,64 +5032,59 @@ async function identityMonitorCheckNow(nome, ctrl) {
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
+    let banResult = { ok: true, action: 'human_hold_banned' };
     try {
-    const prev = await readAccountFlags(nome);
-    const already = prev && prev.banned === true;
-    let banResult = { ok: true };
-    let closeOk = true;
-
-    // Evidence + auto-delete (ultra enterprise, mas sem “mágica por trás dos panos”):
-    // REGRA (ordem determinística):
-    // 1) DESLIGA desired imediatamente (impede reabertura)
-    // 2) FECHA o navegador usando o MESMO motor do sistema (handlers.deactivate)
-    // 3) EXCLUI o perfil usando o MESMO fluxo do DELETE /api/perfis/:nome (sem HTTP, para evitar deadlock)
-    // 4) ENVIA pro estoque Excluídas (CT) com evidence (ou enfileira retry)
-    //
-    // Guardrails:
-    // - nunca deletar perfil se o navegador ainda estiver vivo (anti-janela fantasma)
-    // - não logar credenciais
-    // - best-effort (não pode travar o worker)
-    // - se a pré-condição de close falhar, NÃO deletar (marca pendente e sai)
-    try {
+      const prev = await readAccountFlags(nome);
+      const already = prev && prev.banned === true;
       const flowId = newFlowId('ban');
-      // Anti-reopen: nurse/activate não abrem enquanto o banflow fecha.
+
+      // Contrato ops (2026-07):
+      // - NÃO fecha navegador no ban
+      // - marca flag + INVOCA humano (usuário verifica)
+      // - exclusão diária (config) fecha + exclui no horário
       try {
         robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].banCloseInFlight = true;
-        robeMeta[nome].banCloseInFlightAt = Date.now();
-        robeMeta[nome].whyNotOpen = 'banned';
-      } catch {}
-      // Captura stockAccountId logo no começo (antes de qualquer delete), para nunca “sumir” no CT.
-      let stockAccountId = null;
-      try {
-        const m0 = await manifestStore.read(nome).catch(()=>null);
-        if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
+        robeMeta[nome].whyNotOpen = 'banned_human_hold';
+        delete robeMeta[nome].banCloseInFlight;
+        delete robeMeta[nome].banCloseInFlightAt;
       } catch {}
 
-      // 0) Captura evidence (antes de fechar)
+      let stockAccountId = null;
+      try {
+        const m0 = await manifestStore.read(nome).catch(() => null);
+        if (m0 && (m0.stockAccountId || m0.stock_account_id)) {
+          stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
+        }
+      } catch {}
+
       let b64 = '';
       let evBuf = null;
       let url = '';
       try {
         const ctrl = controllers.get(nome);
-        const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+        const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(() => []) : [];
         const p0 = pages && pages[0];
         if (p0) {
           try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
           try {
-            const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
+            const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(() => null);
             if (buf && buf.length) { evBuf = buf; b64 = Buffer.from(buf).toString('base64'); }
           } catch {}
         }
       } catch {}
 
-      // UA+FP telemetry (banned/disabled)
       try { await emitUaFpEventToCT(nome, { eventKind: 'banned', url, title: String(snippet || '').slice(0, 180) }); } catch {}
 
-      // Evidência local (para retry se CT estiver fora)
       let evidencePath = '';
       try {
-        const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `banned:${String(reason||'').slice(0,80)}` });
+        const ev = saveCtEvidenceJpeg({
+          stockAccountId,
+          profileName: nome,
+          flowId,
+          jpegBuf: evBuf,
+          url,
+          reason: `banned:${String(reason || '').slice(0, 80)}`
+        });
         if (ev && ev.ok) evidencePath = String(ev.path || '');
       } catch {}
 
@@ -5080,104 +5093,172 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           ts: Date.now(),
           event: 'banflow_begin',
           flowId,
-          nome: String(nome||''),
+          nome: String(nome || ''),
           stockAccountId: stockAccountId || null,
-          reason: String(reason||'').slice(0, 180),
+          reason: String(reason || '').slice(0, 180),
           hasEvidence: !!(b64 && b64.length),
           evidencePath: evidencePath ? String(evidencePath).slice(0, 260) : null,
           url: url ? String(url).slice(0, 260) : null,
-          controllersHas: controllers.has(nome)
+          controllersHas: controllers.has(nome),
+          policy: 'human_hold_no_close'
         });
       } catch {}
 
-      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
-      try {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {};
-          d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-          return d;
-        });
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_desired_disabled', nome: String(nome||'') }); } catch {}
-      } catch {}
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        man.accountFlags.banned = true;
+        man.accountFlags.bannedAt = Date.now();
+        man.accountFlags.bannedReason = String(reason || '');
+        man.accountFlags.bannedText = String(snippet || '').slice(0, 400);
+        delete man.accountFlags.bannedPendingClose;
+        delete man.accountFlags.bannedPendingCloseAt;
+        delete man.accountFlags.bannedPendingCloseReason;
+        delete man.accountFlags.loginRemediateFailed;
+        delete man.accountFlags.loginRemediateFailedAt;
+        delete man.accountFlags.loginRemediateFailedReason;
+        delete man.accountFlags.loginRemediateFailedSource;
+        delete man.accountFlags.loginRemediateFailedStage;
+        delete man.accountFlags.loginRemediateFailedCount;
+        return man;
+      });
+      try { invalidateAccountFlagsCache(nome); } catch {}
 
-      // 2) FECHA o navegador via fluxo oficial (deactivate)
+      // Humano: browser fica aberto (ou hold se ainda não tiver browser)
       try {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        // Usa o mesmo handler (deactivate) que a API usa para fechar navegador.
-        // policy=null => fechamento completo (sem preservar desired) e sem reabertura automática.
-        const dr = await handlers.deactivate({ nome, reason: 'auto_banned', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
-        if (!dr || dr.ok !== true) {
-          closeOk = false;
-          banResult = { ok: false, error: 'banned_close_failed' };
-          // Se não fechou, NÃO deletar (evita janela fantasma). Mas ainda assim vamos arquivar no CT.
-          try {
-            await manifestStore.update(nome, (man) => {
-              man = man || {};
-              man.accountFlags = man.accountFlags || {};
-              man.accountFlags.bannedPendingClose = true;
-              man.accountFlags.bannedPendingCloseAt = Date.now();
-              man.accountFlags.bannedPendingCloseReason = 'deactivate_failed';
-              return man;
-            });
-          } catch {}
+        const ctrl = controllers.get(nome);
+        if (ctrl) {
+          await enterHumanMode(nome, ctrl, { reason: `banned:${String(reason || '').slice(0, 120)}` });
+        } else {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
         }
       } catch {}
 
-      // Regra operacional atual: nunca excluir/arquivar automaticamente por ban.
-      // Apenas marca flags + issue para revisão humana e eventual exclusão manual.
       try {
         provisionAudit.append({
           ts: Date.now(),
-          event: 'auto_banned_manual_review_only',
+          event: 'banflow_human_hold',
           flowId,
           nome: String(nome || ''),
           stockAccountId: stockAccountId || null,
-          closeOk: !!closeOk
+          already: !!already,
+          closeBrowser: false
         });
       } catch {}
-    } catch {}
-    await manifestStore.update(nome, (man) => {
-      man = man || {};
-      man.accountFlags = man.accountFlags || {};
-      man.accountFlags.banned = true;
-      man.accountFlags.bannedAt = Date.now();
-      man.accountFlags.bannedReason = String(reason||'');
-      man.accountFlags.bannedText = String(snippet||'').slice(0, 400);
-      // Enterprise: se chegou ao ban, não faz sentido manter "loginRemediateFailed" mascarando o estado.
-      delete man.accountFlags.loginRemediateFailed;
-      delete man.accountFlags.loginRemediateFailedAt;
-      delete man.accountFlags.loginRemediateFailedReason;
-      delete man.accountFlags.loginRemediateFailedSource;
-      delete man.accountFlags.loginRemediateFailedStage;
-      delete man.accountFlags.loginRemediateFailedCount;
-      return man;
-    });
-    // Pós-write: invalidate obrigatório (invalidate no início + read re-cacheia o valor antigo).
-    try { invalidateAccountFlagsCache(nome); } catch {}
-    if (!already) {
-      await issues.append(
-        nome,
-        'account_banned_detected',
-        `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
-      );
+
+      if (!already) {
+        await issues.append(
+          nome,
+          'account_banned_detected',
+          `reason=${reason || ''} snippet="${(snippet || '').slice(0, 120)}" at=${new Date().toISOString()}`
+        );
+      }
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].banned = true;
+      robeMeta[nome].whyNotOpen = 'banned_human_hold';
+      delete robeMeta[nome].loginRemediateFailed;
+      delete robeMeta[nome].loginRemediateFailedReason;
+      try { await snapshotStatusAndWrite(); } catch {}
+    } catch (e) {
+      banResult = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
     }
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].banned = true;
-    robeMeta[nome].whyNotOpen = 'banned';
-    // Mantém coerência no runtime store também.
-    delete robeMeta[nome].loginRemediateFailed;
-    delete robeMeta[nome].loginRemediateFailedReason;
-    } catch {}
     try {
       if (robeMeta[nome]) {
         delete robeMeta[nome].banCloseInFlight;
         delete robeMeta[nome].banCloseInFlightAt;
       }
     } catch {}
-    // Sempre retorna (não propaga)
     return banResult;
+  });
+}
+
+// MKT Desativado: marketplace create bloqueado permanentemente (só Robe create).
+// Contrato: NÃO fecha browser, marca flag, invoca humano; exclusão diária fecha+exclui.
+async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell', snippet = '', source = 'robe_create' } = {}) {
+  try { invalidateAccountFlagsCache(nome); } catch {}
+  return lockProfileAction(nome, async () => {
+    try {
+      const prev = await readAccountFlags(nome);
+      const already = prev && prev.marketplaceDisabled === true;
+      const flowId = newFlowId('mkt_disabled');
+
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        man.accountFlags.marketplaceDisabled = true;
+        man.accountFlags.marketplaceDisabledAt = Date.now();
+        man.accountFlags.marketplaceDisabledReason = String(reason || 'cannot_buy_or_sell').slice(0, 180);
+        man.accountFlags.marketplaceDisabledSource = String(source || 'robe_create').slice(0, 80);
+        man.accountFlags.marketplaceDisabledText = String(snippet || '').slice(0, 400);
+        delete man.accountFlags.loginRemediateFailed;
+        delete man.accountFlags.loginRemediateFailedAt;
+        delete man.accountFlags.loginRemediateFailedReason;
+        delete man.accountFlags.loginRemediateFailedSource;
+        delete man.accountFlags.loginRemediateFailedStage;
+        delete man.accountFlags.loginRemediateFailedCount;
+        return man;
+      });
+      try { invalidateAccountFlagsCache(nome); } catch {}
+
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl) {
+          await enterHumanMode(nome, ctrl, { reason: `marketplace_disabled:${String(reason || '').slice(0, 100)}` });
+        } else {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
+        }
+      } catch {}
+
+      try { await snapshotStatusAndWrite(); } catch {}
+      try { await emitUaFpEventToCT(nome, { eventKind: 'marketplace_disabled', title: String(snippet || '').slice(0, 180) }); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'marketplace_disabled_human_hold',
+          flowId,
+          nome: String(nome || ''),
+          reason: String(reason || '').slice(0, 180),
+          source: String(source || '').slice(0, 80),
+          already: !!already
+        });
+      } catch {}
+
+      if (!already) {
+        try {
+          await issues.append(
+            nome,
+            'marketplace_disabled_detected',
+            `reason=${reason || ''} source=${source || ''} snippet="${(snippet || '').slice(0, 120)}" at=${new Date().toISOString()}`
+          );
+        } catch {}
+      }
+
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].marketplaceDisabled = true;
+      robeMeta[nome].whyNotOpen = 'marketplace_disabled_human_hold';
+      return { ok: true, action: 'human_hold_marketplace_disabled' };
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'marketplace_disabled_human_hold_error',
+          nome: String(nome || ''),
+          error: String(msg).slice(0, 220)
+        });
+      } catch {}
+      return { ok: false, error: msg };
+    }
   });
 }
 
@@ -5326,6 +5407,35 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.bannedAt;
           delete man.accountFlags.bannedReason;
           delete man.accountFlags.bannedText;
+        }
+      }
+      if (which.includes('marketplaceDisabled')) {
+        if (
+          man.accountFlags.marketplaceDisabled ||
+          man.accountFlags.marketplaceDisabledAt ||
+          man.accountFlags.marketplaceDisabledReason ||
+          man.accountFlags.marketplaceDisabledSource ||
+          man.accountFlags.marketplaceDisabledText
+        ) {
+          delete man.accountFlags.marketplaceDisabled;
+          delete man.accountFlags.marketplaceDisabledAt;
+          delete man.accountFlags.marketplaceDisabledReason;
+          delete man.accountFlags.marketplaceDisabledSource;
+          delete man.accountFlags.marketplaceDisabledText;
+        }
+      }
+      if (which.includes('captchaCheckpoint')) {
+        if (
+          man.accountFlags.captchaCheckpoint ||
+          man.accountFlags.captchaCheckpointAt ||
+          man.accountFlags.captchaCheckpointReason
+        ) {
+          delete man.accountFlags.captchaCheckpoint;
+          delete man.accountFlags.captchaCheckpointAt;
+          delete man.accountFlags.captchaCheckpointReason;
+          delete man.accountFlags.captchaCheckpointSource;
+          delete man.accountFlags.captchaCheckpointUrl;
+          delete man.accountFlags.captchaCheckpointTitle;
         }
       }
       if (which.includes('messengerPin')) {
@@ -13161,6 +13271,29 @@ const handlers = {
             try {
               res = await startRobeDynamic(ctrl.browser, nome, drawRobeCooldownMs(), workingNow, getRobePhotoDeletePolicy());
             } catch (e) {
+              if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
+                const rr = String(e.marketplaceDisabledReason || 'cannot_buy_or_sell');
+                const sn = String(e.marketplaceDisabledSnippet || '');
+                const ss = String(e.marketplaceDisabledSource || 'robe_create');
+                try {
+                  provisionAudit.append({
+                    ts: Date.now(),
+                    event: 'robe_marketplace_disabled_detected',
+                    nome: String(nome || ''),
+                    reason: rr,
+                    source: ss
+                  });
+                } catch {}
+                try {
+                  await setMarketplaceDisabledFlag(nome, { reason: rr, snippet: sn, source: ss });
+                } catch {}
+                try {
+                  await reportAction(nome, 'marketplace_disabled', `Robe: MKT Desativado (${rr}); humano invocado.`);
+                } catch {}
+                robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
+                try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+                return;
+              }
               if (e && e.ROBE_LOGIN_REQUIRED === true) {
                 const rr = String(e.loginReason || 'login_required');
                 const ss = String(e.loginSource || 'facebook');
@@ -13607,6 +13740,12 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const marketplaceDisabled = man ? !!(man.accountFlags && man.accountFlags.marketplaceDisabled === true) : !!robeMeta[nome]?.marketplaceDisabled;
+      const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledAt) || null) : null;
+      const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
+      const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
+      const captchaCheckpoint = man ? !!(man.accountFlags && man.accountFlags.captchaCheckpoint === true) : false;
+      const captchaCheckpointReason = man ? ((man.accountFlags && man.accountFlags.captchaCheckpointReason) || null) : null;
       const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
       const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
       const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
@@ -13638,13 +13777,15 @@ const handlers = {
         ? !!(
           (man.accountFlags && man.accountFlags.loginRequired === true) ||
           (man.accountFlags && man.accountFlags.banned === true) ||
+          (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
+          (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
           (man.accountFlags && man.accountFlags.twoFactor === true) ||
           (man.accountFlags && man.accountFlags.identityRequired === true) ||
           (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
           (man.accountFlags && man.accountFlags.messengerPin === true) ||
           (man.accountFlags && man.accountFlags.appealSubmitted === true)
         )
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
       const robeDailyPlanSummary = await (async () => {
@@ -13730,6 +13871,12 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
+        marketplaceDisabled,
+        marketplaceDisabledAt,
+        marketplaceDisabledReason,
+        marketplaceDisabledText,
+        captchaCheckpoint,
+        captchaCheckpointReason,
         twoFactor,
         twoFactorAt,
         twoFactorReason,
@@ -14154,6 +14301,16 @@ const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const marketplaceDisabled = man ? !!(man.accountFlags && man.accountFlags.marketplaceDisabled === true) : !!robeMeta[nome]?.marketplaceDisabled;
+const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledAt) || null) : null;
+const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
+const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
+const captchaCheckpoint = man ? !!(man.accountFlags && man.accountFlags.captchaCheckpoint === true) : false;
+const captchaCheckpointReason = man ? ((man.accountFlags && man.accountFlags.captchaCheckpointReason) || null) : null;
+const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
+const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
+const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
+const twoFactorText = man ? ((man.accountFlags && man.accountFlags.twoFactorText) || null) : null;
 const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
 const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
 const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
@@ -14182,12 +14339,15 @@ const problem = man
   ? !!(
     (man.accountFlags && man.accountFlags.loginRequired === true) ||
     (man.accountFlags && man.accountFlags.banned === true) ||
+    (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
+    (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
+    (man.accountFlags && man.accountFlags.twoFactor === true) ||
     (man.accountFlags && man.accountFlags.identityRequired === true) ||
     (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
     (man.accountFlags && man.accountFlags.messengerPin === true) ||
     (man.accountFlags && man.accountFlags.appealSubmitted === true)
   )
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 // Estoque (CT): vínculo determinístico do perfil do servidor com a conta do estoque.
@@ -14266,6 +14426,16 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
+  marketplaceDisabled,
+  marketplaceDisabledAt,
+  marketplaceDisabledReason,
+  marketplaceDisabledText,
+  captchaCheckpoint,
+  captchaCheckpointReason,
+  twoFactor,
+  twoFactorAt,
+  twoFactorReason,
+  twoFactorText,
   identityRequired,
   identitySubmitted,
   identityNextCheckAt,

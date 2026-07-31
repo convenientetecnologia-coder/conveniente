@@ -70,10 +70,10 @@ function saveState(patch) {
  * Ordem (militar — NÃO inverter):
  * 1) banned → delete
  * 2) 2FA → delete
- * 3) captcha / checkpoint (flag OU motivo) → delete
- *    (política non_lr NÃO pode mascarar captcha real)
- * 4) login requerido genérico / estados de login recuperáveis → keep
- * 5) resto → keep
+ * 3) marketplaceDisabled (MKT Desativado) → delete
+ * 4) captcha / checkpoint (flag OU motivo) → delete
+ * 5) login requerido genérico → keep
+ * 6) resto → keep
  */
 
 /** Motivos de LOGIN (não-terminal). Nunca inclui captcha/checkpoint/2fa/ban. */
@@ -134,7 +134,16 @@ function classifyTerminalDelete(flags) {
     return { delete: true, category: 'two_factor', detail: `login_reason:${loginReason}`.slice(0, 120) };
   }
 
-  // 3) CAPTCHA / CHECKPOINT — SEMPRE delete. Vence mascara non_lr / qualquer keep de login.
+  // 3) MKT Desativado (marketplace create permanente)
+  if (f.marketplaceDisabled === true) {
+    return {
+      delete: true,
+      category: 'marketplace_disabled',
+      detail: String(f.marketplaceDisabledReason || 'marketplace_disabled').slice(0, 120)
+    };
+  }
+
+  // 4) CAPTCHA / CHECKPOINT — SEMPRE delete. Vence mascara non_lr / qualquer keep de login.
   if (f.captchaCheckpoint === true) {
     return {
       delete: true,
@@ -260,13 +269,13 @@ async function runDailyTerminalCleanup({
     lastFailed: 0,
     lastScanned: perfis.length,
     lastCandidates: candidates.length,
-    lastByCategory: { banned: 0, two_factor: 0, captcha: 0 },
+    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0 },
     lastClaimedAt: now()
   });
 
   let deleted = 0;
   let failed = 0;
-  const byCategory = { banned: 0, two_factor: 0, captcha: 0 };
+  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0 };
   const failures = [];
 
   try {

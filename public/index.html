@@ -386,6 +386,29 @@
           return { kind: 'banned', label: 'Conta suspensa', cls: 'bad', title: (p.bannedText || 'Suspensão/désativação detectada') };
         }
 
+        // 1.2) MKT Desativado (marketplace create permanente — Robe)
+        if (p.marketplaceDisabled === true) {
+          return {
+            kind: 'marketplace_disabled',
+            label: 'MKT Desativado',
+            cls: 'bad',
+            title: String(p.marketplaceDisabledText || p.marketplaceDisabledReason || 'Não pode comprar ou vender itens no Facebook')
+          };
+        }
+
+        // 1.3) 2FA / Captcha por flag (não depende só de loginReason)
+        if (p.twoFactor === true) {
+          return { kind: 'two_factor', label: '2FA', cls: 'warn', title: String(p.twoFactorReason || p.twoFactorText || '2FA') };
+        }
+        if (p.captchaCheckpoint === true) {
+          return {
+            kind: 'captcha',
+            label: 'Captcha/Checkpoint',
+            cls: 'bad',
+            title: String(p.captchaCheckpointReason || 'Confirme que é humano')
+          };
+        }
+
         // 1.5) Recurso/Apelação submetida (monitoramento a cada 1h)
         if (p.appealSubmitted === true) {
           const nextAt = Number(p.appealNextCheckAt || 0) || 0;

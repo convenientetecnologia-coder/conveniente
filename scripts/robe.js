@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
-const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectLoginRequired } = require('./browser.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectLoginRequired, detectMarketplaceDisabled } = require('./browser.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
@@ -128,6 +128,17 @@ function makeRobeLoginRequiredError(det = {}) {
   e.ROBE_LOGIN_REQUIRED = true;
   e.loginReason = reason;
   e.loginSource = source;
+  return e;
+}
+
+function makeRobeMarketplaceDisabledError(det = {}) {
+  const reason = String((det && det.reason) || 'cannot_buy_or_sell');
+  const snippet = String((det && det.snippet) || '');
+  const e = new Error(`ROBE_MARKETPLACE_DISABLED:${reason}`);
+  e.ROBE_MARKETPLACE_DISABLED = true;
+  e.marketplaceDisabledReason = reason;
+  e.marketplaceDisabledSnippet = snippet;
+  e.marketplaceDisabledSource = 'robe_create_item';
   return e;
 }
 
@@ -3071,6 +3082,25 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
+      // MKT Desativado (URL-gated create) — antes de LR/compose
+      try {
+        const md = await detectMarketplaceDisabled(p).catch(() => ({ disabled: false }));
+        if (md && md.disabled === true) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'dbg_robe_open_create_marketplace_disabled',
+              nome: String(nome || ''),
+              attempt: Number(attempt || 0),
+              reason: String(md.reason || ''),
+              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+            });
+          } catch {}
+          throw makeRobeMarketplaceDisabledError(md);
+        }
+      } catch (e) {
+        if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
+      }
       // Guardrail: se create/item redirecionar para fluxo de login, sinalizar erro semântico de Robe.
       try {
         const lrNow = await detectLoginRequired(p).catch(() => ({ loginRequired: false }));
@@ -3701,6 +3731,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     };
     const hasBody = await waitBody();
     if (!hasBody) throw new Error('create_body_not_available');
+
+    // MKT Desativado (após body) — permanente, não confundir com "Limite atingido"
+    try {
+      const md = await detectMarketplaceDisabled(page).catch(() => ({ disabled: false }));
+      if (md && md.disabled === true) {
+        logger.warn('[ROBE] Marketplace desativado detectado — humano + flag', { nome, attId });
+        throw makeRobeMarketplaceDisabledError(md);
+      }
+    } catch (e) {
+      if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
+    }
 
     const bloqueioLimite = await page.evaluate(() => {
       function normalize(str) {

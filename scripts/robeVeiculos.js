@@ -3,7 +3,19 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
-const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectMarketplaceDisabled } = require('./browser.js');
+const provisionAudit = require('./provisionAudit.js');
+
+function makeRobeMarketplaceDisabledError(det = {}) {
+  const reason = String((det && det.reason) || 'cannot_buy_or_sell');
+  const snippet = String((det && det.snippet) || '');
+  const e = new Error(`ROBE_MARKETPLACE_DISABLED:${reason}`);
+  e.ROBE_MARKETPLACE_DISABLED = true;
+  e.marketplaceDisabledReason = reason;
+  e.marketplaceDisabledSnippet = snippet;
+  e.marketplaceDisabledSource = 'robe_create_vehicle';
+  return e;
+}
 const fotosV = require('./fotosVeiculos.js');       // autoridade central de fotos (VEÍCULOS)
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
@@ -1405,6 +1417,24 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       } catch {}
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/vehicle', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      try {
+        const md = await detectMarketplaceDisabled(p).catch(() => ({ disabled: false }));
+        if (md && md.disabled === true) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'dbg_robe_v_open_create_marketplace_disabled',
+              nome: String(nome || ''),
+              attempt: Number(attempt || 0),
+              reason: String(md.reason || ''),
+              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+            });
+          } catch {}
+          throw makeRobeMarketplaceDisabledError(md);
+        }
+      } catch (e) {
+        if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
+      }
       return p; // sucesso
     } catch (e) {
       lastError = e;
@@ -2173,6 +2203,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     };
     const hasBody = await waitBody();
     if (!hasBody) throw new Error('create_body_not_available');
+
+    try {
+      const md = await detectMarketplaceDisabled(page).catch(() => ({ disabled: false }));
+      if (md && md.disabled === true) {
+        logger.warn('[ROBE_V] Marketplace desativado detectado — humano + flag', { nome, attId });
+        throw makeRobeMarketplaceDisabledError(md);
+      }
+    } catch (e) {
+      if (e && e.ROBE_MARKETPLACE_DISABLED === true) throw e;
+    }
 
     const bloqueioLimite = await page.evaluate(() => {
       function normalize(str) {
