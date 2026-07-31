@@ -1786,6 +1786,28 @@ function _overlayReasonFromFlags(flags) {
   } catch { return 'human_mode'; }
 }
 
+function _terminalFlagFromFlags(flags) {
+  try {
+    flags = (flags && typeof flags === 'object') ? flags : {};
+    if (flags.banned === true) return 'banned';
+    if (flags.twoFactor === true) return 'two_factor';
+    if (flags.marketplaceDisabled === true) return 'marketplace_disabled';
+    if (flags.captchaCheckpoint === true) return 'captcha_checkpoint';
+    return '';
+  } catch { return ''; }
+}
+
+async function syncClosedTerminalDesiredState(nome) {
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off', humanHold: false };
+      return d;
+    });
+  } catch {}
+}
+
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
@@ -1833,12 +1855,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       if (ctrl) {
         await enterHumanMode(nome, ctrl, { reason: `captcha_checkpoint:${String(reason || '').slice(0, 100)}` });
       } else {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {};
-          d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-          return d;
-        });
+        await syncClosedTerminalDesiredState(nome);
       }
     }
   } catch {}
@@ -2268,9 +2285,8 @@ async function _installOverlayOnPage(nome, page) {
         const startedAt = Date.now();
         try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'close_browser' }); } catch {}
         try {
-          // Política alinhada: não forçar desired.active=false (permite reabrir depois conforme desired atual).
-          // Manter preserveDesired evita efeitos colaterais agressivos; o sistema decide reabrir conforme desired/nurse.
-          const r = await handlers.deactivate({ nome, reason: 'human_overlay_close', policy: 'preserveDesired' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+          // Fechar via HUD é fechamento intencional: limpa hold/desired e mata o runtime.
+          const r = await handlers.deactivate({ nome, reason: 'human_overlay_close' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
           try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'close_browser', ok: !!(r && r.ok), error: r && r.error ? String(r.error).slice(0, 180) : null, durationMs: Date.now() - startedAt }); } catch {}
           return r && typeof r === 'object' ? r : { ok: false, error: 'close_browser_failed' };
         } catch (e) {
@@ -5124,18 +5140,13 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       });
       try { invalidateAccountFlagsCache(nome); } catch {}
 
-      // Humano: browser fica aberto (ou hold se ainda não tiver browser)
+      // Humano: browser fica aberto; sem browser vivo, persiste só o bloqueio técnico fechado.
       try {
         const ctrl = controllers.get(nome);
         if (ctrl) {
           await enterHumanMode(nome, ctrl, { reason: `banned:${String(reason || '').slice(0, 120)}` });
         } else {
-          await fileStore.withDesiredFileLockUpdate((d) => {
-            d = d || {};
-            d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-            return d;
-          });
+          await syncClosedTerminalDesiredState(nome);
         }
       } catch {}
 
@@ -5210,12 +5221,7 @@ async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell',
         if (ctrl) {
           await enterHumanMode(nome, ctrl, { reason: `marketplace_disabled:${String(reason || '').slice(0, 100)}` });
         } else {
-          await fileStore.withDesiredFileLockUpdate((d) => {
-            d = d || {};
-            d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-            return d;
-          });
+          await syncClosedTerminalDesiredState(nome);
         }
       } catch {}
 
@@ -5300,13 +5306,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         if (ctrl) {
           await enterHumanMode(nome, ctrl, { reason: `two_factor:${String(reason || '').slice(0, 120)}` });
         } else {
-          // Sem browser ativo agora: persistir hold para não retomar automação no próximo ciclo.
-          await fileStore.withDesiredFileLockUpdate((d) => {
-            d = d || {};
-            d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-            return d;
-          });
+          await syncClosedTerminalDesiredState(nome);
         }
       } catch {}
 
@@ -5438,6 +5438,27 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.captchaCheckpointTitle;
         }
       }
+      if (which.includes('twoFactor')) {
+        if (
+          man.accountFlags.twoFactor ||
+          man.accountFlags.twoFactorAt ||
+          man.accountFlags.twoFactorReason ||
+          man.accountFlags.twoFactorText ||
+          man.accountFlags.twoFactorPendingClose ||
+          man.accountFlags.twoFactorPendingCloseAt ||
+          man.accountFlags.twoFactorPendingCloseReason ||
+          man.accountFlags.twoFactorPendingClosePids
+        ) {
+          delete man.accountFlags.twoFactor;
+          delete man.accountFlags.twoFactorAt;
+          delete man.accountFlags.twoFactorReason;
+          delete man.accountFlags.twoFactorText;
+          delete man.accountFlags.twoFactorPendingClose;
+          delete man.accountFlags.twoFactorPendingCloseAt;
+          delete man.accountFlags.twoFactorPendingCloseReason;
+          delete man.accountFlags.twoFactorPendingClosePids;
+        }
+      }
       if (which.includes('messengerPin')) {
         if (man.accountFlags.messengerPin || man.accountFlags.messengerPinReason || man.accountFlags.messengerPinSource || man.accountFlags.messengerPinAt) {
           delete man.accountFlags.messengerPin;
@@ -5481,6 +5502,15 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('banned') && (prev && prev.banned)) {
       await issues.append(nome, 'account_banned_cleared', `at=${new Date().toISOString()}`);
     }
+    if (which.includes('marketplaceDisabled') && (prev && prev.marketplaceDisabled)) {
+      await issues.append(nome, 'mil_action', `marketplace_disabled_cleared at=${new Date().toISOString()}`);
+    }
+    if (which.includes('captchaCheckpoint') && (prev && prev.captchaCheckpoint)) {
+      await issues.append(nome, 'mil_action', `captcha_checkpoint_cleared at=${new Date().toISOString()}`);
+    }
+    if (which.includes('twoFactor') && (prev && prev.twoFactor)) {
+      await issues.append(nome, 'mil_action', `two_factor_cleared at=${new Date().toISOString()}`);
+    }
     if (which.includes('messengerPin') && (prev && prev.messengerPin)) {
       await issues.append(nome, 'mil_action', `messenger_pin_cleared at=${new Date().toISOString()}`);
     }
@@ -5499,6 +5529,17 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       // Durante failFast, whyNotOpen pode ser um motivo específico (two_factor, ui_blocked:..., etc).
       // Ao "Retomar trabalho", sempre limpa.
       if (typeof robeMeta[nome].whyNotOpen === 'string') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('marketplaceDisabled')) {
+      delete robeMeta[nome].marketplaceDisabled;
+      if (robeMeta[nome].whyNotOpen === 'marketplace_disabled_human_hold') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('captchaCheckpoint')) {
+      if (robeMeta[nome].whyNotOpen === 'captcha_checkpoint') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('twoFactor')) {
+      delete robeMeta[nome].twoFactor;
+      if (robeMeta[nome].whyNotOpen === 'two_factor_human_hold') delete robeMeta[nome].whyNotOpen;
     }
     if (which.includes('banned')) delete robeMeta[nome].banned;
     if (which.includes('messengerPin')) {
@@ -6797,25 +6838,32 @@ async function activateOnce(nome, source = '', operator = '') {
     try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_ban_close_inflight', nome: String(nome||''), source: String(source||'') }); } catch {}
     return { ok: false, error: 'ban_close_inflight' };
   }
+  const opTrim = String(operator || '').trim();
+  // Open-all pode chegar com operator=lockOwner (para bypass do provision_lock). Então:
+  // - detecta bulk-open por operator OU por source.
+  const srcTrim = String(source || '').trim();
+  const _isBulkOpen =
+    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim) ||
+    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(srcTrim);
+  if (_isBulkOpen && String(nome || '') === 'caxias_do_sul-1769748234162') {
+    try { provisionAudit.append({ ts: Date.now(), event: 'open_all_activate_once_enter', nome: String(nome||''), source: String(source||''), operator: String(operator||'') }); } catch {}
+  }
+  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
+  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
+  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
+  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
+  let _flagsAtOpenStart = null;
+  let _manualHumanReason = '';
   try {
-    const fl = await readAccountFlags(nome).catch(() => null);
-    // Terminais com humano: não reabrir via nurse/auto (browser já deve estar aberto + hold).
-    // Limpeza diária fecha+exclui; open-all também filtra estes.
-    if (fl && fl.banned === true) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_banned', nome: String(nome||''), source: String(source||'') }); } catch {}
-      return { ok: false, error: 'banned' };
+    _flagsAtOpenStart = await readAccountFlags(nome).catch(() => null);
+    const terminalFlag = _terminalFlagFromFlags(_flagsAtOpenStart);
+    if (_isManualOpen) {
+      const holdReason = _overlayReasonFromFlags(_flagsAtOpenStart || {});
+      if (holdReason && holdReason !== 'human_mode') _manualHumanReason = holdReason;
     }
-    if (fl && fl.twoFactor === true) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_two_factor', nome: String(nome||''), source: String(source||'') }); } catch {}
-      return { ok: false, error: 'two_factor' };
-    }
-    if (fl && fl.marketplaceDisabled === true) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_marketplace_disabled', nome: String(nome||''), source: String(source||'') }); } catch {}
-      return { ok: false, error: 'marketplace_disabled' };
-    }
-    if (fl && fl.captchaCheckpoint === true) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_captcha_checkpoint', nome: String(nome||''), source: String(source||'') }); } catch {}
-      return { ok: false, error: 'captcha_checkpoint' };
+    if (terminalFlag && !_isManualOpen) {
+      try { provisionAudit.append({ ts: Date.now(), event: `activate_skip_${terminalFlag}`, nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: terminalFlag };
     }
   } catch {}
 
@@ -6833,25 +6881,12 @@ async function activateOnce(nome, source = '', operator = '') {
 
   opening[nome] = true;
   let _supervisorSlotGranted = false;
-  // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
-  // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
+  // Enterprise rule (2026-01): humanHold órfão é só cache.
+  // Exceção do contrato atual: abertura manual com flag persistida reabre direto em humano.
   let _humanHoldAtStart = false;
-  const opTrim = String(operator || '').trim();
-  // Open-all pode chegar com operator=lockOwner (para bypass do provision_lock). Então:
-  // - detecta bulk-open por operator OU por source.
-  const srcTrim = String(source || '').trim();
-  const _isBulkOpen =
-    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim) ||
-    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(srcTrim);
-  if (_isBulkOpen && String(nome || '') === 'caxias_do_sul-1769748234162') {
-    try { provisionAudit.append({ ts: Date.now(), event: 'open_all_activate_once_enter', nome: String(nome||''), source: String(source||''), operator: String(operator||'') }); } catch {}
-  }
-  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
-  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
-  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
-  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
-  // Regra do usuário: ao abrir (open_all/manual), limpar flags de login para revalidar estado real.
-  if (_isBulkOpen || _isManualOpen) {
+  const _manualHumanFromFlags = _isManualOpen && !!_manualHumanReason;
+  // Regra do usuário: open_all/login_required continua revalidando do zero; manual preserva flags para inspeção humana.
+  if (_isBulkOpen) {
     try {
       const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
       const had = {
@@ -6937,11 +6972,11 @@ async function activateOnce(nome, source = '', operator = '') {
     } catch {}
 
     // Se vier humanHold marcado, limpamos antes de abrir e fazemos probe real depois.
-    // Só voltará a humano invocado se o probe detectar captcha/checkpoint ou falha real de login.
+    // Exceção: abertura manual com flag persistida preserva o hold para já abrir em humano.
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       _humanHoldAtStart = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
-      if (_humanHoldAtStart) {
+      if (_humanHoldAtStart && !_manualHumanFromFlags) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d = d || {};
@@ -7051,12 +7086,15 @@ async function activateOnce(nome, source = '', operator = '') {
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
-        // Regra enterprise: NÃO abrir já em humano/overlay por "humanHold".
-        // Abertura sempre começa normal; o probe decide (captcha/checkpoint => invocar humano).
+        // Regra enterprise: NÃO abrir já em humano/overlay só por humanHold órfão.
+        // Exceção do contrato atual: abertura manual com flag persistida entra em humano na hora.
 
         // Enterprise: se este perfil está marcado como "loginRemediateFailed",
         // NÃO invocar humano às cegas: primeiro navegar + revalidar (pode ter virado identidade).
         try {
+          if (_manualHumanFromFlags) {
+            // manual+flag persistida: o operador pediu inspeção humana explícita.
+          } else {
           const flags = await readAccountFlags(nome).catch(()=>({}));
           if (flags && flags.loginRemediateFailed === true) {
             const ctrl = controllers.get(nome);
@@ -7088,6 +7126,7 @@ async function activateOnce(nome, source = '', operator = '') {
               } catch {}
             }
           }
+          }
         } catch {}
 
         // Regra enterprise: identidade/appeal NÃO devem abrir já em "humano invocado".
@@ -7113,8 +7152,9 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
             }
               // Open / Open-all / Open manual: não pode ficar em about:blank (tela preta).
-              // Garante navegação e faz probe para refletir estado real (identity/captcha/login/appeal).
-              // Pós-abertura: sempre probe (bulk/manual/unknown).
+              // Garante navegação e:
+              // - bulk/manual saudável => probe para refletir estado real
+              // - manual com flag persistida => entra direto em humano para inspeção
               // Importante: NÃO navegar pra home se já estamos numa tela real (ex.: identidade),
               // senão removemos o contexto e atrasamos/impedimos o fluxo.
               if (_isBulkOpen || _isManualOpen) {
@@ -7124,16 +7164,33 @@ async function activateOnce(nome, source = '', operator = '') {
                   try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
                   const isBlank = (!u0 || u0 === 'about:blank');
                   if (isBlank) {
-                    // Em Delta, evita passo inicial em marketplace para não "piscar" legacy.
+                    // Manual com flag persistida abre direto em Facebook para o humano inspecionar.
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
-                    const preferEntry = desiredEngineAtOpen === 'delta' ? 'facebook_messages' : 'messenger';
+                    const preferEntry = _manualHumanFromFlags
+                      ? 'facebook'
+                      : (desiredEngineAtOpen === 'delta' ? 'facebook_messages' : 'messenger');
                     await ensureNonBlankEntryPage(nome, ctrl, {
                       prefer: preferEntry,
-                      reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry'
+                      reasonBase: _manualHumanFromFlags
+                        ? 'open_manual_flag_entry'
+                        : (_isBulkOpen ? 'open_all_entry' : 'open_manual_entry')
                     });
                   }
                 } catch {}
-                try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
+                if (_manualHumanFromFlags) {
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'open_manual_human_from_flags',
+                      nome: String(nome || ''),
+                      source: String(source || ''),
+                      reason: String(_manualHumanReason || '').slice(0, 180)
+                    });
+                  } catch {}
+                  try { await enterHumanMode(nome, ctrl, { reason: _manualHumanReason }); } catch {}
+                } else {
+                  try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
+                }
               }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
@@ -10629,6 +10686,21 @@ const handlers = {
         return { ok: false, error: 'controller_missing_no_userDataDir' };
       }
     }
+    if (!preserve) {
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off', humanHold: false };
+          return d;
+        });
+      } catch {}
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].reopenAt = null;
+        robeMeta[nome].closingReason = String(reason || 'deactivate').slice(0, 120);
+      } catch {}
+    }
     const d = readJsonFile(desiredPath, { perfis: {} });
     const isHold = d.perfis?.[nome]?.humanHold === true;
     if (preserve && !isFrozenNow(nome) && !isHold) {
@@ -10804,7 +10876,7 @@ const handlers = {
     try {
       await fileStore.withDesiredFileLockUpdate((d) => {
         d.perfis = d.perfis || {};
-        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off', humanHold: false };
         return d;
       });
     } catch (e) {
@@ -12938,39 +13010,36 @@ const handlers = {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
+      const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','captchaCheckpoint','twoFactor'];
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
         // Hardening: quando não há browser vivo, tente auto-reconciliação segura para evitar conta "presa".
-        let desiredActive = false;
-        try {
-          const desiredSnap = fileStore.loadDesiredJson();
-          desiredActive = !!(desiredSnap && desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].active === true);
-        } catch {}
         try {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].numPages = 0;
           delete robeMeta[nome].whyNotOpen;
         } catch {}
-        if (desiredActive) {
-          try {
-            await fileStore.withDesiredFileLockUpdate((d) => {
-              d = d || {};
-              d.perfis = d.perfis || {};
-              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false };
-              return d;
-            });
-          } catch {}
-          try {
-            const op = `human_resume_reconcile_no_browser:${String(nome||'')}:${Date.now()}`;
-            setTimeout(() => {
-              try { handlers.activate({ nome, operator: op }).catch(()=>{}); } catch {}
-            }, 0);
-            try { await snapshotStatusAndWrite(); } catch {}
-            try { await issues.append(nome, 'human_resume_reconcile', 'no_browser_activate_scheduled'); } catch {}
-            return { ok: true, reconciled: 'no_browser_activate_scheduled' };
-          } catch {}
-        }
+        try { await clearAccountFlags(nome, resumeClearFlags); } catch {}
+        try { await clearAppealSubmittedFlag(nome); } catch {}
+        try { await clearIdentityFlags(nome); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+            return d;
+          });
+        } catch {}
+        try {
+          const op = `human_resume_reconcile_no_browser:${String(nome||'')}:${Date.now()}`;
+          setTimeout(() => {
+            try { handlers.activate({ nome, operator: op }).catch(()=>{}); } catch {}
+          }, 0);
+          try { await snapshotStatusAndWrite(); } catch {}
+          try { await issues.append(nome, 'human_resume_reconcile', 'no_browser_activate_scheduled'); } catch {}
+          return { ok: true, reconciled: 'no_browser_activate_scheduled' };
+        } catch {}
         try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
@@ -12978,7 +13047,7 @@ const handlers = {
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
-      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
       // Libera browser para o motor: limpa flag + timers de "fora do inbox" antes de qualquer nav/boot.
@@ -12987,7 +13056,7 @@ const handlers = {
       try { await syncHumanOverlay(nome); } catch {}
       // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
       // - limpa flags de login/falha e também estados de análise (appeal/identity) para não engessar.
-      try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
+      try { await clearAccountFlags(nome, resumeClearFlags); } catch {}
       try { await clearAppealSubmittedFlag(nome); } catch {}
       try { await clearIdentityFlags(nome); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
@@ -16192,10 +16261,10 @@ async function nurseTick() {
 
     // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
-    // Terminais (ban/2FA/MKT/captcha): contrato ops 2026-07 = humano + browser aberto.
-    // - NÃO forçar active=false (fecharia intenção / brigaria com enterHumanMode)
-    // - NÃO forçar active=true (não reabrir terminal em massa; activateOnce já bloqueia)
-    // - Garantir virtus=off + humanHold=true
+    // Terminais (ban/2FA/MKT/captcha): contrato ops 2026-07
+    // - browser vivo em humano => active/humanHold permanecem true
+    // - browser fechado => conta fica ativa=false, virtus=off, humanHold=false
+    // - nunca reabrir terminal em massa
     let autoOpenEnabled = false;
     try {
       const ao = desired0 && desired0._autoOpen && typeof desired0._autoOpen === 'object' ? desired0._autoOpen : null;
@@ -16225,17 +16294,14 @@ async function nurseTick() {
           const perfisArr = loadPerfisJson();
           const names = Array.isArray(perfisArr) ? perfisArr.map(p => p && p.nome).filter(Boolean) : [];
           const terminalSkip = new Set();
+          const terminalLive = new Set();
           for (const nome of names) {
             try {
               const flags = await readAccountFlags(nome).catch(() => null);
-              if (
-                flags &&
-                (flags.banned === true ||
-                  flags.twoFactor === true ||
-                  flags.marketplaceDisabled === true ||
-                  flags.captchaCheckpoint === true)
-              ) {
+              if (_terminalFlagFromFlags(flags)) {
                 terminalSkip.add(String(nome));
+                const c = controllers.get(nome);
+                if (c && c.browser && c.browser.isConnected?.()) terminalLive.add(String(nome));
               }
             } catch {}
           }
@@ -16247,11 +16313,14 @@ async function nurseTick() {
               if (terminalSkip.has(String(nome))) {
                 skippedTerminal++;
                 const cur = d.perfis[nome] || {};
-                // Preserva active (se true, browser humano fica; se false, não reabre).
+                const keepHumanBrowser = terminalLive.has(String(nome));
+                const nextActive = keepHumanBrowser;
+                const nextHold = keepHumanBrowser;
+                const needActive = cur.active !== nextActive;
                 const needVirtusOff = String(cur.virtus || '') !== 'off';
-                const needHold = cur.humanHold !== true;
-                if (needVirtusOff || needHold) {
-                  d.perfis[nome] = { ...cur, virtus: 'off', humanHold: true };
+                const needHold = cur.humanHold !== nextHold;
+                if (needActive || needVirtusOff || needHold) {
+                  d.perfis[nome] = { ...cur, active: nextActive, virtus: 'off', humanHold: nextHold };
                   changed++;
                 }
                 continue;
@@ -16303,34 +16372,56 @@ async function nurseTick() {
           for (const nome of Object.keys((desired0 && desired0.perfis) || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
-              // Terminais: reafirmar human hold (NÃO fecha; exclusão só na limpeza diária).
+              const liveCtrl = (() => {
+                try {
+                  const c = controllers.get(nome);
+                  return !!(c && c.browser && c.browser.isConnected?.());
+                } catch { return false; }
+              })();
+              // Terminais sem browser vivo ficam fechados/limpos; com browser vivo seguem em humano.
               if (flags && flags.banned === true) {
-                try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
+                if (!liveCtrl) {
+                  try { await syncClosedTerminalDesiredState(nome); } catch {}
+                } else {
+                  try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
+                }
                 continue;
               }
               if (flags && flags.twoFactor === true) {
-                try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
+                if (!liveCtrl) {
+                  try { await syncClosedTerminalDesiredState(nome); } catch {}
+                } else {
+                  try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
+                }
                 continue;
               }
               if (flags && flags.marketplaceDisabled === true) {
-                try {
-                  await setMarketplaceDisabledFlag(nome, {
-                    reason: String(flags.marketplaceDisabledReason || 'cannot_buy_or_sell'),
-                    snippet: String(flags.marketplaceDisabledText || ''),
-                    source: 'nurse_zero_ctrl_sweep'
-                  });
-                } catch {}
+                if (!liveCtrl) {
+                  try { await syncClosedTerminalDesiredState(nome); } catch {}
+                } else {
+                  try {
+                    await setMarketplaceDisabledFlag(nome, {
+                      reason: String(flags.marketplaceDisabledReason || 'cannot_buy_or_sell'),
+                      snippet: String(flags.marketplaceDisabledText || ''),
+                      source: 'nurse_zero_ctrl_sweep'
+                    });
+                  } catch {}
+                }
                 continue;
               }
               if (flags && flags.captchaCheckpoint === true) {
-                try {
-                  await setCaptchaCheckpointFlag(nome, {
-                    reason: String(flags.captchaCheckpointReason || 'captcha'),
-                    source: 'nurse_zero_ctrl_sweep',
-                    url: String(flags.captchaCheckpointUrl || ''),
-                    title: String(flags.captchaCheckpointTitle || '')
-                  });
-                } catch {}
+                if (!liveCtrl) {
+                  try { await syncClosedTerminalDesiredState(nome); } catch {}
+                } else {
+                  try {
+                    await setCaptchaCheckpointFlag(nome, {
+                      reason: String(flags.captchaCheckpointReason || 'captcha'),
+                      source: 'nurse_zero_ctrl_sweep',
+                      url: String(flags.captchaCheckpointUrl || ''),
+                      title: String(flags.captchaCheckpointTitle || '')
+                    });
+                  } catch {}
+                }
                 continue;
               }
               // Compat retroativa: loginRequired+reason two_factor => human hold 2FA
@@ -16926,7 +17017,7 @@ async function nurseTick() {
         // humanHold COM Chrome vivo: não atropelar o humano (overlay + skip automação).
         // humanHold SEM Chrome: cache órfão (regra 2026-01) — limpar hold e não bloquear
         // keepalive reopen se desired.active ainda pede aberto. Contas saudáveis sem hold: intactas.
-        // EXCEÇÃO ops 2026-07: terminais (ban/2FA/MKT/captcha) mantêm humanHold até limpeza diária.
+        // Contrato 2026-07: terminais só mantêm hold com browser humano vivo.
         const humanHoldLive = !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.());
         if (humanHoldLive) {
           try {
@@ -16953,9 +17044,18 @@ async function nurseTick() {
         } catch {}
         if (terminalHumanHold) {
           try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d = d || {};
+              d.perfis = d.perfis || {};
+              const prev = d.perfis[nome] || {};
+              d.perfis[nome] = { ...prev, active: false, virtus: 'off', humanHold: false };
+              return d;
+            });
+          } catch {}
+          try {
             provisionAudit.append({
               ts: now,
-              event: 'nurse_terminal_human_hold_keep_no_ctrl',
+              event: 'nurse_terminal_human_hold_cleared_no_ctrl',
               nome: String(nome || ''),
               active: want.active === true
             });

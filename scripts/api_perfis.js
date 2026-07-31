@@ -634,13 +634,6 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_activate_request', `by=${op}`);
 
-    // Override explícito do hold humano ao ativar manualmente/por Abrir Todos
-    await fileStore.withDesiredFileLockUpdate(desired => {
-      desired.perfis = desired.perfis || {};
-      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false };
-      return desired;
-    });
-
     // BLOQUEIO de ativação por limit_posting
     // --- PATCH CIRÚRGICO: BLOCO REMOVIDO CONFORME INSTRUÇÃO ---
 
@@ -1867,7 +1860,8 @@ module.exports = (app, workerClient, fileStore) => {
             desired.perfis[nome] = {
               ...(desired.perfis[nome] || {}),
               active: false,
-              virtus: 'off'
+              virtus: 'off',
+              humanHold: false
             };
           }
         }

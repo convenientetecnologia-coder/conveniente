@@ -1008,12 +1008,13 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
           ...cur,
           active: false,
           virtus: 'off',
+          humanHold: false,
           configureOnce: false,
           robePlay: false,
           invokeHuman: false
         };
         desired.perfis[nome] = next;
-        if (cur.active !== false || String(cur.virtus || '') !== 'off') changed++;
+        if (cur.active !== false || String(cur.virtus || '') !== 'off' || cur.humanHold === true) changed++;
       }
       // Cancela open_all pendente (política: nunca auto-abrir após restart).
       try {
