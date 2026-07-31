@@ -280,6 +280,7 @@
       <div class="metric"><span>Próx. troca IP</span><b id="mNextSwap">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
+      <div class="metric clickable" id="metricMkt" style="display:none"><span>MKT Desativado</span><b id="mMktDisabled">0</b></div>
       <div class="metric clickable" id="metricBanned" style="display:none"><span>Banidas</span><b id="mBanidas">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
@@ -2384,23 +2385,29 @@
       // Contagens agregadas
       // Login requerido (AGREGADO): soma de subtipos do guarda-chuva loginRequired (captcha/login/session/2fa/identity/consent/unknown)
       let loginCount = 0;
+      let marketplaceDisabledCount = 0;
       let bannedCount = 0;
       for (const p of perfis) {
         const st = classifyAccountFinal(p, robes);
         if (st.kind === 'banned') bannedCount++;
+        else if (st.kind === 'marketplace_disabled') marketplaceDisabledCount++;
         else if (['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind)) loginCount++;
       }
 
       // Atualiza cards do header
       const loginCard = document.getElementById('metricLogin');
+      const mktCard   = document.getElementById('metricMkt');
       const banCard   = document.getElementById('metricBanned');
       const mLogin    = document.getElementById('mLoginReq');
+      const mMkt      = document.getElementById('mMktDisabled');
       const mBan      = document.getElementById('mBanidas');
 
       if (mLogin) mLogin.textContent = String(loginCount);
+      if (mMkt)   mMkt.textContent   = String(marketplaceDisabledCount);
       if (mBan)   mBan.textContent   = String(bannedCount);
 
       if (loginCard) loginCard.style.display = loginCount > 0 ? 'inline-flex' : 'none';
+      if (mktCard)   mktCard.style.display   = marketplaceDisabledCount > 0 ? 'inline-flex' : 'none';
       if (banCard)   banCard.style.display   = bannedCount > 0 ? 'inline-flex' : 'none';
 
       // No final da reloadPerfis, sempre faça:
@@ -2953,7 +2960,14 @@
         const st = classifyAccountFinal(p, lastRobesCache || {});
         ok = !!st && ['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind);
       }
-      else if (currentFilter === 'banned')    ok = (p.banned === true);
+      else if (currentFilter === 'marketplace_disabled') {
+        const st = classifyAccountFinal(p, lastRobesCache || {});
+        ok = !!st && st.kind === 'marketplace_disabled';
+      }
+      else if (currentFilter === 'banned') {
+        const st = classifyAccountFinal(p, lastRobesCache || {});
+        ok = !!st && st.kind === 'banned';
+      }
 
       if (!ok) return false;
       return passSearch(p);
@@ -3095,10 +3109,12 @@
       // default
       setFilter('all');
     })();
-    (function bindLoginBannedCards(){
+    (function bindProblemMetricCards(){
       const loginCard = document.getElementById('metricLogin');
+      const mktCard   = document.getElementById('metricMkt');
       const banCard   = document.getElementById('metricBanned');
       if (loginCard) loginCard.onclick = () => setFilter('login');
+      if (mktCard)   mktCard.onclick   = () => setFilter('marketplace_disabled');
       if (banCard)   banCard.onclick   = () => setFilter('banned');
     })();
 
