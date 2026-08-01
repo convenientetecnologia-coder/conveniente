@@ -157,6 +157,15 @@ const DEFAULTS = Object.freeze({
     openWindowEndHour: 7,
     openWindowEndMinute: 0
   },
+  marketplaceRenew: {
+    enabled: false,
+    windowStartHour: 8,
+    windowStartMinute: 0,
+    windowEndHour: 0,
+    windowEndMinute: 0,
+    scrollDaysMin: 7,
+    scrollDaysMax: 45
+  },
   // Limpeza ban/2FA/captcha: INDEPENDENTE do renovar/fechar/abrir.
   // Default off = zero regressão na migração (antes rodava acoplada ao abrir).
   terminalAccountCleanup: {
@@ -252,6 +261,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
+  const renew = (r.marketplaceRenew && typeof r.marketplaceRenew === "object") ? r.marketplaceRenew : {};
   const termClean = (r.terminalAccountCleanup && typeof r.terminalAccountCleanup === "object")
     ? r.terminalAccountCleanup
     : {};
@@ -352,8 +362,14 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const openWindowEndMinute = clamp(Math.floor(toNum(daily.openWindowEndMinute, DEFAULTS.dailyWindow.openWindowEndMinute)), 0, 59);
   const executionModeRaw = String(daily.executionMode || "").trim().toLowerCase();
   let executionMode = "always_on_24h";
-  if (executionModeRaw === "window_close_open") executionMode = "window_close_open";
-  else if (executionModeRaw === "renew_window_close_open") executionMode = "renew_window_close_open";
+  // Migração: renew_window_close_open vira window_close_open (renovação agora é config própria).
+  if (executionModeRaw === "window_close_open" || executionModeRaw === "renew_window_close_open") {
+    executionMode = "window_close_open";
+  }
+  const renewScrollDaysMinRaw = clamp(Math.floor(toNum(renew.scrollDaysMin, DEFAULTS.marketplaceRenew.scrollDaysMin)), 1, 120);
+  const renewScrollDaysMaxRaw = clamp(Math.floor(toNum(renew.scrollDaysMax, DEFAULTS.marketplaceRenew.scrollDaysMax)), 1, 120);
+  const renewScrollDaysMin = Math.min(renewScrollDaysMinRaw, renewScrollDaysMaxRaw);
+  const renewScrollDaysMax = Math.max(renewScrollDaysMinRaw, renewScrollDaysMaxRaw);
 
   const normalized = {
     version: CONFIG_VERSION,
@@ -422,7 +438,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       modemPassword
     },
     dailyWindow: {
-      enabled: daily.enabled === true || executionMode === "window_close_open" || executionMode === "renew_window_close_open",
+      enabled: daily.enabled === true || executionMode === "window_close_open",
       executionMode,
       closeWindowStartHour,
       closeWindowStartMinute,
@@ -432,6 +448,27 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       openWindowStartMinute,
       openWindowEndHour,
       openWindowEndMinute
+    },
+    marketplaceRenew: {
+      enabled: renew.enabled === true,
+      windowStartHour: clamp(Math.floor(toNum(
+        renew.windowStartHour,
+        DEFAULTS.marketplaceRenew.windowStartHour
+      )), 0, 23),
+      windowStartMinute: clamp(Math.floor(toNum(
+        renew.windowStartMinute,
+        DEFAULTS.marketplaceRenew.windowStartMinute
+      )), 0, 59),
+      windowEndHour: clamp(Math.floor(toNum(
+        renew.windowEndHour,
+        DEFAULTS.marketplaceRenew.windowEndHour
+      )), 0, 23),
+      windowEndMinute: clamp(Math.floor(toNum(
+        renew.windowEndMinute,
+        DEFAULTS.marketplaceRenew.windowEndMinute
+      )), 0, 59),
+      scrollDaysMin: renewScrollDaysMin,
+      scrollDaysMax: renewScrollDaysMax
     },
     terminalAccountCleanup: {
       enabled: termClean.enabled === true,
@@ -470,10 +507,11 @@ function validateServerConfigPayload(payload) {
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
   const daily = (p.dailyWindow && typeof p.dailyWindow === "object") ? p.dailyWindow : null;
+  const renew = (p.marketplaceRenew && typeof p.marketplaceRenew === "object") ? p.marketplaceRenew : null;
   const termClean = (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === "object")
     ? p.terminalAccountCleanup
     : null;
-  if (!cap && !robe && !mem && !net && !daily && !termClean) {
+  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -596,6 +634,7 @@ function validateServerConfigPayload(payload) {
     }
     if (daily.executionMode !== undefined) {
       const mode = String(daily.executionMode || "").trim().toLowerCase();
+      // renew_window_close_open: legado aceito só para migrar → window_close_open (sem fused renew).
       if (!["always_on_24h", "window_close_open", "renew_window_close_open"].includes(mode)) {
         errors.push("dailyWindow.executionMode_invalido");
       }
@@ -610,6 +649,25 @@ function validateServerConfigPayload(payload) {
       if (daily[f] !== undefined) {
         const n = toNum(daily[f], NaN);
         if (!Number.isFinite(n)) errors.push(`dailyWindow.${f}_invalido`);
+      }
+    }
+  }
+  if (renew) {
+    if (renew.enabled !== undefined && typeof renew.enabled !== "boolean") {
+      errors.push("marketplaceRenew.enabled_invalido");
+    }
+    const intFields = [
+      "windowStartHour",
+      "windowStartMinute",
+      "windowEndHour",
+      "windowEndMinute",
+      "scrollDaysMin",
+      "scrollDaysMax"
+    ];
+    for (const f of intFields) {
+      if (renew[f] !== undefined) {
+        const n = toNum(renew[f], NaN);
+        if (!Number.isFinite(n)) errors.push(`marketplaceRenew.${f}_invalido`);
       }
     }
   }
@@ -637,6 +695,11 @@ function validateServerConfigPayload(payload) {
     memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) },
     networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) },
     dailyWindow: { ...DEFAULTS.dailyWindow, ...((readServerConfigRaw() || {}).dailyWindow || {}), ...(daily || {}) },
+    marketplaceRenew: {
+      ...DEFAULTS.marketplaceRenew,
+      ...((readServerConfigRaw() || {}).marketplaceRenew || {}),
+      ...(renew || {})
+    },
     terminalAccountCleanup: {
       ...DEFAULTS.terminalAccountCleanup,
       ...((readServerConfigRaw() || {}).terminalAccountCleanup || {}),
@@ -658,6 +721,18 @@ function validateServerConfigPayload(payload) {
   }
   if (openDur < 1 || openDur > 720) {
     return { ok: false, error: "validation_failed", details: ["dailyWindow.open_window_invalida"] };
+  }
+  const renewStart = hmToMin(
+    normalized.marketplaceRenew.windowStartHour,
+    normalized.marketplaceRenew.windowStartMinute
+  );
+  const renewEnd = hmToMin(
+    normalized.marketplaceRenew.windowEndHour,
+    normalized.marketplaceRenew.windowEndMinute
+  );
+  const renewDur = windowDurationMinutes(renewStart, renewEnd);
+  if (renewDur < 1 || renewDur >= 1440) {
+    return { ok: false, error: "validation_failed", details: ["marketplaceRenew.window_invalida"] };
   }
   const tcStart = hmToMin(
     normalized.terminalAccountCleanup.windowStartHour,
@@ -737,6 +812,15 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       openWindowStartMinute: v.normalized.dailyWindow.openWindowStartMinute,
       openWindowEndHour: v.normalized.dailyWindow.openWindowEndHour,
       openWindowEndMinute: v.normalized.dailyWindow.openWindowEndMinute
+    },
+    marketplaceRenew: {
+      enabled: v.normalized.marketplaceRenew.enabled === true,
+      windowStartHour: v.normalized.marketplaceRenew.windowStartHour,
+      windowStartMinute: v.normalized.marketplaceRenew.windowStartMinute,
+      windowEndHour: v.normalized.marketplaceRenew.windowEndHour,
+      windowEndMinute: v.normalized.marketplaceRenew.windowEndMinute,
+      scrollDaysMin: v.normalized.marketplaceRenew.scrollDaysMin,
+      scrollDaysMax: v.normalized.marketplaceRenew.scrollDaysMax
     },
     terminalAccountCleanup: {
       enabled: v.normalized.terminalAccountCleanup.enabled === true,

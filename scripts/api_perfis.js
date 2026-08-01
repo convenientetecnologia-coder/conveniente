@@ -38,8 +38,6 @@ const serverConfig = require('./serverConfig.js');
 const terminalAccountCleanupScheduler = require('./terminalAccountCleanupScheduler.js');
 const networkRotation = require('./networkRotation.js');
 
-const renewMetrics = require('./renewMetrics.js');
-
 module.exports = (app, workerClient, fileStore) => {
   const normalizeVirtusEngine = (v) => {
     const s = String(v || '').trim().toLowerCase();
@@ -67,7 +65,22 @@ module.exports = (app, workerClient, fileStore) => {
       (p.robe && typeof p.robe === 'object') ||
       (p.memory && typeof p.memory === 'object') ||
       (p.networkRotation && typeof p.networkRotation === 'object') ||
-      (p.dailyWindow && typeof p.dailyWindow === 'object')
+      (p.dailyWindow && typeof p.dailyWindow === 'object') ||
+      (p.marketplaceRenew && typeof p.marketplaceRenew === 'object') ||
+      (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === 'object')
+    );
+  };
+  const marketplaceRenewConfigChanged = (prev, next) => {
+    const a = (prev && typeof prev === 'object') ? prev : {};
+    const b = (next && typeof next === 'object') ? next : {};
+    return (
+      (!!a.enabled) !== (!!b.enabled) ||
+      Number(a.windowStartHour || 0) !== Number(b.windowStartHour || 0) ||
+      Number(a.windowStartMinute || 0) !== Number(b.windowStartMinute || 0) ||
+      Number(a.windowEndHour || 0) !== Number(b.windowEndHour || 0) ||
+      Number(a.windowEndMinute || 0) !== Number(b.windowEndMinute || 0) ||
+      Number(a.scrollDaysMin || 0) !== Number(b.scrollDaysMin || 0) ||
+      Number(a.scrollDaysMax || 0) !== Number(b.scrollDaysMax || 0)
     );
   };
   const extractRequestedVirtusEngine = (payload) => {
@@ -175,6 +188,7 @@ module.exports = (app, workerClient, fileStore) => {
       const requestedVirtusEngine = extractRequestedVirtusEngine(payload);
       const previousVirtusEngine = readDesiredVirtusEngine();
       let engineChanged = false;
+      let renewReplanResult = null;
       const hasConfigFields = hasServerConfigFields(payload);
       try {
         provisionAudit.append({
@@ -188,14 +202,11 @@ module.exports = (app, workerClient, fileStore) => {
         });
       } catch {}
       if (hasConfigFields) {
-        const previousTc = (() => {
-          try {
-            const prev = serverConfig.readServerConfigEffective({});
-            return (prev && prev.terminalAccountCleanup) ? prev.terminalAccountCleanup : null;
-          } catch {
-            return null;
-          }
+        const previousCfg = (() => {
+          try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
         })();
+        const previousTc = (previousCfg && previousCfg.terminalAccountCleanup) ? previousCfg.terminalAccountCleanup : null;
+        const previousRenew = (previousCfg && previousCfg.marketplaceRenew) ? previousCfg.marketplaceRenew : null;
         const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
         if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
         try {
@@ -218,6 +229,45 @@ module.exports = (app, workerClient, fileStore) => {
           try {
             logger.warn('[SERVER_CONFIG] falha ao resetar claim limpeza ban/captcha', {
               error: (eReset && eReset.message) || String(eReset)
+            });
+          } catch {}
+        }
+        try {
+          const nextRenew = (wr.saved && wr.saved.marketplaceRenew) ? wr.saved.marketplaceRenew : null;
+          if (nextRenew && marketplaceRenewConfigChanged(previousRenew, nextRenew)) {
+            if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
+              try {
+                renewReplanResult = await workerClient.sendWorkerCommand('renew-replan-all', {
+                  reason: 'ui_server_config_save',
+                  operator
+                }, { timeoutMs: 180000 });
+              } catch (eReplan) {
+                renewReplanResult = {
+                  ok: false,
+                  error: 'renew_replan_all_failed',
+                  details: (eReplan && eReplan.message) ? eReplan.message : String(eReplan)
+                };
+              }
+            } else {
+              renewReplanResult = {
+                ok: false,
+                error: 'worker_client_unavailable'
+              };
+            }
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'marketplace_renew_config_changed',
+                by: operator,
+                previous: previousRenew || null,
+                next: nextRenew
+              });
+            } catch {}
+          }
+        } catch (eRenew) {
+          try {
+            logger.warn('[SERVER_CONFIG] falha ao replanejar renovação marketplace', {
+              error: (eRenew && eRenew.message) || String(eRenew)
             });
           } catch {}
         }
@@ -330,6 +380,7 @@ module.exports = (app, workerClient, fileStore) => {
           ok: true,
           config: effectiveWithVirtusEngine,
           applyNowResult: result || null,
+          renewReplanResult: renewReplanResult || null,
           robeV2WarmupResult: robeV2WarmupResult || null,
           engineRolloverResult: engineRolloverResult || null
         });
@@ -2075,257 +2126,21 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  // ====== Renovar classificados + fechar (modo diário renew_window_close_open) ======
+  // Renovação desacoplada: endpoint fused renew-then-close removido.
+  // Use marketplaceRenew (config) + pós-publish Robe / overlay manual.
   app.post('/api/perfis/renew-then-close', async (req, res) => {
-    const lockOwner = `renew_then_close:${Date.now()}`;
-    const by = String(req.headers && (req.headers['x-operator'] || req.headers['X-Operator']) || 'daily_window_scheduler');
     try {
-      try {
-        provisionAudit.append({
-          event: 'renew_then_close_api_called',
-          by,
-          lockOwner,
-          ip: (req && (req.ip || (req.socket && req.socket.remoteAddress))) ? String(req.ip || req.socket.remoteAddress) : null
-        });
-      } catch {}
-
-      try {
-        // NÃO force-release: isso era o buraco que permitia 2º/3º ciclo atropelar o 1º
-        // e re-zerar renovados no meio da madrugada (forense 31/07).
-        // Lock morto (pid morto / TTL) já é limpo por provisionLock.get().
-        const lk = provisionLock.tryAcquire({
-          owner: lockOwner,
-          ttlMs: 4 * 60 * 60 * 1000,
-          meta: { kind: 'renew_then_close', by: String(by || '').slice(0, 120) }
-        });
-        if (!lk || !lk.ok) {
-          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
-          const curKind = lk && lk.lock && lk.lock.meta && lk.lock.meta.kind
-            ? String(lk.lock.meta.kind)
-            : '';
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'renew_then_close_lock_busy',
-              by,
-              lockOwner,
-              busyOwner: curOwner || null,
-              busyKind: curKind || null
-            });
-          } catch {}
-          return res.json({
-            ok: false,
-            error: `renew_then_close_lock_busy${curOwner ? ` owner=${curOwner}` : ''}`
-          });
-        }
-      } catch (e) {
-        return res.json({ ok: false, error: `renew_then_close_lock_error ${(e && e.message) || String(e)}` });
-      }
-
-      opsState.begin('renew_then_close', { total: 0, done: 0, ok: 0, fail: 0, current: 'reset_renovados' });
-
-      // 0a) ZERA renovados/qtd deste servidor ANTES de começar a renovar (ciclo limpo).
-      let resetRenovados = null;
-      try {
-        resetRenovados = await renewMetrics.resetAllRenovadosFlags({
-          fileStore,
-          by: String(by || 'renew_then_close').slice(0, 120)
-        });
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'renew_then_close_renovados_reset',
-            by,
-            lockOwner,
-            ok: !!(resetRenovados && resetRenovados.ok),
-            cleared: Number(resetRenovados && resetRenovados.cleared || 0) || 0,
-            failed: Number(resetRenovados && resetRenovados.failed || 0) || 0,
-            total: Number(resetRenovados && resetRenovados.total || 0) || 0,
-            errors: Array.isArray(resetRenovados && resetRenovados.errors) ? resetRenovados.errors.slice(0, 8) : []
-          });
-        } catch {}
-      } catch (e) {
-        resetRenovados = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'renew_then_close_renovados_reset_failed',
-            by,
-            lockOwner,
-            error: String((e && e.message) || e).slice(0, 180)
-          });
-        } catch {}
-      }
-
-      opsState.update('renew_then_close', { current: 'renew_shard' });
-
-      // 0b) ANTES do shard: desliga autopilot / open-all (igual close_all).
-      // Sem isso o nurse faz desired_enforce_active e REABRE cada browser que o renew acabou de fechar.
-      // NÃO zera active de todos aqui: browsers ainda abertos precisam renovar (shard usa controllers).
-      try {
-        await fileStore.withDesiredFileLockUpdate((desired) => {
-          desired.perfis = desired.perfis || {};
-          if (desired._openAll && desired._openAll.active === true) {
-            desired._openAll = {
-              ...(desired._openAll || {}),
-              active: false,
-              cancelledAt: Date.now(),
-              cancelledReason: 'renew_then_close_begin'
-            };
-          }
-          desired._autoOpen = desired._autoOpen || {};
-          desired._autoOpen.enabled = false;
-          desired._autoOpen.changedAt = Date.now();
-          desired._autoOpen.changedBy = String(by || 'renew_then_close').slice(0, 120);
-          return desired;
-        });
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'renew_then_close_autopilot_off_before_shard',
-            by,
-            lockOwner
-          });
-        } catch {}
-      } catch (e) {
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'renew_then_close_autopilot_off_failed',
-            by,
-            error: (e && e.message) ? String(e.message).slice(0, 180) : String(e)
-          });
-        } catch {}
-      }
-
-      // 1) Broadcast: cada worker renova (1 conta por vez) e fecha após renovar.
-      let shardResult = null;
-      try {
-        shardResult = await workerClient.sendWorkerCommand(
-          'renew-listings-shard',
-          { closeAfter: true },
-          { timeoutMs: 4 * 60 * 60 * 1000 }
-        );
-      } catch (e) {
-        shardResult = { ok: false, error: (e && e.message) || String(e) };
-      }
-
-      const renewedOk = Number(shardResult && shardResult.renewedOk || 0) || 0;
-      const renewedFail = Number(shardResult && shardResult.renewedFail || 0) || 0;
-      const renewedNone = Number(shardResult && shardResult.renewedNone || 0) || 0;
-      const skipped = Number(shardResult && shardResult.skipped || 0) || 0;
-
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'renew_then_close_shard_result',
-          by,
-          lockOwner,
-          ok: !!(shardResult && shardResult.ok !== false),
-          renewedOk,
-          renewedFail,
-          renewedNone,
-          skipped,
-          error: shardResult && shardResult.error ? String(shardResult.error).slice(0, 180) : null
-        });
-      } catch {}
-
-      // 2) Close-all residual (desired limpo + browsers remanescentes / skipped humano).
-      opsState.update('renew_then_close', { current: 'close_all' });
-      let closeOk = 0;
-      let closeFail = 0;
-      const perfisArr = fileStore.loadPerfisJson() || [];
-      await fileStore.withDesiredFileLockUpdate(desired => {
-        desired.perfis = desired.perfis || {};
-        if (desired._openAll && desired._openAll.active === true) {
-          desired._openAll = {
-            ...(desired._openAll || {}),
-            active: false,
-            cancelledAt: Date.now(),
-            cancelledReason: 'renew_then_close'
-          };
-        }
-        desired._autoOpen = desired._autoOpen || {};
-        desired._autoOpen.enabled = false;
-        desired._autoOpen.changedAt = Date.now();
-        desired._autoOpen.changedBy = String(by || 'renew_then_close').slice(0, 120);
-        for (const p of perfisArr) {
-          if (!p || !p.nome) continue;
-          const nome = p.nome;
-          desired.perfis[nome] = {
-            ...(desired.perfis[nome] || {}),
-            active: false,
-            virtus: 'off',
-            humanHold: false
-          };
-        }
-        return desired;
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'renew_then_close_removed',
+        by: String(req.headers && (req.headers['x-operator'] || req.headers['X-Operator']) || 'unknown').slice(0, 120)
       });
-
-      for (const p of perfisArr) {
-        const nome = p && p.nome;
-        if (!nome) continue;
-        opsState.update('renew_then_close', { current: nome });
-        let okDeactivate = false;
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          try {
-            const r = await workerClient.sendWorkerCommand(
-              'deactivate',
-              { nome, reason: 'renew_then_close_final' },
-              { timeoutMs: 90000 }
-            );
-            okDeactivate = !!(r && r.ok);
-            if (okDeactivate) break;
-          } catch {}
-          await new Promise(r => setTimeout(r, 800));
-        }
-        if (okDeactivate) closeOk++; else closeFail++;
-        await new Promise(r => setTimeout(r, 300));
-      }
-
-      const ok =
-        !!(shardResult && shardResult.ok !== false) &&
-        (renewedFail === 0 || (renewedOk + renewedNone + skipped) > 0);
-      opsState.finish('renew_then_close', {
-        success: ok,
-        renewedOk,
-        renewedFail,
-        renewedNone,
-        skipped,
-        closedOk: closeOk,
-        closedFail: closeFail,
-        current: null
-      });
-      return res.json({
-        ok,
-        renewedOk,
-        renewedFail,
-        renewedNone,
-        skipped,
-        closedOk: closeOk,
-        closedFail: closeFail,
-        renovadosReset: resetRenovados && typeof resetRenovados === 'object'
-          ? {
-              ok: !!resetRenovados.ok,
-              cleared: Number(resetRenovados.cleared || 0) || 0,
-              failed: Number(resetRenovados.failed || 0) || 0,
-              total: Number(resetRenovados.total || 0) || 0
-            }
-          : null,
-        shard: shardResult && typeof shardResult === 'object'
-          ? {
-              total: Number(shardResult.total || 0) || 0,
-              results: Array.isArray(shardResult.results) ? shardResult.results.slice(0, 300) : []
-            }
-          : null,
-        error: ok ? null : ((shardResult && shardResult.error) ? String(shardResult.error) : 'renew_then_close_partial_fail')
-      });
-    } catch (e) {
-      try { opsState.finish('renew_then_close', { success: false, error: (e && e.message) || String(e), current: null }); } catch {}
-      return res.json({ ok: false, error: (e && e.message) || String(e) });
-    } finally {
-      try { provisionLock.release({ owner: lockOwner }); } catch {}
-    }
+    } catch {}
+    return res.status(410).json({
+      ok: false,
+      error: 'renew_then_close_removed',
+      message: 'Renovação foi desacoplada do fechar/abrir. Use marketplaceRenew no Config do Servidor.'
+    });
   });
 
   // ====== PATCH — trocar cidade do perfil (atômico + apply em runtime) ======

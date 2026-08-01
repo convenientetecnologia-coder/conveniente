@@ -1287,7 +1287,6 @@
           <label>Modo diário de operação</label>
           <select id="srvDailyMode">
             <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
-            <option value="renew_window_close_open">Renovar e fechar/abrir por janela aleatória</option>
             <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
           </select>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
@@ -1308,7 +1307,33 @@
               <input type="time" id="srvDailyOpenEndTime" />
             </label>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. No modo Renovar, na hora de fechar o sistema renova os classificados e só então fecha os navegadores. A limpeza de ban/captcha NÃO roda aqui — use a config abaixo.</div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. A renovação de classificados NÃO roda aqui — use a config Renovação abaixo.</div>
+        </div>
+        <div class="form-row">
+          <label>Renovação de classificados</label>
+          <select id="srvRenewEnabled">
+            <option value="0">Desativado</option>
+            <option value="1">Ativado</option>
+          </select>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Janela: início
+              <input type="time" id="srvRenewStartTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Janela: fim
+              <input type="time" id="srvRenewEndTime" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Dias scroll: mín
+              <input type="number" id="srvRenewScrollMin" min="1" max="120" step="1" />
+            </label>
+            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
+              Dias scroll: máx
+              <input type="number" id="srvRenewScrollMax" min="1" max="120" step="1" />
+            </label>
+          </div>
+          <div class="muted" style="margin-top:6px; font-size:12px;">Independente do fechar/abrir. Se Ativado: ao salvar, cada conta recebe 1 horário aleatório na janela e 1 quantidade de dias de scroll. Depois da postagem Robe (após o ID), se o horário já passou e ainda está Renovou - nao, renova e marca Renovou - sim. A janela pode atravessar a madrugada. Meia-noite (SP) zera o dia automaticamente. Se Desativado: não renova automaticamente e não mostra pills no card; o botão manual continua liberado para teste humano.</div>
         </div>
         <div class="form-row">
           <label>Excluir contas ban / captcha (e 2FA)</label>
@@ -1384,6 +1409,11 @@
       const dailyCloseEndTimeEl = box.querySelector('#srvDailyCloseEndTime');
       const dailyOpenStartTimeEl = box.querySelector('#srvDailyOpenStartTime');
       const dailyOpenEndTimeEl = box.querySelector('#srvDailyOpenEndTime');
+      const renewEnabledEl = box.querySelector('#srvRenewEnabled');
+      const renewStartTimeEl = box.querySelector('#srvRenewStartTime');
+      const renewEndTimeEl = box.querySelector('#srvRenewEndTime');
+      const renewScrollMinEl = box.querySelector('#srvRenewScrollMin');
+      const renewScrollMaxEl = box.querySelector('#srvRenewScrollMax');
       const terminalCleanupEnabledEl = box.querySelector('#srvTerminalCleanupEnabled');
       const terminalCleanupStartTimeEl = box.querySelector('#srvTerminalCleanupStartTime');
       const terminalCleanupEndTimeEl = box.querySelector('#srvTerminalCleanupEndTime');
@@ -1402,6 +1432,7 @@
       const closeBtn = box.querySelector('#srvCfgClose');
       const rotateNowBtn = box.querySelector('#srvRotateNow');
       const saveBtn = box.querySelector('#srvCfgSave');
+      let loadedServerConfig = null;
       let globalCitiesAll = [];
       let globalCitiesSelected = [];
 
@@ -1504,6 +1535,7 @@
       }
 
       const fillFromConfig = (cfg) => {
+        loadedServerConfig = (cfg && typeof cfg === 'object') ? cfg : {};
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         const mem = (cfg && cfg.memory) ? cfg.memory : {};
@@ -1517,9 +1549,12 @@
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
-          if (mode === 'renew_window_close_open') dailyModeEl.value = 'renew_window_close_open';
-          else if (mode === 'window_close_open' || daily.enabled === true) dailyModeEl.value = 'window_close_open';
-          else dailyModeEl.value = 'always_on_24h';
+          // renew_window_close_open foi removido: trata como fechar/abrir puro.
+          if (mode === 'window_close_open' || mode === 'renew_window_close_open') {
+            dailyModeEl.value = 'window_close_open';
+          } else {
+            dailyModeEl.value = 'always_on_24h';
+          }
         }
         if (dailyCloseStartTimeEl) {
           const hh = String(Number(daily.closeWindowStartHour || 1)).padStart(2, '0');
@@ -1541,6 +1576,20 @@
           const mm = String(Number(daily.openWindowEndMinute || 0)).padStart(2, '0');
           dailyOpenEndTimeEl.value = `${hh}:${mm}`;
         }
+        const renew = (cfg && cfg.marketplaceRenew) ? cfg.marketplaceRenew : {};
+        if (renewEnabledEl) renewEnabledEl.value = renew.enabled === true ? '1' : '0';
+        if (renewStartTimeEl) {
+          const hh = String(Number(renew.windowStartHour != null ? renew.windowStartHour : 8)).padStart(2, '0');
+          const mm = String(Number(renew.windowStartMinute != null ? renew.windowStartMinute : 0)).padStart(2, '0');
+          renewStartTimeEl.value = `${hh}:${mm}`;
+        }
+        if (renewEndTimeEl) {
+          const hh = String(Number(renew.windowEndHour != null ? renew.windowEndHour : 0)).padStart(2, '0');
+          const mm = String(Number(renew.windowEndMinute != null ? renew.windowEndMinute : 0)).padStart(2, '0');
+          renewEndTimeEl.value = `${hh}:${mm}`;
+        }
+        if (renewScrollMinEl) renewScrollMinEl.value = Number(renew.scrollDaysMin != null ? renew.scrollDaysMin : 7);
+        if (renewScrollMaxEl) renewScrollMaxEl.value = Number(renew.scrollDaysMax != null ? renew.scrollDaysMax : 45);
         const termClean = (cfg && cfg.terminalAccountCleanup) ? cfg.terminalAccountCleanup : {};
         if (terminalCleanupEnabledEl) {
           terminalCleanupEnabledEl.value = termClean.enabled === true ? '1' : '0';
@@ -1651,11 +1700,16 @@
           const netMax = Math.floor(Number((netRotateMaxEl && netRotateMaxEl.value) || 420));
           const netAttempts = Math.floor(Number((netRotateAttemptsEl && netRotateAttemptsEl.value) || 5));
           const dailyMode = String((dailyModeEl && dailyModeEl.value) || 'window_close_open').trim().toLowerCase();
-          const dailyEnabled = (dailyMode === 'window_close_open' || dailyMode === 'renew_window_close_open');
+          const dailyEnabled = (dailyMode === 'window_close_open');
           const dailyCloseStartRaw = String((dailyCloseStartTimeEl && dailyCloseStartTimeEl.value) || '').trim();
           const dailyCloseEndRaw = String((dailyCloseEndTimeEl && dailyCloseEndTimeEl.value) || '').trim();
           const dailyOpenStartRaw = String((dailyOpenStartTimeEl && dailyOpenStartTimeEl.value) || '').trim();
           const dailyOpenEndRaw = String((dailyOpenEndTimeEl && dailyOpenEndTimeEl.value) || '').trim();
+          const renewEnabled = String((renewEnabledEl && renewEnabledEl.value) || '0') === '1';
+          const renewStartRaw = String((renewStartTimeEl && renewStartTimeEl.value) || '').trim();
+          const renewEndRaw = String((renewEndTimeEl && renewEndTimeEl.value) || '').trim();
+          const renewScrollMin = Math.floor(Number((renewScrollMinEl && renewScrollMinEl.value) || 7));
+          const renewScrollMax = Math.floor(Number((renewScrollMaxEl && renewScrollMaxEl.value) || 45));
           const terminalCleanupEnabled = String((terminalCleanupEnabledEl && terminalCleanupEnabledEl.value) || '0') === '1';
           const terminalCleanupStartRaw = String((terminalCleanupStartTimeEl && terminalCleanupStartTimeEl.value) || '').trim();
           const terminalCleanupEndRaw = String((terminalCleanupEndTimeEl && terminalCleanupEndTimeEl.value) || '').trim();
@@ -1690,16 +1744,63 @@
             if (!Number.isFinite(h) || !Number.isFinite(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) return null;
             return { h, m: mm };
           };
+          const clampInt = (v, lo, hi, fallback) => {
+            const n = Math.floor(Number(v));
+            if (!Number.isFinite(n)) return fallback;
+            return Math.max(lo, Math.min(hi, n));
+          };
+          const savedRenewCfg = (() => {
+            const raw = (loadedServerConfig && loadedServerConfig.marketplaceRenew && typeof loadedServerConfig.marketplaceRenew === 'object')
+              ? loadedServerConfig.marketplaceRenew
+              : {};
+            const minRaw = clampInt(raw.scrollDaysMin, 1, 120, 7);
+            const maxRaw = clampInt(raw.scrollDaysMax, 1, 120, 45);
+            return {
+              windowStartHour: clampInt(raw.windowStartHour, 0, 23, 8),
+              windowStartMinute: clampInt(raw.windowStartMinute, 0, 59, 0),
+              windowEndHour: clampInt(raw.windowEndHour, 0, 23, 0),
+              windowEndMinute: clampInt(raw.windowEndMinute, 0, 59, 0),
+              scrollDaysMin: Math.min(minRaw, maxRaw),
+              scrollDaysMax: Math.max(minRaw, maxRaw)
+            };
+          })();
           const closeStartHm = parseHm(dailyCloseStartRaw);
           const closeEndHm = parseHm(dailyCloseEndRaw);
           const openStartHm = parseHm(dailyOpenStartRaw);
           const openEndHm = parseHm(dailyOpenEndRaw);
+          const renewStartHmInput = parseHm(renewStartRaw);
+          const renewEndHmInput = parseHm(renewEndRaw);
           const terminalCleanupStartHm = parseHm(terminalCleanupStartRaw);
           const terminalCleanupEndHm = parseHm(terminalCleanupEndRaw);
           if (!closeStartHm || !closeEndHm || !openStartHm || !openEndHm) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
               message: 'Defina horários válidos no formato HH:MM para início/fim das janelas de fechar e abrir.',
+              tone: 'bad'
+            });
+            return;
+          }
+          const renewRangeValid = (
+            Number.isFinite(renewScrollMin) &&
+            Number.isFinite(renewScrollMax) &&
+            renewScrollMin >= 1 &&
+            renewScrollMax >= 1 &&
+            renewScrollMin <= 120 &&
+            renewScrollMax <= 120 &&
+            renewScrollMax >= renewScrollMin
+          );
+          if (renewEnabled && (!renewStartHmInput || !renewEndHmInput)) {
+            await showSystemMessageModal({
+              title: 'Janela de renovação inválida',
+              message: 'Defina horários válidos (HH:MM) para início/fim da janela de renovação.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (renewEnabled && !renewRangeValid) {
+            await showSystemMessageModal({
+              title: 'Dias de scroll inválidos',
+              message: 'Use dias entre 1 e 120, com máximo maior ou igual ao mínimo.',
               tone: 'bad'
             });
             return;
@@ -1712,15 +1813,40 @@
             });
             return;
           }
+          const renewScrollMinEffective = renewRangeValid ? renewScrollMin : savedRenewCfg.scrollDaysMin;
+          const renewScrollMaxEffective = renewRangeValid ? renewScrollMax : savedRenewCfg.scrollDaysMax;
           const hmToMin = ({ h, m }) => (h * 60) + m;
           const windowDuration = (startMin, endMin) => (endMin > startMin) ? (endMin - startMin) : ((24 * 60 - startMin) + endMin);
+          const savedRenewStartHm = {
+            h: savedRenewCfg.windowStartHour,
+            m: savedRenewCfg.windowStartMinute
+          };
+          const savedRenewEndHm = {
+            h: savedRenewCfg.windowEndHour,
+            m: savedRenewCfg.windowEndMinute
+          };
+          const renewDraftStartHm = renewStartHmInput || savedRenewStartHm;
+          const renewDraftEndHm = renewEndHmInput || savedRenewEndHm;
+          const renewDraftDur = windowDuration(hmToMin(renewDraftStartHm), hmToMin(renewDraftEndHm));
+          const renewDraftWindowValid = renewDraftDur >= 1 && renewDraftDur < (24 * 60);
+          const renewStartHm = (!renewEnabled && !renewDraftWindowValid) ? savedRenewStartHm : renewDraftStartHm;
+          const renewEndHm = (!renewEnabled && !renewDraftWindowValid) ? savedRenewEndHm : renewDraftEndHm;
           const closeDur = windowDuration(hmToMin(closeStartHm), hmToMin(closeEndHm));
           const openDur = windowDuration(hmToMin(openStartHm), hmToMin(openEndHm));
+          const renewDur = windowDuration(hmToMin(renewStartHm), hmToMin(renewEndHm));
           const terminalCleanupDur = windowDuration(hmToMin(terminalCleanupStartHm), hmToMin(terminalCleanupEndHm));
           if (closeDur < 1 || closeDur > (12 * 60) || openDur < 1 || openDur > (12 * 60)) {
             await showSystemMessageModal({
               title: 'Janela diária inválida',
               message: 'Cada janela (fechar/abrir) deve ter duração entre 1 minuto e 12 horas.',
+              tone: 'bad'
+            });
+            return;
+          }
+          if (renewEnabled && !(renewDur >= 1 && renewDur < (24 * 60))) {
+            await showSystemMessageModal({
+              title: 'Janela de renovação inválida',
+              message: 'A janela de renovação precisa ter duração entre 1 minuto e 23h59. Pode cruzar a madrugada.',
               tone: 'bad'
             });
             return;
@@ -1779,9 +1905,7 @@
             },
             dailyWindow: {
               enabled: dailyEnabled,
-              executionMode: (dailyMode === 'renew_window_close_open')
-                ? 'renew_window_close_open'
-                : (dailyMode === 'window_close_open' ? 'window_close_open' : 'always_on_24h'),
+              executionMode: dailyMode === 'window_close_open' ? 'window_close_open' : 'always_on_24h',
               closeWindowStartHour: closeStartHm.h,
               closeWindowStartMinute: closeStartHm.m,
               closeWindowEndHour: closeEndHm.h,
@@ -1790,6 +1914,15 @@
               openWindowStartMinute: openStartHm.m,
               openWindowEndHour: openEndHm.h,
               openWindowEndMinute: openEndHm.m
+            },
+            marketplaceRenew: {
+              enabled: renewEnabled,
+              windowStartHour: renewStartHm.h,
+              windowStartMinute: renewStartHm.m,
+              windowEndHour: renewEndHm.h,
+              windowEndMinute: renewEndHm.m,
+              scrollDaysMin: renewScrollMinEffective,
+              scrollDaysMax: renewScrollMaxEffective
             },
             terminalAccountCleanup: {
               enabled: terminalCleanupEnabled,
@@ -1817,10 +1950,17 @@
           setBtnLoading(saveBtn, true, 'Salvando...');
           const r = await saveServerConfig(payload, { applyNow: false });
           fillFromConfig(r.config);
+          const renewReplan = r && r.renewReplanResult;
+          const renewReplanFailed = !!(renewReplan && renewReplan.ok === false);
+          const renewReplanMsg = renewReplan && renewReplan.ok === true
+            ? ` Renovação marketplace replanejada para ${Number(renewReplan.regenerated || 0)} conta(s).`
+            : (renewReplan && renewReplan.ok === false
+              ? ` Config salva, mas o replanejamento da renovação falhou: ${String(renewReplan.error || 'erro')}.`
+              : '');
           await showSystemMessageModal({
-            title: 'Configuração salva',
-            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.',
-            tone: 'good'
+            title: renewReplanFailed ? 'Configuração salva com alerta' : 'Configuração salva',
+            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + renewReplanMsg,
+            tone: renewReplanFailed ? 'bad' : 'good'
           });
           try { await reloadPerfis(); } catch {}
         } catch (e) {
@@ -2672,10 +2812,27 @@
           titleRow.append(buildPill('ID - nao', 'info'));
         }
 
-        // ------- Última renovação de classificados -------
-        {
-          const n = Math.floor(Number(p.renovadosLastCount || 0) || 0);
-          if (n > 0) titleRow.append(buildPill('Renovados - ' + n, 'good'));
+        // ------- Renovação Marketplace (só se config ativada) -------
+        if (p.marketplaceRenewEnabled === true) {
+          if (p.marketplaceRenewDoneToday === true) {
+            titleRow.append(buildPill('Renovou - sim', 'good'));
+          } else {
+            titleRow.append(buildPill('Renovou - nao', 'info'));
+          }
+          const dueLabel = String(p.marketplaceRenewDueLabel || '').trim();
+          if (dueLabel) {
+            if (p.marketplaceRenewDueReached === true) {
+              titleRow.append(buildPill('Renovação liberada', 'good'));
+            } else {
+              titleRow.append(buildPill('Renovação liberada após ' + dueLabel, 'info'));
+            }
+          }
+          const scrollDays = Math.floor(Number(p.marketplaceRenewScrollDays || 0) || 0);
+          if (scrollDays > 0) {
+            titleRow.append(buildPill('Scroll: ' + scrollDays + ' dia' + (scrollDays === 1 ? '' : 's'), 'info'));
+          }
+          const lastCount = Math.floor(Number(p.marketplaceRenewLastCount || 0) || 0);
+          if (lastCount > 0) titleRow.append(buildPill('Renovados - ' + lastCount, 'good'));
         }
 
         // ------- COOLDOWN (ADICIONAL) -------

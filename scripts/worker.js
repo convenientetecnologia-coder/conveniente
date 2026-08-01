@@ -234,6 +234,7 @@ const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
+const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
 const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const gptFallback = require('./gptFallback.js');
@@ -330,10 +331,12 @@ async function persistRenovadosLastCount(nome, count) {
 
 /**
  * Executa renovação em uma conta aberta.
- * mode=manual: não fecha browser, mantém humanHold.
- * mode=auto: arma hold só na page (anti-enforcer), renovar, depois caller fecha.
+ * NUNCA fecha o browser (renovação desacoplada do fechar/abrir).
+ * mode=manual: overlay humano; mode=auto: pós-publish / legado sem close.
  */
-async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = false } = {}) {
+async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = false, scrollStopAgeDays = null } = {}) {
+  // closeAfter ignorado de propósito: zero fused renew+close.
+  void closeAfter;
   const n = String(nome || '').trim();
   const ctrl = controllers.get(n);
   if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
@@ -343,6 +346,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     return { ok: false, error: 'renew_already_in_flight', renewedCount: 0 };
   }
 
+  let autoDecision = null;
   // Auto: não atropelar humano invocado.
   if (mode === 'auto') {
     try {
@@ -354,6 +358,45 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
         return { ok: true, skipped: true, reason: 'human_hold', renewedCount: 0 };
       }
     } catch {}
+    try {
+      autoDecision = await marketplaceRenewPlan.shouldAutoRenewAfterPublish(n);
+    } catch (e) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'auto_gate_error',
+        error: (e && e.message) ? String(e.message) : String(e),
+        renewedCount: 0
+      };
+    }
+    if (!autoDecision || autoDecision.shouldRun !== true) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: (autoDecision && autoDecision.reason) ? String(autoDecision.reason) : 'not_due',
+        renewedCount: 0
+      };
+    }
+  }
+
+  let resolvedScrollDays = null;
+  try {
+    if (scrollStopAgeDays != null && Number.isFinite(Number(scrollStopAgeDays))) {
+      resolvedScrollDays = Math.max(1, Math.min(120, Math.floor(Number(scrollStopAgeDays))));
+    } else if (mode === 'manual') {
+      // Manual: sempre liberado; scroll randomizado na faixa da config (mesmo se renovação auto estiver off).
+      resolvedScrollDays = Number(marketplaceRenewPlan.pickManualScrollDays().scrollDays || 0) || null;
+    } else if (mode === 'auto') {
+      // Auto via worker: usa o mesmo gate/plano oficial do pós-publish.
+      const sd = Number(
+        (autoDecision && autoDecision.scrollDays != null)
+          ? autoDecision.scrollDays
+          : 0
+      ) || 0;
+      if (sd > 0) resolvedScrollDays = Math.max(1, Math.min(120, Math.floor(sd)));
+    }
+  } catch {
+    resolvedScrollDays = null;
   }
 
   // Exclusão mútua com Robe: espera ciclo em voo (mesma mainPage).
@@ -375,6 +418,12 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       if (mode === 'auto') {
         return { ok: true, skipped: true, reason: 'robe_in_flight', renewedCount: 0 };
       }
+      return {
+        ok: false,
+        error: 'Robe ainda está executando esta conta. Aguarde terminar para renovar manualmente.',
+        reason: 'robe_in_flight',
+        renewedCount: 0
+      };
     }
   } catch {}
 
@@ -413,6 +462,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       nome: n,
       mode,
       deadlineAt,
+      scrollStopAgeDays: resolvedScrollDays,
       isAborted: () => {
         try {
           const c = controllers.get(n);
@@ -456,48 +506,15 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     if (r && r.ok && count > 0) {
       try { await persistRenovadosLastCount(n, count); } catch {}
     }
-
-    let closedOk = false;
-    if (closeAfter && mode === 'auto') {
-      // Grace final: mesmo após hold do motor, dá tempo da rede FB com host carregado.
+    // Manual/auto concluído com sucesso: marca Renovou - sim do dia (mesmo none_renewable).
+    // Manual sempre autorizado mesmo se já estava sim; markDoneToday só reforça o dia.
+    if (r && r.ok === true) {
       try {
-        const graceMs = 12000 + Math.floor(Math.random() * 8001);
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'renew_then_close_grace_before_deactivate',
-            nome: n,
-            graceMs,
-            renewOk: !!(r && r.ok),
-            renewedCount: count
-          });
-        } catch {}
-        try { logger.info('[RENEW] grace_before_close', { nome: n, graceMs, renewOk: !!(r && r.ok), count }); } catch {}
-        await new Promise((res) => setTimeout(res, graceMs));
+        await marketplaceRenewPlan.markDoneToday(n, {
+          count,
+          source: mode === 'manual' ? 'human_overlay_manual' : 'worker_auto'
+        });
       } catch {}
-      try {
-        const dr = await handlers.deactivate({ nome: n, reason: 'renew_then_close' });
-        closedOk = !!(dr && dr.ok);
-        if (!closedOk) {
-          return {
-            ok: !!(r && r.ok),
-            renewedCount: count,
-            reason: r && r.reason,
-            error: r && r.error,
-            closeError: (dr && dr.error) ? String(dr.error) : 'deactivate_failed',
-            closedOk: false
-          };
-        }
-      } catch (e) {
-        return {
-          ok: !!(r && r.ok),
-          renewedCount: count,
-          reason: r && r.reason,
-          error: r && r.error,
-          closeError: (e && e.message) ? String(e.message) : String(e),
-          closedOk: false
-        };
-      }
     }
 
     return {
@@ -506,14 +523,14 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       reason: r && r.reason ? String(r.reason) : null,
       error: r && r.error ? String(r.error) : null,
       skipped: false,
-      closedOk: closeAfter && mode === 'auto' ? closedOk : undefined
+      scrollStopAgeDays: resolvedScrollDays
     };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e), renewedCount: 0 };
   } finally {
     try { ctrl.renewInFlight = false; } catch {}
     // Manual: mantém hold do operador.
-    // Auto: só limpa hold se browser já fechou OU deactivate ok; se browser vivo e close falhou, mantém anti-yank.
+    // Auto: limpa hold ao terminar (browser permanece aberto — close é do dailyWindow).
     if (mode === 'auto' && armedHold) {
       try {
         if (ctrl.humanControl === true) {
@@ -522,17 +539,8 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
           const stillLive = !!(ctrl.browser && ctrl.browser.isConnected && ctrl.browser.isConnected());
           if (!stillLive) {
             await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done_closed' });
-          } else if (!(closeAfter === true)) {
-            await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done_keep_open' });
           } else {
-            // closeAfter pediu fechar mas browser ainda vivo: mantém hold até close-all residual.
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'renew_auto_hold_kept_browser_alive',
-                nome: n
-              });
-            } catch {}
+            await syncDeltaHumanHoldBrowserGuard(n, false, { reason: 'renew_auto_done_keep_open' });
           }
         }
       } catch {}
@@ -12852,7 +12860,7 @@ const handlers = {
     });
   },
 
-  /** Renovar classificados (1 conta). Manual = overlay; auto = nightly. */
+  /** Renovar classificados (1 conta). Manual = overlay; auto = legado (não usado pelo diário). */
   async ['renew-listings']({ nome, mode, closeAfter }) {
     const n = String(nome || '').trim();
     if (!n) return { ok: false, error: 'nome_ausente', renewedCount: 0 };
@@ -12874,7 +12882,18 @@ const handlers = {
     if (ctrlEarly) ctrlEarly.renewGate = true;
     try {
       return await lockProfileAction(n, async () => {
-        const m = String(mode || 'manual').trim().toLowerCase() === 'auto' ? 'auto' : 'manual';
+        const requestedMode = String(mode || 'manual').trim().toLowerCase();
+        if (requestedMode === 'auto') {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'renew_listings_handler_rejected_auto_mode',
+              nome: n
+            });
+          } catch {}
+          return { ok: false, error: 'renew_auto_handler_removed', renewedCount: 0 };
+        }
+        const m = 'manual';
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -12889,7 +12908,7 @@ const handlers = {
         } catch {}
         const r = await runRenewListingsForProfile(n, {
           mode: m,
-          closeAfter: m === 'auto' && closeAfter === true
+          closeAfter: false
         });
         try {
           logger.info('[RENEW][handler] done', {
@@ -12926,82 +12945,27 @@ const handlers = {
   },
 
   /**
-   * Processa renovação de TODAS as contas abertas neste shard (1 por vez).
-   * Cluster: master faz broadcast; single-worker: 1 chamada.
+   * REMOVIDO: renovação fused com fechar/abrir.
+   * Renovação agora é marketplaceRenew (config própria) + pós-publish Robe / overlay manual.
    */
-  async ['renew-listings-shard']({ closeAfter } = {}) {
-    const doClose = closeAfter !== false;
-    const names = [];
-    try {
-      for (const [nome, ctrl] of controllers.entries()) {
-        if (!nome) continue;
-        if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
-        names.push(String(nome));
-      }
-    } catch {}
-    names.sort();
-    const results = [];
-    let renewedOk = 0;
-    let renewedFail = 0;
-    let renewedNone = 0;
-    let skipped = 0;
+  async ['renew-listings-shard']() {
     try {
       provisionAudit.append({
         ts: Date.now(),
-        event: 'renew_listings_shard_begin',
-        total: names.length,
-        names: names.slice(0, 200),
-        closeAfter: doClose,
-        pid: process.pid
-      });
-    } catch {}
-
-    for (const nome of names) {
-      try {
-        const r = await lockProfileAction(nome, async () => {
-          return runRenewListingsForProfile(nome, { mode: 'auto', closeAfter: doClose });
-        });
-        results.push({ nome, ...(r && typeof r === 'object' ? r : { ok: false, error: 'no_result' }) });
-        if (r && r.skipped) skipped += 1;
-        else if (r && r.ok && Number(r.renewedCount || 0) > 0) renewedOk += 1;
-        else if (r && r.ok && (r.reason === 'none_renewable' || Number(r.renewedCount || 0) === 0)) renewedNone += 1;
-        else renewedFail += 1;
-      } catch (e) {
-        renewedFail += 1;
-        results.push({
-          nome,
-          ok: false,
-          error: (e && e.message) ? String(e.message).slice(0, 180) : String(e)
-        });
-      }
-      // Respiro entre contas (FB / Chrome)
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-
-    try { await snapshotStatusAndWrite(); } catch {}
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'renew_listings_shard_done',
-        total: names.length,
-        renewedOk,
-        renewedFail,
-        renewedNone,
-        skipped,
+        event: 'renew_listings_shard_removed',
         pid: process.pid
       });
     } catch {}
     return {
-      ok: renewedFail === 0 || names.length === 0,
-      total: names.length,
-      renewedOk,
-      renewedFail,
-      renewedNone,
-      skipped,
-      results,
-      error: renewedFail > 0 && renewedOk === 0 && renewedNone === 0 && skipped === 0
-        ? 'renew_shard_all_failed'
-        : null
+      ok: false,
+      error: 'renew_listings_shard_removed',
+      message: 'Renovação desacoplada do fechar/abrir. Use marketplaceRenew + pós-publish Robe.',
+      total: 0,
+      renewedOk: 0,
+      renewedFail: 0,
+      renewedNone: 0,
+      skipped: 0,
+      results: []
     };
   },
 
@@ -13985,15 +13949,31 @@ const handlers = {
         ? String(man.accountFlags.robeIdDocDoneDay)
         : null;
       const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
-      const renovadosLastCount = (() => {
-        try {
-          const n = Number(man && man.accountFlags && man.accountFlags.renovadosLastCount);
-          return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
-        } catch { return 0; }
-      })();
       const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
         ? Number(man.accountFlags.renovadosAt) || null
         : null;
+      const marketplaceRenewStatus = await (async () => {
+        try {
+          return await marketplaceRenewPlan.getStatusSnapshot(nome, { nowMs: Date.now(), manifestHint: man });
+        } catch {
+          return {
+            marketplaceRenewEnabled: false,
+            marketplaceRenewDueLabel: null,
+            marketplaceRenewDueMinute: null,
+            marketplaceRenewDueReached: false,
+            marketplaceRenewScrollDays: null,
+            marketplaceRenewPlanDate: null,
+            marketplaceRenewDoneDay: null,
+            marketplaceRenewDoneAt: null,
+            marketplaceRenewDoneToday: false,
+            marketplaceRenewLastCount: 0
+          };
+        }
+      })();
+      const effectiveRenovadosLastCount = marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday === true
+        ? Math.max(0, Number(marketplaceRenewStatus.marketplaceRenewLastCount || 0) || 0)
+        : 0;
+      const effectiveRenovadosAt = effectiveRenovadosLastCount > 0 ? renovadosAt : null;
       const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
       const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
       const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -14114,8 +14094,18 @@ const handlers = {
         identityNextCheckAt,
         robeIdDocDoneDay,
         robeIdDocDoneToday,
-        renovadosLastCount,
-        renovadosAt,
+        renovadosLastCount: effectiveRenovadosLastCount,
+        renovadosAt: effectiveRenovadosAt,
+        marketplaceRenewEnabled: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewEnabled),
+        marketplaceRenewDueLabel: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueLabel : null,
+        marketplaceRenewDueMinute: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueMinute : null,
+        marketplaceRenewDueReached: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDueReached),
+        marketplaceRenewScrollDays: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewScrollDays : null,
+        marketplaceRenewPlanDate: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewPlanDate : null,
+        marketplaceRenewDoneDay: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneDay : null,
+        marketplaceRenewDoneAt: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneAt : null,
+        marketplaceRenewDoneToday: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday),
+        marketplaceRenewLastCount: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewLastCount : 0,
         appealSubmitted,
         appealSubmittedAt,
         appealNextCheckAt,
@@ -14278,6 +14268,32 @@ const handlers = {
       } catch {}
       try { await snapshotStatusAndWrite(); } catch {}
       return { ok: true, totalProfiles: nomes.length, manifestsUpdated, plansRegenerated, sessionsCleared, cityCyclesCleared };
+    } catch (e) {
+      return { ok: false, error: e && e.message || String(e) };
+    }
+  },
+
+  async ['renew-replan-all']({ reason, operator } = {}) {
+    try {
+      const r = await marketplaceRenewPlan.replanAllProfiles({
+        nowMs: Date.now(),
+        fileStore
+      });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'marketplace_renew_replan_all',
+          ok: !!(r && r.ok),
+          enabled: !!(r && r.enabled),
+          total: Number(r && r.total || 0) || 0,
+          regenerated: Number(r && r.regenerated || 0) || 0,
+          failed: Number(r && r.failed || 0) || 0,
+          reason: String(reason || '').slice(0, 120) || null,
+          operator: String(operator || '').slice(0, 120) || null
+        });
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return r && typeof r === 'object' ? r : { ok: false, error: 'replan_failed' };
     } catch (e) {
       return { ok: false, error: e && e.message || String(e) };
     }
@@ -14546,15 +14562,31 @@ const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDo
   ? String(man.accountFlags.robeIdDocDoneDay)
   : null;
 const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
-const renovadosLastCount = (() => {
-  try {
-    const n = Number(man && man.accountFlags && man.accountFlags.renovadosLastCount);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
-  } catch { return 0; }
-})();
 const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
   ? Number(man.accountFlags.renovadosAt) || null
   : null;
+const marketplaceRenewStatus = await (async () => {
+  try {
+    return await marketplaceRenewPlan.getStatusSnapshot(nome, { nowMs: Date.now(), manifestHint: man });
+  } catch {
+    return {
+      marketplaceRenewEnabled: false,
+      marketplaceRenewDueLabel: null,
+      marketplaceRenewDueMinute: null,
+      marketplaceRenewDueReached: false,
+      marketplaceRenewScrollDays: null,
+      marketplaceRenewPlanDate: null,
+      marketplaceRenewDoneDay: null,
+      marketplaceRenewDoneAt: null,
+      marketplaceRenewDoneToday: false,
+      marketplaceRenewLastCount: 0
+    };
+  }
+})();
+const effectiveRenovadosLastCount = marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday === true
+  ? Math.max(0, Number(marketplaceRenewStatus.marketplaceRenewLastCount || 0) || 0)
+  : 0;
+const effectiveRenovadosAt = effectiveRenovadosLastCount > 0 ? renovadosAt : null;
 const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
@@ -14669,8 +14701,18 @@ perfis.push({
   identityNextCheckAt,
   robeIdDocDoneDay,
   robeIdDocDoneToday,
-  renovadosLastCount,
-  renovadosAt,
+  renovadosLastCount: effectiveRenovadosLastCount,
+  renovadosAt: effectiveRenovadosAt,
+  marketplaceRenewEnabled: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewEnabled),
+  marketplaceRenewDueLabel: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueLabel : null,
+  marketplaceRenewDueMinute: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueMinute : null,
+  marketplaceRenewDueReached: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDueReached),
+  marketplaceRenewScrollDays: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewScrollDays : null,
+  marketplaceRenewPlanDate: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewPlanDate : null,
+  marketplaceRenewDoneDay: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneDay : null,
+  marketplaceRenewDoneAt: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneAt : null,
+  marketplaceRenewDoneToday: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday),
+  marketplaceRenewLastCount: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewLastCount : 0,
   appealSubmitted,
   appealSubmittedAt,
   appealNextCheckAt,

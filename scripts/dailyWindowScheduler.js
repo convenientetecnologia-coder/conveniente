@@ -56,6 +56,61 @@ function todayKeySaoPaulo(ts = Date.now()) {
   }
 }
 
+function saoPauloDateParts(ts = Date.now()) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(new Date(ts));
+    const bag = {};
+    for (const part of parts) {
+      if (part && part.type && part.type !== "literal") bag[part.type] = part.value;
+    }
+    const y = Math.max(2000, Math.floor(Number(bag.year) || 0));
+    const m = Math.max(1, Math.min(12, Math.floor(Number(bag.month) || 0)));
+    const d = Math.max(1, Math.min(31, Math.floor(Number(bag.day) || 0)));
+    if (y && m && d) return { y, m, d };
+  } catch {}
+  const fallback = new Date(ts);
+  return {
+    y: fallback.getFullYear(),
+    m: fallback.getMonth() + 1,
+    d: fallback.getDate()
+  };
+}
+
+function saoPauloOffsetMinutes(ts = Date.now()) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      timeZoneName: "shortOffset",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).formatToParts(new Date(ts));
+    const tzName = String((parts.find((part) => part.type === "timeZoneName") || {}).value || "");
+    const match = tzName.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+    if (match) {
+      const sign = match[1] === "-" ? -1 : 1;
+      const hh = Math.max(0, Math.min(23, Math.floor(Number(match[2]) || 0)));
+      const mm = Math.max(0, Math.min(59, Math.floor(Number(match[3]) || 0)));
+      return sign * ((hh * 60) + mm);
+    }
+  } catch {}
+  return -180;
+}
+
+function formatUtcOffset(totalMinutes) {
+  const mins = Math.max(-14 * 60, Math.min(14 * 60, Math.floor(Number(totalMinutes) || 0)));
+  const sign = mins < 0 ? "-" : "+";
+  const abs = Math.abs(mins);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${sign}${hh}:${mm}`;
+}
+
 function buildDefaultState() {
   return {
     version: 2,
@@ -110,6 +165,17 @@ function localMidnightTs(ts) {
   return d.getTime();
 }
 
+function saoPauloMidnightTs(ts = Date.now()) {
+  try {
+    const { y, m, d } = saoPauloDateParts(ts);
+    const offset = formatUtcOffset(saoPauloOffsetMinutes(ts));
+    const iso = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T00:00:00${offset}`;
+    const parsed = Date.parse(iso);
+    if (Number.isFinite(parsed)) return parsed;
+  } catch {}
+  return localMidnightTs(ts);
+}
+
 function hmToMin(h, m) {
   const hh = Math.max(0, Math.min(23, Math.floor(Number(h) || 0)));
   const mm = Math.max(0, Math.min(59, Math.floor(Number(m) || 0)));
@@ -126,7 +192,7 @@ function randomBetweenMs(startMs, endMs) {
 
 function computeNextRandomAtFromWindow({ nowTs, startMin, endMin, skipCurrentInterval = false }) {
   const dayMs = 24 * 60 * 60 * 1000;
-  const baseMidnight = localMidnightTs(nowTs);
+  const baseMidnight = saoPauloMidnightTs(nowTs);
   const crossesMidnight = endMin <= startMin;
   const intervals = [];
   for (let offset = -1; offset <= 3; offset += 1) {
@@ -209,73 +275,8 @@ async function runCloseAllOnly({ origin = "daily_window_close_only" } = {}) {
   return { ok: true };
 }
 
-async function runCloseRoutine({ renewFirst = false } = {}) {
-  if (renewFirst) {
-    // Renova classificados nos browsers abertos (1 conta/worker), depois fecha.
-    // Timeout generoso: FB lento + dezenas/centenas de anúncios por conta.
-    const renew = await httpJson(
-      `http://127.0.0.1:${localPort}/api/perfis/renew-then-close`,
-      {},
-      4 * 60 * 60 * 1000
-    );
-    const renewErr = renew && renew.error ? String(renew.error) : "";
-    // Outro renew-then-close ativo: NÃO atropelar com close-all (mataria o ciclo dono do lock).
-    if (renewErr && /renew_then_close_lock_busy|lock_busy/i.test(renewErr)) {
-      try {
-        provisionAudit.append({
-          ts: now(),
-          event: "daily_window_renew_then_close_result",
-          ok: false,
-          error: renewErr.slice(0, 180),
-          skippedCloseAll: true
-        });
-      } catch {}
-      return { ok: false, error: "renew_then_close_lock_busy", renew };
-    }
-    if (!renew || renew.ok !== true) {
-      // Mesmo se renew falhar parcialmente, ainda tenta fechar tudo (dormir).
-      try {
-        provisionAudit.append({
-          ts: now(),
-          event: "daily_window_renew_then_close_result",
-          ok: false,
-          error: (renew && renew.error) ? String(renew.error) : "renew_then_close_failed",
-          renewedOk: Number(renew && renew.renewedOk || 0) || 0,
-          renewedFail: Number(renew && renew.renewedFail || 0) || 0,
-          renewedNone: Number(renew && renew.renewedNone || 0) || 0
-        });
-      } catch {}
-    } else {
-      try {
-        provisionAudit.append({
-          ts: now(),
-          event: "daily_window_renew_then_close_result",
-          ok: true,
-          renewedOk: Number(renew.renewedOk || 0) || 0,
-          renewedFail: Number(renew.renewedFail || 0) || 0,
-          renewedNone: Number(renew.renewedNone || 0) || 0,
-          closedOk: Number(renew.closedOk || 0) || 0
-        });
-      } catch {}
-    }
-    // renew-then-close já dispara close-all no final; ainda assim verificamos.
-    let verifyRenew = await waitAllClosed({});
-    if (!verifyRenew.ok) {
-      await httpJson(`http://127.0.0.1:${localPort}/api/perfis/close-all`, { origin: "daily_window_renew_retry" }, 20 * 60 * 1000);
-      verifyRenew = await waitAllClosed({});
-    }
-    if (!verifyRenew.ok) {
-      return {
-        ok: false,
-        error: "close_all_not_fully_closed_after_renew",
-        activeRemaining: verifyRenew.activeRemaining,
-        renew
-      };
-    }
-    saveState({ lastCloseAt: now(), lastError: null });
-    return { ok: true, renewFirst: true, renew };
-  }
-
+async function runCloseRoutine() {
+  // Renovação desacoplada: close-only. Marketplace renew tem config própria.
   const closeOnly = await runCloseAllOnly({ origin: "daily_window_close" });
   if (!closeOnly.ok) return closeOnly;
   saveState({ lastCloseAt: now(), lastError: null });
@@ -416,8 +417,7 @@ async function tick() {
     const cfg = serverConfig.readServerConfigEffective({});
     const dw = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
     const mode = String(dw.executionMode || "").trim().toLowerCase();
-    const windowModeEnabled =
-      (mode === "window_close_open" || mode === "renew_window_close_open") && dw.enabled === true;
+    const windowModeEnabled = mode === "window_close_open" && dw.enabled === true;
     if (!windowModeEnabled) {
       const cur = state || loadState();
       if (Number(cur.nextCloseAt || 0) > 0 || Number(cur.nextOpenAt || 0) > 0 || String(cur.scheduleSignature || "").length) {
@@ -607,13 +607,11 @@ async function tick() {
           ts: now(),
           event: "daily_window_close_day_claimed",
           day,
-          mode,
-          renewFirst: mode === "renew_window_close_open"
+          mode
         });
       } catch {}
 
-      const renewFirst = mode === "renew_window_close_open";
-      const rr = await runCloseRoutine({ renewFirst });
+      const rr = await runCloseRoutine();
       const nextCloseAt = computeNextRandomAtFromWindow({
         nowTs: now(),
         startMin: meta.closeWindowStartMin,
@@ -632,7 +630,6 @@ async function tick() {
           ts: now(),
           event: "daily_window_close",
           ok: !!(rr && rr.ok === true),
-          renewFirst: !!renewFirst,
           day,
           error: rr && rr.error ? String(rr.error) : null,
           nextCloseAt

@@ -39,6 +39,7 @@ const logger = require('./logger.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
+const robePostPublishRenew = require('./robePostPublishRenew.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -2556,8 +2557,18 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           err: String((eId && eId.message) || eId).slice(0, 220)
         });
       }
+      // Pós-ID: renovação desacoplada (se due e ainda não renovou hoje). Nunca invalida publish_ok.
+      try {
+        await robePostPublishRenew.runRobeAutoRenewSafe({
+          page,
+          nome,
+          attId,
+          deadlineAt: Date.now() + (robePostPublishRenew.BUDGET_TOTAL_MS || (35 * 60 * 1000))
+        });
+      } catch {}
     } else {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_id', skipped: true, reason: 'page_gone' });
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_renew', skipped: true, reason: 'page_gone' });
     }
 
     try { await safeClosePage(page); } catch {}

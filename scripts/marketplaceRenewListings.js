@@ -2,7 +2,7 @@
 
 /**
  * Motor único: renovar classificados no Marketplace Selling.
- * Usado pelo overlay (manual) e pelo modo diário renew_window_close_open (auto).
+ * Usado pelo overlay (manual) e pela renovação pós-publicação do Robe (auto).
  *
  * Selectors por texto/aria-label normalizado — nunca classes efêmeras do Facebook.
  */
@@ -343,12 +343,13 @@ async function ensureSelling(page, { onProgress } = {}) {
   return true;
 }
 
-async function scrollToAgeThreshold(page, { onProgress } = {}) {
-  await progress(page, onProgress, 'scroll_down', 'Rolando classificados até a data alvo...');
+async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCROLL_STOP_AGE_DAYS } = {}) {
+  const ageDays = Math.max(1, Math.min(120, Math.floor(Number(scrollStopAgeDays) || SCROLL_STOP_AGE_DAYS) || SCROLL_STOP_AGE_DAYS));
+  await progress(page, onProgress, 'scroll_down', `Rolando classificados até ${ageDays} dia(s)...`);
   const targetIso = (() => {
     const today = new Date();
     const t0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const target = new Date(t0.getTime() - SCROLL_STOP_AGE_DAYS * 86400000);
+    const target = new Date(t0.getTime() - ageDays * 86400000);
     const y = target.getFullYear();
     const m = String(target.getMonth() + 1).padStart(2, '0');
     const d = String(target.getDate()).padStart(2, '0');
@@ -1371,7 +1372,8 @@ async function runMarketplaceRenewListings({
   onProgress = null,
   onAudit = null,
   deadlineAt = 0,
-  isAborted = null
+  isAborted = null,
+  scrollStopAgeDays = SCROLL_STOP_AGE_DAYS
 } = {}) {
   const audit = (event, data = {}) => {
     try {
@@ -1395,7 +1397,8 @@ async function runMarketplaceRenewListings({
   }
 
   const startedAt = now();
-  audit('renew_listings_begin', { startedAt });
+  const ageDays = Math.max(1, Math.min(120, Math.floor(Number(scrollStopAgeDays) || SCROLL_STOP_AGE_DAYS) || SCROLL_STOP_AGE_DAYS));
+  audit('renew_listings_begin', { startedAt, scrollStopAgeDays: ageDays });
 
   try {
     if (aborted()) return abortResult();
@@ -1431,8 +1434,8 @@ async function runMarketplaceRenewListings({
     }
     if (aborted()) return abortResult();
 
-    const scrolled = await scrollToAgeThreshold(page, { onProgress });
-    audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason });
+    const scrolled = await scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays: ageDays });
+    audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason, scrollStopAgeDays: ageDays });
     if (aborted()) return abortResult();
 
     // Ritmo humano pós-scroll: sobe → seleciona → ações → renovar (sem atropelo).
