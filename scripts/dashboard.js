@@ -776,25 +776,14 @@ function buildQuickSnapshot(status) {
   const avatarUrl = process.env.OPERATOR_AVATAR || '';
   const humanId = `${username}@${computerName}`;
 
-  // NOVO: fotosCount — leitura do diretório de fotos (raiz + subpastas p/m/g do V3)
-  let fotosCount = 0;
-  try {
-    const dir = fotos.resolveFotosDir();
-    const list = fsSync.readdirSync(dir, { withFileTypes: true });
-    for (const ent of list) {
-      if (ent.isFile() && isImage(ent.name)) {
-        fotosCount += 1;
-        continue;
-      }
-      if (!ent.isDirectory()) continue;
-      const sub = String(ent.name || '').trim().toLowerCase();
-      if (sub !== 'p' && sub !== 'm' && sub !== 'g') continue;
-      try {
-        const subList = fsSync.readdirSync(path.join(dir, ent.name), { withFileTypes: true });
-        fotosCount += subList.filter(e => e.isFile() && isImage(e.name)).length;
-      } catch {}
-    }
-  } catch {}
+  // Inventário enterprise: raiz + p/m/g (mesma fábrica do event bridge).
+  const fotosInv = (() => {
+    try {
+      if (fotos && typeof fotos.countFotosInventory === 'function') return fotos.countFotosInventory();
+    } catch {}
+    return { dir: '', root: 0, p: 0, m: 0, g: 0, total: 0 };
+  })();
+  const fotosCount = Number(fotosInv && fotosInv.total || 0) || 0;
 
   return {
     system: {
@@ -817,7 +806,15 @@ function buildQuickSnapshot(status) {
     sys,
     risk,
     ts: now(),
-    fotosCount // NOVO CAMPO
+    fotosCount,
+    fotos: {
+      dir: String(fotosInv && fotosInv.dir || ''),
+      root: Number(fotosInv && fotosInv.root || 0) || 0,
+      p: Number(fotosInv && fotosInv.p || 0) || 0,
+      m: Number(fotosInv && fotosInv.m || 0) || 0,
+      g: Number(fotosInv && fotosInv.g || 0) || 0,
+      total: fotosCount
+    }
   };
 }
 
@@ -841,6 +838,21 @@ function buildPollLightTelemetry(status) {
       activeCount: Number(quick && quick.activeCount || 0) || 0,
       workingCount: Number(quick && quick.workingCount || 0) || 0,
       fotosCount: Number(quick && quick.fotosCount || 0) || 0,
+      fotos: (quick && quick.fotos && typeof quick.fotos === 'object') ? {
+        dir: String(quick.fotos.dir || ''),
+        root: Number(quick.fotos.root || 0) || 0,
+        p: Number(quick.fotos.p || 0) || 0,
+        m: Number(quick.fotos.m || 0) || 0,
+        g: Number(quick.fotos.g || 0) || 0,
+        total: Number(quick.fotos.total != null ? quick.fotos.total : quick.fotosCount || 0) || 0
+      } : {
+        dir: '',
+        root: 0,
+        p: 0,
+        m: 0,
+        g: 0,
+        total: Number(quick && quick.fotosCount || 0) || 0
+      },
       sys: {
         freeMB: Number(quick && quick.sys && quick.sys.freeMB),
         totalMB: Number(quick && quick.sys && quick.sys.totalMB),

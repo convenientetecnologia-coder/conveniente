@@ -376,6 +376,20 @@ module.exports = (app, workerClient, fileStore) => {
       const finish = async (result) => {
         const robeV2WarmupResult = await tryWarmupV2();
         const engineRolloverResult = await tryEngineRollover();
+        // Snapshot de config → CT (event-driven; não depende só do save ter mudado hash).
+        try {
+          const ctPush = require('./serverConfigCtPush.js');
+          if (ctPush && typeof ctPush.requestPush === 'function') {
+            ctPush.requestPush('ui_server_config_save');
+          }
+        } catch {}
+        try {
+          if (typeof global.__serverEventBridgeTick === 'function') {
+            setImmediate(() => {
+              try { global.__serverEventBridgeTick('config_save').catch(() => {}); } catch {}
+            });
+          }
+        } catch {}
         return res.json({
           ok: true,
           config: effectiveWithVirtusEngine,

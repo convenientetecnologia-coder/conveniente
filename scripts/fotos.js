@@ -96,7 +96,7 @@ function writeJsonAtomic(file, obj) {
   } catch { return false; }
 }
 function isImageFile(name) {
-  return /.(jpe?g|png)$/i.test(name || '');
+  return /\.(jpe?g|png)$/i.test(String(name || ''));
 }
 
 // Serialização simples para evitar corridas entre chamadas
@@ -772,9 +772,43 @@ async function clearAccountHistory(nomeConta) {
   });
 }
 
+/**
+ * Inventário enterprise de fotos (raiz Desktop/fotos + subpastas p/m/g).
+ * Conta só arquivos de imagem (jpg/jpeg/png). Pastas ausentes = 0.
+ */
+function countFotosInventory() {
+  const dir = resolveFotosDir();
+  const out = {
+    dir: String(dir || ''),
+    root: 0,
+    p: 0,
+    m: 0,
+    g: 0,
+    total: 0
+  };
+  const countFilesIn = (abs) => {
+    try {
+      if (!abs || !fs.existsSync(abs)) return 0;
+      const list = fs.readdirSync(abs, { withFileTypes: true });
+      return list.filter((ent) => ent && ent.isFile() && isImageFile(ent.name)).length;
+    } catch {
+      return 0;
+    }
+  };
+  try {
+    out.root = countFilesIn(dir);
+    out.p = countFilesIn(path.join(dir, 'p'));
+    out.m = countFilesIn(path.join(dir, 'm'));
+    out.g = countFilesIn(path.join(dir, 'g'));
+    out.total = out.root + out.p + out.m + out.g;
+  } catch {}
+  return out;
+}
+
 module.exports = {
   resolveFotosDir,
   ensurePmgDirs,
+  countFotosInventory,
   buildV3PhotoScopeChain,
   pickPhotoForAccount,
   markPostedAndMaybeDelete,

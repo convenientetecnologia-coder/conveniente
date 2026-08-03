@@ -3458,6 +3458,8 @@ const {
   classifyAccountKind: __classifyAccountState,
   buildServerCardAggs: __buildServerCardAggs
 } = require('./scripts/serverCardAgg');
+const __fotosMod = (() => { try { return require('./scripts/fotos.js'); } catch { return null; } })();
+const __serverConfigCtPush = (() => { try { return require('./scripts/serverConfigCtPush.js'); } catch { return null; } })();
 
 function __buildServerEventTelemetry(status) {
   const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
@@ -3467,10 +3469,29 @@ function __buildServerEventTelemetry(status) {
   // Fábrica única (= CT fbAccountState + anti-redundância human_invoked).
   const { accountsAgg, flagsAgg } = __buildServerCardAggs(status);
 
+  const fotosInv = (() => {
+    try {
+      if (__fotosMod && typeof __fotosMod.countFotosInventory === 'function') {
+        return __fotosMod.countFotosInventory();
+      }
+    } catch {}
+    return { dir: '', root: 0, p: 0, m: 0, g: 0, total: 0 };
+  })();
+  const fotosCount = Number(fotosInv && fotosInv.total || 0) || 0;
+
   const quick = {
     perfisCount: perfis.length,
     activeCount: perfis.filter((p) => p && p.active).length,
     workingCount: perfis.filter((p) => p && p.trabalhando).length,
+    fotosCount,
+    fotos: {
+      dir: String(fotosInv && fotosInv.dir || ''),
+      root: Number(fotosInv && fotosInv.root || 0) || 0,
+      p: Number(fotosInv && fotosInv.p || 0) || 0,
+      m: Number(fotosInv && fotosInv.m || 0) || 0,
+      g: Number(fotosInv && fotosInv.g || 0) || 0,
+      total: fotosCount
+    },
     sys: {
       freeMB: Number(sys.freeMB || 0) || 0,
       totalMB: Number(sys.totalMB || 0) || 0,
@@ -3696,12 +3717,27 @@ async function __serverEventBridgeTick(reason) {
     const deltaConfirmed = changed && (reason === 'boot' || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
     const shouldSendDelta = deltaConfirmed && deltaRateOk;
-    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot') {
+
+    // Config Servidor → CT: boot/1ª vez no processo/save/hash mudou (sem spam).
+    const configPush = (() => {
+      try {
+        if (!__serverConfigCtPush || typeof __serverConfigCtPush.shouldPushConfig !== 'function') {
+          return { need: false, reason: 'module_unavailable', hash: '' };
+        }
+        return __serverConfigCtPush.shouldPushConfig({ reason }) || { need: false, reason: 'no_decision', hash: '' };
+      } catch {
+        return { need: false, reason: 'push_eval_error', hash: '' };
+      }
+    })();
+    const needConfigPush = !!(configPush && configPush.need);
+
+    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush) {
       __appendServerEventBridgeLog('bridge_skip_noop', {
         hostId,
         changed,
         pendingTicks: __serverEventPendingTicks,
-        heartbeatDue: false
+        heartbeatDue: false,
+        needConfigPush: false
       });
       return;
     }
@@ -3713,17 +3749,40 @@ async function __serverEventBridgeTick(reason) {
     } catch {
       needsConfig = true;
     }
+
+    let serverConfigPayload = null;
+    if (needConfigPush) {
+      try {
+        const mirror = (configPush && configPush.mirror)
+          ? configPush.mirror
+          : (__serverConfigCtPush.buildConfigMirror ? __serverConfigCtPush.buildConfigMirror() : null);
+        serverConfigPayload = __serverConfigCtPush.attachPushedMeta
+          ? __serverConfigCtPush.attachPushedMeta(mirror, {
+            hash: configPush && configPush.hash,
+            reason: configPush && configPush.reason
+          })
+          : mirror;
+      } catch {
+        serverConfigPayload = null;
+      }
+    }
+
+    const eventType = shouldSendDelta
+      ? 'server_delta'
+      : (needConfigPush && !heartbeatDue ? 'server_config' : 'heartbeat');
+
     const payload = {
       hostId,
       hostname: String(os.hostname() || ''),
       sentAt: now,
-      eventType: shouldSendDelta ? 'server_delta' : 'heartbeat',
+      eventType,
       stateHash: telemetry.stateHash,
       quick: telemetry.quick,
       accountsAgg: telemetry.accountsAgg,
       flagsAgg: telemetry.flagsAgg,
       needsConfig,
-      ...(shouldSendDelta ? { status } : {})
+      ...(shouldSendDelta ? { status } : {}),
+      ...(serverConfigPayload ? { serverConfig: serverConfigPayload } : {})
     };
     const out = await __postServerEventToCt(payload);
     if (out && out.ok) {
@@ -3734,11 +3793,22 @@ async function __serverEventBridgeTick(reason) {
         __serverEventPendingTicks = 0;
       }
       __serverEventLastSentAt = now;
+      if (serverConfigPayload && __serverConfigCtPush && typeof __serverConfigCtPush.markPushed === 'function') {
+        try {
+          __serverConfigCtPush.markPushed({
+            hash: (configPush && configPush.hash) || serverConfigPayload.configHash || '',
+            reason: (configPush && configPush.reason) || reason
+          });
+        } catch {}
+      }
       __appendServerEventBridgeLog('bridge_sent', {
         hostId,
         eventType: payload.eventType,
         stateHash: telemetry.stateHash,
         pendingTicks: __serverEventPendingTicks,
+        configPushed: !!serverConfigPayload,
+        configPushReason: (configPush && configPush.reason) || null,
+        fotosCount: Number(telemetry && telemetry.quick && telemetry.quick.fotosCount || 0) || 0,
         status: out.status || null,
         source: out.source || null,
         attempt: Number(out.attempt || 0) || null,
@@ -3746,11 +3816,16 @@ async function __serverEventBridgeTick(reason) {
         eventUrl: out.eventUrl || null
       });
     } else if (out && !out.skipped) {
+      // Se falhou com config anexado, força retry no próximo tick (não marca pushed).
+      if (serverConfigPayload && __serverConfigCtPush && typeof __serverConfigCtPush.requestPush === 'function') {
+        try { __serverConfigCtPush.requestPush((configPush && configPush.reason) || 'retry_after_fail'); } catch {}
+      }
       __appendServerEventBridgeLog('bridge_send_failed', {
         hostId,
         eventType: payload.eventType,
         stateHash: telemetry.stateHash,
         pendingTicks: __serverEventPendingTicks,
+        configPushed: !!serverConfigPayload,
         error: out.error || 'unknown',
         status: out.status || null,
         source: out.source || null,
@@ -3789,6 +3864,7 @@ function startServerEventBridge() {
       return;
     }
     if (__serverEventBridgeTimer) return;
+    try { global.__serverEventBridgeTick = __serverEventBridgeTick; } catch {}
     __serverEventBridgeTick('boot').catch(() => {});
     __serverEventBridgeTimer = setInterval(() => {
       __serverEventBridgeTick('interval').catch(() => {});
