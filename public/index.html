@@ -202,6 +202,27 @@
     input[type="text"], textarea, select{
       width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#0a1322; color:var(--text);
     }
+    /* Config Servidor: abas só de layout (não muda IDs/payload/validação). */
+    .modal-box.srv-cfg-modal{ max-width:860px; }
+    .modal-box.srv-cfg-modal label{ font-size:14px; }
+    .modal-box.srv-cfg-modal .muted{ font-size:13px !important; }
+    .modal-box.srv-cfg-modal input[type="number"],
+    .modal-box.srv-cfg-modal input[type="time"],
+    .modal-box.srv-cfg-modal input[type="text"],
+    .modal-box.srv-cfg-modal select{
+      width:100%; padding:9px 11px; font-size:14px; border-radius:8px; border:1px solid var(--border); background:#0a1322; color:var(--text);
+    }
+    .srv-cfg-tabs{ display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; }
+    .srv-cfg-tab{
+      border:1px solid var(--btn-border); background:var(--btn); color:var(--text);
+      border-radius:9px; padding:8px 12px; font-size:13px; font-weight:700; cursor:pointer;
+    }
+    .srv-cfg-tab:hover{ background:var(--btn-hover); }
+    .srv-cfg-tab.active{
+      background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff;
+    }
+    .srv-cfg-panel{ display:none; }
+    .srv-cfg-panel.active{ display:block; }
     .modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:14px }
     .danger-zone{
       margin-top:14px; padding:10px; border:1px solid #432; background:rgba(227,90,90,.08); border-radius:8px;
@@ -1228,175 +1249,213 @@
     }
     function showServerConfigModal() {
       const overlay = document.createElement('div'); overlay.className = 'modal-ov';
-      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth = '760px';
+      const box = document.createElement('div'); box.className = 'modal-box srv-cfg-modal';
       box.innerHTML = `
         <h2>Configuração do Servidor</h2>
         <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
-        <div class="form-row">
-          <label>Capacidade de abertura</label>
-          <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta cooldown, RAM (governor + reserva para abrir navegador) e política de deleção de foto do Robe.</div>
+        <div class="srv-cfg-tabs" role="tablist">
+          <button type="button" class="srv-cfg-tab active" data-srv-cfg-tab="servidor">Servidor</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="rede">Rede</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="robe">Robe</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="virtus">Virtus</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="localizacao">Localização</button>
         </div>
-        <div class="form-row">
-          <label>RAM — modo leve (governor): RAM livre abaixo de / acima de (MB)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="number" id="srvMemGovEnter" min="256" max="32768" step="64" />
-            <input type="number" id="srvMemGovExit" min="256" max="32768" step="64" />
+
+        <div class="srv-cfg-panel active" data-srv-cfg-panel="servidor">
+          <div class="form-row">
+            <label>Capacidade de abertura</label>
+            <div class="pill info"><span class="dot"></span>Controlada automaticamente pelo sistema (política fixa). Esta tela ajusta cooldown, RAM (governor + reserva para abrir navegador) e política de deleção de foto do Robe.</div>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">RAM livre = Windows <code>os.freemem</code> / Linux MemAvailable. Entrar em modo leve após ~5 min abaixo do primeiro valor; sair após ~5 min acima do segundo (se o segundo for menor que o primeiro, o sistema ajusta para igual ao primeiro).</div>
-        </div>
-        <div class="form-row">
-          <label>RAM — reserva mínima livre para abrir navegadores: base do servidor (MB)</label>
-          <input type="number" id="srvMemHostBase" min="256" max="16384" step="128" />
-        </div>
-        <div class="form-row">
-          <label>RAM — extra por bloco de 16 GB de RAM física (MB, × ceil(GB÷16))</label>
-          <input type="number" id="srvMemPer8" min="0" max="8192" step="128" />
-        </div>
-        <div class="form-row">
-          <label>RAM — pico em provision / cookies (MB, reserva mínima livre nesse modo)</label>
-          <input type="number" id="srvMemProvisionSpike" min="256" max="8192" step="64" />
-        </div>
-        <div class="form-row">
-          <label>Robe — cooldown por postagem (mín / máx, em minutos)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="number" id="srvCooldownMin" min="1" max="1440" step="1" />
-            <input type="number" id="srvCooldownMax" min="1" max="1440" step="1" />
+          <div class="form-row">
+            <label>RAM — modo leve (governor): RAM livre abaixo de / acima de (MB)</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input type="number" id="srvMemGovEnter" min="256" max="32768" step="64" />
+              <input type="number" id="srvMemGovExit" min="256" max="32768" step="64" />
+            </div>
+            <div class="muted" style="margin-top:6px;">RAM livre = Windows <code>os.freemem</code> / Linux MemAvailable. Entrar em modo leve após ~5 min abaixo do primeiro valor; sair após ~5 min acima do segundo (se o segundo for menor que o primeiro, o sistema ajusta para igual ao primeiro).</div>
+          </div>
+          <div class="form-row">
+            <label>RAM — reserva mínima livre para abrir navegadores: base do servidor (MB)</label>
+            <input type="number" id="srvMemHostBase" min="256" max="16384" step="128" />
+          </div>
+          <div class="form-row">
+            <label>RAM — extra por bloco de 16 GB de RAM física (MB, × ceil(GB÷16))</label>
+            <input type="number" id="srvMemPer8" min="0" max="8192" step="128" />
+          </div>
+          <div class="form-row">
+            <label>RAM — pico em provision / cookies (MB, reserva mínima livre nesse modo)</label>
+            <input type="number" id="srvMemProvisionSpike" min="256" max="8192" step="64" />
+          </div>
+          <div class="form-row">
+            <label>Modo diário de operação</label>
+            <select id="srvDailyMode">
+              <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
+              <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
+            </select>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Fechar: início
+                <input type="time" id="srvDailyCloseStartTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Fechar: fim
+                <input type="time" id="srvDailyCloseEndTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Abrir: início
+                <input type="time" id="srvDailyOpenStartTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Abrir: fim
+                <input type="time" id="srvDailyOpenEndTime" />
+              </label>
+            </div>
+            <div class="muted" style="margin-top:6px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. A renovação de classificados NÃO roda aqui — use a config Renovação na aba Robe.</div>
+          </div>
+          <div class="form-row">
+            <label>Excluir contas ban / captcha (e 2FA)</label>
+            <select id="srvTerminalCleanupEnabled">
+              <option value="0">Não</option>
+              <option value="1">Sim</option>
+            </select>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Janela: início
+                <input type="time" id="srvTerminalCleanupStartTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Janela: fim
+                <input type="time" id="srvTerminalCleanupEndTime" />
+              </label>
+            </div>
+            <div class="muted" style="margin-top:6px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia (ban, captcha bloqueante e 2FA). Não afeta login/AYMH/identity.</div>
           </div>
         </div>
-        <div class="form-row">
-          <label>Rotação de IP — ativar agendamento automático</label>
-          <select id="srvNetRotateEnabled">
-            <option value="1">Ativo</option>
-            <option value="0">Desativado</option>
-          </select>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Quando ativo, o servidor pausa o trabalho, reinicia o modem e valida troca real de IP.</div>
-        </div>
-        <div class="form-row">
-          <label>Rotação de IP — janela aleatória (mín / máx, em minutos)</label>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <input type="number" id="srvNetRotateMin" min="10" max="1440" step="1" />
-            <input type="number" id="srvNetRotateMax" min="10" max="1440" step="1" />
+
+        <div class="srv-cfg-panel" data-srv-cfg-panel="rede">
+          <div class="form-row">
+            <label>Rotação de IP — ativar agendamento automático</label>
+            <select id="srvNetRotateEnabled">
+              <option value="1">Ativo</option>
+              <option value="0">Desativado</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Quando ativo, o servidor pausa o trabalho, reinicia o modem e valida troca real de IP.</div>
+          </div>
+          <div class="form-row">
+            <label>Rotação de IP — janela aleatória (mín / máx, em minutos)</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input type="number" id="srvNetRotateMin" min="10" max="1440" step="1" />
+              <input type="number" id="srvNetRotateMax" min="10" max="1440" step="1" />
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Rotação de IP — tentativas máximas por ciclo</label>
+            <input type="number" id="srvNetRotateAttempts" min="1" max="5" step="1" />
+            <div class="muted" style="margin-top:6px;">Gateway e credenciais são gerenciados automaticamente pelo runtime.</div>
+          </div>
+          <div class="form-row">
+            <button class="btn btn-amarelo" type="button" id="srvRotateNow">Rotacionar IP agora</button>
           </div>
         </div>
-        <div class="form-row">
-          <label>Rotação de IP — tentativas máximas por ciclo</label>
-          <input type="number" id="srvNetRotateAttempts" min="1" max="5" step="1" />
-          <div class="muted" style="margin-top:6px; font-size:12px;">Gateway e credenciais são gerenciados automaticamente pelo runtime.</div>
-        </div>
-        <div class="form-row">
-          <label>Modo diário de operação</label>
-          <select id="srvDailyMode">
-            <option value="window_close_open">Fechar/Abrir por janela aleatória</option>
-            <option value="always_on_24h">24 horas contínuo (não fecha/abre automático)</option>
-          </select>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Fechar: início
-              <input type="time" id="srvDailyCloseStartTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Fechar: fim
-              <input type="time" id="srvDailyCloseEndTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Abrir: início
-              <input type="time" id="srvDailyOpenStartTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Abrir: fim
-              <input type="time" id="srvDailyOpenEndTime" />
-            </label>
+
+        <div class="srv-cfg-panel" data-srv-cfg-panel="robe">
+          <div class="form-row">
+            <label>Robe — cooldown por postagem (mín / máx, em minutos)</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input type="number" id="srvCooldownMin" min="1" max="1440" step="1" />
+              <input type="number" id="srvCooldownMax" min="1" max="1440" step="1" />
+            </div>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. A renovação de classificados NÃO roda aqui — use a config Renovação abaixo.</div>
-        </div>
-        <div class="form-row">
-          <label>Renovação de classificados</label>
-          <select id="srvRenewEnabled">
-            <option value="0">Desativado</option>
-            <option value="1">Ativado</option>
-          </select>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Janela: início
-              <input type="time" id="srvRenewStartTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Janela: fim
-              <input type="time" id="srvRenewEndTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Dias scroll: mín
-              <input type="number" id="srvRenewScrollMin" min="1" max="120" step="1" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Dias scroll: máx
-              <input type="number" id="srvRenewScrollMax" min="1" max="120" step="1" />
-            </label>
+          <div class="form-row">
+            <label>Robe — tipo de trabalho</label>
+            <select id="srvRobeWorkMode">
+              <option value="v3_pmg">Robe V3 PMG (cidades + fotos P/M/G)</option>
+              <option value="v2_auto">Robe V2 automatizado</option>
+              <option value="v1">Robe V1</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Robe V1 usa cidade da conta + extras. Robe V2 usa cidades globais (Habitantes × Insight). Robe V3 = V2 + fotos em Desktop/fotos/p|m|g (pastas criadas automaticamente ao salvar). Se a pasta do tamanho estiver vazia, usa a raiz e depois as outras pastas — só aborta sem nenhuma foto.</div>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Independente do fechar/abrir. Se Ativado: ao salvar, cada conta recebe 1 horário aleatório na janela e 1 quantidade de dias de scroll. Depois da postagem Robe (após o ID), se o horário já passou e ainda está Renovou - nao, renova e marca Renovou - sim. A janela pode atravessar a madrugada. Meia-noite (SP) zera o dia automaticamente. Se Desativado: não renova automaticamente e não mostra pills no card; o botão manual continua liberado para teste humano.</div>
-        </div>
-        <div class="form-row">
-          <label>Excluir contas ban / captcha (e 2FA)</label>
-          <select id="srvTerminalCleanupEnabled">
-            <option value="0">Não</option>
-            <option value="1">Sim</option>
-          </select>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Janela: início
-              <input type="time" id="srvTerminalCleanupStartTime" />
-            </label>
-            <label class="muted" style="display:flex;flex-direction:column;gap:4px; font-size:12px;">
-              Janela: fim
-              <input type="time" id="srvTerminalCleanupEndTime" />
-            </label>
+          <div class="form-row">
+            <label>Robe — política de deleção de foto</label>
+            <select id="srvPhotoDeletePolicy">
+              <option value="after_all_working_posted">Postar em todas as contas trabalhando, depois apagar</option>
+              <option value="after_first_confirmed_post">Primeira postagem concluída já apaga</option>
+            </select>
           </div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia (ban, captcha bloqueante e 2FA). Não afeta login/AYMH/identity.</div>
-        </div>
-        <div class="form-row">
-          <label>Robe — tipo de trabalho</label>
-          <select id="srvRobeWorkMode">
-            <option value="v3_pmg">Robe V3 PMG (cidades + fotos P/M/G)</option>
-            <option value="v2_auto">Robe V2 automatizado</option>
-            <option value="v1">Robe V1</option>
-          </select>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Robe V1 usa cidade da conta + extras. Robe V2 usa cidades globais (Habitantes × Insight). Robe V3 = V2 + fotos em Desktop/fotos/p|m|g (pastas criadas automaticamente ao salvar). Se a pasta do tamanho estiver vazia, usa a raiz e depois as outras pastas — só aborta sem nenhuma foto.</div>
-        </div>
-        <div class="form-row">
-          <label>Virtus — motor de execução</label>
-          <select id="srvVirtusEngine">
-            <option value="delta">Virtus Delta (CDP + WS)</option>
-            <option value="legacy">Virtus Legacy (modo compatível)</option>
-          </select>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Define qual motor o worker inicia para todos os perfis. Valor persistido no desired.json para troca dinâmica sem editar arquivo manual.</div>
-        </div>
-        <div class="form-row">
-          <label>Robe — política de deleção de foto</label>
-          <select id="srvPhotoDeletePolicy">
-            <option value="after_all_working_posted">Postar em todas as contas trabalhando, depois apagar</option>
-            <option value="after_first_confirmed_post">Primeira postagem concluída já apaga</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>Cidades extras globais (servidor)</label>
-          <div style="display:flex; gap:6px; margin-bottom:6px;">
-            <input type="text" id="srvGlobalCitiesFilter" placeholder="Filtrar cidades (ex.: anapolis, caruaru)" style="flex:1;" />
-            <button class="btn" type="button" id="srvGlobalCitiesClearFilter">Limpar pesquisa</button>
+          <div class="form-row">
+            <label>Renovação de classificados</label>
+            <select id="srvRenewEnabled">
+              <option value="0">Desativado</option>
+              <option value="1">Ativado</option>
+            </select>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px; margin-top:8px;">
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Janela: início
+                <input type="time" id="srvRenewStartTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Janela: fim
+                <input type="time" id="srvRenewEndTime" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Dias scroll: mín
+                <input type="number" id="srvRenewScrollMin" min="1" max="120" step="1" />
+              </label>
+              <label class="muted" style="display:flex;flex-direction:column;gap:4px;">
+                Dias scroll: máx
+                <input type="number" id="srvRenewScrollMax" min="1" max="120" step="1" />
+              </label>
+            </div>
+            <div class="muted" style="margin-top:6px;">Independente do fechar/abrir. Se Ativado: ao salvar, cada conta recebe 1 horário aleatório na janela e 1 quantidade de dias de scroll. Depois da postagem Robe (após o ID), se o horário já passou e ainda está Renovou - nao, renova e marca Renovou - sim. A janela pode atravessar a madrugada. Meia-noite (SP) zera o dia automaticamente. Se Desativado: não renova automaticamente e não mostra pills no card; o botão manual continua liberado para teste humano.</div>
           </div>
-          <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
-            <button class="btn" type="button" id="srvGlobalCitiesToggleAll">Selecionar todas</button>
-          </div>
-          <div id="srvGlobalCitiesWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
-          <div class="muted" style="margin-top:6px; font-size:12px;">Aplicadas para todas as contas do servidor. No Robe V1 entram no pool com cidade principal e extras da conta; no Robe V2 automatizado são a única fonte de cidades para postagem.</div>
         </div>
+
+        <div class="srv-cfg-panel" data-srv-cfg-panel="virtus">
+          <div class="form-row">
+            <label>Virtus — motor de execução</label>
+            <select id="srvVirtusEngine">
+              <option value="delta">Virtus Delta (CDP + WS)</option>
+              <option value="legacy">Virtus Legacy (modo compatível)</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Define qual motor o worker inicia para todos os perfis. Valor persistido no desired.json para troca dinâmica sem editar arquivo manual.</div>
+          </div>
+        </div>
+
+        <div class="srv-cfg-panel" data-srv-cfg-panel="localizacao">
+          <div class="form-row">
+            <label>Cidades extras globais (servidor)</label>
+            <div style="display:flex; gap:6px; margin-bottom:6px;">
+              <input type="text" id="srvGlobalCitiesFilter" placeholder="Filtrar cidades (ex.: anapolis, caruaru)" style="flex:1;" />
+              <button class="btn" type="button" id="srvGlobalCitiesClearFilter">Limpar pesquisa</button>
+            </div>
+            <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+              <button class="btn" type="button" id="srvGlobalCitiesToggleAll">Selecionar todas</button>
+            </div>
+            <div id="srvGlobalCitiesWrap" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; max-height:260px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:#0a1322;"></div>
+            <div class="muted" style="margin-top:6px;">Aplicadas para todas as contas do servidor. No Robe V1 entram no pool com cidade principal e extras da conta; no Robe V2 automatizado são a única fonte de cidades para postagem.</div>
+          </div>
+        </div>
+
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
-          <button class="btn btn-amarelo" id="srvRotateNow">Rotacionar IP agora</button>
           <button class="btn primary" id="srvCfgSave">Salvar</button>
         </div>
       `;
       overlay.append(box);
       document.body.append(overlay);
+      (() => {
+        const tabs = Array.from(box.querySelectorAll('[data-srv-cfg-tab]'));
+        const panels = Array.from(box.querySelectorAll('[data-srv-cfg-panel]'));
+        const activateTab = (name) => {
+          const key = String(name || 'servidor');
+          tabs.forEach((t) => t.classList.toggle('active', t.getAttribute('data-srv-cfg-tab') === key));
+          panels.forEach((p) => p.classList.toggle('active', p.getAttribute('data-srv-cfg-panel') === key));
+        };
+        tabs.forEach((t) => {
+          t.onclick = () => activateTab(t.getAttribute('data-srv-cfg-tab'));
+        });
+        activateTab('servidor');
+      })();
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
       const cdMaxEl = box.querySelector('#srvCooldownMax');
@@ -1516,7 +1575,7 @@
         globalCitiesWrapEl.innerHTML = filtered.map((c) => {
           const k = String(c || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
           const checked = selectedSet.has(k) ? 'checked' : '';
-          return `<label style="display:flex; align-items:center; gap:6px; font-size:12px;"><input type="checkbox" data-srv-global-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
+          return `<label style="display:flex; align-items:center; gap:6px; font-size:14px;"><input type="checkbox" data-srv-global-city="${String(c).replace(/"/g,'&quot;')}" ${checked}/> ${c}</label>`;
         }).join('');
         updateGlobalToggleLabel();
       }
