@@ -14,6 +14,7 @@ const provisionAudit = require('./provisionAudit.js');
 const fileStore = require('./fileStore.js');
 const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqConfig');
 const gatewayProxy = require('./gatewayProxy');
+const { buildServerCardAggs } = require('./serverCardAgg');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
@@ -827,75 +828,8 @@ function buildPollLightTelemetry(status) {
     ativos: perfis.filter((p) => p && p.active).length,
     trabalhando: perfis.filter((p) => p && p.trabalhando).length
   };
-  const accountsAgg = { total: 0 };
-  const flagsAgg = {
-    totalPerfis: 0,
-    human_invoked: 0,
-    messenger_pin: 0,
-    problem: 0,
-    virtus_offline: 0,
-    login_required: 0,
-    login_cookies_failed: 0,
-    appeal_submitted: 0,
-    // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
-    id_sim: 0,
-    renovados: 0,
-    renovados_qtd: 0
-  };
-
-  for (const p of perfis) {
-    if (!p) continue;
-    const banned = p.banned === true;
-    const loginRequired = p.loginRequired === true;
-    const reason = String(p.loginReason || "").trim().toLowerCase();
-    let kind = "ok";
-    if (banned) {
-      kind = "banned";
-    } else if (loginRequired) {
-      if (reason.includes("captcha") || reason.includes("checkpoint")) kind = "captcha";
-      else if (reason === "login_form" || reason === "aymh_continue" || reason.includes("aymh_continue")) kind = "login";
-      else if (reason.includes("session")) kind = "session";
-      else if (reason.includes("2fa") || reason.includes("two_factor")) kind = "two_factor";
-      else if (reason.includes("identity")) kind = "identity";
-      else if (reason.includes("consent")) kind = "consent";
-      else kind = "login_other";
-    } else {
-      const r = p && p.nome ? String(p.nome) : "";
-      const robeRec = (status && status.robes && typeof status.robes === "object" && r) ? status.robes[r] : null;
-      const isLimit = !!(
-        robeRec &&
-        (String(robeRec.estado || "").toLowerCase() === "paused_limit" ||
-         String(robeRec.pauseReason || "").toLowerCase() === "limit_posting") &&
-        Number(robeRec.cooldownSec || 0) > 0
-      );
-      if (isLimit) kind = "limit_exceeded";
-    }
-    accountsAgg[kind] = (Number(accountsAgg[kind] || 0) || 0) + 1;
-    accountsAgg.total++;
-
-    flagsAgg.totalPerfis++;
-    if (p.humanControl === true || p.humanHold === true) flagsAgg.human_invoked++;
-    if (p.messengerPin === true) flagsAgg.messenger_pin++;
-    if (p.problem === true) flagsAgg.problem++;
-    if (p.virtusOnline === false) flagsAgg.virtus_offline++;
-    if (p.loginRequired === true) flagsAgg.login_required++;
-    if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
-    if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
-    if (p.robeIdDocDoneToday === true) flagsAgg.id_sim++;
-    const renovN = (() => {
-      if (p.marketplaceRenewDoneToday === true) {
-        return Math.max(0, Math.floor(Number(p.marketplaceRenewLastCount || 0) || 0));
-      }
-      return 0;
-    })();
-    if (renovN > 0) {
-      flagsAgg.renovados++;
-      flagsAgg.renovados_qtd += renovN;
-    }
-  }
-
-  accountsAgg.lr_total = ["captcha", "login", "session", "two_factor", "identity", "consent", "login_other"]
-    .reduce((acc, k) => acc + (Number(accountsAgg[k] || 0) || 0), 0);
+  // Fábrica única (= CT fbAccountState + anti-redundância human_invoked).
+  const { accountsAgg, flagsAgg } = buildServerCardAggs(status);
 
   const quick = buildQuickSnapshot(status);
   return {
