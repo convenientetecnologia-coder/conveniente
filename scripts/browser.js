@@ -2153,19 +2153,20 @@ async function detectMessengerPinModal(page) {
         t.includes('seu pin restaura') ||
         t.includes('sem um pin') ||
         (t.includes('pin') && t.includes('historico') && (t.includes('conversa') || t.includes('mensagem')));
+      // “Insira seu PIN” (entrar PIN existente) — NÃO usar “restaurar+historico+pin”
+      // porque colide com o modal de CRIAR PIN (“seu pin restaura seu histórico…”).
+      const hasEnterPinPhrase = (t) =>
+        t.includes('insira seu pin') ||
+        t.includes('inserir seu pin') ||
+        t.includes('enter your pin') ||
+        t.includes('enter pin');
       const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
       const dlgEl = document.querySelector('div[role="dialog"]');
       const dlgTxt = dlgEl ? norm(dlgEl.innerText || dlgEl.textContent || '') : '';
-      const scope = dlgEl || document;
+      // Anti-FP: superfície/texto de PIN só contam DENTRO do dialog. Sem dialog = nunca digita.
+      const scope = dlgEl;
 
-      // Caso A: “Insira seu PIN…”
-      const pinTextScope = dlgTxt || bodyTxt;
-      const pinText =
-        pinTextScope.includes('insira seu pin') ||
-        pinTextScope.includes('inserir seu pin') ||
-        (pinTextScope.includes('restaurar') && pinTextScope.includes('historico') && pinTextScope.includes('pin'));
-
-      const splitPinInputs = Array.from(scope.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
+      const splitPinInputs = scope ? Array.from(scope.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
         if (!isVisible(el)) return false;
         // Ignora o input oficial único (maxlength=6) — slots 1-char são outro layout.
         const id = String(el.id || '');
@@ -2182,63 +2183,65 @@ async function detectMessengerPinModal(page) {
         if (ac.includes('one-time-code') && maxLen > 0 && maxLen <= 2) return true;
         if (al.includes('pin') && maxLen > 0 && maxLen <= 2) return true;
         return false;
-      });
+      }) : [];
       const hasSplitPinInputs = splitPinInputs.length >= 4;
 
       // Contrato DOM real (create PIN modal):
       // <input id="mw-numeric-code-input-prevent-composer-focus-steal" aria-label="PIN"
       //        autocomplete="one-time-code" maxlength="6" type="text">
       // Os "-" visuais são spans aria-hidden — NÃO são inputs.
-      const officialPinEl =
+      const officialPinEl = scope ? (
         scope.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
         scope.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-        scope.querySelector('input[aria-label="PIN"][maxlength="6"]');
+        scope.querySelector('input[aria-label="PIN"][maxlength="6"]')
+      ) : null;
       const hasOfficialPinInput = !!(officialPinEl && isVisible(officialPinEl));
-      const hasPinInput = hasOfficialPinInput ||
+      const hasPinInput = hasOfficialPinInput || !!(scope &&
         Array.from(scope.querySelectorAll('input[type="text"][maxlength="6"],input[type="tel"][maxlength="6"],input[type="password"][maxlength="6"]'))
-          .some(el => isVisible(el) && norm(el.getAttribute('aria-label') || '') === 'pin');
+          .some(el => isVisible(el) && norm(el.getAttribute('aria-label') || '') === 'pin'));
       const hasCreateTypingSurface = hasSplitPinInputs || hasPinInput;
 
       // Caso B: “Continuar sem restaurar?”
       const contText =
-        (dlgTxt || bodyTxt).includes('continuar sem restaurar') ||
-        ((dlgTxt || bodyTxt).includes('nao restaurar') && (dlgTxt || bodyTxt).includes('mensagens'));
+        (dlgTxt || '').includes('continuar sem restaurar') ||
+        ((dlgTxt || '').includes('nao restaurar') && (dlgTxt || '').includes('mensagens'));
       const hasNaoRestaurarBtn =
-        Array.from((dlgEl || document).querySelectorAll('button,[role="button"]'))
+        !!(dlgEl && Array.from(dlgEl.querySelectorAll('button,[role="button"]'))
           .some(el => {
             const t = norm(el.innerText || el.textContent || '');
             const al = norm(el.getAttribute('aria-label') || '');
             const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null);
             if (disabled) return false;
             return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
-          });
+          }));
 
-      // create_pin: texto no DIALOG (preferência). Body só se não houver dialog.
-      const createText = dlgEl ? hasCreatePinPhrase(dlgTxt) : hasCreatePinPhrase(bodyTxt);
+      // create_pin: texto OBRIGATORIAMENTE no dialog (feed/body sozinho NÃO conta).
+      const createText = !!(dlgEl && hasCreatePinPhrase(dlgTxt));
+      const pinText = !!(dlgEl && hasEnterPinPhrase(dlgTxt));
       // Botão "Criar PIN" no feed (sem modal/input) NÃO autoriza digitar — só informativo.
       const hasCreateBtn =
-        !!(dlgEl || document).querySelector('[role="button"][aria-label*="Criar PIN"], button[aria-label*="Criar PIN"]') ||
-        Array.from((dlgEl || document).querySelectorAll('button,div[role="button"]')).some(el => {
+        !!(document.querySelector('[role="button"][aria-label*="Criar PIN"], button[aria-label*="Criar PIN"]') ||
+        Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => {
           if (!isVisible(el)) return false;
           const t = norm(el.innerText || el.textContent || '');
           const al = norm(el.getAttribute('aria-label') || '');
           return t.includes('criar pin') || al.includes('criar pin');
-        });
+        }));
+      const feedCreateCtaOnly = !!(!dlgEl && hasCreateBtn && hasCreatePinPhrase(bodyTxt) && !hasCreateTypingSurface);
 
-      // Digitar create_pin SÓ com dialog + frase + superfície real (input PIN oficial).
-      // Feed com "Criar PIN" (sem input) = NÃO é create_pin acionável (anti-FP).
+      // Prioridade: create_pin ANTES de pin_input (modal criar tem “pin restaura histórico”).
+      // Digitar SÓ com dialog + frase + superfície real (input PIN oficial / slots).
       const isCreatePin = !!(dlgEl && createText && hasCreateTypingSurface);
+      const isPinInput = !!(dlgEl && pinText && hasPinInput && !isCreatePin);
+      const isContinue = !!(dlgEl && contText && hasNaoRestaurarBtn);
 
-      const present =
-        (pinText && hasPinInput) ||
-        (contText && hasNaoRestaurarBtn) ||
-        isCreatePin;
+      const present = isCreatePin || isPinInput || isContinue;
 
       return {
         present: !!present,
-        kind: (pinText && hasPinInput) ? 'pin_input'
-          : (contText && hasNaoRestaurarBtn) ? 'continue_without_restore'
-          : isCreatePin ? 'create_pin'
+        kind: isCreatePin ? 'create_pin'
+          : isPinInput ? 'pin_input'
+          : isContinue ? 'continue_without_restore'
           : null,
         hasPinInput,
         hasOfficialPinInput,
@@ -2247,7 +2250,7 @@ async function detectMessengerPinModal(page) {
         hasNaoRestaurarBtn,
         hasCreateBtn,
         createText: !!createText,
-        feedCreateCtaOnly: !!(createText && hasCreateBtn && !hasCreateTypingSurface)
+        feedCreateCtaOnly: !!feedCreateCtaOnly
       };
     });
   } catch {
@@ -2300,7 +2303,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const dlg = document.querySelector('div[role="dialog"]') || document;
+        // Nunca clicar CTA "Criar PIN" do feed — só botão dentro do dialog.
+        const dlg = document.querySelector('div[role="dialog"]');
+        if (!dlg) return false;
         const buttons = Array.from(dlg.querySelectorAll('button,[role="button"]')).slice(0, 220);
         for (const b of buttons) {
           const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
@@ -2324,8 +2329,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       const didMore = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-        const scope = dialogs[0] || document;
+        const scope = document.querySelector('div[role="dialog"]');
+        if (!scope) return false;
         const btns = Array.from(scope.querySelectorAll('button,[role="button"]')).slice(0, 120);
         for (const b of btns) {
           const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
@@ -2343,7 +2348,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       await sleep(900);
       const didSkip = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const dlg = document.querySelector('div[role="dialog"]') || document;
+        const dlg = document.querySelector('div[role="dialog"]');
+        if (!dlg) return false;
         const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 160);
         const words = ['agora nao', 'agora não', 'pular', 'no momento nao', 'no momento não', 'mais tarde', 'continuar sem'];
         for (const b of btns) {
@@ -2383,15 +2389,16 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           }
         };
         const dlgEl = document.querySelector('div[role="dialog"]');
-        const dlg = dlgEl || document;
-        const txt = norm(dlg.innerText || dlg.textContent || '');
-        const officialPin =
+        const dlg = dlgEl;
+        const txt = dlg ? norm(dlg.innerText || dlg.textContent || '') : '';
+        const officialPin = dlg ? (
           dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
           dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-          dlg.querySelector('input[aria-label="PIN"][maxlength="6"]');
+          dlg.querySelector('input[aria-label="PIN"][maxlength="6"]')
+        ) : null;
         const hasOfficialPinInput = !!(officialPin && isVisible(officialPin));
         const officialPinValueLen = officialPin ? String(officialPin.value || '').trim().length : 0;
-        const splitInputs = Array.from(dlg.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
+        const splitInputs = dlg ? Array.from(dlg.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
           if (!isVisible(el)) return false;
           if (el === officialPin) return false;
           if (String(el.id || '') === 'mw-numeric-code-input-prevent-composer-focus-steal') return false;
@@ -2407,7 +2414,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           if (ac.includes('one-time-code') && maxLen > 0 && maxLen <= 2) return true;
           if (al.includes('pin') && maxLen > 0 && maxLen <= 2) return true;
           return false;
-        });
+        }) : [];
         const filledCount = splitInputs.filter(el => String(el.value || '').trim().length > 0).length;
         const active = document.activeElement;
         const activeAria = active && active.getAttribute ? norm(active.getAttribute('aria-label') || '') : '';
@@ -2424,13 +2431,14 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           activeAria.includes('composer') ||
           activeAria.includes('digite uma mensagem') ||
           (activeRole === 'textbox' && !activeAria.includes('pin') && activeId !== 'mw-numeric-code-input-prevent-composer-focus-steal' && !focusInsideDialog);
-        const hasCreateText =
+        // Só texto do dialog — feed/body sozinho nunca autoriza.
+        const hasCreateText = !!(dlgEl && (
           txt.includes('crie um pin') ||
           txt.includes('criar pin') ||
           txt.includes('seu pin restaura') ||
           txt.includes('sem um pin') ||
-          txt.includes('historico de conversas') ||
-          (txt.includes('historico') && txt.includes('pin'));
+          (txt.includes('historico') && txt.includes('pin'))
+        ));
         return {
           hasCreateText,
           asksRepeat:
@@ -2460,26 +2468,28 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
-  // Digitar create_pin só com o input oficial do modal (DOM real) ou slots 1-char.
+  // Digitar create_pin só com input oficial no dialog OU slots 1-char no dialog.
   // Feed com CTA "Criar PIN" sem input = recusa.
   function canTypeCreatePinKeyboard(state, det) {
     if (!state || typeof state !== 'object') return false;
     if (state.dangerousFocus === true) return false;
     if (state.hasCreateText !== true) return false;
     if (state.hasDialog !== true) return false;
-    if (det && det.hasOfficialPinInput === true) return true;
-    if (state.hasOfficialPinInput === true) return true;
-    if (det && det.hasCreateTypingSurface === true) return true;
-    if (Number(state.splitInputsCount || 0) >= 4) return true;
-    if (det && det.hasPinInput === true) return true;
-    return false;
+    const hasOfficial =
+      (det && det.hasOfficialPinInput === true) ||
+      state.hasOfficialPinInput === true;
+    const hasSplit =
+      Number(state.splitInputsCount || 0) >= 4 ||
+      (det && det.hasSplitPinInputs === true);
+    return !!(hasOfficial || hasSplit);
   }
 
-  // Sem clique: só focus() no input oficial do modal (id/aria do DOM real).
+  // Sem clique: só focus() no input oficial DENTRO do dialog (sem fallback document).
   async function focusOfficialCreatePinInput() {
     try {
       const focused = await page.evaluate(() => {
-        const dlg = document.querySelector('div[role="dialog"]') || document;
+        const dlg = document.querySelector('div[role="dialog"]');
+        if (!dlg) return { ok: false, error: 'dialog_missing' };
         const el =
           dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
           dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
@@ -2519,9 +2529,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return false;
           }
         };
-        const dlg = document.querySelector('div[role="dialog"]') || document;
-        const splitInputs = Array.from(dlg.querySelectorAll('input')).filter(el => {
+        const dlg = document.querySelector('div[role="dialog"]');
+        if (!dlg) return { ok: false, error: 'dialog_missing', count: 0 };
+        const splitInputs = Array.from(dlg.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
           if (!isVisible(el)) return false;
+          const id = String(el.id || '');
+          if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return false;
           const type = norm(el.getAttribute('type') || '');
           const mode = norm(el.getAttribute('inputmode') || '');
           const al = norm(el.getAttribute('aria-label') || '');
@@ -2531,7 +2544,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           if (!isTextLike) return false;
           if (maxLen === 1) return true;
           if (mode.includes('numeric') && maxLen > 0 && maxLen <= 2) return true;
-          if (ac.includes('one-time-code')) return true;
+          if (ac.includes('one-time-code') && maxLen > 0 && maxLen <= 2) return true;
           if (al.includes('pin') && maxLen > 0 && maxLen <= 2) return true;
           return false;
         }).slice(0, 6);
@@ -2582,16 +2595,28 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         });
         return { ok: false, error: 'create_pin_unsafe_target', before, refused: true };
       }
-      // Garante foco no input oficial (sem clique). Evita digitar no composer/chat.
-      const focusRes = await focusOfficialCreatePinInput();
-      if (!(focusRes && focusRes.ok) && !(before && Number(before.splitInputsCount || 0) >= 4)) {
-        pinLog({ event: 'create_pin_refused_no_official_focus', round, focusRes, state: before });
-        return { ok: false, error: 'create_pin_unsafe_target', before, refused: true, focusRes };
+      const hasOfficial =
+        !!(before && before.hasOfficialPinInput === true) ||
+        !!(detHint && detHint.hasOfficialPinInput === true);
+      const hasSplit = Number((before && before.splitInputsCount) || 0) >= 4;
+      let focusRes = null;
+      if (hasOfficial) {
+        // Garante foco no input oficial (sem clique). Evita digitar no composer/chat.
+        focusRes = await focusOfficialCreatePinInput();
+        if (!(focusRes && focusRes.ok)) {
+          pinLog({ event: 'create_pin_refused_no_official_focus', round, focusRes, state: before });
+          return { ok: false, error: 'create_pin_unsafe_target', before, refused: true, focusRes };
+        }
+      } else if (!hasSplit) {
+        pinLog({ event: 'create_pin_refused_no_surface', round, state: before });
+        return { ok: false, error: 'create_pin_unsafe_target', before, refused: true };
       }
       await sleep(250);
-      for (const ch of digits) {
-        try { await page.keyboard.type(String(ch), { delay: perDigitDelayMs }).catch(()=>{}); } catch {}
-        await sleep(betweenDigitPauseMs);
+      if (hasOfficial || !hasSplit) {
+        for (const ch of digits) {
+          try { await page.keyboard.type(String(ch), { delay: perDigitDelayMs }).catch(()=>{}); } catch {}
+          await sleep(betweenDigitPauseMs);
+        }
       }
       await sleep(settleMs);
       let after = await readCreatePinState().catch(()=>null);
@@ -2693,13 +2718,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
 
   async function tryEnterPin(pinValue = DEFAULT_PIN, round = 1) {
     // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
-    // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
+    // Só focar o input oficial DENTRO do dialog e digitar (sem seletor solto maxlength=6).
     try {
       const sel = [
-        'input[aria-label="PIN"][maxlength="6"]',
-        'input#mw-numeric-code-input-prevent-composer-focus-steal',
-        'input[type="text"][maxlength="6"]',
-        'input[type="tel"][maxlength="6"]'
+        'div[role="dialog"] input#mw-numeric-code-input-prevent-composer-focus-steal',
+        'div[role="dialog"] input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]',
+        'div[role="dialog"] input[aria-label="PIN"][maxlength="6"]'
       ];
       let h = null;
       for (const s of sel) {
@@ -2710,8 +2734,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
       if (!h) return { ok: false, error: 'pin_input_not_found' };
 
-      // Foco + limpar sem "ruído"
-      try { await h.click({ clickCount: 3, delay: 60 }).catch(()=>{}); } catch {}
+      // Foco sem clique no composer: focus() no handle do dialog.
+      try { await h.focus().catch(()=>{}); } catch {}
       try { await page.keyboard.press('Backspace').catch(()=>{}); } catch {}
       await sleep(220);
 
@@ -2747,7 +2771,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
             catch { return String(s||'').toLowerCase(); }
           }
-          const dlg = document.querySelector('div[role="dialog"]') || document;
+          const dlg = document.querySelector('div[role="dialog"]');
+          if (!dlg) return false;
           const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
           const words = ['confirmar','confirm','continuar','continue','avancar','avançar','next','ok','done','concluir','finalizar','salvar','save'];
           for (const b of btns) {
@@ -2765,20 +2790,22 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
       }
 
-      // Espera determinística: modal desaparecer / input sumir (até 12s)
+      // Espera determinística: modal PIN sumir (só dialog oficial).
       const cleared = await page.waitForFunction(() => {
         try {
           const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-          const txt = norm(document.body ? (document.body.innerText || '') : '');
+          const dlg = document.querySelector('div[role="dialog"]');
+          if (!dlg) return true;
+          const txt = norm(dlg.innerText || dlg.textContent || '');
           const hasPinInput =
-            !!document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
-            !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-            Array.from(document.querySelectorAll('input[type="text"][maxlength="6"],input[type="tel"][maxlength="6"]'))
-              .some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
+            !!dlg.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+            !!dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal');
           const pinText =
             txt.includes('insira seu pin') ||
             txt.includes('inserir seu pin') ||
-            (txt.includes('restaurar') && txt.includes('historico') && txt.includes('pin'));
+            txt.includes('enter your pin') ||
+            txt.includes('crie um pin') ||
+            txt.includes('criar pin');
           return !(hasPinInput && pinText);
         } catch { return false; }
       }, { timeout: 12_000 }).then(()=>true).catch(()=>false);
