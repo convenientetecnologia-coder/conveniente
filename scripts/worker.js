@@ -17853,31 +17853,71 @@ async function nurseTick() {
 
             if (firstMatch) {
               try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
-              // Anti-loop: ao ver PIN_INPUT, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
-              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
-              // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
-              robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
-              const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
-              if (still && still.present) {
-                // PIN_INPUT: não chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
-                await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
+              // Anti-loop: ao ver PIN, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
+              const dismissRes = await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
+              const dismissErr = String((dismissRes && dismissRes.error) || '');
+              // Alvo inseguro (FP chat/composer): NÃO martelar teclado — cooldown longo.
+              if (dismissErr === 'create_pin_unsafe_target') {
+                robeMeta[nome].pinFailStreak = (Number(robeMeta[nome].pinFailStreak || 0) || 0) + 1;
+                robeMeta[nome].pinCooldownUntil = Date.now() + 30 * 60 * 1000;
+                await setMessengerPinFlag(nome, { reason: 'create_pin_unsafe_target', source: 'nurse' }).catch(()=>{});
                 try {
                   const fsSync2 = require('fs');
                   const path2 = require('path');
                   const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                  fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_still_present', kind: still.kind||null, url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
+                  fsSync2.appendFileSync(p, JSON.stringify({
+                    ts: Date.now(),
+                    src: 'worker.js',
+                    perfil: nome,
+                    event: 'pin_unsafe_target_backoff',
+                    kind: (firstMatch.det && firstMatch.det.kind) || null,
+                    url: String(firstMatch.urlNow || '').slice(0, 220),
+                    streak: robeMeta[nome].pinFailStreak
+                  }) + '\n');
                 } catch {}
               } else {
-                await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
-                try {
-                  const fsSync2 = require('fs');
-                  const path2 = require('path');
-                  const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                  fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
-                } catch {}
+                // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
+                robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
+                const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
+                if (still && still.present) {
+                  // Não chamar GPT. Marcar flag + circuit-breaker se falhar em sequência.
+                  robeMeta[nome].pinFailStreak = (Number(robeMeta[nome].pinFailStreak || 0) || 0) + 1;
+                  const streak = Number(robeMeta[nome].pinFailStreak || 0) || 0;
+                  if (streak >= 3) {
+                    robeMeta[nome].pinCooldownUntil = Date.now() + 30 * 60 * 1000;
+                  } else if (streak >= 2) {
+                    robeMeta[nome].pinCooldownUntil = Date.now() + 5 * 60 * 1000;
+                  }
+                  await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
+                  try {
+                    const fsSync2 = require('fs');
+                    const path2 = require('path');
+                    const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                    fsSync2.appendFileSync(p, JSON.stringify({
+                      ts: Date.now(),
+                      src: 'worker.js',
+                      perfil: nome,
+                      event: 'pin_still_present',
+                      kind: still.kind || null,
+                      url: String(firstMatch.urlNow || '').slice(0, 220),
+                      streak,
+                      dismissError: dismissErr || null
+                    }) + '\n');
+                  } catch {}
+                } else {
+                  robeMeta[nome].pinFailStreak = 0;
+                  await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
+                  try {
+                    const fsSync2 = require('fs');
+                    const path2 = require('path');
+                    const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                    fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
+                  } catch {}
+                }
               }
             } else if (!anyPresent) {
               // se não há PIN em nenhuma aba, limpa flag (se existir)
+              robeMeta[nome].pinFailStreak = 0;
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
             }
           }
