@@ -8,7 +8,7 @@
  *
  * Uma fábrica só: poll leve, event bridge e qualquer outro produtor devem usar isto.
  * Precedência estado final:
- * banned > marketplace_disabled > captcha > two_factor > identity/consent/login/session/login_other > limit_exceeded > ok
+ * banned > marketplace_disabled > captcha > two_factor > id_virtus > identity > consent > login/session/login_other > limit_exceeded > ok
  */
 
 function norm(s) {
@@ -37,6 +37,12 @@ function classifyAccountKind(perfil, robeRec) {
 
   if (p.captchaCheckpoint === true) return 'captcha';
   if (p.twoFactor === true) return 'two_factor';
+
+  // ID Virtus (Messenger "para enviar mensagens") — ≠ identity selfie/vídeo.
+  if (p.idVirtus === true) return 'id_virtus';
+
+  // Identity selfie/vídeo (flag própria).
+  if (p.identitySubmitted === true || p.identityRequired === true) return 'identity';
 
   if (p.loginRequired === true) {
     const rNorm = norm(p.loginReason || '') || 'login_required';
@@ -136,7 +142,7 @@ function buildServerCardAggs(status, opts = {}) {
     }
   }
 
-  accountsAgg.lr_total = ['captcha', 'login', 'session', 'two_factor', 'identity', 'consent', 'login_other']
+  accountsAgg.lr_total = ['captcha', 'login', 'session', 'two_factor', 'id_virtus', 'identity', 'consent', 'login_other']
     .reduce((acc, k) => acc + (Number(accountsAgg[k] || 0) || 0), 0);
 
   if (reasons) {
