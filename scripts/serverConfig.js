@@ -869,7 +869,21 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       windowStartHour: v.normalized.terminalAccountCleanup.windowStartHour,
       windowStartMinute: v.normalized.terminalAccountCleanup.windowStartMinute,
       windowEndHour: v.normalized.terminalAccountCleanup.windowEndHour,
-      windowEndMinute: v.normalized.terminalAccountCleanup.windowEndMinute
+      windowEndMinute: v.normalized.terminalAccountCleanup.windowEndMinute,
+      deleteKinds: (() => {
+        const dk = (v.normalized.terminalAccountCleanup
+          && v.normalized.terminalAccountCleanup.deleteKinds
+          && typeof v.normalized.terminalAccountCleanup.deleteKinds === 'object')
+          ? v.normalized.terminalAccountCleanup.deleteKinds
+          : (DEFAULTS.terminalAccountCleanup.deleteKinds || {});
+        return {
+          banned: dk.banned === true,
+          captcha: dk.captcha === true,
+          two_factor: dk.two_factor === true,
+          marketplace_disabled: dk.marketplace_disabled === true,
+          id_virtus: dk.id_virtus === true
+        };
+      })()
     }
   };
   try {
