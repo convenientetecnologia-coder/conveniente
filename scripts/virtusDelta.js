@@ -254,9 +254,45 @@ function extractWsMessageEvents(input, accountUserId = "") {
 }
 
 let killChromeProfileProcesses = null;
+let detectVirtusIdentityBlock = null;
 try {
-  killChromeProfileProcesses = require("./browser.js").killChromeProfileProcesses;
+  const browserMod = require("./browser.js");
+  killChromeProfileProcesses = browserMod.killChromeProfileProcesses;
+  detectVirtusIdentityBlock = browserMod.detectVirtusIdentityBlock;
 } catch (_) {}
+
+async function probeIdVirtusBlock(page, { account_login = null, thread_key = null, stage = "" } = {}) {
+  try {
+    if (typeof detectVirtusIdentityBlock !== "function" || !page) return null;
+    const iv = await detectVirtusIdentityBlock(page).catch(() => null);
+    if (!(iv && iv.blocked === true)) return null;
+    try {
+      __forensicEdgeEmit({
+        account_login: account_login == null ? null : String(account_login || "").trim(),
+        thread_key: thread_key == null ? null : String(thread_key || "").trim(),
+        flow_stage: "id_virtus_blocked",
+        details: {
+          stage: String(stage || "").slice(0, 80),
+          reason: String(iv.reason || "id_virtus_send_identity").slice(0, 160),
+          url: iv.url || null,
+          title: iv.title || null,
+          evidence: iv.evidence || null,
+          ts_ms: Date.now()
+        }
+      });
+    } catch (_) {}
+    return {
+      ok: false,
+      error: "id_virtus_blocked",
+      idVirtus: true,
+      reason: String(iv.reason || "id_virtus_send_identity"),
+      url: iv.url || null,
+      title: iv.title || null
+    };
+  } catch (_) {
+    return null;
+  }
+}
 let getDeltaCityCollector = null;
 let isCleanCityLabelFn = null;
 let isDirtyCityLabelFn = null;
@@ -4675,11 +4711,30 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       }
     } catch (_) {}
 
+    // ID Virtus: banner "Confirme sua identidade para enviar mensagens" — antes do composer.
+    {
+      const ivPre = await probeIdVirtusBlock(page, {
+        account_login: forensicAccountLogin,
+        thread_key: t,
+        stage: "pre_composer"
+      });
+      if (ivPre) return ivPre;
+    }
+
     try {
       await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
     } catch (compErr) {
       const em = String((compErr && compErr.message) || compErr || "");
       if (em.includes("composer_missing")) {
+        // Antes do hop: se for ID Virtus, não tratar como routing.
+        {
+          const ivMiss = await probeIdVirtusBlock(page, {
+            account_login: forensicAccountLogin,
+            thread_key: t,
+            stage: "composer_missing"
+          });
+          if (ivMiss) return ivMiss;
+        }
         // Uma chance só com Aceitar (Marketplace). Continuar E2EE nunca.
         await clickAcceptMessageRequestIfPresent(page, {
           account_login: forensicAccountLogin,
@@ -4697,6 +4752,14 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
           }
           await ensureComposerFocused(page, { thread_key: t, account_login: forensicAccountLogin });
         } catch (_) {
+          {
+            const ivMiss2 = await probeIdVirtusBlock(page, {
+              account_login: forensicAccountLogin,
+              thread_key: t,
+              stage: "composer_missing_after_accept"
+            });
+            if (ivMiss2) return ivMiss2;
+          }
           return { ok: false, error: "composer_missing" };
         }
       } else {
@@ -7020,7 +7083,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         e === "send_not_confirmed_composer_not_empty" ||
         e === "composer_text_not_registered" ||
         e === "thread_content_unavailable" ||
-        e.includes("thread_content_unavailable")
+        e.includes("thread_content_unavailable") ||
+        e.includes("id_virtus")
       );
     };
     const isBadThreadSignal = (err) => {

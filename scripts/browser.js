@@ -4886,6 +4886,156 @@ async function detectLoginRequired(page) {
   return { loginRequired: true, reason: 'probe_failed' };
 }
 
+/**
+ * ID Virtus — bloqueio Messenger de envio (NÃO é identity selfie/vídeo).
+ * Âncora forte: "Confirme sua identidade para enviar mensagens" (+ reforço).
+ * Zero FP vs selfie, captcha persona, login/2FA.
+ */
+async function detectVirtusIdentityBlock(page) {
+  try {
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      return { blocked: false, reason: 'page_closed' };
+    }
+    const v = await page.evaluate(() => {
+      function norm(s) {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase();
+        } catch {
+          return String(s || '').toLowerCase();
+        }
+      }
+      const href = String(location.href || '');
+      const host = String(location.hostname || '').toLowerCase();
+      const path = String(location.pathname || '');
+      const isMessenger =
+        host.includes('messenger.com') ||
+        /facebook\.com$/i.test(host) && (/\/messages\b/i.test(path) || /\/marketplace\/t\//i.test(path));
+      if (!isMessenger) return { blocked: false, reason: 'not_messenger' };
+
+      const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
+      const hasSendIdentityPt = bodyTxt.includes('confirme sua identidade para enviar mensagens');
+      const hasSendIdentityEn = bodyTxt.includes('confirm your identity to send messages');
+      if (!hasSendIdentityPt && !hasSendIdentityEn) {
+        return { blocked: false, reason: 'no_send_identity_anchor' };
+      }
+
+      // Negativo: fluxo selfie/vídeo (identityRequired do Robe/FB)
+      const selfieHints =
+        (bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
+        bodyTxt.includes('selfie de video') ||
+        bodyTxt.includes('video selfie') ||
+        bodyTxt.includes('gravar uma selfie') ||
+        bodyTxt.includes('grave uma selfie');
+      if (selfieHints) return { blocked: false, reason: 'selfie_identity_not_id_virtus' };
+
+      // Negativo: captcha persona
+      if (
+        bodyTxt.includes('confirme que voce e uma pessoa') ||
+        bodyTxt.includes('confirm that you are a person')
+      ) {
+        return { blocked: false, reason: 'captcha_persona_not_id_virtus' };
+      }
+
+      const hasUnusual =
+        bodyTxt.includes('atividade incomum') ||
+        bodyTxt.includes('unusual activity') ||
+        bodyTxt.includes('acoes foram restringidas') ||
+        bodyTxt.includes('actions have been restricted');
+
+      let hasComoConfirmar = false;
+      try {
+        const els = Array.from(
+          document.querySelectorAll('[role="button"],button,a,[aria-label]')
+        ).slice(0, 800);
+        for (const el of els) {
+          const aria = norm((el.getAttribute && el.getAttribute('aria-label')) || '');
+          const txt = norm(el.innerText || el.textContent || '');
+          if (
+            aria.includes('como confirmar') ||
+            txt.includes('como confirmar') ||
+            aria.includes('how to confirm') ||
+            txt.includes('how to confirm')
+          ) {
+            hasComoConfirmar = true;
+            break;
+          }
+        }
+      } catch {}
+
+      if (!hasUnusual && !hasComoConfirmar) {
+        return { blocked: false, reason: 'missing_reinforcement' };
+      }
+
+      let alertHit = false;
+      try {
+        const alerts = Array.from(document.querySelectorAll('[role="alert"]')).slice(0, 40);
+        for (const a of alerts) {
+          const t = norm(a.innerText || a.textContent || '');
+          if (
+            t.includes('confirme sua identidade para enviar mensagens') ||
+            t.includes('confirm your identity to send messages')
+          ) {
+            alertHit = true;
+            break;
+          }
+        }
+      } catch {}
+
+      let composerCount = 0;
+      try {
+        composerCount = Array.from(
+          document.querySelectorAll(
+            'div[data-lexical-editor="true"][contenteditable="true"]'
+          )
+        ).filter((el) => {
+          try {
+            const st = window.getComputedStyle(el);
+            return st && st.display !== 'none' && st.visibility !== 'hidden';
+          } catch {
+            return true;
+          }
+        }).length;
+      } catch {}
+
+      return {
+        blocked: true,
+        reason: 'id_virtus_send_identity',
+        hasUnusual,
+        hasComoConfirmar,
+        alertHit,
+        composerCount,
+        href: href.slice(0, 300),
+        title: String(document.title || '').slice(0, 200)
+      };
+    }).catch(() => null);
+
+    if (!v || v.blocked !== true) {
+      return { blocked: false, reason: (v && v.reason) || 'not_blocked' };
+    }
+    return {
+      blocked: true,
+      reason: String(v.reason || 'id_virtus_send_identity'),
+      url: v.href || null,
+      title: v.title || null,
+      evidence: {
+        hasUnusual: !!v.hasUnusual,
+        hasComoConfirmar: !!v.hasComoConfirmar,
+        alertHit: !!v.alertHit,
+        composerCount: Number(v.composerCount || 0) || 0
+      }
+    };
+  } catch (e) {
+    return {
+      blocked: false,
+      reason: 'probe_failed',
+      error: String((e && e.message) || e).slice(0, 120)
+    };
+  }
+}
+
 // ==== CAPTCHA/CONFIRME-HUMANO HELPERS (SEM OCR IMPLEMENTADO) ====
 
 async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
@@ -6169,6 +6319,7 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
+  detectVirtusIdentityBlock,
   tryClickAymhContinuar,
   // ==== CAPTCHA/CONFIRME-HUMANO (SEM OCR IMPLEMENTADO):
   clickContinueByLabel,

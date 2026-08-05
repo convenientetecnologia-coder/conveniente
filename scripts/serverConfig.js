@@ -166,14 +166,22 @@ const DEFAULTS = Object.freeze({
     scrollDaysMin: 7,
     scrollDaysMax: 45
   },
-  // Limpeza ban/2FA/captcha: INDEPENDENTE do renovar/fechar/abrir.
+  // Limpeza terminal: INDEPENDENTE do renovar/fechar/abrir.
   // Default off = zero regressão na migração (antes rodava acoplada ao abrir).
+  // deleteKinds: o que excluir quando enabled=true (default = legado + id_virtus).
   terminalAccountCleanup: {
     enabled: false,
     windowStartHour: 0,
     windowStartMinute: 0,
     windowEndHour: 1,
-    windowEndMinute: 0
+    windowEndMinute: 0,
+    deleteKinds: {
+      banned: true,
+      captcha: true,
+      two_factor: true,
+      marketplace_disabled: true,
+      id_virtus: true
+    }
   }
 });
 
@@ -470,25 +478,48 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       scrollDaysMin: renewScrollDaysMin,
       scrollDaysMax: renewScrollDaysMax
     },
-    terminalAccountCleanup: {
-      enabled: termClean.enabled === true,
-      windowStartHour: clamp(Math.floor(toNum(
-        termClean.windowStartHour,
-        DEFAULTS.terminalAccountCleanup.windowStartHour
-      )), 0, 23),
-      windowStartMinute: clamp(Math.floor(toNum(
-        termClean.windowStartMinute,
-        DEFAULTS.terminalAccountCleanup.windowStartMinute
-      )), 0, 59),
-      windowEndHour: clamp(Math.floor(toNum(
-        termClean.windowEndHour,
-        DEFAULTS.terminalAccountCleanup.windowEndHour
-      )), 0, 23),
-      windowEndMinute: clamp(Math.floor(toNum(
-        termClean.windowEndMinute,
-        DEFAULTS.terminalAccountCleanup.windowEndMinute
-      )), 0, 59)
-    }
+    terminalAccountCleanup: (() => {
+      const defKinds = DEFAULTS.terminalAccountCleanup.deleteKinds || {};
+      const rawKinds = (termClean.deleteKinds && typeof termClean.deleteKinds === "object")
+        ? termClean.deleteKinds
+        : null;
+      // Config antiga sem deleteKinds → defaults (legado + id_virtus).
+      const deleteKinds = rawKinds
+        ? {
+          banned: rawKinds.banned === true,
+          captcha: rawKinds.captcha === true,
+          two_factor: rawKinds.two_factor === true,
+          marketplace_disabled: rawKinds.marketplace_disabled === true,
+          id_virtus: rawKinds.id_virtus === true
+        }
+        : {
+          banned: defKinds.banned !== false,
+          captcha: defKinds.captcha !== false,
+          two_factor: defKinds.two_factor !== false,
+          marketplace_disabled: defKinds.marketplace_disabled !== false,
+          id_virtus: defKinds.id_virtus !== false
+        };
+      return {
+        enabled: termClean.enabled === true,
+        windowStartHour: clamp(Math.floor(toNum(
+          termClean.windowStartHour,
+          DEFAULTS.terminalAccountCleanup.windowStartHour
+        )), 0, 23),
+        windowStartMinute: clamp(Math.floor(toNum(
+          termClean.windowStartMinute,
+          DEFAULTS.terminalAccountCleanup.windowStartMinute
+        )), 0, 59),
+        windowEndHour: clamp(Math.floor(toNum(
+          termClean.windowEndHour,
+          DEFAULTS.terminalAccountCleanup.windowEndHour
+        )), 0, 23),
+        windowEndMinute: clamp(Math.floor(toNum(
+          termClean.windowEndMinute,
+          DEFAULTS.terminalAccountCleanup.windowEndMinute
+        )), 0, 59),
+        deleteKinds
+      };
+    })()
   };
 
   normalized.capacity.maxAccountsEffective = calcMaxAccountsEffective({
@@ -682,6 +713,17 @@ function validateServerConfigPayload(payload) {
       if (termClean[f] !== undefined) {
         const n = toNum(termClean[f], NaN);
         if (!Number.isFinite(n)) errors.push(`terminalAccountCleanup.${f}_invalido`);
+      }
+    }
+    if (termClean.deleteKinds !== undefined) {
+      if (!termClean.deleteKinds || typeof termClean.deleteKinds !== "object") {
+        errors.push("terminalAccountCleanup.deleteKinds_invalido");
+      } else {
+        for (const k of ["banned", "captcha", "two_factor", "marketplace_disabled", "id_virtus"]) {
+          if (termClean.deleteKinds[k] !== undefined && typeof termClean.deleteKinds[k] !== "boolean") {
+            errors.push(`terminalAccountCleanup.deleteKinds.${k}_invalido`);
+          }
+        }
       }
     }
   }

@@ -1784,6 +1784,7 @@ function _overlayReasonFromFlags(flags) {
     if (flags.marketplaceDisabled === true) return `marketplace_disabled:${flags.marketplaceDisabledReason || ''}`.trim();
     if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
     if (flags.captchaCheckpoint === true) return `captcha_checkpoint:${flags.captchaCheckpointReason || ''}`.trim();
+    if (flags.idVirtus === true) return `id_virtus:${flags.idVirtusReason || ''}`.trim();
     if (flags.identitySubmitted === true) return 'identity_submitted';
     if (flags.identityRequired === true) return 'identity_required';
     if (flags.appealSubmitted === true) return 'appeal_submitted';
@@ -1801,6 +1802,7 @@ function _terminalFlagFromFlags(flags) {
     if (flags.twoFactor === true) return 'two_factor';
     if (flags.marketplaceDisabled === true) return 'marketplace_disabled';
     if (flags.captchaCheckpoint === true) return 'captcha_checkpoint';
+    if (flags.idVirtus === true) return 'id_virtus';
     return '';
   } catch { return ''; }
 }
@@ -1862,6 +1864,75 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       const ctrl = controllers.get(nome);
       if (ctrl) {
         await enterHumanMode(nome, ctrl, { reason: `captcha_checkpoint:${String(reason || '').slice(0, 100)}` });
+      } else {
+        await syncClosedTerminalDesiredState(nome);
+      }
+    }
+  } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
+}
+
+// Contrato ops: ID Virtus (Messenger "para enviar mensagens") → flag + INVOCA humano.
+// Distinto de identityRequired (selfie/vídeo), que NÃO invoca humano.
+async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  let already = false;
+  try {
+    const prev = await readAccountFlags(nome).catch(() => null);
+    already = !!(prev && prev.idVirtus === true);
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.idVirtus = true;
+      man.accountFlags.idVirtusAt = Number(man.accountFlags.idVirtusAt || 0) || Date.now();
+      man.accountFlags.idVirtusReason = String(reason || 'id_virtus_send_identity').slice(0, 220);
+      man.accountFlags.idVirtusSource = String(source || '').slice(0, 80);
+      man.accountFlags.idVirtusUrl = String(url || '').slice(0, 300);
+      man.accountFlags.idVirtusTitle = String(title || '').slice(0, 200);
+      // Não mascarar com login/cookies falhou / LR genérico.
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginReason;
+      delete man.accountFlags.loginSource;
+      delete man.accountFlags.lastLoginRequiredAt;
+      return man;
+    });
+    try { invalidateAccountFlagsCache(nome); } catch {}
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].whyNotOpen = 'id_virtus';
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
+    delete robeMeta[nome].loginRequired;
+    delete robeMeta[nome].loginReason;
+  } catch {}
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'id_virtus_detected',
+      nome: String(nome || ''),
+      reason: String(reason || '').slice(0, 160),
+      source: String(source || '').slice(0, 80),
+      url: String(url || '').slice(0, 220),
+      title: String(title || '').slice(0, 120),
+      already: !!already
+    });
+  } catch {}
+
+  try {
+    let alreadyHold = false;
+    try {
+      const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+      alreadyHold = !!(d.perfis && d.perfis[nome] && d.perfis[nome].humanHold === true);
+    } catch {}
+    if (!already || !alreadyHold) {
+      const ctrl = controllers.get(nome);
+      if (ctrl) {
+        await enterHumanMode(nome, ctrl, { reason: `id_virtus:${String(reason || '').slice(0, 100)}` });
       } else {
         await syncClosedTerminalDesiredState(nome);
       }
@@ -2234,6 +2305,7 @@ async function _buildHumanOverlayData(nome) {
         loginReason: flags ? (flags.loginReason || '') : '',
         banned: flags && flags.banned === true,
         captchaCheckpoint: flags && flags.captchaCheckpoint === true,
+        idVirtus: flags && flags.idVirtus === true,
         identityRequired: flags && flags.identityRequired === true,
         identitySubmitted: flags && flags.identitySubmitted === true,
         identityNextCheckAt: flags ? (flags.identityNextCheckAt || null) : null,
@@ -3225,6 +3297,7 @@ async function _installOverlayOnPage(nome, page) {
             else if (f.marketplaceDisabled) statusTxt = 'MKT Desativado (Humano)';
             else if (f.twoFactor) statusTxt = '2FA requerido (Humano)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
+            else if (f.idVirtus) statusTxt = 'ID Virtus (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
             else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
@@ -5446,6 +5519,23 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.captchaCheckpointTitle;
         }
       }
+      if (which.includes('idVirtus')) {
+        if (
+          man.accountFlags.idVirtus ||
+          man.accountFlags.idVirtusAt ||
+          man.accountFlags.idVirtusReason ||
+          man.accountFlags.idVirtusSource ||
+          man.accountFlags.idVirtusUrl ||
+          man.accountFlags.idVirtusTitle
+        ) {
+          delete man.accountFlags.idVirtus;
+          delete man.accountFlags.idVirtusAt;
+          delete man.accountFlags.idVirtusReason;
+          delete man.accountFlags.idVirtusSource;
+          delete man.accountFlags.idVirtusUrl;
+          delete man.accountFlags.idVirtusTitle;
+        }
+      }
       if (which.includes('twoFactor')) {
         if (
           man.accountFlags.twoFactor ||
@@ -5516,6 +5606,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('captchaCheckpoint') && (prev && prev.captchaCheckpoint)) {
       await issues.append(nome, 'mil_action', `captcha_checkpoint_cleared at=${new Date().toISOString()}`);
     }
+    if (which.includes('idVirtus') && (prev && prev.idVirtus)) {
+      await issues.append(nome, 'mil_action', `id_virtus_cleared at=${new Date().toISOString()}`);
+    }
     if (which.includes('twoFactor') && (prev && prev.twoFactor)) {
       await issues.append(nome, 'mil_action', `two_factor_cleared at=${new Date().toISOString()}`);
     }
@@ -5544,6 +5637,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     }
     if (which.includes('captchaCheckpoint')) {
       if (robeMeta[nome].whyNotOpen === 'captcha_checkpoint') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('idVirtus')) {
+      if (robeMeta[nome].whyNotOpen === 'id_virtus') delete robeMeta[nome].whyNotOpen;
     }
     if (which.includes('twoFactor')) {
       delete robeMeta[nome].twoFactor;
@@ -8349,6 +8445,7 @@ async function robeIsAutoEnqueueEligible(nome, opts = {}) {
     if (fl && fl.twoFactor === true) return { ok: false, reason: 'two_factor' };
     if (fl && fl.marketplaceDisabled === true) return { ok: false, reason: 'marketplace_disabled' };
     if (fl && fl.captchaCheckpoint === true) return { ok: false, reason: 'captcha_checkpoint' };
+    if (fl && fl.idVirtus === true) return { ok: false, reason: 'id_virtus' };
   } catch {}
   if (isFrozenNow(n)) return { ok: false, reason: 'frozen' };
   if (robeQueue.inQueue(n) || robeQueue.isActive(n)) return { ok: false, reason: 'queue_busy' };
@@ -10256,6 +10353,18 @@ async function start_work({ nome, operator }) {
           });
         } catch {}
         return { ok: false, error: 'captcha_checkpoint' };
+      }
+      if (flags && flags.idVirtus === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'id_virtus', reason: String(flags.idVirtusReason||'id_virtus').slice(0,120) }); } catch {}
+        try {
+          await setIdVirtusFlag(nome, {
+            reason: String(flags.idVirtusReason || 'id_virtus'),
+            source: 'start_work_flags',
+            url: String(flags.idVirtusUrl || ''),
+            title: String(flags.idVirtusTitle || '')
+          });
+        } catch {}
+        return { ok: false, error: 'id_virtus' };
       }
       if (flags && flags.loginRequired === true) {
         const rr = String(flags.loginReason || 'login_required').slice(0, 120);
@@ -12591,6 +12700,34 @@ const handlers = {
           return { ok: true, status: 'send_ok', client_message_id: cmid };
         }
         const err = String((out && out.error) || 'send_failed').trim() || 'send_failed';
+        // ID Virtus: terminal para hands — invoca humano, não hop/retry de rota.
+        if (
+          err.includes('id_virtus') ||
+          (out && out.idVirtus === true)
+        ) {
+          try {
+            await setIdVirtusFlag(n, {
+              reason: String((out && out.reason) || err || 'id_virtus_send_identity').slice(0, 220),
+              source: 'virtus_delta_reply',
+              url: String((out && out.url) || ''),
+              title: String((out && out.title) || '')
+            });
+          } catch {}
+          try {
+            logger.warn('[DELTA][HANDS] delta-reply-task id_virtus', {
+              nome: n,
+              thread_key: tk,
+              client_message_id: cmid,
+              error: err
+            });
+          } catch {}
+          return {
+            ok: false,
+            error: 'id_virtus_blocked',
+            status: 'send_failed_nonretryable',
+            client_message_id: cmid
+          };
+        }
         // Falha de rota/hidratação: sempre retryable no outbox (nunca send_failed_nonretryable).
         const routingFail = __deltaIsHandsRoutingFailure(err);
         const failStatus = routingFail
@@ -12805,9 +12942,11 @@ const handlers = {
         const rr = String((flags && (flags.loginReason || flags.captchaCheckpointReason || flags.reason)) || '').toLowerCase();
         skipNavigation = !!(
           (flags && flags.captchaCheckpoint === true) ||
+          (flags && flags.idVirtus === true) ||
           rr.includes('captcha') ||
           rr.includes('checkpoint') ||
-          rr.includes('persona')
+          rr.includes('persona') ||
+          rr.includes('id_virtus')
         );
       } catch {}
 
@@ -12974,7 +13113,7 @@ const handlers = {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
-      const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','captchaCheckpoint','twoFactor'];
+      const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','captchaCheckpoint','twoFactor','idVirtus'];
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
@@ -13011,7 +13150,7 @@ const handlers = {
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
-      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
       // Libera browser para o motor: limpa flag + timers de "fora do inbox" antes de qualquer nav/boot.
@@ -13104,6 +13243,31 @@ const handlers = {
             logger.info('[HANDLER] human-resume preflight -> banned', { nome, reason: preflight.reason });
             return { ok: true, preflight };
           }
+
+          // 0.5) ID Virtus no Messenger (aba Virtus) — limpou a flag no resume; reavaliar DOM real.
+          // Sem isso, retomar com banner ainda aberto deixa Virtus “OK” até o próximo nurse/reply.
+          try {
+            for (const pgIv of (pages || []).slice(0, 8)) {
+              const uIv = safeUrl(pgIv);
+              if (!/messenger\.com/i.test(uIv) && !/\/messages\b/i.test(uIv) && !/\/marketplace\/t\//i.test(uIv)) continue;
+              const iv = await browserHelper.detectVirtusIdentityBlock(pgIv).catch(() => null);
+              if (iv && iv.blocked === true) {
+                preflight = { ok: true, state: 'id_virtus', reason: String(iv.reason || 'id_virtus_send_identity') };
+                try { await issues.append(nome, 'human_resume_preflight', `state=id_virtus reason=${preflight.reason}`); } catch {}
+                try {
+                  await setIdVirtusFlag(nome, {
+                    reason: String(iv.reason || 'id_virtus_send_identity'),
+                    source: 'human_resume_preflight',
+                    url: String(iv.url || uIv || ''),
+                    title: String(iv.title || '')
+                  });
+                } catch {}
+                try { await snapshotStatusAndWrite(); } catch {}
+                logger.info('[HANDLER] human-resume preflight -> id_virtus', { nome, reason: preflight.reason });
+                return { ok: true, preflight };
+              }
+            }
+          } catch {}
 
           // 1) Login required / captcha / identity / appeal_submitted etc.
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
@@ -13938,6 +14102,8 @@ const handlers = {
       const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
       const captchaCheckpoint = man ? !!(man.accountFlags && man.accountFlags.captchaCheckpoint === true) : false;
       const captchaCheckpointReason = man ? ((man.accountFlags && man.accountFlags.captchaCheckpointReason) || null) : null;
+      const idVirtus = man ? !!(man.accountFlags && man.accountFlags.idVirtus === true) : false;
+      const idVirtusReason = man ? ((man.accountFlags && man.accountFlags.idVirtusReason) || null) : null;
       const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
       const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
       const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
@@ -13987,6 +14153,7 @@ const handlers = {
           (man.accountFlags && man.accountFlags.banned === true) ||
           (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
           (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
+          (man.accountFlags && man.accountFlags.idVirtus === true) ||
           (man.accountFlags && man.accountFlags.twoFactor === true) ||
           (man.accountFlags && man.accountFlags.identityRequired === true) ||
           (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
@@ -14085,6 +14252,8 @@ const handlers = {
         marketplaceDisabledText,
         captchaCheckpoint,
         captchaCheckpointReason,
+        idVirtus,
+        idVirtusReason,
         twoFactor,
         twoFactorAt,
         twoFactorReason,
@@ -16466,6 +16635,21 @@ async function nurseTick() {
                 }
                 continue;
               }
+              if (flags && flags.idVirtus === true) {
+                if (!liveCtrl) {
+                  try { await syncClosedTerminalDesiredState(nome); } catch {}
+                } else {
+                  try {
+                    await setIdVirtusFlag(nome, {
+                      reason: String(flags.idVirtusReason || 'id_virtus'),
+                      source: 'nurse_zero_ctrl_sweep',
+                      url: String(flags.idVirtusUrl || ''),
+                      title: String(flags.idVirtusTitle || '')
+                    });
+                  } catch {}
+                }
+                continue;
+              }
               // Compat retroativa: loginRequired+reason two_factor => human hold 2FA
               if (flags && flags.loginRequired === true) {
                 const rr = String(flags.loginReason || '').toLowerCase();
@@ -16617,9 +16801,9 @@ async function nurseTick() {
             try {
               const rm = robeMeta[n] || {};
               if (rm.banned === true || rm.twoFactor === true || rm.marketplaceDisabled === true) continue;
-              if (rm.whyNotOpen === 'captcha_checkpoint' || rm.whyNotOpen === 'marketplace_disabled_human_hold') continue;
+              if (rm.whyNotOpen === 'captcha_checkpoint' || rm.whyNotOpen === 'id_virtus' || rm.whyNotOpen === 'marketplace_disabled_human_hold') continue;
               const flags = await readAccountFlags(n).catch(() => null);
-              if (flags && (flags.banned === true || flags.twoFactor === true || flags.marketplaceDisabled === true || flags.captchaCheckpoint === true)) continue;
+              if (flags && (flags.banned === true || flags.twoFactor === true || flags.marketplaceDisabled === true || flags.captchaCheckpoint === true || flags.idVirtus === true)) continue;
             } catch {}
             pending++;
             pendingNames.push(String(n));
@@ -17436,6 +17620,29 @@ async function nurseTick() {
                 url: urlNow,
                 title: titleNow
               });
+            }
+          }
+        } catch {}
+
+        // === ID Virtus (Messenger send-identity) — antes do LR genérico ===
+        // Distinto de identity selfie; invoca humano via setIdVirtusFlag.
+        try {
+          const flagsIv = await readAccountFlags(nome).catch(() => null);
+          if (!(flagsIv && flagsIv.idVirtus === true)) {
+            for (const pg of (pages || []).slice(0, 8)) {
+              let uIv = '';
+              try { uIv = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+              if (!/messenger\.com/i.test(String(uIv || '')) && !/\/messages\b/i.test(String(uIv || ''))) continue;
+              const iv = await browserHelper.detectVirtusIdentityBlock(pg).catch(() => null);
+              if (iv && iv.blocked === true) {
+                await setIdVirtusFlag(nome, {
+                  reason: String(iv.reason || 'id_virtus_send_identity'),
+                  source: 'nurse_messenger_scan',
+                  url: String(iv.url || uIv || ''),
+                  title: String(iv.title || '')
+                }).catch(() => {});
+                break;
+              }
             }
           }
         } catch {}
@@ -19836,6 +20043,8 @@ function __deltaIsHandsRoutingFailure(errorRaw) {
   if (!e) return false;
   // Chat excluído / indisponível: não tratar como routing (senão requeue em loop).
   if (e.includes('thread_content_unavailable')) return false;
+  // ID Virtus: terminal (humano), não hop de candidatos.
+  if (e.includes('id_virtus')) return false;
   return (
     e.includes('routing_recovery_exhausted') ||
     e.includes('wrong_thread_guard_blocked') ||

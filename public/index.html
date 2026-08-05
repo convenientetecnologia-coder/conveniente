@@ -431,6 +431,16 @@
           };
         }
 
+        // 1.4) ID Virtus (Messenger: confirme identidade para enviar mensagens)
+        if (p.idVirtus === true) {
+          return {
+            kind: 'id_virtus',
+            label: 'ID Virtus',
+            cls: 'bad',
+            title: String(p.idVirtusReason || 'Confirme sua identidade para enviar mensagens')
+          };
+        }
+
         // 1.5) Recurso/Apelação submetida (monitoramento a cada 1h)
         if (p.appealSubmitted === true) {
           const nextAt = Number(p.appealNextCheckAt || 0) || 0;
@@ -1313,7 +1323,7 @@
             <div class="muted" style="margin-top:6px;">Todo dia o sistema sorteia 1 horário dentro da janela de fechar e 1 dentro da janela de abrir. Ex.: fechar 01:00-03:00, abrir 05:00-07:00. A renovação de classificados NÃO roda aqui — use a config Renovação na aba Robe.</div>
           </div>
           <div class="form-row">
-            <label>Excluir contas ban / captcha (e 2FA)</label>
+            <label>Excluir contas</label>
             <select id="srvTerminalCleanupEnabled">
               <option value="0">Não</option>
               <option value="1">Sim</option>
@@ -1328,7 +1338,24 @@
                 <input type="time" id="srvTerminalCleanupEndTime" />
               </label>
             </div>
-            <div class="muted" style="margin-top:6px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia (ban, captcha bloqueante e 2FA). Não afeta login/AYMH/identity.</div>
+            <div id="srvTerminalCleanupKinds" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px;">
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindBanned" checked /> Ban
+              </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindCaptcha" checked /> Captcha / Checkpoint
+              </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindTwoFactor" checked /> 2FA
+              </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindMkt" checked /> MKT Desativado
+              </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindIdVirtus" checked /> ID Virtus
+              </label>
+            </div>
+            <div class="muted" style="margin-top:6px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia só os tipos marcados. Não afeta login/AYMH/identity selfie.</div>
           </div>
         </div>
 
@@ -1663,6 +1690,21 @@
           const mm = String(Number(termClean.windowEndMinute != null ? termClean.windowEndMinute : 0)).padStart(2, '0');
           terminalCleanupEndTimeEl.value = `${hh}:${mm}`;
         }
+        {
+          const dk = (termClean.deleteKinds && typeof termClean.deleteKinds === 'object')
+            ? termClean.deleteKinds
+            : null;
+          const setKind = (id, defTrue) => {
+            const el = box.querySelector(id);
+            if (!el) return;
+            el.checked = dk ? (dk[defTrue.key] === true) : (defTrue.fallback !== false);
+          };
+          setKind('#srvTcKindBanned', { key: 'banned', fallback: true });
+          setKind('#srvTcKindCaptcha', { key: 'captcha', fallback: true });
+          setKind('#srvTcKindTwoFactor', { key: 'two_factor', fallback: true });
+          setKind('#srvTcKindMkt', { key: 'marketplace_disabled', fallback: true });
+          setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
+        }
         const wm = String(robe.workMode || 'v1');
         workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
@@ -1988,7 +2030,14 @@
               windowStartHour: terminalCleanupStartHm.h,
               windowStartMinute: terminalCleanupStartHm.m,
               windowEndHour: terminalCleanupEndHm.h,
-              windowEndMinute: terminalCleanupEndHm.m
+              windowEndMinute: terminalCleanupEndHm.m,
+              deleteKinds: {
+                banned: !!(box.querySelector('#srvTcKindBanned') && box.querySelector('#srvTcKindBanned').checked),
+                captcha: !!(box.querySelector('#srvTcKindCaptcha') && box.querySelector('#srvTcKindCaptcha').checked),
+                two_factor: !!(box.querySelector('#srvTcKindTwoFactor') && box.querySelector('#srvTcKindTwoFactor').checked),
+                marketplace_disabled: !!(box.querySelector('#srvTcKindMkt') && box.querySelector('#srvTcKindMkt').checked),
+                id_virtus: !!(box.querySelector('#srvTcKindIdVirtus') && box.querySelector('#srvTcKindIdVirtus').checked)
+              }
             },
             robe: {
               cooldownMinMinutes: cooldownMin,
@@ -2590,7 +2639,7 @@
         const st = classifyAccountFinal(p, robes);
         if (st.kind === 'banned') bannedCount++;
         else if (st.kind === 'marketplace_disabled') marketplaceDisabledCount++;
-        else if (['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind)) loginCount++;
+        else if (['captcha','id_virtus','login','session','two_factor','identity','consent','unknown'].includes(st.kind)) loginCount++;
       }
 
       // Atualiza cards do header
@@ -3174,7 +3223,7 @@
       // Clicks das métricas: "Login requerido" (agregado)
       else if (currentFilter === 'login') {
         const st = classifyAccountFinal(p, lastRobesCache || {});
-        ok = !!st && ['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind);
+        ok = !!st && ['captcha','id_virtus','login','session','two_factor','identity','consent','unknown'].includes(st.kind);
       }
       else if (currentFilter === 'marketplace_disabled') {
         const st = classifyAccountFinal(p, lastRobesCache || {});

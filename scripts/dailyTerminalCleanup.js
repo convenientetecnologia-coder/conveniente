@@ -1,17 +1,19 @@
 'use strict';
 
 /**
- * Limpeza diária de contas TERMINAIS (ban / 2FA / captcha / checkpoint).
+ * Limpeza diária de contas TERMINAIS (ban / 2FA / captcha / checkpoint / ID Virtus / MKT).
  * Acionada pelo terminalAccountCleanupScheduler (config própria no servidor).
  * NÃO acoplada a renovar/fechar/abrir. NÃO deve ser chamada pelo botão Abrir tudo.
  *
- * Allowlist positiva (DELETE):
+ * Allowlist positiva (DELETE) filtrada por terminalAccountCleanup.deleteKinds:
  * - banned
  * - twoFactor / 2FA
- * - captcha / checkpoint (flag ou motivo) — inclusive se houver mascara de política (non_lr)
+ * - captcha / checkpoint
+ * - marketplaceDisabled
+ * - idVirtus (Messenger "para enviar mensagens")
  *
  * Nunca exclui: login requerido genérico (login_form, session, aymh, login_other,
- * identity, consent, appeal, password_reset, hacked_review).
+ * identity selfie/vídeo, consent, appeal, password_reset, hacked_review).
  */
 
 const fs = require('fs');
@@ -21,6 +23,14 @@ const provisionAudit = require('./provisionAudit.js');
 const logger = require('./logger.js');
 
 const STATE_PATH = path.join(__dirname, '..', 'dados', 'daily_terminal_cleanup_state.json');
+
+const DEFAULT_DELETE_KINDS = Object.freeze({
+  banned: true,
+  captcha: true,
+  two_factor: true,
+  marketplace_disabled: true,
+  id_virtus: true
+});
 
 function now() { return Date.now(); }
 
@@ -64,31 +74,54 @@ function saveState(patch) {
 }
 
 /**
- * Decide se a conta deve ser excluída nesta limpeza.
- * Allowlist positiva — nunca “loginRequired genérico”.
- *
- * Ordem (militar — NÃO inverter):
- * 1) banned → delete
- * 2) 2FA → delete
- * 3) marketplaceDisabled (MKT Desativado) → delete
- * 4) captcha / checkpoint (flag OU motivo) → delete
- * 5) login requerido genérico → keep
- * 6) resto → keep
+ * Resolve deleteKinds a partir da config.
+ * Sem deleteKinds (config antiga) → default legado + id_virtus.
+ * Com deleteKinds → só true explícito.
  */
+function resolveDeleteKinds(termCleanOrKinds) {
+  const raw = (termCleanOrKinds && typeof termCleanOrKinds === 'object')
+    ? termCleanOrKinds
+    : {};
+  const dk = (raw.deleteKinds && typeof raw.deleteKinds === 'object')
+    ? raw.deleteKinds
+    : ((raw.banned !== undefined || raw.captcha !== undefined || raw.id_virtus !== undefined)
+      ? raw
+      : null);
+  if (!dk) {
+    return { ...DEFAULT_DELETE_KINDS };
+  }
+  return {
+    banned: dk.banned === true,
+    captcha: dk.captcha === true,
+    two_factor: dk.two_factor === true,
+    marketplace_disabled: dk.marketplace_disabled === true,
+    id_virtus: dk.id_virtus === true
+  };
+}
 
-/** Motivos de LOGIN (não-terminal). Nunca inclui captcha/checkpoint/2fa/ban. */
+function deleteKindsSignature(kinds) {
+  const k = resolveDeleteKinds(kinds);
+  return [
+    k.banned ? '1' : '0',
+    k.captcha ? '1' : '0',
+    k.two_factor ? '1' : '0',
+    k.marketplace_disabled ? '1' : '0',
+    k.id_virtus ? '1' : '0'
+  ].join('');
+}
+
+/** Motivos de LOGIN (não-terminal). Nunca inclui captcha/checkpoint/2fa/ban/id_virtus. */
 function isLoginOnlyKeepReason(reason) {
   const r = String(reason || '').trim().toLowerCase();
   if (!r) return false;
-  // Política de host — ruído, NÃO é motivo de keep por si só.
   if (r === 'non_lr_automation_paused' || r.includes('non_lr_automation_paused')) return false;
   if (r.includes('password_reset')) return true;
   if (r.includes('hacked_review')) return true;
   if (r.includes('appeal')) return true;
+  // identity selfie/vídeo — NÃO é ID Virtus
   if (r.includes('identity')) return true;
   if (r === 'login_form' || r.includes('login_form')) return true;
   if (r === 'aymh_continue' || r.includes('aymh_continue')) return true;
-  // session expirada = login; se vier "session"+"checkpoint/captcha", o detector de captcha vence antes.
   if (r.includes('session')) return true;
   if (r === 'login_other' || r.includes('login_other')) return true;
   if (r.includes('consent')) return true;
@@ -98,7 +131,6 @@ function isLoginOnlyKeepReason(reason) {
 function isCaptchaOrCheckpointReason(reason) {
   const r = String(reason || '').trim().toLowerCase();
   if (!r) return false;
-  // Qualquer captcha/checkpoint é terminal (inclui checkpoint_back_to_facebook).
   if (r.includes('captcha')) return true;
   if (r.includes('checkpoint')) return true;
   return false;
@@ -115,27 +147,45 @@ function isExplicitlyRecoverableReason(reason) {
   return isLoginOnlyKeepReason(reason);
 }
 
-function classifyTerminalDelete(flags) {
+/**
+ * Decide se a conta deve ser excluída nesta limpeza.
+ * @param {object} flags
+ * @param {{ deleteKinds?: object }} [opts]
+ */
+function classifyTerminalDelete(flags, opts = {}) {
   const f = (flags && typeof flags === 'object') ? flags : {};
+  const kinds = resolveDeleteKinds(opts.deleteKinds || opts);
   const loginReason = String(f.loginReason || '').trim().toLowerCase();
   const captchaReason = String(f.captchaCheckpointReason || '').trim().toLowerCase();
   const combined = captchaReason || loginReason;
 
   // 1) BAN
   if (f.banned === true) {
+    if (!kinds.banned) {
+      return { delete: false, category: 'banned_skipped', detail: 'kind_disabled' };
+    }
     return { delete: true, category: 'banned', detail: String(f.bannedReason || 'banned').slice(0, 120) };
   }
 
   // 2) 2FA
   if (f.twoFactor === true) {
+    if (!kinds.two_factor) {
+      return { delete: false, category: 'two_factor_skipped', detail: 'kind_disabled' };
+    }
     return { delete: true, category: 'two_factor', detail: String(f.twoFactorReason || 'two_factor').slice(0, 120) };
   }
   if (f.loginRequired === true && isTwoFactorReason(loginReason)) {
+    if (!kinds.two_factor) {
+      return { delete: false, category: 'two_factor_skipped', detail: 'kind_disabled' };
+    }
     return { delete: true, category: 'two_factor', detail: `login_reason:${loginReason}`.slice(0, 120) };
   }
 
-  // 3) MKT Desativado (marketplace create permanente)
+  // 3) MKT Desativado
   if (f.marketplaceDisabled === true) {
+    if (!kinds.marketplace_disabled) {
+      return { delete: false, category: 'marketplace_disabled_skipped', detail: 'kind_disabled' };
+    }
     return {
       delete: true,
       category: 'marketplace_disabled',
@@ -143,30 +193,44 @@ function classifyTerminalDelete(flags) {
     };
   }
 
-  // 4) CAPTCHA / CHECKPOINT — SEMPRE delete. Vence mascara non_lr / qualquer keep de login.
+  // 4) CAPTCHA / CHECKPOINT
   if (f.captchaCheckpoint === true) {
+    if (!kinds.captcha) {
+      return { delete: false, category: 'captcha_skipped', detail: 'kind_disabled' };
+    }
     return {
       delete: true,
       category: 'captcha',
       detail: `captchaCheckpoint:${combined || 'flag'}`.slice(0, 120)
     };
   }
-  if (isCaptchaOrCheckpointReason(captchaReason)) {
+  if (isCaptchaOrCheckpointReason(captchaReason) || isCaptchaOrCheckpointReason(loginReason)) {
+    if (!kinds.captcha) {
+      return { delete: false, category: 'captcha_skipped', detail: 'kind_disabled' };
+    }
+    const detailSrc = isCaptchaOrCheckpointReason(captchaReason)
+      ? `captcha_reason:${captchaReason}`
+      : `login_reason:${loginReason}`;
     return {
       delete: true,
       category: 'captcha',
-      detail: `captcha_reason:${captchaReason}`.slice(0, 120)
-    };
-  }
-  if (isCaptchaOrCheckpointReason(loginReason)) {
-    return {
-      delete: true,
-      category: 'captcha',
-      detail: `login_reason:${loginReason}`.slice(0, 120)
+      detail: detailSrc.slice(0, 120)
     };
   }
 
-  // 4) Login requerido genérico → NÃO excluir
+  // 5) ID Virtus (Messenger send-identity) — NÃO confundir com identity selfie
+  if (f.idVirtus === true) {
+    if (!kinds.id_virtus) {
+      return { delete: false, category: 'id_virtus_skipped', detail: 'kind_disabled' };
+    }
+    return {
+      delete: true,
+      category: 'id_virtus',
+      detail: String(f.idVirtusReason || 'id_virtus').slice(0, 120)
+    };
+  }
+
+  // 6) Login requerido genérico → NÃO excluir
   if (f.loginRequired === true) {
     if (isLoginOnlyKeepReason(loginReason) || !loginReason) {
       return {
@@ -175,7 +239,6 @@ function classifyTerminalDelete(flags) {
         detail: String(loginReason || 'login_required').slice(0, 120)
       };
     }
-    // Motivo de login desconhecido (sem captcha/2fa/ban) → keep seguro
     return {
       delete: false,
       category: 'login_required_keep',
@@ -183,7 +246,7 @@ function classifyTerminalDelete(flags) {
     };
   }
 
-  // 5) Resto
+  // 7) Resto (inclui identityRequired/Submitted)
   return { delete: false, category: 'keep', detail: null };
 }
 
@@ -209,7 +272,8 @@ async function runDailyTerminalCleanup({
   fileStore,
   localPort,
   by = 'daily_window_open',
-  force = false
+  force = false,
+  deleteKinds = null
 } = {}) {
   const day = todayKeySaoPaulo();
   const st = loadState();
@@ -229,6 +293,7 @@ async function runDailyTerminalCleanup({
     return { ok: false, error: 'missing_file_store' };
   }
 
+  const kinds = resolveDeleteKinds(deleteKinds || {});
   const loaded = fileStore.loadPerfisJson();
   const perfis = Array.isArray(loaded) ? loaded : [];
   const candidates = [];
@@ -242,7 +307,7 @@ async function runDailyTerminalCleanup({
     } catch {
       flags = {};
     }
-    const decision = classifyTerminalDelete(flags);
+    const decision = classifyTerminalDelete(flags, { deleteKinds: kinds });
     if (decision.delete) {
       candidates.push({ nome, category: decision.category, detail: decision.detail });
     }
@@ -256,12 +321,11 @@ async function runDailyTerminalCleanup({
       day,
       scanned: perfis.length,
       candidates: candidates.length,
+      deleteKinds: kinds,
       preview: candidates.slice(0, 30).map((c) => ({ nome: c.nome, category: c.category }))
     });
   } catch {}
 
-  // Claim 1×/dia ANTES do loop: se crashar no meio, não re-roda (evita double-delete)
-  // e também não “perde o dia” por throw após o scan.
   saveState({
     lastTerminalCleanupDay: day,
     lastTerminalCleanupAt: now(),
@@ -269,13 +333,14 @@ async function runDailyTerminalCleanup({
     lastFailed: 0,
     lastScanned: perfis.length,
     lastCandidates: candidates.length,
-    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0 },
+    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0 },
+    lastDeleteKinds: kinds,
     lastClaimedAt: now()
   });
 
   let deleted = 0;
   let failed = 0;
-  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0 };
+  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0 };
   const failures = [];
 
   try {
@@ -331,7 +396,8 @@ async function runDailyTerminalCleanup({
       lastFailed: failed,
       lastScanned: perfis.length,
       lastCandidates: candidates.length,
-      lastByCategory: byCategory
+      lastByCategory: byCategory,
+      lastDeleteKinds: kinds
     });
   }
 
@@ -345,7 +411,8 @@ async function runDailyTerminalCleanup({
       candidates: candidates.length,
       deleted,
       failed,
-      byCategory
+      byCategory,
+      deleteKinds: kinds
     });
   } catch {}
 
@@ -356,7 +423,8 @@ async function runDailyTerminalCleanup({
       candidates: candidates.length,
       deleted,
       failed,
-      byCategory
+      byCategory,
+      deleteKinds: kinds
     });
   } catch {}
 
@@ -369,6 +437,7 @@ async function runDailyTerminalCleanup({
     deleted,
     failed,
     byCategory,
+    deleteKinds: kinds,
     failures
   };
 }
@@ -376,6 +445,9 @@ async function runDailyTerminalCleanup({
 module.exports = {
   classifyTerminalDelete,
   runDailyTerminalCleanup,
+  resolveDeleteKinds,
+  deleteKindsSignature,
+  DEFAULT_DELETE_KINDS,
   todayKeySaoPaulo,
   STATE_PATH
 };

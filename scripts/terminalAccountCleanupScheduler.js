@@ -119,7 +119,14 @@ function tcConfigSignature(tc) {
   const t = (tc && typeof tc === 'object') ? tc : {};
   const startMin = hmToMin(t.windowStartHour, t.windowStartMinute);
   const endMin = hmToMin(t.windowEndHour, t.windowEndMinute);
-  return `${t.enabled === true ? 'on' : 'off'}|${startMin}|${endMin}|v3`;
+  const kindsSig = (() => {
+    try {
+      return dailyTerminalCleanup.deleteKindsSignature(t.deleteKinds || t);
+    } catch {
+      return 'xxxxx';
+    }
+  })();
+  return `${t.enabled === true ? 'on' : 'off'}|${startMin}|${endMin}|kinds:${kindsSig}|v4`;
 }
 
 function terminalAccountCleanupConfigChanged(prevTc, nextTc) {
@@ -351,7 +358,8 @@ async function tick() {
         fileStore,
         localPort,
         by: 'terminal_account_cleanup_scheduler',
-        force: true
+        force: true,
+        deleteKinds: (tc && tc.deleteKinds) ? tc.deleteKinds : null
       });
     } catch (e) {
       result = {
