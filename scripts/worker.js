@@ -11233,15 +11233,19 @@ const handlers = {
             try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_appeal_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
             return { ok: false, error: 'appeal_submitted' };
           }
-          if (rr.includes('aymh_continue') || rr === 'aymh') {
-            // AYMH: NÃO tentar Continuar/login/senha aqui — só LR + humano.
+          const isAymh = (rr.includes('aymh_continue') || rr === 'aymh');
+          // RUNTIME (conta já trabalhando): AYMH = humano na hora, zero auto-login.
+          // CADASTRO (stock_provision): AYMH/login é padrão natural → tenta Continuar+senha antes.
+          if (isAymh && !isStockProvision) {
             try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: best.domain || 'configure' }); } catch {}
+            enteredHuman = true;
             try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:configure' }); } catch {}
             try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_aymh_continue', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
             return { ok: false, error: 'aymh_continue' };
           }
 
-          // Fallback: tentar login/senha (mesmo padrão do login_remediate)
+          // Fallback: Continuar (se AYMH) + login/senha.
+          // CADASTRO: até 3 tentativas. RUNTIME login_form: 1 tentativa (comportamento antigo).
           let login2 = null, password2 = null;
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
@@ -11254,20 +11258,101 @@ const handlers = {
             if (fb && fb.ok) { login2 = fb.login; password2 = fb.password; }
           }
           if (!login2 || !password2) {
-            await invokeHumanForConfigure('missing_credentials');
+            if (isStockProvision) {
+              try { await setLoginRequiredFlag(nome, { reason: 'missing_credentials', source: 'configure' }); } catch {}
+              enteredHuman = true;
+              try { await enterHumanMode(nome, ctrl, { reason: 'missing_credentials:configure_stock' }); } catch {}
+            } else {
+              await invokeHumanForConfigure('missing_credentials');
+            }
             return { ok: false, error: 'missing_credentials' };
           }
 
+          const maxAttempts = isStockProvision ? 3 : 1;
+          let after = { loginRequired: true, reason: rr || 'login' };
+          let workPage = bestPage;
           try {
-            if (bestPage) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'configure_login_fallback_begin', nome: String(nome||''), operator: op || null }); } catch {}
-              await browserHelper.ensureFbUiUnblocked(bestPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-              await browserHelper.tryLoginEmailPass(bestPage, { nome, login: login2, password: password2, allowGpt: true }).catch(()=>null);
-              await sleep(900);
-            }
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_login_fallback_begin',
+              nome: String(nome || ''),
+              operator: op || null,
+              isStockProvision: !!isStockProvision,
+              isAymh: !!isAymh,
+              maxAttempts
+            });
           } catch {}
 
-          const after = await (bestPage ? browserHelper.detectLoginRequired(bestPage).catch(()=>({ loginRequired:false })) : ({ loginRequired:false }));
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (!workPage) {
+              try {
+                const pages = await ctrl.browser.pages().catch(() => []);
+                workPage = (pages && pages[0]) ? pages[0] : null;
+              } catch { workPage = null; }
+            }
+            if (!workPage) break;
+
+            let curReason = '';
+            try {
+              const lrNow = await browserHelper.detectLoginRequired(workPage).catch(() => null);
+              after = lrNow || { loginRequired: false };
+              curReason = String((lrNow && lrNow.reason) || '').toLowerCase();
+              if (!(lrNow && lrNow.loginRequired)) {
+                after = { loginRequired: false };
+                break;
+              }
+            } catch {}
+
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_login_fallback_attempt',
+                nome: String(nome || ''),
+                operator: op || null,
+                attempt,
+                reason: curReason.slice(0, 80)
+              });
+            } catch {}
+
+            // Continuar (AYMH / pre-screen) — só no cadastro ou quando a tela atual pede.
+            if (isStockProvision || curReason.includes('aymh') || curReason.includes('continuar') || curReason.includes('pre_screen')) {
+              try {
+                const clk = await browserHelper.clickContinueByLabel(workPage, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+                try {
+                  provisionAudit.append({
+                    ts: Date.now(),
+                    event: 'configure_login_fallback_continue_click',
+                    nome: String(nome || ''),
+                    operator: op || null,
+                    attempt,
+                    ok: !!(clk && clk.ok),
+                    error: clk && clk.error ? String(clk.error).slice(0, 80) : null
+                  });
+                } catch {}
+                await sleep(1100);
+                const lrAfterClick = await browserHelper.detectLoginRequired(workPage).catch(() => null);
+                if (!(lrAfterClick && lrAfterClick.loginRequired)) {
+                  after = { loginRequired: false };
+                  break;
+                }
+                after = lrAfterClick || after;
+                curReason = String((lrAfterClick && lrAfterClick.reason) || curReason).toLowerCase();
+              } catch {}
+            }
+
+            try {
+              await browserHelper.ensureFbUiUnblocked(workPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(() => null);
+              await browserHelper.tryLoginEmailPass(workPage, { nome, login: login2, password: password2, allowGpt: true }).catch(() => null);
+              await sleep(900);
+            } catch {}
+
+            try {
+              const lrAfterLogin = await browserHelper.detectLoginRequired(workPage).catch(() => ({ loginRequired: false }));
+              after = lrAfterLogin || { loginRequired: false };
+              if (!(lrAfterLogin && lrAfterLogin.loginRequired)) break;
+            } catch {}
+          }
+
           try {
             provisionAudit.append({
               ts: Date.now(),
@@ -11280,14 +11365,13 @@ const handlers = {
             });
           } catch {}
           if (after && after.loginRequired) {
-            // Enterprise: quando o configure falha por "still_login_required", precisamos de evidência real
-            // (HTML + screenshot) centralizada no CT, sem pedir logs manuais ao humano.
+            // Enterprise: evidência no CT quando ainda loginRequired após tentativas.
             try {
               robeMeta[nome] = robeMeta[nome] || {};
               const now = Date.now();
               const last = Number(robeMeta[nome].lastConfigureFbGptResolveAt || 0) || 0;
               if (!last || (now - last) > (10 * 60 * 1000)) {
-                const pg = bestPage || (await ctrl.browser.pages().then(ps => ps && ps[0]).catch(() => null));
+                const pg = workPage || bestPage || (await ctrl.browser.pages().then(ps => ps && ps[0]).catch(() => null));
                 const urlNow = pg && typeof pg.url === 'function' ? String(pg.url() || '') : '';
                 const titleNow = pg && typeof pg.title === 'function' ? await pg.title().catch(() => '') : '';
                 const html = pg ? await pg.content().catch(() => '') : '';
@@ -11313,13 +11397,20 @@ const handlers = {
                 robeMeta[nome].lastConfigureFbGptResolveAt = now;
               }
             } catch {}
-            await invokeHumanForConfigure(`still_login_required:${String(after.reason||'login')}`);
-            return { ok: false, error: `still_login_required:${String(after.reason||'login')}` };
+            const failReason = `still_login_required:${String(after.reason || 'login')}`;
+            if (isStockProvision) {
+              try { await setLoginRequiredFlag(nome, { reason: String(after.reason || 'aymh_continue'), source: 'configure' }); } catch {}
+              enteredHuman = true;
+              try { await enterHumanMode(nome, ctrl, { reason: `configure_stock_exhausted:${String(after.reason || '').slice(0, 60)}` }); } catch {}
+            } else {
+              await invokeHumanForConfigure(failReason);
+            }
+            return { ok: false, error: failReason };
           }
 
           // Atualiza cookies frescos (best-effort)
           try {
-            const fresh = await browserHelper.collectFreshCookies(bestPage || (await ctrl.browser.pages().then(ps=>ps[0]).catch(()=>null)));
+            const fresh = await browserHelper.collectFreshCookies(workPage || bestPage || (await ctrl.browser.pages().then(ps=>ps[0]).catch(()=>null)));
             if (fresh && fresh.ok && Array.isArray(fresh.cookies) && fresh.cookies.length) {
               await manifestStore.update(nome, (m) => {
                 m = m || {};
@@ -11375,9 +11466,72 @@ const handlers = {
           }
         }
 
+        // CADASTRO: pós-sucesso fecha extras e deixa SÓ aba 0 (messages / Virtus).
+        // create/item fica pro Robe abrir depois do cooldown 24h — não fica viva no cadastro.
+        if (isStockProvision) {
+          try {
+            const pages = await ctrl.browser.pages().catch(() => []);
+            const pageUrl = (pg) => {
+              try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; }
+            };
+            let keep = null;
+            for (const pg of (pages || [])) {
+              const u = pageUrl(pg);
+              if (/messenger\.com/i.test(u)) { keep = pg; break; }
+            }
+            if (!keep) {
+              for (const pg of (pages || [])) {
+                const u = pageUrl(pg);
+                if (/facebook\.com\/messages/i.test(u)) { keep = pg; break; }
+              }
+            }
+            if (!keep && pages && pages[0]) keep = pages[0];
+            let closedExtras = 0;
+            for (const pg of (pages || [])) {
+              if (!pg || pg === keep) continue;
+              try {
+                await Promise.race([
+                  pg.close({ runBeforeUnload: false }).catch(() => {}),
+                  new Promise((r) => setTimeout(r, 2500))
+                ]);
+                closedExtras++;
+              } catch {}
+            }
+            if (keep) {
+              try { ctrl.mainPage = keep; } catch {}
+              const ku = pageUrl(keep);
+              if (!/messenger\.com/i.test(ku) && !/facebook\.com\/messages/i.test(ku)) {
+                try {
+                  await keep.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+                } catch {}
+              }
+            }
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_stock_keep_messages_tab_only',
+                nome: String(nome || ''),
+                operator: op || null,
+                closedExtras,
+                keepUrl: keep ? String(pageUrl(keep) || '').slice(0, 220) : null
+              });
+            } catch {}
+          } catch (e) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_stock_keep_messages_tab_only_fail',
+                nome: String(nome || ''),
+                operator: op || null,
+                error: (e && e.message) ? String(e.message).slice(0, 180) : String(e)
+              });
+            } catch {}
+          }
+        }
+
         // Sucesso: limpa flags e segue.
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
         logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
         return { ok: true, closedForRam };
       } catch (e) {
@@ -11693,23 +11847,28 @@ const handlers = {
         return { ok: false, error: 'browser_not_connected', steps };
       }
 
-      // Blindagem AYMH: Continuar + Usar outro perfil = humano only.
-      // Abort ANTES de quiesce/pausar Virtus dos outros e ANTES de injetar cookies.
-      try {
-        const pagesAymh = await ctrl.browser.pages().catch(() => []);
-        for (const pgA of (pagesAymh || []).slice(0, 8)) {
-          const lrA = await browserHelper.detectLoginRequired(pgA).catch(() => null);
-          const ra = String((lrA && lrA.reason) || '').toLowerCase();
-          if (lrA && lrA.loginRequired && (ra.includes('aymh_continue') || ra === 'aymh')) {
-            pushStep({ step: 'aymh_continue_abort_no_inject', reason: ra.slice(0, 80) });
-            try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrA.domain || 'login_remediate' }); } catch {}
-            try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:login_remediate_abort' }); } catch {}
-            try { provisionLock.release({ owner: op }); } catch {}
-            try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_human_only'); } catch {}
-            return { ok: false, error: 'aymh_continue', steps };
+      // RUNTIME: AYMH = humano only (conta já trabalhava).
+      // CADASTRO (stock_provision): NÃO aborta aqui — segue inject/Continuar/login.
+      const isStockProvisionOp = String(op || '').toLowerCase().startsWith('stock_provision');
+      if (!isStockProvisionOp) {
+        try {
+          const pagesAymh = await ctrl.browser.pages().catch(() => []);
+          for (const pgA of (pagesAymh || []).slice(0, 8)) {
+            const lrA = await browserHelper.detectLoginRequired(pgA).catch(() => null);
+            const ra = String((lrA && lrA.reason) || '').toLowerCase();
+            if (lrA && lrA.loginRequired && (ra.includes('aymh_continue') || ra === 'aymh')) {
+              pushStep({ step: 'aymh_continue_abort_no_inject', reason: ra.slice(0, 80) });
+              try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrA.domain || 'login_remediate' }); } catch {}
+              try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:login_remediate_abort' }); } catch {}
+              try { provisionLock.release({ owner: op }); } catch {}
+              try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_human_only'); } catch {}
+              return { ok: false, error: 'aymh_continue', steps };
+            }
           }
-        }
-      } catch {}
+        } catch {}
+      } else {
+        pushStep({ step: 'aymh_stock_provision_allow_continue_login' });
+      }
 
       // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
       // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
@@ -11732,23 +11891,26 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         pushStep({ step: 'quiesce_failed', error: msg });
         try { provisionLock.release({ owner: op }); } catch {}
-        // Durante a espera a UI pode ter virado AYMH — aborta humano only (sem failFast busy_timeout).
-        try {
-          const pagesQ = await ctrl.browser.pages().catch(() => []);
-          for (const pgQ of (pagesQ || []).slice(0, 8)) {
-            const lrQ = await browserHelper.detectLoginRequired(pgQ).catch(() => null);
-            const rq = String((lrQ && lrQ.reason) || '').toLowerCase();
-            if (lrQ && lrQ.loginRequired && (rq.includes('aymh_continue') || rq === 'aymh')) {
-              pushStep({ step: 'aymh_continue_abort_after_quiesce_fail', reason: rq.slice(0, 80) });
-              try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrQ.domain || 'login_remediate' }); } catch {}
-              try { await clearIdentityFlags(nome); } catch {}
-              try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
-              try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:quiesce_failed' }); } catch {}
-              try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_after_quiesce_fail'); } catch {}
-              return { ok: false, error: 'aymh_continue', steps, pausedVirtus };
+        // RUNTIME: durante a espera UI virou AYMH → humano only.
+        // CADASTRO: não aborta AYMH aqui; segue fail do quiesce (sem misturar política).
+        if (!isStockProvisionOp) {
+          try {
+            const pagesQ = await ctrl.browser.pages().catch(() => []);
+            for (const pgQ of (pagesQ || []).slice(0, 8)) {
+              const lrQ = await browserHelper.detectLoginRequired(pgQ).catch(() => null);
+              const rq = String((lrQ && lrQ.reason) || '').toLowerCase();
+              if (lrQ && lrQ.loginRequired && (rq.includes('aymh_continue') || rq === 'aymh')) {
+                pushStep({ step: 'aymh_continue_abort_after_quiesce_fail', reason: rq.slice(0, 80) });
+                try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrQ.domain || 'login_remediate' }); } catch {}
+                try { await clearIdentityFlags(nome); } catch {}
+                try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
+                try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:quiesce_failed' }); } catch {}
+                try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_after_quiesce_fail'); } catch {}
+                return { ok: false, error: 'aymh_continue', steps, pausedVirtus };
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
         // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
         await failFastToHuman(msg);
         return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
@@ -12050,6 +12212,19 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
+          // CADASTRO: se ainda for AYMH/Continuar, tenta Continuar até 3x antes do login+senha.
+          if (isStockProvisionOp) {
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              const lrA = await browserHelper.detectLoginRequired(p0).catch(() => null);
+              const ra = String((lrA && lrA.reason) || '').toLowerCase();
+              if (!(lrA && lrA.loginRequired)) break;
+              if (!(ra.includes('aymh') || ra.includes('pre_screen') || ra.includes('continuar'))) break;
+              const clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+              pushStep({ step: 'stock_aymh_continue_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
+              await sleep(1100);
+            }
+          }
+
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
           // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
@@ -12285,6 +12460,35 @@ const handlers = {
               });
             } catch {}
             try { robeUpdateMeta(nome, { pauseReason: 'new_account' }); } catch {}
+            // CADASTRO: só aba messages (Virtus). create/item o Robe abre depois.
+            try {
+              const pagesOk = await ctrl.browser.pages().catch(() => []);
+              const uOf = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+              let keepMsg = null;
+              for (const pg of (pagesOk || [])) { if (/messenger\.com/i.test(uOf(pg))) { keepMsg = pg; break; } }
+              if (!keepMsg) {
+                for (const pg of (pagesOk || [])) { if (/facebook\.com\/messages/i.test(uOf(pg))) { keepMsg = pg; break; } }
+              }
+              if (!keepMsg && pagesOk && pagesOk[0]) keepMsg = pagesOk[0];
+              let closedN = 0;
+              for (const pg of (pagesOk || [])) {
+                if (!pg || pg === keepMsg) continue;
+                try {
+                  await Promise.race([pg.close({ runBeforeUnload: false }).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]);
+                  closedN++;
+                } catch {}
+              }
+              if (keepMsg) {
+                try { ctrl.mainPage = keepMsg; } catch {}
+                const ku = uOf(keepMsg);
+                if (!/messenger\.com/i.test(ku) && !/facebook\.com\/messages/i.test(ku)) {
+                  try { await keepMsg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
+                }
+              }
+              pushStep({ step: 'stock_keep_messages_tab_only', closedExtras: closedN });
+            } catch (eTab) {
+              pushStep({ step: 'stock_keep_messages_tab_only_fail', error: (eTab && eTab.message) || String(eTab) });
+            }
           }
         } catch (e) {
           pushStep({ step: 'new_account_robe_pause_apply_fail', error: (e && e.message) || String(e) });
