@@ -2194,10 +2194,32 @@ async function detectMessengerPinModal(page) {
       };
 
       const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
-      const pagePinContext =
-        hasCreatePinPhrase(bodyTxt) ||
-        hasConfirmPinPhrase(bodyTxt) ||
-        hasEnterPinPhrase(bodyTxt);
+      const hasLocalPinContext = (el) => {
+        let n = el;
+        const boundary = el && el.closest
+          ? el.closest('div[role="dialog"], [aria-modal="true"]')
+          : null;
+        for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+          const t = norm(n.innerText || n.textContent || '');
+          if (hasCreatePinPhrase(t) || hasConfirmPinPhrase(t) || hasEnterPinPhrase(t)) return true;
+          if (boundary && n === boundary) break;
+          n = n.parentElement;
+        }
+        return false;
+      };
+      const hasLocalConfirmContext = (el) => {
+        let n = el;
+        const boundary = el && el.closest
+          ? el.closest('div[role="dialog"], [aria-modal="true"]')
+          : null;
+        for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+          const t = norm(n.innerText || n.textContent || '');
+          if (hasConfirmPinPhrase(t)) return true;
+          if (boundary && n === boundary) break;
+          n = n.parentElement;
+        }
+        return false;
+      };
       // Âncora 1: input oficial em qualquer lugar visível (modal restaurar/criar).
       const officialCandidates = Array.from(document.querySelectorAll(
         'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
@@ -2218,10 +2240,13 @@ async function detectMessengerPinModal(page) {
           if (el.getAttribute('aria-hidden') === 'true') return false;
           if (el.getAttribute('disabled') != null) return false;
           if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
-          if (al === 'pin' && maxLen === 6) return true;
-          if (maxLen === 6 && al.includes('pin') && (al.includes('confirme') || al.includes('confirm'))) return true;
-          if (maxLen === 6 && pagePinContext && (ac.includes('one-time-code') || mode.includes('numeric'))) return true;
-          return isVisible(el);
+          if (maxLen === 6 && al.includes('pin')) return true;
+          if (
+            maxLen === 6 &&
+            hasLocalPinContext(el) &&
+            (ac.includes('one-time-code') || mode.includes('numeric'))
+          ) return true;
+          return false;
         } catch { return false; }
       };
       const activeEl = document.activeElement;
@@ -2229,7 +2254,10 @@ async function detectMessengerPinModal(page) {
       const confirmOfficial = officialCandidates.find((el) => {
         if (!isOfficialPinUsable(el)) return false;
         const al = norm(el.getAttribute('aria-label') || '');
-        return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
+        return (
+          (al.includes('pin') && (al.includes('confirme') || al.includes('confirm'))) ||
+          hasLocalConfirmContext(el)
+        );
       }) || null;
       // O React mantém o input da etapa 1 no DOM e monta outro com o MESMO id
       // na confirmação. Priorizar o ativo; depois, o aria de confirmação.
@@ -2606,19 +2634,88 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return true; // opacity/box 0 é normal no input oficial do FB
           } catch { return false; }
         };
-        const active = document.activeElement;
-        const activeOfficial = officialCandidates.find((el) => el === active && isUsableOfficial(el)) || null;
-        const confirmOfficial = officialCandidates.find((el) => {
+        const hasPinSurface = (el) => {
+          let n = el;
+          const boundary = el && el.closest
+            ? el.closest('div[role="dialog"], [aria-modal="true"]')
+            : null;
+          for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('crie um pin') ||
+              t.includes('criar pin') ||
+              t.includes('create a pin') ||
+              t.includes('create pin') ||
+              t.includes('confirme o pin') ||
+              t.includes('confirme seu pin') ||
+              t.includes('confirm your pin') ||
+              (t.includes('pin') && (
+                t.includes('historico') ||
+                t.includes('restaur') ||
+                t.includes('repita') ||
+                t.includes('novamente') ||
+                t.includes('reinsira')
+              ))
+            ) return true;
+            if (boundary && n === boundary) break;
+            n = n.parentElement;
+          }
+          return false;
+        };
+        const hasConfirmSurface = (el) => {
+          let n = el;
+          const boundary = el && el.closest
+            ? el.closest('div[role="dialog"], [aria-modal="true"]')
+            : null;
+          for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('confirme o pin') ||
+              t.includes('confirme seu pin') ||
+              t.includes('confirm your pin') ||
+              (t.includes('pin') && (
+                t.includes('repita') ||
+                t.includes('novamente') ||
+                t.includes('reinsira') ||
+                t.includes('digite de novo')
+              ))
+            ) return true;
+            if (boundary && n === boundary) break;
+            n = n.parentElement;
+          }
+          return false;
+        };
+        const isTrustedOfficial = (el) => {
           if (!isUsableOfficial(el)) return false;
+          const id = String(el.id || '');
           const al = norm(el.getAttribute('aria-label') || '');
-          return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
+          const maxLen = Number(el.getAttribute('maxlength') || 0) || 0;
+          const ac = norm(el.getAttribute('autocomplete') || '');
+          const mode = norm(el.getAttribute('inputmode') || '');
+          if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
+          if (maxLen === 6 && al.includes('pin')) return true;
+          return !!(
+            maxLen === 6 &&
+            hasPinSurface(el) &&
+            (ac.includes('one-time-code') || mode.includes('numeric'))
+          );
+        };
+        const active = document.activeElement;
+        const activeOfficial = officialCandidates.find((el) => el === active && isTrustedOfficial(el)) || null;
+        const confirmOfficial = officialCandidates.find((el) => {
+          if (!isTrustedOfficial(el)) return false;
+          const al = norm(el.getAttribute('aria-label') || '');
+          return (
+            (al.includes('pin') && (al.includes('confirme') || al.includes('confirm'))) ||
+            hasConfirmSurface(el)
+          );
         }) || null;
         // Há dois nós com o mesmo id durante a transição. Nunca escolher o
         // input antigo apenas porque ele aparece primeiro no DOM.
         const officialPin =
           activeOfficial ||
           confirmOfficial ||
-          officialCandidates.find(isUsableOfficial) ||
+          officialCandidates.find(isTrustedOfficial) ||
           null;
         const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
         const dlgEl =
@@ -2776,6 +2873,49 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return true;
           } catch { return false; }
         };
+        const hasPinSurface = (el) => {
+          let n = el;
+          const boundary = el && el.closest
+            ? el.closest('div[role="dialog"], [aria-modal="true"]')
+            : null;
+          for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('crie um pin') ||
+              t.includes('criar pin') ||
+              t.includes('create a pin') ||
+              t.includes('create pin') ||
+              t.includes('confirme o pin') ||
+              t.includes('confirme seu pin') ||
+              t.includes('confirm your pin') ||
+              (t.includes('pin') && (
+                t.includes('historico') ||
+                t.includes('restaur') ||
+                t.includes('repita') ||
+                t.includes('novamente') ||
+                t.includes('reinsira')
+              ))
+            ) return true;
+            if (boundary && n === boundary) break;
+            n = n.parentElement;
+          }
+          return false;
+        };
+        const trusted = (el) => {
+          if (!usable(el)) return false;
+          const id = String(el.id || '');
+          const al = norm(el.getAttribute('aria-label') || '');
+          const maxLen = Number(el.getAttribute('maxlength') || 0) || 0;
+          const ac = norm(el.getAttribute('autocomplete') || '');
+          const mode = norm(el.getAttribute('inputmode') || '');
+          if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
+          if (maxLen === 6 && al.includes('pin')) return true;
+          return !!(
+            maxLen === 6 &&
+            hasPinSurface(el) &&
+            (ac.includes('one-time-code') || mode.includes('numeric'))
+          );
+        };
         const isConfirm = (el) => {
           const al = norm(el && el.getAttribute ? el.getAttribute('aria-label') || '' : '');
           return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
@@ -2804,17 +2944,17 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           return false;
         };
         const active = document.activeElement;
-        const activeCandidate = candidates.find((el) => el === active && usable(el)) || null;
+        const activeCandidate = candidates.find((el) => el === active && trusted(el)) || null;
         let el = null;
         if (preferConfirm) {
           el =
             (activeCandidate && (isConfirm(activeCandidate) || isConfirmSurface(activeCandidate)) ? activeCandidate : null) ||
-            candidates.find((candidate) => usable(candidate) && (isConfirm(candidate) || isConfirmSurface(candidate))) ||
+            candidates.find((candidate) => trusted(candidate) && (isConfirm(candidate) || isConfirmSurface(candidate))) ||
             activeCandidate ||
-            [...candidates].reverse().find(usable) ||
+            [...candidates].reverse().find(trusted) ||
             null;
         } else {
-          el = activeCandidate || candidates.find(usable) || null;
+          el = activeCandidate || candidates.find(trusted) || null;
         }
         if (!el) {
           return {
@@ -3300,6 +3440,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   async function focusOfficialPinInputAnywhere() {
     try {
       return await page.evaluate(() => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
         const isVisible = (el) => {
           try {
             if (!el || typeof el.getBoundingClientRect !== 'function') return false;
@@ -3310,16 +3451,48 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return true;
           } catch { return false; }
         };
+        const hasPinSurface = (el) => {
+          let n = el;
+          const boundary = el && el.closest
+            ? el.closest('div[role="dialog"], [aria-modal="true"]')
+            : null;
+          for (let i = 0; i < 14 && n && n !== document.body && n !== document.documentElement; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('insira seu pin') ||
+              t.includes('inserir seu pin') ||
+              t.includes('enter your pin') ||
+              (t.includes('pin') && (t.includes('restaur') || t.includes('conversas')))
+            ) return true;
+            if (boundary && n === boundary) break;
+            n = n.parentElement;
+          }
+          return false;
+        };
+        const candidates = Array.from(document.querySelectorAll(
+          'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
+        ));
+        const trusted = (candidate) => {
+          if (!candidate || !candidate.isConnected) return false;
+          const id = String(candidate.id || '');
+          const aria = norm(candidate.getAttribute('aria-label') || '');
+          const maxLen = Number(candidate.getAttribute('maxlength') || 0) || 0;
+          const ac = norm(candidate.getAttribute('autocomplete') || '');
+          const mode = norm(candidate.getAttribute('inputmode') || '');
+          if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
+          if (maxLen === 6 && aria.includes('pin')) return true;
+          return !!(
+            isVisible(candidate) &&
+            maxLen === 6 &&
+            hasPinSurface(candidate) &&
+            (ac.includes('one-time-code') || mode.includes('numeric'))
+          );
+        };
+        const active = document.activeElement;
         const el =
-          Array.from(document.querySelectorAll(
-            'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
-          )).find((candidate) => {
-            if (isVisible(candidate)) return true;
-            const id = String(candidate && candidate.id || '');
-            const aria = String(candidate && candidate.getAttribute && candidate.getAttribute('aria-label') || '').toLowerCase();
-            return id === 'mw-numeric-code-input-prevent-composer-focus-steal' ||
-              (aria.includes('pin') && (aria.includes('confirme') || aria.includes('confirm')));
-          }) || null;
+          candidates.find((candidate) => candidate === active && trusted(candidate)) ||
+          candidates.find(trusted) ||
+          null;
         if (!el) return { ok: false, error: 'official_pin_input_missing' };
         try {
           const proto = el.constructor ? el.constructor.prototype : null;
