@@ -8562,6 +8562,132 @@ async function robeTryEnqueueIfAwaiting(nome, source = 'start_work') {
   return r;
 }
 
+/**
+ * Conta nova (stock): Robe pausado 24h.
+ * Idempotente (Math.max) e não sobrescreve limit_posting.
+ */
+async function applyNewAccountRobePause24h(nome, { operator = null, via = '' } = {}) {
+  const n = String(nome || '');
+  if (!n) return { ok: false, error: 'no_nome' };
+  const plus24 = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const desiredUntil = now + plus24;
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      const curUntil = Number(m.robeCooldownUntil || 0) || 0;
+      m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
+      m.robeCooldownRemainingMs = 0;
+      const r = String(m.robePauseReason || '');
+      if (String(r).toLowerCase() !== 'limit_posting') {
+        m.robePauseReason = 'new_account';
+      }
+      return m;
+    });
+    try { robeUpdateMeta(n, { pauseReason: 'new_account' }); } catch {}
+    try { invalidateRobeGateCache(n); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'new_account_robe_pause_applied',
+        nome: n,
+        operator: operator || null,
+        via: String(via || '').slice(0, 80) || null,
+        untilMs: desiredUntil,
+        reason: 'new_account'
+      });
+    } catch {}
+    return { ok: true, untilMs: desiredUntil };
+  } catch (e) {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'new_account_robe_pause_apply_fail',
+        nome: n,
+        operator: operator || null,
+        via: String(via || '').slice(0, 80) || null,
+        error: (e && e.message) ? String(e.message).slice(0, 220) : String(e)
+      });
+    } catch {}
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+function inferProfileCreatedAtMs(man, nome) {
+  try {
+    const c = Number(man && man.createdAt || 0) || 0;
+    if (c > 1e12) return c;
+  } catch {}
+  try {
+    const m = String(nome || '').match(/-(\d{12,})$/);
+    if (m) {
+      const t = Number(m[1]) || 0;
+      if (t > 1e12) return t;
+    }
+  } catch {}
+  return 0;
+}
+
+/**
+ * Garante janela 24h de conta nova quando:
+ * - stockAccountId presente, e
+ * - ainda dentro de 24h desde createdAt (ou nome-timestamp), e
+ * - cooldown new_account não está ativo.
+ * Cobre configure abortado no PIN + "Retomar trabalho" sem pause aplicado.
+ */
+async function ensureNewAccountRobePauseIfNeeded(nome, { operator = null, via = '' } = {}) {
+  const n = String(nome || '');
+  if (!n) return { ok: false, skipped: true, reason: 'no_nome' };
+  const plus24 = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  let man = null;
+  try { man = await manifestStore.read(n).catch(() => null); } catch { man = null; }
+  const sid = Number((man && (man.stockAccountId || man.stock_account_id)) || 0) || 0;
+  const configuredAt = Number(man && man.configuredAt || 0) || 0;
+  const createdAt = inferProfileCreatedAtMs(man, n) || now;
+  const windowEnd = createdAt + plus24;
+  // Stock OU cadastro incompleto (configuredAt vazio) ainda na janela de 24h.
+  const incompleteConfigure = !configuredAt && now < windowEnd;
+  if (!sid && !incompleteConfigure) return { ok: true, skipped: true, reason: 'not_stock' };
+  if (now >= windowEnd) return { ok: true, skipped: true, reason: 'window_elapsed' };
+  const curUntil = Number(man && man.robeCooldownUntil || 0) || 0;
+  const reason = String((man && man.robePauseReason) || '').toLowerCase();
+  if (curUntil > now && (reason === 'new_account' || reason === 'limit_posting')) {
+    return { ok: true, skipped: true, reason: 'already_paused', untilMs: curUntil };
+  }
+  // Força pelo menos até o fim da janela de conta nova (createdAt+24h).
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      const u = Number(m.robeCooldownUntil || 0) || 0;
+      m.robeCooldownUntil = Math.max(u, windowEnd, now + 1000);
+      m.robeCooldownRemainingMs = 0;
+      const r = String(m.robePauseReason || '');
+      if (String(r).toLowerCase() !== 'limit_posting') {
+        m.robePauseReason = 'new_account';
+      }
+      return m;
+    });
+    try { robeUpdateMeta(n, { pauseReason: 'new_account' }); } catch {}
+    try { invalidateRobeGateCache(n); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'new_account_robe_pause_ensured',
+        nome: n,
+        operator: operator || null,
+        via: String(via || '').slice(0, 80) || null,
+        createdAt,
+        untilMs: Math.max(curUntil, windowEnd),
+        reason: 'new_account'
+      });
+    } catch {}
+    return { ok: true, skipped: false, untilMs: Math.max(curUntil, windowEnd) };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 function scheduleRobeEnqueueAfterStartWork(nome) {
   const n = String(nome || '');
   if (!n) return;
@@ -8571,6 +8697,8 @@ function scheduleRobeEnqueueAfterStartWork(nome) {
   setTimeout(() => {
     (async () => {
       try {
+        // Blindagem: conta stock nova sem pause (ex.: cadastro abortou no PIN) não posta.
+        try { await ensureNewAccountRobePauseIfNeeded(n, { via: 'schedule_robe_enqueue' }); } catch {}
         const awaiting = await robeIsAwaitingEnqueue(n);
         if (awaiting) {
           const r = await robeTryEnqueueIfAwaiting(n, 'start_work');
@@ -11081,6 +11209,11 @@ const handlers = {
           mustHaveProvisionLock: !!mustHaveProvisionLock
         });
       } catch {}
+      // Conta nova: aplica pause Robe 24h JÁ no início do configure (stock).
+      // Se abortar no PIN/humano mid-cadastro, "Retomar trabalho" não posta Robe.
+      if (isStockProvision) {
+        try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_begin' }); } catch {}
+      }
       // Anti-retry: se já está em humano/captcha (ex.: timeout API re-disparou configure),
       // NÃO reinjetar cookies nem marcar configure_success.
       try {
@@ -11633,48 +11766,9 @@ const handlers = {
           }
         }
 
-        // Blindagem cadastro (stock_provision):
-        // garante Robe pausado por 24h já no fim do configure.
-        // Assim, mesmo que falhe em etapas posteriores (recycle/start_work),
-        // conta nova não posta antes da janela mínima.
+        // Blindagem cadastro (stock_provision): reafirma 24h no fim do configure (idempotente).
         if (isStockProvision) {
-          try {
-            const plus24 = 24 * 60 * 60 * 1000;
-            const now = Date.now();
-            const desiredUntil = now + plus24;
-            await manifestStore.update(nome, (m) => {
-              m = m || {};
-              const curUntil = Number(m.robeCooldownUntil || 0) || 0;
-              m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
-              m.robeCooldownRemainingMs = 0;
-              const r = String(m.robePauseReason || '');
-              if (String(r).toLowerCase() !== 'limit_posting') {
-                m.robePauseReason = 'new_account';
-              }
-              return m;
-            });
-            try { robeUpdateMeta(nome, { pauseReason: 'new_account' }); } catch {}
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'configure_new_account_robe_pause_applied',
-                nome: String(nome || ''),
-                operator: op || null,
-                untilMs: desiredUntil,
-                reason: 'new_account'
-              });
-            } catch {}
-          } catch (e) {
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'configure_new_account_robe_pause_apply_fail',
-                nome: String(nome || ''),
-                operator: op || null,
-                error: (e && e.message) ? String(e.message) : String(e)
-              });
-            } catch {}
-          }
+          try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_success' }); } catch {}
         }
 
         // CADASTRO: pós-sucesso fecha extras e deixa SÓ aba 0 (messages / Virtus).
@@ -11842,6 +11936,7 @@ const handlers = {
             }
             if (keep0) try { ctrl.mainPage = keep0; } catch {}
           } catch {}
+          try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_marketplace_disabled' }); } catch {}
           try { await enterHumanMode(nome, ctrl, { reason: 'marketplace_disabled:configure_stock' }); } catch {}
           try { provisionAudit.append({ ts: Date.now(), event: 'configure_marketplace_disabled', nome: String(nome||''), operator: op || null, error: errMsg.slice(0, 220) }); } catch {}
           return { ok: false, error: 'marketplace_disabled' };
@@ -11859,8 +11954,16 @@ const handlers = {
               error: errMsg.slice(0, 220)
             });
           } catch {}
+          if (isStockProvision) {
+            try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_pin_pending' }); } catch {}
+          }
           // Não aborta como fatal de humano — deixa stock/nurse seguir.
           return { ok: true, pinPending: true, closedForRam };
+        }
+
+        // Mid-cadastro (humano/erro): ainda assim conta nova não pode postar Robe.
+        if (isStockProvision) {
+          try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_catch' }); } catch {}
         }
 
         // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
@@ -12768,38 +12871,16 @@ const handlers = {
       if (success) {
         pushStep({ step: 'login_remediate_success' });
         // Conta nova (stock_provision): garantir Robe pausado 24h SEMPRE (110%).
-        // Regra do lead: conta nova inicia trabalho com Virtus ON, mas Robe pausado 24h antes de postar.
         try {
           const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
           if (isStockProvision) {
-            const plus24 = 24 * 60 * 60 * 1000;
-            const now = Date.now();
-            const desiredUntil = now + plus24;
-            await manifestStore.update(nome, (m) => {
-              m = m || {};
-              const curUntil = Number(m.robeCooldownUntil || 0) || 0;
-              // Garantia: pelo menos 24h a partir de agora.
-              m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
-              m.robeCooldownRemainingMs = 0;
-              // Não sobrescrever "limit_posting" (estado mais forte), mas em conta nova queremos new_account.
-              const r = String(m.robePauseReason || '');
-              if (String(r).toLowerCase() !== 'limit_posting') {
-                m.robePauseReason = 'new_account';
-              }
-              return m;
+            const rrPause = await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'login_remediate_success' });
+            pushStep({
+              step: (rrPause && rrPause.ok) ? 'new_account_robe_pause_applied' : 'new_account_robe_pause_apply_fail',
+              untilMs: (rrPause && rrPause.untilMs) || null,
+              reason: 'new_account',
+              error: (rrPause && rrPause.error) || null
             });
-            pushStep({ step: 'new_account_robe_pause_applied', untilMs: desiredUntil, reason: 'new_account' });
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'new_account_robe_pause_applied',
-                nome: String(nome || ''),
-                operator: op,
-                untilMs: desiredUntil,
-                reason: 'new_account'
-              });
-            } catch {}
-            try { robeUpdateMeta(nome, { pauseReason: 'new_account' }); } catch {}
             // CADASTRO: só aba messages (Virtus). create/item o Robe abre depois.
             try {
               const pagesOk = await ctrl.browser.pages().catch(() => []);
@@ -14025,6 +14106,8 @@ const handlers = {
 
       if (!appealDetectedInPreflight) {
         if (automationAllowed(ctrl)) {
+          // Conta stock com cadastro incompleto (ex.: humano no PIN): garante 24h antes do Robe.
+          try { await ensureNewAccountRobePauseIfNeeded(nome, { operator: 'human_resume', via: 'human_resume_before_robe' }); } catch {}
           ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
           ctrl.trabalhando = true;
           try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
