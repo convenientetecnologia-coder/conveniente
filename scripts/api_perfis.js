@@ -1024,13 +1024,16 @@ module.exports = (app, workerClient, fileStore) => {
     // Enterprise (produção): perfil recém-provisionado via Estoque deve entrar com
     // Robe pausado por 24h, mas Virtus ON imediatamente.
     // Regra do lead: conta nova = garantir 24h (mínimo) para não postar cedo.
+    // Se o operador já liberou via Robe Play/Liberar Robe, não rearmar o pause.
     if (op && String(op).toLowerCase().startsWith('stock_provision')) {
       try {
         const manifestStore = require('./manifestStore.js');
+        const { getNewAccountPauseManualRelease } = require('./robeManualRelease.js');
         const plus24 = 24 * 60 * 60 * 1000;
         await manifestStore.update(nome, (m) => {
           const now = Date.now();
           m = m || {};
+          if (getNewAccountPauseManualRelease(m, nome)) return m;
           const desiredUntil = now + plus24;
           const curUntil = Number(m.robeCooldownUntil || 0) || 0;
           // Garantia: pelo menos 24h a partir de agora (não encurta cooldown maior).

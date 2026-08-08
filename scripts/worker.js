@@ -232,6 +232,11 @@ const fotos        = require('./fotos.js');
 
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
+const {
+  inferProfileCreatedAtMs,
+  getNewAccountPauseManualRelease,
+  releaseRobeCooldownForOperator
+} = require('./robeManualRelease.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
@@ -8573,8 +8578,11 @@ async function applyNewAccountRobePause24h(nome, { operator = null, via = '' } =
   const now = Date.now();
   const desiredUntil = now + plus24;
   try {
+    let manualRelease = null;
     await manifestStore.update(n, (m) => {
       m = m || {};
+      manualRelease = getNewAccountPauseManualRelease(m, n);
+      if (manualRelease) return m;
       const curUntil = Number(m.robeCooldownUntil || 0) || 0;
       m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
       m.robeCooldownRemainingMs = 0;
@@ -8584,6 +8592,14 @@ async function applyNewAccountRobePause24h(nome, { operator = null, via = '' } =
       }
       return m;
     });
+    if (manualRelease) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'manual_release',
+        releasedAt: manualRelease.releasedAt
+      };
+    }
     try { robeUpdateMeta(n, { pauseReason: 'new_account' }); } catch {}
     try { invalidateRobeGateCache(n); } catch {}
     try {
@@ -8613,21 +8629,6 @@ async function applyNewAccountRobePause24h(nome, { operator = null, via = '' } =
   }
 }
 
-function inferProfileCreatedAtMs(man, nome) {
-  try {
-    const c = Number(man && man.createdAt || 0) || 0;
-    if (c > 1e12) return c;
-  } catch {}
-  try {
-    const m = String(nome || '').match(/-(\d{12,})$/);
-    if (m) {
-      const t = Number(m[1]) || 0;
-      if (t > 1e12) return t;
-    }
-  } catch {}
-  return 0;
-}
-
 /**
  * Garante janela 24h de conta nova quando:
  * - stockAccountId presente, e
@@ -8652,13 +8653,28 @@ async function ensureNewAccountRobePauseIfNeeded(nome, { operator = null, via = 
   if (now >= windowEnd) return { ok: true, skipped: true, reason: 'window_elapsed' };
   const curUntil = Number(man && man.robeCooldownUntil || 0) || 0;
   const reason = String((man && man.robePauseReason) || '').toLowerCase();
-  if (curUntil > now && (reason === 'new_account' || reason === 'limit_posting')) {
+  if (curUntil > now && reason === 'limit_posting') {
+    return { ok: true, skipped: true, reason: 'already_paused', untilMs: curUntil };
+  }
+  const manualRelease = getNewAccountPauseManualRelease(man, n);
+  if (manualRelease) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'manual_release',
+      releasedAt: manualRelease.releasedAt
+    };
+  }
+  if (curUntil > now && reason === 'new_account') {
     return { ok: true, skipped: true, reason: 'already_paused', untilMs: curUntil };
   }
   // Força pelo menos até o fim da janela de conta nova (createdAt+24h).
   try {
+    let releaseDetectedDuringUpdate = null;
     await manifestStore.update(n, (m) => {
       m = m || {};
+      releaseDetectedDuringUpdate = getNewAccountPauseManualRelease(m, n);
+      if (releaseDetectedDuringUpdate) return m;
       const u = Number(m.robeCooldownUntil || 0) || 0;
       m.robeCooldownUntil = Math.max(u, windowEnd, now + 1000);
       m.robeCooldownRemainingMs = 0;
@@ -8668,6 +8684,14 @@ async function ensureNewAccountRobePauseIfNeeded(nome, { operator = null, via = 
       }
       return m;
     });
+    if (releaseDetectedDuringUpdate) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'manual_release',
+        releasedAt: releaseDetectedDuringUpdate.releasedAt
+      };
+    }
     try { robeUpdateMeta(n, { pauseReason: 'new_account' }); } catch {}
     try { invalidateRobeGateCache(n); } catch {}
     try {
@@ -13988,20 +14012,12 @@ const handlers = {
             }
 
             // login_form (ou outros loginRequired "automatable"): agenda login_remediate imediatamente.
-            // Requisito do lead: após sucesso, conta nova/retomada deve iniciar com Robe em 24h (igual conta nova).
+            // Conta nova/retomada: pause 24h, mas respeita override humano (Robe Play / Liberar Robe).
             try {
-              const plus24 = 24 * 60 * 60 * 1000;
-              const now = Date.now();
-              await manifestStore.update(nome, (m) => {
-                m = m || {};
-                const curLeft = m.robeCooldownUntil ? (Number(m.robeCooldownUntil || 0) - now) : 0;
-                const desiredLeft = plus24;
-                const use = Math.max(0, curLeft, desiredLeft);
-                m.robeCooldownUntil = now + use;
-                m.robePauseReason = 'new_account';
-                return m;
+              await applyNewAccountRobePause24h(nome, {
+                operator: 'human_resume',
+                via: 'human_resume_login_form_pre_remediate'
               });
-              robeUpdateMeta(nome, { pauseReason: 'new_account' });
             } catch {}
 
             // Evita que Virtus reinicie antes do login_remediate pegar o provisionLock/quiesce.
@@ -14162,20 +14178,62 @@ const handlers = {
         return { ok: false, error: 'delta_robe_play_blocked_by_feature_flags' };
       }
 
+      let manualRelease = null;
       try {
         await manifestStore.update(nome, (m) => {
-          m = m || {};
-          m.robeCooldownUntil = Date.now();
-          m.robeCooldownRemainingMs = 0;
-          if (m.robePauseReason) delete m.robePauseReason;
-          return m;
+          manualRelease = releaseRobeCooldownForOperator(m, {
+            nome,
+            now: Date.now(),
+            via: 'robe_play',
+            awaitingEnqueue: false
+          });
+          return manualRelease.manifest;
         });
-        if (robeMeta[nome]) {
-          delete robeMeta[nome].pauseReason;
-          delete robeMeta[nome].lastRobeBlockAt;
-        }
-        try { invalidateRobeGateCache(nome); } catch {}
-        try { robeDisarmNext(nome); } catch {}
+      } catch (e) {
+        return {
+          ok: false,
+          error: `robe_play_release_persist_failed:${String((e && e.message) || e)}`
+        };
+      }
+      if (!manualRelease) {
+        return { ok: false, error: 'robe_play_release_persist_failed' };
+      }
+      if (!manualRelease.released) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'robe_manual_release_blocked',
+            nome: String(nome || ''),
+            via: 'robe_play',
+            reason: manualRelease.blockedReason || 'blocked'
+          });
+        } catch {}
+        return {
+          ok: false,
+          error: manualRelease.blockedReason === 'limit_posting'
+            ? 'limit_posting_active'
+            : (manualRelease.blockedReason || 'robe_play_release_blocked')
+        };
+      }
+      if (robeMeta[nome]) {
+        delete robeMeta[nome].pauseReason;
+        delete robeMeta[nome].lastRobeBlockAt;
+        delete robeMeta[nome].robeCooldownUntilMem;
+        delete robeMeta[nome].robeAwaitingEnqueue;
+        delete robeMeta[nome].robeAwaitingEnqueueReason;
+      }
+      robeUpdateMeta(nome, { cooldownSec: 0, pauseReason: null });
+      try { invalidateRobeGateCache(nome); } catch {}
+      try { robeDisarmNext(nome); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'robe_manual_release_applied',
+          nome: String(nome || ''),
+          via: 'robe_play',
+          releasedAt: manualRelease.releasedAt || null,
+          releasedFromReason: manualRelease.releasedFromReason || null
+        });
       } catch {}
 
       if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
@@ -14434,26 +14492,47 @@ const handlers = {
     });
     const perfisArr = loadPerfisJson(); // já filtrado pelo SHARD_SET deste worker
     let cleared = 0;
+    const blockedLimitPosting = [];
+    const limitBlockedNames = new Set();
     for (const p of perfisArr) {
       if (!p || !p.nome) continue;
       try {
         robeMeta[p.nome] = robeMeta[p.nome] || {};
+        let release = null;
+        await manifestStore.update(p.nome, (m) => {
+          release = releaseRobeCooldownForOperator(m, {
+            nome: p.nome,
+            now: Date.now(),
+            via: 'release_all',
+            awaitingEnqueue: true
+          });
+          return release.manifest;
+        });
+        if (!release) continue;
+        if (!release.released) {
+          if (release.blockedReason === 'limit_posting') {
+            blockedLimitPosting.push(p.nome);
+            limitBlockedNames.add(p.nome);
+          }
+          continue;
+        }
         delete robeMeta[p.nome].pauseReason;
         delete robeMeta[p.nome].lastRobeBlockAt;
         delete robeMeta[p.nome].robeCooldownUntilMem;
-        await manifestStore.update(p.nome, (m) => {
-          m = m || {};
-          m.robeCooldownUntil = Date.now();
-          m.robeCooldownRemainingMs = 0;
-          if (m.robePauseReason) delete m.robePauseReason;
-          m.robeAwaitingEnqueue = true;
-          m.robeAwaitingEnqueueAt = Date.now();
-          m.robeAwaitingEnqueueReason = 'release_all';
-          return m;
-        });
+        robeUpdateMeta(p.nome, { cooldownSec: 0, pauseReason: null });
         try {
           robeMeta[p.nome].robeAwaitingEnqueue = true;
           robeMeta[p.nome].robeAwaitingEnqueueReason = 'release_all';
+        } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'robe_manual_release_applied',
+            nome: String(p.nome || ''),
+            via: 'release_all',
+            releasedAt: release.releasedAt || null,
+            releasedFromReason: release.releasedFromReason || null
+          });
         } catch {}
         cleared++;
       } catch {}
@@ -14468,6 +14547,7 @@ const handlers = {
     try {
       for (const nome of controllers.keys()) {
         if (SHARD_SET.size && !inShard(nome)) continue;
+        if (limitBlockedNames.has(nome)) continue;
         workingNames.push(String(nome));
       }
     } catch {}
@@ -14503,17 +14583,20 @@ const handlers = {
     }
     if (retryNames.length) {
       await sleep(400);
-      // Reafirma cooldown zerado antes do retry.
+      // Reafirma liberação humana + override 24h antes do retry.
       for (const nome of retryNames) {
         try {
           await manifestStore.update(nome, (m) => {
-            m = m || {};
-            m.robeCooldownUntil = Date.now();
-            m.robeCooldownRemainingMs = 0;
-            if (m.robePauseReason && m.robePauseReason !== 'limit_posting') delete m.robePauseReason;
-            return m;
+            const release = releaseRobeCooldownForOperator(m, {
+              nome,
+              now: Date.now(),
+              via: 'release_all_retry',
+              awaitingEnqueue: true
+            });
+            return release.manifest;
           });
           try { delete robeMeta[nome].robeCooldownUntilMem; } catch {}
+          try { invalidateRobeGateCache(nome); } catch {}
         } catch {}
       }
       enqueued += await passEnqueue(retryNames, 'release_all_retry');
@@ -14532,6 +14615,8 @@ const handlers = {
       working: workingNames.length,
       stillPronto: stillPronto.length,
       stillSample: stillPronto.slice(0, 12),
+      blockedLimitPosting: blockedLimitPosting.length,
+      blockedLimitPostingSample: blockedLimitPosting.slice(0, 12),
       awaitingKept,
       skipped: skipped.length,
       sampleSkip: skipped.slice(0, 12)
@@ -14546,6 +14631,7 @@ const handlers = {
         enqueued,
         working: workingNames.length,
         stillPronto: stillPronto.slice(0, 40),
+        blockedLimitPosting: blockedLimitPosting.slice(0, 40),
         awaitingKept,
         skippedCount: skipped.length,
         skippedSample: skipped.slice(0, 40)
@@ -14558,6 +14644,7 @@ const handlers = {
       awaitingKept,
       working: workingNames.length,
       stillPronto,
+      blockedLimitPosting,
       skipped,
       shard: shardIdx,
       pid: process.pid

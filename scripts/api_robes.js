@@ -6,6 +6,7 @@ module.exports = (app, workerClient, fileStore) => {
   const fs = require('fs');
   const path = require('path');
   const serverConfig = require('./serverConfig.js');
+  const { releaseRobeCooldownForOperator } = require('./robeManualRelease.js');
 
   function readJsonSafe(fp, fallback) {
     try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { return fallback; }
@@ -65,20 +66,33 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       const perfisArr = fileStore.loadPerfisJson();
       let total = 0, failed = 0, fails = [];
+      const blockedLimitPosting = [];
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
 
         try {
+          let release = null;
           await manifestStore.update(p.nome, man => {
-            man = man || {};
-            man.robeCooldownUntil = Date.now();
-            man.robeCooldownRemainingMs = 0;
-            if (man.robePauseReason) delete man.robePauseReason;
-            man.robeAwaitingEnqueue = true;
-            man.robeAwaitingEnqueueAt = Date.now();
-            man.robeAwaitingEnqueueReason = 'release_all';
-            return man;
+            release = releaseRobeCooldownForOperator(man, {
+              nome: p.nome,
+              now: Date.now(),
+              via: 'release_all',
+              awaitingEnqueue: true
+            });
+            return release.manifest;
           });
+          if (!release) throw new Error('release_result_missing');
+          if (!release.released) {
+            if (release.blockedReason === 'limit_posting') blockedLimitPosting.push(p.nome);
+            if (issues && typeof issues.append === "function") {
+              issues.append(
+                'system',
+                'robe_release_all',
+                `perfil=${p.nome} ok=false blocked=${release.blockedReason || 'unknown'}`
+              );
+            }
+            continue;
+          }
           total++;
           if (issues && typeof issues.append === "function") {
             issues.append('system', 'robe_release_all', `perfil=${p.nome} ok=true`);
@@ -104,16 +118,28 @@ module.exports = (app, workerClient, fileStore) => {
       const stillPronto = Array.isArray(workerResult && workerResult.stillPronto)
         ? workerResult.stillPronto
         : [];
-      if (failed > 0 || (fails && fails.length)) {
-        logger.warn('Falha em /api/robes/release-all', { failed, fails, enqueued, awaitingKept, stillPronto: stillPronto.length });
+      const workerFailed = !workerResult || workerResult.ok !== true;
+      if (failed > 0 || (fails && fails.length) || workerFailed) {
+        logger.warn('Falha em /api/robes/release-all', {
+          failed,
+          fails,
+          workerError: workerResult && workerResult.error,
+          enqueued,
+          awaitingKept,
+          stillPronto: stillPronto.length,
+          blockedLimitPosting: blockedLimitPosting.length
+        });
         res.json({
           ok: false,
-          error: `Failure in ${failed} perfil(s)`,
+          error: workerFailed
+            ? String((workerResult && workerResult.error) || 'robes_release_all_worker_sync_failed')
+            : `Failure in ${failed} perfil(s)`,
           fails,
           total,
           enqueued,
           awaitingKept,
           stillPronto,
+          blockedLimitPosting,
           worker: workerResult
         });
       } else {
@@ -123,6 +149,8 @@ module.exports = (app, workerClient, fileStore) => {
           awaitingKept,
           stillPronto: stillPronto.length,
           stillSample: stillPronto.slice(0, 12),
+          blockedLimitPosting: blockedLimitPosting.length,
+          blockedLimitPostingSample: blockedLimitPosting.slice(0, 12),
           workerOk: !!(workerResult && workerResult.ok),
           nodes: workerResult && workerResult.results
             ? workerResult.results.map((r, i) => ({
@@ -133,7 +161,15 @@ module.exports = (app, workerClient, fileStore) => {
             }))
             : null
         });
-        res.json({ ok: true, total, enqueued, awaitingKept, stillPronto, worker: workerResult });
+        res.json({
+          ok: true,
+          total,
+          enqueued,
+          awaitingKept,
+          stillPronto,
+          blockedLimitPosting,
+          worker: workerResult
+        });
       }
     } catch (e) {
       logger.error('Erro em /api/robes/release-all', {}, e);
