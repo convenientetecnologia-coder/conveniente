@@ -1339,6 +1339,189 @@ const EDGE_DELTA_REPLY_OUTBOX_ACK_DIR = path.join(EDGE_DELTA_REPLY_OUTBOX_DIR, '
 const EDGE_DELTA_RESPONDED_FILENAME = 'chats_respondidos_delta.json';
 const EDGE_DELTA_REJECT_STATUS = 'rejected_by_agent';
 
+// ===================== Stock Provision Outbox (Edge) =====================
+// Contrato CT: aceitar o pacote da conta imediatamente (HTTP ok) e cadastrar
+// em background. Configure/login NÃO bloqueia o ACK de recebimento.
+const STOCK_PROVISION_OUTBOX_DIR = path.join(__dirname, 'dados', 'stock_provision_outbox');
+const STOCK_PROVISION_PENDING_DIR = path.join(STOCK_PROVISION_OUTBOX_DIR, 'pending');
+const STOCK_PROVISION_DONE_DIR = path.join(STOCK_PROVISION_OUTBOX_DIR, 'done');
+let __stockProvisionPumpInFlight = false;
+
+function __edgeEnsureStockProvisionOutboxDirsSync() {
+  try { fs.mkdirSync(STOCK_PROVISION_PENDING_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(STOCK_PROVISION_DONE_DIR, { recursive: true }); } catch {}
+}
+
+function __edgeExtractStockProvisionAccountIds(payload) {
+  const actions = Array.isArray(payload && payload.actions) ? payload.actions : [];
+  const ids = [];
+  const seen = new Set();
+  for (const a of actions) {
+    const id = Number(a && (a.stockAccountId || a.stock_account_id) || 0) || 0;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function __edgeAcceptStockProvisionToDiskSync(cmd) {
+  __edgeEnsureStockProvisionOutboxDirsSync();
+  const cmdId = String(cmd && cmd.id || '').trim()
+    || (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object')
+    ? cmd.payload
+    : ((cmd && cmd.data && typeof cmd.data === 'object') ? cmd.data : null);
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'missing_payload', cmdId };
+  }
+  const stockAccountIds = __edgeExtractStockProvisionAccountIds(payload);
+  if (!stockAccountIds.length) {
+    return { ok: false, error: 'missing_stockAccountId', cmdId };
+  }
+  const pendingPath = path.join(STOCK_PROVISION_PENDING_DIR, `${cmdId}.json`);
+  const donePath = path.join(STOCK_PROVISION_DONE_DIR, `${cmdId}.json`);
+  if (fs.existsSync(donePath) || fs.existsSync(pendingPath)) {
+    return {
+      ok: true,
+      cmdId,
+      duplicate: true,
+      stockAccountIds,
+      batchId: String(payload.batchId || '').trim() || null
+    };
+  }
+
+  // Blindagem local: a mesma stockAccountId não pode entrar 2x na fila pendente.
+  try {
+    const want = new Set(stockAccountIds.map((n) => Number(n) || 0).filter(Boolean));
+    const files = fs.readdirSync(STOCK_PROVISION_PENDING_DIR)
+      .filter((f) => String(f || '').toLowerCase().endsWith('.json'));
+    for (const fileName of files) {
+      if (String(fileName) === `${cmdId}.json`) continue;
+      let other = null;
+      try {
+        other = JSON.parse(String(fs.readFileSync(path.join(STOCK_PROVISION_PENDING_DIR, fileName), 'utf8') || '{}'));
+      } catch { continue; }
+      const otherIds = Array.isArray(other && other.stockAccountIds)
+        ? other.stockAccountIds
+        : __edgeExtractStockProvisionAccountIds(other && other.payload);
+      for (const oid of otherIds) {
+        const n = Number(oid || 0) || 0;
+        if (n && want.has(n)) {
+          return {
+            ok: false,
+            error: 'stock_account_already_inflight',
+            cmdId,
+            stockAccountId: n,
+            otherCmdId: String(other && other.id || fileName.replace(/\.json$/i, '')) || null
+          };
+        }
+      }
+    }
+  } catch {}
+
+  const rec = {
+    id: cmdId,
+    type: 'stock_provision',
+    payload,
+    enqueuedAt: Date.now(),
+    stockAccountIds
+  };
+  try {
+    // create exclusive: falha se outro processo ganhou a corrida do mesmo cmdId
+    fs.writeFileSync(pendingPath, JSON.stringify(rec), { encoding: 'utf8', flag: 'wx' });
+  } catch (e) {
+    if (e && (e.code === 'EEXIST' || /EEXIST/i.test(String(e.message || '')))) {
+      return {
+        ok: true,
+        cmdId,
+        duplicate: true,
+        stockAccountIds,
+        batchId: String(payload.batchId || '').trim() || null
+      };
+    }
+    return {
+      ok: false,
+      error: (e && e.message) ? String(e.message) : 'stock_provision_persist_failed',
+      cmdId
+    };
+  }
+  return {
+    ok: true,
+    cmdId,
+    duplicate: false,
+    stockAccountIds,
+    batchId: String(payload.batchId || '').trim() || null
+  };
+}
+
+async function __edgePumpStockProvisionOutbox() {
+  if (__stockProvisionPumpInFlight) return;
+  __stockProvisionPumpInFlight = true;
+  try {
+    __edgeEnsureStockProvisionOutboxDirsSync();
+    let files = [];
+    try {
+      files = fs.readdirSync(STOCK_PROVISION_PENDING_DIR)
+        .filter((f) => String(f || '').toLowerCase().endsWith('.json'))
+        .sort();
+    } catch { files = []; }
+    for (const fileName of files) {
+      const pendingPath = path.join(STOCK_PROVISION_PENDING_DIR, fileName);
+      const donePath = path.join(STOCK_PROVISION_DONE_DIR, fileName);
+      let rec = null;
+      try {
+        rec = JSON.parse(String(fs.readFileSync(pendingPath, 'utf8') || '{}'));
+      } catch {
+        try { fs.renameSync(pendingPath, donePath); } catch {}
+        continue;
+      }
+      const cmd = {
+        id: String(rec && rec.id || fileName.replace(/\.json$/i, '')),
+        type: 'stock_provision',
+        payload: (rec && rec.payload && typeof rec.payload === 'object') ? rec.payload : {}
+      };
+      try {
+        await applyInfraCommands([cmd]);
+      } catch (e) {
+        try {
+          forensicLog('STOCK_PROVISION', 'outbox_exec_failed', {
+            cmdId: cmd.id,
+            error: (e && e.message) ? String(e.message) : String(e)
+          });
+        } catch {}
+      }
+      try {
+        if (fs.existsSync(donePath)) {
+          try { fs.unlinkSync(pendingPath); } catch {}
+        } else {
+          fs.renameSync(pendingPath, donePath);
+        }
+      } catch {
+        try { fs.writeFileSync(donePath, JSON.stringify(rec || {}), 'utf8'); } catch {}
+        try { fs.unlinkSync(pendingPath); } catch {}
+      }
+    }
+  } finally {
+    __stockProvisionPumpInFlight = false;
+    try {
+      const left = fs.readdirSync(STOCK_PROVISION_PENDING_DIR)
+        .filter((f) => String(f || '').toLowerCase().endsWith('.json'));
+      if (left.length) {
+        setTimeout(() => { __edgeKickStockProvisionPump(); }, 1500).unref?.();
+      }
+    } catch {}
+  }
+}
+
+function __edgeKickStockProvisionPump() {
+  try {
+    setImmediate(() => { __edgePumpStockProvisionOutbox().catch(() => {}); });
+  } catch {
+    try { __edgePumpStockProvisionOutbox().catch(() => {}); } catch {}
+  }
+}
+
 function __edgeResolveProfileDirSafe(nome) {
   const n = String(nome || '').trim();
   if (!n) return '';
@@ -3258,6 +3441,47 @@ app.post('/api/infra/command-bus', async (req, res) => {
         continue;
       }
 
+      // Contrato estoque: stock_provision = ACK de recebimento imediato.
+      // Persistência durável + cadastro em background (não espera configure/login).
+      if (t === 'stock_provision') {
+        if (!cmd.payload && cmd.data && typeof cmd.data === 'object') cmd.payload = cmd.data;
+        const accepted = __edgeAcceptStockProvisionToDiskSync(cmd);
+        const cmdId = String((accepted && accepted.cmdId) || (cmd && cmd.id) || '').trim() || null;
+        if (!(accepted && accepted.ok)) {
+          results[i] = {
+            id: cmdId,
+            type: 'stock_provision',
+            ok: false,
+            error: String((accepted && accepted.error) || 'stock_provision_accept_failed'),
+            details: null
+          };
+          continue;
+        }
+        __edgeKickStockProvisionPump();
+        const stockAccountIds = Array.isArray(accepted.stockAccountIds) ? accepted.stockAccountIds : [];
+        results[i] = {
+          id: cmdId,
+          type: 'stock_provision',
+          ok: true,
+          status: 'received_by_edge',
+          deliveryAccepted: true,
+          details: {
+            deliveryAccepted: true,
+            stage: 'received_by_edge',
+            batchId: accepted.batchId || null,
+            duplicate: !!accepted.duplicate,
+            results: stockAccountIds.map((sid) => ({
+              stockAccountId: sid,
+              ok: true,
+              deliveryAccepted: true,
+              stage: 'received_by_edge',
+              profileName: null
+            }))
+          }
+        };
+        continue;
+      }
+
       normal.push(cmd);
       normalIdx.push(i);
     }
@@ -4186,6 +4410,8 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       }
       __edgeKickDeltaReplyPump();
     } catch {}
+    // Retoma cadastros aceitos e ainda pendentes após restart.
+    try { __edgeKickStockProvisionPump(); } catch {}
   });
 })();
 
