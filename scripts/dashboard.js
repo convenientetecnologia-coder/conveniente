@@ -2350,8 +2350,8 @@ async function execStockProvision(cmd) {
       m.includes('human_hold') ||
       m.includes('disabled_checkpoint') ||
       m.includes('suspended') ||
-      m.includes('marketplace_disabled') ||
-      m.includes('messenger_pin')
+      m.includes('marketplace_disabled')
+      // messenger_pin NÃO é fatal: nurse digita PIN; cadastro não pode engessar conta.
     );
   };
   const isTransient = (msg) => {

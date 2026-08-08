@@ -2164,7 +2164,10 @@ async function detectMessengerPinModal(page) {
         t.includes('crie um pin') ||
         t.includes('criar pin') ||
         t.includes('seu pin restaura') ||
-        t.includes('sem um pin');
+        t.includes('sem um pin') ||
+        t.includes('evitar a perda') ||
+        t.includes('historico de conversas') ||
+        t.includes('perda do seu historico');
       const hasEnterPinPhrase = (t) =>
         t.includes('insira seu pin') ||
         t.includes('inserir seu pin') ||
@@ -2184,7 +2187,22 @@ async function detectMessengerPinModal(page) {
       const officialCandidates = Array.from(document.querySelectorAll(
         'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"]'
       ));
-      const officialPinEl = officialCandidates.find(isVisible) || null;
+      // FB PIN oficial costuma ter opacity:0 / box 0x0 — isVisible falha e o sistema nunca digita
+      // (forense MAE1 joinville-1786214565664: CTA click ok, hasOfficial=false com input no DOM).
+      const isOfficialPinUsable = (el) => {
+        try {
+          if (!el || !el.isConnected) return false;
+          const id = String(el.id || '');
+          const al = norm(el.getAttribute('aria-label') || '');
+          const maxLen = Number(el.getAttribute('maxlength') || 0) || 0;
+          const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+          if (st && st.display === 'none') return false;
+          if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
+          if (al === 'pin' && maxLen === 6) return true;
+          return isVisible(el);
+        } catch { return false; }
+      };
+      const officialPinEl = officialCandidates.find(isOfficialPinUsable) || null;
       const hasOfficialPinInput = !!officialPinEl;
       const surfaceTxt = officialPinEl ? textNear(officialPinEl) : '';
       const pinIncorrect =
@@ -2244,10 +2262,10 @@ async function detectMessengerPinModal(page) {
           }));
 
       // Frases: preferir texto perto do input oficial (não body inteiro do feed).
-      const phraseTxt = surfaceTxt || dlgTxt;
+      const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
+      const phraseTxt = surfaceTxt || dlgTxt || bodyTxt;
       const createText = !!(hasOfficialPinInput && hasCreatePinPhrase(phraseTxt) && !hasEnterPinPhrase(phraseTxt));
       const pinText = !!(hasOfficialPinInput && hasEnterPinPhrase(phraseTxt));
-      const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
       const hasCreateBtn =
         Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => {
           if (!isVisible(el)) return false;
@@ -2410,13 +2428,32 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         }
         return { ok: false };
       });
-      return !!(clicked && clicked.ok);
+      if (clicked && clicked.ok) return true;
+      // Clique real Puppeteer (evaluate click às vezes não avança o React do FB).
+      try {
+        const h =
+          (await page.$('[aria-label="Criar PIN"][role="button"]')) ||
+          (await page.$('[aria-label="Criar PIN"]')) ||
+          (await page.$('div[role="button"][aria-label="Criar PIN"]'));
+        if (h) {
+          await h.click({ delay: 70 }).catch(() => {});
+          return true;
+        }
+      } catch {}
+      return false;
     } catch { return false; }
   }
 
   async function waitForOfficialPinInput({ timeoutMs = 10_000 } = {}) {
     const t0 = Date.now();
     while ((Date.now() - t0) < timeoutMs) {
+      try {
+        const h = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"]');
+        if (h) {
+          const det = await detectMessengerPinModal(page).catch(() => ({ present: true, hasOfficialPinInput: true, kind: 'create_pin' }));
+          return { ok: true, det: det || { present: true, hasOfficialPinInput: true, kind: 'create_pin' } };
+        }
+      } catch {}
       const det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
       if (det && (det.hasOfficialPinInput || det.hasSplitPinInputs || det.kind === 'create_pin' || det.kind === 'pin_input')) {
         return { ok: true, det };
@@ -2491,15 +2528,21 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return false;
           }
         };
-        const dlgEl = document.querySelector('div[role="dialog"]');
+        const dlgEl = document.querySelector('div[role="dialog"], [aria-modal="true"]');
         const dlg = dlgEl;
-        const txt = dlg ? norm(dlg.innerText || dlg.textContent || '') : '';
-        const officialPin = dlg ? (
-          dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-          dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-          dlg.querySelector('input[aria-label="PIN"][maxlength="6"]')
-        ) : null;
-        const hasOfficialPinInput = !!(officialPin && isVisible(officialPin));
+        const officialPin = (
+          (dlg && (
+            dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+            dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
+            dlg.querySelector('input[aria-label="PIN"][maxlength="6"]')
+          )) ||
+          document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+          document.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
+          document.querySelector('input[aria-label="PIN"][maxlength="6"]')
+        );
+        const scopeEl = dlg || (officialPin && officialPin.closest('div')) || document.body;
+        const txt = scopeEl ? norm(scopeEl.innerText || scopeEl.textContent || '') : '';
+        const hasOfficialPinInput = !!officialPin;
         const officialPinValueLen = officialPin ? String(officialPin.value || '').trim().length : 0;
         const splitInputs = dlg ? Array.from(dlg.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
           if (!isVisible(el)) return false;
@@ -2535,13 +2578,14 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           activeAria.includes('digite uma mensagem') ||
           (activeRole === 'textbox' && !activeAria.includes('pin') && activeId !== 'mw-numeric-code-input-prevent-composer-focus-steal' && !focusInsideDialog);
         // Só texto do dialog — feed/body sozinho nunca autoriza.
-        const hasCreateText = !!(dlgEl && (
+        const hasCreateText = !!(
           txt.includes('crie um pin') ||
           txt.includes('criar pin') ||
           txt.includes('seu pin restaura') ||
           txt.includes('sem um pin') ||
+          txt.includes('evitar a perda') ||
           (txt.includes('historico') && txt.includes('pin'))
-        ));
+        );
         return {
           hasCreateText,
           asksRepeat:
@@ -2576,14 +2620,18 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   function canTypeCreatePinKeyboard(state, det) {
     if (!state || typeof state !== 'object') return false;
     if (state.dangerousFocus === true) return false;
-    if (state.hasCreateText !== true) return false;
-    if (state.hasDialog !== true) return false;
     const hasOfficial =
       (det && det.hasOfficialPinInput === true) ||
       state.hasOfficialPinInput === true;
     const hasSplit =
       Number(state.splitInputsCount || 0) >= 4 ||
       (det && det.hasSplitPinInputs === true);
+    // Dialog opcional: FB renderiza modal PIN sem role=dialog em alguns builds.
+    const createOk =
+      state.hasCreateText === true ||
+      (det && det.createText === true) ||
+      (det && (det.kind === 'create_pin' || det.kind === 'create_pin_cta'));
+    if (!createOk) return false;
     return !!(hasOfficial || hasSplit);
   }
 
@@ -2591,20 +2639,33 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   async function focusOfficialCreatePinInput() {
     try {
       const focused = await page.evaluate(() => {
-        const dlg = document.querySelector('div[role="dialog"]');
-        if (!dlg) return { ok: false, error: 'dialog_missing' };
-        const el =
-          dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-          dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-          dlg.querySelector('input[aria-label="PIN"][maxlength="6"]');
-        if (!el) return { ok: false, error: 'official_pin_input_missing' };
+        const pick = (root) => {
+          if (!root || !root.querySelector) return null;
+          return (
+            root.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+            root.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
+            root.querySelector('input[aria-label="PIN"][maxlength="6"]')
+          );
+        };
+        const dlg = document.querySelector('div[role="dialog"], [aria-modal="true"]');
+        const el = pick(dlg) || pick(document);
+        if (!el) return { ok: false, error: 'official_pin_input_missing', hasDialog: !!dlg };
+        try {
+          const proto = el.constructor ? el.constructor.prototype : null;
+          const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+          if (desc && typeof desc.set === 'function') desc.set.call(el, '');
+          else el.value = '';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        } catch {}
         try { el.focus(); } catch {}
+        try { el.click(); } catch {}
         const active = document.activeElement;
         return {
           ok: !!(active && active === el),
           id: String(el.id || ''),
           aria: String(el.getAttribute('aria-label') || ''),
-          valueLen: String(el.value || '').trim().length
+          valueLen: String(el.value || '').trim().length,
+          hasDialog: !!dlg
         };
       }).catch(() => ({ ok: false, error: 'focus_eval_failed' }));
       pinLog({ event: 'create_pin_official_focus', result: focused });
@@ -2990,7 +3051,28 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           hasOfficial: !!(waited && waited.det && waited.det.hasOfficialPinInput)
         });
         if (!(waited && waited.ok)) {
-          return { ok: false, error: 'create_pin_cta_no_input_after_click', dismissed: false };
+          // Fallback duro: input oficial no DOM mesmo se detect ainda achar CTA.
+          let hardInput = null;
+          try { hardInput = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"]'); } catch {}
+          if (!hardInput) {
+            return { ok: false, error: 'create_pin_cta_no_input_after_click', dismissed: false };
+          }
+          pinLog({ event: 'create_pin_cta_hard_input_type', attempt });
+          const detForce = {
+            present: true,
+            kind: 'create_pin',
+            hasOfficialPinInput: true,
+            hasCreateTypingSurface: true,
+            createText: true,
+            hasCreateBtn: false
+          };
+          const createRes = await tryCreatePinTwiceNoClicks(DEFAULT_PIN, detForce);
+          if (createRes && createRes.ok) {
+            pinLog({ event: 'create_pin_cta_hard_type_success', attempt, rounds: createRes.rounds || 0 });
+            return { ok: true, dismissed: true, pinEntered: true, confirmed: true, rounds: createRes.rounds || 2, via: 'cta_hard_input' };
+          }
+          pinLog({ event: 'create_pin_cta_hard_type_failed', attempt, error: (createRes && createRes.error) || null });
+          return { ok: false, error: (createRes && createRes.error) || 'create_pin_cta_hard_type_failed', dismissed: false };
         }
         // Continua o loop: agora deve ser create_pin / pin_input com superfície digitável.
         continue;
@@ -3587,23 +3669,18 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch {}
 
-  // PIN na aba 0 (messages) — clicar Criar PIN se CTA intro + digitar 882584×2.
+  // PIN na aba 0 (messages) — clicar Criar PIN se CTA intro + digitar 882584x2.
+  // Contrato: PIN NUNCA aborta cadastro nem invoca humano. Nurse retenta se sobrar.
   try {
     await resolveNonceIfPresent(p0, { logPrefix: '[CONFIG][Messages][nonce]' });
     await clickContinuarComo(p0, { logPrefix: '[CONFIG][Messages][continuar]' }).catch(() => false);
-    const pin1 = await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin]', maxTries: 5 });
+    const pin1 = await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin]', maxTries: 6 });
     if (!(pin1 && pin1.ok)) {
-      await sleep(1500);
-      const pin2 = await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin-retry]', maxTries: 3 });
-      const still = await detectMessengerPinModal(p0).catch(() => ({ present: false }));
-      if (still && still.present && !(pin2 && pin2.ok)) {
-        if (dbg) logger.debug('[CONFIG] pin still present after dismiss', { nome, kind: still.kind || null });
-        throw new Error('messenger_pin_modal');
-      }
+      await sleep(1200);
+      await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin-retry]', maxTries: 4 }).catch(() => null);
     }
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
-    if (/messenger_pin_modal/i.test(msg)) throw e;
     if (dbg) logger.debug('[CONFIG] pin path soft-fail', { nome, error: msg });
   }
 
@@ -3625,7 +3702,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
-    if (/marketplace_disabled/i.test(msg) || /messenger_pin_modal/i.test(msg)) throw e;
+    if (/marketplace_disabled/i.test(msg)) throw e;
     if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: msg });
   }
 

@@ -11566,13 +11566,23 @@ const handlers = {
                   try { await msgPg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
                   await sleep(900);
                 }
-                const pinR = await browserHelper.tryDismissMessengerPinModal(msgPg, { logPrefix: '[CONFIG][postLogin][pin]', maxTries: 5 }).catch(() => ({ ok: false }));
+                // PIN: tenta digitar; NUNCA humano / NUNCA aborta cadastro.
+                const pinR = await browserHelper.tryDismissMessengerPinModal(msgPg, { logPrefix: '[CONFIG][postLogin][pin]', maxTries: 6 }).catch(() => ({ ok: false }));
                 const stillPin = await browserHelper.detectMessengerPinModal(msgPg).catch(() => ({ present: false }));
                 if (stillPin && stillPin.present && !(pinR && pinR.ok)) {
-                  enteredHuman = true;
-                  try { await setMessengerPinFlag(nome, { reason: String(stillPin.kind || 'messenger_pin_modal'), source: 'configure_post_login' }); } catch {}
-                  try { await enterHumanMode(nome, ctrl, { reason: 'messenger_pin_modal:configure_post_login' }); } catch {}
-                  return { ok: false, error: 'messenger_pin_modal' };
+                  try { await setMessengerPinFlag(nome, { reason: String(stillPin.kind || 'messenger_pin_pending'), source: 'configure_post_login' }); } catch {}
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'configure_pin_pending_no_human',
+                      nome: String(nome || ''),
+                      operator: op || null,
+                      kind: String(stillPin.kind || ''),
+                      error: String((pinR && pinR.error) || '')
+                    });
+                  } catch {}
+                } else if (pinR && pinR.ok) {
+                  try { await clearAccountFlags(nome, ['messengerPin']).catch(() => {}); } catch {}
                 }
               }
               // Valida create (aba temporária) — se MKT desativado, humano + fecha create.
@@ -11837,11 +11847,20 @@ const handlers = {
           return { ok: false, error: 'marketplace_disabled' };
         }
 
-        if (/messenger_pin_modal/i.test(errMsg)) {
-          enteredHuman = true;
-          try { await setMessengerPinFlag(nome, { reason: 'messenger_pin_modal', source: 'configure' }); } catch {}
-          try { await enterHumanMode(nome, ctrl, { reason: 'messenger_pin_modal:configure' }); } catch {}
-          return { ok: false, error: 'messenger_pin_modal' };
+        // PIN NUNCA invoca humano (contrato ops): flag + nurse retenta; cadastro segue.
+        if (/messenger_pin/i.test(errMsg)) {
+          try { await setMessengerPinFlag(nome, { reason: 'messenger_pin_pending', source: 'configure' }); } catch {}
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_pin_pending_no_human',
+              nome: String(nome || ''),
+              operator: op || null,
+              error: errMsg.slice(0, 220)
+            });
+          } catch {}
+          // Não aborta como fatal de humano — deixa stock/nurse seguir.
+          return { ok: true, pinPending: true, closedForRam };
         }
 
         // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
