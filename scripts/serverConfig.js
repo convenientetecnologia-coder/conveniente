@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
     postsPerHourMax: 3.4,
     cooldownMinMinutes: 60,
     cooldownMaxMinutes: 120,
-    workMode: "v2_auto",
+    workMode: "v3_pmg",
     v2Tuning: {
       alpha: 0.10,
       beta: 1.0,
@@ -130,7 +130,7 @@ const DEFAULTS = Object.freeze({
     ]
   },
   networkRotation: {
-    enabled: true,
+    enabled: false,
     intervalMinMinutes: 300,
     intervalMaxMinutes: 420,
     maxAttemptsPerCycle: 5,
@@ -158,23 +158,23 @@ const DEFAULTS = Object.freeze({
     openWindowEndMinute: 0
   },
   marketplaceRenew: {
-    enabled: false,
+    enabled: true,
     windowStartHour: 8,
     windowStartMinute: 0,
-    windowEndHour: 0,
+    windowEndHour: 23,
     windowEndMinute: 0,
-    scrollDaysMin: 7,
+    scrollDaysMin: 42,
     scrollDaysMax: 45
   },
   // Limpeza terminal: INDEPENDENTE do renovar/fechar/abrir.
-  // Default off = zero regressão na migração (antes rodava acoplada ao abrir).
+  // Fábrica: enabled + janela curta 00:00-00:20.
   // deleteKinds: o que excluir quando enabled=true (default = legado + id_virtus).
   terminalAccountCleanup: {
-    enabled: false,
+    enabled: true,
     windowStartHour: 0,
     windowStartMinute: 0,
-    windowEndHour: 1,
-    windowEndMinute: 0,
+    windowEndHour: 0,
+    windowEndMinute: 20,
     deleteKinds: {
       banned: true,
       captcha: true,

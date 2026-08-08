@@ -1670,11 +1670,11 @@
           renewStartTimeEl.value = `${hh}:${mm}`;
         }
         if (renewEndTimeEl) {
-          const hh = String(Number(renew.windowEndHour != null ? renew.windowEndHour : 0)).padStart(2, '0');
+          const hh = String(Number(renew.windowEndHour != null ? renew.windowEndHour : 23)).padStart(2, '0');
           const mm = String(Number(renew.windowEndMinute != null ? renew.windowEndMinute : 0)).padStart(2, '0');
           renewEndTimeEl.value = `${hh}:${mm}`;
         }
-        if (renewScrollMinEl) renewScrollMinEl.value = Number(renew.scrollDaysMin != null ? renew.scrollDaysMin : 7);
+        if (renewScrollMinEl) renewScrollMinEl.value = Number(renew.scrollDaysMin != null ? renew.scrollDaysMin : 42);
         if (renewScrollMaxEl) renewScrollMaxEl.value = Number(renew.scrollDaysMax != null ? renew.scrollDaysMax : 45);
         const termClean = (cfg && cfg.terminalAccountCleanup) ? cfg.terminalAccountCleanup : {};
         if (terminalCleanupEnabledEl) {
@@ -1686,8 +1686,8 @@
           terminalCleanupStartTimeEl.value = `${hh}:${mm}`;
         }
         if (terminalCleanupEndTimeEl) {
-          const hh = String(Number(termClean.windowEndHour != null ? termClean.windowEndHour : 1)).padStart(2, '0');
-          const mm = String(Number(termClean.windowEndMinute != null ? termClean.windowEndMinute : 0)).padStart(2, '0');
+          const hh = String(Number(termClean.windowEndHour != null ? termClean.windowEndHour : 0)).padStart(2, '0');
+          const mm = String(Number(termClean.windowEndMinute != null ? termClean.windowEndMinute : 20)).padStart(2, '0');
           terminalCleanupEndTimeEl.value = `${hh}:${mm}`;
         }
         {
@@ -1705,7 +1705,7 @@
           setKind('#srvTcKindMkt', { key: 'marketplace_disabled', fallback: true });
           setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
         }
-        const wm = String(robe.workMode || 'v1');
+        const wm = String(robe.workMode || 'v3_pmg');
         workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
@@ -1854,12 +1854,12 @@
             const raw = (loadedServerConfig && loadedServerConfig.marketplaceRenew && typeof loadedServerConfig.marketplaceRenew === 'object')
               ? loadedServerConfig.marketplaceRenew
               : {};
-            const minRaw = clampInt(raw.scrollDaysMin, 1, 120, 7);
+            const minRaw = clampInt(raw.scrollDaysMin, 1, 120, 42);
             const maxRaw = clampInt(raw.scrollDaysMax, 1, 120, 45);
             return {
               windowStartHour: clampInt(raw.windowStartHour, 0, 23, 8),
               windowStartMinute: clampInt(raw.windowStartMinute, 0, 59, 0),
-              windowEndHour: clampInt(raw.windowEndHour, 0, 23, 0),
+              windowEndHour: clampInt(raw.windowEndHour, 0, 23, 23),
               windowEndMinute: clampInt(raw.windowEndMinute, 0, 59, 0),
               scrollDaysMin: Math.min(minRaw, maxRaw),
               scrollDaysMax: Math.max(minRaw, maxRaw)
@@ -2043,7 +2043,7 @@
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
               workMode: (() => {
-                const wm = String((workModeEl && workModeEl.value) || 'v1');
+                const wm = String((workModeEl && workModeEl.value) || 'v3_pmg');
                 if (wm === 'v3_pmg' || wm === 'v2_auto') return wm;
                 return 'v1';
               })(),
