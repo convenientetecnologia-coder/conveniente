@@ -133,7 +133,10 @@ function __gateBUpdateRuntime(patch) {
 
 async function maybeBootstrapGateBToken() {
   // Require local: Gate B pode rodar antes do bloco de requires do dashboard (linha ~994).
-  const { writeCtConfig: writeCtConfigLocal } = require('./scripts/ctConfig.js');
+  const {
+    readCtConfig: readCtConfigLocal,
+    writeCtConfig: writeCtConfigLocal
+  } = require('./scripts/ctConfig.js');
   const DATA_DIR = path.join(__dirname, 'dados');
   const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
   const BUNDLE_PATH = path.join(DATA_DIR, 'gate_b_bundle.json');
@@ -158,6 +161,25 @@ async function maybeBootstrapGateBToken() {
     process.env.CT_BOOTSTRAP_URL ||
     'https://api.convenientetecnologia.com/api/edge/bootstrap'
   ).trim();
+  const ensureCtBaseFromBootstrapUrl = () => {
+    try {
+      const current = readCtConfigLocal();
+      if (String(current && current.ctBaseUrl || '').trim()) return true;
+      let ctBaseUrl = '';
+      try {
+        const u = new URL(BOOTSTRAP_URL);
+        ctBaseUrl = `${u.protocol}//${u.host}`;
+      } catch {}
+      if (!ctBaseUrl) return false;
+      const wr = writeCtConfigLocal({ ctBaseUrl });
+      if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
+      const confirmed = readCtConfigLocal();
+      return !!String(confirmed && confirmed.ctBaseUrl || '').trim();
+    } catch (e) {
+      try { logger.warn('[GATE_B][BOOTSTRAP] ctBaseUrl local persist fail', { error: (e && e.message) || String(e) }); } catch {}
+      return false;
+    }
+  };
   const BOOTSTRAP_SECRET = String(process.env.CONVENIENTE_BOOTSTRAP_SECRET || '').trim();
   const EDGE_PROBE_ENABLED = String(process.env.GATE_B_EDGE_PROBE_ENABLED || '1').trim() !== '0';
   const EDGE_PROBE_INTERVAL_MS = Math.max(15000, Number(process.env.GATE_B_EDGE_PROBE_INTERVAL_MS || 45000) || 45000);
@@ -581,7 +603,10 @@ async function maybeBootstrapGateBToken() {
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
-        if (shouldReuseExistingToken) return true;
+        if (shouldReuseExistingToken && ensureCtBaseFromBootstrapUrl()) {
+          if (__gateBCloudflaredStarted) notifyGateBReady();
+          return true;
+        }
       }
 
       const tokenEnv = String(process.env.CONVENIENTE_GATE_B_TUNNEL_TOKEN || '').trim();
@@ -608,7 +633,10 @@ async function maybeBootstrapGateBToken() {
           __gateBCloudflaredStarted = !!ok;
           logger.info('[GATE_B][BOOTSTRAP] token_env: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
-        return true;
+        if (ensureCtBaseFromBootstrapUrl()) {
+          if (__gateBCloudflaredStarted) notifyGateBReady();
+          return true;
+        }
       }
 
       if (typeof fetch !== 'function') {

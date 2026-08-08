@@ -23246,6 +23246,25 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
         const status = Number(res.status || 0) || 0;
         if (status >= 300 && status < 400) continue;
         const raw = await res.text().catch(() => '');
+        const parsedAny = __deltaSafeJsonParse(raw);
+        if (status === 202 && parsedAny && typeof parsedAny === 'object') {
+          try {
+            const fromPayload = String(parsedAny.ctBaseUrl || '').trim();
+            let fromUrl = '';
+            try {
+              const u = new URL(String(url));
+              fromUrl = `${u.protocol}//${u.host}`;
+            } catch {}
+            const ctBaseUrl = fromPayload || fromUrl;
+            if (ctBaseUrl) {
+              const wr = writeCtConfig({ ctBaseUrl });
+              if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
+            }
+          } catch (eWrite) {
+            try { logger.warn('[DELTA][INGEST][BOOTSTRAP] ctBaseUrl persist fail (202)', { error: (eWrite && eWrite.message) || String(eWrite) }); } catch {}
+          }
+          continue;
+        }
         if (status !== 200 || !raw) {
           try {
             logger.warn('[DELTA][INGEST][BOOTSTRAP] refresh sem segredo útil', {
@@ -23256,7 +23275,7 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
           } catch {}
           continue;
         }
-        const parsed = __deltaSafeJsonParse(raw);
+        const parsed = parsedAny;
         if (!parsed || typeof parsed !== 'object') continue;
 
         const resolvedSecrets = __deltaExtractBootstrapSecrets(parsed);
