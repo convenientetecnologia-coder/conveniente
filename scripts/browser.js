@@ -2163,11 +2163,21 @@ async function detectMessengerPinModal(page) {
       const hasCreatePinPhrase = (t) =>
         t.includes('crie um pin') ||
         t.includes('criar pin') ||
+        t.includes('create a pin') ||
+        t.includes('create pin') ||
         t.includes('seu pin restaura') ||
         t.includes('sem um pin') ||
         t.includes('evitar a perda') ||
         t.includes('historico de conversas') ||
         t.includes('perda do seu historico');
+      const hasConfirmPinPhrase = (t) =>
+        t.includes('confirme o pin') ||
+        t.includes('confirme seu pin') ||
+        t.includes('confirmar o pin') ||
+        t.includes('confirm your pin') ||
+        t.includes('reinsira seu pin') ||
+        t.includes('digite novamente') ||
+        t.includes('digite de novo');
       const hasEnterPinPhrase = (t) =>
         t.includes('insira seu pin') ||
         t.includes('inserir seu pin') ||
@@ -2183,9 +2193,14 @@ async function detectMessengerPinModal(page) {
         return norm(document.body ? (document.body.innerText || '') : '');
       };
 
+      const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
+      const pagePinContext =
+        hasCreatePinPhrase(bodyTxt) ||
+        hasConfirmPinPhrase(bodyTxt) ||
+        hasEnterPinPhrase(bodyTxt);
       // Âncora 1: input oficial em qualquer lugar visível (modal restaurar/criar).
       const officialCandidates = Array.from(document.querySelectorAll(
-        'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"]'
+        'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
       ));
       // FB PIN oficial costuma ter opacity:0 / box 0x0 — isVisible falha e o sistema nunca digita
       // (forense MAE1 joinville-1786214565664: CTA click ok, hasOfficial=false com input no DOM).
@@ -2195,14 +2210,34 @@ async function detectMessengerPinModal(page) {
           const id = String(el.id || '');
           const al = norm(el.getAttribute('aria-label') || '');
           const maxLen = Number(el.getAttribute('maxlength') || 0) || 0;
+          const ac = norm(el.getAttribute('autocomplete') || '');
+          const mode = norm(el.getAttribute('inputmode') || '');
           const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
           if (st && st.display === 'none') return false;
+          if (st && st.visibility === 'hidden') return false;
+          if (el.getAttribute('aria-hidden') === 'true') return false;
+          if (el.getAttribute('disabled') != null) return false;
           if (id === 'mw-numeric-code-input-prevent-composer-focus-steal') return true;
           if (al === 'pin' && maxLen === 6) return true;
+          if (maxLen === 6 && al.includes('pin') && (al.includes('confirme') || al.includes('confirm'))) return true;
+          if (maxLen === 6 && pagePinContext && (ac.includes('one-time-code') || mode.includes('numeric'))) return true;
           return isVisible(el);
         } catch { return false; }
       };
-      const officialPinEl = officialCandidates.find(isOfficialPinUsable) || null;
+      const activeEl = document.activeElement;
+      const activeOfficial = officialCandidates.find((el) => el === activeEl && isOfficialPinUsable(el)) || null;
+      const confirmOfficial = officialCandidates.find((el) => {
+        if (!isOfficialPinUsable(el)) return false;
+        const al = norm(el.getAttribute('aria-label') || '');
+        return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
+      }) || null;
+      // O React mantém o input da etapa 1 no DOM e monta outro com o MESMO id
+      // na confirmação. Priorizar o ativo; depois, o aria de confirmação.
+      const officialPinEl =
+        activeOfficial ||
+        confirmOfficial ||
+        officialCandidates.find(isOfficialPinUsable) ||
+        null;
       const hasOfficialPinInput = !!officialPinEl;
       const surfaceTxt = officialPinEl ? textNear(officialPinEl) : '';
       const pinIncorrect =
@@ -2262,16 +2297,28 @@ async function detectMessengerPinModal(page) {
           }));
 
       // Frases: preferir texto perto do input oficial (não body inteiro do feed).
-      const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
       const phraseTxt = surfaceTxt || dlgTxt || bodyTxt;
-      const createText = !!(hasOfficialPinInput && hasCreatePinPhrase(phraseTxt) && !hasEnterPinPhrase(phraseTxt));
+      const officialPinAria = officialPinEl ? norm(officialPinEl.getAttribute('aria-label') || '') : '';
+      const isPinConfirmation = !!(
+        hasOfficialPinInput &&
+        (
+          hasConfirmPinPhrase(phraseTxt) ||
+          (officialPinAria.includes('pin') && (officialPinAria.includes('confirme') || officialPinAria.includes('confirm')))
+        )
+      );
+      const createText = !!(
+        hasOfficialPinInput &&
+        (hasCreatePinPhrase(phraseTxt) || isPinConfirmation) &&
+        !hasEnterPinPhrase(phraseTxt)
+      );
       const pinText = !!(hasOfficialPinInput && hasEnterPinPhrase(phraseTxt));
       const hasCreateBtn =
         Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => {
           if (!isVisible(el)) return false;
           const t = norm(el.innerText || el.textContent || '');
           const al = norm(el.getAttribute('aria-label') || '');
-          return t.includes('criar pin') || al.includes('criar pin') || al === 'criar pin';
+          return t.includes('criar pin') || al.includes('criar pin') || al === 'criar pin' ||
+            t.includes('create pin') || al.includes('create pin') || al === 'create pin';
         });
       // Intro modal real (forense MAE1 sorocaba-1786213049929):
       // "Crie um PIN para acessar suas conversas..." + botão Criar PIN, SEM input ainda.
@@ -2305,6 +2352,8 @@ async function detectMessengerPinModal(page) {
         createText: !!createText,
         pinText: !!pinText,
         pinIncorrect: !!pinIncorrect,
+        isPinConfirmation: !!isPinConfirmation,
+        officialPinAria,
         feedCreateCtaOnly: !!feedCreateCtaOnly,
         isCreatePinCta: !!isCreatePinCta,
         hasDialog: !!dlgEl
@@ -2391,7 +2440,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         const matchCreate = (el) => {
           const t = norm(el.innerText || el.textContent || '');
           const al = norm(el.getAttribute('aria-label') || '');
-          return al === 'criar pin' || t === 'criar pin' || t.includes('criar pin') || al.includes('criar pin');
+          return al === 'criar pin' || t === 'criar pin' || t.includes('criar pin') || al.includes('criar pin') ||
+            al === 'create pin' || t === 'create pin' || t.includes('create pin') || al.includes('create pin');
         };
         // 1) dialog/aria-modal (preferido)
         const roots = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
@@ -2404,7 +2454,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           for (const h of hs.slice(0, 6)) {
             let n = h;
             for (let i = 0; i < 10 && n; i++) {
-              if (n.querySelector && n.querySelector('[aria-label="Criar PIN"], [role="button"]')) {
+              if (n.querySelector && n.querySelector('[aria-label="Criar PIN"], [aria-label="Create PIN"], [role="button"]')) {
                 roots.push(n);
                 break;
               }
@@ -2434,7 +2484,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         const h =
           (await page.$('[aria-label="Criar PIN"][role="button"]')) ||
           (await page.$('[aria-label="Criar PIN"]')) ||
-          (await page.$('div[role="button"][aria-label="Criar PIN"]'));
+          (await page.$('div[role="button"][aria-label="Criar PIN"]')) ||
+          (await page.$('[aria-label="Create PIN"][role="button"]')) ||
+          (await page.$('[aria-label="Create PIN"]'));
         if (h) {
           await h.click({ delay: 70 }).catch(() => {});
           return true;
@@ -2444,18 +2496,31 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     } catch { return false; }
   }
 
-  async function waitForOfficialPinInput({ timeoutMs = 10_000 } = {}) {
+  async function waitForOfficialPinInput({ timeoutMs = 10_000, preferConfirmation = false } = {}) {
     const t0 = Date.now();
     while ((Date.now() - t0) < timeoutMs) {
+      const det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      if (
+        det &&
+        det.hasOfficialPinInput &&
+        (!preferConfirmation || det.isPinConfirmation === true)
+      ) {
+        return { ok: true, det };
+      }
       try {
-        const h = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"]');
-        if (h) {
-          const det = await detectMessengerPinModal(page).catch(() => ({ present: true, hasOfficialPinInput: true, kind: 'create_pin' }));
-          return { ok: true, det: det || { present: true, hasOfficialPinInput: true, kind: 'create_pin' } };
+        const h = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]');
+        if (h && !preferConfirmation) {
+          return {
+            ok: true,
+            det: det || { present: true, hasOfficialPinInput: true, kind: 'create_pin' }
+          };
         }
       } catch {}
-      const det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
-      if (det && (det.hasOfficialPinInput || det.hasSplitPinInputs || det.kind === 'create_pin' || det.kind === 'pin_input')) {
+      if (
+        !preferConfirmation &&
+        det &&
+        (det.hasOfficialPinInput || det.hasSplitPinInputs || det.kind === 'create_pin' || det.kind === 'pin_input')
+      ) {
         return { ok: true, det };
       }
       await sleep(350);
@@ -2528,22 +2593,73 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return false;
           }
         };
-        const dlgEl = document.querySelector('div[role="dialog"], [aria-modal="true"]');
+        const officialSelector =
+          'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]';
+        const officialCandidates = Array.from(document.querySelectorAll(officialSelector));
+        const isUsableOfficial = (el) => {
+          try {
+            if (!el || !el.isConnected) return false;
+            const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+            if (el.getAttribute('aria-hidden') === 'true') return false;
+            if (el.getAttribute('disabled') != null) return false;
+            return true; // opacity/box 0 é normal no input oficial do FB
+          } catch { return false; }
+        };
+        const active = document.activeElement;
+        const activeOfficial = officialCandidates.find((el) => el === active && isUsableOfficial(el)) || null;
+        const confirmOfficial = officialCandidates.find((el) => {
+          if (!isUsableOfficial(el)) return false;
+          const al = norm(el.getAttribute('aria-label') || '');
+          return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
+        }) || null;
+        // Há dois nós com o mesmo id durante a transição. Nunca escolher o
+        // input antigo apenas porque ele aparece primeiro no DOM.
+        const officialPin =
+          activeOfficial ||
+          confirmOfficial ||
+          officialCandidates.find(isUsableOfficial) ||
+          null;
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
+        const dlgEl =
+          (officialPin && officialPin.closest('div[role="dialog"], [aria-modal="true"]')) ||
+          dialogs.find((d) => {
+            const t = norm(d.innerText || d.textContent || '');
+            return t.includes('pin') && (
+              t.includes('confirme') ||
+              t.includes('crie') ||
+              t.includes('criar') ||
+              t.includes('historico')
+            );
+          }) ||
+          dialogs[0] ||
+          null;
         const dlg = dlgEl;
-        const officialPin = (
-          (dlg && (
-            dlg.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-            dlg.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-            dlg.querySelector('input[aria-label="PIN"][maxlength="6"]')
-          )) ||
-          document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-          document.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-          document.querySelector('input[aria-label="PIN"][maxlength="6"]')
-        );
-        const scopeEl = dlg || (officialPin && officialPin.closest('div')) || document.body;
-        const txt = scopeEl ? norm(scopeEl.innerText || scopeEl.textContent || '') : '';
+        // O modal real de confirmação pode vir SEM role=dialog. O div mais próximo
+        // contém só o input; subir a árvore até encontrar o título/descrição.
+        const textNear = (el) => {
+          let n = el;
+          for (let i = 0; i < 14 && n; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('confirme o pin') ||
+              t.includes('confirme seu pin') ||
+              t.includes('confirm your pin') ||
+              t.includes('crie um pin') ||
+              t.includes('criar pin') ||
+              t.includes('evitar a perda') ||
+              (t.includes('historico') && t.includes('pin'))
+            ) return t;
+            n = n.parentElement;
+          }
+          return norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+        };
+        const txt = dlg
+          ? norm(dlg.innerText || dlg.textContent || '')
+          : (officialPin ? textNear(officialPin) : norm(document.body ? (document.body.innerText || '') : ''));
         const hasOfficialPinInput = !!officialPin;
         const officialPinValueLen = officialPin ? String(officialPin.value || '').trim().length : 0;
+        const officialPinAria = officialPin ? norm(officialPin.getAttribute('aria-label') || '') : '';
         const splitInputs = dlg ? Array.from(dlg.querySelectorAll('input:not([aria-hidden="true"])')).filter(el => {
           if (!isVisible(el)) return false;
           if (el === officialPin) return false;
@@ -2562,7 +2678,6 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           return false;
         }) : [];
         const filledCount = splitInputs.filter(el => String(el.value || '').trim().length > 0).length;
-        const active = document.activeElement;
         const activeAria = active && active.getAttribute ? norm(active.getAttribute('aria-label') || '') : '';
         const activeRole = active && active.getAttribute ? norm(active.getAttribute('role') || '') : '';
         const activeId = active && active.id ? String(active.id) : '';
@@ -2578,27 +2693,34 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           activeAria.includes('digite uma mensagem') ||
           (activeRole === 'textbox' && !activeAria.includes('pin') && activeId !== 'mw-numeric-code-input-prevent-composer-focus-steal' && !focusInsideDialog);
         // Só texto do dialog — feed/body sozinho nunca autoriza.
+        const asksRepeat = !!(
+          txt.includes('confirme o pin') ||
+          txt.includes('confirme seu pin') ||
+          txt.includes('confirm your pin') ||
+          txt.includes('repita') ||
+          txt.includes('repet') ||
+          txt.includes('digite de novo') ||
+          txt.includes('digite novamente') ||
+          (officialPinAria.includes('pin') && (officialPinAria.includes('confirme') || officialPinAria.includes('confirm')))
+        );
         const hasCreateText = !!(
           txt.includes('crie um pin') ||
           txt.includes('criar pin') ||
           txt.includes('seu pin restaura') ||
           txt.includes('sem um pin') ||
           txt.includes('evitar a perda') ||
-          (txt.includes('historico') && txt.includes('pin'))
+          (txt.includes('historico') && txt.includes('pin')) ||
+          asksRepeat
         );
         return {
           hasCreateText,
-          asksRepeat:
-            txt.includes('repita') ||
-            txt.includes('repet') ||
-            txt.includes('novamente') ||
-            txt.includes('confirm') ||
-            txt.includes('digite de novo') ||
-            txt.includes('digite novamente'),
+          asksRepeat,
+          phase: asksRepeat ? 'confirm' : (hasCreateText ? 'create' : 'unknown'),
           splitInputsCount: splitInputs.length,
           filledCount,
           hasOfficialPinInput,
           officialPinValueLen,
+          officialPinAria,
           focusOnOfficialPin,
           focusInsideDialog,
           dangerousFocus,
@@ -2635,21 +2757,73 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     return !!(hasOfficial || hasSplit);
   }
 
-  // Sem clique: só focus() no input oficial DENTRO do dialog (sem fallback document).
-  async function focusOfficialCreatePinInput() {
+  // Sem clique: foca o input oficial. Na confirmação, o Facebook mantém o
+  // input antigo no DOM (às vezes com o mesmo id), então aria/active mandam.
+  async function focusOfficialCreatePinInput({ preferConfirmation = false } = {}) {
     try {
-      const focused = await page.evaluate(() => {
-        const pick = (root) => {
-          if (!root || !root.querySelector) return null;
-          return (
-            root.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-            root.querySelector('input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"]') ||
-            root.querySelector('input[aria-label="PIN"][maxlength="6"]')
-          );
+      const focused = await page.evaluate((preferConfirm) => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const selector =
+          'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]';
+        const candidates = Array.from(document.querySelectorAll(selector));
+        const usable = (el) => {
+          try {
+            if (!el || !el.isConnected) return false;
+            const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+            if (el.getAttribute('aria-hidden') === 'true') return false;
+            if (el.getAttribute('disabled') != null) return false;
+            return true;
+          } catch { return false; }
         };
-        const dlg = document.querySelector('div[role="dialog"], [aria-modal="true"]');
-        const el = pick(dlg) || pick(document);
-        if (!el) return { ok: false, error: 'official_pin_input_missing', hasDialog: !!dlg };
+        const isConfirm = (el) => {
+          const al = norm(el && el.getAttribute ? el.getAttribute('aria-label') || '' : '');
+          return al.includes('pin') && (al.includes('confirme') || al.includes('confirm'));
+        };
+        const isConfirmSurface = (el) => {
+          let n = el;
+          const boundary = el && el.closest
+            ? el.closest('div[role="dialog"], [aria-modal="true"]')
+            : null;
+          for (let i = 0; i < 12 && n; i++) {
+            const t = norm(n.innerText || n.textContent || '');
+            if (
+              t.includes('confirme o pin') ||
+              t.includes('confirme seu pin') ||
+              t.includes('confirm your pin') ||
+              (t.includes('pin') && (
+                t.includes('digite novamente') ||
+                t.includes('digite de novo') ||
+                t.includes('repita') ||
+                t.includes('reinsira')
+              ))
+            ) return true;
+            if (boundary && n === boundary) break;
+            n = n.parentElement;
+          }
+          return false;
+        };
+        const active = document.activeElement;
+        const activeCandidate = candidates.find((el) => el === active && usable(el)) || null;
+        let el = null;
+        if (preferConfirm) {
+          el =
+            (activeCandidate && (isConfirm(activeCandidate) || isConfirmSurface(activeCandidate)) ? activeCandidate : null) ||
+            candidates.find((candidate) => usable(candidate) && (isConfirm(candidate) || isConfirmSurface(candidate))) ||
+            activeCandidate ||
+            [...candidates].reverse().find(usable) ||
+            null;
+        } else {
+          el = activeCandidate || candidates.find(usable) || null;
+        }
+        if (!el) {
+          return {
+            ok: false,
+            error: preferConfirm ? 'confirmation_pin_input_missing' : 'official_pin_input_missing',
+            candidates: candidates.length
+          };
+        }
+        const dlg = el.closest('div[role="dialog"], [aria-modal="true"]');
         try {
           const proto = el.constructor ? el.constructor.prototype : null;
           const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
@@ -2659,15 +2833,18 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         } catch {}
         try { el.focus(); } catch {}
         try { el.click(); } catch {}
-        const active = document.activeElement;
+        const activeAfter = document.activeElement;
         return {
-          ok: !!(active && active === el),
+          ok: !!(activeAfter && activeAfter === el),
           id: String(el.id || ''),
           aria: String(el.getAttribute('aria-label') || ''),
           valueLen: String(el.value || '').trim().length,
-          hasDialog: !!dlg
+          hasDialog: !!dlg,
+          confirmationSurface: !!isConfirmSurface(el),
+          preferConfirmation: !!preferConfirm,
+          candidates: candidates.length
         };
-      }).catch(() => ({ ok: false, error: 'focus_eval_failed' }));
+      }, !!preferConfirmation).catch(() => ({ ok: false, error: 'focus_eval_failed' }));
       pinLog({ event: 'create_pin_official_focus', result: focused });
       return focused;
     } catch (e) {
@@ -2766,10 +2943,26 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       let focusRes = null;
       if (hasOfficial) {
         // Garante foco no input oficial (sem clique). Evita digitar no composer/chat.
-        focusRes = await focusOfficialCreatePinInput();
+        const explicitConfirm = !!(
+          round >= 2 &&
+          (
+            (before && String(before.officialPinAria || '').includes('confirm')) ||
+            (detHint && detHint.isPinConfirmation === true)
+          )
+        );
+        focusRes = await focusOfficialCreatePinInput({ preferConfirmation: explicitConfirm });
         if (!(focusRes && focusRes.ok)) {
           pinLog({ event: 'create_pin_refused_no_official_focus', round, focusRes, state: before });
           return { ok: false, error: 'create_pin_unsafe_target', before, refused: true, focusRes };
+        }
+        const focusedAria = String(focusRes.aria || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        if (
+          explicitConfirm &&
+          !(focusedAria.includes('pin') && focusedAria.includes('confirm')) &&
+          focusRes.confirmationSurface !== true
+        ) {
+          pinLog({ event: 'create_pin_refused_stale_round1_input', round, focusRes, state: before });
+          return { ok: false, error: 'create_pin_confirmation_focus_mismatch', before, refused: true, focusRes };
         }
       } else if (!hasSplit) {
         pinLog({ event: 'create_pin_refused_no_surface', round, state: before });
@@ -2799,48 +2992,114 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
-  async function waitForCreatePinAdvance({ timeoutMs = 7_000 } = {}) {
+  async function waitForCreatePinAdvance({
+    timeoutMs = 14_000,
+    stableGoneMs = 4_500,
+    previousState = null
+  } = {}) {
     const t0 = Date.now();
-    let sawFilled = false;
-    let sawOfficialFilled = false;
+    let absentSince = 0;
+    let sawFilled = Number(previousState && previousState.filledCount || 0) >= 4;
+    let sawOfficialFilled = Number(previousState && previousState.officialPinValueLen || 0) >= 6;
+    let lastDet = null;
+    let lastState = previousState || null;
+
     while ((Date.now() - t0) < timeoutMs) {
       const det = await detectMessengerPinModal(page).catch(()=>({ present:false }));
-      if (!det.present) {
-        return { ok: true, dismissed: true, reason: 'modal_dismissed' };
-      }
       const state = await readCreatePinState().catch(()=>null);
+      lastDet = det || lastDet;
+      lastState = state || lastState;
+
+      // Contrato DOM confirmado: tela 2 usa título "Confirme o PIN..." e
+      // aria-label="Confirme seu PIN", inclusive sem role=dialog.
+      if (
+        (state && state.asksRepeat === true) ||
+        (det && det.isPinConfirmation === true)
+      ) {
+        return {
+          ok: true,
+          dismissed: false,
+          reason: 'confirmation_screen_ready',
+          state,
+          det
+        };
+      }
+
       if (state) {
-        if (state.asksRepeat === true) {
-          return { ok: true, dismissed: false, reason: 'repeat_prompt_text', state };
-        }
-        // Modal DOM real: 1 input maxlength=6 — após 1ª rodada o valor zera e pede repetir.
+        // Builds sem texto/aria explícito: após a primeira entrada, o mesmo
+        // input (ou os slots) zera para receber a confirmação.
         if (state.hasOfficialPinInput) {
           const n = Number(state.officialPinValueLen || 0) || 0;
           if (n >= 6) sawOfficialFilled = true;
           if (sawOfficialFilled && n === 0) {
-            return { ok: true, dismissed: false, reason: 'official_pin_reset_for_repeat', state };
+            return {
+              ok: true,
+              dismissed: false,
+              reason: 'official_pin_reset_for_repeat',
+              state,
+              det
+            };
           }
         }
         if (state.splitInputsCount >= 4) {
           if (state.filledCount >= 4) sawFilled = true;
           if (sawFilled && state.filledCount === 0) {
-            return { ok: true, dismissed: false, reason: 'slots_reset_for_repeat', state };
+            return {
+              ok: true,
+              dismissed: false,
+              reason: 'slots_reset_for_repeat',
+              state,
+              det
+            };
           }
         }
       }
-      await sleep(350);
+
+      if (!det || !det.present) {
+        if (!absentSince) absentSince = Date.now();
+        // Nunca concluir sucesso no primeiro frame sem modal: entre as telas
+        // 1 e 2 o React desmonta/remonta o componente por alguns instantes.
+        if ((Date.now() - absentSince) >= stableGoneMs) {
+          return {
+            ok: true,
+            dismissed: true,
+            reason: 'modal_absent_stable_after_round1',
+            state,
+            det
+          };
+        }
+      } else {
+        absentSince = 0;
+      }
+      await sleep(300);
     }
-    return { ok: false, dismissed: false, reason: 'advance_timeout' };
+    return {
+      ok: false,
+      dismissed: false,
+      reason: 'confirmation_screen_timeout',
+      state: lastState,
+      det: lastDet
+    };
   }
 
-  async function waitForPinModalGone({ timeoutMs = 12_000 } = {}) {
+  async function waitForPinModalGone({ timeoutMs = 15_000, stableGoneMs = 1_800 } = {}) {
     const t0 = Date.now();
+    let absentSince = 0;
+    let lastState = null;
     while ((Date.now() - t0) < timeoutMs) {
       const det = await detectMessengerPinModal(page).catch(()=>({ present:false }));
-      if (!det.present) return { ok: true, dismissed: true, reason: 'modal_dismissed' };
-      await sleep(450);
+      lastState = await readCreatePinState().catch(()=>lastState);
+      if (!det || !det.present) {
+        if (!absentSince) absentSince = Date.now();
+        if ((Date.now() - absentSince) >= stableGoneMs) {
+          return { ok: true, dismissed: true, reason: 'modal_absent_stable' };
+        }
+      } else {
+        absentSince = 0;
+      }
+      await sleep(350);
     }
-    return { ok: false, dismissed: false, reason: 'modal_still_present', state: await readCreatePinState().catch(()=>null) };
+    return { ok: false, dismissed: false, reason: 'modal_still_present', state: lastState };
   }
 
   async function tryCreatePinTwiceNoClicks(pinValue = DEFAULT_PIN, detHint = null) {
@@ -2854,14 +3113,93 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       };
     }
 
-    const afterFirst = await waitForCreatePinAdvance({ timeoutMs: 7_000 });
-    pinLog({ event: 'create_pin_round_transition', round: 1, ok: !!afterFirst.ok, dismissed: !!afterFirst.dismissed, reason: afterFirst.reason || null });
+    const afterFirst = await waitForCreatePinAdvance({
+      timeoutMs: 14_000,
+      stableGoneMs: 4_500,
+      previousState: first.after || null
+    });
+    pinLog({
+      event: 'create_pin_round_transition',
+      round: 1,
+      ok: !!afterFirst.ok,
+      dismissed: !!afterFirst.dismissed,
+      reason: afterFirst.reason || null,
+      state: afterFirst.state || null,
+      isPinConfirmation: !!(afterFirst.det && afterFirst.det.isPinConfirmation)
+    });
     if (afterFirst.dismissed) {
-      return { ok: true, dismissed: true, rounds: 1, transitionReason: afterFirst.reason || 'modal_dismissed_after_round1' };
+      // Regra conservadora: criar PIN só é sucesso após DUAS entradas.
+      // Se a confirmação não apareceu, não inventar sucesso de uma etapa.
+      return {
+        ok: false,
+        error: 'create_pin_confirmation_missing_after_round1',
+        dismissed: true,
+        rounds: 1,
+        transitionReason: afterFirst.reason || 'modal_absent_stable_after_round1'
+      };
+    }
+    if (!afterFirst.ok) {
+      return {
+        ok: false,
+        error: 'create_pin_confirmation_not_reached',
+        rounds: 1,
+        transitionReason: afterFirst.reason || null,
+        finalState: afterFirst.state || null
+      };
     }
 
-    // 2ª rodada (confirmação) — ainda sem clicar; só se alvo continuar seguro.
-    const second = await typePinWithKeyboardOnly(pinValue, { round: 2, detHint });
+    // 2ª rodada obrigatória no fluxo de duas etapas. Reaquisição explícita:
+    // o input da tela 1 foi desmontado e a tela 2 possui outro nó React.
+    await sleep(350);
+    const afterFirstAria = String(
+      (afterFirst.state && afterFirst.state.officialPinAria) ||
+      (afterFirst.det && afterFirst.det.officialPinAria) ||
+      ''
+    ).toLowerCase();
+    const explicitConfirmationUi = !!(
+      (afterFirst.det && afterFirst.det.isPinConfirmation === true) ||
+      (afterFirstAria.includes('pin') && afterFirstAria.includes('confirm'))
+    );
+    const confirmInput = await waitForOfficialPinInput({
+      timeoutMs: 8_000,
+      preferConfirmation: explicitConfirmationUi
+    });
+    const confirmDet =
+      (confirmInput && confirmInput.det) ||
+      afterFirst.det ||
+      await detectMessengerPinModal(page).catch(() => detHint);
+    const confirmState = await readCreatePinState().catch(() => afterFirst.state || null);
+    const confirmationReady = !!(
+      (confirmInput && confirmInput.ok) &&
+      (
+        (confirmState && confirmState.asksRepeat === true) ||
+        (confirmDet && confirmDet.isPinConfirmation === true) ||
+        afterFirst.reason === 'official_pin_reset_for_repeat' ||
+        afterFirst.reason === 'slots_reset_for_repeat'
+      )
+    );
+    pinLog({
+      event: 'create_pin_confirmation_ready',
+      ready: confirmationReady,
+      transitionReason: afterFirst.reason || null,
+      state: confirmState || null,
+      detKind: (confirmDet && confirmDet.kind) || null,
+      isPinConfirmation: !!(confirmDet && confirmDet.isPinConfirmation)
+    });
+    if (!confirmationReady) {
+      return {
+        ok: false,
+        error: 'create_pin_confirmation_input_not_ready',
+        rounds: 1,
+        transitionReason: afterFirst.reason || null,
+        finalState: confirmState || null
+      };
+    }
+
+    const second = await typePinWithKeyboardOnly(pinValue, {
+      round: 2,
+      detHint: confirmDet || detHint
+    });
     if (!second.ok) {
       return {
         ok: false,
@@ -2872,12 +3210,91 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       };
     }
 
-    const final = await waitForPinModalGone({ timeoutMs: 12_000 });
-    pinLog({ event: 'create_pin_final_wait', ok: !!final.ok, dismissed: !!final.dismissed, reason: final.reason || null, state: final.state || null });
+    const final = await waitForPinModalGone({ timeoutMs: 15_000, stableGoneMs: 1_800 });
+    pinLog({
+      event: 'create_pin_final_wait',
+      ok: !!final.ok,
+      dismissed: !!final.dismissed,
+      reason: final.reason || null,
+      state: final.state || null
+    });
     if (final.ok && final.dismissed) {
-      return { ok: true, dismissed: true, rounds: 2, transitionReason: afterFirst.reason || final.reason || null };
+      return {
+        ok: true,
+        dismissed: true,
+        rounds: 2,
+        transitionReason: afterFirst.reason || final.reason || null
+      };
     }
-    return { ok: false, error: 'create_pin_still_present', rounds: 2, transitionReason: afterFirst.reason || null, finalState: final.state || null };
+    return {
+      ok: false,
+      error: 'create_pin_still_present_after_confirmation',
+      rounds: 2,
+      transitionReason: afterFirst.reason || null,
+      finalState: final.state || null
+    };
+  }
+
+  async function tryConfirmExistingCreatePin(pinValue = DEFAULT_PIN, detHint = null) {
+    const state = await readCreatePinState().catch(() => null);
+    const isConfirmation = !!(
+      (detHint && detHint.isPinConfirmation === true) ||
+      (state && state.asksRepeat === true)
+    );
+    if (!isConfirmation) {
+      return {
+        ok: false,
+        error: 'create_pin_confirmation_not_proven',
+        rounds: 1,
+        finalState: state || null
+      };
+    }
+    pinLog({
+      event: 'create_pin_existing_confirmation_begin',
+      state: state || null,
+      detKind: (detHint && detHint.kind) || null,
+      officialPinAria: (detHint && detHint.officialPinAria) || null
+    });
+    const second = await typePinWithKeyboardOnly(pinValue, {
+      round: 2,
+      detHint
+    });
+    if (!second.ok) {
+      return {
+        ok: false,
+        error: second.error || 'create_pin_existing_confirmation_type_failed',
+        rounds: 1,
+        refused: !!second.refused,
+        finalState: second.after || second.before || state || null
+      };
+    }
+    const final = await waitForPinModalGone({
+      timeoutMs: 15_000,
+      stableGoneMs: 1_800
+    });
+    pinLog({
+      event: 'create_pin_existing_confirmation_final',
+      ok: !!final.ok,
+      dismissed: !!final.dismissed,
+      reason: final.reason || null,
+      state: final.state || null
+    });
+    if (final.ok && final.dismissed) {
+      return {
+        ok: true,
+        dismissed: true,
+        pinEntered: true,
+        confirmed: true,
+        rounds: 2,
+        resumedAtConfirmation: true
+      };
+    }
+    return {
+      ok: false,
+      error: 'create_pin_still_present_after_existing_confirmation',
+      rounds: 2,
+      finalState: final.state || null
+    };
   }
 
   async function focusOfficialPinInputAnywhere() {
@@ -2895,8 +3312,14 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         };
         const el =
           Array.from(document.querySelectorAll(
-            'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"]'
-          )).find(isVisible) || null;
+            'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
+          )).find((candidate) => {
+            if (isVisible(candidate)) return true;
+            const id = String(candidate && candidate.id || '');
+            const aria = String(candidate && candidate.getAttribute && candidate.getAttribute('aria-label') || '').toLowerCase();
+            return id === 'mw-numeric-code-input-prevent-composer-focus-steal' ||
+              (aria.includes('pin') && (aria.includes('confirme') || aria.includes('confirm')));
+          }) || null;
         if (!el) return { ok: false, error: 'official_pin_input_missing' };
         try {
           const proto = el.constructor ? el.constructor.prototype : null;
@@ -3004,9 +3427,21 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     return { ok: false, dismissed: false, error: 'pin_fallback_failed', kind: (det && det.kind) || null };
   }
 
+  let createPinFlowArmed = false;
   for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
     const det = await detectMessengerPinModal(page);
-    if (!det.present) return { ok: true, dismissed: false };
+    if (!det.present) {
+      if (createPinFlowArmed) {
+        pinLog({ event: 'create_pin_flow_lost', attempt, error: 'pin_surface_missing_after_create_click' });
+        return {
+          ok: false,
+          error: 'create_pin_flow_lost_before_double_confirmation',
+          dismissed: false,
+          confirmed: false
+        };
+      }
+      return { ok: true, dismissed: false };
+    }
 
     // snapshot mínimo sempre que detecta (ajuda a comparar DOM real vs esperado)
     try {
@@ -3020,6 +3455,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         hasCreateTypingSurface: !!det.hasCreateTypingSurface,
         hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn,
         hasCreateBtn: !!det.hasCreateBtn,
+        isPinConfirmation: !!det.isPinConfirmation,
+        officialPinAria: det.officialPinAria || null,
         feedCreateCtaOnly: !!det.feedCreateCtaOnly,
         isCreatePinCta: !!det.isCreatePinCta
       });
@@ -3041,6 +3478,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             return { ok: false, error: 'create_pin_cta_click_failed', dismissed: false };
           }
         }
+        createPinFlowArmed = true;
         await sleep(1100);
         const waited = await waitForOfficialPinInput({ timeoutMs: 12_000 });
         pinLog({
@@ -3053,7 +3491,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         if (!(waited && waited.ok)) {
           // Fallback duro: input oficial no DOM mesmo se detect ainda achar CTA.
           let hardInput = null;
-          try { hardInput = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"]'); } catch {}
+          try {
+            hardInput = await page.$('input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]');
+          } catch {}
           if (!hardInput) {
             return { ok: false, error: 'create_pin_cta_no_input_after_click', dismissed: false };
           }
@@ -3067,7 +3507,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             hasCreateBtn: false
           };
           const createRes = await tryCreatePinTwiceNoClicks(DEFAULT_PIN, detForce);
-          if (createRes && createRes.ok) {
+          if (createRes && createRes.ok && Number(createRes.rounds || 0) === 2) {
             pinLog({ event: 'create_pin_cta_hard_type_success', attempt, rounds: createRes.rounds || 0 });
             return { ok: true, dismissed: true, pinEntered: true, confirmed: true, rounds: createRes.rounds || 2, via: 'cta_hard_input' };
           }
@@ -3085,8 +3525,31 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     // CREATE_PIN: digitar se a superfície/foco do PIN estiver seguro
     // (campo especial já vem selecionado — 882584, depois de novo 882584).
     if (det.kind === 'create_pin') {
+      createPinFlowArmed = true;
       try {
         const preState = await readCreatePinState().catch(() => null);
+        // Conta já parada na tela 2 (inclusive após restart/deploy): não
+        // reiniciar a criação; apenas concluir a segunda entrada.
+        if (det.isPinConfirmation === true || (preState && preState.asksRepeat === true)) {
+          const existingConfirmation = await tryConfirmExistingCreatePin(DEFAULT_PIN, det);
+          pinLog({
+            event: existingConfirmation.ok
+              ? 'create_pin_existing_confirmation_success'
+              : 'create_pin_existing_confirmation_failed',
+            attempt,
+            ok: !!existingConfirmation.ok,
+            error: existingConfirmation.error || null,
+            rounds: existingConfirmation.rounds || 1,
+            finalState: existingConfirmation.finalState || null
+          });
+          if (existingConfirmation.ok) return existingConfirmation;
+          return {
+            ...existingConfirmation,
+            dismissed: false,
+            pinEntered: false,
+            confirmed: false
+          };
+        }
         pinLog({
           event: 'create_pin_keyboard_only_begin',
           attempt,
@@ -3108,7 +3571,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           return { ok: false, error: 'create_pin_unsafe_target', dismissed: false, pinEntered: false };
         }
         const createRes = await tryCreatePinTwiceNoClicks(DEFAULT_PIN, det);
-        if (createRes.ok) {
+        if (createRes.ok && Number(createRes.rounds || 0) === 2) {
           pinLog({
             event: 'create_pin_keyboard_only_success',
             attempt,
@@ -3129,10 +3592,23 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         if (createRes.refused || createRes.error === 'create_pin_unsafe_target') {
           return { ok: false, error: 'create_pin_unsafe_target', dismissed: false, pinEntered: false };
         }
+        return {
+          ...createRes,
+          ok: false,
+          dismissed: false,
+          pinEntered: Number(createRes.rounds || 0) > 0,
+          confirmed: false
+        };
       } catch (e) {
         pinLog({ event: 'create_pin_keyboard_only_exception', attempt, error: (e && e.message) || String(e) });
+        return {
+          ok: false,
+          error: (e && e.message) || 'create_pin_keyboard_only_exception',
+          dismissed: false,
+          pinEntered: false,
+          confirmed: false
+        };
       }
-      return { ok: false, error: 'create_pin_still_present', dismissed: false, pinEntered: false };
     }
 
     // PIN INPUT (restaurar conversas): digitar UMA vez com calma; até 3 tentativas;
@@ -3250,6 +3726,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         // 2) Caso do PIN (input 6 dígitos): tente clicar em "Fechar" (X) no topo (não necessariamente dentro de dialog)
         const pinInput =
           document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+          document.querySelector('input[aria-label="Confirme seu PIN"][maxlength="6"]') ||
+          document.querySelector('input[aria-label="Confirm your PIN"][maxlength="6"]') ||
           document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
           null;
         if (pinInput) {
