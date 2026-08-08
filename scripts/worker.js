@@ -11574,9 +11574,17 @@ const handlers = {
             } catch {}
 
             // Continuar (AYMH / pre-screen) — só no cadastro ou quando a tela atual pede.
+            // CADASTRO AYMH: tryClickAymhContinuar (Continuar <Nome>, ignora wrapper tabindex=-1).
+            // RUNTIME: este bloco só roda se reason já for aymh/pre_screen; AYMH puro já abortou acima.
             if (isStockProvision || curReason.includes('aymh') || curReason.includes('continuar') || curReason.includes('pre_screen')) {
               try {
-                const clk = await browserHelper.clickContinueByLabel(workPage, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+                let clk = { ok: false };
+                if (curReason.includes('aymh') || isAymh) {
+                  clk = await browserHelper.tryClickAymhContinuar(workPage).catch(() => ({ ok: false }));
+                }
+                if (!(clk && clk.ok)) {
+                  clk = await browserHelper.clickContinueByLabel(workPage, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+                }
                 try {
                   provisionAudit.append({
                     ts: Date.now(),
@@ -11585,7 +11593,8 @@ const handlers = {
                     operator: op || null,
                     attempt,
                     ok: !!(clk && clk.ok),
-                    error: clk && clk.error ? String(clk.error).slice(0, 80) : null
+                    error: clk && clk.error ? String(clk.error).slice(0, 80) : null,
+                    via: (curReason.includes('aymh') || isAymh) ? 'aymh_then_label' : 'label'
                   });
                 } catch {}
                 await sleep(1100);
@@ -11601,7 +11610,14 @@ const handlers = {
 
             try {
               await browserHelper.ensureFbUiUnblocked(workPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(() => null);
-              await browserHelper.tryLoginEmailPass(workPage, { nome, login: login2, password: password2, allowGpt: true }).catch(() => null);
+              // Cadastro: se ainda AYMH, tryLogin pode clicar Continuar; runtime NÃO (allowAymhContinue=false).
+              await browserHelper.tryLoginEmailPass(workPage, {
+                nome,
+                login: login2,
+                password: password2,
+                allowGpt: true,
+                allowAymhContinue: !!isStockProvision
+              }).catch(() => null);
               await sleep(900);
             } catch {}
 
@@ -12692,7 +12708,13 @@ const handlers = {
               const ra = String((lrA && lrA.reason) || '').toLowerCase();
               if (!(lrA && lrA.loginRequired)) break;
               if (!(ra.includes('aymh') || ra.includes('pre_screen') || ra.includes('continuar'))) break;
-              const clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+              let clk = { ok: false };
+              if (ra.includes('aymh')) {
+                clk = await browserHelper.tryClickAymhContinuar(p0).catch(() => ({ ok: false }));
+              }
+              if (!(clk && clk.ok)) {
+                clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+              }
               pushStep({ step: 'stock_aymh_continue_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
               await sleep(1100);
             }
@@ -12712,7 +12734,13 @@ const handlers = {
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
           if (await checkAndAbortIfBanned(p0, 'before_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, {
+            nome,
+            login: login2,
+            password: password2,
+            allowGpt: true,
+            allowAymhContinue: !!isStockProvisionOp
+          }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
           if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
@@ -12734,7 +12762,13 @@ const handlers = {
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
           if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, {
+            nome,
+            login: login2,
+            password: password2,
+            allowGpt: true,
+            allowAymhContinue: !!isStockProvisionOp
+          }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
           if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };

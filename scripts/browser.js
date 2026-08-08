@@ -6076,25 +6076,29 @@ async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
       const r = await page.evaluate(() => {
         function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
         const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
-        const pick = () => {
-          for (const el of candidates) {
-            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
-            const txt = norm(el.innerText || el.textContent || '');
-            if (aria === 'continuar' || txt === 'continuar') return el;
+        // AYMH: wrapper role=button tabindex=-1 envolve o Continuar real (tabindex=0).
+        // NÃO abortar no wrapper — pular e seguir buscando o CTA clicável.
+        let sawDisabledReal = null;
+        for (const el of candidates) {
+          const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+          const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+          const isContinuarExact = (aria === 'continuar' || txt === 'continuar' || aria === 'continue' || txt === 'continue');
+          if (!isContinuarExact) continue;
+          const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
+          const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
+          if (tabIndex === '-1') continue; // wrapper/decoy
+          if (ariaDisabled === 'true') {
+            sawDisabledReal = { ariaDisabled, tabIndex };
+            continue;
           }
-          return null;
-        };
-        const el = pick();
-        if (!el) return { ok: false, error: 'continue_not_found' };
-        // heurística “clicável”
-        const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
-        const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
-        const disabled = (ariaDisabled === 'true') || (tabIndex === '-1');
-        // clicar mesmo se disabled=false; se disabled=true, retornamos info e não clicamos
-        if (disabled) return { ok: false, error: 'continue_disabled', ariaDisabled, tabIndex };
-        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-        try { el.click(); } catch {}
-        return { ok: true };
+          try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+          try { el.click(); } catch {}
+          return { ok: true };
+        }
+        if (sawDisabledReal) {
+          return { ok: false, error: 'continue_disabled', ariaDisabled: sawDisabledReal.ariaDisabled, tabIndex: sawDisabledReal.tabIndex };
+        }
+        return { ok: false, error: 'continue_not_found' };
       }).catch(()=>null);
       if (r && r.ok) {
         // #region agent log (debug)
@@ -7031,13 +7035,14 @@ async function _maybeClickCloseX(page) {
   return false;
 }
 
-async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true } = {}) {
+async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true, allowAymhContinue = false } = {}) {
   const email = String(login || '').trim();
   const pass = String(password || '').trim();
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
 
   // 1) destravar telas comuns:
-  //    - AYMH (Continuar + Usar outro perfil) = NÃO clicar Continuar (contrato humano-only)
+  //    - RUNTIME: AYMH (Continuar + Usar outro perfil) = humano-only (NÃO clicar Continuar)
+  //    - CADASTRO (allowAymhContinue): clica Continuar e segue pra senha / email+senha
   //    - se já tem form → NÃO clica "Usar outro perfil"
   //    - senão, "Usar outro perfil" só para cair no form em branco clássico
   await _maybeClickCloseX(page);
@@ -7045,7 +7050,14 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
     const aymh = await detectLoginRequired(page).catch(() => null);
     const aymhReason = String((aymh && aymh.reason) || '').toLowerCase();
     if (aymh && aymh.loginRequired && (aymhReason.includes('aymh_continue') || aymhReason === 'aymh')) {
-      return { ok: false, error: 'aymh_continue_human_only' };
+      if (!allowAymhContinue) {
+        return { ok: false, error: 'aymh_continue_human_only' };
+      }
+      const clk = await tryClickAymhContinuar(page).catch(() => ({ ok: false }));
+      if (!(clk && clk.ok)) {
+        return { ok: false, error: 'aymh_continue_click_failed' };
+      }
+      await sleep(1200);
     }
   } catch {}
   try {
@@ -7055,8 +7067,11 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
       return { hasEmail, hasPass };
     }).catch(() => ({ hasEmail: false, hasPass: false }));
     if (!(surface && (surface.hasEmail || surface.hasPass))) {
-      await _maybeClickUseAnotherProfile(page);
-      await sleep(700);
+      // Em cadastro com AYMH, NÃO clicar "Usar outro perfil" — Continuar já foi o caminho.
+      if (!allowAymhContinue) {
+        await _maybeClickUseAnotherProfile(page);
+        await sleep(700);
+      }
     }
   } catch {}
 
@@ -7093,31 +7108,58 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
   try {
     // dá um respiro pra UI renderizar botões/handlers após preencher inputs
     await sleep(600);
-    const clicked = await page.evaluate(() => {
-      const btn =
+    const clickLoginCta = () => page.evaluate(() => {
+      function norm(s) {
+        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        catch { return String(s || '').toLowerCase(); }
+      }
+      const classic =
         document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
         document.querySelector('form#login_form button[type="submit"]') ||
-        document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]');
-      if (!btn) return false;
-      btn.click();
-      return true;
-    });
+        document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]') ||
+        document.querySelector('form#aymh_password_entry_view input[type="submit"]');
+      if (classic) {
+        try { classic.click(); return true; } catch { return false; }
+      }
+      // AYMH pós-Continuar: CTA "Entrar" é div[role=button], não <button type=submit>
+      const candidates = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).slice(0, 1600);
+      for (const el of candidates) {
+        const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+        const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const tabIndex = el.getAttribute && el.getAttribute('tabindex') === '-1';
+        const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled') === 'true';
+        if (tabIndex || ariaDisabled) continue;
+        const isEntrar =
+          aria === 'entrar' || txt === 'entrar' ||
+          aria === 'log in' || txt === 'log in' ||
+          aria === 'sign in' || txt === 'sign in' ||
+          /^entrar(\s|$)/.test(aria) || /^entrar(\s|$)/.test(txt);
+        if (!isEntrar) continue;
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+        try { el.click(); return true; } catch {}
+      }
+      return false;
+    }).catch(() => false);
+
+    const clicked = await clickLoginCta();
 
     if (!clicked) {
       // fallback 1: Enter no campo senha
       try {
-        await page.focus('input[name="pass"], input#pass').catch(()=>{});
+        await page.focus('input[name="pass"], input#pass, input[type="password"]').catch(()=>{});
         await page.keyboard.press('Enter').catch(()=>{});
         await sleep(450);
       } catch {}
 
-      // fallback 2: form.submit()
+      // fallback 2: form.submit() (inclui AYMH password entry)
       try {
         const submitted = await page.evaluate(() => {
           const form =
             document.querySelector('form#login_form') ||
             document.querySelector('form[data-testid="royal_login_form"]') ||
-            document.querySelector('form[action*="/login/password/"]');
+            document.querySelector('form#aymh_password_entry_view') ||
+            document.querySelector('form[action*="/login/password/"]') ||
+            document.querySelector('form[action*="/login/"]');
           if (!form) return false;
           try { form.submit(); return true; } catch { return false; }
         });
@@ -7128,23 +7170,12 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
       if (allowGpt && nome) {
         try { await gptRemediateFbUi(page, nome, { reason: 'login_submit_fallback', stage: 'login_submit' }); } catch {}
         await sleep(900);
-        const clicked2 = await page.evaluate(() => {
-          // inclui botões que não são submit mas funcionam como CTA
-          const norm = (s) => (s || '').toLowerCase();
-          const btn =
-            document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
-            document.querySelector('form#login_form button[type="submit"]') ||
-            document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]') ||
-            Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).find(el => {
-              const t = norm(el.innerText || el.textContent || '');
-              return t === 'entrar' || t === 'continuar' || t.includes('continuar') || t.includes('entrar') || t.includes('log in') || t.includes('sign in');
-            });
-          if (!btn) return false;
-          try { btn.click(); return true; } catch { return false; }
-        }).catch(()=>false);
+        const clicked2 = await clickLoginCta();
         if (!clicked2) return { ok: false, error: 'login_submit_failed' };
       } else {
-        return { ok: false, error: 'login_submit_failed' };
+        // Sem GPT: ainda tenta CTA Entrar uma 2ª vez (AYMH password-only)
+        const clicked2 = await clickLoginCta();
+        if (!clicked2) return { ok: false, error: 'login_submit_failed' };
       }
     }
   } catch (e) {
