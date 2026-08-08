@@ -11056,7 +11056,6 @@ const handlers = {
         try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
         return { ok: false, error: 'Cookies não encontrados no manifest!' };
       }
-      ctrl.configurando = true;
 
       const op = String(operator || '').trim();
       const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
@@ -11082,6 +11081,33 @@ const handlers = {
           mustHaveProvisionLock: !!mustHaveProvisionLock
         });
       } catch {}
+      // Anti-retry: se já está em humano/captcha (ex.: timeout API re-disparou configure),
+      // NÃO reinjetar cookies nem marcar configure_success.
+      try {
+        const d0 = readJsonFile(desiredPath, { perfis: {} });
+        const hold0 = !!(d0 && d0.perfis && d0.perfis[nome] && d0.perfis[nome].humanHold === true);
+        const flags0 = await readAccountFlags(nome).catch(() => null);
+        const cap0 = !!(flags0 && flags0.captchaCheckpoint === true);
+        if (hold0 || cap0 || (ctrl && ctrl.humanControl === true)) {
+          const why = cap0
+            ? String(flags0.captchaCheckpointReason || 'captcha_checkpoint')
+            : (hold0 ? 'human_hold' : 'human_control');
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_abort_already_human',
+              nome: String(nome || ''),
+              operator: op || null,
+              reason: why,
+              hold: !!hold0,
+              captcha: !!cap0,
+              humanControl: !!(ctrl && ctrl.humanControl === true)
+            });
+          } catch {}
+          return { ok: false, error: `configure_blocked_${String(why || 'human').slice(0, 60)}` };
+        }
+      } catch {}
+      ctrl.configurando = true;
       const pausedGlobal = [];
       const closedForRam = [];
       let enteredHuman = false;
@@ -11119,6 +11145,42 @@ const handlers = {
         if (s.includes('appeal')) return 2;
         if (s.includes('login_form')) return 1;
         return 0;
+      };
+      // Captcha/checkpoint/2FA/disabled = humano imediato. NÃO gastar 3x login+GPT.
+      const isHumanGateReason = (r) => {
+        const s = String(r || '').toLowerCase();
+        if (!s) return false;
+        if (s.includes('captcha')) return true;
+        if (s.includes('checkpoint')) return true;
+        if (s.includes('two_factor') || s.includes('2fa') || s.includes('two_step')) return true;
+        if (s.includes('disabled') || s.includes('suspended')) return true;
+        return false;
+      };
+      const scanHardBlock = async () => {
+        let hit = null;
+        let hitPage = null;
+        try {
+          const pages = await ctrl.browser.pages().catch(() => []);
+          for (const pg of (pages || []).slice(0, 8)) {
+            let u = '';
+            try { u = (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { u = ''; }
+            if (/\/checkpoint\//i.test(u) || /captcha/i.test(u)) {
+              const urlHit = { loginRequired: true, reason: 'url_checkpoint', domain: 'facebook', url: u, title: '' };
+              if (!hit || reasonPriority(urlHit.reason) >= reasonPriority(hit.reason)) {
+                hit = urlHit;
+                hitPage = pg;
+              }
+            }
+            const det = await browserHelper.detectLoginRequired(pg).catch(() => null);
+            if (det && det.loginRequired) {
+              if (!hit || reasonPriority(det.reason) > reasonPriority(hit.reason)) {
+                hit = det;
+                hitPage = pg;
+              }
+            }
+          }
+        } catch {}
+        return { best: hit, bestPage: hitPage };
       };
 
       try {
@@ -11197,19 +11259,13 @@ const handlers = {
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_done', nome: String(nome||''), operator: op || null }); } catch {}
 
         // Pós-injeção: validar estado real (login_required / appeal_submitted / etc)
+        // Inclui hard URL /checkpoint/ mesmo se detectLoginRequired falhar (overlay humano).
         let best = null;
         let bestPage = null;
         try {
-          const pages = await ctrl.browser.pages().catch(()=>[]);
-          for (const pg of (pages || []).slice(0, 8)) {
-            const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
-              if (det && det.loginRequired) {
-                if (!best || reasonPriority(det.reason) > reasonPriority(best.reason)) {
-                best = det;
-                bestPage = pg;
-              }
-            }
-          }
+          const scanned = await scanHardBlock();
+          best = scanned.best;
+          bestPage = scanned.bestPage;
         } catch {}
         try {
           provisionAudit.append({
@@ -11242,6 +11298,30 @@ const handlers = {
             try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_appeal_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
             return { ok: false, error: 'appeal_submitted' };
           }
+          // CAPTCHA / CHECKPOINT / 2FA / DISABLED: humano imediato, zero login retries.
+          // Evidência MAE1 (porto_alegre-1786212097772): 3 attempts × ~67s = ~3.5min mortos em captcha_persona.
+          if (isHumanGateReason(rr)) {
+            enteredHuman = true;
+            try {
+              await setCaptchaCheckpointFlag(nome, {
+                reason: rr || 'captcha_checkpoint',
+                source: 'configure',
+                url: best.url || '',
+                title: best.title || ''
+              });
+            } catch {}
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_abort_human_gate',
+                nome: String(nome || ''),
+                operator: op || null,
+                reason: rr,
+                url: String(best.url || '').slice(0, 220)
+              });
+            } catch {}
+            return { ok: false, error: `configure_blocked_${String(rr || 'captcha').slice(0, 60)}` };
+          }
           const isAymh = (rr.includes('aymh_continue') || rr === 'aymh');
           // RUNTIME (conta já trabalhando): AYMH = humano na hora, zero auto-login.
           // CADASTRO (stock_provision): AYMH/login é padrão natural → tenta Continuar+senha antes.
@@ -11255,6 +11335,7 @@ const handlers = {
 
           // Fallback: Continuar (se AYMH) + login/senha.
           // CADASTRO: até 3 tentativas. RUNTIME login_form: 1 tentativa (comportamento antigo).
+          // Nunca entra aqui para captcha/checkpoint (já abortou no human gate).
           let login2 = null, password2 = null;
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
@@ -11311,6 +11392,12 @@ const handlers = {
                 break;
               }
             } catch {}
+
+            // Se virou captcha/checkpoint no meio do fallback → para na hora (humano).
+            if (isHumanGateReason(curReason)) {
+              after = after && after.loginRequired ? after : { loginRequired: true, reason: curReason || 'captcha' };
+              break;
+            }
 
             try {
               provisionAudit.append({
@@ -11374,6 +11461,30 @@ const handlers = {
             });
           } catch {}
           if (after && after.loginRequired) {
+            const afterReason = String(after.reason || 'login').toLowerCase();
+            // Captcha/checkpoint pós-fallback: humano + flag correta (sem GPT spam).
+            if (isHumanGateReason(afterReason)) {
+              enteredHuman = true;
+              try {
+                await setCaptchaCheckpointFlag(nome, {
+                  reason: afterReason,
+                  source: 'configure_login_fallback',
+                  url: after.url || '',
+                  title: after.title || ''
+                });
+              } catch {}
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'configure_abort_human_gate_after_fallback',
+                  nome: String(nome || ''),
+                  operator: op || null,
+                  reason: afterReason,
+                  url: String(after.url || '').slice(0, 220)
+                });
+              } catch {}
+              return { ok: false, error: `configure_blocked_${afterReason.slice(0, 60)}` };
+            }
             // Enterprise: evidência no CT quando ainda loginRequired após tentativas.
             try {
               robeMeta[nome] = robeMeta[nome] || {};
@@ -11538,6 +11649,61 @@ const handlers = {
           }
         }
 
+        // Gate final anti falso-positivo (evidência MAE1):
+        // 2º configure após timeout/humano podia marcar configure_success com URL ainda em /checkpoint/.
+        try {
+          let holdDesired = false;
+          try {
+            const dHold = readJsonFile(desiredPath, { perfis: {} });
+            holdDesired = !!(dHold && dHold.perfis && dHold.perfis[nome] && dHold.perfis[nome].humanHold === true);
+          } catch {}
+          let flagsCap = null;
+          try { flagsCap = await readAccountFlags(nome).catch(() => null); } catch {}
+          const alreadyCap = !!(flagsCap && flagsCap.captchaCheckpoint === true);
+          const scannedEnd = await scanHardBlock();
+          const endBest = scannedEnd && scannedEnd.best;
+          if (enteredHuman || holdDesired || alreadyCap || (endBest && endBest.loginRequired && isHumanGateReason(endBest.reason))) {
+            const why = alreadyCap
+              ? String(flagsCap.captchaCheckpointReason || 'captcha_checkpoint')
+              : (endBest && endBest.reason) ? String(endBest.reason) : (holdDesired ? 'human_hold' : 'configure_aborted_human');
+            enteredHuman = true;
+            try {
+              await setCaptchaCheckpointFlag(nome, {
+                reason: why,
+                source: 'configure_final_gate',
+                url: (endBest && endBest.url) || (flagsCap && flagsCap.captchaCheckpointUrl) || '',
+                title: (endBest && endBest.title) || ''
+              });
+            } catch {}
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_abort_final_gate',
+                nome: String(nome || ''),
+                operator: op || null,
+                reason: why,
+                holdDesired: !!holdDesired,
+                alreadyCap: !!alreadyCap,
+                url: endBest ? String(endBest.url || '').slice(0, 220) : null
+              });
+            } catch {}
+            return { ok: false, error: `configure_blocked_${String(why || 'human').slice(0, 60)}` };
+          }
+          if (endBest && endBest.loginRequired) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_abort_final_gate_login',
+                nome: String(nome || ''),
+                operator: op || null,
+                reason: String(endBest.reason || 'login'),
+                url: String(endBest.url || '').slice(0, 220)
+              });
+            } catch {}
+            return { ok: false, error: `still_login_required:${String(endBest.reason || 'login')}` };
+          }
+        } catch {}
+
         // Sucesso: limpa flags e segue.
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
@@ -11556,7 +11722,22 @@ const handlers = {
         // - configure (falha) => entra em modo humano (para inspeção/resolução)
         // - configure (sucesso) => NÃO força modo humano; restaura estado desejado e retoma automação
         // - stock_provision ainda controla "start_work" no pipeline (dashboard.js)
-        ctrl.humanControl = enteredHuman ? true : false;
+        // Blindagem: NUNCA apagar humanControl se desired.humanHold / captcha já ativos
+        // (2º configure falso-sucesso limpava hold e deixava conta estranha).
+        try {
+          let holdDesired = false;
+          try {
+            const dHold = readJsonFile(desiredPath, { perfis: {} });
+            holdDesired = !!(dHold && dHold.perfis && dHold.perfis[nome] && dHold.perfis[nome].humanHold === true);
+          } catch {}
+          if (enteredHuman || holdDesired || ctrl.humanControl === true) {
+            ctrl.humanControl = true;
+          } else {
+            ctrl.humanControl = false;
+          }
+        } catch {
+          ctrl.humanControl = enteredHuman ? true : false;
+        }
         stopPruneLoop(nome);
         // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescência.
         try {

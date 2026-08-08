@@ -2335,8 +2335,27 @@ async function execStockProvision(cmd) {
     const msg = (e && e.message) ? String(e.message) : String(e || '');
     return msg.trim().slice(0, 500);
   };
+  const isFatalConfigureErr = (msg) => {
+    const m = String(msg || '').toLowerCase();
+    return (
+      m.includes('captcha') ||
+      m.includes('checkpoint') ||
+      m.includes('identity') ||
+      m.includes('appeal') ||
+      m.includes('still_login_required') ||
+      m.includes('missing_credentials') ||
+      m.includes('aymh_continue') ||
+      m.includes('configure_aborted_human') ||
+      m.includes('configure_blocked_') ||
+      m.includes('human_hold') ||
+      m.includes('disabled_checkpoint') ||
+      m.includes('suspended')
+    );
+  };
   const isTransient = (msg) => {
     const m = String(msg || '').toLowerCase();
+    // Erros humanos/FB (captcha/checkpoint/login) NÃO são transitórios — retry só piora.
+    if (isFatalConfigureErr(m)) return false;
     return (
       m.includes('timeout') ||
       m.includes('already_opening') ||
@@ -2582,8 +2601,16 @@ async function execStockProvision(cmd) {
         retries: []
       };
 
-      const runStep = async (step, fn) => {
-        const maxAttempts = 20;
+      const runStep = async (step, fn, opts = {}) => {
+        // configure/login: no máximo 1 tentativa — timeout/retry em cima de captcha
+        // gera 2º configure e falso sucesso (forense MAE1 porto_alegre-1786212097772).
+        const stepKey = String(step || '').toLowerCase();
+        const noRetryStep = (
+          stepKey === 'configure' ||
+          stepKey === 'login_remediate_password_first' ||
+          stepKey === 'start_work'
+        );
+        const maxAttempts = noRetryStep ? 1 : Math.max(1, Number(opts.maxAttempts || 20) || 20);
         let attempt = 0;
         while (true) {
           attempt++;
@@ -2747,7 +2774,7 @@ async function execStockProvision(cmd) {
           });
         } else {
           await runStep('configure', async () => {
-            const longTimeoutMs = Math.max(60_000, Math.min(8 * 60 * 1000, budgetLeftMs() + 30_000));
+            const longTimeoutMs = Math.max(60_000, Math.min(10 * 60 * 1000, budgetLeftMs() + 30_000));
             const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {
               method: 'POST',
               headers: { 'x-operator': lockOwner },
@@ -2755,7 +2782,17 @@ async function execStockProvision(cmd) {
               retries: 0,
               body: {}
             });
-            if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
+            // Worker pode devolver { ok:true, result:{ ok:false } } ou { ok:false, error }.
+            // Tratar nested ok evita falso positivo e retry em cima de captcha/humano.
+            const rr = (r5 && r5.result && typeof r5.result === 'object') ? r5.result : r5;
+            if (!r5 || r5.ok === false || !rr || rr.ok === false) {
+              const err = String(
+                (rr && rr.error) ||
+                (r5 && r5.error) ||
+                'configure_failed'
+              );
+              throw new Error(err);
+            }
             return r5;
           });
         }

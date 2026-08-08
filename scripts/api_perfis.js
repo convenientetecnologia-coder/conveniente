@@ -823,7 +823,6 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok:false, error:e.message }); 
     }
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
-    // Timeout aumentado para 180000ms (3min) para comando configure
     try {
       // Enterprise hardening (sem achismo):
       // Quando o configure é manual (UI/admin), isole o servidor para evitar:
@@ -848,8 +847,14 @@ module.exports = (app, workerClient, fileStore) => {
           return res.json({ ok: false, error: `configure_lock_error ${(e && e.message) || String(e)}` });
         }
       }
+      // Cadastro (stock): timeout alinhado ao client do dashboard (até ~8–10min).
+      // Timeout curto (3min) fazia o API retornar "Timeout..." enquanto o worker
+      // ainda rodava → stock_provision retryava configure em cima do humano/captcha.
+      const configureTimeoutMs = isStockProvision
+        ? Math.max(180000, Number(process.env.STOCK_CONFIGURE_WORKER_TIMEOUT_MS || (10 * 60 * 1000)) || (10 * 60 * 1000))
+        : Math.max(180000, Number(process.env.CONFIGURE_WORKER_TIMEOUT_MS || 180000) || 180000);
       // Passa operador para o worker decidir se deixa em modo humano (admin) ou segue fluxo automático (stock_provision)
-      const resp = await workerClient.sendWorkerCommand('configure', { nome, operator: (isStockProvision ? opTrim : lockOwner) }, { timeoutMs: 180000 });
+      const resp = await workerClient.sendWorkerCommand('configure', { nome, operator: (isStockProvision ? opTrim : lockOwner) }, { timeoutMs: configureTimeoutMs });
       logger.info('Perfil configurado por API', { nome });
       return res.json(resp);
     } catch (e) {

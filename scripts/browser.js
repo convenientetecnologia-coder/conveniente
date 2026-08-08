@@ -3462,15 +3462,32 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // Delta: evitar “double-goto” (home -> messages). Entrar direto no /messages.
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
+  // Fail-fast ANTES do GPT unblock: se já é captcha/checkpoint/login, não gasta rounds.
+  // (antes: ensureFbUiUnblocked ×3 em captcha + abas 1/2 = minutos mortos).
+  try {
+    const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+    const url0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : '';
+    const rr0 = String((lr0 && lr0.reason) || '').toLowerCase();
+    if (dbg) logger.debug('[CONFIG] fb0 lr', { nome, lr: lr0 || null, url: url0 });
+    const hardBlock =
+      (lr0 && lr0.loginRequired === true) ||
+      /\/checkpoint\//i.test(url0) ||
+      /captcha/i.test(url0);
+    if (hardBlock) {
+      if (dbg) logger.debug('[CONFIG] fb0 hard_block early_return', { nome, reason: rr0 || 'url_checkpoint', url: url0.slice(0, 220) });
+      return;
+    }
+  } catch {}
   try {
     const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 3 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] fb0 ui', { nome, ui: ui0 || null });
   } catch {}
-  // Se já caiu em login_form, não faz sentido abrir as outras abas (o worker seguirá para login+senha).
+  // Re-checa após UI unblock (consent/cookie banner pode ter mascarado).
   try {
-    const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-    if (dbg) logger.debug('[CONFIG] fb0 lr', { nome, lr: lr0 || null, url: (p0.url ? String(p0.url()||'') : '') });
-    if (lr0 && lr0.loginRequired && String(lr0.reason || '').toLowerCase().includes('login_form')) {
+    const lr0b = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+    const url0b = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : '';
+    if ((lr0b && lr0b.loginRequired === true) || /\/checkpoint\//i.test(url0b) || /captcha/i.test(url0b)) {
+      if (dbg) logger.debug('[CONFIG] fb0 hard_block after_ui', { nome, reason: String((lr0b && lr0b.reason) || 'url_checkpoint'), url: url0b.slice(0, 220) });
       return;
     }
   } catch {}
