@@ -2253,18 +2253,28 @@ async function detectMessengerPinModal(page) {
           if (!isVisible(el)) return false;
           const t = norm(el.innerText || el.textContent || '');
           const al = norm(el.getAttribute('aria-label') || '');
-          return t.includes('criar pin') || al.includes('criar pin');
+          return t.includes('criar pin') || al.includes('criar pin') || al === 'criar pin';
         });
-      const feedCreateCtaOnly = !!(!hasOfficialPinInput && hasCreateBtn && hasCreatePinPhrase(bodyTxt));
+      // Intro modal real (forense MAE1 sorocaba-1786213049929):
+      // "Crie um PIN para acessar suas conversas..." + botão Criar PIN, SEM input ainda.
+      // Antes: p:false sempre (exigia input) → nurse/configure nunca clicava.
+      const introCreatePhrase =
+        bodyTxt.includes('crie um pin para acessar suas conversas') ||
+        bodyTxt.includes('create a pin to access your conversations') ||
+        (dlgTxt.includes('crie um pin') && (dlgTxt.includes('qualquer dispositivo') || dlgTxt.includes('criptografia'))) ||
+        (hasCreatePinPhrase(dlgTxt) && dlgTxt.includes('qualquer dispositivo'));
+      const isCreatePinCta = !!(!hasOfficialPinInput && !hasSplitPinInputs && hasCreateBtn && introCreatePhrase);
+      const feedCreateCtaOnly = !!(!hasOfficialPinInput && hasCreateBtn && hasCreatePinPhrase(bodyTxt) && !introCreatePhrase);
 
       const isCreatePin = !!(createText && hasCreateTypingSurface);
       const isPinInput = !!(pinText && hasPinInput && !isCreatePin);
       const isContinue = !!(contText && hasNaoRestaurarBtn);
-      const present = isCreatePin || isPinInput || isContinue;
+      const present = isCreatePinCta || isCreatePin || isPinInput || isContinue;
 
       return {
         present: !!present,
-        kind: isCreatePin ? 'create_pin'
+        kind: isCreatePinCta ? 'create_pin_cta'
+          : isCreatePin ? 'create_pin'
           : isPinInput ? 'pin_input'
           : isContinue ? 'continue_without_restore'
           : null,
@@ -2278,6 +2288,7 @@ async function detectMessengerPinModal(page) {
         pinText: !!pinText,
         pinIncorrect: !!pinIncorrect,
         feedCreateCtaOnly: !!feedCreateCtaOnly,
+        isCreatePinCta: !!isCreatePinCta,
         hasDialog: !!dlgEl
       };
     });
@@ -2341,24 +2352,78 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        // Nunca clicar CTA "Criar PIN" do feed — só botão dentro do dialog.
-        const dlg = document.querySelector('div[role="dialog"]');
-        if (!dlg) return false;
-        const buttons = Array.from(dlg.querySelectorAll('button,[role="button"]')).slice(0, 220);
-        for (const b of buttons) {
-          const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
-          if (disabled) continue;
-          const t = norm(b.innerText || b.textContent || '');
-          const al = norm(b.getAttribute('aria-label') || '');
-          if (t.includes('criar pin') || al.includes('criar pin')) {
-            b.click();
+        const isVisible = (el) => {
+          try {
+            if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+            const r = el.getBoundingClientRect();
+            const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (!r || r.width < 2 || r.height < 2) return false;
+            if (st && (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0')) return false;
             return true;
+          } catch { return false; }
+        };
+        const isEnabled = (el) => {
+          if (!el || !isVisible(el)) return false;
+          if (el.getAttribute('aria-disabled') === 'true') return false;
+          if (el.getAttribute('aria-hidden') === 'true') return false;
+          if (el.getAttribute('disabled') != null) return false;
+          if (String(el.getAttribute('tabindex') || '') === '-1') return false;
+          return true;
+        };
+        const matchCreate = (el) => {
+          const t = norm(el.innerText || el.textContent || '');
+          const al = norm(el.getAttribute('aria-label') || '');
+          return al === 'criar pin' || t === 'criar pin' || t.includes('criar pin') || al.includes('criar pin');
+        };
+        // 1) dialog/aria-modal (preferido)
+        const roots = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
+        // 2) fallback: superfície do intro (título "Crie um PIN para acessar...") — sem role=dialog em alguns builds
+        if (!roots.length) {
+          const hs = Array.from(document.querySelectorAll('h2,span')).filter((el) => {
+            const t = norm(el.innerText || el.textContent || '');
+            return t.includes('crie um pin para acessar') || t.includes('create a pin to access');
+          });
+          for (const h of hs.slice(0, 6)) {
+            let n = h;
+            for (let i = 0; i < 10 && n; i++) {
+              if (n.querySelector && n.querySelector('[aria-label="Criar PIN"], [role="button"]')) {
+                roots.push(n);
+                break;
+              }
+              n = n.parentElement;
+            }
           }
         }
-        return false;
+        const scopes = roots.length ? roots : [document];
+        for (const scope of scopes) {
+          const buttons = Array.from(scope.querySelectorAll('button,[role="button"],div[aria-label]')).slice(0, 260);
+          // Preferir aria-label exato "Criar PIN"
+          for (const b of buttons) {
+            if (!isEnabled(b)) continue;
+            const al = norm(b.getAttribute('aria-label') || '');
+            if (al === 'criar pin') { try { b.click(); return { ok: true, via: 'aria_label' }; } catch {} }
+          }
+          for (const b of buttons) {
+            if (!isEnabled(b)) continue;
+            if (matchCreate(b)) { try { b.click(); return { ok: true, via: 'text' }; } catch {} }
+          }
+        }
+        return { ok: false };
       });
-      return clicked;
+      return !!(clicked && clicked.ok);
     } catch { return false; }
+  }
+
+  async function waitForOfficialPinInput({ timeoutMs = 10_000 } = {}) {
+    const t0 = Date.now();
+    while ((Date.now() - t0) < timeoutMs) {
+      const det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      if (det && (det.hasOfficialPinInput || det.hasSplitPinInputs || det.kind === 'create_pin' || det.kind === 'pin_input')) {
+        return { ok: true, det };
+      }
+      await sleep(350);
+    }
+    return { ok: false, det: await detectMessengerPinModal(page).catch(() => ({ present: false })) };
   }
 
   async function clickMoreOptionsThenSkip() {
@@ -2894,11 +2959,48 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         hasCreateTypingSurface: !!det.hasCreateTypingSurface,
         hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn,
         hasCreateBtn: !!det.hasCreateBtn,
-        feedCreateCtaOnly: !!det.feedCreateCtaOnly
+        feedCreateCtaOnly: !!det.feedCreateCtaOnly,
+        isCreatePinCta: !!det.isCreatePinCta
       });
     } catch {}
 
-    // CREATE_PIN: não clicar; digitar só se a superfície/foco do PIN estiver seguro
+    // CREATE_PIN_CTA (intro): clicar "Criar PIN" → espera input → digita 882584×2.
+    // Evidência MAE1: modal visível com p:false porque detector exigia input.
+    if (det.kind === 'create_pin_cta' || (det.isCreatePinCta === true && !det.hasOfficialPinInput)) {
+      try {
+        pinLog({ event: 'create_pin_cta_click_begin', attempt });
+        const clicked = await clickCreatePinButton().catch(() => false);
+        pinLog({ event: 'create_pin_cta_click_result', attempt, clicked: !!clicked });
+        if (!clicked) {
+          // retry curto com sleep (DOM pode animar)
+          await sleep(900);
+          const clicked2 = await clickCreatePinButton().catch(() => false);
+          pinLog({ event: 'create_pin_cta_click_retry', attempt, clicked: !!clicked2 });
+          if (!clicked2) {
+            return { ok: false, error: 'create_pin_cta_click_failed', dismissed: false };
+          }
+        }
+        await sleep(1100);
+        const waited = await waitForOfficialPinInput({ timeoutMs: 12_000 });
+        pinLog({
+          event: 'create_pin_cta_wait_input',
+          attempt,
+          ok: !!(waited && waited.ok),
+          kindAfter: waited && waited.det ? (waited.det.kind || null) : null,
+          hasOfficial: !!(waited && waited.det && waited.det.hasOfficialPinInput)
+        });
+        if (!(waited && waited.ok)) {
+          return { ok: false, error: 'create_pin_cta_no_input_after_click', dismissed: false };
+        }
+        // Continua o loop: agora deve ser create_pin / pin_input com superfície digitável.
+        continue;
+      } catch (e) {
+        pinLog({ event: 'create_pin_cta_exception', attempt, error: (e && e.message) || String(e) });
+        return { ok: false, error: 'create_pin_cta_exception', dismissed: false };
+      }
+    }
+
+    // CREATE_PIN: digitar se a superfície/foco do PIN estiver seguro
     // (campo especial já vem selecionado — 882584, depois de novo 882584).
     if (det.kind === 'create_pin') {
       try {
@@ -3387,10 +3489,11 @@ async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', a
 // ===============
 async function configureProfile(browser, nome, cookiesOverride = null) {
   const dbg = process.env.CONFIGURE_DEBUG === '1';
-  if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
+  if (dbg) logger.debug('[CONFIG] configureProfile (2-tabs) begin', { nome });
 
-  // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
-  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
+  // Cadastro (contrato 2026-08-08): SOMENTE 2 abas — sem redundância messages×2.
+  // 0) facebook.com/messages (Virtus) — cookies + PIN + validação
+  // 1) marketplace/create/(item|vehicle) (Robe) — validação; depois worker fecha e deixa só aba 0
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
@@ -3442,16 +3545,10 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  // Blindagem Delta: em delta, a aba 2 NÃO pode navegar para messenger.com (conflito de rotas).
-  // Em vez disso, mantém o alvo em facebook.com (ambiente estável do delta).
-  const msgUrl = isDeltaMotorEnabledRuntime()
-    ? 'https://www.facebook.com/messages'
-    : 'https://www.messenger.com/marketplace';
-  const fb0Url = isDeltaMotorEnabledRuntime()
-    ? 'https://www.facebook.com/messages'
-    : 'https://www.facebook.com/';
+  // Cadastro: aba 0 sempre messages (Virtus). Delta/legado: mesma URL canônica.
+  const fb0Url = 'https://www.facebook.com/messages';
 
-  // Aba 0 — Facebook base
+  // Aba 0 — Messages (Virtus)
   try {
     await patchPage(nome, p0, coords);
   } catch (e) {
@@ -3459,11 +3556,9 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     throw e;
   }
   await injectCookies(p0, cookies);
-  // Delta: evitar “double-goto” (home -> messages). Entrar direto no /messages.
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
   // Fail-fast ANTES do GPT unblock: se já é captcha/checkpoint/login, não gasta rounds.
-  // (antes: ensureFbUiUnblocked ×3 em captcha + abas 1/2 = minutos mortos).
   try {
     const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
     const url0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : '';
@@ -3479,7 +3574,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch {}
   try {
-    const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 2 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] fb0 ui', { nome, ui: ui0 || null });
   } catch {}
   // Re-checa após UI unblock (consent/cookie banner pode ter mascarado).
@@ -3492,7 +3587,27 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     }
   } catch {}
 
-  // Aba 1 — Create (Robe)
+  // PIN na aba 0 (messages) — clicar Criar PIN se CTA intro + digitar 882584×2.
+  try {
+    await resolveNonceIfPresent(p0, { logPrefix: '[CONFIG][Messages][nonce]' });
+    await clickContinuarComo(p0, { logPrefix: '[CONFIG][Messages][continuar]' }).catch(() => false);
+    const pin1 = await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin]', maxTries: 5 });
+    if (!(pin1 && pin1.ok)) {
+      await sleep(1500);
+      const pin2 = await tryDismissMessengerPinModal(p0, { logPrefix: '[CONFIG][Messages][pin-retry]', maxTries: 3 });
+      const still = await detectMessengerPinModal(p0).catch(() => ({ present: false }));
+      if (still && still.present && !(pin2 && pin2.ok)) {
+        if (dbg) logger.debug('[CONFIG] pin still present after dismiss', { nome, kind: still.kind || null });
+        throw new Error('messenger_pin_modal');
+      }
+    }
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    if (/messenger_pin_modal/i.test(msg)) throw e;
+    if (dbg) logger.debug('[CONFIG] pin path soft-fail', { nome, error: msg });
+  }
+
+  // Aba 1 — Create (Robe) — só se aba 0 passou login/captcha/PIN
   let p1 = null;
   try {
     p1 = await browser.newPage();
@@ -3500,67 +3615,18 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     await injectCookies(p1, cookies);
     await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
-    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 2 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] create ui', { nome, createUrl, ui: ui1 || null });
-  } catch (e) {
-    if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: (e && e.message) || String(e) });
-  }
-
-  // Aba 2 — Messenger (Virtus)
-  let p2 = null;
-  try {
-    p2 = await browser.newPage();
-    await patchPage(nome, p2, coords);
-    await injectCookies(p2, cookies);
-    await p2.goto(msgUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    await sleep(900);
-    try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-    await sleep(900);
-
-    // Nonce + “Continuar como...”
-    await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
-    const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
-      if (!clicked) {
-      await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce-2]' });
-      await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
+    // Marketplace desativado no create → sinaliza worker (fecha aba 1 + humano).
+    const mkt = await detectMarketplaceDisabled(p1).catch(() => ({ disabled: false }));
+    if (mkt && mkt.disabled === true) {
+      const sn = String(mkt.snippet || '').slice(0, 180);
+      throw new Error(`marketplace_disabled:${String(mkt.reason || 'cannot_buy_or_sell')}:${sn}`);
     }
-
-    // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
-    try {
-      const pin1 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
-        if (!pin1.ok) {
-        // Uma espera extra e re-tenta 1 vez (sem cliques adicionais)
-        await sleep(2500);
-        const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-retry]', maxTries: 2 });
-        if (!pin2.ok) {
-          const still = await detectMessengerPinModal(p2);
-          if (still.present) {
-            // Fallback enterprise: permitir GPT ajudar a clicar “Criar PIN”/“Continuar sem PIN”
-            // APENAS se a solução determinística falhar.
-            try {
-              await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg_pin', allowGpt: true, maxRounds: 4 }).catch(()=>null);
-            } catch {}
-            await sleep(1200);
-            const pin3 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-gpt-retry]', maxTries: 2 }).catch(()=>({ ok:false }));
-            const still2 = await detectMessengerPinModal(p2).catch(()=>({ present:false }));
-            if (still2 && still2.present) throw new Error('messenger_pin_modal');
-            if (!pin3 || pin3.ok !== true) {
-              // Se resolveu via UI unblock, ok; se não, o erro acima já aborta.
-            }
-          }
-          }
-        }
-      } catch (e) {
-        throw e;
-      }
-
-    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: 3 }).catch(()=>null);
-    if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
   } catch (e) {
-    if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
-    // Se ficou preso em PIN no provision, não mascarar: deixe o worker registrar/flaggear corretamente.
     const msg = (e && e.message) ? String(e.message) : String(e);
-    if (/messenger_pin_modal/i.test(msg)) throw e;
+    if (/marketplace_disabled/i.test(msg) || /messenger_pin_modal/i.test(msg)) throw e;
+    if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: msg });
   }
 
   if (dbg) {
@@ -3568,7 +3634,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       const ps = await browser.pages().catch(()=>[]);
       const urls = [];
       for (const pg of (ps || []).slice(0, 5)) { try { urls.push(String(pg.url() || '')); } catch { urls.push(''); } }
-      logger.debug('[CONFIG] configureProfile (3-tabs) end', { nome, tabs: (ps || []).length, urls, robeMode, createUrl });
+      logger.debug('[CONFIG] configureProfile (2-tabs) end', { nome, tabs: (ps || []).length, urls, robeMode, createUrl });
     } catch {}
   }
 }

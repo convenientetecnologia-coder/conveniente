@@ -11540,6 +11540,87 @@ const handlers = {
               });
             }
           } catch {}
+
+          // Cadastro: configureProfile early-returna em login_form (antes de PIN/create).
+          // Após login OK, completa PIN na aba 0 + valida create na aba 1.
+          if (isStockProvision) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_stock_post_login_validate_begin',
+                nome: String(nome || ''),
+                operator: op || null
+              });
+            } catch {}
+            try {
+              const pagesPL = await ctrl.browser.pages().catch(() => []);
+              let msgPg = null;
+              for (const pg of (pagesPL || [])) {
+                const u = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+                if (/facebook\.com\/messages/i.test(u) || /messenger\.com/i.test(u)) { msgPg = pg; break; }
+              }
+              if (!msgPg) msgPg = workPage || bestPage || (pagesPL && pagesPL[0]) || null;
+              if (msgPg) {
+                const mu = (() => { try { return String(msgPg.url() || ''); } catch { return ''; } })();
+                if (!/facebook\.com\/messages/i.test(mu) && !/messenger\.com/i.test(mu)) {
+                  try { await msgPg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
+                  await sleep(900);
+                }
+                const pinR = await browserHelper.tryDismissMessengerPinModal(msgPg, { logPrefix: '[CONFIG][postLogin][pin]', maxTries: 5 }).catch(() => ({ ok: false }));
+                const stillPin = await browserHelper.detectMessengerPinModal(msgPg).catch(() => ({ present: false }));
+                if (stillPin && stillPin.present && !(pinR && pinR.ok)) {
+                  enteredHuman = true;
+                  try { await setMessengerPinFlag(nome, { reason: String(stillPin.kind || 'messenger_pin_modal'), source: 'configure_post_login' }); } catch {}
+                  try { await enterHumanMode(nome, ctrl, { reason: 'messenger_pin_modal:configure_post_login' }); } catch {}
+                  return { ok: false, error: 'messenger_pin_modal' };
+                }
+              }
+              // Valida create (aba temporária) — se MKT desativado, humano + fecha create.
+              let createPg = null;
+              let openedCreate = false;
+              try {
+                const manPL = await manifestStore.read(nome).catch(() => null);
+                const modePL = String((manPL && manPL.robeMode) || 'itens').toLowerCase();
+                const createUrlPL = modePL === 'veiculos'
+                  ? 'https://www.facebook.com/marketplace/create/vehicle'
+                  : 'https://www.facebook.com/marketplace/create/item';
+                createPg = await ctrl.browser.newPage();
+                openedCreate = true;
+                try { await createPg.goto(createUrlPL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
+                await sleep(1100);
+                const mktPL = await browserHelper.detectMarketplaceDisabled(createPg).catch(() => ({ disabled: false }));
+                if (mktPL && mktPL.disabled === true) {
+                  throw new Error(`marketplace_disabled:${String(mktPL.reason || 'cannot_buy_or_sell')}:${String(mktPL.snippet || '').slice(0, 180)}`);
+                }
+              } finally {
+                if (openedCreate && createPg) {
+                  try { await Promise.race([createPg.close({ runBeforeUnload: false }).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]); } catch {}
+                }
+              }
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'configure_stock_post_login_validate_ok',
+                  nome: String(nome || ''),
+                  operator: op || null
+                });
+              } catch {}
+            } catch (ePL) {
+              const em = (ePL && ePL.message) ? String(ePL.message) : String(ePL || '');
+              if (/marketplace_disabled/i.test(em)) {
+                throw ePL; // cai no catch externo do configure (handler dedicado)
+              }
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'configure_stock_post_login_validate_fail',
+                  nome: String(nome || ''),
+                  operator: op || null,
+                  error: em.slice(0, 220)
+                });
+              } catch {}
+            }
+          }
         }
 
         // Blindagem cadastro (stock_provision):
@@ -11710,12 +11791,62 @@ const handlers = {
         logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
         return { ok: true, closedForRam };
       } catch (e) {
-        try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
-        logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
-        try { provisionAudit.append({ ts: Date.now(), event: 'configure_exception', nome: String(nome||''), operator: op || null, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+        const errMsg = (e && e.message) ? String(e.message) : String(e || 'falha_injetar_cookies');
+        try { await issues.append(nome, 'cookie_inject_failed', errMsg); } catch {}
+        logger.error('[HANDLER] configure erro', { nome, error: errMsg }, e);
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_exception', nome: String(nome||''), operator: op || null, error: errMsg }); } catch {}
+
+        // Marketplace desativado no create (aba 1): marca flag, fecha create, humano na aba 0.
+        // NÃO chamar setMarketplaceDisabledFlag aqui (reentra lockProfileAction → deadlock).
+        if (/marketplace_disabled/i.test(errMsg)) {
+          enteredHuman = true;
+          try {
+            const sn = errMsg.replace(/^marketplace_disabled:[^:]*:/i, '').slice(0, 400);
+            const reason = (errMsg.match(/^marketplace_disabled:([^:]+)/i) || [])[1] || 'cannot_buy_or_sell';
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.accountFlags = man.accountFlags || {};
+              man.accountFlags.marketplaceDisabled = true;
+              man.accountFlags.marketplaceDisabledAt = Date.now();
+              man.accountFlags.marketplaceDisabledReason = String(reason).slice(0, 180);
+              man.accountFlags.marketplaceDisabledSource = 'configure_stock';
+              man.accountFlags.marketplaceDisabledText = String(sn || '').slice(0, 400);
+              return man;
+            });
+            try { invalidateAccountFlagsCache(nome); } catch {}
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].marketplaceDisabled = true;
+            robeMeta[nome].whyNotOpen = 'marketplace_disabled_human_hold';
+          } catch {}
+          try {
+            const pagesX = await ctrl.browser.pages().catch(() => []);
+            let keep0 = null;
+            for (const pg of (pagesX || [])) {
+              const u = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+              if (/facebook\.com\/messages/i.test(u) || /messenger\.com/i.test(u)) { keep0 = pg; break; }
+            }
+            if (!keep0 && pagesX && pagesX[0]) keep0 = pagesX[0];
+            for (const pg of (pagesX || [])) {
+              if (!pg || pg === keep0) continue;
+              try { await Promise.race([pg.close({ runBeforeUnload: false }).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]); } catch {}
+            }
+            if (keep0) try { ctrl.mainPage = keep0; } catch {}
+          } catch {}
+          try { await enterHumanMode(nome, ctrl, { reason: 'marketplace_disabled:configure_stock' }); } catch {}
+          try { provisionAudit.append({ ts: Date.now(), event: 'configure_marketplace_disabled', nome: String(nome||''), operator: op || null, error: errMsg.slice(0, 220) }); } catch {}
+          return { ok: false, error: 'marketplace_disabled' };
+        }
+
+        if (/messenger_pin_modal/i.test(errMsg)) {
+          enteredHuman = true;
+          try { await setMessengerPinFlag(nome, { reason: 'messenger_pin_modal', source: 'configure' }); } catch {}
+          try { await enterHumanMode(nome, ctrl, { reason: 'messenger_pin_modal:configure' }); } catch {}
+          return { ok: false, error: 'messenger_pin_modal' };
+        }
+
         // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
-        try { await invokeHumanForConfigure((e && e.message) || String(e)); } catch {}
-        return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
+        try { await invokeHumanForConfigure(errMsg); } catch {}
+        return { ok: false, error: errMsg || 'falha_injetar_cookies' };
       } finally {
         ctrl.configurando = false;
         // Regra enterprise:
@@ -16287,6 +16418,51 @@ async function autoLoginRemediateTick() {
 
   const desired = readJsonFile(desiredPath, { perfis: {} });
   const now = Date.now();
+
+  // Contrato 2026-08-08: runtime NÃO tenta cookies/login/senha automaticamente.
+  // Login automático só no cadastro (stock_provision → configure / password_first).
+  // Aqui: se ficou enfileirado, limpa fila + garante humano + flag (usuário resolve).
+  const runtimeHumanOnly = String(process.env.AUTO_LOGIN_REMEDIATE_RUNTIME_HUMAN_ONLY || '1').trim() !== '0';
+  if (runtimeHumanOnly) {
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!nome || !ctrl) continue;
+      const flags = await readAccountFlags(nome).catch(() => ({}));
+      const lrFlag = !!(flags && flags.loginRequired === true);
+      const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
+      const queued = !!(st && st.queued);
+      if (!lrFlag && !queued) continue;
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
+        robeMeta[nome].autoLoginRemediate.queued = false;
+      } catch {}
+      if (ctrl.humanControl === true) continue;
+      const want = desired && desired.perfis ? desired.perfis[nome] : null;
+      if (want && want.humanHold === true) continue;
+      if (!lrFlag) {
+        try {
+          await setLoginRequiredFlag(nome, {
+            reason: String((flags && flags.loginReason) || 'login_required'),
+            source: 'auto_lr_runtime_human_only'
+          });
+        } catch {}
+      }
+      try {
+        if (ctrl.browser && ctrl.browser.isConnected?.()) {
+          await enterHumanMode(nome, ctrl, { reason: 'login_required:runtime_human_only' });
+        }
+      } catch {}
+      try {
+        provisionAudit.append({
+          ts: now,
+          event: 'auto_lr_runtime_human_only',
+          nome: String(nome || ''),
+          reason: String((flags && flags.loginReason) || 'login_required').slice(0, 80)
+        });
+      } catch {}
+    }
+    return;
+  }
 
   let best = null;
   for (const [nome, ctrl] of controllers.entries()) {

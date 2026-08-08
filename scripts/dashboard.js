@@ -2349,7 +2349,9 @@ async function execStockProvision(cmd) {
       m.includes('configure_blocked_') ||
       m.includes('human_hold') ||
       m.includes('disabled_checkpoint') ||
-      m.includes('suspended')
+      m.includes('suspended') ||
+      m.includes('marketplace_disabled') ||
+      m.includes('messenger_pin')
     );
   };
   const isTransient = (msg) => {
