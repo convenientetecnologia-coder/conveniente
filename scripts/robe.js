@@ -15,6 +15,12 @@ const serverConfig = require('./serverConfig.js');
 const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const robePostPublishRenew = require('./robePostPublishRenew.js');
+const {
+  safeClosePage,
+  sweepAboutBlankPages,
+  clearBlankSuppress,
+  armBlankSuppress
+} = require('./robeTabHygiene.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -2557,86 +2563,6 @@ async function preencherLocalizacao(page, cidade) {
   throw new Error('Localização não ficou válida após múltiplas tentativas.');
 }
 
-// Fechamento seguro da aba (anti-trava + anti-fantasma about:blank)
-async function safeClosePage(page) {
-  if (!page) return;
-  try {
-    if (typeof page.isClosed === 'function' && page.isClosed()) return;
-  } catch {}
-  // 1) Neutraliza beforeunload SEM navegar para about:blank.
-  //    goto(about:blank) antes do close deixava fantasma quando CDP travava no close.
-  try {
-    await Promise.race([
-      page.evaluate(() => {
-        try { window.onbeforeunload = null; } catch {}
-        try {
-          window.addEventListener('beforeunload', (e) => {
-            try { e.stopImmediatePropagation(); } catch {}
-          }, true);
-        } catch {}
-      }).catch(() => {}),
-      new Promise((r) => setTimeout(r, 800))
-    ]);
-  } catch {}
-  // 2) stopLoading best-effort com teto (CDP morto não pode segurar o Robe)
-  try {
-    const client = await Promise.race([
-      page.target().createCDPSession(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('cdp_timeout')), 1500))
-    ]);
-    await Promise.race([
-      client.send('Page.stopLoading').catch(() => {}),
-      new Promise((r) => setTimeout(r, 800))
-    ]);
-  } catch {}
-  // 3) close direto
-  try {
-    await Promise.race([
-      page.close({ runBeforeUnload: false }).catch(() => {}),
-      new Promise((r) => setTimeout(r, 2500))
-    ]);
-  } catch {}
-}
-
-/** Fecha about:blank extras (não toca na main / keepPage). Usado após falha de open create. */
-async function sweepAboutBlankPages(browser, { keepPage = null, nome = '' } = {}) {
-  if (!browser) return 0;
-  let closed = 0;
-  try {
-    const pages = await Promise.race([
-      browser.pages().catch(() => []),
-      new Promise((resolve) => setTimeout(() => resolve([]), 3000))
-    ]);
-    for (const p of (pages || [])) {
-      try {
-        if (keepPage && p === keepPage) continue;
-        try {
-          if (typeof p.isClosed === 'function' && p.isClosed()) continue;
-        } catch {}
-        let u = '';
-        try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
-        if (u && u !== 'about:blank') continue;
-        await Promise.race([
-          p.close({ runBeforeUnload: false }).catch(() => {}),
-          new Promise((r) => setTimeout(r, 2000))
-        ]);
-        closed++;
-      } catch {}
-    }
-    if (closed > 0) {
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'dbg_robe_sweep_about_blank',
-          nome: String(nome || ''),
-          closed: Number(closed || 0)
-        });
-      } catch {}
-    }
-  } catch {}
-  return closed;
-}
-
 async function findFileInputInFrame(frame) {
   if (!frame) return null;
   let handle = null;
@@ -3045,8 +2971,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #endregion
       p = await browser.newPage();
       // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
-      const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-      guard[nome] = Date.now() + 20000;
+      armBlankSuppress(browser, nome, 20_000);
 
       await ensureXPathPolyfill(p);
       await patchPage(nome, p, coords);
@@ -3144,6 +3069,8 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       } catch (e) {
         if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
       }
+      // Create já em URL real: libera suppress para o killer limpar órfãs sem esperar fim do Robe.
+      clearBlankSuppress(browser, nome);
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_success', nome: String(nome || ''), attempt: Number(attempt || 0), url: (typeof p.url === 'function') ? String(p.url() || '') : '' }); } catch {}
       // #endregion
@@ -3151,7 +3078,9 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     } catch (e) {
       // MKT: aba create já fechada acima (ou fecha aqui se sobrou). Login: mantém aba p/ remediação.
       if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
-        try { await safeClosePage(p); } catch {}
+        try { await safeClosePage(p, { nome, reason: 'open_create_mkt_disabled' }); } catch {}
+        clearBlankSuppress(browser, nome);
+        try { await sweepAboutBlankPages(browser, { nome }); } catch {}
         throw e;
       }
       if (e && e.ROBE_LOGIN_REQUIRED === true) {
@@ -3162,11 +3091,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
       // #endregion
-      try { await safeClosePage(p); } catch {}
+      try { await safeClosePage(p, { nome, reason: 'open_create_retry_close' }); } catch {}
       // Em falha desta tentativa, libera suppress cedo para o killer poder limpar residual.
-      try {
-        if (browser && browser._suppressBlankKillUntil) delete browser._suppressBlankKillUntil[nome];
-      } catch {}
+      clearBlankSuppress(browser, nome);
+      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out|Network\.enable|Protocol error/i.test(msg)) {
         try {
           const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
@@ -3185,37 +3113,25 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
         } catch {}
         if (attempt < 3) {
           // Reativa suppress só para a próxima tentativa (goto create)
-          try {
-            const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-            guard[nome] = Date.now() + 20000;
-          } catch {}
+          armBlankSuppress(browser, nome, 20_000);
           await new Promise(r => setTimeout(r, 600 * attempt));
           continue;
         }
       }
       if (e && e.ROBE_PROBE_FAILED === true) {
-        try {
-          const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-          guard[nome] = Date.now() + 20000;
-        } catch {}
+        armBlankSuppress(browser, nome, 20_000);
         await new Promise(r => setTimeout(r, 350));
         continue; // retry da ação sem classificar como login_required
       }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
-        try {
-          const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-          guard[nome] = Date.now() + 20000;
-        } catch {}
+        armBlankSuppress(browser, nome, 20_000);
         await new Promise(r => setTimeout(r, 300));
         continue; // retry
       }
-      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       throw e;
     }
   }
-  try {
-    if (browser && browser._suppressBlankKillUntil) delete browser._suppressBlankKillUntil[nome];
-  } catch {}
+  clearBlankSuppress(browser, nome);
   try { await sweepAboutBlankPages(browser, { nome }); } catch {}
   stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
   throw new Error('nav_create_timeout');
@@ -4293,7 +4209,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
     if (limitPostingHit) {
-      try { if (page) await safeClosePage(page); } catch {}
+      try { if (page) await safeClosePage(page, { nome, reason: 'limit_posting' }); } catch {}
+      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
@@ -4302,9 +4219,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       try {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
       } catch {}
+      // Preserva create, mas limpa about:blank extras.
+      try { await sweepAboutBlankPages(browser, { keepPage: page, nome }); } catch {}
       logger.info(`[ROBE][startRobe] FIM: preserve_create_page (remediação)`, { nome });
     } else if (marketplaceDisabledAbort) {
-      try { if (page) await safeClosePage(page); } catch {}
+      try { if (page) await safeClosePage(page, { nome, reason: 'marketplace_disabled' }); } catch {}
       page = null;
       try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
       try {
@@ -4333,7 +4252,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       } catch {}
 
       if (page) {
-        try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
+        try {
+          await safeClosePage(page, { nome, reason: 'robe_end' });
+          logger.info(`[ROBE] Aba fechada no finalmente`, { nome });
+        } catch {}
       }
       // Varredura final anti-fantasma (retries de create que sobraram)
       try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}

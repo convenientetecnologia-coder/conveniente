@@ -5250,9 +5250,12 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       if (!target || (typeof target.type === 'function' && target.type() !== 'page')) return;
       const page = await pageFromTarget(target);
       if (!page) return;
-      const key = keyFor(target);
-      if (!key) return;
-      try { browser._pageBirth[key] = browser._pageBirth[key] || Date.now(); } catch {}
+      // Sem _targetId: ainda rastreia (antes return null engessava blank órfã).
+      const key = keyFor(target) || `page:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+      try {
+        browser._pageBirth[key] = browser._pageBirth[key] || Date.now();
+        if (!page.__convenienteBirth) page.__convenienteBirth = browser._pageBirth[key];
+      } catch {}
 
       // CANCELADORES - NÃO BUSQUE page.url()
       try {
@@ -5266,8 +5269,11 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           if (u && u !== 'about:blank') return;
 
           const now = Date.now();
-          const birth = (browser && browser._pageBirth && browser._pageBirth[key]) || 0;
-          const age = birth ? (now - birth) : null;
+          const birth =
+            (browser && browser._pageBirth && browser._pageBirth[key]) ||
+            Number(page.__convenienteBirth || 0) ||
+            0;
+          const age = birth ? (now - birth) : 0;
           // Override por perfil (ex.: bootstrap precisa de mais tempo para navegar)
           let maxAge = ABOUTBLANK_MAX_AGE_MS;
           try {
@@ -5278,9 +5284,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const suppressed = (browser && browser._robeActiveFor === nome) || (sup > now);
 
           if (suppressed) {
-            if (age != null && age >= maxAge) {
-              // #region agent log
-              // #endregion
+            if (age >= maxAge) {
               try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
               return;
@@ -5292,8 +5296,6 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           }
 
           // Fora de Robe e sem suppress => mata imediatamente
-          // #region agent log
-          // #endregion
           try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
         } finally {

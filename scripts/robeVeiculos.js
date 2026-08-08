@@ -40,6 +40,12 @@ const gatewayProxy = require('./gatewayProxy.js');
 const serverConfig = require('./serverConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const robePostPublishRenew = require('./robePostPublishRenew.js');
+const {
+  safeClosePage,
+  sweepAboutBlankPages,
+  clearBlankSuppress,
+  armBlankSuppress
+} = require('./robeTabHygiene.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -1366,27 +1372,6 @@ async function preencherLocalizacao(page, cidade) {
   throw new Error('Localização não ficou válida após múltiplas tentativas.');
 }
 
-// Fechamento seguro da aba (anti-trava)
-async function safeClosePage(page) {
-  if (!page) return;
-  try {
-    await page.evaluate(() => {
-      try { window.onbeforeunload = null; } catch {}
-      try {
-        window.addEventListener('beforeunload', (e) => {
-          e.stopImmediatePropagation();
-        }, true);
-      } catch {}
-    }).catch(()=>{});
-  } catch {}
-  try {
-    const client = await page.target().createCDPSession();
-    await client.send('Page.stopLoading').catch(()=>{});
-  } catch {}
-  try { await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 1200 }).catch(()=>{}); } catch {}
-  try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-}
-
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
@@ -1396,8 +1381,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     try {
       p = await browser.newPage();
       // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
-      const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-      guard[nome] = Date.now() + 20000;
+      armBlankSuppress(browser, nome, 20_000);
 
       await ensureXPathPolyfill(p);
       await patchPage(nome, p, coords);
@@ -1478,11 +1462,14 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       } catch (e) {
         if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
       }
+      clearBlankSuppress(browser, nome);
       return p; // sucesso
     } catch (e) {
       // MKT: fecha aba create (economia) → throw → humano na aba 0.
       if (e && e.ROBE_MARKETPLACE_DISABLED === true) {
-        try { await safeClosePage(p); } catch {}
+        try { await safeClosePage(p, { nome, reason: 'open_create_vehicle_mkt_disabled' }); } catch {}
+        clearBlankSuppress(browser, nome);
+        try { await sweepAboutBlankPages(browser, { nome }); } catch {}
         throw e;
       }
       if (e && e.ROBE_LOGIN_REQUIRED === true) {
@@ -1490,7 +1477,9 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       }
       lastError = e;
       const msg = (e && e.message) ? e.message : String(e);
-      try { await safeClosePage(p); } catch {}
+      try { await safeClosePage(p, { nome, reason: 'open_create_vehicle_retry_close' }); } catch {}
+      clearBlankSuppress(browser, nome);
+      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
         try {
           const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
@@ -1508,21 +1497,26 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
           }
         } catch {}
         if (attempt < 3) {
+          armBlankSuppress(browser, nome, 20_000);
           await new Promise(r => setTimeout(r, 600 * attempt));
           continue;
         }
       }
       if (e && e.ROBE_PROBE_FAILED === true) {
+        armBlankSuppress(browser, nome, 20_000);
         await new Promise(r => setTimeout(r, 350));
         continue; // retry da ação sem classificar como login_required
       }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
+        armBlankSuppress(browser, nome, 20_000);
         await new Promise(r => setTimeout(r, 300));
         continue; // retry
       }
       throw e;
     }
   }
+  clearBlankSuppress(browser, nome);
+  try { await sweepAboutBlankPages(browser, { nome }); } catch {}
   stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
   throw new Error('nav_create_timeout');
 }
@@ -2691,7 +2685,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   } finally {
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
     if (limitPostingHit) {
-      try { if (page) await safeClosePage(page); } catch {}
+      try { if (page) await safeClosePage(page, { nome, reason: 'limit_posting_vehicle' }); } catch {}
+      try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
 
@@ -2699,10 +2694,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_preserve_create_page', success: false });
       } catch {}
+      try { await sweepAboutBlankPages(browser, { keepPage: page, nome }); } catch {}
       logger.info(`[ROBE][startRobe] FIM (veículos): preserve_create_page`, { nome });
     } else if (marketplaceDisabledAbort) {
-      try { if (page) await safeClosePage(page); } catch {}
+      try { if (page) await safeClosePage(page, { nome, reason: 'marketplace_disabled_vehicle' }); } catch {}
       page = null;
+      try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
       try {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end_marketplace_disabled', success: false });
       } catch {}
@@ -2729,8 +2726,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       } catch {}
 
       if (page) {
-        try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
+        try {
+          await safeClosePage(page, { nome, reason: 'robe_vehicle_end' });
+          logger.info(`[ROBE] Aba fechada no finalmente`, { nome });
+        } catch {}
       }
+      try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
 
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
       logger.info(`[ROBE][startRobe] FIM (veículos): ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });

@@ -237,6 +237,12 @@ const {
   getNewAccountPauseManualRelease,
   releaseRobeCooldownForOperator
 } = require('./robeManualRelease.js');
+const {
+  isBlankUrl,
+  pageAgeMs: hygienePageAgeMs,
+  ensurePageBirth,
+  sweepAboutBlankPages
+} = require('./robeTabHygiene.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
@@ -8926,16 +8932,13 @@ function __pickKeepPage(stablePages, mainPage) {
 }
 
 function __pageAgeMs(browser, page) {
+  // Contrato: nunca retornar null (null engessava blank sob protectedCtx).
+  // Primeira visão carimba birth=now e idade=0 (não mata goto create em andamento).
   try {
-    const t = page && typeof page.target === 'function' ? page.target() : null;
-    const tid = t && t._targetId ? String(t._targetId) : null;
-    if (!tid) return null;
-    const birth = browser && browser._pageBirth && browser._pageBirth[tid];
-    const n = Number(birth || 0) || 0;
-    if (!n) return null;
-    return Math.max(0, Date.now() - n);
+    ensurePageBirth(browser, page);
+    return hygienePageAgeMs(browser, page);
   } catch {
-    return null;
+    return 0;
   }
 }
 
@@ -8977,10 +8980,11 @@ async function closeExtraPages(browser, mainPage, nome) {
         if (keepPage && p === keepPage) continue;
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (!(!url || url === 'about:blank')) continue;
+        if (!isBlankUrl(url)) continue;
+        if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
         if (protectedCtx) {
           const age = __pageAgeMs(browser, p);
-          if (age == null || age < blankMaxAgeMs) continue;
+          if (age < blankMaxAgeMs) continue;
         }
         await Promise.race([
           p.close({ runBeforeUnload: false }).catch(() => {}),
@@ -9948,6 +9952,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+          try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
           if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
             try {
               if (deltaSequentialResumeRequired) {
@@ -9966,6 +9971,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
           return;
         }
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+        try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
 
         if (virtusWasRunning || deltaSequentialResumeRequired) {
           if (automationAllowed(ctrl)) {
@@ -14427,6 +14433,7 @@ const handlers = {
               await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+              try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
               if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
                 try {
                   if (deltaSequentialResumeRequired) {
@@ -14445,6 +14452,7 @@ const handlers = {
               return;
             }
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+            try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
 
             if (virtusWasRunning || deltaSequentialResumeRequired) {
               if (automationAllowed(ctrl)) {
@@ -27501,11 +27509,13 @@ async function periodicAboutBlankCleanup() {
 
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-            if (!url || url !== 'about:blank') continue;
+            // Alinhado ao prune: blank OU URL vazia (antes URL '' era skipada e virava fantasma).
+            if (!isBlankUrl(url)) continue;
+            if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
 
             if (protectedCtx || hasCreateItem) {
               const age = __pageAgeMs(ctrl.browser, p);
-              if (age == null || age < blankMaxAgeMs) continue;
+              if (age < blankMaxAgeMs) continue;
             }
 
             await Promise.race([
