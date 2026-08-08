@@ -2183,6 +2183,15 @@ async function detectMessengerPinModal(page) {
         t.includes('inserir seu pin') ||
         t.includes('enter your pin') ||
         (t.includes('insira') && t.includes('pin') && t.includes('restaurar'));
+      const hasRestoreSyncNoticePhrase = (t) =>
+        (
+          t.includes('apos restaurar o historico de conversas') &&
+          t.includes('sincronizacao automatica das mensagens continuara')
+        ) ||
+        (
+          t.includes('after restoring your chat history') &&
+          t.includes('automatic message syncing')
+        );
       const textNear = (el) => {
         let n = el;
         for (let i = 0; i < 12 && n; i++) {
@@ -2323,6 +2332,23 @@ async function detectMessengerPinModal(page) {
             const al = norm(el.getAttribute('aria-label') || '');
             return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
           }));
+      // Pós-PIN de restauração: aviso de sincronização com botão OK. O Facebook
+      // pode manter o input anterior no DOM; por isso o aviso exato tem prioridade.
+      const restoreSyncOkBtn =
+        Array.from(document.querySelectorAll('button,[role="button"]')).find((el) => {
+          if (!isEnabledBtn(el)) return false;
+          const t = norm(el.innerText || el.textContent || '').trim();
+          const al = norm(el.getAttribute('aria-label') || '').trim();
+          if (t !== 'ok' && al !== 'ok') return false;
+          let n = el;
+          for (let i = 0; i < 18 && n && n !== document.body && n !== document.documentElement; i++) {
+            const localText = norm(n.innerText || n.textContent || '');
+            if (hasRestoreSyncNoticePhrase(localText)) return true;
+            n = n.parentElement;
+          }
+          return false;
+        }) || null;
+      const isRestoreSyncNotice = !!restoreSyncOkBtn;
 
       // Frases: preferir texto perto do input oficial (não body inteiro do feed).
       const phraseTxt = surfaceTxt || dlgTxt || bodyTxt;
@@ -2362,11 +2388,12 @@ async function detectMessengerPinModal(page) {
       const isCreatePin = !!(createText && hasCreateTypingSurface);
       const isPinInput = !!(pinText && hasPinInput && !isCreatePin);
       const isContinue = !!(contText && hasNaoRestaurarBtn);
-      const present = isCreatePinCta || isCreatePin || isPinInput || isContinue;
+      const present = isRestoreSyncNotice || isCreatePinCta || isCreatePin || isPinInput || isContinue;
 
       return {
         present: !!present,
-        kind: isCreatePinCta ? 'create_pin_cta'
+        kind: isRestoreSyncNotice ? 'restore_sync_notice'
+          : isCreatePinCta ? 'create_pin_cta'
           : isCreatePin ? 'create_pin'
           : isPinInput ? 'pin_input'
           : isContinue ? 'continue_without_restore'
@@ -2384,6 +2411,7 @@ async function detectMessengerPinModal(page) {
         officialPinAria,
         feedCreateCtaOnly: !!feedCreateCtaOnly,
         isCreatePinCta: !!isCreatePinCta,
+        hasRestoreSyncOkBtn: !!restoreSyncOkBtn,
         hasDialog: !!dlgEl
       };
     });
@@ -2441,6 +2469,91 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }).catch(() => false);
       return !!clicked;
     } catch { return false; }
+  }
+
+  async function clickRestoreSyncOkTrusted() {
+    const marker = 'data-conveniente-restore-sync-ok';
+    try {
+      const marked = await page.evaluate((markerAttr) => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const hasNoticePhrase = (t) =>
+          (
+            t.includes('apos restaurar o historico de conversas') &&
+            t.includes('sincronizacao automatica das mensagens continuara')
+          ) ||
+          (
+            t.includes('after restoring your chat history') &&
+            t.includes('automatic message syncing')
+          );
+        const isEnabledVisible = (el) => {
+          try {
+            if (!el || !el.isConnected) return false;
+            if (el.getAttribute('aria-disabled') === 'true') return false;
+            if (el.getAttribute('aria-hidden') === 'true') return false;
+            if (el.getAttribute('disabled') != null) return false;
+            if (String(el.getAttribute('tabindex') || '') === '-1') return false;
+            const r = el.getBoundingClientRect();
+            const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (!r || r.width < 2 || r.height < 2) return false;
+            if (st && (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0')) return false;
+            return true;
+          } catch { return false; }
+        };
+        try {
+          document.querySelectorAll(`[${markerAttr}]`).forEach(el => el.removeAttribute(markerAttr));
+        } catch {}
+        const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+        for (const el of buttons) {
+          if (!isEnabledVisible(el)) continue;
+          const text = norm(el.innerText || el.textContent || '').trim();
+          const aria = norm(el.getAttribute('aria-label') || '').trim();
+          if (text !== 'ok' && aria !== 'ok') continue;
+          let n = el;
+          let anchored = false;
+          for (let i = 0; i < 18 && n && n !== document.body && n !== document.documentElement; i++) {
+            const localText = norm(n.innerText || n.textContent || '');
+            if (hasNoticePhrase(localText)) {
+              anchored = true;
+              break;
+            }
+            n = n.parentElement;
+          }
+          if (!anchored) continue;
+          el.setAttribute(markerAttr, '1');
+          return true;
+        }
+        return false;
+      }, marker).catch(() => false);
+      if (!marked) return false;
+      const handle = await page.$(`[${marker}="1"]`);
+      if (!handle) return false;
+      await handle.click({ delay: 70 });
+      await page.evaluate((markerAttr) => {
+        try {
+          document.querySelectorAll(`[${markerAttr}]`).forEach(el => el.removeAttribute(markerAttr));
+        } catch {}
+      }, marker).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function dismissRestoreSyncNotice() {
+    for (let clickAttempt = 1; clickAttempt <= 2; clickAttempt++) {
+      const before = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      if (!before || before.kind !== 'restore_sync_notice') {
+        return { ok: true, dismissed: true, clicked: clickAttempt > 1 };
+      }
+      const clicked = await clickRestoreSyncOkTrusted().catch(() => false);
+      pinLog({ event: 'restore_sync_notice_ok_click', clickAttempt, clicked: !!clicked });
+      await sleep(clicked ? 900 : 450);
+      const after = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      if (!after || after.kind !== 'restore_sync_notice') {
+        return { ok: true, dismissed: true, clicked: !!clicked };
+      }
+    }
+    return { ok: false, dismissed: false, error: 'restore_sync_notice_ok_still_present' };
   }
 
   async function clickCreatePinButton() {
@@ -3229,6 +3342,26 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     while ((Date.now() - t0) < timeoutMs) {
       const det = await detectMessengerPinModal(page).catch(()=>({ present:false }));
       lastState = await readCreatePinState().catch(()=>lastState);
+      if (det && det.kind === 'restore_sync_notice') {
+        const notice = await dismissRestoreSyncNotice();
+        pinLog({
+          event: 'create_pin_restore_sync_notice_result',
+          ok: !!notice.ok,
+          dismissed: !!notice.dismissed,
+          error: notice.error || null
+        });
+        if (!notice.ok) {
+          return {
+            ok: false,
+            dismissed: false,
+            reason: notice.error || 'restore_sync_notice_ok_failed',
+            state: lastState
+          };
+        }
+        absentSince = 0;
+        await sleep(250);
+        continue;
+      }
       if (!det || !det.present) {
         if (!absentSince) absentSince = Date.now();
         if ((Date.now() - absentSince) >= stableGoneMs) {
@@ -3557,6 +3690,40 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
+  async function waitForRestorePinOutcome({
+    timeoutMs = 8_000,
+    stableGoneMs = 3_500
+  } = {}) {
+    const t0 = Date.now();
+    let absentSince = 0;
+    let pinStillSince = 0;
+    let lastDet = { present: false };
+    while ((Date.now() - t0) < timeoutMs) {
+      const det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+      lastDet = det || lastDet;
+      if (det && det.present) {
+        absentSince = 0;
+        // Durante a validação o campo pode continuar montado por alguns
+        // segundos sem erro. Não redigitar o PIN enquanto o FB processa.
+        if (det.kind === 'pin_input' && det.pinIncorrect !== true) {
+          if (!pinStillSince) pinStillSince = Date.now();
+          if ((Date.now() - pinStillSince) < 4_500) {
+            await sleep(250);
+            continue;
+          }
+        }
+        return { det, absentStable: false };
+      }
+      pinStillSince = 0;
+      if (!absentSince) absentSince = Date.now();
+      if ((Date.now() - absentSince) >= stableGoneMs) {
+        return { det: det || { present: false }, absentStable: true };
+      }
+      await sleep(250);
+    }
+    return { det: lastDet, absentStable: !(lastDet && lastDet.present), timedOut: true };
+  }
+
   async function dismissPinInputAfterFailures() {
     // Contrato: Esc e/ou X → "Continuar sem restaurar?" → "Não restaurar mensagens" (habilitado).
     pinLog({ event: 'pin_restore_fallback_begin' });
@@ -3631,9 +3798,29 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         isPinConfirmation: !!det.isPinConfirmation,
         officialPinAria: det.officialPinAria || null,
         feedCreateCtaOnly: !!det.feedCreateCtaOnly,
-        isCreatePinCta: !!det.isCreatePinCta
+        isCreatePinCta: !!det.isCreatePinCta,
+        hasRestoreSyncOkBtn: !!det.hasRestoreSyncOkBtn
       });
     } catch {}
+
+    if (det.kind === 'restore_sync_notice') {
+      const notice = await dismissRestoreSyncNotice();
+      pinLog({
+        event: 'restore_sync_notice_result',
+        attempt,
+        ok: !!notice.ok,
+        dismissed: !!notice.dismissed,
+        error: notice.error || null
+      });
+      if (notice.ok) {
+        return { ok: true, dismissed: true, via: 'restore_sync_ok' };
+      }
+      return {
+        ok: false,
+        error: notice.error || 'restore_sync_notice_ok_failed',
+        dismissed: false
+      };
+    }
 
     // CREATE_PIN_CTA (intro): clicar "Criar PIN" → espera input → digita 882584×2.
     // Evidência MAE1: modal visível com p:false porque detector exigia input.
@@ -3812,7 +3999,37 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             kindAfter: enterResult.kindAfter || null
           });
 
-          const detAfter = await detectMessengerPinModal(page).catch(() => ({ present: false }));
+          // O PIN some antes de o aviso pós-restauração montar em alguns builds.
+          // Só aceitar ausência após uma janela estável para não deixar o OK cobrindo a tela.
+          const restoreOutcome = await waitForRestorePinOutcome();
+          const detAfter = (restoreOutcome && restoreOutcome.det) || { present: false };
+          if (detAfter.kind === 'restore_sync_notice') {
+            const notice = await dismissRestoreSyncNotice();
+            pinLog({
+              event: 'pin_restore_sync_notice_result',
+              attempt,
+              round,
+              ok: !!notice.ok,
+              dismissed: !!notice.dismissed,
+              error: notice.error || null
+            });
+            if (notice.ok) {
+              return {
+                ok: true,
+                dismissed: true,
+                pinEntered: true,
+                via: 'restore_sync_ok',
+                rounds: round
+              };
+            }
+            return {
+              ok: false,
+              error: notice.error || 'restore_sync_notice_ok_failed',
+              dismissed: false,
+              pinEntered: true,
+              rounds: round
+            };
+          }
           if (!detAfter || !detAfter.present) {
             pinLog({ event: 'pin_success_modal_dismissed', attempt, round });
             return { ok: true, dismissed: true, pinEntered: true, rounds: round };
