@@ -49,7 +49,6 @@ function redactHtml(html) {
 
 async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
   const secret = getLogIngestSecret();
-  if (!secret) return { ok: false, skipped: true, reason: "LOG_INGEST_SECRET_not_configured" };
 
   const base = notifierBaseFromEndpoints();
   if (!base) return { ok: false, skipped: true, reason: "notifier_base_unavailable" };
@@ -85,7 +84,7 @@ async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Log-Secret": secret
+        ...(secret ? { "X-Log-Secret": secret } : {})
       },
       body: JSON.stringify(body),
       signal: ac.signal
@@ -100,7 +99,6 @@ async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
 
 async function resolveFbGpt({ perfil, url, title, html, screenshotBase64, reason, source, history } = {}) {
   const secret = getLogIngestSecret();
-  if (!secret) return { ok: false, skipped: true, reason: "LOG_INGEST_SECRET_not_configured" };
 
   const base = notifierBaseFromEndpoints();
   if (!base) return { ok: false, skipped: true, reason: "notifier_base_unavailable" };
@@ -130,7 +128,7 @@ async function resolveFbGpt({ perfil, url, title, html, screenshotBase64, reason
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Log-Secret": secret
+        ...(secret ? { "X-Log-Secret": secret } : {})
       },
       body: JSON.stringify(body),
       signal: ac.signal

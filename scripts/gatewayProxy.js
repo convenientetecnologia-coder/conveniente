@@ -728,7 +728,7 @@ async function reportProxyIssue({ resolved, reason, context } = {}) {
     const cfg = readCtConfig();
     const ctBaseUrl = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || "");
     const secret = String(cfg && cfg.logIngestSecret || "").trim();
-    if (!ctBaseUrl || !secret) return { ok: false, skipped: true, reason: "missing_ct_config" };
+    if (!ctBaseUrl) return { ok: false, skipped: true, reason: "missing_ct_config" };
 
     const hostId = readHostIdSafe();
     if (!hostId) return { ok: false, skipped: true, reason: "missing_host_id" };
@@ -746,7 +746,7 @@ async function reportProxyIssue({ resolved, reason, context } = {}) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-log-secret": secret
+        ...(secret ? { "x-log-secret": secret } : {})
       },
       body: JSON.stringify(body)
     });

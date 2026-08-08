@@ -492,7 +492,7 @@ function resolveCtSecretConfig() {
     } catch {}
   }
   let secret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
-  if (!base || !secret) return { ok: false, error: 'ct_config_missing' };
+  if (!base) return { ok: false, error: 'ct_config_missing' };
   base = base.replace(/\/+$/, '');
   return { ok: true, base, secret };
 }
@@ -930,7 +930,10 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
     try {
       const resp = await fetch(`${base}/api/robe/v2/city_stats_secret`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Log-Secret': ct.secret },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(ct.secret ? { 'X-Log-Secret': ct.secret } : {})
+        },
         body: JSON.stringify({ hostId, windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))), cities }),
         signal: ac.signal
       });

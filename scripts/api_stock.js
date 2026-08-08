@@ -42,16 +42,13 @@ function getOrCreateHostId() {
 }
 
 function stockSecret() {
-  // Reusa o mesmo secret já usado para logs/ingest
-  const env = String(process.env.LOG_INGEST_SECRET || "").trim();
-  if (env) return env;
+  // Legado opcional: arquivo persistido tem prioridade sobre env.
   try {
     const cfg = readCtConfig();
     const s = String(cfg && cfg.logIngestSecret || "").trim();
-    return s;
-  } catch {
-    return "";
-  }
+    if (s) return s;
+  } catch {}
+  return String(process.env.LOG_INGEST_SECRET || "").trim();
 }
 
 function requestRaw(url, { method = "GET", headers = {}, body = null, timeoutMs = 12000 } = {}) {
@@ -137,7 +134,11 @@ async function getAvailableFromCt({ limit, secret } = {}) {
   for (const base of bases) {
     const url = `${base}/api/stock/available_secret?limit=${encodeURIComponent(String(limit))}`;
     try {
-      const r = await requestJson(url, { method: "GET", timeoutMs: 15000, headers: { "X-Log-Secret": secret } });
+      const r = await requestJson(url, {
+        method: "GET",
+        timeoutMs: 15000,
+        headers: secret ? { "X-Log-Secret": secret } : {}
+      });
       if (!r.json) {
         const preview = String(r.body || "").slice(0, 240);
         last = { base, error: "ct_non_json", status: r.status, bodyPreview: preview };
@@ -186,7 +187,6 @@ module.exports = (app) => {
       const base = notifierBaseFromEndpoints();
       if (!base) return res.json({ ok: false, error: "ct_base_unavailable", details: { hint: "configure CT_BASE_URL/CT_URL ou CT_NOTIFIER_REPORT_URL", hasSecret: !!stockSecret(), triedBases: candidateCtBases() } });
       const sec = stockSecret();
-      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured", details: { hint: "configure LOG_INGEST_SECRET no servidor (mesmo secret do CT)", base } });
       const limit = Math.max(20, Math.min(800, Number(req.query?.limit || 250) || 250));
 
       const r = await getAvailableFromCt({ limit, secret: sec });
@@ -212,14 +212,13 @@ module.exports = (app) => {
       const base = notifierBaseFromEndpoints();
       if (!base) return res.json({ ok: false, error: "ct_base_unavailable", details: { hint: "configure CT_BASE_URL/CT_URL ou CT_NOTIFIER_REPORT_URL", hasSecret: !!stockSecret() } });
       const sec = stockSecret();
-      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured", details: { hint: "configure LOG_INGEST_SECRET no servidor (mesmo secret do CT)", base } });
 
       const hostId = getOrCreateHostId();
       const url = `${base}/api/stock/provision/from_account_secret`;
       const r = await requestJson(url, {
         method: "POST",
         timeoutMs: 20000,
-        headers: { "X-Log-Secret": sec },
+        headers: sec ? { "X-Log-Secret": sec } : {},
         bodyObj: {
         hostId,
         city: c,

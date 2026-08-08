@@ -1486,14 +1486,17 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
-  if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
+  if (!base || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
   try {
     const Aborter = global.AbortController || require('node-abort-controller');
     const ac = new Aborter();
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 8000);
     const resp = await fetch(`${base}/api/stock/profile_credentials_secret`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(secret ? { 'X-Log-Secret': secret } : {})
+      },
       body: JSON.stringify({ hostId, profileName: p }),
       signal: ac.signal
     });
@@ -1523,7 +1526,7 @@ async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, 
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
-  if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
+  if (!base || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
   try {
     let sid = Number(stockAccountId || 0) || 0;
     if (!sid) {
@@ -1543,7 +1546,10 @@ async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, 
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
     const resp = await fetch(`${base}/api/stock/assigned/archive_with_evidence_secret`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(secret ? { 'X-Log-Secret': secret } : {})
+      },
       body: JSON.stringify({
         hostId,
         profileName: p,
@@ -1604,7 +1610,7 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
   base = normalizeCtBaseUrl(base);
   const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
-  if (!base || !secret || !hostId || !nome) return { ok: false, error: 'ct_config_missing' };
+  if (!base || !hostId || !nome) return { ok: false, error: 'ct_config_missing' };
 
   // Throttle enterprise: evita spam de eventos repetidos do mesmo perfil
   const kind = String(eventKind || '').trim().toLowerCase();
@@ -1637,7 +1643,10 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
     const resp = await fetch(`${base}/api/stock/uafp_event_secret`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(secret ? { 'X-Log-Secret': secret } : {})
+      },
       body: JSON.stringify({
         hostId,
         profileName: String(nome || '').trim(),
@@ -18103,30 +18112,25 @@ async function nurseTick() {
 
             // GPT fallback (central): envia evidência redacted para o sitechatbot classificar e registrar padrões.
             // Guardrails:
-            // - só envia se LOG_INGEST_SECRET estiver configurado (segurança)
+            // - log secret é opcional (CT opera em bridge interna sem segredo)
             // - rate-limit 30min por perfil+reason (no cliente e também no servidor central)
             try {
-              // Evita custo se não houver chance real de envio
-              const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
-              const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
-              if (secret) {
-                robeMeta[nome] = robeMeta[nome] || {};
-                const now = Date.now();
-                const last = Number(robeMeta[nome].lastFbGptIngestAt || 0) || 0;
-                if (!last || (now - last) > (30 * 60 * 1000)) {
-                  // Para reduzir custo: envia só quando capturou evidência ou houve mudança no motivo
-                  if (captured || changed) {
-                    const html = await (lrPage || p0).content().catch(()=>null);
-                    await gptFallback.ingestFbGpt({
-                      perfil: nome,
-                      url: lr.url || null,
-                      title: lr.title || null,
-                      html: html || '',
-                      reason: curReason || null,
-                      source: `lr:${curSource || 'unknown'}`
-                    }).catch(()=>{});
-                    robeMeta[nome].lastFbGptIngestAt = now;
-                  }
+              robeMeta[nome] = robeMeta[nome] || {};
+              const now = Date.now();
+              const last = Number(robeMeta[nome].lastFbGptIngestAt || 0) || 0;
+              if (!last || (now - last) > (30 * 60 * 1000)) {
+                // Para reduzir custo: envia só quando capturou evidência ou houve mudança no motivo
+                if (captured || changed) {
+                  const html = await (lrPage || p0).content().catch(()=>null);
+                  await gptFallback.ingestFbGpt({
+                    perfil: nome,
+                    url: lr.url || null,
+                    title: lr.title || null,
+                    html: html || '',
+                    reason: curReason || null,
+                    source: `lr:${curSource || 'unknown'}`
+                  }).catch(()=>{});
+                  robeMeta[nome].lastFbGptIngestAt = now;
                 }
               }
             } catch {}
@@ -23095,12 +23099,12 @@ function __deltaBuildIngestRepairCandidates(currentIngestUrl = '') {
   push('https://api.convenientetecnologia.com', 'api_default');
   return out;
 }
-async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempotencyKey = '' } = {}) {
+async function __deltaTryAutoRepairIngestEndpoint({ ingestUrl, payload, idempotencyKey = '', auth = null } = {}) {
   const candidates = __deltaBuildIngestRepairCandidates(ingestUrl);
   if (!candidates.length) return { ok: false, reason: 'no_candidates' };
 
   for (const cand of candidates.slice(0, 4)) {
-    const retryHeaders = __deltaBuildCtIngestHeaders({ idempotencyKey });
+    const retryHeaders = __deltaBuildCtIngestHeaders({ idempotencyKey, ...(auth || {}) });
     const res = await __deltaPostWebhookJson(cand.ingestUrl, payload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
     if (__deltaLooksLikeWrongIngestEndpointResponse(res)) continue;
     if (!__deltaIsReachableIngestEndpointResponse(res)) continue;
@@ -23269,22 +23273,25 @@ async function __deltaTryBootstrapSecretRefresh({ force = false, reason = '' } =
             source: 'delta_ingest_bootstrap'
           });
         }
-        if (logSecret) {
-          try {
-            const ctBaseUrlFromBootstrap = (() => {
-              try {
-                const parsedUrl = new URL(String(url));
-                return `${parsedUrl.protocol}//${parsedUrl.host}`;
-              } catch {
-                return '';
-              }
-            })();
+        // Contrato ninja: ctBaseUrl no bootstrap SEMPRE (secret opcional/legado).
+        try {
+          const ctBaseUrlFromPayload = String(parsed.ctBaseUrl || '').trim();
+          const ctBaseUrlFromBootstrap = (() => {
+            try {
+              const parsedUrl = new URL(String(url));
+              return `${parsedUrl.protocol}//${parsedUrl.host}`;
+            } catch {
+              return '';
+            }
+          })();
+          const ctBaseUrl = ctBaseUrlFromPayload || ctBaseUrlFromBootstrap || '';
+          if (ctBaseUrl || logSecret) {
             writeCtConfig({
-              ctBaseUrl: ctBaseUrlFromBootstrap || undefined,
-              logIngestSecret: logSecret
+              ctBaseUrl: ctBaseUrl || undefined,
+              logIngestSecret: logSecret || undefined
             });
-          } catch {}
-        }
+          }
+        } catch {}
         if (infraSecret || deltaSecret || logSecret) {
           return { infraSecret, deltaSecret, logSecret };
         }
@@ -23331,9 +23338,17 @@ async function __deltaResolveCtIngestAuth({ forceBootstrap = false, reason = '' 
     logSecret: String(logSecret || '').trim()
   };
 }
-function __deltaBuildCtIngestHeaders({ idempotencyKey = '' } = {}) {
+function __deltaBuildCtIngestHeaders({
+  idempotencyKey = '',
+  deltaSecret = '',
+  infraSecret = '',
+  logSecret = ''
+} = {}) {
   const headers = {};
   if (idempotencyKey) headers['x-idempotency-key'] = String(idempotencyKey);
+  if (deltaSecret) headers['x-delta-secret'] = String(deltaSecret);
+  if (infraSecret) headers['x-infra-secret'] = String(infraSecret);
+  if (logSecret) headers['x-log-secret'] = String(logSecret);
   return headers;
 }
 
@@ -23711,7 +23726,10 @@ async function __deltaIngestTick() {
       return;
     }
 
-    const headers = __deltaBuildCtIngestHeaders({ idempotencyKey: payload.idempotency_key });
+    const headers = __deltaBuildCtIngestHeaders({
+      idempotencyKey: payload.idempotency_key,
+      ...(auth || {})
+    });
     const retryKey = __deltaIngestRetryKeyFromPayload(payload, ctPayload);
 
     try {
@@ -23736,7 +23754,8 @@ async function __deltaIngestTick() {
       ingestUrl = String(auth && auth.ingestUrl || ingestUrl || '').trim();
       if (ingestUrl) {
         const retryHeaders = __deltaBuildCtIngestHeaders({
-          idempotencyKey: payload.idempotency_key
+          idempotencyKey: payload.idempotency_key,
+          ...(auth || {})
         });
         res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
       }
@@ -23748,7 +23767,8 @@ async function __deltaIngestTick() {
       ingestUrl = String(auth && auth.ingestUrl || ingestUrl || '').trim();
       if (ingestUrl) {
         const retryHeaders = __deltaBuildCtIngestHeaders({
-          idempotencyKey: payload.idempotency_key
+          idempotencyKey: payload.idempotency_key,
+          ...(auth || {})
         });
         res = await __deltaPostWebhookJson(ingestUrl, ctPayload, { timeoutMs: DELTA_INGEST_HTTP_TIMEOUT_MS, headers: retryHeaders });
       }
@@ -23758,7 +23778,8 @@ async function __deltaIngestTick() {
         const repaired = await __deltaTryAutoRepairIngestEndpoint({
           ingestUrl,
           payload: ctPayload,
-          idempotencyKey: payload.idempotency_key
+          idempotencyKey: payload.idempotency_key,
+          auth
         });
         if (repaired && repaired.ok) {
           ingestUrl = String(repaired.ingestUrl || ingestUrl || '').trim() || ingestUrl;

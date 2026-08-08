@@ -4317,7 +4317,22 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'set_groq_config')  { details = await execSetGroqConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'reseed_host_id')   { details = await execReseedHostId(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { details = await execGatewaySetProxies(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
-      else if (c.type === 'force_full_report') { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, forced: true } }); }
+      else if (c.type === 'force_full_report') {
+        const forceBridge = global.__serverEventBridgeTick;
+        if (typeof forceBridge !== 'function') {
+          results.push({ id: cmdId || null, type: cmdType, ok: false, error: 'server_event_bridge_unavailable', details: null });
+        } else {
+          details = await forceBridge('force_full_report');
+          const forcedOk = !!(details && details.ok === true);
+          results.push({
+            id: cmdId || null,
+            type: cmdType,
+            ok: forcedOk,
+            error: forcedOk ? null : String((details && details.error) || 'force_full_report_failed'),
+            details: details || null
+          });
+        }
+      }
       else if (c.type === 'rotate_logs')      { details = await execRotateLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'infra_ping')       { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, pong: true, ts: Date.now() } }); }
@@ -4427,9 +4442,9 @@ async function tick(reason = 'interval') {
       status.virtusMetrics = getVirtusMetricsCached(status);
     } catch {}
 
-    // Verifica se precisa solicitar config (ctBaseUrl ou logIngestSecret ausentes)
+    // Contrato: só ctBaseUrl. logIngestSecret é legado opcional (não bloqueia servidor novo).
     const cfg = readCtConfig();
-    const needsConfig = !cfg.ctBaseUrl || !cfg.logIngestSecret;
+    const needsConfig = !cfg.ctBaseUrl;
     // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
     // Importante: sem segredos no report — apenas boolean/modelo/metadata.
     const groqCfg = readGroqConfig(); // usado em runtime (OCR)

@@ -1570,7 +1570,7 @@ module.exports = (app, workerClient, fileStore) => {
         const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
         let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) ? cfg.ctBaseUrl : (process.env.CT_BASE_URL || process.env.CT_URL || ''));
         const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
-        if (!hostId || !base || !secret) {
+        if (!hostId || !base) {
           ct = {
             attempted: true,
             ok: false,
@@ -1593,7 +1593,10 @@ module.exports = (app, workerClient, fileStore) => {
               const tCred = setTimeout(() => { try { acCred.abort(); } catch {} }, 8000);
               const respCred = await fetch(`${base}/api/stock/profile_credentials_secret`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(secret ? { 'X-Log-Secret': secret } : {})
+                },
                 body: JSON.stringify({ hostId, profileName: String(nome || '').trim() }),
                 signal: acCred.signal
               }).catch(e => ({ ok: false, _err: e }));
@@ -1615,7 +1618,10 @@ module.exports = (app, workerClient, fileStore) => {
             const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
             const resp = await fetch(`${base}/api/stock/assigned/archive_with_evidence_secret`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(secret ? { 'X-Log-Secret': secret } : {})
+              },
               body: JSON.stringify({
                 hostId,
                 profileName: String(nome || '').trim(),
@@ -1680,7 +1686,10 @@ module.exports = (app, workerClient, fileStore) => {
             const tReject = setTimeout(() => { try { acReject.abort(); } catch {} }, 12000);
             const respReject = await fetch(`${base}/api/attendance/messenger-delta/account-deleted_secret`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(secret ? { 'X-Log-Secret': secret } : {})
+              },
               body: JSON.stringify({
                 hostId,
                 profileName: String(nome || '').trim(),

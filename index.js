@@ -132,9 +132,23 @@ function __gateBUpdateRuntime(patch) {
 }
 
 async function maybeBootstrapGateBToken() {
+  // Require local: Gate B pode rodar antes do bloco de requires do dashboard (linha ~994).
+  const { writeCtConfig: writeCtConfigLocal } = require('./scripts/ctConfig.js');
   const DATA_DIR = path.join(__dirname, 'dados');
   const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
   const BUNDLE_PATH = path.join(DATA_DIR, 'gate_b_bundle.json');
+  const notifyGateBReady = (attempt = 0) => {
+    try {
+      const fn = global.__serverEventBridgeTick;
+      if (typeof fn === 'function') {
+        Promise.resolve(fn('gate_b_ready')).catch(() => {});
+        return;
+      }
+      if (attempt >= 10) return;
+      const t = setTimeout(() => notifyGateBReady(attempt + 1), 1000);
+      try { t.unref?.(); } catch {}
+    } catch {}
+  };
   // URL de bootstrap (pode ser sobrescrita por env).
   // Importante:
   // - NÃO depender de redirects 302 (POST pode virar GET automaticamente).
@@ -681,6 +695,19 @@ async function maybeBootstrapGateBToken() {
           const raw = await res.text().catch(() => '');
           if (lastStatus === 202) {
             const parsed202 = (() => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } })();
+            // Mesmo em provisioning: já grava ctBaseUrl (não espera tunnel).
+            try {
+              const fromPayload = parsed202 && parsed202.ctBaseUrl ? String(parsed202.ctBaseUrl).trim() : '';
+              let fromUrl = '';
+              try { const u = new URL(String(url)); fromUrl = `${u.protocol}//${u.host}`; } catch {}
+              const ctBaseUrl = fromPayload || fromUrl;
+              if (ctBaseUrl) {
+                const wr = writeCtConfigLocal({ ctBaseUrl });
+                if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
+              }
+            } catch (eWrite) {
+              try { logger.warn('[GATE_B][BOOTSTRAP] ctBaseUrl persist fail (202)', { error: (eWrite && eWrite.message) || String(eWrite) }); } catch {}
+            }
             const retryAfterSec = Number(parsed202 && parsed202.retryAfterSec || 0) || 0;
             if (retryAfterSec > 0 && retryAfterSec < 600) {
               // “primeiro mundo”: CT está provisionando; retenta rápido sem esperar 60s
@@ -725,6 +752,23 @@ async function maybeBootstrapGateBToken() {
           const hostFqdn = parsed && parsed.hostFqdn ? String(parsed.hostFqdn).trim() : '';
           const infraSecret = parsed && parsed.infraSecret ? String(parsed.infraSecret).trim() : '';
           const previousToken = String((existing && existing.tunnelToken) ? existing.tunnelToken : '').trim();
+          // Contrato ninja: ctBaseUrl vem no bootstrap (ou deriva da URL). Sem depender de set_ct_config/log secret.
+          try {
+            const fromPayload = parsed && parsed.ctBaseUrl ? String(parsed.ctBaseUrl).trim() : '';
+            let fromUrl = '';
+            try {
+              const u = new URL(String(url));
+              fromUrl = `${u.protocol}//${u.host}`;
+            } catch {}
+            const ctBaseUrl = fromPayload || fromUrl;
+            if (ctBaseUrl) {
+              const wr = writeCtConfigLocal({ ctBaseUrl });
+              if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
+              logger.info('[GATE_B][BOOTSTRAP] ctBaseUrl persistido', { ctBaseUrl: String(ctBaseUrl).slice(0, 120) });
+            }
+          } catch (eWrite) {
+            try { logger.warn('[GATE_B][BOOTSTRAP] ctBaseUrl persist fail', { error: (eWrite && eWrite.message) || String(eWrite) }); } catch {}
+          }
 
           // Sempre cacheia host/secret quando vier (mesmo sem tunnel token), para reduzir acoplamento.
           if (hostFqdn || infraSecret) {
@@ -794,6 +838,7 @@ async function maybeBootstrapGateBToken() {
           } else {
             logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: bundle atualizado (cloudflared já ativo)', { forceRefresh, tokenRotated });
           }
+          if (__gateBCloudflaredStarted) notifyGateBReady();
           return;
         } finally {
           clearTimeout(to);
@@ -967,7 +1012,7 @@ const terminalAccountCleanupScheduler = require('./scripts/terminalAccountCleanu
 
 // Dashboard monitor
 const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
-const { readCtConfig } = require('./scripts/ctConfig.js');
+const { readCtConfig, writeCtConfig } = require('./scripts/ctConfig.js');
 
 // Inicialização
 const app = express();
@@ -3399,7 +3444,12 @@ app.post('/api/infra/server-event-log', (req, res) => {
 
 // ===================== Server Event Bridge (delta + heartbeat) =====================
 const SERVER_EVENT_CHECK_INTERVAL_MS = Math.max(2000, Number(process.env.SERVER_EVENT_CHECK_INTERVAL_MS || 5000) || 5000);
-const SERVER_EVENT_HEARTBEAT_MS = Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 600000) || 600000); // 10 min
+// Heartbeat sempre menor que o grace online do CT (130s): 60–90s,
+// mesmo se houver configuração antiga excessiva no ambiente.
+const SERVER_EVENT_HEARTBEAT_MS = Math.min(
+  90000,
+  Math.max(60000, Number(process.env.SERVER_EVENT_HEARTBEAT_MS || 60000) || 60000)
+);
 const SERVER_EVENT_DELTA_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SERVER_EVENT_DELTA_MIN_INTERVAL_MS || 30000) || 30000);
 const SERVER_EVENT_CHANGE_CONFIRM_TICKS = Math.max(1, Number(process.env.SERVER_EVENT_CHANGE_CONFIRM_TICKS || 2) || 2);
 // Bridge de presença/evento:
@@ -3520,7 +3570,18 @@ function __buildServerEventTelemetry(status) {
   const signature = {
     perfis: perfisStable,
     accountsAgg,
-    flagsAgg
+    flagsAgg,
+    // Mudança false→true força snapshot completo quando Gate B/tunnel fica pronto.
+    gateBReady: !!(
+      status &&
+      status.gateB &&
+      status.gateB.bundle &&
+      status.gateB.bundle.present === true &&
+      status.gateB.bundle.hasTunnelToken === true &&
+      status.gateB.runtime &&
+      status.gateB.runtime.cloudflared &&
+      status.gateB.runtime.cloudflared.started === true
+    )
   };
 
   const stateHash = crypto.createHash('sha1').update(JSON.stringify(signature)).digest('hex');
@@ -3656,13 +3717,39 @@ async function __postServerEventToCt(payload) {
         signal: controller.signal
       });
       if (res.ok) {
+        const reply = await res.json().catch(() => null);
+        let ctConfigApplied = false;
+        let ctConfigError = null;
+        try {
+          const ctBaseUrl = String(
+            reply && reply.ctConfig && reply.ctConfig.ctBaseUrl || ''
+          ).trim();
+          if (ctBaseUrl) {
+            const wr = writeCtConfig({ ctBaseUrl });
+            if (!wr || wr.ok !== true) {
+              ctConfigError = String((wr && wr.error) || 'write_ct_config_failed');
+            } else {
+              const confirmed = readCtConfig();
+              const persistedBase = String(confirmed && confirmed.ctBaseUrl || '').trim();
+              if (!persistedBase) {
+                ctConfigError = 'ct_base_not_persisted';
+              } else {
+                ctConfigApplied = true;
+              }
+            }
+          }
+        } catch (eWrite) {
+          ctConfigError = String((eWrite && eWrite.message) || eWrite);
+        }
         return {
           ok: true,
           status: res.status,
           ctBaseUrl: cand.ctBaseUrl || cfg.ctBaseUrl || null,
           eventUrl: cand.eventUrl,
           source: cand.source,
-          attempt
+          attempt,
+          ctConfigApplied,
+          ctConfigError
         };
       }
       const body = await res.text().catch(() => '');
@@ -3694,7 +3781,7 @@ async function __postServerEventToCt(payload) {
 }
 
 async function __serverEventBridgeTick(reason) {
-  if (__serverEventBridgeInFlight) return;
+  if (__serverEventBridgeInFlight) return { ok: false, skipped: true, error: 'bridge_in_flight' };
   __serverEventBridgeInFlight = true;
   try {
     const status = await __readLocalStatusForEventBridge();
@@ -3714,9 +3801,14 @@ async function __serverEventBridgeTick(reason) {
       __serverEventPendingHash = '';
       __serverEventPendingTicks = 0;
     }
-    const deltaConfirmed = changed && (reason === 'boot' || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
+    const forceStatusEvent =
+      reason === 'boot' ||
+      reason === 'gate_b_ready' ||
+      reason === 'ct_config_applied' ||
+      reason === 'force_full_report';
+    const deltaConfirmed = changed && (forceStatusEvent || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
-    const shouldSendDelta = deltaConfirmed && deltaRateOk;
+    const shouldSendDelta = forceStatusEvent || (deltaConfirmed && deltaRateOk);
 
     // Config Servidor → CT: boot/1ª vez no processo/save/hash mudou (sem spam).
     const configPush = (() => {
@@ -3731,7 +3823,18 @@ async function __serverEventBridgeTick(reason) {
     })();
     const needConfigPush = !!(configPush && configPush.need);
 
-    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush) {
+    // Configuração de transporte é urgente: enquanto ctBaseUrl não persistir,
+    // envia needsConfig em todos os ticks (5s). O CT aplica backoff curto (~12s).
+    // Isso impede o fallback de cair no heartbeat normal.
+    let needsConfig = false;
+    try {
+      const cfgCt = readCtConfig();
+      needsConfig = !String((cfgCt && cfgCt.ctBaseUrl) || '').trim();
+    } catch {
+      needsConfig = true;
+    }
+
+    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush && !needsConfig) {
       __appendServerEventBridgeLog('bridge_skip_noop', {
         hostId,
         changed,
@@ -3739,15 +3842,7 @@ async function __serverEventBridgeTick(reason) {
         heartbeatDue: false,
         needConfigPush: false
       });
-      return;
-    }
-
-    let needsConfig = false;
-    try {
-      const cfgCt = readCtConfig();
-      needsConfig = !String((cfgCt && cfgCt.ctBaseUrl) || '').trim() || !String((cfgCt && cfgCt.logIngestSecret) || '').trim();
-    } catch {
-      needsConfig = true;
+      return { ok: true, skipped: true, reason: 'noop' };
     }
 
     let serverConfigPayload = null;
@@ -3781,6 +3876,9 @@ async function __serverEventBridgeTick(reason) {
       accountsAgg: telemetry.accountsAgg,
       flagsAgg: telemetry.flagsAgg,
       needsConfig,
+      // CT novo devolve ctBaseUrl na própria resposta; zero dependência do
+      // tunnel reverso e zero push DNS prematuro.
+      acceptCtConfigReply: true,
       ...(shouldSendDelta ? { status } : {}),
       ...(serverConfigPayload ? { serverConfig: serverConfigPayload } : {})
     };
@@ -3793,6 +3891,14 @@ async function __serverEventBridgeTick(reason) {
         __serverEventPendingTicks = 0;
       }
       __serverEventLastSentAt = now;
+      if (out.ctConfigApplied) {
+        // Confirma ao CT, em seguida, que a configuração já está persistida e
+        // publica um snapshot completo pós-configuração.
+        const t = setTimeout(() => {
+          __serverEventBridgeTick('ct_config_applied').catch(() => {});
+        }, 250);
+        try { t.unref?.(); } catch {}
+      }
       if (serverConfigPayload && __serverConfigCtPush && typeof __serverConfigCtPush.markPushed === 'function') {
         try {
           __serverConfigCtPush.markPushed({
@@ -3813,7 +3919,9 @@ async function __serverEventBridgeTick(reason) {
         source: out.source || null,
         attempt: Number(out.attempt || 0) || null,
         ctBaseUrl: out.ctBaseUrl || null,
-        eventUrl: out.eventUrl || null
+        eventUrl: out.eventUrl || null,
+        ctConfigApplied: !!out.ctConfigApplied,
+        ctConfigError: out.ctConfigError || null
       });
     } else if (out && !out.skipped) {
       // Se falhou com config anexado, força retry no próximo tick (não marca pushed).
@@ -3848,9 +3956,24 @@ async function __serverEventBridgeTick(reason) {
         reason: out && out.error ? String(out.error) : 'skipped'
       });
     }
+    if (out && out.ok) {
+      return {
+        ok: true,
+        status: Number(out.status || 0) || 0,
+        eventType: payload.eventType,
+        source: out.source || null
+      };
+    }
+    return {
+      ok: false,
+      skipped: !!(out && out.skipped),
+      error: String((out && out.error) || 'bridge_send_failed'),
+      status: Number(out && out.status || 0) || 0
+    };
   } catch (e) {
     __appendServerEventBridgeLog('bridge_tick_exception', { error: (e && e.message) || String(e) });
     logger.warn('[SERVER_EVENT_BRIDGE] tick falhou', { error: (e && e.message) || String(e) });
+    return { ok: false, error: (e && e.message) || String(e) };
   } finally {
     __serverEventBridgeInFlight = false;
   }
