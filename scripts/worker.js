@@ -239,9 +239,15 @@ const {
 } = require('./robeManualRelease.js');
 const {
   isBlankUrl,
+  isJunkUrl,
+  isDeadTabUrl,
+  pagesLookAllJunk,
+  listPagesBounded,
   pageAgeMs: hygienePageAgeMs,
   ensurePageBirth,
-  sweepAboutBlankPages
+  sweepAboutBlankPages,
+  probeBrowserHealth,
+  cureBrowserInPlace
 } = require('./robeTabHygiene.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
@@ -634,7 +640,13 @@ const DELTA_NO_PAGES_HARD_MS = Math.max(
 function shouldBypassNurseZombie(nome, source = 'nurse') {
   if (!isDeltaEngineActiveStrict()) return false;
   const src = String(source || 'nurse');
-  if (src === 'nurse.no_pages') {
+  const hardSources = (
+    src === 'nurse.no_pages' ||
+    src === 'nurse.page_zombie' ||
+    src === 'nurse.unusable' ||
+    src === 'deactivate.handler'
+  );
+  if (hardSources) {
     try {
       robeMeta[nome] = robeMeta[nome] || {};
       const firstAt = Number(robeMeta[nome].lastNoPagesAt || 0) || 0;
@@ -6849,6 +6861,116 @@ function setKillGuard(nome, ms=90000) {
   robeMeta[nome].killGuardUntil = Date.now() + ms;
 }
 
+const CHROME_SICK_REOPEN_MIN_MS = Math.max(
+  5 * 60 * 1000,
+  Math.min(20 * 60 * 1000, Number(process.env.CHROME_SICK_REOPEN_MIN_MS || (8 * 60 * 1000)) || (8 * 60 * 1000))
+);
+const CHROME_CURE_RETRY_MS = Math.max(
+  15_000,
+  Math.min(120_000, Number(process.env.CHROME_CURE_RETRY_MS || 30_000) || 30_000)
+);
+
+async function tryCureAccountBrowser(nome, { source = 'nurse' } = {}) {
+  const n = String(nome || '');
+  const ctrl = controllers.get(n);
+  if (!ctrl || !ctrl.browser) return { ok: false, needReopen: true, reason: 'no_browser' };
+  robeMeta[n] = robeMeta[n] || {};
+  const now = Date.now();
+  const last = Number(robeMeta[n].lastChromeCureAt || 0) || 0;
+  if (last && (now - last) < CHROME_CURE_RETRY_MS) {
+    return { ok: false, skipped: true, reason: 'cure_throttle' };
+  }
+  robeMeta[n].lastChromeCureAt = now;
+  let result = null;
+  try {
+    result = await cureBrowserInPlace(ctrl.browser, { nome: n, keepPage: ctrl.mainPage || null });
+  } catch (e) {
+    result = {
+      ok: false,
+      needReopen: true,
+      action: 'cure_throw',
+      error: String((e && e.message) || e || '').slice(0, 220)
+    };
+  }
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'chrome_cure_attempt',
+      nome: n,
+      source: String(source || ''),
+      ok: !!(result && result.ok),
+      action: (result && result.action) || null,
+      needReopen: !!(result && result.needReopen),
+      skipped: !!(result && result.skipped),
+      healthReason: (result && result.health && result.health.reason) || null
+    });
+  } catch {}
+  if (result && result.ok) {
+    try {
+      const listed = await listPagesBounded(ctrl.browser, 3000);
+      const pages = listed.pages || [];
+      const live = pages.find((p) => {
+        let u = '';
+        try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
+        return u && !isJunkUrl(u);
+      });
+      if (live) ctrl.mainPage = live;
+      else if (pages[0]) ctrl.mainPage = pages[0];
+    } catch {}
+    robeMeta[n].noPagesStrikes = 0;
+    robeMeta[n].lastNoPagesAt = 0;
+    robeMeta[n].zombieStrikes = 0;
+    try { delete robeMeta[n].chromeSickHoldUntil; } catch {}
+  }
+  return result || { ok: false, needReopen: true };
+}
+
+async function annihilateChromeSick(nome, source = 'chrome_sick') {
+  const n = String(nome || '');
+  if (!n) return { ok: false, reason: 'no_nome' };
+  robeMeta[n] = robeMeta[n] || {};
+  const now = Date.now();
+  const last = Number(robeMeta[n].lastChromeSickReopenAt || 0) || 0;
+  if (last && (now - last) < CHROME_SICK_REOPEN_MIN_MS) {
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'chrome_sick_reopen_backoff',
+        nome: n,
+        source: String(source || ''),
+        ageMs: now - last,
+        minMs: CHROME_SICK_REOPEN_MIN_MS
+      });
+    } catch {}
+    return { ok: false, skipped: true, reason: 'reopen_backoff' };
+  }
+  if (killGuardActive(n)) {
+    try { await issues.append(n, 'guard_skip', 'chrome_sick suprimido por kill_guard_until'); } catch {}
+    return { ok: false, skipped: true, reason: 'kill_guard' };
+  }
+  if (robeMeta[n].lastDeactivateAt && (now - robeMeta[n].lastDeactivateAt) < 10000) {
+    return { ok: false, skipped: true, reason: 'deactivate_backoff' };
+  }
+  robeMeta[n].lastDeactivateAt = now;
+  try {
+    provisionAudit.append({
+      ts: now,
+      event: 'chrome_sick_annihilate',
+      nome: n,
+      source: String(source || '')
+    });
+  } catch {}
+  try { await issues.append(n, 'mil_action', `chrome_sick_annihilate source=${String(source || '').slice(0, 60)}`); } catch {}
+  const dres = await handlers.deactivate({ nome: n, reason: 'chrome_sick', policy: 'preserveDesired' });
+  if (dres && dres.skipped) return dres;
+  robeMeta[n].lastChromeSickReopenAt = now;
+  setKillGuard(n);
+  robeMeta[n].noPagesStrikes = 0;
+  robeMeta[n].lastNoPagesAt = 0;
+  robeMeta[n].zombieStrikes = 0;
+  return dres || { ok: true };
+}
+
 try {
   const perfisArr = loadPerfisJson();
   for (const p of perfisArr) {
@@ -8468,6 +8590,11 @@ async function robeIsAutoEnqueueEligible(nome, opts = {}) {
     if (fl && fl.idVirtus === true) return { ok: false, reason: 'id_virtus' };
   } catch {}
   if (isFrozenNow(n)) return { ok: false, reason: 'frozen' };
+  try {
+    if (robeMeta[n]?.chromeSickHoldUntil && Number(robeMeta[n].chromeSickHoldUntil) > Date.now()) {
+      return { ok: false, reason: 'chrome_sick_hold' };
+    }
+  } catch {}
   if (robeQueue.inQueue(n) || robeQueue.isActive(n)) return { ok: false, reason: 'queue_busy' };
   try { await unfreezeCooldownIfWorking(n); } catch {}
   const manGate = await manifestStore.read(n).catch(() => null);
@@ -8916,16 +9043,19 @@ function getWorkingProfileNames() {
 function __pickKeepPage(stablePages, mainPage) {
   try {
     const pages = Array.isArray(stablePages) ? stablePages : [];
-    if (mainPage && pages.includes(mainPage)) return mainPage;
-    const nonBlank = pages.find((pg) => {
+    const isLive = (pg) => {
       try {
         const u = typeof pg.url === 'function' ? String(pg.url() || '') : '';
-        return !!u && u !== 'about:blank';
+        return !!u && !isJunkUrl(u);
       } catch {
         return false;
       }
-    });
-    return nonBlank || pages[0] || null;
+    };
+    if (mainPage && pages.includes(mainPage) && isLive(mainPage)) return mainPage;
+    const live = pages.find(isLive);
+    if (live) return live;
+    if (mainPage && pages.includes(mainPage)) return mainPage;
+    return pages[0] || null;
   } catch {
     return (Array.isArray(stablePages) && stablePages[0]) || null;
   }
@@ -8972,17 +9102,19 @@ async function closeExtraPages(browser, mainPage, nome) {
     // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
     const keepPage = __pickKeepPage(stablePages, mainPage);
 
-    // 1) about:blank — contrato anti-fantasma:
-    //    - fora de proteção: fecha já
-    //    - sob Robe/config/human/sendLock: só órfãs com idade >= maxAge (não mata goto create em andamento)
+    // 1) lixo (about:blank / chrome-error / Aw Snap):
+    //    - chrome-error: fecha já (nunca é create válido), mesmo sob proteção
+    //    - about:blank sob Robe/config/human/sendLock: só órfãs com idade >= maxAge
     for (const p of stablePages) {
       try {
         if (keepPage && p === keepPage) continue;
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (!isBlankUrl(url)) continue;
         if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
-        if (protectedCtx) {
+        const dead = isDeadTabUrl(url);
+        const blank = isBlankUrl(url);
+        if (!dead && !blank) continue;
+        if (!dead && protectedCtx) {
           const age = __pageAgeMs(browser, p);
           if (age < blankMaxAgeMs) continue;
         }
@@ -9808,6 +9940,32 @@ async function robeQueuedCycle(nome, source = 'auto') {
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
+        let chromeAnnihilated = false;
+        try {
+          const pre = await probeBrowserHealth(ctrl.browser, { nome });
+          if (!(pre && pre.ok)) {
+            const cure = await tryCureAccountBrowser(nome, { source: 'robe_pre_start' });
+            if (!(cure && cure.ok)) {
+              if (cure && (cure.needReopen || (pre && pre.needReopen))) {
+                const ann = await annihilateChromeSick(nome, 'robe_pre_start');
+                chromeAnnihilated = !(ann && ann.skipped);
+              }
+              if (chromeAnnihilated) {
+                virtusWasRunning = false;
+                deltaSequentialResumeRequired = false;
+              }
+              try {
+                robeMeta[nome] = robeMeta[nome] || {};
+                robeMeta[nome].chromeSickHoldUntil = Date.now() + 45_000;
+              } catch {}
+              try { await reportAction(nome, 'chrome_sick', 'Robe abortado: Chrome doente; cura/reopen acionado'); } catch {}
+              robeUpdateMeta(nome, { estado: 'erro', emExecucao: false });
+              try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+              return;
+            }
+          }
+        } catch {}
+
         const robePauseMs = drawRobeCooldownMs();
         const photoDeletePolicy = getRobePhotoDeletePolicy();
 
@@ -9896,6 +10054,19 @@ async function robeQueuedCycle(nome, source = 'auto') {
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
+          if (e && e.CHROME_SICK === true) {
+            try { await annihilateChromeSick(nome, 'robe_open_create_throw'); } catch {}
+            virtusWasRunning = false;
+            deltaSequentialResumeRequired = false;
+            try {
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].chromeSickHoldUntil = Date.now() + 45_000;
+            } catch {}
+            try { await reportAction(nome, 'chrome_sick', `Robe fila: Chrome doente (${String((e && e.message) || '').slice(0, 160)}); cura/reopen acionado`); } catch {}
+            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            return;
+          }
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão configurado no servidor será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeQueuedCycle] Robe error', { nome, error: e && e.message || e }); } catch {}
@@ -9909,6 +10080,20 @@ async function robeQueuedCycle(nome, source = 'auto') {
           robeMeta[nome].pauseReason = 'limit_posting';
           robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+          return;
+        }
+
+        if (res && res.chromeSick === true) {
+          try { await annihilateChromeSick(nome, 'robe_open_create'); } catch {}
+          virtusWasRunning = false;
+          deltaSequentialResumeRequired = false;
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].chromeSickHoldUntil = Date.now() + 45_000;
+          } catch {}
+          try { await reportAction(nome, 'chrome_sick', `Robe ciclo: Chrome doente (${String((res && res.error) || '').slice(0, 160)}); cura/reopen acionado`); } catch {}
+          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
@@ -16215,6 +16400,11 @@ function getControlledReopenDelayMs(reason = '') {
   } catch {}
   if (r === 'ramkill' || r === 'cpukill') return ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random() * 120000);
   if (r === 'virtus_block') return ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+  if (r === 'chrome_sick' || r === 'chrome_cure_reopen') {
+    const minMs = Math.max(20_000, Number(process.env.CHROME_SICK_REOPEN_DELAY_MIN_MS || 45_000) || 45_000);
+    const maxMs = Math.max(minMs, Number(process.env.CHROME_SICK_REOPEN_DELAY_MAX_MS || 90_000) || 90_000);
+    return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  }
   const minMs = _envMs('REOPEN_NON_RAM_MIN_MS', 5 * 60 * 1000);
   const maxMs = Math.max(minMs, _envMs('REOPEN_NON_RAM_MAX_MS', 15 * 60 * 1000));
   return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
@@ -18312,22 +18502,38 @@ async function nurseTick() {
       }
 
       if (!ctrl || !ctrl.browser) continue;
-      let pages = [];
-      try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
+      const listed = await listPagesBounded(ctrl.browser, 4000);
+      let pages = listed.pages || [];
 
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].noPagesStrikes = robeMeta[nome].noPagesStrikes || 0;
       robeMeta[nome].lastNoPagesAt = robeMeta[nome].lastNoPagesAt || 0;
 
-      if (!pages || !pages[0]) {
-        let retryFailed = false;
-        if (ctrl.browser.isConnected?.()) {
+      if (listed.timedOut) {
+        if (!robeMeta[nome].lastNoPagesAt) robeMeta[nome].lastNoPagesAt = Date.now();
+        try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
+        await appendIssueNurseDebounced(nome, 'suspect_chrome_cdp_timeout', 'pages() timed out', 'suspect_chrome_cdp_timeout');
+        await annihilateChromeSick(nome, 'nurse.pages_timeout');
+        continue;
+      }
+
+      if (!pages[0] || pagesLookAllJunk(pages)) {
+        let retryFailed = true;
+        if (!pages[0] && ctrl.browser.isConnected?.()) {
           await new Promise(r=>setTimeout(r,400));
-          let retryPages = [];
-          try { retryPages = await ctrl.browser.pages(); } catch {}
-          if (!retryPages || !retryPages[0]) retryFailed = true;
-        } else {
+          const retryListed = await listPagesBounded(ctrl.browser, 4000);
+          if (retryListed.timedOut) {
+            await annihilateChromeSick(nome, 'nurse.pages_timeout_retry');
+            continue;
+          }
+          pages = retryListed.pages || [];
+          retryFailed = !pages[0] || pagesLookAllJunk(pages);
+        } else if (pages[0] && pagesLookAllJunk(pages)) {
           retryFailed = true;
+        } else if (!ctrl.browser.isConnected?.()) {
+          retryFailed = true;
+        } else {
+          retryFailed = !pages[0] || pagesLookAllJunk(pages);
         }
         if (retryFailed) {
           // Mesmo sem páginas, registre um snapshot leve quando a flag LR já está setada.
@@ -18347,7 +18553,7 @@ async function nurseTick() {
                   event: 'lr_flag_snapshot_no_pages',
                   storedReason: flags.loginReason || null,
                   storedSource: flags.loginSource || null,
-                  pagesCount: 0,
+                  pagesCount: Array.isArray(pages) ? pages.length : 0,
                   evidenceCaptured: false,
                   url: null,
                   title: null
@@ -18357,34 +18563,41 @@ async function nurseTick() {
           } catch {}
 
           robeMeta[nome].noPagesStrikes += 1;
-          // Contrato: lastNoPagesAt = início da sequência sem páginas (NÃO resetar a cada strike).
+          // Contrato: lastNoPagesAt = início da sequência sem página útil (NÃO resetar a cada strike).
           // Bug antigo: gravava Date.now() a cada strike → (now - last) >= 5000 nunca ficava true → kill morto.
+          // Bug Delta: bypass zerava lastNoPagesAt → 20s hard nunca acumulava.
           if (!robeMeta[nome].lastNoPagesAt) {
             robeMeta[nome].lastNoPagesAt = Date.now();
           }
-          // Sem página: invalida idle DOM skip até novo pageReadyBasic real.
           try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
-          await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
+          await appendIssueNurseDebounced(nome, `suspect_no_usable_page`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_usable_page');
+
+          const cure = await tryCureAccountBrowser(nome, { source: 'nurse.unusable' });
+          if (cure && cure.ok) {
+            continue;
+          }
+
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
             if (killGuardActive(nome)) {
               await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
               continue;
             }
-            // PATCH P1 START (anti-flap deactivate)
             const now = Date.now();
             robeMeta[nome] = robeMeta[nome] || {};
             if (robeMeta[nome].lastDeactivateAt && (now - robeMeta[nome].lastDeactivateAt) < 10000) {
               await appendIssueNurseDebounced(nome, 'mil_action', 'deactivate_backoff_skip', 'deactivate_backoff_skip');
               continue;
             }
-            robeMeta[nome].lastDeactivateAt = now;
-            // PATCH P1 END
+            const age = robeMeta[nome].lastNoPagesAt ? (now - robeMeta[nome].lastNoPagesAt) : 0;
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
-            if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
-              robeMeta[nome].noPagesStrikes = 0;
-              robeMeta[nome].lastNoPagesAt = 0;
+            if (age >= DELTA_NO_PAGES_HARD_MS || (cure && cure.needReopen)) {
+              await annihilateChromeSick(nome, 'nurse.unusable');
               continue;
             }
+            if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
+              continue;
+            }
+            robeMeta[nome].lastDeactivateAt = now;
             await registerFailure(nome, 'no_pages', 'external');
             const dres = await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             if (!(dres && dres.skipped)) setKillGuard(nome);
@@ -19162,8 +19375,24 @@ async function nurseTick() {
             robeMeta[nome].lastDeactivateAt = now;
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
-            if (shouldBypassNurseZombie(nome, 'nurse.page_zombie')) {
+            if (!robeMeta[nome].lastNoPagesAt) robeMeta[nome].lastNoPagesAt = Date.now();
+            const cureZ = await tryCureAccountBrowser(nome, { source: 'nurse.page_zombie' });
+            if (cureZ && cureZ.ok) {
               robeMeta[nome].zombieStrikes = 0;
+              continue;
+            }
+            const ageZ = robeMeta[nome].lastNoPagesAt ? (Date.now() - robeMeta[nome].lastNoPagesAt) : 0;
+            if (cureZ && cureZ.needReopen) {
+              try { registerFailure(nome, 'zombie', 'external'); } catch {}
+              await annihilateChromeSick(nome, 'nurse.page_zombie_cdp');
+              continue;
+            }
+            if (ageZ >= DELTA_NO_PAGES_HARD_MS) {
+              try { registerFailure(nome, 'zombie', 'external'); } catch {}
+              await annihilateChromeSick(nome, 'nurse.page_zombie');
+              continue;
+            }
+            if (shouldBypassNurseZombie(nome, 'nurse.page_zombie')) {
               continue;
             }
             try { registerFailure(nome, 'zombie', 'external'); } catch {}
@@ -27518,15 +27747,21 @@ async function periodicAboutBlankCleanup() {
         const inHuman = ctrl.humanControl === true;
         const protectedCtx = !!(inRobe || sendLockActive || inConfig || inHuman);
 
-        const pages = await Promise.race([
-          ctrl.browser.pages().catch(() => []),
-          new Promise((resolve) => setTimeout(() => resolve([]), 4000))
-        ]);
-        if (!Array.isArray(pages) || pages.length <= 1) continue;
+        const pagesListed = await listPagesBounded(ctrl.browser, 4000);
+        if (pagesListed.timedOut) continue;
+        const pages = pagesListed.pages || [];
+        if (!Array.isArray(pages) || pages.length === 0) continue;
+
+        const junkOnly = pagesLookAllJunk(pages);
+        if (junkOnly) {
+          await tryCureAccountBrowser(nome, { source: 'periodic_junk_only' });
+          continue;
+        }
+        if (pages.length <= 1) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
 
-        // Se há create item, não limpa abas reais — mas about:blank órfãs (idade) ainda podem sair.
+        // Se há create item, não limpa abas reais — mas lixo órfão (idade) ainda pode sair.
         const hasCreateItem = pages.some(pg => {
           try {
             const u = pg.url ? pg.url() : '';
@@ -27543,11 +27778,12 @@ async function periodicAboutBlankCleanup() {
 
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-            // Alinhado ao prune: blank OU URL vazia (antes URL '' era skipada e virava fantasma).
-            if (!isBlankUrl(url)) continue;
             if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
+            const dead = isDeadTabUrl(url);
+            const blank = isBlankUrl(url);
+            if (!dead && !blank) continue;
 
-            if (protectedCtx || hasCreateItem) {
+            if (!dead && (protectedCtx || hasCreateItem)) {
               const age = __pageAgeMs(ctrl.browser, p);
               if (age < blankMaxAgeMs) continue;
             }

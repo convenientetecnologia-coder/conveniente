@@ -44,7 +44,8 @@ const {
   safeClosePage,
   sweepAboutBlankPages,
   clearBlankSuppress,
-  armBlankSuppress
+  armBlankSuppress,
+  isChromeProtocolSickError
 } = require('./robeTabHygiene.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
@@ -1480,6 +1481,11 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try { await safeClosePage(p, { nome, reason: 'open_create_vehicle_retry_close' }); } catch {}
       clearBlankSuppress(browser, nome);
       try { await sweepAboutBlankPages(browser, { nome }); } catch {}
+      if (isChromeProtocolSickError(msg)) {
+        try { e.CHROME_SICK = true; } catch {}
+        lastError = e;
+        break;
+      }
       if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out/i.test(msg)) {
         try {
           const sid = String(gatewayResolved && gatewayResolved.slot && gatewayResolved.slot.slotId || '').trim();
@@ -1518,6 +1524,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   clearBlankSuppress(browser, nome);
   try { await sweepAboutBlankPages(browser, { nome }); } catch {}
   stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
+  if (lastError && lastError.CHROME_SICK === true) throw lastError;
   throw new Error('nav_create_timeout');
 }
 
@@ -2652,15 +2659,18 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // PATCH MILITAR — Se houve limit_posting neste ciclo, retorna imediatamente sem aplicar cooldown curto.
     if (limitPostingHit) return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
 
-    // Cooldown padrão: após post/sessão, usa robePauseMsSafe; fallback 25–50min.
+    // Cooldown: sucesso/erro técnico usa robePauseMsSafe (relógio do servidor). Chrome doente: settle curto.
     try {
-      const pause = robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000);
+      const isChromeSick = (e && e.CHROME_SICK === true) || isChromeProtocolSickError(errMsg);
+      const pause = isChromeSick
+        ? (2 + Math.floor(Math.random() * 3)) * 60 * 1000
+        : (robePauseMsSafe > 0 ? robePauseMsSafe : ((25 + Math.floor(Math.random() * 26)) * 60 * 1000));
       await manifestStore.update(nome, m => {
         m.robeCooldownUntil = Date.now() + pause;
         return m;
       });
       cooldownApplied = true;
-      try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
+      try { await logIssue(nome, 'robe_error', `Erro técnico${isChromeSick ? ' (chrome_sick_settle)' : ''}; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
     } catch {}
 
     // P2 ULTRA ROBUSTO: MARCAR COMO USADA MESMO EM FALHA!!!
@@ -2680,7 +2690,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
     } catch {}
 
-    return { ok: false, error: errMsg, log: stepLogArr };
+    return { ok: false, error: errMsg, chromeSick: (e && e.CHROME_SICK === true) || isChromeProtocolSickError(errMsg), log: stepLogArr };
 
   } finally {
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting

@@ -1,11 +1,12 @@
 "use strict";
 
 /**
- * Contrato preto-no-branco anti about:blank (Robe itens + veículos + worker):
- * - Aba 0 (messages/Virtus) = keepPage — nunca varrer como lixo.
+ * Contrato preto-no-branco anti aba-morta (Robe itens + veículos + worker):
+ * - Aba 0 (messages/Virtus) = keepPage — nunca varrer como lixo SE estiver viva.
  * - Create nasce about:blank → goto URL real → ao fim close SEM goto(about:blank).
- * - Qualquer about:blank / URL vazia órfã deve morrer (sucesso ou falha do post).
- * - Suppress só durante goto create; não engessa idle.
+ * - Lixo = about:blank / URL vazia / chrome-error / Aw Snap / chromewebdata.
+ * - Suppress só durante goto create (about:blank); chrome-error nunca é create válido.
+ * - Cura in-place se o CDP responde; se pages()/CDP estoura timeout → needReopen.
  */
 
 const provisionAudit = (() => {
@@ -15,6 +16,49 @@ const provisionAudit = (() => {
 function isBlankUrl(url) {
   const u = String(url || "").trim();
   return !u || u === "about:blank";
+}
+
+function isDeadTabUrl(url) {
+  const u = String(url || "").trim().toLowerCase();
+  if (!u) return false;
+  if (u.startsWith("chrome-error://")) return true;
+  if (u.includes("chromewebdata")) return true;
+  if (u.startsWith("chrome://crash")) return true;
+  if (u.startsWith("chrome://kill")) return true;
+  if (u.startsWith("chrome://hang")) return true;
+  if (u.startsWith("chrome://gpucrash")) return true;
+  if (u.startsWith("chrome://gpuhang")) return true;
+  if (u.startsWith("chrome://inducebrowsercrashforrealz")) return true;
+  return false;
+}
+
+function isJunkUrl(url) {
+  return isBlankUrl(url) || isDeadTabUrl(url);
+}
+
+function isCreateMarketplaceUrl(url) {
+  return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(String(url || ""));
+}
+
+function isLiveWorkUrl(url) {
+  const u = String(url || "");
+  if (isJunkUrl(u)) return false;
+  return /facebook\.com|messenger\.com/i.test(u);
+}
+
+function isChromeProtocolSickError(msg) {
+  const s = String(msg || "");
+  return /Network\.enable timed out|Network\.enable|Protocol error \(Runtime|Protocol error \(Network|Page crashed|Runtime\.callFunctionOn timed out|cdp_timeout|pages_timeout|cure_goto_timeout|cure_newpage_timeout|cure_newpage_goto_timeout/i.test(s);
+}
+
+function pagesLookAllJunk(pages) {
+  if (!Array.isArray(pages) || pages.length < 1) return true;
+  for (const p of pages) {
+    let u = "";
+    try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
+    if (u && !isJunkUrl(u)) return false;
+  }
+  return true;
 }
 
 function targetIdOf(page) {
@@ -65,6 +109,20 @@ function armBlankSuppress(browser, nome, ms = 20_000) {
     const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
     guard[nome] = Date.now() + Math.max(1_000, Number(ms) || 20_000);
   } catch {}
+}
+
+async function listPagesBounded(browser, timeoutMs = 4000) {
+  if (!browser) return { ok: false, timedOut: true, pages: [] };
+  try {
+    const pages = await Promise.race([
+      browser.pages().catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve("__timeout__"), Math.max(800, Number(timeoutMs) || 4000)))
+    ]);
+    if (pages === "__timeout__") return { ok: false, timedOut: true, pages: [] };
+    return { ok: true, timedOut: false, pages: Array.isArray(pages) ? pages : [] };
+  } catch {
+    return { ok: false, timedOut: false, pages: [] };
+  }
 }
 
 async function safeClosePage(page, { nome = "", reason = "" } = {}) {
@@ -139,7 +197,7 @@ async function safeClosePage(page, { nome = "", reason = "" } = {}) {
 }
 
 /**
- * Fecha todas as about:blank / URL vazia, preservando keepPage (Virtus/messages).
+ * Fecha about:blank / chrome-error / Aw Snap, preservando keepPage (Virtus/messages).
  * Nunca toca create/item|vehicle real.
  */
 async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}) {
@@ -147,11 +205,10 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
   let closed = 0;
   let failed = 0;
   try {
-    const pages = await Promise.race([
-      browser.pages().catch(() => []),
-      new Promise((resolve) => setTimeout(() => resolve([]), 3000))
-    ]);
-    for (const p of (pages || [])) {
+    const listed = await listPagesBounded(browser, 3000);
+    if (listed.timedOut) return { ok: false, closed: 0, failed: 0, timedOut: true };
+    const pages = listed.pages || [];
+    for (const p of pages) {
       try {
         if (keepPage && p === keepPage) continue;
         try {
@@ -159,9 +216,9 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         } catch {}
         let u = "";
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
-        if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
-        if (!isBlankUrl(u)) continue;
-        const r = await safeClosePage(p, { nome, reason: "sweep_about_blank" });
+        if (isCreateMarketplaceUrl(u)) continue;
+        if (!isJunkUrl(u)) continue;
+        const r = await safeClosePage(p, { nome, reason: "sweep_junk_tab" });
         if (r && r.closed) closed++;
         else failed++;
       } catch {
@@ -173,7 +230,7 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         if (provisionAudit && typeof provisionAudit.append === "function") {
           provisionAudit.append({
             ts: Date.now(),
-            event: "dbg_robe_sweep_about_blank",
+            event: "dbg_robe_sweep_junk_tabs",
             nome: String(nome || ""),
             closed: Number(closed || 0),
             failed: Number(failed || 0)
@@ -185,12 +242,253 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
   return { ok: true, closed, failed };
 }
 
+async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } = {}) {
+  let closed = 0;
+  let failed = 0;
+  try {
+    const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
+    const pageTargets = targets.filter((t) => {
+      try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
+    });
+    let session = null;
+    for (const t of pageTargets) {
+      let u = "";
+      try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
+      if (!isJunkUrl(u)) continue;
+      let tid = "";
+      try { tid = String(t._targetId || (t._targetInfo && t._targetInfo.targetId) || ""); } catch { tid = ""; }
+      if (keepTargetId && tid && String(keepTargetId) === tid) continue;
+      let page = null;
+      try {
+        page = await Promise.race([
+          Promise.resolve().then(() => t.page()).catch(() => null),
+          new Promise((r) => setTimeout(() => r(null), 1500))
+        ]);
+      } catch {}
+      if (page) {
+        const r = await safeClosePage(page, { nome, reason: "junk_cdp_target_page" });
+        if (r && r.closed) { closed++; continue; }
+      }
+      try {
+        if (!tid) { failed++; continue; }
+        if (!session) {
+          session = await Promise.race([
+            browser.target().createCDPSession(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 2000))
+          ]);
+        }
+        await Promise.race([
+          session.send("Target.closeTarget", { targetId: tid }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("close_target_timeout")), 2000))
+        ]);
+        closed++;
+      } catch {
+        failed++;
+      }
+    }
+    if (closed > 0 || failed > 0) {
+      try {
+        if (provisionAudit && typeof provisionAudit.append === "function") {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: "dbg_chrome_junk_targets_closed",
+            nome: String(nome || ""),
+            closed: Number(closed || 0),
+            failed: Number(failed || 0)
+          });
+        }
+      } catch {}
+    }
+  } catch {}
+  return { closed, failed };
+}
+
+async function probeBrowserHealth(browser, { nome = "", timeoutMs = 4000 } = {}) {
+  if (!browser) return { ok: false, reason: "no_browser", needReopen: true, canCure: false, live: 0, junk: 0 };
+  try {
+    if (typeof browser.isConnected === "function" && !browser.isConnected()) {
+      return { ok: false, reason: "disconnected", needReopen: true, canCure: false, live: 0, junk: 0 };
+    }
+  } catch {
+    return { ok: false, reason: "isConnected_throw", needReopen: true, canCure: false, live: 0, junk: 0 };
+  }
+
+  const listed = await listPagesBounded(browser, timeoutMs);
+  if (listed.timedOut) {
+    return { ok: false, reason: "pages_timeout", needReopen: true, canCure: false, live: 0, junk: 0 };
+  }
+  const pages = listed.pages || [];
+
+  let targetsCount = 0;
+  let junkTargets = 0;
+  try {
+    const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
+    const pageTargets = targets.filter((t) => {
+      try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
+    });
+    targetsCount = pageTargets.length;
+    for (const t of pageTargets) {
+      let u = "";
+      try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
+      if (isJunkUrl(u)) junkTargets++;
+    }
+  } catch {}
+
+  let live = 0;
+  let junk = 0;
+  for (const p of pages) {
+    let u = "";
+    try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
+    if (isJunkUrl(u)) junk++;
+    else if (isLiveWorkUrl(u) || (u && !isJunkUrl(u))) live++;
+  }
+
+  const splitBrain = targetsCount > (pages.length + 1);
+  const extraJunkTargets = junkTargets > junk;
+
+  if (live >= 1 && junk === 0 && !extraJunkTargets && !splitBrain) {
+    return {
+      ok: true,
+      reason: "healthy",
+      needReopen: false,
+      canCure: false,
+      live,
+      junk,
+      junkTargets,
+      pages: pages.length,
+      targets: targetsCount,
+      nome: String(nome || "")
+    };
+  }
+  if (live >= 1) {
+    return {
+      ok: false,
+      reason: extraJunkTargets || splitBrain ? "split_brain_junk" : "junk_tabs",
+      needReopen: false,
+      canCure: true,
+      live,
+      junk,
+      junkTargets,
+      pages: pages.length,
+      targets: targetsCount
+    };
+  }
+  return {
+    ok: false,
+    reason: pages.length ? "all_junk" : "no_pages",
+    needReopen: false,
+    canCure: true,
+    live,
+    junk,
+    junkTargets,
+    pages: pages.length,
+    targets: targetsCount
+  };
+}
+
+async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) {
+  const health0 = await probeBrowserHealth(browser, { nome });
+  if (health0.ok) return { ok: true, action: "already_healthy", health: health0 };
+  if (health0.needReopen) return { ok: false, needReopen: true, action: "cdp_dead", health: health0 };
+
+  const sweep = await sweepAboutBlankPages(browser, { keepPage, nome });
+  if (sweep && sweep.timedOut) {
+    return { ok: false, needReopen: true, action: "sweep_pages_timeout", health: health0, sweep };
+  }
+
+  let keepTid = null;
+  try {
+    if (keepPage && typeof keepPage.target === "function") {
+      const t = keepPage.target();
+      if (t && t._targetId) keepTid = String(t._targetId);
+    }
+  } catch {}
+  const closedTargets = await closeJunkCdpTargets(browser, { nome, keepTargetId: keepTid });
+
+  let after = await probeBrowserHealth(browser, { nome });
+  if (after.ok) return { ok: true, action: "swept_junk", health: after, sweep, closedTargets };
+  if (after.needReopen) return { ok: false, needReopen: true, action: "cdp_dead_after_sweep", health: after, sweep, closedTargets };
+
+  const listed = await listPagesBounded(browser, 4000);
+  if (listed.timedOut) {
+    return { ok: false, needReopen: true, action: "pages_timeout_before_goto", health: after, sweep, closedTargets };
+  }
+  const pages = listed.pages || [];
+  const candidate = (keepPage && pages.includes(keepPage) ? keepPage : null) || pages[0] || null;
+  const messagesUrl = "https://www.facebook.com/messages";
+
+  if (candidate) {
+    try {
+      await Promise.race([
+        candidate.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("cure_goto_timeout")), 28000))
+      ]);
+      after = await probeBrowserHealth(browser, { nome });
+      if (after.ok || after.live >= 1) {
+        await sweepAboutBlankPages(browser, { keepPage: candidate, nome });
+        return { ok: true, action: "goto_messages", health: after, sweep, closedTargets };
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e || "");
+      if (isChromeProtocolSickError(msg) || /cure_goto_timeout/i.test(msg)) {
+        return {
+          ok: false,
+          needReopen: true,
+          action: "goto_failed_cdp",
+          error: msg.slice(0, 220),
+          health: after,
+          sweep,
+          closedTargets
+        };
+      }
+    }
+  }
+
+  try {
+    const p = await Promise.race([
+      browser.newPage(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_timeout")), 8000))
+    ]);
+    await Promise.race([
+      p.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_goto_timeout")), 28000))
+    ]);
+    await sweepAboutBlankPages(browser, { keepPage: p, nome });
+    after = await probeBrowserHealth(browser, { nome });
+    if (after.ok || after.live >= 1) {
+      return { ok: true, action: "newpage_messages", health: after, sweep, closedTargets };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      needReopen: true,
+      action: "newpage_failed",
+      error: String((e && e.message) || e || "").slice(0, 220),
+      health: after,
+      sweep,
+      closedTargets
+    };
+  }
+
+  return { ok: false, needReopen: true, action: "still_unhealthy", health: after, sweep, closedTargets };
+}
+
 module.exports = {
   isBlankUrl,
+  isDeadTabUrl,
+  isJunkUrl,
+  isCreateMarketplaceUrl,
+  isLiveWorkUrl,
+  isChromeProtocolSickError,
+  pagesLookAllJunk,
+  listPagesBounded,
   ensurePageBirth,
   pageAgeMs,
   clearBlankSuppress,
   armBlankSuppress,
   safeClosePage,
-  sweepAboutBlankPages
+  sweepAboutBlankPages,
+  closeJunkCdpTargets,
+  probeBrowserHealth,
+  cureBrowserInPlace
 };

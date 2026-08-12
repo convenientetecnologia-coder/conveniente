@@ -1468,28 +1468,58 @@ function installOneTabGuard(browser, nome, {
     }
     async function enforceHardCap() {
       try {
+        const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
+        const isDead = (u) => hygiene && typeof hygiene.isDeadTabUrl === 'function' ? hygiene.isDeadTabUrl(u) : false;
+        const isJunk = (u) => hygiene && typeof hygiene.isJunkUrl === 'function' ? hygiene.isJunkUrl(u) : (!u || u === 'about:blank');
         const pages = await browser.pages();
         const beforeCount = Array.isArray(pages) ? pages.length : 0;
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
         if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
         const lim = (allow && allow()) ? limOpt : 1;
-        if (Array.isArray(pages) && pages.length > lim) {
+        if (!Array.isArray(pages) || pages.length < 1) return;
+
+        const closedUrls = [];
+        // Sempre fecha chrome-error/Aw Snap extras. A última aba morta fica para a cura (goto), não zera o browser.
+        let pageCount = pages.length;
+        for (let i = pages.length - 1; i >= 0; i--) {
+          if (pageCount <= 1) break;
+          const p = pages[i];
+          let u = '';
+          try { u = await p.url().catch(()=>''); } catch {}
+          if (!isDead(u)) continue;
+          if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
+          try { closedUrls.push(String(u || '')); } catch {}
+          try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+          pageCount--;
+        }
+
+        const afterJunk = await browser.pages();
+        const livePages = Array.isArray(afterJunk) ? afterJunk : [];
+        let keepIdx = livePages.findIndex((p) => {
+          try {
+            const u = (typeof p.url === 'function') ? String(p.url() || '') : '';
+            return u && !isJunk(u);
+          } catch { return false; }
+        });
+        if (keepIdx < 0) keepIdx = 0;
+
+        if (livePages.length > lim) {
           let reason = '';
           try {
             reason = (typeof getReason === 'function') ? String(getReason() || '') : String(getReason || '');
           } catch { reason = ''; }
 
-          const closedUrls = [];
-          // Mantenha a primeira (main) e feche todas as demais
-          for (let i = pages.length - 1; i >= 1; i--) {
-            if (pages.length <= lim) break;
-            const p = pages[i];
+          let remaining = livePages.length;
+          for (let i = livePages.length - 1; i >= 0; i--) {
+            if (remaining <= lim) break;
+            if (i === keepIdx) continue;
+            const p = livePages[i];
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
-            if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue; // Nunca fechar create item/vehicle
+            if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
             try { closedUrls.push(String(u || '')); } catch {}
-            try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
-            catch {}
+            try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+            remaining--;
           }
           const cur = await browser.pages();
           const afterCount = (cur && cur.length) || 0;
@@ -1502,6 +1532,22 @@ function installOneTabGuard(browser, nome, {
                 beforeCount,
                 afterCount,
                 reason,
+                closedUrls: closedUrls.slice(0, 8)
+              })).catch(()=>{});
+            }
+          } catch {}
+        } else if (closedUrls.length > 0) {
+          const cur = await browser.pages();
+          const afterCount = (cur && cur.length) || 0;
+          log('[PRUNER][HARD] Guard fechou abas mortas', { nome, final: afterCount, closed: closedUrls.length });
+          try {
+            if (onPrune) {
+              Promise.resolve(onPrune({
+                nome,
+                lim,
+                beforeCount,
+                afterCount,
+                reason: 'dead_tab',
                 closedUrls: closedUrls.slice(0, 8)
               })).catch(()=>{});
             }
@@ -5266,6 +5312,16 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
         try {
           if (page.isClosed && page.isClosed()) return;
           const u = page.url ? page.url() : '';
+          let dead = false;
+          try {
+            const hy = require('./robeTabHygiene.js');
+            dead = !!(hy && typeof hy.isDeadTabUrl === 'function' && hy.isDeadTabUrl(u));
+          } catch {}
+          if (dead) {
+            try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+            try { await issues.append(nome, 'mil_action', 'dead_tab_killed'); } catch {}
+            return;
+          }
           if (u && u !== 'about:blank') return;
 
           const now = Date.now();
@@ -5314,7 +5370,12 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       const key = keyFor(t);
       // Use t.url() apenas (ThreadSafe), não page.url()
       const u = (t && typeof t.url === 'function') ? t.url() : '';
-      if (u && u !== 'about:blank') clearTimer(key);
+      let dead = false;
+      try {
+        const hy = require('./robeTabHygiene.js');
+        dead = !!(hy && typeof hy.isDeadTabUrl === 'function' && hy.isDeadTabUrl(u));
+      } catch {}
+      if (u && u !== 'about:blank' && !dead) clearTimer(key);
     } catch {}
   });
   browser.on('targetdestroyed', async (t) => {
