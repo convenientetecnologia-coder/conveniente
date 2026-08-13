@@ -7729,50 +7729,85 @@ async function collectFreshCookies(browser) {
  * Retorna { banned: true/false, reason, snippet }
  */
 /**
- * Marketplace permanentemente desativado (create/item|vehicle).
- * NÃO rodar em Virtus/messages — exige URL create.
- * Texto canônico PT: "Você não pode comprar ou vender itens no Facebook"
+ * Marketplace desativado: create/item|vehicle OU parede /marketplace/ineligible
+ * (o FB redireciona o create para ineligible). NÃO rodar em Virtus/messages.
+ * Textos: "Você não pode comprar ou vender..." e "O Marketplace não está disponível para você".
  */
 async function detectMarketplaceDisabled(page) {
+  async function readDisabledSignals() {
+    return await page.evaluate(() => {
+      function norm(s) {
+        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        catch { return String(s || '').toLowerCase(); }
+      }
+      const nodes = Array.from(document.querySelectorAll('span,div,h1,h2')).slice(0, 2500);
+      const texts = nodes.map((el) => (el.innerText || el.textContent || '')).filter(Boolean);
+      const tnorm = texts.map(norm);
+      const ineligible =
+        tnorm.some((t) => t.includes('o marketplace nao esta disponivel para voce')) ||
+        tnorm.some((t) => t.includes('marketplace is not available to you') || t.includes('marketplace isnt available to you')) ||
+        tnorm.some((t) => t.includes('marketplace no esta disponible para ti') || t.includes('marketplace no esta disponible para usted'));
+      const buySell =
+        tnorm.some((t) => t.includes('voce nao pode comprar ou vender itens')) ||
+        tnorm.some((t) => t.includes('voce nao pode comprar ou vender')) ||
+        tnorm.some((t) => t.includes('you can\'t buy or sell items') || t.includes('you cannot buy or sell items')) ||
+        tnorm.some((t) => t.includes('no puedes comprar ni vender articulos') || t.includes('no puedes comprar o vender'));
+      const community =
+        tnorm.some((t) => t.includes('padroes da comunidade') || t.includes('community standards') || t.includes('estandares de la comunidad'));
+      let snippet = '';
+      if (ineligible) {
+        snippet =
+          texts.find((s) => /marketplace nao esta disponivel|marketplace n[aã]o est[aá] dispon[ií]vel|marketplace isn'?t available|marketplace is not available|marketplace no esta disponible/i.test(norm(s))) ||
+          texts.find((s) => /nao esta disponivel para voce|not available to you|no esta disponible para ti/i.test(norm(s))) ||
+          '';
+      } else if (buySell) {
+        snippet =
+          texts.find((s) => /comprar ou vender|buy or sell|comprar ni vender|comprar o vender/i.test(String(s || ''))) ||
+          '';
+      }
+      if (!snippet) snippet = texts.slice(0, 20).join(' | ').slice(0, 420);
+      return {
+        ineligible: !!ineligible,
+        buySell: !!buySell,
+        community: !!community,
+        snippet: String(snippet || '').slice(0, 420)
+      };
+    });
+  }
+
   async function probeOnce() {
     try {
       const href = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
-      if (!/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(href)) {
+      const isCreate = /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(href);
+      const isIneligibleUrl = /facebook\.com\/marketplace\/ineligible/i.test(href);
+      // Create (item/vehicle) ou a parede /ineligible (o FB redireciona o create para cá).
+      if (!isCreate && !isIneligibleUrl) {
         return { disabled: false };
       }
-      const v = await page.evaluate(() => {
-        function norm(s) {
-          try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-          catch { return String(s || '').toLowerCase(); }
-        }
-        const nodes = Array.from(document.querySelectorAll('span,div,h1,h2')).slice(0, 2500);
-        const texts = nodes.map((el) => (el.innerText || el.textContent || '')).filter(Boolean);
-        const tnorm = texts.map(norm);
-        const buySell =
-          tnorm.some((t) => t.includes('voce nao pode comprar ou vender itens')) ||
-          tnorm.some((t) => t.includes('voce nao pode comprar ou vender')) ||
-          tnorm.some((t) => t.includes('you can\'t buy or sell items') || t.includes('you cannot buy or sell items')) ||
-          tnorm.some((t) => t.includes('no puedes comprar ni vender articulos') || t.includes('no puedes comprar o vender'));
-        if (!buySell) return { hit: false, snippet: '' };
-        const community =
-          tnorm.some((t) => t.includes('padroes da comunidade') || t.includes('community standards') || t.includes('estandares de la comunidad'));
-        const snippet =
-          texts.find((s) => /comprar ou vender|buy or sell|comprar ni vender|comprar o vender/i.test(String(s || ''))) ||
-          texts.slice(0, 20).join(' | ').slice(0, 420);
-        return { hit: true, community: !!community, snippet: String(snippet || '').slice(0, 420) };
-      });
-      if (v && v.hit) {
+
+      let signals = { ineligible: false, buySell: false, community: false, snippet: '' };
+      try { signals = (await readDisabledSignals()) || signals; } catch {}
+
+      if (isIneligibleUrl || signals.ineligible) {
+        return {
+          disabled: true,
+          reason: 'ineligible',
+          snippet: String(signals.snippet || 'marketplace/ineligible').slice(0, 420),
+          communityStandards: false
+        };
+      }
+      if (signals.buySell) {
         return {
           disabled: true,
           reason: 'cannot_buy_or_sell',
-          snippet: v.snippet || '',
-          communityStandards: !!v.community
+          snippet: String(signals.snippet || '').slice(0, 420),
+          communityStandards: !!signals.community
         };
       }
     } catch {}
     return { disabled: false };
   }
-  // 1ª leitura + 1 retry curto (DOM do create às vezes atrasa o texto).
+  // 1ª leitura + 1 retry curto (redirect create → ineligible / DOM atrasado).
   let out = await probeOnce();
   if (out && out.disabled === true) return out;
   try { await new Promise((r) => setTimeout(r, 900)); } catch {}
