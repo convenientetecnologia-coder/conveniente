@@ -2423,6 +2423,19 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw e;
     }
 
+    // Operador: vidro maximizado. Identidade da página continua o setViewport do preset (já colado no portão).
+    try {
+      const pagesNow = await browser.pages();
+      const firstMax = pagesNow && pagesNow[0];
+      if (firstMax) {
+        const clientMax = await firstMax.target().createCDPSession();
+        const { windowId } = await clientMax.send('Browser.getWindowForTarget');
+        await clientMax.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+      }
+    } catch (e) {
+      logger.warn('[BROWSER] Falha ao maximizar janela do operador (seguindo): ' + ((e && e.message) || e));
+    }
+
     browser.getPageCount = async () => (await browser.pages()).length;
 
     // Após toda a abertura e logo antes de return:
