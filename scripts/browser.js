@@ -12,8 +12,64 @@ const gptFallback = require('./gptFallback.js');
 const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
+const fileStore = require('./fileStore.js');
 
-puppeteer.use(StealthPlugin());
+// Stealth permanece LIGADO (webdriver, plugins, permissions, codecs, chrome.*).
+// user-agent-override continua off (a UA da conta é o patchPage).
+// languages / hardwareConcurrency / webgl.vendor saem do default do plugin
+// (en-US, 4 núcleos, Iris OpenGL) e entram como instâncias configuráveis
+// para cantar a mesma voz do patchPage por conta.
+const stealthLanguages = require('puppeteer-extra-plugin-stealth/evasions/navigator.languages')({
+  languages: ['pt-BR', 'pt']
+});
+const stealthHwc = require('puppeteer-extra-plugin-stealth/evasions/navigator.hardwareConcurrency')({
+  hardwareConcurrency: 8
+});
+const stealthWebgl = require('puppeteer-extra-plugin-stealth/evasions/webgl.vendor')({
+  vendor: 'Intel Inc.',
+  renderer: 'Intel(R) UHD Graphics 620'
+});
+const stealthPlugin = StealthPlugin();
+try { stealthPlugin.enabledEvasions.delete('user-agent-override'); } catch {}
+try { stealthPlugin.enabledEvasions.delete('navigator.languages'); } catch {}
+try { stealthPlugin.enabledEvasions.delete('navigator.hardwareConcurrency'); } catch {}
+try { stealthPlugin.enabledEvasions.delete('webgl.vendor'); } catch {}
+puppeteer.use(stealthLanguages);
+puppeteer.use(stealthHwc);
+puppeteer.use(stealthWebgl);
+puppeteer.use(stealthPlugin);
+
+function syncStealthVoiceForAccount({ languages, hardwareConcurrency, webglVendor, webglRenderer } = {}) {
+  try {
+    const langs = Array.isArray(languages) && languages.length
+      ? languages.map((x) => String(x || '')).filter(Boolean)
+      : ['pt-BR', 'pt'];
+    if (langs.length) stealthLanguages.opts.languages = langs;
+  } catch {}
+  try {
+    const hwc = Number(hardwareConcurrency);
+    stealthHwc.opts.hardwareConcurrency = (Number.isFinite(hwc) && hwc >= 2 && hwc <= 32) ? Math.floor(hwc) : 8;
+  } catch {}
+  try {
+    if (webglVendor) stealthWebgl.opts.vendor = String(webglVendor);
+    if (webglRenderer) stealthWebgl.opts.renderer = String(webglRenderer);
+  } catch {}
+}
+
+async function syncStealthFromManifest(nome, manifest) {
+  const who = String(nome || '').trim();
+  const man = (manifest && typeof manifest === 'object') ? manifest : {};
+  const proxyResolved = gatewayProxy.resolveProxyForProfile({ profileName: who, manifest: man });
+  const proxyCountry = String(proxyResolved && proxyResolved.slot && proxyResolved.slot.country || '').trim().toLowerCase() || 'br';
+  const antiState = await ensureFingerprintProfileState({ nome: who, manifest: man, proxyCountry });
+  syncStealthVoiceForAccount({
+    languages: antiState.navigatorLanguages,
+    hardwareConcurrency: (man.fp && man.fp.hardwareConcurrency) || 8,
+    webglVendor: antiState.webglVendor,
+    webglRenderer: antiState.webglRenderer
+  });
+  return antiState;
+}
 
 const DESIRED_ENGINE_PATH = path.join(__dirname, '..', 'dados', 'desired.json');
 let __desiredEngineCache = { at: 0, engine: 'delta' };
@@ -411,6 +467,346 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
   return state;
 }
 
+function resolveAccountWindowBounds(manifest) {
+  const vp = (manifest && manifest.fp && manifest.fp.viewport && typeof manifest.fp.viewport === 'object')
+    ? manifest.fp.viewport
+    : {};
+  let width = Math.floor(Number(vp.width) || 0);
+  let height = Math.floor(Number(vp.height) || 0);
+  if (width < 800 || height < 600) {
+    width = 1366;
+    height = 768;
+  }
+  if (width > 3840) width = 3840;
+  if (height > 2160) height = 2160;
+  const left = Math.floor(Math.random() * 600);
+  const top = Math.floor(Math.random() * 400);
+  return { width, height, left, top };
+}
+
+function installAccountFingerprintHooks(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  try {
+    if (window.__convenienteFpHooks === true) return;
+    window.__convenienteFpHooks = true;
+  } catch {}
+
+  const safeDefine = (obj, key, getter) => {
+    try {
+      Object.defineProperty(obj, key, { get: getter, configurable: true });
+    } catch {}
+  };
+
+  const canvasNoise = Number(cfg.canvasNoise || 1) || 1;
+  const audioNoise = Number(cfg.audioNoise || 0.00001) || 0.00001;
+
+  const applyCanvasNoise = (data) => {
+    try {
+      if (!data || data.length < 4) return;
+      const n = ((canvasNoise % 9) + 1) | 0;
+      const pixels = (data.length / 4) | 0;
+      if (pixels < 1) return;
+      const marks = [
+        0,
+        4 * ((n * 13) % pixels),
+        4 * ((n * 29) % pixels),
+        4 * ((n * 47) % pixels)
+      ];
+      for (let k = 0; k < marks.length; k++) {
+        const i = marks[k];
+        if (i >= 0 && i < data.length) data[i] = (data[i] + n) % 256;
+      }
+    } catch {}
+  };
+
+  const applyAudioNoise = (data) => {
+    try {
+      if (!data || data.length < 8) return;
+      const lim = Math.min(data.length, 32);
+      for (let i = 0; i < lim; i++) {
+        data[i] = data[i] + (audioNoise * ((i % 5) + 1));
+      }
+    } catch {}
+  };
+
+  const applyPixelBufferNoise = (pixels) => {
+    try {
+      if (!pixels || pixels.length < 4) return;
+      const n = ((canvasNoise % 9) + 1) | 0;
+      const i = (n * 7) % pixels.length;
+      pixels[i] = (Number(pixels[i]) + n) % 256;
+    } catch {}
+  };
+
+  safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
+  safeDefine(navigator, 'languages', () => (cfg.navigatorLanguages || []).slice());
+  safeDefine(navigator, 'platform', () => 'Win32');
+  safeDefine(navigator, 'webdriver', () => undefined);
+  safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
+  safeDefine(navigator, 'maxTouchPoints', () => cfg.maxTouchPoints);
+  if (cfg.hardwareConcurrency) {
+    safeDefine(navigator, 'hardwareConcurrency', () => cfg.hardwareConcurrency);
+  }
+
+  const ro = Intl.DateTimeFormat.prototype.resolvedOptions;
+  if (typeof ro === 'function') {
+    Intl.DateTimeFormat.prototype.resolvedOptions = function () {
+      const out = ro.apply(this, arguments);
+      return Object.assign({}, out, { timeZone: cfg.timezone, locale: cfg.navigatorLanguage });
+    };
+  }
+
+  const fakePlugins = (cfg.plugins || []).map((name, idx) => ({
+    name,
+    filename: `internal-${idx}.dll`,
+    description: name
+  }));
+  const pluginArray = Object.assign(fakePlugins.slice(), {
+    item: (i) => fakePlugins[i] || null,
+    namedItem: (n) => fakePlugins.find((p) => p && p.name === n) || null,
+    refresh: () => {}
+  });
+  safeDefine(navigator, 'plugins', () => pluginArray);
+  safeDefine(navigator, 'mimeTypes', () => ({ length: 0, item: () => null, namedItem: () => null }));
+
+  const patchWebGl = (Proto) => {
+    if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
+    const originalGetParameter = Proto.prototype.getParameter;
+    const originalGetExtension = Proto.prototype.getExtension;
+    const originalReadPixels = Proto.prototype.readPixels;
+    const wrappedGetParameter = function (param) {
+      if (param === 37445) return cfg.webglVendor;
+      if (param === 37446) return cfg.webglRenderer;
+      return originalGetParameter.apply(this, arguments);
+    };
+    const wrappedGetExtension = function (name) {
+      const n = String(name || '').toUpperCase();
+      if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+        return {
+          UNMASKED_VENDOR_WEBGL: 37445,
+          UNMASKED_RENDERER_WEBGL: 37446
+        };
+      }
+      return originalGetExtension ? originalGetExtension.apply(this, arguments) : null;
+    };
+    const wrappedReadPixels = function () {
+      const out = originalReadPixels ? originalReadPixels.apply(this, arguments) : undefined;
+      try {
+        const pixels = arguments.length ? arguments[arguments.length - 1] : null;
+        applyPixelBufferNoise(pixels);
+      } catch {}
+      return out;
+    };
+    try {
+      Object.defineProperty(Proto.prototype, 'getParameter', { value: wrappedGetParameter, configurable: true });
+    } catch {
+      try { Proto.prototype.getParameter = wrappedGetParameter; } catch {}
+    }
+    try {
+      Object.defineProperty(Proto.prototype, 'getExtension', { value: wrappedGetExtension, configurable: true });
+    } catch {
+      try { Proto.prototype.getExtension = wrappedGetExtension; } catch {}
+    }
+    if (originalReadPixels) {
+      try {
+        Object.defineProperty(Proto.prototype, 'readPixels', { value: wrappedReadPixels, configurable: true });
+      } catch {
+        try { Proto.prototype.readPixels = wrappedReadPixels; } catch {}
+      }
+    }
+  };
+
+  const installWebglContextWrapper = () => {
+    try {
+      const proto = window.HTMLCanvasElement && window.HTMLCanvasElement.prototype;
+      if (!proto || proto.__adWebglCtxWrapped) return;
+      const originalGetContext = proto.getContext;
+      proto.getContext = function (type) {
+        const ctx = originalGetContext.apply(this, arguments);
+        const t = String(type || '').toLowerCase();
+        if (ctx && (t === 'webgl' || t === 'experimental-webgl' || t === 'webgl2')) {
+          try {
+            const gp = ctx.getParameter && ctx.getParameter.bind(ctx);
+            const ge = ctx.getExtension && ctx.getExtension.bind(ctx);
+            const rp = ctx.readPixels && ctx.readPixels.bind(ctx);
+            if (gp) {
+              ctx.getParameter = function (param) {
+                if (param === 37445) return cfg.webglVendor;
+                if (param === 37446) return cfg.webglRenderer;
+                return gp(param);
+              };
+            }
+            if (ge) {
+              ctx.getExtension = function (name) {
+                const n = String(name || '').toUpperCase();
+                if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
+                  return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+                }
+                return ge(name);
+              };
+            }
+            if (rp) {
+              ctx.readPixels = function () {
+                const out = rp.apply(this, arguments);
+                try {
+                  const pixels = arguments.length ? arguments[arguments.length - 1] : null;
+                  applyPixelBufferNoise(pixels);
+                } catch {}
+                return out;
+              };
+            }
+          } catch {}
+        }
+        return ctx;
+      };
+      proto.__adWebglCtxWrapped = true;
+    } catch {}
+  };
+  patchWebGl(window.WebGLRenderingContext);
+  patchWebGl(window.WebGL2RenderingContext);
+  installWebglContextWrapper();
+
+  if (window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype && window.CanvasRenderingContext2D.prototype.getImageData) {
+    const originalGetImageData = window.CanvasRenderingContext2D.prototype.getImageData;
+    window.CanvasRenderingContext2D.prototype.getImageData = function () {
+      const imageData = originalGetImageData.apply(this, arguments);
+      try {
+        if (imageData && imageData.data) applyCanvasNoise(imageData.data);
+      } catch {}
+      return imageData;
+    };
+  }
+
+  const noiseCloneAndCall = (canvasEl, origMethod, args) => {
+    const c = document.createElement('canvas');
+    c.width = canvasEl.width;
+    c.height = canvasEl.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(canvasEl, 0, 0);
+    try {
+      const img = ctx.getImageData(0, 0, c.width, c.height);
+      ctx.putImageData(img, 0, 0);
+    } catch {}
+    return origMethod.apply(c, args);
+  };
+
+  if (window.HTMLCanvasElement && window.HTMLCanvasElement.prototype) {
+    const origToDataURL = window.HTMLCanvasElement.prototype.toDataURL;
+    window.HTMLCanvasElement.prototype.toDataURL = function () {
+      try {
+        return noiseCloneAndCall(this, origToDataURL, arguments);
+      } catch {
+        return origToDataURL.apply(this, arguments);
+      }
+    };
+    if (typeof window.HTMLCanvasElement.prototype.toBlob === 'function') {
+      const origToBlob = window.HTMLCanvasElement.prototype.toBlob;
+      window.HTMLCanvasElement.prototype.toBlob = function () {
+        try {
+          return noiseCloneAndCall(this, origToBlob, arguments);
+        } catch {
+          return origToBlob.apply(this, arguments);
+        }
+      };
+    }
+  }
+
+  try {
+    if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype && OffscreenCanvas.prototype.convertToBlob) {
+      const origConvert = OffscreenCanvas.prototype.convertToBlob;
+      OffscreenCanvas.prototype.convertToBlob = function () {
+        try {
+          const c = new OffscreenCanvas(this.width, this.height);
+          const ctx = c.getContext('2d');
+          ctx.drawImage(this, 0, 0);
+          const img = ctx.getImageData(0, 0, c.width, c.height);
+          ctx.putImageData(img, 0, 0);
+          return origConvert.apply(c, arguments);
+        } catch {
+          return origConvert.apply(this, arguments);
+        }
+      };
+    }
+  } catch {}
+
+  if (window.AudioBuffer && window.AudioBuffer.prototype && window.AudioBuffer.prototype.getChannelData) {
+    const originalGetChannelData = window.AudioBuffer.prototype.getChannelData;
+    window.AudioBuffer.prototype.getChannelData = function () {
+      const data = originalGetChannelData.apply(this, arguments);
+      applyAudioNoise(data);
+      return data;
+    };
+  }
+  if (window.AudioBuffer && window.AudioBuffer.prototype && window.AudioBuffer.prototype.copyFromChannel) {
+    const originalCopyFromChannel = window.AudioBuffer.prototype.copyFromChannel;
+    window.AudioBuffer.prototype.copyFromChannel = function (destination) {
+      const out = originalCopyFromChannel.apply(this, arguments);
+      applyAudioNoise(destination);
+      return out;
+    };
+  }
+
+  try {
+    const fonts = Array.isArray(cfg.fonts) ? cfg.fonts.map((x) => String(x || '').toLowerCase()) : [];
+    if (document.fonts && typeof document.fonts.check === 'function') {
+      const originalCheck = document.fonts.check.bind(document.fonts);
+      document.fonts.check = function (font) {
+        try {
+          const family = String(font || '').toLowerCase();
+          if (fonts.some((f) => family.includes(f))) return true;
+        } catch {}
+        return originalCheck.apply(this, arguments);
+      };
+    }
+  } catch {}
+
+  window.chrome = window.chrome || { runtime: {} };
+  if (typeof window.Notification === 'undefined') {
+    try {
+      const NotificationShim = function Notification() {
+        throw new TypeError('Illegal constructor');
+      };
+      NotificationShim.permission = 'denied';
+      NotificationShim.requestPermission = () => Promise.resolve('denied');
+      Object.defineProperty(window, 'Notification', {
+        value: NotificationShim,
+        configurable: true,
+        writable: true
+      });
+    } catch {}
+  }
+}
+
+async function persistAlignedUa(nome, aligned) {
+  if (!nome || !aligned || !aligned.changed) return;
+  try {
+    await manifestStore.update(nome, (cur) => {
+      const next = Object.assign({}, cur || {});
+      next.uaString = aligned.uaString;
+      next.uaCh = aligned.uaCh;
+      return next;
+    });
+  } catch {}
+  try {
+    fileStore.withPerfisFileLockUpdate((arr) => {
+      return (Array.isArray(arr) ? arr : []).map((p) => {
+        if (!p || p.nome !== nome) return p;
+        return Object.assign({}, p, { uaString: aligned.uaString, uaCh: aligned.uaCh });
+      });
+    }, { caller: 'ua_align_binary', nome });
+  } catch {}
+  try {
+    const recPath = path.join(__dirname, '..', 'dados', 'perfis', String(nome), 'perfil.json');
+    const existing = fileStore.readJsonSafe(recPath, null) || {};
+    fileStore.writePerfilRecord(Object.assign({}, existing, {
+      nome,
+      uaString: aligned.uaString,
+      uaCh: aligned.uaCh,
+      userDataDir: existing.userDataDir || null
+    }), { caller: 'ua_align_binary' });
+  } catch {}
+}
+
 async function patchPage(nome, page, coords) {
   // BLINDAGEM: nome obrigatório
   if (!nome) throw new Error('manifest_incomplete: nome ausente (perfil corrompido)');
@@ -438,51 +834,58 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- RESTANTE INALTERADO (só troquei para usar manifest lido acima) ---
-  const ua = manifest.uaString;
-  const uaCh = manifest.uaCh || {};
   const viewport = manifest.fp?.viewport || { width: 1366, height: 768 };
   const dpr = manifest.fp?.dpr || 1;
   const hardwareConcurrency = manifest.fp?.hardwareConcurrency || 8;
   const proxyResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
   const proxyCountry = String(proxyResolved && proxyResolved.slot && proxyResolved.slot.country || '').trim().toLowerCase() || 'br';
   const antiState = await ensureFingerprintProfileState({ nome, manifest, proxyCountry });
+  syncStealthVoiceForAccount({
+    languages: antiState.navigatorLanguages,
+    hardwareConcurrency,
+    webglVendor: antiState.webglVendor,
+    webglRenderer: antiState.webglRenderer
+  });
+  const alignedUa = fileStore.alignUaToInstalledChrome(manifest.uaString, manifest.uaCh);
+  const ua = alignedUa.uaString;
+  const uaCh = alignedUa.uaCh || {};
+  try { if (alignedUa.changed) await persistAlignedUa(nome, alignedUa); } catch {}
 
   // --- PATCH FULL UA/UA-CH ---
-  // P0 enterprise: CDP pode falhar com "Target closed" ou "Network.enable timed out" quando
-  // página/navegador está fechando (ex.: RAM, governor). Guard + catch evita unhandledRejection.
-  try { if (ua) await page.setUserAgent(ua); } catch {}
-  if (ua && uaCh && uaCh.brands) {
-    try {
-      if (!(page.isClosed && typeof page.isClosed === 'function' && page.isClosed())) {
-      const client = await page.target().createCDPSession();
-      await client.send('Network.setUserAgentOverride', {
-        userAgent: ua,
-        userAgentMetadata: uaCh,
-      });
-      }
-    } catch (e) {
-      const msg = (e && e.message) || String(e);
-      const isCdpFatal = /Target closed|Network\.enable|Protocol error|timed out/i.test(msg);
-      if (isCdpFatal) logger.warn('[patchPage] CDP UA-CH falhou (target/timeout) — continuando sem UA-CH', { nome: String(nome || '').slice(0, 40), err: msg.slice(0, 120) });
-      else if (process.env.BROWSER_DEBUG === '1') logger.warn('[patchPage] Falha ao setar UA-CH: ' + msg);
-    }
+  // Identidade: falhou = throw (o portão retenta 3x). Não segue pelado / Frankenstein.
+  if (!ua) throw new Error('patchPage_ua_missing');
+  if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) {
+    throw new Error('patchPage_closed_before_ua');
+  }
+  await page.setUserAgent(ua);
+  if (uaCh && uaCh.brands) {
+    const client = await page.target().createCDPSession();
+    await client.send('Network.setUserAgentOverride', {
+      userAgent: ua,
+      userAgentMetadata: uaCh,
+    });
+  }
+
+  // Viewport/DPR do preset (antes era lido e descartado — tela virava a da MAE).
+  const vw = Number(viewport && viewport.width) || 0;
+  const vh = Number(viewport && viewport.height) || 0;
+  const scaleRaw = Number(dpr);
+  const scale = (Number.isFinite(scaleRaw) && scaleRaw >= 1 && scaleRaw <= 3) ? scaleRaw : 1;
+  if (vw >= 800 && vh >= 600) {
+    await page.setViewport({
+      width: Math.floor(vw),
+      height: Math.floor(vh),
+      deviceScaleFactor: scale
+    });
   }
 
   // --- IDIOMA E REGION ---
   // ATENÇÃO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
   const patchLang = process.env.BROWSER_LANG || antiState.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
   const patchTz = process.env.BROWSER_TZ || antiState.timezone || 'America/Sao_Paulo';
-  try { await page.setExtraHTTPHeaders({ 'accept-language': patchLang }); } catch {}
-  try { await page.emulateTimezone(patchTz); } catch {}
+  await page.setExtraHTTPHeaders({ 'accept-language': patchLang });
+  await page.emulateTimezone(patchTz);
 
-  // --- viewport, deviceScale, threads ---
-  await page.evaluateOnNewDocument((hwc) => {
-    try {
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
-    } catch {}
-  }, hardwareConcurrency);
-
-  // --- LANGUAGE/PLATFORM PATCH anti-detect ---
   const fingerprintCfg = {
     navigatorLanguage: antiState.navigatorLanguage,
     navigatorLanguages: antiState.navigatorLanguages,
@@ -494,248 +897,20 @@ async function patchPage(nome, page, coords) {
     plugins: antiState.plugins,
     fonts: antiState.fonts,
     deviceMemory: antiState.deviceMemory,
-    maxTouchPoints: antiState.maxTouchPoints
+    maxTouchPoints: antiState.maxTouchPoints,
+    hardwareConcurrency
   };
 
-  await page.evaluateOnNewDocument((cfg) => {
-    const safeDefine = (obj, key, getter) => {
-      try {
-        Object.defineProperty(obj, key, { get: getter, configurable: true });
-      } catch {}
-    };
-    safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
-    safeDefine(navigator, 'languages', () => cfg.navigatorLanguages.slice());
-    safeDefine(navigator, 'platform', () => 'Win32');
-    safeDefine(navigator, 'webdriver', () => undefined);
-    safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
-    safeDefine(navigator, 'maxTouchPoints', () => cfg.maxTouchPoints);
-    const ro = Intl.DateTimeFormat.prototype.resolvedOptions;
-    if (typeof ro === 'function') {
-      Intl.DateTimeFormat.prototype.resolvedOptions = function () {
-        const out = ro.apply(this, arguments);
-        return Object.assign({}, out, { timeZone: cfg.timezone, locale: cfg.navigatorLanguage });
-      };
-    }
-
-    const fakePlugins = (cfg.plugins || []).map((name, idx) => ({
-      name,
-      filename: `internal-${idx}.dll`,
-      description: name
-    }));
-    const pluginArray = Object.assign(fakePlugins.slice(), {
-      item: (i) => fakePlugins[i] || null,
-      namedItem: (n) => fakePlugins.find((p) => p && p.name === n) || null,
-      refresh: () => {}
-    });
-    safeDefine(navigator, 'plugins', () => pluginArray);
-    safeDefine(navigator, 'mimeTypes', () => ({ length: 0, item: () => null, namedItem: () => null }));
-
-    // WebGL determinístico por perfil/coorte
-    const patchWebGl = (Proto) => {
-      if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
-      const originalGetParameter = Proto.prototype.getParameter;
-      const originalGetExtension = Proto.prototype.getExtension;
-      const wrappedGetParameter = function (param) {
-        if (param === 37445) return cfg.webglVendor;   // UNMASKED_VENDOR_WEBGL
-        if (param === 37446) return cfg.webglRenderer; // UNMASKED_RENDERER_WEBGL
-        return originalGetParameter.apply(this, arguments);
-      };
-      const wrappedGetExtension = function (name) {
-        const n = String(name || '').toUpperCase();
-        if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
-          return {
-            UNMASKED_VENDOR_WEBGL: 37445,
-            UNMASKED_RENDERER_WEBGL: 37446
-          };
-        }
-        return originalGetExtension ? originalGetExtension.apply(this, arguments) : null;
-      };
-      try {
-        Object.defineProperty(Proto.prototype, 'getParameter', { value: wrappedGetParameter, configurable: true });
-      } catch {
-        try { Proto.prototype.getParameter = wrappedGetParameter; } catch {}
-      }
-      try {
-        Object.defineProperty(Proto.prototype, 'getExtension', { value: wrappedGetExtension, configurable: true });
-      } catch {
-        try { Proto.prototype.getExtension = wrappedGetExtension; } catch {}
-      }
-    };
-    const installWebglContextWrapper = () => {
-      try {
-        const proto = window.HTMLCanvasElement && window.HTMLCanvasElement.prototype;
-        if (!proto || proto.__adWebglCtxWrapped) return;
-        const originalGetContext = proto.getContext;
-        proto.getContext = function (type) {
-          const ctx = originalGetContext.apply(this, arguments);
-          const t = String(type || '').toLowerCase();
-          if (ctx && (t === 'webgl' || t === 'experimental-webgl' || t === 'webgl2')) {
-            try {
-              const gp = ctx.getParameter && ctx.getParameter.bind(ctx);
-              const ge = ctx.getExtension && ctx.getExtension.bind(ctx);
-              if (gp) {
-                ctx.getParameter = function (param) {
-                  if (param === 37445) return cfg.webglVendor;
-                  if (param === 37446) return cfg.webglRenderer;
-                  return gp(param);
-                };
-              }
-              if (ge) {
-                ctx.getExtension = function (name) {
-                  const n = String(name || '').toUpperCase();
-                  if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
-                    return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-                  }
-                  return ge(name);
-                };
-              }
-            } catch {}
-          }
-          return ctx;
-        };
-        proto.__adWebglCtxWrapped = true;
-      } catch {}
-    };
-    patchWebGl(window.WebGLRenderingContext);
-    patchWebGl(window.WebGL2RenderingContext);
-    installWebglContextWrapper();
-
-    // Canvas determinístico estável (ruído mínimo por seed)
-    if (window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype && window.CanvasRenderingContext2D.prototype.getImageData) {
-      const originalGetImageData = window.CanvasRenderingContext2D.prototype.getImageData;
-      window.CanvasRenderingContext2D.prototype.getImageData = function () {
-        const imageData = originalGetImageData.apply(this, arguments);
-        try {
-          if (imageData && imageData.data && imageData.data.length >= 4) {
-            imageData.data[0] = (imageData.data[0] + cfg.canvasNoise) % 255;
-          }
-        } catch {}
-        return imageData;
-      };
-    }
-
-    // Audio fingerprint determinístico estável (offset minúsculo)
-    if (window.AudioBuffer && window.AudioBuffer.prototype && window.AudioBuffer.prototype.getChannelData) {
-      const originalGetChannelData = window.AudioBuffer.prototype.getChannelData;
-      window.AudioBuffer.prototype.getChannelData = function () {
-        const data = originalGetChannelData.apply(this, arguments);
-        try {
-          if (data && data.length > 8) data[0] = data[0] + cfg.audioNoise;
-        } catch {}
-        return data;
-      };
-    }
-
-    // Fonts (sinal plausível + estável)
-    try {
-      const fonts = Array.isArray(cfg.fonts) ? cfg.fonts.map((x) => String(x || '').toLowerCase()) : [];
-      if (document.fonts && typeof document.fonts.check === 'function') {
-        const originalCheck = document.fonts.check.bind(document.fonts);
-        document.fonts.check = function (font) {
-          try {
-            const family = String(font || '').toLowerCase();
-            if (fonts.some((f) => family.includes(f))) return true;
-          } catch {}
-          return originalCheck.apply(this, arguments);
-        };
-      }
-    } catch {}
-
-    window.chrome = window.chrome || { runtime: {} };
-    // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
-    // We force denied semantics, so behavior stays non-intrusive.
-    if (typeof window.Notification === 'undefined') {
-      try {
-        const NotificationShim = function Notification() {
-          throw new TypeError('Illegal constructor');
-        };
-        NotificationShim.permission = 'denied';
-        NotificationShim.requestPermission = () => Promise.resolve('denied');
-        Object.defineProperty(window, 'Notification', {
-          value: NotificationShim,
-          configurable: true,
-          writable: true
-        });
-      } catch {}
-    }
-  }, fingerprintCfg);
-
-  // Aplicar também no documento corrente (não apenas em navegações futuras).
+  await page.evaluateOnNewDocument(installAccountFingerprintHooks, fingerprintCfg);
   try {
-    await page.evaluate((cfg) => {
-      const safeDefine = (obj, key, getter) => {
-        try { Object.defineProperty(obj, key, { get: getter, configurable: true }); } catch {}
-      };
-      safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
-      safeDefine(navigator, 'languages', () => cfg.navigatorLanguages.slice());
-      safeDefine(navigator, 'platform', () => 'Win32');
-      safeDefine(navigator, 'webdriver', () => undefined);
-      safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
-      safeDefine(navigator, 'maxTouchPoints', () => cfg.maxTouchPoints);
-
-      const patchWebGl = (Proto) => {
-        if (!Proto || !Proto.prototype || !Proto.prototype.getParameter) return;
-        const originalGetParameter = Proto.prototype.getParameter;
-        const originalGetExtension = Proto.prototype.getExtension;
-        const wrappedGetParameter = function (param) {
-          if (param === 37445) return cfg.webglVendor;
-          if (param === 37446) return cfg.webglRenderer;
-          return originalGetParameter.apply(this, arguments);
-        };
-        const wrappedGetExtension = function (name) {
-          const n = String(name || '').toUpperCase();
-          if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
-            return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-          }
-          return originalGetExtension ? originalGetExtension.apply(this, arguments) : null;
-        };
-        try { Object.defineProperty(Proto.prototype, 'getParameter', { value: wrappedGetParameter, configurable: true }); } catch {}
-        try { Object.defineProperty(Proto.prototype, 'getExtension', { value: wrappedGetExtension, configurable: true }); } catch {}
-      };
-      const installWebglContextWrapper = () => {
-        try {
-          const proto = window.HTMLCanvasElement && window.HTMLCanvasElement.prototype;
-          if (!proto || proto.__adWebglCtxWrappedNow) return;
-          const originalGetContext = proto.getContext;
-          proto.getContext = function (type) {
-            const ctx = originalGetContext.apply(this, arguments);
-            const t = String(type || '').toLowerCase();
-            if (ctx && (t === 'webgl' || t === 'experimental-webgl' || t === 'webgl2')) {
-              try {
-                const gp = ctx.getParameter && ctx.getParameter.bind(ctx);
-                const ge = ctx.getExtension && ctx.getExtension.bind(ctx);
-                if (gp) {
-                  ctx.getParameter = function (param) {
-                    if (param === 37445) return cfg.webglVendor;
-                    if (param === 37446) return cfg.webglRenderer;
-                    return gp(param);
-                  };
-                }
-                if (ge) {
-                  ctx.getExtension = function (name) {
-                    const n = String(name || '').toUpperCase();
-                    if (n === 'WEBGL_DEBUG_RENDERER_INFO') {
-                      return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-                    }
-                    return ge(name);
-                  };
-                }
-              } catch {}
-            }
-            return ctx;
-          };
-          proto.__adWebglCtxWrappedNow = true;
-        } catch {}
-      };
-      patchWebGl(window.WebGLRenderingContext);
-      patchWebGl(window.WebGL2RenderingContext);
-      installWebglContextWrapper();
-    }, fingerprintCfg);
-  } catch {}
+    await page.evaluate(installAccountFingerprintHooks, fingerprintCfg);
+  } catch (e) {
+    throw e;
+  }
 
   // --- GEOLOCALIZAÇÃO ---
   if (coords && coords.latitude) {
-    try { await page.setGeolocation(coords); } catch(e){}
+    await page.setGeolocation(coords);
   }
 
   // --- OCULTAR BANNER AUTOMATION ---
@@ -873,23 +1048,13 @@ async function patchPage(nome, page, coords) {
       window.addEventListener('beforeunload', (e) => { try { e.stopImmediatePropagation(); } catch {} }, true);
     });
   } catch (e) {
-    // #region agent log (debug)
-    // Diagnóstico do porquê caiu em probe_failed (sem HTML/sem segredos)
+    // Hook de beforeunload não é identidade. Não aborta o patch e não devolve objeto de probe.
     try {
-      let hrefSafe = '';
-      try { hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
-      const msg = (e && e.message) ? String(e.message) : String(e || '');
+      logger.warn('[patchPage] beforeunload hook falhou (seguindo)', {
+        nome: String(nome || '').slice(0, 40),
+        err: String((e && e.message) || e || '').slice(0, 160)
+      });
     } catch {}
-    // #endregion
-    // Fail-safe enterprise: se o probe falhar, não podemos concluir "liberado".
-    // Mantemos como loginRequired=true para evitar ações erradas.
-    try {
-      const hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
-      const titleSafe = (page && typeof page.title === 'function') ? String(page.title() || '') : '';
-      const msg = (e && e.message) ? String(e.message) : String(e || '');
-      return { loginRequired: true, reason: 'probe_failed', domain: null, url: hrefSafe ? hrefSafe.slice(0, 260) : null, title: titleSafe ? titleSafe.slice(0, 120) : null, evidence: { probeError: { name: (e && e.name) ? String(e.name).slice(0, 80) : null, msg: msg.slice(0, 260) } } };
-    } catch {}
-    return { loginRequired: true, reason: 'probe_failed' };
   }
 }
 
@@ -916,6 +1081,400 @@ function resolvePatchCoordsForProfile(profileName, manifest) {
     return geoProxy.coords;
   }
   return utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
+}
+
+const BLINDAR_TRIES = 3;
+const BLINDAR_RETRY_MS = 450;
+const NEWPAGE_CONTA_TRIES = 3;
+
+function _isAccountPageClosed(page) {
+  try {
+    if (!page) return true;
+    if (typeof page.isClosed === 'function' && page.isClosed()) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function _browserGateBusy(browser) {
+  return Number(browser && browser._convenienteGateInFlight || 0) > 0;
+}
+
+function _pageIsBlinding(page) {
+  return !!(page && page._convenienteBlindarPromise);
+}
+
+async function _safeCloseAccountPage(page) {
+  try {
+    if (!_isAccountPageClosed(page) && typeof page.close === 'function') {
+      await page.close({ runBeforeUnload: false }).catch(() => {});
+    }
+  } catch {}
+}
+
+function _auditBlindar(event, extra) {
+  try {
+    provisionAudit.append(Object.assign({ ts: Date.now(), event: String(event || '') }, extra || {}));
+  } catch {}
+}
+
+async function applyProxyAuthIfEnabled(page, nome) {
+  const manifest = await manifestStore.read(nome).catch(() => null);
+  const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest: manifest || {} });
+  if (gatewayProxy.isStrictProxyRequired() && (!resolved || resolved.enabled !== true)) {
+    const reason = String((resolved && resolved.reason) || 'proxy_unresolved').trim() || 'proxy_unresolved';
+    throw new Error(`gateway_proxy_required:${reason}`);
+  }
+  if (!(resolved && resolved.enabled === true && resolved.auth && typeof page.authenticate === 'function')) {
+    return { enabled: false };
+  }
+  await page.authenticate({
+    username: String(resolved.auth.username || ''),
+    password: String(resolved.auth.password || '')
+  });
+  return { enabled: true };
+}
+
+async function _blindarOnce(page, nome) {
+  if (_isAccountPageClosed(page)) throw new Error('blindar_page_closed');
+  const manifest = await manifestStore.read(nome).catch(() => null);
+  const coords = resolvePatchCoordsForProfile(nome, manifest || {});
+  await patchPage(nome, page, coords);
+  await applyProxyAuthIfEnabled(page, nome);
+  page._convenientePatched = true;
+  page._convenientePatchedNome = String(nome);
+  page._convenientePatchedAt = Date.now();
+}
+
+async function blindarPaginaDaConta(page, nome, opts = {}) {
+  const who = String(nome || '').trim();
+  if (!who) throw new Error('blindar_nome_ausente');
+  if (_isAccountPageClosed(page)) throw new Error('blindar_page_closed');
+
+  if (page._convenientePatched === true && page._convenientePatchedNome === who) {
+    return page;
+  }
+
+  if (page._convenienteBlindarPromise) {
+    await page._convenienteBlindarPromise;
+    if (page._convenientePatched === true && page._convenientePatchedNome === who) return page;
+    if (_isAccountPageClosed(page)) throw new Error('blindar_page_closed');
+  }
+
+  const source = String((opts && opts.source) || 'blindar').slice(0, 80);
+  const tries = Math.max(1, Math.min(5, Number((opts && opts.tries) || BLINDAR_TRIES) || BLINDAR_TRIES));
+
+  page._convenienteBlindarPromise = (async () => {
+    const errors = [];
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      if (_isAccountPageClosed(page)) throw new Error('blindar_page_closed');
+      try {
+        await _blindarOnce(page, who);
+        if (attempt > 1) {
+          try { logger.info('[BLINDAR] ok apos retry', { nome: who, attempt, source }); } catch {}
+        }
+        _auditBlindar('account_page_blinded', { nome: who, attempt, source });
+        return page;
+      } catch (e) {
+        const msg = String((e && e.message) || e || '').slice(0, 220);
+        errors.push(`t${attempt}:${msg}`);
+        try { logger.warn('[BLINDAR] falhou, retenta', { nome: who, attempt, tries, source, err: msg }); } catch {}
+        _auditBlindar('account_page_blind_retry', { nome: who, attempt, tries, source, error: msg });
+        if (attempt < tries) await new Promise((r) => setTimeout(r, BLINDAR_RETRY_MS * attempt));
+      }
+    }
+    const joined = errors.join(' | ');
+    _auditBlindar('account_page_blind_failed', { nome: who, tries, source, error: joined.slice(0, 400) });
+    throw new Error(`blindar_failed:${who}:${joined}`.slice(0, 500));
+  })();
+
+  try {
+    return await page._convenienteBlindarPromise;
+  } catch (e) {
+    try { page._convenienteBlindarPromise = null; } catch {}
+    throw e;
+  }
+}
+
+async function newPageDaConta(browser, nome, opts = {}) {
+  const who = String(nome || '').trim();
+  if (!browser) throw new Error('newPageDaConta_no_browser');
+  if (!who) throw new Error('newPageDaConta_nome_ausente');
+  const source = String((opts && opts.source) || 'newPageDaConta').slice(0, 80);
+  const tries = Math.max(1, Math.min(5, Number((opts && opts.tries) || NEWPAGE_CONTA_TRIES) || NEWPAGE_CONTA_TRIES));
+  const errors = [];
+
+  try { browser._convenienteNome = who; } catch {}
+  try {
+    const man = await manifestStore.read(who).catch(() => null);
+    if (man) await syncStealthFromManifest(who, man);
+  } catch {}
+  // A aba nasce about:blank. O killer (7s) mata blank se não houver suppress.
+  // Cola+UA-CH pode passar de 7s; sem isto o killer fecha a aba no meio do portão.
+  try {
+    const until = Date.now() + 25000;
+    browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {};
+    browser._suppressBlankKillUntil[who] = Math.max(Number(browser._suppressBlankKillUntil[who] || 0) || 0, until);
+  } catch {}
+  browser._convenienteGateInFlight = (Number(browser._convenienteGateInFlight || 0) || 0) + 1;
+  try {
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      let page = null;
+      try {
+        page = await browser.newPage();
+        await blindarPaginaDaConta(page, who, { source: `${source}:a${attempt}`, tries: 1 });
+        return page;
+      } catch (e) {
+        const msg = String((e && e.message) || e || '').slice(0, 220);
+        errors.push(`t${attempt}:${msg}`);
+        try { logger.warn('[NEWPAGE_CONTA] falhou, fecha aba e retenta', { nome: who, attempt, tries, source, err: msg }); } catch {}
+        _auditBlindar('account_newpage_retry', { nome: who, attempt, tries, source, error: msg });
+        await _safeCloseAccountPage(page);
+        if (attempt < tries) await new Promise((r) => setTimeout(r, BLINDAR_RETRY_MS * attempt));
+      }
+    }
+    const joined = errors.join(' | ');
+    _auditBlindar('account_newpage_failed', { nome: who, tries, source, error: joined.slice(0, 400) });
+    throw new Error(`newPageDaConta_failed:${who}:${joined}`.slice(0, 500));
+  } finally {
+    browser._convenienteGateInFlight = Math.max(0, (Number(browser._convenienteGateInFlight || 1) || 1) - 1);
+  }
+}
+
+function _installForceCloseExtras(browser) {
+  browser.forceCloseExtras = async () => {
+    try {
+      if (_browserGateBusy(browser)) return;
+      const pages = await browser.pages();
+      if (pages && pages.length > 1) {
+        for (const p of pages.slice(1)) {
+          if (_pageIsBlinding(p)) continue;
+          let u = '';
+          try { u = await p.url(); } catch {}
+          if (/facebook.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
+          if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
+        }
+      }
+    } catch {}
+  };
+  browser.forceCloseExtrasHard = async () => {
+    try {
+      if (_browserGateBusy(browser)) return;
+      const pages = await browser.pages();
+      if (pages && pages.length > 1) {
+        for (const p of pages.slice(1)) {
+          if (_pageIsBlinding(p)) continue;
+          if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
+        }
+      }
+    } catch {}
+  };
+}
+
+/**
+ * Cola identidade + portão neste objeto Browser (launch OU reconnect CDP).
+ * Sem isto, puppeteer.connect nasce sem targetcreated/UA-CH/timezone.
+ */
+async function bindAccountIdentity(browser, nome, opts = {}) {
+  const who = String(nome || '').trim();
+  if (!browser) throw new Error('bindAccountIdentity_no_browser');
+  if (!who) throw new Error('bindAccountIdentity_nome_ausente');
+  const source = String((opts && opts.source) || 'bind').slice(0, 80);
+
+  try { browser._convenienteNome = who; } catch {}
+  try {
+    const until = Date.now() + 25000;
+    browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {};
+    browser._suppressBlankKillUntil[who] = Math.max(Number(browser._suppressBlankKillUntil[who] || 0) || 0, until);
+  } catch {}
+
+  try {
+    const conn = browser && browser._connection;
+    if (conn && typeof conn.setProtocolTimeout === 'function') {
+      conn.setProtocolTimeout(60000);
+    }
+  } catch {}
+
+  const manifest = await manifestStore.read(who).catch(() => null);
+  try { await syncStealthFromManifest(who, manifest || {}); } catch {}
+  const gatewayResolved = gatewayProxy.resolveProxyForProfile({
+    profileName: who,
+    manifest: manifest || {}
+  });
+
+  const setDefaults = async (p) => {
+    try {
+      if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.auth) {
+        try {
+          await p.authenticate({
+            username: String(gatewayResolved.auth.username || ''),
+            password: String(gatewayResolved.auth.password || '')
+          });
+        } catch (e) {
+          try {
+            await gatewayProxy.reportProxyIssue({
+              resolved: gatewayResolved,
+              reason: 'page_auth_proxy_failed',
+              context: { stage: 'authenticate', error: String((e && e.message) || e || '').slice(0, 220) }
+            });
+          } catch {}
+        }
+      }
+      p.setDefaultTimeout(30000);
+      p.setDefaultNavigationTimeout(45000);
+      p.on('dialog', async (dlg) => {
+        try {
+          const t = dlg.type && dlg.type();
+          const m = (dlg.message && dlg.message()) || '';
+          if (t === 'beforeunload' || /sair|deixar|leave this page|continuar|recarregar|atualizar/i.test(m)) {
+            await dlg.accept().catch(()=>{});
+          } else {
+            await dlg.dismiss().catch(()=>{});
+          }
+        } catch {}
+      });
+    } catch {}
+  };
+
+  const already = !!browser._convenienteIdentityBound;
+  if (!already) {
+    browser._convenienteIdentityBound = true;
+    const pagesNow = await browser.pages().catch(() => []);
+    for (const p of (pagesNow || [])) await setDefaults(p);
+    browser.on('targetcreated', async (t) => {
+      try {
+        let isPage = true;
+        try { if (t && t.type && t.type() !== 'page') isPage = false; } catch {}
+        const p = await t.page().catch(()=>null);
+        if (p) await setDefaults(p);
+        if (!isPage || !p) return;
+        const accountNome = String(browser._convenienteNome || who).trim();
+        if (!accountNome) return;
+        const gateBusy = _browserGateBusy(browser);
+        try {
+          await blindarPaginaDaConta(p, accountNome, {
+            source: gateBusy ? 'targetcreated_gate' : 'targetcreated_popup',
+            tries: gateBusy ? 1 : BLINDAR_TRIES
+          });
+        } catch (e) {
+          if (!gateBusy && !_isAccountPageClosed(p)) {
+            let opener = null;
+            try { opener = await p.opener(); } catch {}
+            let u = '';
+            try { u = String((typeof p.url === 'function' && p.url()) || ''); } catch {}
+            const junk = !u || u === 'about:blank' || /chrome-error:|chromewebdata|chrome:\/\/crash/i.test(u);
+            const isPopup = !!opener;
+            if (isPopup || junk) {
+              try {
+                logger.warn('[BLINDAR] popup/lixo sem cara, fechando', {
+                  nome: accountNome,
+                  junk: !!junk,
+                  popup: !!isPopup,
+                  url: u.slice(0, 160),
+                  err: String((e && e.message) || e || '').slice(0, 180)
+                });
+              } catch {}
+              await _safeCloseAccountPage(p);
+            } else {
+              try {
+                logger.warn('[BLINDAR] type=page sem cara, nao fecho (pode ser iframe da Meta)', {
+                  nome: accountNome,
+                  url: u.slice(0, 160),
+                  err: String((e && e.message) || e || '').slice(0, 180)
+                });
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+    });
+    _installForceCloseExtras(browser);
+  }
+
+  try {
+    const context = browser.defaultBrowserContext();
+    const MEDIA_ORIGINS = [
+      'https://facebook.com',
+      'https://www.facebook.com',
+      'https://m.facebook.com',
+      'https://web.facebook.com',
+      'https://mbasic.facebook.com',
+      'https://business.facebook.com',
+      'https://messenger.com',
+      'https://www.messenger.com',
+      'https://lookaside.facebook.com',
+      'https://staticxx.facebook.com'
+    ];
+    for (const o of MEDIA_ORIGINS) {
+      await context.overridePermissions(o, ['geolocation', 'camera', 'microphone']);
+    }
+    function originOf(u) {
+      try {
+        const url = new URL(u);
+        return `${url.protocol}//${url.host}`;
+      } catch { return null; }
+    }
+    function isFbHost(host) {
+      return !!host && (
+        host.endsWith('.facebook.com') || host === 'facebook.com' ||
+        host.endsWith('.messenger.com') || host === 'messenger.com'
+      );
+    }
+    async function grantForUrl(u) {
+      const ori = originOf(u);
+      if (!ori) return;
+      try {
+        const h = (new URL(u)).host;
+        if (isFbHost(h)) {
+          await context.overridePermissions(ori, ['geolocation', 'camera', 'microphone']);
+        }
+      } catch {}
+    }
+    if (!browser._mediaPermListenerInstalled) {
+      browser._mediaPermListenerInstalled = true;
+      browser.on('targetcreated', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+      browser.on('targetchanged', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+    }
+    if (process.env.BROWSER_DEBUG === '1') {
+      logger.debug('>> [BROWSER][STEP] Permissões de mídia concedidas para Facebook/Messenger.');
+    }
+  } catch (e) {
+    logger.warn('[BROWSER][Permissões mídia] Falha ao conceder mídia: ' + ((e && e.message) || e));
+  }
+
+  const all = await browser.pages().catch(() => []);
+  const page0 = all && all[0];
+  if (!page0) throw new Error('bindAccountIdentity_no_page0');
+
+  browser._convenienteGateInFlight = (Number(browser._convenienteGateInFlight || 0) || 0) + 1;
+  try {
+    await blindarPaginaDaConta(page0, who, { source: `${source}_tab0` });
+    for (const extra of (all || []).slice(1)) {
+      let u = '';
+      try { u = (typeof extra.url === 'function') ? String(extra.url() || '') : ''; } catch {}
+      if (!u || u === 'about:blank') {
+        await _safeCloseAccountPage(extra);
+        continue;
+      }
+      try {
+        await blindarPaginaDaConta(extra, who, { source: `${source}_extra` });
+      } catch (e) {
+        try {
+          logger.warn('[BLINDAR] aba extra sem cara, fechando', {
+            nome: who,
+            source,
+            url: u.slice(0, 160),
+            err: String((e && e.message) || e || '').slice(0, 160)
+          });
+        } catch {}
+        await _safeCloseAccountPage(extra);
+      }
+    }
+  } finally {
+    browser._convenienteGateInFlight = Math.max(0, (Number(browser._convenienteGateInFlight || 1) || 1) - 1);
+  }
+  return browser;
 }
 
 // Minimização suave
@@ -1304,7 +1863,7 @@ function writeJsonAtomic(file, obj) {
  * - Força: session.restore_on_startup=0 (Nova guia), startup_urls=[]
  * - Em "Local State": exited_cleanly=true
  */
-function ensureChromeProfilePreferences(userDataDir) {
+function ensureChromeProfilePreferences(userDataDir, windowBounds) {
   try {
     if (!userDataDir) return;
 
@@ -1319,6 +1878,20 @@ function ensureChromeProfilePreferences(userDataDir) {
     prefs.session = prefs.session || {};
     prefs.session.restore_on_startup = 0; // 0: Nova guia
     prefs.session.startup_urls = [];
+    if (windowBounds && Number(windowBounds.width) >= 800 && Number(windowBounds.height) >= 600) {
+      const left = Math.floor(Number(windowBounds.left) || 0);
+      const top = Math.floor(Number(windowBounds.top) || 0);
+      const width = Math.floor(Number(windowBounds.width));
+      const height = Math.floor(Number(windowBounds.height));
+      prefs.browser = prefs.browser || {};
+      prefs.browser.window_placement = {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        maximized: false
+      };
+    }
     writeJsonAtomic(prefsPath, prefs);
 
     // Local State
@@ -1342,14 +1915,17 @@ function ensureChromeProfilePreferences(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
-  // 1) Sempre fecha about:blank extras (nunca aguarda flags)
+  // 1) Fecha about:blank extras — EXCETO enquanto o portão está colando uma aba nova
+  //    (a aba do portão nasce blank; fechar aqui mata a cola no meio).
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  if (_browserGateBusy(browser)) return;
   try {
     const pages = await browser.pages();
     for (const p of pages) {
       try {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (_pageIsBlinding(p)) continue;
         let u = ''; try { u = p.url(); } catch {}
         if (!u || u === 'about:blank') {
           await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1378,6 +1954,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
       for (const p of pages) {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (_pageIsBlinding(p)) continue;
         let u = ''; try { u = p.url(); } catch {}
         if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1397,6 +1974,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
  */
 async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = null } = {}) {
   if (!browser) return { ok: false, error: 'no_browser' };
+  if (_browserGateBusy(browser)) return { ok: true, kept: 0, closed: 0, reason: 'gate_busy' };
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   try {
     const pages = await browser.pages().catch(()=>[]);
@@ -1429,6 +2007,7 @@ async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = 
     let closed = 0;
     for (const p of pages) {
       if (p === keep) continue;
+      if (_pageIsBlinding(p)) continue;
       try { await p.close({ runBeforeUnload: false }).catch(()=>{}); closed++; } catch {}
       await sleep(60);
     }
@@ -1468,6 +2047,7 @@ function installOneTabGuard(browser, nome, {
     }
     async function enforceHardCap() {
       try {
+        if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
         const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
         const isDead = (u) => hygiene && typeof hygiene.isDeadTabUrl === 'function' ? hygiene.isDeadTabUrl(u) : false;
         const isJunk = (u) => hygiene && typeof hygiene.isJunkUrl === 'function' ? hygiene.isJunkUrl(u) : (!u || u === 'about:blank');
@@ -1484,6 +2064,7 @@ function installOneTabGuard(browser, nome, {
         for (let i = pages.length - 1; i >= 0; i--) {
           if (pageCount <= 1) break;
           const p = pages[i];
+          if (_pageIsBlinding(p)) continue;
           let u = '';
           try { u = await p.url().catch(()=>''); } catch {}
           if (!isDead(u)) continue;
@@ -1514,6 +2095,7 @@ function installOneTabGuard(browser, nome, {
             if (remaining <= lim) break;
             if (i === keepIdx) continue;
             const p = livePages[i];
+            if (_pageIsBlinding(p)) continue;
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
             if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
@@ -1585,45 +2167,8 @@ function installOneTabGuard(browser, nome, {
 // ====== FIND CHROME STABLE ======
 // Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
 function findChromeStable() {
-  const envChrome = process.env.CHROME_PATH;
-  if (envChrome && fs.existsSync(envChrome)) {
-    return envChrome;
-  }
-  const envChromium = process.env.CHROMIUM_PATH;
-  if (envChromium && fs.existsSync(envChromium)) {
-    return envChromium;
-  }
-
-  // Default installs, by OS
-  const candidates = [];
-  if (process.platform === 'win32') {
-    candidates.push(
-      path.join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe')
-    );
-  } else if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      path.join(os.homedir(), 'Applications', 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome')
-    );
-  } else {
-    candidates.push(
-      '/opt/google/chrome/chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/snap/bin/chromium'
-    );
-  }
-
-  // Adiciona ao final dos candidatos o path do Chromium por variável de ambiente, se definido
-  if (envChromium) {
-    candidates.push(envChromium);
-  }
-
-  for (const file of candidates) {
-    if (file && fs.existsSync(file)) return file;
-  }
+  const found = fileStore.findChromeStablePath();
+  if (found) return found;
   throw new Error('Chrome/Chromium não encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
 }
 
@@ -1657,9 +2202,13 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // GUARDA: RAM, userDataDir correto
     ensureUserDataDirUnderChrome(manifest);
     const userDataDir = manifest.userDataDir;
+    const accountNome = String((manifest && manifest.nome) || nome || '').trim();
+    let launchAntiState = null;
+    try { launchAntiState = await syncStealthFromManifest(accountNome, manifest); } catch {}
+    const windowBounds = resolveAccountWindowBounds(manifest);
 
-    // RAM: Garantir preferências, evitar restauração
-    ensureChromeProfilePreferences(userDataDir);
+    // RAM: Garantir preferências, evitar restauração / maximize fantasma
+    ensureChromeProfilePreferences(userDataDir, windowBounds);
 
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
       logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
@@ -1678,12 +2227,13 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY!
+    const launchLang = String((launchAntiState && launchAntiState.navigatorLanguage) || 'pt-BR');
     const launchArgs = [
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
       '--password-store=basic', // Evita prompts/chaves desktop
       '--disable-extensions', // Zero extensão custom
-      '--lang=pt-BR', // GOAL: idioma fixo PT-BR
+      `--lang=${launchLang}`,
       '--disable-background-timer-throttling', // Não pausa timers de fundo
       '--disable-backgrounding-occluded-windows', // Prev. throttling CPU tabs background
       '--disable-renderer-backgrounding', // Garantir render foreground
@@ -1691,9 +2241,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
       '--disk-cache-size=104857600', // 100MB de cap em disco
       '--media-cache-size=0', // Zero cache de mídia
-      '--window-size=1366,768', // Sempre inicializa janela visível/tamanho padrão
-      '--start-maximized' // Maximizada sempre
-      // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
+      `--window-size=${windowBounds.width},${windowBounds.height}`,
+      `--window-position=${windowBounds.left},${windowBounds.top}`
+      // Sem --start-maximized: a janela física tem que ser o preset, não o monitor da MAE.
     ];
 
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
@@ -1703,6 +2253,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
 
     if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer) {
       launchArgs.push(`--proxy-server=${gatewayResolved.proxyServer}`);
+      // Só com proxy: sem túnel, HTTP e WebRTC já saem no mesmo IP do modem.
+      launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
     }
 
     // ENV para adicionar argumentos de debug
@@ -1800,6 +2352,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
+    try { browser._convenienteNome = String((manifest && manifest.nome) || nome || '').trim(); } catch {}
 
     // 1. PATCH: Set protocol timeout GLOBAL para 60s
     try {
@@ -1824,121 +2377,27 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
     // Permaneça inativo aqui.
 
-    // 2) Maximizar janela (se falhar, segue)
+    // 2) Janela = preset (não maximizar no monitor da MAE)
     try {
       const first = (await browser.pages())[0];
       const client = await first.target().createCDPSession();
       const { windowId } = await client.send('Browser.getWindowForTarget');
       await client.send('Browser.setWindowBounds', {
         windowId,
-        bounds: { windowState: 'maximized' }
+        bounds: {
+          windowState: 'normal',
+          left: windowBounds.left,
+          top: windowBounds.top,
+          width: windowBounds.width,
+          height: windowBounds.height
+        }
       });
-      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela maximizada [OK]');
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela no preset [OK]');
     } catch (e) {
-      logger.warn('[BROWSER] Falha ao maximizar (seguindo normal): ' + ((e && e.message) || e));
+      logger.warn('[BROWSER] Falha ao aplicar window bounds do preset (seguindo): ' + ((e && e.message) || e));
     }
 
-    // 2. PATCH: Configuração defaultTimeout, defaultNavigationTimeout e interceptação beforeunload para TODAS as new pages!
-    try {
-      const setDefaults = async (p) => {
-        try {
-          if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.auth) {
-            try {
-              await p.authenticate({
-                username: String(gatewayResolved.auth.username || ''),
-                password: String(gatewayResolved.auth.password || '')
-              });
-            } catch (e) {
-              try {
-                await gatewayProxy.reportProxyIssue({
-                  resolved: gatewayResolved,
-                  reason: 'page_auth_proxy_failed',
-                  context: { stage: 'authenticate', error: String((e && e.message) || e || '').slice(0, 220) }
-                });
-              } catch {}
-            }
-          }
-          p.setDefaultTimeout(30000); // 30s ações padrão
-          p.setDefaultNavigationTimeout(45000); // 45s navegação
-          p.on('dialog', async (dlg) => {
-            try {
-              const t = dlg.type && dlg.type();
-              const m = (dlg.message && dlg.message()) || '';
-              if (t === 'beforeunload' || /sair|deixar|leave this page|continuar|recarregar|atualizar/i.test(m)) {
-                await dlg.accept().catch(()=>{});
-              } else {
-                await dlg.dismiss().catch(()=>{});
-              }
-            } catch {}
-          });
-        } catch {}
-      };
-      const pagesNow = await browser.pages();
-      for (const p of (pagesNow||[])) await setDefaults(p);
-      browser.on('targetcreated', async (t) => {
-        try {
-          const p = await t.page().catch(()=>null);
-          if (p) await setDefaults(p);
-        } catch {}
-      });
-    } catch {}
-
-    // 3) Permissões: GEO + CAMERA + MICROFONE (militar, multi-origin, dinâmico)
-    try {
-      const context = browser.defaultBrowserContext();
-      const MEDIA_ORIGINS = [
-        'https://facebook.com',
-        'https://www.facebook.com',
-        'https://m.facebook.com',
-        'https://web.facebook.com',
-        'https://mbasic.facebook.com',
-        'https://business.facebook.com',
-        'https://messenger.com',
-        'https://www.messenger.com',
-        'https://lookaside.facebook.com',
-        'https://staticxx.facebook.com'
-      ];
-      for (const o of MEDIA_ORIGINS) {
-        await context.overridePermissions(o, ['geolocation', 'camera', 'microphone']);
-      }
-
-      // Blindagem dinâmica: qualquer nova target criada/alterada (iframe/popup/flow) -> re-grant
-      function originOf(u) {
-        try {
-          const url = new URL(u);
-          return `${url.protocol}//${url.host}`;
-        } catch { return null; }
-      }
-      function isFbHost(host) {
-        return !!host && (
-          host.endsWith('.facebook.com') || host === 'facebook.com' ||
-          host.endsWith('.messenger.com') || host === 'messenger.com'
-        );
-      }
-      async function grantForUrl(u) {
-        const ori = originOf(u);
-        if (!ori) return;
-        try {
-          const h = (new URL(u)).host;
-          if (isFbHost(h)) {
-            await context.overridePermissions(ori, ['geolocation', 'camera', 'microphone']);
-          }
-        } catch {}
-      }
-      if (!browser._mediaPermListenerInstalled) {
-        browser._mediaPermListenerInstalled = true;
-        browser.on('targetcreated', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
-        browser.on('targetchanged', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
-      }
-
-      if (process.env.BROWSER_DEBUG === '1') {
-        logger.debug('>> [BROWSER][STEP] Permissões de mídia concedidas para Facebook/Messenger.');
-      }
-    } catch (e) {
-      logger.warn('[BROWSER][Permissões mídia] Falha ao conceder mídia: ' + ((e && e.message) || e));
-    }
-
-    // 4) Espera por pelo menos 1 page pronta
+    // 2–5) Portão único: defaults, popup, permissões, cola aba 0/extras, forceClose.
     const LAUNCH_MAX_WAIT = 7000;
     const LAUNCH_POLL = 200;
     let ready = false;
@@ -1955,42 +2414,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não inicializou/target não disponível em tempo aceitável!');
     }
 
-    // 5) patchPage na primeira aba — se falhar, fecha e relança
     try {
-      const page = (await browser.pages())[0];
-      await patchPage(manifest.nome, page, coords);
+      await bindAccountIdentity(browser, String((manifest && manifest.nome) || nome || '').trim(), {
+        source: 'openBrowser'
+      });
     } catch (e) {
       await safeCloseBrowser(browser);
       throw e;
     }
 
-    // RAM: expose pages (sanity check)
     browser.getPageCount = async () => (await browser.pages()).length;
-    browser.forceCloseExtras = async () => {
-      try {
-        const pages = await browser.pages();
-        if (pages && pages.length > 1) {
-          const mainPage = pages[0];
-          for (const p of pages.slice(1)) {
-            let u = '';
-            try { u = await p.url(); } catch {}
-            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
-            if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
-          }
-        }
-      } catch {}
-    };
-    // Enterprise HARDCORE: fecha TUDO exceto a aba 0 (independente de URL).
-    browser.forceCloseExtrasHard = async () => {
-      try {
-        const pages = await browser.pages();
-        if (pages && pages.length > 1) {
-          for (const p of pages.slice(1)) {
-            if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
-          }
-        }
-      } catch {}
-    };
 
     // Após toda a abertura e logo antes de return:
     if (browser && typeof browser.process === "function") {
@@ -4493,7 +4926,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
-    try { pages = [await browser.newPage()]; } catch {}
+    pages = [await newPageDaConta(browser, nome, { source: 'configure_missing_p0' })];
   }
   if (!pages || !pages[0]) throw new Error('configureProfile_no_page0');
 
@@ -4546,9 +4979,9 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
   // Aba 0 — Messages (Virtus)
   try {
-    await patchPage(nome, p0, coords);
+    await blindarPaginaDaConta(p0, nome, { source: 'configure_p0' });
   } catch (e) {
-    if (dbg) logger.debug('[CONFIG] patchPage p0 fail', { nome, error: (e && e.message) || String(e) });
+    if (dbg) logger.debug('[CONFIG] blindar p0 fail', { nome, error: (e && e.message) || String(e) });
     throw e;
   }
   await injectCookies(p0, cookies);
@@ -4601,8 +5034,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // Aba 1 — Create (Robe) — só se aba 0 passou login/captcha/PIN
   let p1 = null;
   try {
-    p1 = await browser.newPage();
-    await patchPage(nome, p1, coords);
+    p1 = await newPageDaConta(browser, nome, { source: 'configure_p1' });
     await injectCookies(p1, cookies);
     await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
@@ -5309,8 +5741,15 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       } catch {}
 
       async function check() {
+        let rearmed = false;
         try {
           if (page.isClosed && page.isClosed()) return;
+          if (_browserGateBusy(browser) || _pageIsBlinding(page)) {
+            rearmed = true;
+            const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
+            timers.set(key, t2);
+            return;
+          }
           const u = page.url ? page.url() : '';
           let dead = false;
           try {
@@ -5345,7 +5784,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
               return;
             }
-            // Rearmável: tenta de novo depois
+            rearmed = true;
             const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
             timers.set(key, t2);
             return;
@@ -5355,7 +5794,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
         } finally {
-          clearTimer(key);
+          if (!rearmed) clearTimer(key);
         }
       }
 
@@ -7401,6 +7840,9 @@ module.exports = {
   configureProfile,
   invocarHumano,
   patchPage,
+  blindarPaginaDaConta,
+  newPageDaConta,
+  bindAccountIdentity,
   resolvePatchCoordsForProfile,
   injectCookies,
   ensureMinimizedWindowForPage,

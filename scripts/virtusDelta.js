@@ -255,10 +255,14 @@ function extractWsMessageEvents(input, accountUserId = "") {
 
 let killChromeProfileProcesses = null;
 let detectVirtusIdentityBlock = null;
+let newPageDaConta = null;
+let blindarPaginaDaConta = null;
 try {
   const browserMod = require("./browser.js");
   killChromeProfileProcesses = browserMod.killChromeProfileProcesses;
   detectVirtusIdentityBlock = browserMod.detectVirtusIdentityBlock;
+  newPageDaConta = browserMod.newPageDaConta;
+  blindarPaginaDaConta = browserMod.blindarPaginaDaConta;
 } catch (_) {}
 
 async function probeIdVirtusBlock(page, { account_login = null, thread_key = null, stage = "" } = {}) {
@@ -6640,7 +6644,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   }
 
   const pages = await browser.pages().catch(() => []);
-  const page = pages[restrictTab] || pages[0] || (await browser.newPage());
+  let page = pages[restrictTab] || pages[0] || null;
+  const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
+  if (!page) {
+    if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
+    if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
+    page = await newPageDaConta(browser, bootNome, { source: "virtusDelta_boot" });
+  } else {
+    if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
+    if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
+    await blindarPaginaDaConta(page, bootNome, { source: "virtusDelta_boot_existing" });
+  }
   attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
 
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).

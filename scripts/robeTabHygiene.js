@@ -97,6 +97,7 @@ function pageAgeMs(browser, page) {
 
 function clearBlankSuppress(browser, nome) {
   try {
+    if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
     if (browser && browser._suppressBlankKillUntil && nome) {
       delete browser._suppressBlankKillUntil[nome];
     }
@@ -106,8 +107,9 @@ function clearBlankSuppress(browser, nome) {
 function armBlankSuppress(browser, nome, ms = 20_000) {
   try {
     if (!browser || !nome) return;
+    const until = Date.now() + Math.max(1_000, Number(ms) || 20_000);
     const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-    guard[nome] = Date.now() + Math.max(1_000, Number(ms) || 20_000);
+    guard[nome] = Math.max(Number(guard[nome] || 0) || 0, until);
   } catch {}
 }
 
@@ -217,6 +219,8 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         let u = "";
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
         if (isCreateMarketplaceUrl(u)) continue;
+        if (p && p._convenienteBlindarPromise) continue;
+        if (Number(browser && browser._convenienteGateInFlight || 0) > 0) continue;
         if (!isJunkUrl(u)) continue;
         const r = await safeClosePage(p, { nome, reason: "sweep_junk_tab" });
         if (r && r.closed) closed++;
@@ -243,6 +247,8 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
 }
 
 async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } = {}) {
+  if (!browser) return { closed: 0, failed: 0 };
+  if (Number(browser._convenienteGateInFlight || 0) > 0) return { closed: 0, failed: 0 };
   let closed = 0;
   let failed = 0;
   try {
@@ -266,6 +272,7 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
         ]);
       } catch {}
       if (page) {
+        if (page._convenienteBlindarPromise) continue;
         const r = await safeClosePage(page, { nome, reason: "junk_cdp_target_page" });
         if (r && r.closed) { closed++; continue; }
       }
@@ -419,6 +426,10 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
 
   if (candidate) {
     try {
+      if (!nome) throw new Error("cure_goto_no_nome");
+      const browserMod = require("./browser.js");
+      if (typeof browserMod.blindarPaginaDaConta !== "function") throw new Error("cure_goto_no_gate");
+      await browserMod.blindarPaginaDaConta(candidate, nome, { source: "cure_goto_existing" });
       await Promise.race([
         candidate.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
         new Promise((_, rej) => setTimeout(() => rej(new Error("cure_goto_timeout")), 28000))
@@ -445,9 +456,13 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
   }
 
   try {
+    const browserMod = require("./browser.js");
+    if (!nome || typeof browserMod.newPageDaConta !== "function") {
+      throw new Error("cure_newpage_no_gate");
+    }
     const p = await Promise.race([
-      browser.newPage(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_timeout")), 8000))
+      browserMod.newPageDaConta(browser, nome, { source: "cure_messages" }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_timeout")), 28000))
     ]);
     await Promise.race([
       p.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),

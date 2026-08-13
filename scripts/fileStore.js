@@ -6,7 +6,9 @@
 
 const fs   = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const utils = require('./utils.js'); // slugify, etc.
 
 //// Constantes de caminhos globais ////
@@ -223,6 +225,133 @@ function extractChromeMajorFromUa(uaString) {
   return m ? (Number(m[1]) || 0) : 0;
 }
 
+function findChromeStablePath() {
+  try {
+    const envChrome = process.env.CHROME_PATH;
+    if (envChrome && fs.existsSync(envChrome)) return envChrome;
+    const envChromium = process.env.CHROMIUM_PATH;
+    if (envChromium && fs.existsSync(envChromium)) return envChromium;
+    const candidates = [];
+    if (process.platform === 'win32') {
+      candidates.push(
+        path.join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
+      );
+    } else if (process.platform === 'darwin') {
+      candidates.push(
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        path.join(os.homedir(), 'Applications', 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome')
+      );
+    } else {
+      candidates.push(
+        '/opt/google/chrome/chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/snap/bin/chromium'
+      );
+    }
+    if (envChromium) candidates.push(envChromium);
+    for (const file of candidates) {
+      if (file && fs.existsSync(file)) return file;
+    }
+  } catch {}
+  return null;
+}
+
+function _parseChromeVersionToken(raw) {
+  const m = String(raw || '').match(/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  const full = m[0];
+  const major = Number(m[1]) || 0;
+  if (!major) return null;
+  return { full, major };
+}
+
+let _chromeVerCache = { at: 0, val: null };
+function readInstalledChromeVersion() {
+  const now = Date.now();
+  if (_chromeVerCache && _chromeVerCache.at && (now - _chromeVerCache.at) < 60000) {
+    return _chromeVerCache.val;
+  }
+  let val = null;
+  try {
+    const exe = findChromeStablePath();
+    if (exe) {
+      const dir = path.dirname(exe);
+      let best = null;
+      try {
+        const names = fs.readdirSync(dir);
+        for (const name of names) {
+          const parsed = _parseChromeVersionToken(name);
+          if (!parsed) continue;
+          const asDir = path.join(dir, name);
+          let isDir = false;
+          try { isDir = fs.statSync(asDir).isDirectory(); } catch {}
+          if (!isDir) continue;
+          if (!best || parsed.major > best.major || (parsed.major === best.major && parsed.full > best.full)) {
+            best = parsed;
+          }
+        }
+      } catch {}
+      if (best) val = Object.assign({ exe }, best);
+      if (!val) {
+        try {
+          const out = execFileSync(exe, ['--version'], {
+            timeout: 4000,
+            encoding: 'utf8',
+            windowsHide: true
+          });
+          const parsed = _parseChromeVersionToken(out);
+          if (parsed) val = Object.assign({ exe }, parsed);
+        } catch {}
+      }
+    }
+  } catch {}
+  _chromeVerCache = { at: now, val };
+  return val;
+}
+
+function _isGreaseBrand(brand) {
+  const b = String(brand || '');
+  return /not.?a.?brand/i.test(b) || /^not /i.test(b);
+}
+
+function alignUaToInstalledChrome(uaString, uaCh, version) {
+  const ver = version || readInstalledChromeVersion();
+  const ua0 = String(uaString || '');
+  const ch0 = (uaCh && typeof uaCh === 'object') ? uaCh : {};
+  if (!ver || !ver.major || !ua0) {
+    return { uaString: ua0, uaCh: ch0, changed: false, version: ver || null };
+  }
+  let ua = ua0.replace(/Chrome\/[\d.]+/g, 'Chrome/' + ver.full);
+  ua = ua.replace(/Chromium\/[\d.]+/g, 'Chromium/' + ver.full);
+  const ch = JSON.parse(JSON.stringify(ch0));
+  if (Array.isArray(ch.brands)) {
+    ch.brands = ch.brands.map((row) => {
+      if (!row || typeof row !== 'object') return row;
+      if (_isGreaseBrand(row.brand)) return row;
+      if (/Chromium|Google Chrome/i.test(String(row.brand || ''))) {
+        return Object.assign({}, row, { version: String(ver.major) });
+      }
+      return row;
+    });
+  }
+  if (ch.fullVersion) ch.fullVersion = ver.full;
+  if (Array.isArray(ch.fullVersionList)) {
+    ch.fullVersionList = ch.fullVersionList.map((row) => {
+      if (!row || typeof row !== 'object') return row;
+      if (_isGreaseBrand(row.brand)) return row;
+      if (/Chromium|Google Chrome/i.test(String(row.brand || ''))) {
+        return Object.assign({}, row, { version: ver.full });
+      }
+      return row;
+    });
+  }
+  const changed = ua !== ua0 || JSON.stringify(ch) !== JSON.stringify(ch0);
+  return { uaString: ua, uaCh: ch, changed, version: ver };
+}
+
 function buildDefaultUaPolicy(presets) {
   const list = Array.isArray(presets) ? presets : [];
   let maxMajor = 0;
@@ -280,6 +409,8 @@ function pickUaPreset() {
     const perfis = loadPerfisJson();
     if (!Array.isArray(presets) || presets.length === 0) return null;
     const policy = loadUaPolicy(presets);
+    const ver = readInstalledChromeVersion();
+    const wantMajor = ver && ver.major ? Number(ver.major) : 0;
 
     const count = {};
     for (const p of presets) count[p.id] = 0;
@@ -287,28 +418,56 @@ function pickUaPreset() {
       if (pf && pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1;
     }
 
-    let bestScore = Number.POSITIVE_INFINITY;
-    let candidates = [];
-    for (const p of presets) {
-      const id = String(p && p.id || '').trim();
-      if (!id) continue;
-      const row = policy && policy.tiersByPresetId ? policy.tiersByPresetId[id] : null;
-      const enabled = !(row && row.enabledForNewProfiles === false);
-      if (!enabled) continue;
-      const w = Number(row && row.weight || 1) || 1;
-      const weight = Math.max(0.01, w);
-      const usage = Number(count[id] || 0) || 0;
-      const score = usage / weight;
-      if (score < bestScore - 1e-9) {
-        bestScore = score;
-        candidates = [p];
-      } else if (Math.abs(score - bestScore) <= 1e-9) {
-        candidates.push(p);
+    const collect = (majorPred) => {
+      let bestScore = Number.POSITIVE_INFINITY;
+      let candidates = [];
+      for (const p of presets) {
+        const id = String(p && p.id || '').trim();
+        if (!id) continue;
+        if (typeof majorPred === 'function' && !majorPred(p)) continue;
+        const row = policy && policy.tiersByPresetId ? policy.tiersByPresetId[id] : null;
+        const enabled = !(row && row.enabledForNewProfiles === false);
+        if (!enabled) continue;
+        const w = Number(row && row.weight || 1) || 1;
+        const weight = Math.max(0.01, w);
+        const usage = Number(count[id] || 0) || 0;
+        const score = usage / weight;
+        if (score < bestScore - 1e-9) {
+          bestScore = score;
+          candidates = [p];
+        } else if (Math.abs(score - bestScore) <= 1e-9) {
+          candidates.push(p);
+        }
       }
+      return candidates;
+    };
+
+    let candidates = [];
+    if (wantMajor) {
+      candidates = collect((p) => extractChromeMajorFromUa(p && p.uaString) === wantMajor);
+      if (!candidates.length) {
+        candidates = collect((p) => {
+          const maj = extractChromeMajorFromUa(p && p.uaString);
+          return maj > 0 && maj <= wantMajor && (wantMajor - maj) <= 2;
+        });
+      }
+      if (!candidates.length) {
+        candidates = collect((p) => {
+          const maj = extractChromeMajorFromUa(p && p.uaString);
+          return maj > 0 && maj <= wantMajor;
+        });
+      }
+      if (!candidates.length) candidates = collect(null);
+    } else {
+      candidates = collect(null);
     }
     if (!candidates.length) return null;
     candidates.sort(() => Math.random() - 0.5);
-    return candidates[0] || null;
+    const picked = candidates[0] || null;
+    if (!picked) return null;
+    if (!ver) return picked;
+    const aligned = alignUaToInstalledChrome(picked.uaString, picked.uaCh, ver);
+    return Object.assign({}, picked, { uaString: aligned.uaString, uaCh: aligned.uaCh });
   } catch { return null; }
 }
 
@@ -1136,6 +1295,7 @@ module.exports = {
   readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
   patchDesired, // agora async/lock
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
+  findChromeStablePath, readInstalledChromeVersion, alignUaToInstalledChrome, extractChromeMajorFromUa,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:

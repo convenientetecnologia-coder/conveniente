@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
+const { newPageDaConta, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectLoginRequired, detectMarketplaceDisabled } = require('./browser.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
@@ -2970,31 +2970,17 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_attempt', nome: String(nome || ''), attempt: Number(attempt || 0), baseAttId: String(baseAttId || '') }); } catch {}
       // #endregion
-      p = await browser.newPage();
-      // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
+      // SUPRESSOR para o killer de about:blank durante patch+goto (20s de guarda)
       armBlankSuppress(browser, nome, 20_000);
 
+      p = await newPageDaConta(browser, nome, { source: 'robe_create' });
       await ensureXPathPolyfill(p);
-      await patchPage(nome, p, coords);
-      // Importante: autentica o proxy da aba ANTES do primeiro goto para evitar race
-      // com o handler assíncrono de targetcreated (que às vezes autentica tarde demais).
       try {
         const manifest = await manifestStore.read(nome);
         gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
         if (gatewayProxy.isStrictProxyRequired() && (!gatewayResolved || gatewayResolved.enabled !== true)) {
           const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
           throw new Error(`gateway_proxy_required:${reason}`);
-        }
-        if (
-          gatewayResolved &&
-          gatewayResolved.enabled === true &&
-          gatewayResolved.auth &&
-          typeof p.authenticate === 'function'
-        ) {
-          await p.authenticate({
-            username: String(gatewayResolved.auth.username || ''),
-            password: String(gatewayResolved.auth.password || '')
-          });
         }
         try {
           const slot = gatewayResolved && gatewayResolved.slot ? gatewayResolved.slot : null;
@@ -3008,7 +2994,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
             ipCurrent: slot ? String(slot.ipCurrent || '') : null
           });
         } catch {}
-      } catch {}
+      } catch (e) {
+        const em = String((e && e.message) || e || '');
+        if (/gateway_proxy_required:/i.test(em)) throw e;
+      }
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);

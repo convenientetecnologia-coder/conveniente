@@ -3646,14 +3646,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     // Fluxo enterprise: NÃO criar novas abas só porque a aba 0 está em about:blank.
     // A aba 0 é navegável e deve ser reaproveitada (senão abrimos 2+ abas no bootstrap e o sistema “desgoverna”).
     if (!p0) {
-      p0 = await ctrl.browser.newPage().catch(()=>null);
-      if (p0) {
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
-          await browserHelper.patchPage(nome, p0, coords).catch(()=>{});
-        } catch {}
-      }
+      p0 = await browserHelper.newPageDaConta(ctrl.browser, nome, { source: 'human_entry' });
     }
     if (!p0) return { ok: false, error: 'no_page' };
     try { await p0.bringToFront?.().catch(()=>{}); } catch {}
@@ -3705,12 +3698,15 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     // Limpa abas about:blank órfãs para não ficar "Abas: 2" e economizar RAM
     try {
-      const ps = await ctrl.browser.pages().catch(()=>[]);
-      for (const pg of (ps || [])) {
-        if (!pg || pg === p0) continue;
-        const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
-        if (!uu || uu === 'about:blank') {
-          try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      if (!(ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) > 0)) {
+        const ps = await ctrl.browser.pages().catch(()=>[]);
+        for (const pg of (ps || [])) {
+          if (!pg || pg === p0) continue;
+          if (pg && pg._convenienteBlindarPromise) continue;
+          const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
+          if (!uu || uu === 'about:blank') {
+            try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+          }
         }
       }
     } catch {}
@@ -3894,18 +3890,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
 
           // Janela curta e segura: abre aba, valida pronto de verdade, fecha.
           const tProbe0 = Date.now();
-          const p = await ctrl.browser.newPage().catch(()=>null);
-          if (!p) throw new Error('robe_probe_no_newPage');
+          const p = await browserHelper.newPageDaConta(ctrl.browser, nome, { source: 'bootstrap_robe_probe' });
           try { await wirePageObservers(nome, p); } catch {}
-          // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda) — igual ao Robe.
+          // SUPRESSOR para o killer de about:blank durante goto (20s de guarda) — igual ao Robe.
           try {
             const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
             guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 20000);
-          } catch {}
-          // PatchPage na aba 1 para consistência (coords/UA/stealth hooks)
-          try {
-            const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
-            await browserHelper.patchPage(nome, p, coords).catch(()=>{});
           } catch {}
           const tNav0 = Date.now();
           try { await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }); } catch (e) {}
@@ -5951,11 +5941,7 @@ async function tryFixPhantom(nome, page) {
   if (ph.newpages30m.length < PHANTOM_CFG.MAX_PHTM_NEWPAGE_30M) {
     try {
       const ctrl2 = controllers.get(nome);
-      const np = await ctrl2.browser.newPage();
-      try {
-        const man = await manifestStore.read(nome).catch(()=>null);
-        await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
-      } catch {}
+      const np = await browserHelper.newPageDaConta(ctrl2.browser, nome, { source: 'phantom_fix' });
       await __gotoMarketplaceTracked(np, { nome, source: 'phantom_fix.newPage', timeoutMs: 30000, swallow: true });
       try {
         let closedOk = false;
@@ -7455,76 +7441,14 @@ async function activateOnce(nome, source = '', operator = '') {
                   try {
                     const b = controllers.get(nome)?.browser;
                     if (!b) return;
+                    if (Number(b._convenienteGateInFlight || 0) > 0) return;
                     if (b._suppressBlankKillUntil && b._suppressBlankKillUntil[nome]) delete b._suppressBlankKillUntil[nome];
                     if (b._aboutBlankMaxAgeMs && b._aboutBlankMaxAgeMs[nome]) delete b._aboutBlankMaxAgeMs[nome];
                   } catch {}
                 }, BOOTSTRAP_TABS_MS + 5000);
               } catch {}
 
-              browserHelper.installOneTabGuard(ctrl.browser, nome, {
-                allow: () => {
-                  const c = controllers.get(nome);
-                  const rm = robeMeta[nome] || {};
-                  const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-                  const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
-                  const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
-                  const isVirtusSwap = swapUntil > Date.now();
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true || isVirtusSwap === true));
-                },
-                maxPagesWhenAllow: () => {
-                  const c = controllers.get(nome);
-                  const rm = robeMeta[nome] || {};
-                  const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-                  const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
-                  const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
-                  const isVirtusSwap = swapUntil > Date.now();
-                  // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
-                  if (c && c.humanControl === true) return 1;
-                  // Swap controlado do Virtus precisa no máximo 2 abas (nova + antiga) por poucos segundos.
-                  if (isVirtusSwap) return 2;
-                  // CRÍTICO (provision/injetar cookies): durante configuração precisamos 3 abas estáveis:
-                  // 0) FB base  1) FB create (item|vehicle)  2) Messenger
-                  // Se bootstrap limitar para 2, ele fecha uma aba e causa exatamente o "atropelo" (Messenger sendo puxado pro create).
-                  if (c && c.configurando === true) return 3;
-                  // Bootstrap (fora de configure): permitir 2 abas para navegar Messenger+Facebook sem ser podado.
-                  if (isBootstrap) return 2;
-                  return rm.emExecucao === true ? 3 : 10;
-                },
-                getReason: () => {
-                  try {
-                    const c = controllers.get(nome);
-                    const rm = robeMeta[nome] || {};
-                    const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-                    const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
-                    const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
-                    const isVirtusSwap = swapUntil > Date.now();
-                    if (c && c.humanControl === true) return 'human';
-                    if (isVirtusSwap) return 'virtus_swap';
-                    if (c && c.configurando === true) return 'config';
-                    if (rm && rm.emExecucao === true) return 'robe';
-                    if (isBootstrap) return 'bootstrap';
-                    return 'default';
-                  } catch { return 'default'; }
-                },
-                onPrune: (info) => {
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'one_tab_guard_prune',
-                      nome: String(nome || ''),
-                      ...info
-                    });
-                  } catch {}
-                },
-                onNumPages: (n) => {
-                  robeMeta[nome] = robeMeta[nome] || {};
-                  robeMeta[nome].numPages = n;
-                  snapshotStatusAndWrite().catch(()=>{});
-                }
-              });
-            } catch {}
-            try {
-              browserHelper.installAboutBlankKiller(ctrl.browser, nome, { graceMs: 7000 });
+              installAccountTabGuards(nome, ctrl.browser);
             } catch {}
           }
         } catch {}
@@ -9102,12 +9026,15 @@ async function closeExtraPages(browser, mainPage, nome) {
     // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
     const keepPage = __pickKeepPage(stablePages, mainPage);
 
+    if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
+
     // 1) lixo (about:blank / chrome-error / Aw Snap):
     //    - chrome-error: fecha já (nunca é create válido), mesmo sob proteção
     //    - about:blank sob Robe/config/human/sendLock: só órfãs com idade >= maxAge
     for (const p of stablePages) {
       try {
         if (keepPage && p === keepPage) continue;
+        if (p && p._convenienteBlindarPromise) continue;
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
@@ -9142,6 +9069,7 @@ async function closeExtraPages(browser, mainPage, nome) {
       for (const p of stableAgain) {
         try {
           if (keep2 && p === keep2) continue;
+          if (p && p._convenienteBlindarPromise) continue;
           let url = '';
           try { url = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
           // Nunca mata create/item/vehicle no prune amplo
@@ -10127,7 +10055,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
       } finally {
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         try {
-          if (ctrl && ctrl.browser && ctrl.browser._suppressBlankKillUntil) {
+          if (ctrl && ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.browser._suppressBlankKillUntil) {
             delete ctrl.browser._suppressBlankKillUntil[nome];
           }
         } catch {}
@@ -10921,8 +10849,15 @@ const handlers = {
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-    const preset = pickUaPreset();
-    if (!preset) return { ok: false, error: 'UA preset esgotado.' };
+    const preset0 = pickUaPreset();
+    if (!preset0) return { ok: false, error: 'UA preset esgotado.' };
+    let preset = preset0;
+    try {
+      const aligned = fileStore.alignUaToInstalledChrome(preset0.uaString, preset0.uaCh);
+      if (aligned && aligned.uaString) {
+        preset = Object.assign({}, preset0, { uaString: aligned.uaString, uaCh: aligned.uaCh || preset0.uaCh });
+      }
+    } catch {}
 
     const cookiesArr = utils.normalizeCookies(cookies);
     if (!cookiesArr.length || !cookiesArr.find(c => c.name === 'c_user') || !cookiesArr.find(c => c.name === 'xs')) {
@@ -11387,7 +11322,7 @@ const handlers = {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-      guard[nome] = Date.now() + 10601000;
+      guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 10601000);
 
       const perfisArr = loadPerfisJson();
       const perfil = perfisArr.find(p => p && p.nome === nome);
@@ -11958,7 +11893,7 @@ const handlers = {
                 const createUrlPL = modePL === 'veiculos'
                   ? 'https://www.facebook.com/marketplace/create/vehicle'
                   : 'https://www.facebook.com/marketplace/create/item';
-                createPg = await ctrl.browser.newPage();
+                createPg = await browserHelper.newPageDaConta(ctrl.browser, nome, { source: 'configure_stock_create' });
                 openedCreate = true;
                 try { await createPg.goto(createUrlPL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
                 await sleep(1100);
@@ -12639,7 +12574,7 @@ const handlers = {
           // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
           try {
             const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
-            guard[nome] = Date.now() + (6 * 60 * 1000);
+            guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + (6 * 60 * 1000));
           } catch {}
           pushStep({ step: 'attempt1_inject_cookies_begin' });
           await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
@@ -13804,7 +13739,7 @@ const handlers = {
       await snapshotStatusAndWrite();
 
       const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-      guard[nome] = Date.now() + 246060*1000;
+      guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 246060*1000);
 
       try { await stopVirtus(nome); } catch {}
       // Re-stamp após stop (páginas podem ter mudado; orphan timer ainda lê a flag).
@@ -14036,7 +13971,7 @@ const handlers = {
       try { await clearAccountFlags(nome, resumeClearFlags); } catch {}
       try { await clearAppealSubmittedFlag(nome); } catch {}
       try { await clearIdentityFlags(nome); } catch {}
-      try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
+      try { if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
       try {
         // Limpa runtime/meta que pode manter status antigo no painel.
         robeMeta[nome] = robeMeta[nome] || {};
@@ -14642,7 +14577,7 @@ const handlers = {
           } finally {
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             try {
-              if (ctrl && ctrl.browser && ctrl.browser._suppressBlankKillUntil) {
+              if (ctrl && ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.browser._suppressBlankKillUntil) {
                 delete ctrl.browser._suppressBlankKillUntil[nome];
               }
             } catch {}
@@ -16426,6 +16361,91 @@ function shouldCloseAfterLoginRemediateSuccess(opts = {}) {
   return !stayOpenDefault;
 }
 
+function copyAccountBrowserRuntimeState(fromBrowser, toBrowser) {
+  if (!fromBrowser || !toBrowser || fromBrowser === toBrowser) return;
+  const keys = [
+    '_convenienteNome',
+    '_robeActiveFor',
+    '_sendLock',
+    '_virtusSwapUntil',
+    '_suppressBlankKillUntil',
+    '_aboutBlankMaxAgeMs',
+    '_pageBirth',
+    '_fenceEpochMap',
+    '_rootPid'
+  ];
+  for (const k of keys) {
+    try {
+      if (typeof fromBrowser[k] !== 'undefined') toBrowser[k] = fromBrowser[k];
+    } catch {}
+  }
+}
+
+function installAccountTabGuards(nome, browser) {
+  if (!browser) return;
+  const BOOTSTRAP_TABS_MS = parseInt(process.env.BOOTSTRAP_TABS_MS || '60000', 10);
+  try {
+    browserHelper.installOneTabGuard(browser, nome, {
+      allow: () => {
+        const c = controllers.get(nome);
+        const rm = robeMeta[nome] || {};
+        const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+        const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+        const isVirtusSwap = swapUntil > Date.now();
+        return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true || isVirtusSwap === true));
+      },
+      maxPagesWhenAllow: () => {
+        const c = controllers.get(nome);
+        const rm = robeMeta[nome] || {};
+        const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+        const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+        const isVirtusSwap = swapUntil > Date.now();
+        if (c && c.humanControl === true) return 1;
+        if (isVirtusSwap) return 2;
+        if (c && c.configurando === true) return 3;
+        if (isBootstrap) return 2;
+        return rm.emExecucao === true ? 3 : 10;
+      },
+      getReason: () => {
+        try {
+          const c = controllers.get(nome);
+          const rm = robeMeta[nome] || {};
+          const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+          const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+          const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
+          const isVirtusSwap = swapUntil > Date.now();
+          if (c && c.humanControl === true) return 'human';
+          if (isVirtusSwap) return 'virtus_swap';
+          if (c && c.configurando === true) return 'config';
+          if (rm && rm.emExecucao === true) return 'robe';
+          if (isBootstrap) return 'bootstrap';
+          return 'default';
+        } catch { return 'default'; }
+      },
+      onPrune: (info) => {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'one_tab_guard_prune',
+            nome: String(nome || ''),
+            ...info
+          });
+        } catch {}
+      },
+      onNumPages: (n) => {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].numPages = n;
+        snapshotStatusAndWrite().catch(()=>{});
+      }
+    });
+  } catch {}
+  try {
+    browserHelper.installAboutBlankKiller(browser, nome, { graceMs: 7000 });
+  } catch {}
+}
+
 async function tryReconnectAfterDisconnected(nome, prevCtrl) {
   const startedAt = Date.now();
   const flowId = newFlowId('reconnect');
@@ -16462,31 +16482,46 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
         protocolTimeout: 60000
       });
       if (b && b.isConnected && b.isConnected()) {
-        const pages = await b.pages().catch(() => []);
-        const current = controllers.get(nome);
-        const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
-        controllers.set(nome, nextCtrl);
-        try { attachBrowserLifecycle(nome, b); } catch {}
         try {
-          if (pages && pages[0]) {
-            nextCtrl.mainPage = pages[0];
-            await wirePageObservers(nome, nextCtrl.mainPage).catch(() => {});
-            maybeStartPruneLoop(nome, nextCtrl.browser, nextCtrl.mainPage);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'reconnect_success',
-            nome: String(nome || ''),
-            flowId,
-            attempt,
-            pagesCount: Array.isArray(pages) ? pages.length : null,
-            durationMs: Date.now() - startedAt
-          });
-        } catch {}
-        return { ok: true, flowId, attempt, pagesCount: Array.isArray(pages) ? pages.length : null };
+          const oldBrowser = (controllers.get(nome) && controllers.get(nome).browser) || (prevCtrl && prevCtrl.browser) || null;
+          try { copyAccountBrowserRuntimeState(oldBrowser, b); } catch {}
+          await browserHelper.bindAccountIdentity(b, nome, { source: 'cdp_reconnect' });
+          const pages = await b.pages().catch(() => []);
+          const current = controllers.get(nome);
+          const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
+          controllers.set(nome, nextCtrl);
+          try { attachBrowserLifecycle(nome, b); } catch {}
+          try {
+            if (pages && pages[0]) {
+              nextCtrl.mainPage = pages[0];
+              await wirePageObservers(nome, nextCtrl.mainPage).catch(() => {});
+              stopPruneLoop(nome);
+              maybeStartPruneLoop(nome, nextCtrl.browser, nextCtrl.mainPage);
+            }
+          } catch {}
+          try { installAccountTabGuards(nome, b); } catch {}
+          try {
+            if (isProfileHumanHeld(nome)) {
+              await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'cdp_reconnect' });
+            }
+          } catch {}
+          try { await snapshotStatusAndWrite(); } catch {}
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'reconnect_success',
+              nome: String(nome || ''),
+              flowId,
+              attempt,
+              pagesCount: Array.isArray(pages) ? pages.length : null,
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+          return { ok: true, flowId, attempt, pagesCount: Array.isArray(pages) ? pages.length : null };
+        } catch (inner) {
+          try { if (b && typeof b.disconnect === 'function') await b.disconnect(); } catch {}
+          throw inner;
+        }
       }
     } catch (e) {
       const msg = (e && e.message) ? String(e.message) : String(e);
@@ -27529,12 +27564,7 @@ async function recoveryStep(nome, page, step) {
     try {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser) return false;
-      const np = await ctrl.browser.newPage();
-      try {
-        const man = await manifestStore.read(nome).catch(() => null);
-        const coords = browserHelper.resolvePatchCoordsForProfile(nome, man || {});
-        await browserHelper.patchPage(nome, np, coords);
-      } catch {}
+      const np = await browserHelper.newPageDaConta(ctrl.browser, nome, { source: 'health_recover' });
       await __gotoMarketplaceTracked(np, { nome, source: 'health_recover.newPage', timeoutMs: 30000, swallow: true });
       try {
         let closedOk = false;
@@ -27549,6 +27579,16 @@ async function recoveryStep(nome, page, step) {
       st.lastNewPageAt = now;
       try { await issues.append(nome, 'mil_action', 'health_recover:newPage'); } catch {}
       return true;
+    } catch (e) {
+      try {
+        __appendMarketplaceTrace(nome, {
+          source: 'health_recover.newPage',
+          action: 'newpage_conta_failed',
+          ok: false,
+          error: String((e && e.message) || e || '').slice(0, 180)
+        });
+      } catch {}
+      return false;
     } finally {
       st.newPageInFlight = false;
     }
@@ -27765,7 +27805,7 @@ async function periodicAboutBlankCleanup() {
         const hasCreateItem = pages.some(pg => {
           try {
             const u = pg.url ? pg.url() : '';
-            return /facebook\.com\/marketplace\/create\/item/i.test(u);
+            return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u);
           } catch { return false; }
         });
 
@@ -27775,6 +27815,8 @@ async function periodicAboutBlankCleanup() {
           try {
             if (p === mainPage) continue;
             if (!mainPage && p === pages[0]) continue;
+            if (p && p._convenienteBlindarPromise) continue;
+            if (Number(ctrl.browser && ctrl.browser._convenienteGateInFlight || 0) > 0) continue;
 
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}

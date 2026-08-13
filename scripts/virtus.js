@@ -16,7 +16,7 @@ const fs = require('fs/promises');
 const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
 const path = require('path');
 const os = require('os');
-const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
+const { newPageDaConta, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
@@ -972,13 +972,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try {
           if (browser && browser._robeActiveFor === nome) {
             // Em ciclo de postagem — não tocar em abas
+          } else if (Number(browser && browser._convenienteGateInFlight || 0) > 0) {
+            // Portão colando aba nova — não fechar blank no meio da cola
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
               for (let i = allPages.length - 1; i >= 1; i--) {
+                if (allPages[i] && allPages[i]._convenienteBlindarPromise) continue;
                 let u = '';
                 try { u = await allPages[i].url(); } catch {}
-                if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // NUNCA fechar create item
+                if (/facebook.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
                 try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
               }
             }
@@ -986,17 +989,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
         if (!page) {
           if (!running || !epochOk()) return null;
-          // cria nova aba
-          const newP = await browser.newPage();
+          const newP = await newPageDaConta(browser, nome, { source: 'virtus_ensurePage' });
           try {
-            const manifest = await manifestStore.read(nome);
-            const coords = utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
-            if (!running || !epochOk()) return null;
-            await patchPage(nome, newP, coords);
-            if (!running || !epochOk()) return null;
+            if (!running || !epochOk()) {
+              try { await newP.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+              return null;
+            }
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
-            logger.warn('ensurePage: falha patchPage/minimize na nova aba', { nome }, e);
+            logger.warn('ensurePage: falha pos-portao na nova aba', { nome }, e);
+            try { await newP.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+            return null;
           }
           try { newP.once && newP.once('close', () => { if (page === newP) page = null; }); } catch {}
           page = newP;
@@ -2035,14 +2038,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 }
               } catch {}
               try {
-                swapCandidatePage = await browser.newPage();
+                swapCandidatePage = await newPageDaConta(browser, nome, { source: 'virtus_swap' });
                 try {
-                  const manifest = await manifestStore.read(nome);
-                  const coords = utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
-                  await patchPage(nome, swapCandidatePage, coords);
                   await ensureMinimizedWindowForPage(swapCandidatePage);
                 } catch (swapPatchErr) {
-                  logger.warn('virtus swap recycle: falha patch/minimize', { nome }, swapPatchErr);
+                  logger.warn('virtus swap recycle: falha minimize', { nome }, swapPatchErr);
                 }
                 swapOldPage = p;
                 p = swapCandidatePage;

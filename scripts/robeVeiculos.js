@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { patchPage, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
+const { newPageDaConta, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectMarketplaceDisabled, detectLoginRequired } = require('./browser.js');
 const provisionAudit = require('./provisionAudit.js');
 
@@ -1380,30 +1380,17 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     let p = null;
     let gatewayResolved = null;
     try {
-      p = await browser.newPage();
-      // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
+      // SUPRESSOR para o killer de about:blank durante patch+goto (20s de guarda)
       armBlankSuppress(browser, nome, 20_000);
 
+      p = await newPageDaConta(browser, nome, { source: 'robe_veiculo_create' });
       await ensureXPathPolyfill(p);
-      await patchPage(nome, p, coords);
-      // Evita corrida de autenticação no proxy da nova aba (mesmo padrão do robe de itens).
       try {
         const manifest = await manifestStore.read(nome);
         gatewayResolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
         if (gatewayProxy.isStrictProxyRequired() && (!gatewayResolved || gatewayResolved.enabled !== true)) {
           const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
           throw new Error(`gateway_proxy_required:${reason}`);
-        }
-        if (
-          gatewayResolved &&
-          gatewayResolved.enabled === true &&
-          gatewayResolved.auth &&
-          typeof p.authenticate === 'function'
-        ) {
-          await p.authenticate({
-            username: String(gatewayResolved.auth.username || ''),
-            password: String(gatewayResolved.auth.password || '')
-          });
         }
         try {
           const slot = gatewayResolved && gatewayResolved.slot ? gatewayResolved.slot : null;
@@ -1415,7 +1402,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
             ipCurrent: slot ? String(slot.ipCurrent || '') : null
           });
         } catch {}
-      } catch {}
+      } catch (e) {
+        const em = String((e && e.message) || e || '');
+        if (/gateway_proxy_required:/i.test(em)) throw e;
+      }
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/vehicle', { waitUntil: 'domcontentloaded', timeout: 45000 });
       try {
