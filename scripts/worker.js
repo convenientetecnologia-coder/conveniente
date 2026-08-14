@@ -1850,6 +1850,68 @@ async function syncClosedTerminalDesiredState(nome) {
   } catch {}
 }
 
+function isLiveBrowserCtrl(ctrl) {
+  try {
+    if (!ctrl || !ctrl.browser) return false;
+    if (typeof ctrl.browser.isConnected === 'function') return !!ctrl.browser.isConnected();
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function readDesiredHumanHoldFlag(nome) {
+  try {
+    const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+    return !!(d.perfis && d.perfis[nome] && d.perfis[nome].humanHold === true);
+  } catch {
+    return false;
+  }
+}
+
+/** Humano já está no controle com hold persistido e Chrome vivo. Não reinvocar. */
+function isHumanAlreadyInvoked(nome, ctrl) {
+  try {
+    if (!isLiveBrowserCtrl(ctrl)) return false;
+    if (ctrl.humanControl !== true) return false;
+    return readDesiredHumanHoldFlag(nome) === true;
+  } catch {
+    return false;
+  }
+}
+
+function shouldSkipHumanInvokeNavigation(reason) {
+  const r = String(reason || '').toLowerCase();
+  return (
+    r.startsWith('banned') ||
+    r.includes('captcha') ||
+    r.includes('checkpoint') ||
+    r.startsWith('two_factor') ||
+    r.startsWith('marketplace_disabled') ||
+    r.startsWith('id_virtus') ||
+    r.startsWith('aymh_continue')
+  );
+}
+
+async function ensureTerminalHumanHoldOnce(nome, { reason = 'human_mode' } = {}) {
+  const ctrl = controllers.get(nome);
+  if (ctrl && isLiveBrowserCtrl(ctrl)) {
+    if (!isHumanAlreadyInvoked(nome, ctrl)) {
+      await enterHumanMode(nome, ctrl, { reason: String(reason || 'human_mode') });
+    }
+    return { ok: true, invoked: true };
+  }
+  return { ok: true, invoked: false };
+}
+
+async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
+  const live = isLiveBrowserCtrl(ctrl);
+  const invoked = !!(live && ctrl && ctrl.humanControl === true && want && want.humanHold === true);
+  if (live && !invoked) {
+    try { await enterHumanMode(nome, ctrl, { reason: String(reason || 'human_mode') }); } catch {}
+  }
+}
+
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
@@ -1857,6 +1919,18 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
     already = !!(prev && prev.captchaCheckpoint === true);
+    if (already) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].whyNotOpen = 'captcha_checkpoint';
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl && isLiveBrowserCtrl(ctrl)) {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `captcha_checkpoint:${String(reason || prev.captchaCheckpointReason || 'captcha').slice(0, 100)}` });
+        }
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return;
+    }
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
@@ -1885,20 +1959,13 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
   // UA+FP telemetry (captcha/checkpoint)
   try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
 
-  // Invoca humano (idempotente se já em hold)
+  // Invoca humano 1 vez. Já em hold+controle: não reinvoca. Sem Chrome: não reabre.
   try {
-    let alreadyHold = false;
-    try {
-      const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
-      alreadyHold = !!(d.perfis && d.perfis[nome] && d.perfis[nome].humanHold === true);
-    } catch {}
-    if (!already || !alreadyHold) {
-      const ctrl = controllers.get(nome);
-      if (ctrl) {
-        await enterHumanMode(nome, ctrl, { reason: `captcha_checkpoint:${String(reason || '').slice(0, 100)}` });
-      } else {
-        await syncClosedTerminalDesiredState(nome);
-      }
+    const ctrl = controllers.get(nome);
+    if (ctrl && isLiveBrowserCtrl(ctrl)) {
+      await ensureTerminalHumanHoldOnce(nome, { reason: `captcha_checkpoint:${String(reason || '').slice(0, 100)}` });
+    } else if (!already) {
+      await syncClosedTerminalDesiredState(nome);
     }
   } catch {}
   try { await snapshotStatusAndWrite(); } catch {}
@@ -1911,6 +1978,18 @@ async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
     already = !!(prev && prev.idVirtus === true);
+    if (already) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].whyNotOpen = 'id_virtus';
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl && isLiveBrowserCtrl(ctrl)) {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `id_virtus:${String(reason || prev.idVirtusReason || 'id_virtus').slice(0, 100)}` });
+        }
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return;
+    }
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
@@ -1956,24 +2035,30 @@ async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title
   } catch {}
 
   try {
-    let alreadyHold = false;
-    try {
-      const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
-      alreadyHold = !!(d.perfis && d.perfis[nome] && d.perfis[nome].humanHold === true);
-    } catch {}
-    if (!already || !alreadyHold) {
-      const ctrl = controllers.get(nome);
-      if (ctrl) {
-        await enterHumanMode(nome, ctrl, { reason: `id_virtus:${String(reason || '').slice(0, 100)}` });
-      } else {
-        await syncClosedTerminalDesiredState(nome);
-      }
+    const ctrl = controllers.get(nome);
+    if (ctrl && isLiveBrowserCtrl(ctrl)) {
+      await ensureTerminalHumanHoldOnce(nome, { reason: `id_virtus:${String(reason || '').slice(0, 100)}` });
+    } else if (!already) {
+      await syncClosedTerminalDesiredState(nome);
     }
   } catch {}
   try { await snapshotStatusAndWrite(); } catch {}
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
+  const live = isLiveBrowserCtrl(ctrl);
+  const alreadyHold = readDesiredHumanHoldFlag(nome) === true;
+  const alreadyCtrl = !!(live && ctrl && ctrl.humanControl === true);
+  // Já invocado com Chrome vivo e hold persistido: não traz janela, não navega, não reescreve.
+  if (alreadyCtrl && alreadyHold) {
+    try {
+      if (ctrl) {
+        ctrl.trabalhando = false;
+        try { await stopVirtus(nome); } catch {}
+      }
+    } catch {}
+    return;
+  }
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d = d || {}; d.perfis = d.perfis || {};
@@ -1989,8 +2074,14 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
       try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: String(reason || 'enter_human_mode') }); } catch {}
       try { await stopVirtus(nome); } catch {}
       try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
-      // Bring-to-front/human prompt (best-effort)
-      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+      // Se o humano já está no controle, só repara o hold. Não navega de novo.
+      if (!alreadyCtrl) {
+        try {
+          await browserHelper.invocarHumano(ctrl.browser, nome, {
+            skipNavigation: shouldSkipHumanInvokeNavigation(reason)
+          });
+        } catch {}
+      }
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
@@ -2021,7 +2112,8 @@ async function enforcePausedNonLrState(nome, { kind = '', source = '' } = {}) {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d = d || {};
       d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+      // Não desarmar humanHold: captcha já invocohu humano. Só garante Virtus off.
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off' };
       return d;
     });
   } catch {}
@@ -3696,9 +3788,15 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     try { await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase, allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
     ctrl.mainPage = p0;
 
-    // Limpa abas about:blank órfãs para não ficar "Abas: 2" e economizar RAM
     try {
-      if (!(ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) > 0)) {
+      const hygiene = require('./robeTabHygiene.js');
+      if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
+        await hygiene.closeRedundantVirtusTabs(ctrl.browser, {
+          keepPage: p0,
+          nome,
+          reason: String(reasonBase || 'open_entry')
+        });
+      } else if (!(ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) > 0)) {
         const ps = await ctrl.browser.pages().catch(()=>[]);
         for (const pg of (ps || [])) {
           if (!pg || pg === p0) continue;
@@ -5159,14 +5257,22 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
 
       // Contrato ops (2026-07):
       // - NÃO fecha navegador no ban
-      // - marca flag + INVOCA humano (usuário verifica)
+      // - marca flag + INVOCA humano 1 vez (usuário verifica)
       // - exclusão diária (config) fecha + exclui no horário
       try {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].whyNotOpen = 'banned_human_hold';
+        robeMeta[nome].banned = true;
         delete robeMeta[nome].banCloseInFlight;
         delete robeMeta[nome].banCloseInFlightAt;
       } catch {}
+
+      if (already) {
+        try {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `banned:${String(reason || prev.bannedReason || 'banned').slice(0, 120)}` });
+        } catch {}
+        return banResult;
+      }
 
       let stockAccountId = null;
       try {
@@ -5246,8 +5352,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // Humano: browser fica aberto; sem browser vivo, persiste só o bloqueio técnico fechado.
       try {
         const ctrl = controllers.get(nome);
-        if (ctrl) {
-          await enterHumanMode(nome, ctrl, { reason: `banned:${String(reason || '').slice(0, 120)}` });
+        if (ctrl && isLiveBrowserCtrl(ctrl)) {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `banned:${String(reason || '').slice(0, 120)}` });
         } else {
           await syncClosedTerminalDesiredState(nome);
         }
@@ -5301,6 +5407,18 @@ async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell',
       const already = prev && prev.marketplaceDisabled === true;
       const flowId = newFlowId('mkt_disabled');
 
+      if (already) {
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].marketplaceDisabled = true;
+          robeMeta[nome].whyNotOpen = 'marketplace_disabled_human_hold';
+        } catch {}
+        try {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `marketplace_disabled:${String(reason || '').slice(0, 100)}` });
+        } catch {}
+        return { ok: true, action: 'human_hold_marketplace_disabled' };
+      }
+
       await manifestStore.update(nome, (man) => {
         man = man || {};
         man.accountFlags = man.accountFlags || {};
@@ -5321,9 +5439,9 @@ async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell',
 
       try {
         const ctrl = controllers.get(nome);
-        if (ctrl) {
-          await enterHumanMode(nome, ctrl, { reason: `marketplace_disabled:${String(reason || '').slice(0, 100)}` });
-        } else {
+        if (ctrl && isLiveBrowserCtrl(ctrl)) {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `marketplace_disabled:${String(reason || '').slice(0, 100)}` });
+        } else if (!already) {
           await syncClosedTerminalDesiredState(nome);
         }
       } catch {}
@@ -5381,6 +5499,18 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       const already = prev && prev.twoFactor === true;
       const flowId = newFlowId('two_factor');
 
+      if (already) {
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].twoFactor = true;
+          robeMeta[nome].whyNotOpen = 'two_factor_human_hold';
+        } catch {}
+        try {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `two_factor:${String(reason || '').slice(0, 120)}` });
+        } catch {}
+        return { ok: true, action: 'human_hold_two_factor' };
+      }
+
       await manifestStore.update(nome, (man) => {
         man = man || {};
         man.accountFlags = man.accountFlags || {};
@@ -5406,9 +5536,9 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
       try {
         const ctrl = controllers.get(nome);
-        if (ctrl) {
-          await enterHumanMode(nome, ctrl, { reason: `two_factor:${String(reason || '').slice(0, 120)}` });
-        } else {
+        if (ctrl && isLiveBrowserCtrl(ctrl)) {
+          await ensureTerminalHumanHoldOnce(nome, { reason: `two_factor:${String(reason || '').slice(0, 120)}` });
+        } else if (!already) {
           await syncClosedTerminalDesiredState(nome);
         }
       } catch {}
@@ -12700,7 +12830,7 @@ const handlers = {
             pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
             try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
             // IMPORTANTE (enterprise): ban/disabled NÃO é “login/cookies falhou”.
-            // Aqui a ação correta é setBannedFlag() (que fecha + remove do servidor).
+            // Aqui a ação correta é setBannedFlag() (flag + humano 1 vez; exclusão é diária).
             // Não deve marcar loginRemediateFailed/loginRequired depois disso.
             return true;
           }
@@ -13752,10 +13882,16 @@ const handlers = {
         skipNavigation = !!(
           (flags && flags.captchaCheckpoint === true) ||
           (flags && flags.idVirtus === true) ||
+          (flags && flags.banned === true) ||
+          (flags && flags.twoFactor === true) ||
+          (flags && flags.marketplaceDisabled === true) ||
           rr.includes('captcha') ||
           rr.includes('checkpoint') ||
           rr.includes('persona') ||
-          rr.includes('id_virtus')
+          rr.includes('id_virtus') ||
+          rr.includes('banned') ||
+          rr.includes('two_factor') ||
+          rr.includes('2fa')
         );
       } catch {}
 
@@ -17267,7 +17403,7 @@ function maybeBypassReopenWaitForOpenAll(nome, desiredHint = null) {
 // Problema real observado em produção (RM4): perfis ficam "engessados" com flags antigas
 // (ex.: loginRemediateFailed) mesmo quando a UI mudou para identidade/ban/login_form.
 // Este reconciliador NÃO posta nada e NÃO liga Virtus; ele só:
-// - detecta BAN/disabled_checkpoint e aplica setBannedFlag (auto delete)
+// - detecta BAN/disabled_checkpoint e aplica setBannedFlag (flag + humano 1 vez; exclusão é diária)
 // - detecta identidade/appeal/login_required e atualiza flags corretas (limpando flags obsoletas)
 // - opcional: se for login_form, pode agendar login_remediate com backoff (política do cliente)
 const HUMAN_RECONCILE_CFG = {
@@ -17600,89 +17736,30 @@ async function nurseTick() {
     })();
 
     if (controllers.size === 0) {
-      // Ainda fazemos o sweep leve (ban/2FA) 1x/min.
+      // Sem Chrome neste worker: só fecha desired de terminal que ainda está active/hold.
+      // Não reinvoca humano, não tira print, não reescreve conta já fechada.
       try {
         robeMeta.system = robeMeta.system || {};
         const last = Number(robeMeta.system.nurseZeroControllersSweepAt || 0) || 0;
-        if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
+        if (!last || (now0 - last) > 60_000) {
           robeMeta.system.nurseZeroControllersSweepAt = now0;
           for (const nome of Object.keys((desired0 && desired0.perfis) || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
-              const liveCtrl = (() => {
-                try {
-                  const c = controllers.get(nome);
-                  return !!(c && c.browser && c.browser.isConnected?.());
-                } catch { return false; }
-              })();
-              // Terminais sem browser vivo ficam fechados/limpos; com browser vivo seguem em humano.
-              if (flags && flags.banned === true) {
-                if (!liveCtrl) {
-                  try { await syncClosedTerminalDesiredState(nome); } catch {}
-                } else {
-                  try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
-                }
-                continue;
-              }
-              if (flags && flags.twoFactor === true) {
-                if (!liveCtrl) {
-                  try { await syncClosedTerminalDesiredState(nome); } catch {}
-                } else {
-                  try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
-                }
-                continue;
-              }
-              if (flags && flags.marketplaceDisabled === true) {
-                if (!liveCtrl) {
-                  try { await syncClosedTerminalDesiredState(nome); } catch {}
-                } else {
-                  try {
-                    await setMarketplaceDisabledFlag(nome, {
-                      reason: String(flags.marketplaceDisabledReason || 'cannot_buy_or_sell'),
-                      snippet: String(flags.marketplaceDisabledText || ''),
-                      source: 'nurse_zero_ctrl_sweep'
-                    });
-                  } catch {}
-                }
-                continue;
-              }
-              if (flags && flags.captchaCheckpoint === true) {
-                if (!liveCtrl) {
-                  try { await syncClosedTerminalDesiredState(nome); } catch {}
-                } else {
-                  try {
-                    await setCaptchaCheckpointFlag(nome, {
-                      reason: String(flags.captchaCheckpointReason || 'captcha'),
-                      source: 'nurse_zero_ctrl_sweep',
-                      url: String(flags.captchaCheckpointUrl || ''),
-                      title: String(flags.captchaCheckpointTitle || '')
-                    });
-                  } catch {}
-                }
-                continue;
-              }
-              if (flags && flags.idVirtus === true) {
-                if (!liveCtrl) {
-                  try { await syncClosedTerminalDesiredState(nome); } catch {}
-                } else {
-                  try {
-                    await setIdVirtusFlag(nome, {
-                      reason: String(flags.idVirtusReason || 'id_virtus'),
-                      source: 'nurse_zero_ctrl_sweep',
-                      url: String(flags.idVirtusUrl || ''),
-                      title: String(flags.idVirtusTitle || '')
-                    });
-                  } catch {}
-                }
-                continue;
-              }
-              // Compat retroativa: loginRequired+reason two_factor => human hold 2FA
-              if (flags && flags.loginRequired === true) {
-                const rr = String(flags.loginReason || '').toLowerCase();
-                if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
-                  try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(flags.loginReason || '') }); } catch {}
-                  continue;
-                }
+              const row = (desired0 && desired0.perfis && desired0.perfis[nome]) || {};
+              const rr = String((flags && (flags.loginReason || flags.reason)) || '').toLowerCase();
+              const terminal = !!(
+                flags &&
+                (flags.banned === true ||
+                  flags.twoFactor === true ||
+                  flags.marketplaceDisabled === true ||
+                  flags.captchaCheckpoint === true ||
+                  flags.idVirtus === true ||
+                  (flags.loginRequired === true && (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor'))))
+              );
+              if (!terminal) continue;
+              if (row.active === true || row.humanHold === true) {
+                try { await syncClosedTerminalDesiredState(nome); } catch {}
               }
             } catch {}
           }
@@ -18019,72 +18096,36 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Auto-exclusão enterprise: se já está marcado como banned/suspended, arquiva no CT e deleta o perfil local.
-      // Isso cobre casos pós-restart onde a flag já estava setada e não vai passar novamente pelos fluxos de detecção.
+      // Terminais (ban / 2FA / mkt / id_virtus / captcha com pause):
+      // Exclusão é só na limpeza diária. Aqui: se o Chrome está vivo e o humano
+      // ainda não foi invocado, invoca 1 vez. Já invocado: não reinvoca, não navega, não fecha.
       try {
-        const flagsB = await readAccountFlags(nome).catch(()=>({}));
-        if (flagsB && flagsB.banned === true) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          // Anti-reopen: se desired ainda estiver active (race), força off.
-          try {
-            if (want && want.active === true) {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {};
-                d.perfis = d.perfis || {};
-                const prev = d.perfis[nome] || {};
-                d.perfis[nome] = { ...prev, active: false, virtus: 'off', humanHold: false };
-                return d;
-              });
-              try { provisionAudit.append({ ts: now, event: 'ban_desired_force_off', nome: String(nome || '') }); } catch {}
-            }
-          } catch {}
-          const last = Number(robeMeta[nome].banSweepLastAt || 0) || 0;
-          if (!last || (now - last) > (2 * 60 * 1000)) { // no máximo 1 tentativa a cada 2min por perfil
-            robeMeta[nome].banSweepLastAt = now;
-            try {
-              provisionAudit.append({
-                ts: now,
-                event: 'ban_sweep_attempt',
-                nome: String(nome || ''),
-                reason: String(flagsB.bannedReason || flagsB.reason || '').slice(0, 160)
-              });
-            } catch {}
-            try { await setBannedFlag(nome, { reason: String(flagsB.bannedReason || 'banned'), snippet: String(flagsB.bannedText || '') }); } catch {}
-          }
-          continue;
-        }
-      } catch {}
-
-      // Auto-exclusão enterprise: 2FA (persistente) — cobre pós-restart.
-      try {
-        const flags2 = await readAccountFlags(nome).catch(()=>({}));
-        if (flags2 && flags2.twoFactor === true) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          const last = Number(robeMeta[nome].twoFactorSweepLastAt || 0) || 0;
-          if (!last || (now - last) > (2 * 60 * 1000)) {
-            robeMeta[nome].twoFactorSweepLastAt = now;
-            try { provisionAudit.append({ ts: now, event: 'two_factor_sweep_attempt', nome: String(nome||''), reason: String(flags2.twoFactorReason||'two_factor').slice(0,160) }); } catch {}
-            try { await setTwoFactorFlag(nome, { reason: String(flags2.twoFactorReason || 'two_factor'), snippet: String(flags2.twoFactorText || '') }); } catch {}
-          }
+        const flagsTerm = await readAccountFlags(nome).catch(() => ({}));
+        const banned = !!(flagsTerm && flagsTerm.banned === true);
+        const twoFa = !!(flagsTerm && flagsTerm.twoFactor === true);
+        const mktOff = !!(flagsTerm && flagsTerm.marketplaceDisabled === true);
+        const idVirtus = !!(flagsTerm && flagsTerm.idVirtus === true);
+        const captchaHold = !!(flagsTerm && flagsTerm.captchaCheckpoint === true && isNonLrAutomationPaused());
+        if (banned || twoFa || mktOff || idVirtus || captchaHold) {
+          const reason =
+            banned ? `banned:${String(flagsTerm.bannedReason || 'banned').slice(0, 120)}` :
+            twoFa ? `two_factor:${String(flagsTerm.twoFactorReason || 'two_factor').slice(0, 120)}` :
+            mktOff ? `marketplace_disabled:${String(flagsTerm.marketplaceDisabledReason || 'cannot_buy_or_sell').slice(0, 100)}` :
+            idVirtus ? `id_virtus:${String(flagsTerm.idVirtusReason || 'id_virtus').slice(0, 100)}` :
+            `captcha_checkpoint:${String(flagsTerm.captchaCheckpointReason || 'captcha').slice(0, 100)}`;
+          await nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason);
           continue;
         }
       } catch {}
 
       // Compat retroativa: versões antigas marcavam 2FA como loginRequired com reason "two_factor/2fa".
-      // Se isso acontecer, convertemos para twoFactor e excluímos.
       try {
         const flags3 = await readAccountFlags(nome).catch(()=>({}));
         if (flags3 && flags3.loginRequired === true) {
           const rr = String(flags3.loginReason || flags3.reason || '').toLowerCase();
           const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
           if (isTwoFactor) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            const last = Number(robeMeta[nome].twoFactorCompatSweepLastAt || 0) || 0;
-            if (!last || (now - last) > (2 * 60 * 1000)) {
-              robeMeta[nome].twoFactorCompatSweepLastAt = now;
-              try { provisionAudit.append({ ts: now, event: 'two_factor_compat_sweep_attempt', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
-              try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(flags3.loginReason || '') }); } catch {}
-            }
+            try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(flags3.loginReason || '') }); } catch {}
             continue;
           }
         }

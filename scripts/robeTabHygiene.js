@@ -2,11 +2,12 @@
 
 /**
  * Contrato preto-no-branco anti aba-morta (Robe itens + veículos + worker):
- * - Aba 0 (messages/Virtus) = keepPage — nunca varrer como lixo SE estiver viva.
- * - Create nasce about:blank → goto URL real → ao fim close SEM goto(about:blank).
+ * - Aba 0 (messages/Virtus) = keepPage — uma só. Nunca 2 abas Virtus.
+ * - Create (aba 1) nasce about:blank → goto URL real → ao fim close SEM goto(about:blank).
  * - Lixo = about:blank / URL vazia / chrome-error / Aw Snap / chromewebdata.
  * - Suppress só durante goto create (about:blank); chrome-error nunca é create válido.
  * - Cura in-place se o CDP responde; se pages()/CDP estoura timeout → needReopen.
+ * - Restauração de sessão do Chrome NÃO é aba de trabalho: extra Messages/Facebook fecha.
  */
 
 const provisionAudit = (() => {
@@ -44,6 +45,91 @@ function isLiveWorkUrl(url) {
   const u = String(url || "");
   if (isJunkUrl(u)) return false;
   return /facebook\.com|messenger\.com/i.test(u);
+}
+
+function pageUrlOf(page) {
+  try {
+    return typeof page.url === "function" ? String(page.url() || "") : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Uma aba Virtus: prefere /messages, depois Facebook/Messenger vivo, depois a preferida. */
+function pickVirtusKeepPage(pages, preferred) {
+  const list = Array.isArray(pages) ? pages.filter(Boolean) : [];
+  if (!list.length) return null;
+  const prefOk = preferred && list.includes(preferred);
+  if (prefOk && /facebook\.com\/messages/i.test(pageUrlOf(preferred))) return preferred;
+  for (const p of list) {
+    if (/facebook\.com\/messages/i.test(pageUrlOf(p))) return p;
+  }
+  if (prefOk && isLiveWorkUrl(pageUrlOf(preferred)) && !isCreateMarketplaceUrl(pageUrlOf(preferred))) {
+    return preferred;
+  }
+  for (const p of list) {
+    const u = pageUrlOf(p);
+    if (isLiveWorkUrl(u) && !isCreateMarketplaceUrl(u)) return p;
+  }
+  if (prefOk) return preferred;
+  return list[0];
+}
+
+/**
+ * Contrato: 1 aba Virtus. Create do Robe fica. Blank nascendo no portão fica.
+ * Sem Virtus vivo ainda (só blank no launch): não corta — o Chrome ainda está nascendo.
+ */
+async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", reason = "" } = {}) {
+  if (!browser) return { ok: false, closed: 0, error: "no_browser" };
+  const listed = await listPagesBounded(browser, 4000);
+  if (listed.timedOut) return { ok: false, closed: 0, timedOut: true };
+  const pages = listed.pages || [];
+  if (pages.length <= 1) return { ok: true, closed: 0, kept: pages.length };
+
+  const gateBusy = Number(browser._convenienteGateInFlight || 0) > 0;
+  const virtusLive = [];
+  for (const p of pages) {
+    const u = pageUrlOf(p);
+    if (isLiveWorkUrl(u) && !isCreateMarketplaceUrl(u)) virtusLive.push(p);
+  }
+  if (virtusLive.length < 1) {
+    return { ok: true, closed: 0, skipped: "no_live_virtus_yet" };
+  }
+
+  const keep = pickVirtusKeepPage(pages, keepPage || virtusLive[0]);
+  let closed = 0;
+  const closedUrls = [];
+  for (const p of pages) {
+    if (!p || p === keep) continue;
+    const u = pageUrlOf(p);
+    if (isCreateMarketplaceUrl(u)) continue;
+    const junk = isJunkUrl(u);
+    const blinding = !!(p && p._convenienteBlindarPromise);
+    if (junk && (gateBusy || blinding)) continue;
+    try {
+      const r = await safeClosePage(p, { nome, reason: reason || "redundant_virtus_tab" });
+      if (r && (r.closed || r.ok)) {
+        closed++;
+        if (u) closedUrls.push(String(u).slice(0, 180));
+      }
+    } catch {}
+  }
+
+  if (closed > 0) {
+    try {
+      if (provisionAudit && typeof provisionAudit.append === "function") {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: "redundant_virtus_tab_closed",
+          nome: String(nome || ""),
+          reason: String(reason || "").slice(0, 80),
+          closed,
+          closedUrls: closedUrls.slice(0, 6)
+        });
+      }
+    } catch {}
+  }
+  return { ok: true, closed, keep: !!keep };
 }
 
 function isChromeProtocolSickError(msg) {
@@ -505,5 +591,7 @@ module.exports = {
   sweepAboutBlankPages,
   closeJunkCdpTargets,
   probeBrowserHealth,
-  cureBrowserInPlace
+  cureBrowserInPlace,
+  pickVirtusKeepPage,
+  closeRedundantVirtusTabs
 };

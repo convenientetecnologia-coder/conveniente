@@ -1245,6 +1245,13 @@ async function newPageDaConta(browser, nome, opts = {}) {
 function _installForceCloseExtras(browser) {
   browser.forceCloseExtras = async () => {
     try {
+      const hygiene = require('./robeTabHygiene.js');
+      if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
+        await hygiene.closeRedundantVirtusTabs(browser, { reason: 'force_close_extras' });
+        return;
+      }
+    } catch {}
+    try {
       if (_browserGateBusy(browser)) return;
       const pages = await browser.pages();
       if (pages && pages.length > 1) {
@@ -1447,29 +1454,22 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
   const page0 = all && all[0];
   if (!page0) throw new Error('bindAccountIdentity_no_page0');
 
+  const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
+  const keep = (hygiene && typeof hygiene.pickVirtusKeepPage === 'function')
+    ? (hygiene.pickVirtusKeepPage(all, page0) || page0)
+    : page0;
+
   browser._convenienteGateInFlight = (Number(browser._convenienteGateInFlight || 0) || 0) + 1;
   try {
-    await blindarPaginaDaConta(page0, who, { source: `${source}_tab0` });
-    for (const extra of (all || []).slice(1)) {
+    await blindarPaginaDaConta(keep, who, { source: `${source}_virtus` });
+    // Portão aqui é cola da aba Virtus, não create do Robe. Extra restaurada/blank fecha agora.
+    const nowPages = await browser.pages().catch(() => []);
+    for (const extra of (nowPages || [])) {
+      if (!extra || extra === keep) continue;
       let u = '';
       try { u = (typeof extra.url === 'function') ? String(extra.url() || '') : ''; } catch {}
-      if (!u || u === 'about:blank') {
-        await _safeCloseAccountPage(extra);
-        continue;
-      }
-      try {
-        await blindarPaginaDaConta(extra, who, { source: `${source}_extra` });
-      } catch (e) {
-        try {
-          logger.warn('[BLINDAR] aba extra sem cara, fechando', {
-            nome: who,
-            source,
-            url: u.slice(0, 160),
-            err: String((e && e.message) || e || '').slice(0, 160)
-          });
-        } catch {}
-        await _safeCloseAccountPage(extra);
-      }
+      if (hygiene && typeof hygiene.isCreateMarketplaceUrl === 'function' && hygiene.isCreateMarketplaceUrl(u)) continue;
+      await _safeCloseAccountPage(extra);
     }
   } finally {
     browser._convenienteGateInFlight = Math.max(0, (Number(browser._convenienteGateInFlight || 1) || 1) - 1);
@@ -1904,6 +1904,34 @@ function ensureChromeProfilePreferences(userDataDir, windowBounds) {
   }
 }
 
+/**
+ * Prefs sozinhas não impedem o Chrome de devolver Last Session (2 abas Messages).
+ * Apaga só arquivos de sessão/abas. Cookies, History, Preferences ficam.
+ */
+function clearChromeSessionRestore(userDataDir) {
+  try {
+    if (!userDataDir) return;
+    const defaultDir = path.join(userDataDir, 'Default');
+    const files = ['Current Session', 'Last Session', 'Current Tabs', 'Last Tabs'];
+    for (const name of files) {
+      try {
+        const p = path.join(defaultDir, name);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      } catch {}
+    }
+    const sessionsDir = path.join(defaultDir, 'Sessions');
+    try {
+      if (!fs.existsSync(sessionsDir)) return;
+      const ents = fs.readdirSync(sessionsDir);
+      for (const ent of ents) {
+        if (/^(Tabs_|Session_)/i.test(String(ent || ''))) {
+          try { fs.unlinkSync(path.join(sessionsDir, ent)); } catch {}
+        }
+      }
+    } catch {}
+  } catch {}
+}
+
 // BEGIN -- PRUNING PATCH: ULTRA CONSCIENTE
 
 /**
@@ -2135,6 +2163,12 @@ function installOneTabGuard(browser, nome, {
             }
           } catch {}
         }
+
+        try {
+          if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
+            await hygiene.closeRedundantVirtusTabs(browser, { nome, reason: 'one_tab_guard' });
+          }
+        } catch {}
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {
           log('[PRUNER][HARD] erro enforce', { nome, error: (e && e.message) || String(e) });
@@ -2207,17 +2241,17 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { launchAntiState = await syncStealthFromManifest(accountNome, manifest); } catch {}
     const windowBounds = resolveAccountWindowBounds(manifest);
 
-    // RAM: Garantir preferências, evitar restauração / maximize fantasma
-    ensureChromeProfilePreferences(userDataDir, windowBounds);
-
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
       logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
       throw new Error('UserDataDir sem permissão de escrita: ' + userDataDir);
     }
 
-    // RAM: Encerra processos do perfil e limpa locks
+    // RAM: Encerra processos do perfil e limpa locks ANTES das prefs/sessão
+    // (Chrome morrendo depois das prefs reescrevia Last Session com 2 abas).
     try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
+    try { clearChromeSessionRestore(userDataDir); } catch {}
+    ensureChromeProfilePreferences(userDataDir, windowBounds);
 
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
@@ -2339,12 +2373,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
+      try { clearChromeSessionRestore(userDataDir); } catch {}
       browserTry = await tryLaunch(launchArgs, 'LAUNCH 2');
     }
 
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
+      try { clearChromeSessionRestore(userDataDir); } catch {}
       browserTry = await tryLaunch(launchArgs, 'LAUNCH 3');
     }
 
