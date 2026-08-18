@@ -5,6 +5,22 @@ const path = require("path");
 
 const CT_CONFIG_PATH = path.join(__dirname, "..", "dados", "ct_config.json");
 const NGROK_HOST_RE = /(?:^|\.)ngrok(?:-free)?\.(?:io|app)$/i;
+const CT_CANONICAL_API_BASE = "https://api.convenientetecnologia.com";
+
+function canonicalCtApiBase() {
+  const raw = String(
+    process.env.CT_CANONICAL_API_BASE ||
+    process.env.CT_DEFAULT_BASE_URL ||
+    CT_CANONICAL_API_BASE
+  ).trim();
+  const normalized = normalizeCtBaseUrl(raw);
+  return normalized || CT_CANONICAL_API_BASE;
+}
+
+function resolveCtApiBase(rawValue) {
+  const normalized = normalizeCtBaseUrl(rawValue || "");
+  return normalized || canonicalCtApiBase();
+}
 
 function allowLegacyNgrokCtBase() {
   const raw = String(
@@ -77,7 +93,7 @@ function selfHealBlockedNgrokCtBase(rawCtBaseUrl) {
     const now = Date.now();
     const next = {
       ...(cur && typeof cur === "object" ? cur : {}),
-      ctBaseUrl: "",
+      ctBaseUrl: canonicalCtApiBase(),
       legacyCtBaseUrl: blocked,
       legacyCtBaseBlockedAt: Number(cur && cur.legacyCtBaseBlockedAt) || now,
       legacyCtBaseReason: "blocked_ngrok_ct_base",
@@ -94,9 +110,10 @@ function selfHealBlockedNgrokCtBase(rawCtBaseUrl) {
 function readCtConfig() {
   const j = safeReadJson(CT_CONFIG_PATH) || {};
   const rawCtBaseUrl = normalizeCtBaseUrl(j.ctBaseUrl || "", { allowLegacyNgrok: true });
-  const ctBaseUrl = normalizeCtBaseUrl(rawCtBaseUrl || "");
+  let ctBaseUrl = normalizeCtBaseUrl(rawCtBaseUrl || "");
   if (!ctBaseUrl && rawCtBaseUrl && isNgrokCtBaseUrl(rawCtBaseUrl) && !allowLegacyNgrokCtBase()) {
     selfHealBlockedNgrokCtBase(rawCtBaseUrl);
+    ctBaseUrl = canonicalCtApiBase();
   }
   const logIngestSecret = String(j.logIngestSecret || "").trim();
   return {
@@ -123,6 +140,7 @@ function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
       updatedAt: now
     };
     if (!next.ctBaseUrl && ctBaseRaw && isNgrokCtBaseUrl(ctBaseRaw) && !allowLegacyNgrokCtBase()) {
+      next.ctBaseUrl = canonicalCtApiBase();
       next.legacyCtBaseUrl = ctBaseRaw;
       next.legacyCtBaseBlockedAt = Number(next.legacyCtBaseBlockedAt || now) || now;
       next.legacyCtBaseReason = "blocked_ngrok_ct_base";
@@ -141,6 +159,9 @@ function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
 
 module.exports = {
   CT_CONFIG_PATH,
+  CT_CANONICAL_API_BASE,
+  canonicalCtApiBase,
+  resolveCtApiBase,
   readCtConfig,
   writeCtConfig,
   normalizeCtBaseUrl,

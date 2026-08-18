@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const manifestStore = require("./manifestStore");
-const { readCtConfig, normalizeCtBaseUrl } = require("./ctConfig");
+const { readCtConfig, resolveCtApiBase } = require("./ctConfig");
 
 const STATE_PATH = path.join(__dirname, "..", "dados", "gateway_proxy_state.json");
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
@@ -536,8 +536,9 @@ function ensureLocalAssignmentForProfile({ profileName, state, slotsById }) {
 function resolveProxyForProfile({ profileName, manifest }) {
   const st = readState();
   if (!st.globalEnabled || !st.hostEnabled) return { enabled: false, reason: "gateway_disabled" };
-  const provider = String(st.provider || "proxycheap").trim().toLowerCase();
-  if (provider !== "proxycheap") return { enabled: false, reason: "unsupported_provider" };
+  // Qualquer provedor com credencial no slot (ASocks, ProxyCheap, etc.).
+  // O CT decide o provider; este host só aplica o comando gateway_set_proxies.
+  const provider = String(st.provider || "").trim().toLowerCase();
   const slots = st.slots || [];
   if (!slots.length) return { enabled: false, reason: "no_slots" };
 
@@ -726,7 +727,7 @@ async function reportProxyIssue({ resolved, reason, context } = {}) {
     if (shouldThrottleIssue(slot.slotId, minMs)) return { ok: false, skipped: true, reason: "throttled" };
 
     const cfg = readCtConfig();
-    const ctBaseUrl = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || "");
+    const ctBaseUrl = resolveCtApiBase((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || "");
     const secret = String(cfg && cfg.logIngestSecret || "").trim();
     if (!ctBaseUrl) return { ok: false, skipped: true, reason: "missing_ct_config" };
 
