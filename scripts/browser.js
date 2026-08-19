@@ -1955,9 +1955,10 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (_browserGateBusy(browser)) return;
   const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
+  let keep = mainPage || null;
   try {
     const pages = await browser.pages();
-    let keep = mainPage || (pages && pages[0]) || null;
+    keep = mainPage || (pages && pages[0]) || null;
     try {
       if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
         keep = (await hygiene.pickVirtusKeepPageAsync(pages, mainPage)) || keep;
@@ -2000,9 +2001,15 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     try {
       const pages = await browser.pages();
       if (pages.length <= 1) break;
+      let keepNow = keep || mainPage || pages[0];
+      try {
+        if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
+          keepNow = (await hygiene.pickVirtusKeepPageAsync(pages, keepNow)) || keepNow;
+        }
+      } catch {}
       for (const p of pages) {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (keepNow && p === keepNow) continue;
+        if (!keepNow && pages[0] && p === pages[0]) continue;
         if (_pageIsBlinding(p)) continue;
         let u = ''; try { u = p.url(); } catch {}
         if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;

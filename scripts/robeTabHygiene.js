@@ -45,7 +45,8 @@ function isCreateMarketplaceUrl(url) {
 function isLiveWorkUrl(url) {
   const u = String(url || "");
   if (isJunkUrl(u)) return false;
-  return /facebook\.com|messenger\.com/i.test(u);
+  const host = facebookNavHosts.hostnameOf(u);
+  return facebookNavHosts.isOfficialFacebookNavHost(host) || facebookNavHosts.isOfficialMessengerNavHost(host);
 }
 
 function pageUrlOf(page) {
@@ -59,7 +60,27 @@ function pageUrlOf(page) {
 function isChromeErrorUiText(s) {
   const t = String(s || "");
   if (!t) return false;
-  return /ERR_BLOCKED_BY_CLIENT|ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_EMPTY_RESPONSE|ERR_NAME_NOT_RESOLVED|esta p[aá]gina da web foi bloqueada|esta pagina foi bloqueada|n[aã]o [eé] poss[ií]vel acessar esse site|this site can.?t be reached|this page has been blocked|took too long to respond/i.test(t);
+  if (/ERR_(BLOCKED_BY_CLIENT|TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|SOCKS_CONNECTION_FAILED|CONNECTION_TIMED_OUT|CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_REFUSED|EMPTY_RESPONSE|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|SSL_PROTOCOL_ERROR|TIMED_OUT)\b/i.test(t)) {
+    return true;
+  }
+  if (/n[aã]o [eé] poss[ií]vel acessar esse site/i.test(t)) return true;
+  if (/this site can.?t be reached/i.test(t)) return true;
+  if (/esta p[aá]gina da web foi bloqueada/i.test(t)) return true;
+  if (/checking the proxy address|verifique o endere[cç]o do proxy/i.test(t)) return true;
+  return false;
+}
+
+function unknownPageNavState(page) {
+  const url = pageUrlOf(page);
+  const junkUrl = isJunkUrl(url);
+  return {
+    url,
+    junkUrl,
+    deadContent: junkUrl,
+    liveMessages: false,
+    loginGate: false,
+    liveWork: false
+  };
 }
 
 async function pageLooksLikeChromeNetError(page) {
@@ -81,20 +102,24 @@ async function pageLooksLikeChromeNetError(page) {
   } catch {}
   try {
     if (typeof page.evaluate === "function") {
-      const txt = await withTimeout(
+      const probe = await withTimeout(
         page.evaluate(() => {
           try {
+            if (document.querySelector("#main-frame-error, #main-frame-info, .error-code, #error-code")) {
+              return { dom: true, text: "" };
+            }
             const title = String((document && document.title) || "");
             const body = String((document && document.body && document.body.innerText) || "");
-            return (title + "\n" + body).slice(0, 800);
+            return { dom: false, text: (title + "\n" + body).slice(0, 800) };
           } catch {
-            return "";
+            return { dom: false, text: "" };
           }
         }),
         800,
-        ""
+        { dom: false, text: "" }
       );
-      if (isChromeErrorUiText(txt)) return true;
+      if (probe && probe.dom === true) return true;
+      if (probe && isChromeErrorUiText(probe.text)) return true;
     }
   } catch {}
   return false;
@@ -143,14 +168,7 @@ async function pickVirtusKeepPageAsync(pages, preferred) {
     try {
       states.set(p, await classifyPageNavState(p));
     } catch {
-      states.set(p, {
-        url: pageUrlOf(p),
-        junkUrl: true,
-        deadContent: true,
-        liveMessages: false,
-        loginGate: false,
-        liveWork: false
-      });
+      states.set(p, unknownPageNavState(p));
     }
   }
   return pickVirtusKeepPageFromStates(list, preferred, states);
@@ -198,14 +216,7 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
     try {
       states.set(p, await classifyPageNavState(p));
     } catch {
-      states.set(p, {
-        url: pageUrlOf(p),
-        junkUrl: isJunkUrl(pageUrlOf(p)),
-        deadContent: true,
-        liveMessages: false,
-        loginGate: false,
-        liveWork: false
-      });
+      states.set(p, unknownPageNavState(p));
     }
   }
   const virtusLive = pages.filter((p) => {

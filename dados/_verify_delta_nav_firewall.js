@@ -34,6 +34,7 @@ const cases = [
   { u: "https://accounts.google.com/", exp: false },
   { u: "https://lm.facebook.com/l.php", exp: false },
   { u: "https://business.facebook.com/", exp: false },
+  { u: "https://notfacebook.com/messages", exp: false },
   { u: "not-a-url", exp: false },
 ];
 
@@ -86,6 +87,69 @@ if (/\*\.facebook\.com/.test(srcHosts) || /\*\.facebook\.com/.test(srcDelta)) {
   console.log("FAIL", "src:no_star_facebook_wildcard");
 } else {
   console.log("OK", "src:no_star_facebook_wildcard");
+}
+
+if (/\.endsWith\(\s*["']facebook\.com["']\s*\)/.test(srcDelta)) {
+  fail += 1;
+  console.log("FAIL", "src:no_endswith_facebook_wildcard");
+} else {
+  console.log("OK", "src:no_endswith_facebook_wildcard");
+}
+
+if (!/isOfficialFacebookNavHost\(reqHost\)/.test(srcDelta)) {
+  fail += 1;
+  console.log("FAIL", "src:boot_interlock_official_hosts");
+} else {
+  console.log("OK", "src:boot_interlock_official_hosts");
+}
+
+const suffixTrap = "notfacebook.com";
+const officialTrap = facebookNavHosts.isOfficialFacebookNavHost(suffixTrap);
+const suffixWouldMatch = suffixTrap.endsWith("facebook.com");
+if (suffixWouldMatch && !officialTrap) {
+  console.log("OK", "host:notfacebook_suffix_trap");
+} else {
+  fail += 1;
+  console.log("FAIL", "host:notfacebook_suffix_trap", { suffixWouldMatch, officialTrap });
+}
+
+const loginCases = [
+  { u: "https://www.facebook.com/login.php", exp: true },
+  { u: "https://web.facebook.com/checkpoint/", exp: true },
+  { u: "https://m.facebook.com/identity", exp: true },
+  { u: "https://web.facebook.com/messages", exp: false },
+];
+for (const c of loginCases) {
+  const got = facebookNavHosts.isFacebookLoginOrGateUrl(c.u);
+  const ok = got === c.exp;
+  if (!ok) fail += 1;
+  console.log(ok ? "OK" : "FAIL", { kind: "login", got, exp: c.exp, u: c.u });
+}
+
+const hygiene = require("../scripts/robeTabHygiene.js");
+const errCases = [
+  { t: "ERR_TUNNEL_CONNECTION_FAILED\nNao e possivel acessar esse site", exp: true },
+  { t: "ERR_BLOCKED_BY_CLIENT", exp: true },
+  { t: "Não é possível acessar esse site", exp: true },
+  { t: "This site can’t be reached", exp: true },
+  { t: "Esta página da web foi bloqueada", exp: true },
+  { t: "João: took too long to respond\nMessenger", exp: false },
+  { t: "this page has been blocked by the group admin", exp: false },
+  { t: "Marketplace", exp: false },
+];
+for (const c of errCases) {
+  const got = hygiene.isChromeErrorUiText(c.t);
+  const ok = got === c.exp;
+  if (!ok) fail += 1;
+  console.log(ok ? "OK" : "FAIL", { kind: "chrome_err", got, exp: c.exp, t: c.t.slice(0, 60) });
+}
+
+const liveOk = hygiene.isLiveWorkUrl("https://web.facebook.com/messages");
+const liveBad = hygiene.isLiveWorkUrl("https://notfacebook.com/messages") || hygiene.isLiveWorkUrl("https://business.facebook.com/");
+if (liveOk && !liveBad) console.log("OK", "hygiene:live_work_official_only");
+else {
+  fail += 1;
+  console.log("FAIL", "hygiene:live_work_official_only", { liveOk, liveBad });
 }
 
 process.exit(fail ? 1 : 0);

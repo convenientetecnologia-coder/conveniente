@@ -525,7 +525,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
           const reqHost = String(ru.hostname || "").toLowerCase();
           const tgtHost = String(tu.hostname || "").toLowerCase();
           if (reqHost !== tgtHost) {
-            if (!reqHost.endsWith("facebook.com") || !tgtHost.endsWith("facebook.com")) return false;
+            if (!facebookNavHosts.isOfficialFacebookNavHost(reqHost) || !facebookNavHosts.isOfficialFacebookNavHost(tgtHost)) return false;
           }
           return true;
         } catch {
