@@ -3160,6 +3160,8 @@ function logsAllowlist() {
     perfis: path.join(base, 'perfis.json'),
     status: path.join(base, 'status.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
+    connect_lane_events: path.join(base, 'connect_lane_events.jsonl'),
+    connect_lane_fail: path.join(base, 'connect_lane_fail.json'),
     server_runtime_config: path.join(base, 'server_runtime_config.json'),
     ct_config: path.join(base, 'ct_config.json'),
     // Fila durável Delta (diagnóstico de reenvio/queda CT sem perda).

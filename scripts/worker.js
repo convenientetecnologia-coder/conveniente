@@ -251,7 +251,8 @@ const {
   cureBrowserInPlace,
   pageLooksLikeChromeNetError,
   waitForHeavyNavLanding,
-  pickVirtusKeepPageAsync
+  pickVirtusKeepPageAsync,
+  closeRedundantVirtusTabs
 } = require('./robeTabHygiene.js');
 const facebookNavHosts = require('./facebookNavHosts.js');
 const robePostPublishId = require('./robePostPublishId.js');
@@ -17680,10 +17681,34 @@ async function waitHeavyNavBootLanding(nome, ctrl) {
     if (!page) page = pages[0] || null;
     if (!page) return { ok: false, reason: 'no_page' };
     const settleMs = connectLane.bootSettleMs();
-    const land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
+    let land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
+    for (let attempt = 1; attempt <= 2 && land && land.reason === 'net_error'; attempt++) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'connect_lane_boot_retry',
+          nome: String(nome || ''),
+          attempt,
+          url: String((land && land.url) || '').slice(0, 180)
+        });
+      } catch {}
+      await sleep(8000);
+      try {
+        await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      } catch (e) {
+        const msg = String((e && e.message) || e || '');
+        if (/ERR_TUNNEL|ERR_PROXY/i.test(msg)) {
+          try { connectLane.noteFailure(msg.slice(0, 160)); } catch {}
+        }
+      }
+      land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
+    }
     if (land && land.reason === 'net_error') {
       try { connectLane.noteFailure('boot_net_error'); } catch {}
     }
+    try {
+      await closeRedundantVirtusTabs(ctrl.browser, { keepPage: page, nome, reason: 'connect_lane_boot' });
+    } catch {}
     try {
       provisionAudit.append({
         ts: Date.now(),
@@ -17748,6 +17773,16 @@ async function openAllShouldWaitBeforeActivate(nextNome) {
       if (connectLane.isHeld()) {
         return { wait: true, waitingFor: 'host', reason: 'connect_lane_held' };
       }
+      try {
+        if (typeof connectLane.isCooling === 'function' && connectLane.isCooling()) {
+          return {
+            wait: true,
+            waitingFor: 'host',
+            reason: 'connect_lane_tunnel_cool',
+            ageMs: Number(connectLane.coolRemainingMs && connectLane.coolRemainingMs() || 0) || 0
+          };
+        }
+      } catch {}
       return { wait: false };
     }
     let oaStartedAt = 0;

@@ -44,10 +44,13 @@ const ACQUIRE_MS = envNum("CONNECT_LANE_ACQUIRE_MS", 1_500_000, 60_000, null);
 const STALE_MS = envNum("CONNECT_LANE_STALE_MS", 480_000, 120_000, null);
 const POLL_MS = envNum("CONNECT_LANE_POLL_MS", 80, 40, null);
 const BASE_GAP_MS = envNum("CONNECT_LANE_GAP_MS", 800, 0, null);
-const FAIL_GAP_MS = Math.max(BASE_GAP_MS, envNum("CONNECT_LANE_FAIL_GAP_MS", 4000, 0, null));
+const FAIL_GAP_MS = Math.max(BASE_GAP_MS, envNum("CONNECT_LANE_FAIL_GAP_MS", 20_000, 0, null));
 const FAIL_WINDOW_MS = envNum("CONNECT_LANE_FAIL_WINDOW_MS", 300_000, 60_000, null);
 const FAIL_STREAK = envNum("CONNECT_LANE_FAIL_STREAK", 2, 1, null);
 const BOOT_SETTLE_MS = envNum("CONNECT_LANE_BOOT_SETTLE_MS", 14_000, 5_000, 25_000);
+const COOL_SOFT_MS = envNum("CONNECT_LANE_COOL_SOFT_MS", 12_000, 3_000, 60_000);
+const COOL_MS = envNum("CONNECT_LANE_COOL_MS", 25_000, 5_000, 120_000);
+const COOL_HARD_MS = envNum("CONNECT_LANE_COOL_HARD_MS", 45_000, 10_000, 180_000);
 
 let _held = null;
 
@@ -146,23 +149,49 @@ function isEnabled() {
   return isArmed();
 }
 
+function loadFailState() {
+  return readJsonSafe(FAIL_PATH) || {};
+}
+
 function loadFailTs() {
   const now = Date.now();
-  const j = readJsonSafe(FAIL_PATH);
+  const j = loadFailState();
   const arr = j && Array.isArray(j.ts) ? j.ts : [];
   return arr.map(Number).filter((t) => t > 0 && (now - t) <= FAIL_WINDOW_MS);
+}
+
+function coolMsForCount(n) {
+  const c = Number(n || 0) || 0;
+  if (c >= 4) return COOL_HARD_MS;
+  if (c >= 2) return COOL_MS;
+  if (c >= 1) return COOL_SOFT_MS;
+  return 0;
+}
+
+function coolUntilNow() {
+  return Number(loadFailState().coolUntil || 0) || 0;
+}
+
+function isCooling() {
+  return coolUntilNow() > Date.now();
+}
+
+function coolRemainingMs() {
+  return Math.max(0, coolUntilNow() - Date.now());
 }
 
 function noteFailure(reason) {
   const now = Date.now();
   const arr = loadFailTs();
   arr.push(now);
+  const coolUntil = Math.max(coolUntilNow(), now + coolMsForCount(arr.length));
   writeJsonSafe(FAIL_PATH, {
     ts: arr,
     lastReason: String(reason || "").slice(0, 160),
-    lastAt: now
+    lastAt: now,
+    coolUntil
   });
-  appendEvent({ type: "fail", reason: String(reason || "").slice(0, 160) });
+  appendEvent({ type: "fail", reason: String(reason || "").slice(0, 160), coolUntil });
 }
 
 function recentFailCount() {
@@ -229,6 +258,11 @@ async function acquire(meta = {}) {
   const nome = String(meta.nome || "").slice(0, 120);
   const t0 = Date.now();
   while ((Date.now() - t0) < ACQUIRE_MS) {
+    const remain = coolRemainingMs();
+    if (remain > 0) {
+      await sleep(Math.min(remain, Math.max(POLL_MS * 8, 400)));
+      continue;
+    }
     recoverStale();
     try {
       fs.mkdirSync(DADOS_DIR, { recursive: true });
@@ -334,7 +368,9 @@ function bootSnapshot() {
     staleMs: STALE_MS,
     bootSettleMs: BOOT_SETTLE_MS,
     held: isHeld(),
-    failWindow: recentFailCount()
+    failWindow: recentFailCount(),
+    cooling: isCooling(),
+    coolRemainingMs: coolRemainingMs()
   };
 }
 
@@ -342,6 +378,8 @@ module.exports = {
   isEnabled,
   isArmed,
   isHeld,
+  isCooling,
+  coolRemainingMs,
   acquire,
   release,
   withHeavyNav,
