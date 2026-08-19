@@ -152,4 +152,49 @@ else {
   console.log("FAIL", "hygiene:live_work_official_only", { liveOk, liveBad });
 }
 
-process.exit(fail ? 1 : 0);
+const srcHygiene = fs.readFileSync(path.join(__dirname, "..", "scripts", "robeTabHygiene.js"), "utf8");
+const srcWorker = fs.readFileSync(path.join(__dirname, "..", "scripts", "worker.js"), "utf8");
+if (/#main-frame-error/.test(srcHygiene) && !/\.error-code|#error-code/.test(srcHygiene)) {
+  console.log("OK", "src:chrome_error_dom_ids_only");
+} else {
+  fail += 1;
+  console.log("FAIL", "src:chrome_error_dom_ids_only");
+}
+if (/needsEntry = isJunkUrl\(u0\)/.test(srcWorker) && /pageLooksLikeChromeNetError\(p0\)/.test(srcWorker)) {
+  console.log("OK", "src:open_entry_retries_junk_or_dead");
+} else {
+  fail += 1;
+  console.log("FAIL", "src:open_entry_retries_junk_or_dead");
+}
+
+(async () => {
+  const pDead = {
+    url: () => "https://web.facebook.com/messages?_rdc=1&_rdr#",
+    title: async () => "web.facebook.com",
+    evaluate: async () => ({ dom: true, text: "" }),
+    isClosed: () => false
+  };
+  const pLive = {
+    url: () => "https://web.facebook.com/messages?_rdc=1&_rdr#",
+    title: async () => "Messenger",
+    evaluate: async () => ({ dom: false, text: "Chats" }),
+    isClosed: () => false
+  };
+  const keep = await hygiene.pickVirtusKeepPageAsync([pDead, pLive], pDead);
+  if (keep === pLive) console.log("OK", "hygiene:keep_live_over_dead_web_messages");
+  else {
+    fail += 1;
+    console.log("FAIL", "hygiene:keep_live_over_dead_web_messages");
+  }
+  const deadLooks = await hygiene.pageLooksLikeChromeNetError(pDead);
+  const liveLooks = await hygiene.pageLooksLikeChromeNetError(pLive);
+  if (deadLooks === true && liveLooks === false) console.log("OK", "hygiene:dead_probe_dom_vs_live");
+  else {
+    fail += 1;
+    console.log("FAIL", "hygiene:dead_probe_dom_vs_live", { deadLooks, liveLooks });
+  }
+  process.exit(fail ? 1 : 0);
+})().catch((e) => {
+  console.log("FAIL", "async_hygiene_probe", String(e && e.message || e));
+  process.exit(1);
+});

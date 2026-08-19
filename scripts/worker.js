@@ -7560,8 +7560,11 @@ async function activateOnce(nome, source = '', operator = '') {
                   const p0 = pages && pages[0];
                   let u0 = '';
                   try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
-                  const isBlank = (!u0 || u0 === 'about:blank');
-                  if (isBlank) {
+                  let needsEntry = isJunkUrl(u0);
+                  if (!needsEntry && p0) {
+                    try { needsEntry = await pageLooksLikeChromeNetError(p0); } catch { needsEntry = false; }
+                  }
+                  if (needsEntry) {
                     // Manual com flag persistida abre direto em Facebook para o humano inspecionar.
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
                     const preferEntry = _manualHumanFromFlags

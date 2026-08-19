@@ -105,7 +105,7 @@ async function pageLooksLikeChromeNetError(page) {
       const probe = await withTimeout(
         page.evaluate(() => {
           try {
-            if (document.querySelector("#main-frame-error, #main-frame-info, .error-code, #error-code")) {
+            if (document.querySelector("#main-frame-error, #main-frame-info")) {
               return { dom: true, text: "" };
             }
             const title = String((document && document.title) || "");
