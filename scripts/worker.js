@@ -3987,10 +3987,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
             }
             if (dead) {
               lastNavErr = new Error('chrome_net_error_page');
-              if (i < attempts) {
-                await sleep(Math.min(8000, 1500 * i));
-                continue;
-              }
+              try { connectLane.noteFailure('entry_net_error'); } catch {}
               throw lastNavErr;
             }
             lastNavErr = null;
@@ -3998,7 +3995,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
           } catch (eNav) {
             lastNavErr = eNav;
             const em = (eNav && eNav.message) ? String(eNav.message) : String(eNav || '');
-            if (!isRetryableEntryNavError(em) || i >= attempts) throw eNav;
+            if (/chrome_net_error_page|ERR_TUNNEL|ERR_PROXY/i.test(em) || i >= attempts || !isRetryableEntryNavError(em)) throw eNav;
             await sleep(Math.min(8000, 1500 * i));
           }
         }
@@ -7814,28 +7811,24 @@ async function activateOnce(nome, source = '', operator = '') {
             }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
-              // Bootstrap ultra enterprise:
-              // Durante a abertura (open-all/activate), o Chrome cria 2 abas about:blank.
-              // Se o oneTabGuard/blank-killer agir cedo, vira loop abre/fecha/disconnected.
-              const BOOTSTRAP_TABS_MS = parseInt(process.env.BOOTSTRAP_TABS_MS || '60000', 10);
-              const ABOUTBLANK_BOOT_MAX_AGE_MS = parseInt(process.env.ABOUTBLANK_BOOT_MAX_AGE_MS || '120000', 10);
+              // Landing já passou. Suppress 60s + maxAge 120s deixava about:blank
+              // e facebook.com/messages morto empilharem. newPage ainda arma 25s sozinho.
               try {
-                const now = Date.now();
-                ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-                ctrl.browser._aboutBlankMaxAgeMs = ctrl.browser._aboutBlankMaxAgeMs || {};
-                ctrl.browser._suppressBlankKillUntil[nome] = Math.max(ctrl.browser._suppressBlankKillUntil[nome] || 0, now + BOOTSTRAP_TABS_MS);
-                ctrl.browser._aboutBlankMaxAgeMs[nome] = Math.max(ctrl.browser._aboutBlankMaxAgeMs[nome] || 0, ABOUTBLANK_BOOT_MAX_AGE_MS);
-                setTimeout(() => {
-                  try {
-                    const b = controllers.get(nome)?.browser;
-                    if (!b) return;
-                    if (Number(b._convenienteGateInFlight || 0) > 0) return;
-                    if (b._suppressBlankKillUntil && b._suppressBlankKillUntil[nome]) delete b._suppressBlankKillUntil[nome];
-                    if (b._aboutBlankMaxAgeMs && b._aboutBlankMaxAgeMs[nome]) delete b._aboutBlankMaxAgeMs[nome];
-                  } catch {}
-                }, BOOTSTRAP_TABS_MS + 5000);
+                if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0) {
+                  if (ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome];
+                  if (ctrl.browser._aboutBlankMaxAgeMs) delete ctrl.browser._aboutBlankMaxAgeMs[nome];
+                }
               } catch {}
-
+              try {
+                await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome });
+              } catch {}
+              try {
+                await closeRedundantVirtusTabs(ctrl.browser, {
+                  keepPage: ctrl.mainPage || null,
+                  nome,
+                  reason: 'activate_landing_done'
+                });
+              } catch {}
               installAccountTabGuards(nome, ctrl.browser);
             } catch {}
           }
@@ -9420,7 +9413,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
     const keepPage = await __pickKeepPage(stablePages, mainPage);
 
-    if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
+    const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
 
     // 1) lixo (about:blank / chrome-error / Aw Snap):
     //    - chrome-error: fecha já (nunca é create válido), mesmo sob proteção
@@ -9435,6 +9428,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         const dead = isDeadTabUrl(url) || (await pageLooksLikeChromeNetError(p).catch(() => false));
         const blank = isBlankUrl(url);
         if (!dead && !blank) continue;
+        if (gateBusy && blank && !dead) continue;
         if (!dead && protectedCtx) {
           const age = __pageAgeMs(browser, p);
           if (age < blankMaxAgeMs) continue;
@@ -9448,7 +9442,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     }
 
     // 2) Prune amplo (abas reais extras) só fora de proteção
-    if (!protectedCtx) {
+    if (!protectedCtx && !gateBusy) {
       let again = [];
       try {
         again = await Promise.race([
@@ -16786,14 +16780,14 @@ function copyAccountBrowserRuntimeState(fromBrowser, toBrowser) {
 
 function installAccountTabGuards(nome, browser) {
   if (!browser) return;
-  const BOOTSTRAP_TABS_MS = parseInt(process.env.BOOTSTRAP_TABS_MS || '60000', 10);
+  const BOOTSTRAP_TABS_MS = parseInt(process.env.BOOTSTRAP_TABS_MS || '12000', 10);
   try {
     browserHelper.installOneTabGuard(browser, nome, {
       allow: () => {
         const c = controllers.get(nome);
         const rm = robeMeta[nome] || {};
         const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 12000));
         const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
         const isVirtusSwap = swapUntil > Date.now();
         return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true || isVirtusSwap === true));
@@ -16802,21 +16796,21 @@ function installAccountTabGuards(nome, browser) {
         const c = controllers.get(nome);
         const rm = robeMeta[nome] || {};
         const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+        const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 12000));
         const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
         const isVirtusSwap = swapUntil > Date.now();
         if (c && c.humanControl === true) return 1;
         if (isVirtusSwap) return 2;
         if (c && c.configurando === true) return 3;
         if (isBootstrap) return 2;
-        return rm.emExecucao === true ? 3 : 10;
+        return rm.emExecucao === true ? 3 : 1;
       },
       getReason: () => {
         try {
           const c = controllers.get(nome);
           const rm = robeMeta[nome] || {};
           const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
-          const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+          const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 12000));
           const swapUntil = Number((c && c.browser && c.browser._virtusSwapUntil && c.browser._virtusSwapUntil[nome]) || 0) || 0;
           const isVirtusSwap = swapUntil > Date.now();
           if (c && c.humanControl === true) return 'human';
@@ -17682,13 +17676,14 @@ async function waitHeavyNavBootLanding(nome, ctrl) {
     if (!page) return { ok: false, reason: 'no_page' };
     const settleMs = connectLane.bootSettleMs();
     let land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
-    for (let attempt = 1; attempt <= 2 && land && land.reason === 'net_error'; attempt++) {
+    const tunnelCool = (() => { try { return !!connectLane.isCooling(); } catch { return false; } })();
+    if (land && land.reason === 'net_error' && !tunnelCool) {
       try {
         provisionAudit.append({
           ts: Date.now(),
           event: 'connect_lane_boot_retry',
           nome: String(nome || ''),
-          attempt,
+          attempt: 1,
           url: String((land && land.url) || '').slice(0, 180)
         });
       } catch {}
@@ -17708,6 +17703,9 @@ async function waitHeavyNavBootLanding(nome, ctrl) {
     }
     try {
       await closeRedundantVirtusTabs(ctrl.browser, { keepPage: page, nome, reason: 'connect_lane_boot' });
+    } catch {}
+    try {
+      await sweepAboutBlankPages(ctrl.browser, { keepPage: page, nome });
     } catch {}
     try {
       provisionAudit.append({

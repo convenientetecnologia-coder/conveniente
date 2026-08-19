@@ -315,7 +315,6 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   const pages = listed.pages || [];
   if (pages.length <= 1) return { ok: true, closed: 0, kept: pages.length };
 
-  const gateBusy = Number(browser._convenienteGateInFlight || 0) > 0;
   const states = new Map();
   for (const p of pages) {
     try {
@@ -340,8 +339,7 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
     const u = s.url || pageUrlOf(p);
     if (isCreateMarketplaceUrl(u)) continue;
     const blinding = !!(p && p._convenienteBlindarPromise);
-    if (isBlankUrl(u) && (gateBusy || blinding)) continue;
-    if (!virtusLive.length && !(s.deadContent || s.junkUrl)) continue;
+    if (blinding) continue;
     try {
       const r = await safeClosePage(p, { nome, reason: reason || "redundant_virtus_tab" });
       if (r && (r.closed || r.ok)) {
@@ -458,19 +456,24 @@ async function safeClosePage(page, { nome = "", reason = "" } = {}) {
   } catch {}
 
   // 1) Neutraliza beforeunload SEM navegar para about:blank.
-  try {
-    await Promise.race([
-      page.evaluate(() => {
-        try { window.onbeforeunload = null; } catch {}
-        try {
-          window.addEventListener("beforeunload", (e) => {
-            try { e.stopImmediatePropagation(); } catch {}
-          }, true);
-        } catch {}
-      }).catch(() => {}),
-      new Promise((r) => setTimeout(r, 800))
-    ]);
-  } catch {}
+  // about:blank / chrome-error: evaluate no túnel morto só atrasa o close.
+  let skipDom = false;
+  try { skipDom = isJunkUrl(pageUrlOf(page)); } catch { skipDom = false; }
+  if (!skipDom) {
+    try {
+      await Promise.race([
+        page.evaluate(() => {
+          try { window.onbeforeunload = null; } catch {}
+          try {
+            window.addEventListener("beforeunload", (e) => {
+              try { e.stopImmediatePropagation(); } catch {}
+            }, true);
+          } catch {}
+        }).catch(() => {}),
+        new Promise((r) => setTimeout(r, 800))
+      ]);
+    } catch {}
+  }
 
   // 2) stopLoading com teto
   try {
@@ -542,8 +545,11 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
         if (isCreateMarketplaceUrl(u)) continue;
         if (p && p._convenienteBlindarPromise) continue;
-        if (Number(browser && browser._convenienteGateInFlight || 0) > 0) continue;
-        if (!isJunkUrl(u)) continue;
+        let junk = isJunkUrl(u);
+        if (!junk) {
+          try { junk = await pageLooksLikeChromeNetError(p); } catch { junk = false; }
+        }
+        if (!junk) continue;
         const r = await safeClosePage(p, { nome, reason: "sweep_junk_tab" });
         if (r && r.closed) closed++;
         else failed++;
@@ -720,6 +726,12 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
   if (health0.ok) return { ok: true, action: "already_healthy", health: health0 };
   if (health0.needReopen) return { ok: false, needReopen: true, action: "cdp_dead", health: health0 };
 
+  let tunnelCool = false;
+  try {
+    const connectLane = require("./connectLane.js");
+    tunnelCool = !!(typeof connectLane.isCooling === "function" && connectLane.isCooling());
+  } catch {}
+
   const sweep = await sweepAboutBlankPages(browser, { keepPage, nome });
   if (sweep && sweep.timedOut) {
     return { ok: false, needReopen: true, action: "sweep_pages_timeout", health: health0, sweep };
@@ -745,6 +757,21 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
   const pages = listed.pages || [];
   const candidate = (keepPage && pages.includes(keepPage) ? keepPage : null) || pages[0] || null;
   const messagesUrl = "https://www.facebook.com/messages";
+
+  if (tunnelCool) {
+    try {
+      await closeRedundantVirtusTabs(browser, { keepPage: candidate, nome, reason: "cure_tunnel_cool" });
+    } catch {}
+    after = await probeBrowserHealth(browser, { nome });
+    return {
+      ok: !!(after && after.ok),
+      needReopen: false,
+      action: "tunnel_cool_no_nav",
+      health: after,
+      sweep,
+      closedTargets
+    };
+  }
 
   if (candidate) {
     try {

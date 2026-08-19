@@ -2103,7 +2103,7 @@ function installOneTabGuard(browser, nome, {
     }
     async function enforceHardCap() {
       try {
-        if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
+        const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
         const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
         const isDead = (u) => hygiene && typeof hygiene.isDeadTabUrl === 'function' ? hygiene.isDeadTabUrl(u) : false;
         const isJunk = (u) => hygiene && typeof hygiene.isJunkUrl === 'function' ? hygiene.isJunkUrl(u) : (!u || u === 'about:blank');
@@ -2133,6 +2133,26 @@ function installOneTabGuard(browser, nome, {
           try { closedUrls.push(String(u || '')); } catch {}
           try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           pageCount--;
+        }
+
+        if (gateBusy) {
+          if (closedUrls.length > 0) {
+            const cur = await browser.pages().catch(() => []);
+            const afterCount = (cur && cur.length) || 0;
+            try {
+              if (onPrune) {
+                Promise.resolve(onPrune({
+                  nome,
+                  lim,
+                  beforeCount,
+                  afterCount,
+                  reason: 'dead_tab_gate_busy',
+                  closedUrls: closedUrls.slice(0, 8)
+                })).catch(()=>{});
+              }
+            } catch {}
+          }
+          return;
         }
 
         const afterJunk = await browser.pages();
