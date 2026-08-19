@@ -1252,14 +1252,14 @@ function _installForceCloseExtras(browser) {
       }
     } catch {}
     try {
-      if (_browserGateBusy(browser)) return;
       const pages = await browser.pages();
       if (pages && pages.length > 1) {
+        const robeOn = !!(browser && browser._robeActiveFor);
         for (const p of pages.slice(1)) {
           if (_pageIsBlinding(p)) continue;
           let u = '';
           try { u = await p.url(); } catch {}
-          if (/facebook.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
+          if (robeOn && /facebook.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
           if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
         }
       }
@@ -1267,7 +1267,6 @@ function _installForceCloseExtras(browser) {
   };
   browser.forceCloseExtrasHard = async () => {
     try {
-      if (_browserGateBusy(browser)) return;
       const pages = await browser.pages();
       if (pages && pages.length > 1) {
         for (const p of pages.slice(1)) {
@@ -1950,69 +1949,27 @@ function clearChromeSessionRestore(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
-  // 1) Fecha about:blank extras — EXCETO enquanto o portão está colando uma aba nova
-  //    (a aba do portão nasce blank; fechar aqui mata a cola no meio).
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  if (_browserGateBusy(browser)) return;
-  const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
-  let keep = mainPage || null;
   try {
-    const pages = await browser.pages();
-    keep = mainPage || (pages && pages[0]) || null;
-    try {
-      if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
-        keep = (await hygiene.pickVirtusKeepPageAsync(pages, mainPage)) || keep;
-      }
-    } catch {}
-    for (const p of pages) {
-      try {
-        if (keep && p === keep) continue;
-        if (!keep && pages[0] && p === pages[0]) continue;
-        if (_pageIsBlinding(p)) continue;
-        let u = ''; try { u = p.url(); } catch {}
-        let dead = !u || u === 'about:blank';
-        if (!dead && hygiene && typeof hygiene.isDeadTabUrl === 'function') {
-          dead = hygiene.isDeadTabUrl(u);
-        }
-        if (!dead && hygiene && typeof hygiene.pageLooksLikeChromeNetError === 'function') {
-          dead = await hygiene.pageLooksLikeChromeNetError(p).catch(() => false);
-        }
-        if (dead) {
-          await p.close({ runBeforeUnload: false }).catch(()=>{});
-        }
-      } catch {}
+    const hygiene = require('./robeTabHygiene.js');
+    if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
+      await hygiene.closeRedundantVirtusTabs(browser, {
+        keepPage: mainPage || null,
+        nome,
+        reason: 'prune_extra_windows'
+      });
+      return;
     }
   } catch {}
-
-  // 2) Se em Robe/config/etc, não faz prune amplo
-  const isRobeActive = robeMeta && nome && robeMeta[nome] && robeMeta[nome].emExecucao === true;
-  const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
-  const isConfig = ctrl && ctrl.configurando === true;
-  const isHuman = ctrl && ctrl.humanControl === true;
-  const robeActiveFor = (browser && browser._robeActiveFor === nome);
-
-  if (isRobeActive || robeActiveFor || sendLockActive || isConfig || isHuman) {
-    return;
-  }
-
-  // 3) Prune amplo padrão (mais de 1 page)
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   const t0 = Date.now();
   while ((Date.now() - t0) < timeoutMs) {
     try {
       const pages = await browser.pages();
-      if (pages.length <= 1) break;
-      let keepNow = keep || mainPage || pages[0];
-      try {
-        if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
-          keepNow = (await hygiene.pickVirtusKeepPageAsync(pages, keepNow)) || keepNow;
-        }
-      } catch {}
-      for (const p of pages) {
-        if (keepNow && p === keepNow) continue;
-        if (!keepNow && pages[0] && p === pages[0]) continue;
-        if (_pageIsBlinding(p)) continue;
+      if (!pages || pages.length <= 1) break;
+      const robeOn = !!(browser && browser._robeActiveFor);
+      for (const p of pages.slice(1)) {
         let u = ''; try { u = p.url(); } catch {}
-        if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
+        if (robeOn && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
       }
       await sleep(intervalMs);
@@ -2030,7 +1987,6 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
  */
 async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = null } = {}) {
   if (!browser) return { ok: false, error: 'no_browser' };
-  if (_browserGateBusy(browser)) return { ok: true, kept: 0, closed: 0, reason: 'gate_busy' };
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   try {
     const pages = await browser.pages().catch(()=>[]);
@@ -2103,97 +2059,71 @@ function installOneTabGuard(browser, nome, {
     }
     async function enforceHardCap() {
       try {
-        const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
         const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
-        const isDead = (u) => hygiene && typeof hygiene.isDeadTabUrl === 'function' ? hygiene.isDeadTabUrl(u) : false;
-        const isJunk = (u) => hygiene && typeof hygiene.isJunkUrl === 'function' ? hygiene.isJunkUrl(u) : (!u || u === 'about:blank');
-        const pages = await browser.pages();
-        const beforeCount = Array.isArray(pages) ? pages.length : 0;
-        let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
-        if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
-        const lim = (allow && allow()) ? limOpt : 1;
-        if (!Array.isArray(pages) || pages.length < 1) return;
-
-        const closedUrls = [];
-        // Sempre fecha chrome-error/Aw Snap extras (URL ou conteúdo ERR_*), mesmo com lim>1.
-        // A última aba morta fica para a cura (goto), não zera o browser.
-        let pageCount = pages.length;
-        for (let i = pages.length - 1; i >= 0; i--) {
-          if (pageCount <= 1) break;
-          const p = pages[i];
-          if (_pageIsBlinding(p)) continue;
-          let u = '';
-          try { u = await p.url().catch(()=>''); } catch {}
-          let dead = isDead(u);
-          if (!dead && hygiene && typeof hygiene.pageLooksLikeChromeNetError === 'function') {
-            dead = await hygiene.pageLooksLikeChromeNetError(p).catch(() => false);
-          }
-          if (!dead) continue;
-          if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
-          try { closedUrls.push(String(u || '')); } catch {}
-          try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-          pageCount--;
-        }
-
-        if (gateBusy) {
-          if (closedUrls.length > 0) {
-            const cur = await browser.pages().catch(() => []);
-            const afterCount = (cur && cur.length) || 0;
-            try {
-              if (onPrune) {
-                Promise.resolve(onPrune({
-                  nome,
-                  lim,
-                  beforeCount,
-                  afterCount,
-                  reason: 'dead_tab_gate_busy',
-                  closedUrls: closedUrls.slice(0, 8)
-                })).catch(()=>{});
-              }
-            } catch {}
+        const pagesWait = await Promise.race([
+          browser.pages().catch(() => []),
+          new Promise((r) => setTimeout(() => r(null), 4000))
+        ]);
+        if (!pagesWait) {
+          if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
+            await hygiene.closeRedundantVirtusTabs(browser, { nome, reason: 'one_tab_guard_pages_timeout' });
           }
           return;
         }
+        const pages = pagesWait;
+        const beforeCount = Array.isArray(pages) ? pages.length : 0;
+        let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
+        if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
+        let lim = (allow && allow()) ? limOpt : 1;
+        if (!Array.isArray(pages) || pages.length <= 1) return;
 
-        const afterJunk = await browser.pages();
-        const livePages = Array.isArray(afterJunk) ? afterJunk : [];
-        let keepPage = livePages[0] || null;
+        const robeOn = !!(browser && browser._robeActiveFor);
+        let hasCreate = false;
         try {
-          if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
-            keepPage = (await hygiene.pickVirtusKeepPageAsync(livePages, livePages[0])) || livePages[0] || null;
+          hasCreate = pages.some((pg) => {
+            let u = '';
+            try { u = typeof pg.url === 'function' ? String(pg.url() || '') : ''; } catch {}
+            return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u);
+          });
+        } catch {}
+        if (robeOn && !hasCreate) lim = 1;
+        if (pages.length <= lim) return;
+
+        let keepIdx = 0;
+        try {
+          if (hygiene && typeof hygiene.pickVirtusKeepPage === 'function') {
+            const keepPage = hygiene.pickVirtusKeepPage(pages, pages[0]);
+            const idx = pages.indexOf(keepPage);
+            if (idx >= 0) keepIdx = idx;
           }
         } catch {}
-        let keepIdx = keepPage ? livePages.indexOf(keepPage) : -1;
-        if (keepIdx < 0) {
-          keepIdx = livePages.findIndex((p) => {
-            try {
-              const u = (typeof p.url === 'function') ? String(p.url() || '') : '';
-              return u && !isJunk(u);
-            } catch { return false; }
-          });
-        }
-        if (keepIdx < 0) keepIdx = 0;
 
-        if (livePages.length > lim) {
+        const closedUrls = [];
+        let remaining = pages.length;
+        let createKept = false;
+        for (let i = pages.length - 1; i >= 0; i--) {
+          if (remaining <= lim) break;
+          if (i === keepIdx) continue;
+          const p = pages[i];
+          let u = '';
+          try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
+          if (robeOn && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) {
+            if (!createKept) {
+              createKept = true;
+              continue;
+            }
+          }
+          try { closedUrls.push(String(u || '').slice(0, 180)); } catch {}
+          try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+          remaining--;
+        }
+
+        if (closedUrls.length > 0) {
           let reason = '';
           try {
             reason = (typeof getReason === 'function') ? String(getReason() || '') : String(getReason || '');
           } catch { reason = ''; }
-
-          let remaining = livePages.length;
-          for (let i = livePages.length - 1; i >= 0; i--) {
-            if (remaining <= lim) break;
-            if (i === keepIdx) continue;
-            const p = livePages[i];
-            if (_pageIsBlinding(p)) continue;
-            let u = '';
-            try { u = await p.url().catch(()=>''); } catch {}
-            if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
-            try { closedUrls.push(String(u || '')); } catch {}
-            try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-            remaining--;
-          }
-          const cur = await browser.pages();
+          const cur = await browser.pages().catch(() => []);
           const afterCount = (cur && cur.length) || 0;
           log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: afterCount, lim, reason });
           try {
@@ -2203,34 +2133,12 @@ function installOneTabGuard(browser, nome, {
                 lim,
                 beforeCount,
                 afterCount,
-                reason,
-                closedUrls: closedUrls.slice(0, 8)
-              })).catch(()=>{});
-            }
-          } catch {}
-        } else if (closedUrls.length > 0) {
-          const cur = await browser.pages();
-          const afterCount = (cur && cur.length) || 0;
-          log('[PRUNER][HARD] Guard fechou abas mortas', { nome, final: afterCount, closed: closedUrls.length });
-          try {
-            if (onPrune) {
-              Promise.resolve(onPrune({
-                nome,
-                lim,
-                beforeCount,
-                afterCount,
-                reason: 'dead_tab',
+                reason: reason || 'tab_cap',
                 closedUrls: closedUrls.slice(0, 8)
               })).catch(()=>{});
             }
           } catch {}
         }
-
-        try {
-          if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
-            await hygiene.closeRedundantVirtusTabs(browser, { nome, reason: 'one_tab_guard' });
-          }
-        } catch {}
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {
           log('[PRUNER][HARD] erro enforce', { nome, error: (e && e.message) || String(e) });
@@ -2254,8 +2162,10 @@ function installOneTabGuard(browser, nome, {
       await reportNum();
     });
 
-    // Varredura inicial
+    // Varredura inicial + atraso: restore de sessão cola 3-4 abas no portão.
     setTimeout(enforceHardCap, 400);
+    setTimeout(enforceHardCap, 2500);
+    setTimeout(enforceHardCap, 8000);
 
   } catch {}
 }

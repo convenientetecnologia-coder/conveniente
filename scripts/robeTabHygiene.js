@@ -1,13 +1,11 @@
 "use strict";
 
 /**
- * Contrato preto-no-branco anti aba-morta (Robe itens + veículos + worker):
- * - Aba 0 (messages/Virtus) = keepPage — uma só. Nunca 2 abas Virtus.
- * - Create (aba 1) nasce about:blank → goto URL real → ao fim close SEM goto(about:blank).
- * - Lixo = about:blank / URL vazia / chrome-error / Aw Snap / chromewebdata.
- * - Suppress só durante goto create (about:blank); chrome-error nunca é create válido.
- * - Cura in-place se o CDP responde; se pages()/CDP estoura timeout → needReopen.
- * - Restauração de sessão do Chrome NÃO é aba de trabalho: extra Messages/Facebook fecha.
+ * Contrato preto-no-branco (Virtus + Robe):
+ * - Sem Robe: 1 aba (messages/Virtus). Aba 1+ fecha, qualquer URL, qualquer ERR_*.
+ * - Com Robe: aba 0 messages, aba 1 create/item|vehicle. Aba 2+ fecha.
+ * - Restore de sessão do Chrome não é aba de trabalho.
+ * - Teto por contagem. Não filtra tipo de erro. pages() timeout cai nos targets CDP.
  */
 
 const provisionAudit = (() => {
@@ -63,6 +61,7 @@ function isChromeErrorUiText(s) {
   if (/ERR_(BLOCKED_BY_CLIENT|TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|SOCKS_CONNECTION_FAILED|CONNECTION_TIMED_OUT|CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_REFUSED|EMPTY_RESPONSE|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|SSL_PROTOCOL_ERROR|TIMED_OUT)\b/i.test(t)) {
     return true;
   }
+  if (/DNS_PROBE_FINISHED_NO_INTERNET|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED/i.test(t)) return true;
   if (/n[aã]o [eé] poss[ií]vel acessar esse site/i.test(t)) return true;
   if (/this site can.?t be reached/i.test(t)) return true;
   if (/esta p[aá]gina da web foi bloqueada/i.test(t)) return true;
@@ -303,46 +302,180 @@ function pickVirtusKeepPage(pages, preferred) {
   return list[0];
 }
 
-/**
- * Contrato: 1 aba Virtus. Create do Robe fica. Blank nascendo no portão fica.
- * Aba morta (chrome-error / ERR_TUNNEL / ERR_BLOCKED) fecha mesmo com Virtus trabalhando.
- * Segunda aba /messages viva fecha. A última aba fica para retry na mesma page.
- */
-async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", reason = "" } = {}) {
-  if (!browser) return { ok: false, closed: 0, error: "no_browser" };
-  const listed = await listPagesBounded(browser, 4000);
-  if (listed.timedOut) return { ok: false, closed: 0, timedOut: true };
-  const pages = listed.pages || [];
-  if (pages.length <= 1) return { ok: true, closed: 0, kept: pages.length };
+function listPageTargets(browser) {
+  try {
+    const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
+    return targets.filter((t) => {
+      try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
+    });
+  } catch {
+    return [];
+  }
+}
 
-  const states = new Map();
-  for (const p of pages) {
-    try {
-      states.set(p, await classifyPageNavState(p));
-    } catch {
-      states.set(p, unknownPageNavState(p));
+async function fastClosePage(page) {
+  if (!page) return false;
+  try {
+    if (typeof page.isClosed === "function" && page.isClosed()) return true;
+  } catch {
+    return true;
+  }
+  try {
+    await Promise.race([
+      page.close({ runBeforeUnload: false }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 2000))
+    ]);
+  } catch {}
+  try {
+    return typeof page.isClosed === "function" ? !!page.isClosed() : true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Teto por contagem via CDP targets — não espera browser.pages() nem evaluate de ERR_*.
+ * Aba 0 = messages. Aba 1 = create só com Robe. Aba 2+ fecha.
+ */
+async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}) {
+  const pageTargets = listPageTargets(browser);
+  if (pageTargets.length <= 1) return { closed: 0 };
+  const swapping = isVirtusSwapping(browser, nome);
+  if (swapping && pageTargets.length <= 2) return { closed: 0 };
+  let keepIdx = 0;
+  for (let i = 0; i < pageTargets.length; i++) {
+    let u = "";
+    try { u = typeof pageTargets[i].url === "function" ? String(pageTargets[i].url() || "") : ""; } catch {}
+    if (u && !isJunkUrl(u) && facebookNavHosts.isLiveMessagesUrl(u)) {
+      keepIdx = i;
+      break;
     }
   }
-  const virtusLive = pages.filter((p) => {
-    const s = states.get(p);
-    return !!(s && (s.liveMessages || s.liveWork || s.loginGate));
-  });
-
-  const keep = virtusLive.length
-    ? pickVirtusKeepPageFromStates(pages, keepPage || virtusLive[0], states)
-    : (keepPage && pages.includes(keepPage) ? keepPage : pages[0]);
   let closed = 0;
+  let createKept = false;
+  let swapExtraKept = false;
+  let session = null;
+  for (let i = pageTargets.length - 1; i >= 0; i--) {
+    if (i === keepIdx) continue;
+    const t = pageTargets[i];
+    let u = "";
+    try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
+    if (robeOn && isCreateMarketplaceUrl(u)) {
+      if (!createKept) {
+        createKept = true;
+        continue;
+      }
+    }
+    if (swapping && !swapExtraKept) {
+      swapExtraKept = true;
+      continue;
+    }
+    let page = null;
+    try {
+      const got = typeof t.page === "function" ? t.page() : null;
+      if (got && typeof got.then === "function") {
+        page = await Promise.race([
+          Promise.resolve(got).catch(() => null),
+          new Promise((r) => setTimeout(() => r(null), 400))
+        ]);
+      } else {
+        page = got;
+      }
+    } catch {}
+    if (page) {
+      const ok = await fastClosePage(page);
+      if (ok) closed++;
+      continue;
+    }
+    let tid = "";
+    try { tid = String(t._targetId || (t._targetInfo && t._targetInfo.targetId) || ""); } catch { tid = ""; }
+    if (!tid) continue;
+    try {
+      if (!session) {
+        session = await Promise.race([
+          browser.target().createCDPSession(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 1500))
+        ]);
+      }
+      await Promise.race([
+        session.send("Target.closeTarget", { targetId: tid }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("close_target_timeout")), 1500))
+      ]);
+      closed++;
+    } catch {}
+  }
+  if (closed > 0) {
+    try {
+      if (provisionAudit && typeof provisionAudit.append === "function") {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: "redundant_virtus_tab_closed",
+          nome: String(nome || ""),
+          reason: "targets_cap",
+          closed
+        });
+      }
+    } catch {}
+  }
+  return { closed };
+}
+
+/**
+ * Contrato por contagem, sem filtro de ERR_*:
+ * - Sem Robe: 1 aba (Virtus/messages).
+ * - Com Robe: aba 0 messages + aba 1 create. Aba 2+ fecha.
+ * Extra fecha mesmo no portão / chrome-error / dinossauro / facebook.com/messages morto.
+ */
+function isVirtusSwapping(browser, nome) {
+  try {
+    const map = browser && browser._virtusSwapUntil;
+    if (!map || typeof map !== "object") return false;
+    const now = Date.now();
+    if (nome && Number(map[nome] || 0) > now) return true;
+    return Object.keys(map).some((k) => Number(map[k] || 0) > now);
+  } catch {
+    return false;
+  }
+}
+
+async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", reason = "" } = {}) {
+  if (!browser) return { ok: false, closed: 0, error: "no_browser" };
+  const robeOn = !!(browser && browser._robeActiveFor);
+  const listed = await listPagesBounded(browser, 4000);
+  if (listed.timedOut) {
+    const viaTargets = await closeExtraPageTargets(browser, { nome, robeOn });
+    return { ok: true, closed: Number(viaTargets.closed || 0), timedOut: true, via: "targets" };
+  }
+  const pages = listed.pages || [];
+  if (pages.length <= 1) return { ok: true, closed: 0, kept: pages.length };
+  const swapping = isVirtusSwapping(browser, nome);
+  if (swapping && pages.length <= 2) {
+    return { ok: true, closed: 0, kept: pages.length, reason: "virtus_swap" };
+  }
+
+  const keep = (keepPage && pages.includes(keepPage))
+    ? keepPage
+    : (pickVirtusKeepPage(pages, pages[0]) || pages[0]);
+  let closed = 0;
+  let createKept = null;
+  let swapExtraKept = null;
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
-    const s = states.get(p) || {};
-    const u = s.url || pageUrlOf(p);
-    if (isCreateMarketplaceUrl(u)) continue;
-    const blinding = !!(p && p._convenienteBlindarPromise);
-    if (blinding) continue;
+    const u = pageUrlOf(p);
+    if (robeOn && isCreateMarketplaceUrl(u)) {
+      if (!createKept) {
+        createKept = p;
+        continue;
+      }
+    }
+    if (swapping && !swapExtraKept) {
+      swapExtraKept = p;
+      continue;
+    }
     try {
-      const r = await safeClosePage(p, { nome, reason: reason || "redundant_virtus_tab" });
-      if (r && (r.closed || r.ok)) {
+      const ok = await fastClosePage(p);
+      if (ok) {
         closed++;
         if (u) closedUrls.push(String(u).slice(0, 180));
       }

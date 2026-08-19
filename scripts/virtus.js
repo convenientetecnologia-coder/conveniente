@@ -972,16 +972,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try {
           if (browser && browser._robeActiveFor === nome) {
             // Em ciclo de postagem — não tocar em abas
-          } else if (Number(browser && browser._convenienteGateInFlight || 0) > 0) {
-            // Portão colando aba nova — não fechar blank no meio da cola
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
               for (let i = allPages.length - 1; i >= 1; i--) {
-                if (allPages[i] && allPages[i]._convenienteBlindarPromise) continue;
-                let u = '';
-                try { u = await allPages[i].url(); } catch {}
-                if (/facebook.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
                 try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
               }
             }
