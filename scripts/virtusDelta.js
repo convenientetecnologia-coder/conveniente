@@ -500,6 +500,10 @@ async function __gotoWithBootInterlock(page, targetUrl, {
   const url = String(targetUrl || "").trim();
   if (!url) throw new Error("boot_interlock_empty_url");
   const enabled = !!bootInterlockEnabled && __isLikelyMessagesBootUrl(url);
+  const connectLane = require("./connectLane.js");
+  return await connectLane.withHeavyNav(
+    { kind: "delta_boot_goto", nome: String(profileName || "").slice(0, 120) },
+    async () => {
   if (!enabled) {
     return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   }
@@ -554,6 +558,8 @@ async function __gotoWithBootInterlock(page, targetUrl, {
       }
     } catch (_) {}
   }
+    }
+  );
 }
 
 // NOTE (FUSÃO OPERACIONAL):
@@ -2052,7 +2058,12 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
         logInfo(
           `[virtusDelta][marketplace_enforcer] scope=${scope} action=return_messages reason=outside_messages outside_for_ms=${outsideFor} url=${currentUrl}`
         );
-        await page.goto("https://www.facebook.com/messages", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        try {
+          const connectLane = require("./connectLane.js");
+          await connectLane.withHeavyNav({ kind: "delta_return_messages", nome: String(scope || "").slice(0, 120) }, async () => {
+            await page.goto("https://www.facebook.com/messages", { waitUntil: "domcontentloaded", timeout: 45000 });
+          });
+        } catch (_) {}
         await humanPause("domSettle", "marketplace_enforcer_return_messages");
       } else {
         try {
@@ -3768,7 +3779,10 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         } catch (_) {}
       }
       try {
-        await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+        const connectLane = require("./connectLane.js");
+        await connectLane.withHeavyNav({ kind: "delta_login_recover_messages" }, async () => {
+          await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+        });
       } catch (_) {}
       try { await humanPause("domSettle", "fallback_goto_login_recover_messages"); } catch (_) {}
       return {
@@ -3848,7 +3862,10 @@ async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccou
         });
       } catch (_) {}
       try {
-        await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+        const connectLane = require("./connectLane.js");
+        await connectLane.withHeavyNav({ kind: "delta_unavailable_recover_messages" }, async () => {
+          await page.goto("https://www.facebook.com/messages/", { waitUntil: "domcontentloaded", timeout: 45000 });
+        });
       } catch (_) {}
       try { await humanPause("domSettle", "fallback_goto_messages_bootstrap"); } catch (_) {}
       return {

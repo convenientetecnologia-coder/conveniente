@@ -2331,6 +2331,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       launchArgs.push(`--proxy-server=${gatewayResolved.proxyServer}`);
       // Só com proxy: sem túnel, HTTP e WebRTC já saem no mesmo IP do modem.
       launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
+      try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
     }
 
     // ENV para adicionar argumentos de debug

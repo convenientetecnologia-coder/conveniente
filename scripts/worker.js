@@ -241,6 +241,7 @@ const {
   isBlankUrl,
   isJunkUrl,
   isDeadTabUrl,
+  isCreateMarketplaceUrl,
   pagesLookAllJunk,
   listPagesBounded,
   pageAgeMs: hygienePageAgeMs,
@@ -249,6 +250,7 @@ const {
   probeBrowserHealth,
   cureBrowserInPlace,
   pageLooksLikeChromeNetError,
+  waitForHeavyNavLanding,
   pickVirtusKeepPageAsync
 } = require('./robeTabHygiene.js');
 const facebookNavHosts = require('./facebookNavHosts.js');
@@ -257,6 +259,7 @@ const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
 const fileStore = require('./fileStore.js');
 const gatewayProxy = require('./gatewayProxy.js');
+const connectLane = require('./connectLane.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig, writeCtConfig, normalizeCtBaseUrl, isNgrokCtBaseUrl } = require('./ctConfig.js');
@@ -640,6 +643,16 @@ const DELTA_NO_PAGES_HARD_MS = Math.max(
   Math.min(120_000, Number(process.env.DELTA_NO_PAGES_HARD_MS || 20_000) || 20_000)
 );
 
+// Liveness Lightspeed: heartbeat de 4 bytes já atualiza lastSeenAt.
+// Reload só se a sessão MORREU (tick parou), nunca por “2h sem lead”.
+const DELTA_WS_STALE_MS = Math.max(120_000, Math.min(600_000, Number(process.env.DELTA_WS_STALE_MS || 240_000) || 240_000));
+const DELTA_WS_NEVER_MS = Math.max(DELTA_WS_STALE_MS, Math.min(900_000, Number(process.env.DELTA_WS_NEVER_MS || 360_000) || 360_000));
+const DELTA_WS_ACTIVATE_GRACE_MS = Math.max(60_000, Math.min(600_000, Number(process.env.DELTA_WS_ACTIVATE_GRACE_MS || 180_000) || 180_000));
+const DELTA_WS_RELOAD_COOLDOWN_MS = Math.max(300_000, Math.min(3_600_000, Number(process.env.DELTA_WS_RELOAD_COOLDOWN_MS || 1_200_000) || 1_200_000));
+const DELTA_WS_STALE_MAX_RELOADS = Math.max(1, Math.min(4, Number(process.env.DELTA_WS_STALE_MAX_RELOADS || 2) || 2));
+const DELTA_WS_LIVENESS_TICK_MS = Math.max(8_000, Math.min(60_000, Number(process.env.DELTA_WS_LIVENESS_TICK_MS || 20_000) || 20_000));
+let __deltaWsLivenessTickRunning = false;
+
 function shouldBypassNurseZombie(nome, source = 'nurse') {
   if (!isDeltaEngineActiveStrict()) return false;
   const src = String(source || 'nurse');
@@ -778,6 +791,189 @@ async function __deltaPrepareBootInterlockEar(nome, page) {
   } catch (e) {
     __deltaMarkBootEarState(nome, { lastError: (e && e.message) ? String(e.message) : String(e) });
     return false;
+  }
+}
+
+function __deltaWsLastEvidenceAt(nome, ctrl) {
+  const fromCtrl = Number(ctrl && ctrl.deltaNetworkEvidenceAt || 0) || 0;
+  const fromMeta = Number(robeMeta[nome] && robeMeta[nome].deltaNetworkEvidenceAt || 0) || 0;
+  let fromWs = 0;
+  try {
+    const byId = ctrl && ctrl.deltaWsRouteState && ctrl.deltaWsRouteState.byId;
+    if (byId && typeof byId.values === 'function') {
+      for (const m of byId.values()) {
+        const t = Number(m && m.lastSeenAt || 0) || 0;
+        if (t > fromWs) fromWs = t;
+      }
+    }
+  } catch {}
+  return Math.max(fromCtrl, fromMeta, fromWs);
+}
+
+function __deltaClearWsStaleHold(nome) {
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    if (robeMeta[nome].deltaWsStaleStrikes || robeMeta[nome].deltaWsStaleHoldUntil) {
+      robeMeta[nome].deltaWsStaleStrikes = 0;
+      robeMeta[nome].deltaWsStaleHoldUntil = 0;
+    }
+  } catch {}
+}
+
+async function __deltaWsLivenessBusyCheap(nome, ctrl) {
+  if (!ctrl) return 'no_ctrl';
+  if (ctrl.humanControl === true) return 'human';
+  if (ctrl.configurando === true) return 'config';
+  try {
+    if (opening && opening[nome]) return 'opening';
+  } catch {}
+  try {
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) return 'robe';
+  } catch {}
+  try {
+    if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) return 'send_lock';
+  } catch {}
+  try {
+    const p = ctrl.mainPage;
+    if (p && p.__virtusDeltaReplyInFlight) return 'reply_inflight';
+  } catch {}
+  return '';
+}
+
+async function __deltaReloadStaleMessages(nome, page) {
+  return await connectLane.withHeavyNav({ kind: 'delta_ws_stale_reload', nome }, async () => {
+    let u = '';
+    try { u = typeof page.url === 'function' ? String(page.url() || '') : ''; } catch { u = ''; }
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch (e) {
+      const msg = String((e && e.message) || e || '');
+      if (/ERR_TUNNEL|ERR_PROXY/i.test(msg)) {
+        try { connectLane.noteFailure(msg.slice(0, 160)); } catch {}
+      }
+      await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    }
+    try { u = typeof page.url === 'function' ? String(page.url() || '') : ''; } catch { u = ''; }
+    if (u && facebookNavHosts.isFacebookLoginOrGateUrl(u)) return { ok: true, reason: 'login_or_gate' };
+    if (u && !facebookNavHosts.isLiveMessagesUrl(u) && !isJunkUrl(u)) {
+      await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    }
+    return { ok: true, reason: 'reloaded' };
+  });
+}
+
+async function __deltaWsLivenessTick() {
+  if (__deltaWsLivenessTickRunning) return;
+  __deltaWsLivenessTickRunning = true;
+  try {
+    try {
+      if (!isDeltaMotorEnabledRuntime()) return;
+    } catch {
+      return;
+    }
+    try {
+      if (connectLane.isEnabled() && connectLane.isHeld()) return;
+    } catch {}
+    const now = Date.now();
+    let pick = null;
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!nome || !ctrl || !ctrl.browser) continue;
+      try {
+        if (!ctrl.browser.isConnected || !ctrl.browser.isConnected()) continue;
+      } catch {
+        continue;
+      }
+      robeMeta[nome] = robeMeta[nome] || {};
+      const holdUntil = Number(robeMeta[nome].deltaWsStaleHoldUntil || 0) || 0;
+      if (holdUntil && holdUntil > now) continue;
+      const lastReload = Number(robeMeta[nome].deltaWsStaleLastReloadAt || 0) || 0;
+      if (lastReload && (now - lastReload) < DELTA_WS_RELOAD_COOLDOWN_MS) continue;
+      const actAt = Number(robeMeta[nome].activatedAt || 0) || 0;
+      if (actAt && (now - actAt) < DELTA_WS_ACTIVATE_GRACE_MS) continue;
+      const ear = __deltaGetBootEarState(nome);
+      if (!ear || !ear.earAttached) continue;
+      const busy = await __deltaWsLivenessBusyCheap(nome, ctrl);
+      if (busy) continue;
+      const page = ctrl.mainPage || null;
+      if (!page) continue;
+      let u = '';
+      try { u = typeof page.url === 'function' ? String(page.url() || '') : ''; } catch { u = ''; }
+      if (!u || isJunkUrl(u)) continue;
+      if (facebookNavHosts.isFacebookLoginOrGateUrl(u)) continue;
+      if (!facebookNavHosts.isLiveMessagesUrl(u)) continue;
+      let dead = false;
+      try { dead = await pageLooksLikeChromeNetError(page); } catch { dead = false; }
+      if (dead) continue;
+      const evidenceAt = __deltaWsLastEvidenceAt(nome, ctrl);
+      const silentFor = evidenceAt ? (now - evidenceAt) : (now - (Number(ear.earAttachedAt || 0) || now));
+      const neverLived = !evidenceAt;
+      const stale = neverLived
+        ? ((Number(ear.earAttachedAt || 0) || 0) > 0 && (now - Number(ear.earAttachedAt || 0)) >= DELTA_WS_NEVER_MS)
+        : (silentFor >= DELTA_WS_STALE_MS);
+      if (!stale) continue;
+      try {
+        const listed = await listPagesBounded(ctrl.browser, 2200);
+        let createTab = false;
+        for (const p of (listed.pages || [])) {
+          let pu = '';
+          try { pu = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch { pu = ''; }
+          if (isCreateMarketplaceUrl(pu)) { createTab = true; break; }
+        }
+        if (createTab) continue;
+      } catch {}
+      if (!pick || silentFor > pick.silentFor) {
+        pick = { nome, ctrl, page, silentFor, neverLived, evidenceAt };
+      }
+    }
+    if (!pick) return;
+    const nome = pick.nome;
+    robeMeta[nome] = robeMeta[nome] || {};
+    const strikes = Number(robeMeta[nome].deltaWsStaleStrikes || 0) || 0;
+    if (strikes >= DELTA_WS_STALE_MAX_RELOADS) {
+      robeMeta[nome].deltaWsStaleHoldUntil = now + (6 * 60 * 60 * 1000);
+      try {
+        provisionAudit.append({
+          ts: now,
+          event: 'delta_ws_liveness_hold',
+          nome,
+          strikes,
+          silentFor: pick.silentFor,
+          neverLived: !!pick.neverLived
+        });
+      } catch {}
+      try { logger.warn('[DELTA][WS][LIVENESS] hold apos 2 reloads sem tick', { nome, silentFor: pick.silentFor }); } catch {}
+      return;
+    }
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'delta_ws_liveness_reload',
+        nome,
+        silentFor: pick.silentFor,
+        neverLived: !!pick.neverLived,
+        evidenceAt: pick.evidenceAt || 0,
+        strike: strikes + 1
+      });
+    } catch {}
+    try {
+      logger.info('[DELTA][WS][LIVENESS] reload Messages — soquete mudo', {
+        nome,
+        silentFor: pick.silentFor,
+        neverLived: !!pick.neverLived,
+        strike: strikes + 1
+      });
+    } catch {}
+    robeMeta[nome].deltaWsStaleLastReloadAt = now;
+    robeMeta[nome].deltaWsStaleStrikes = strikes + 1;
+    try {
+      await __deltaReloadStaleMessages(nome, pick.page);
+    } catch (e) {
+      try { logger.warn('[DELTA][WS][LIVENESS] reload falhou', { nome, error: e && e.message || e }); } catch {}
+    }
+    try { await wirePageObservers(nome, pick.page); } catch {}
+    try { await __deltaAttachCdpEar(nome, pick.page); } catch {}
+  } finally {
+    __deltaWsLivenessTickRunning = false;
   }
 }
 
@@ -5966,7 +6162,9 @@ async function __gotoMarketplaceTracked(page, { nome, source, timeoutMs = 30000,
   let ok = false;
   let error = null;
   try {
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await connectLane.withHeavyNav({ kind: 'goto_marketplace_tracked', nome: String(nome || ''), source: String(source || '').slice(0, 40) }, async () => {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    });
     ok = true;
   } catch (e) {
     error = (e && e.message) ? String(e.message) : String(e || 'goto_marketplace_failed');
@@ -6641,6 +6839,8 @@ try {
     arch: process.arch,
     cwd: process.cwd()
   });
+  try { connectLane.syncFromGatewayState(); } catch {}
+  try { logger.info('[WORKER][BOOT][CONNECT_LANE]', connectLane.bootSnapshot()); } catch {}
 } catch (e) {
   try { logger.warn('[WORKER][BOOT] log error', { error: e && e.message || e }); } catch {}
 }
@@ -7411,6 +7611,7 @@ async function activateOnce(nome, source = '', operator = '') {
     }
 
     const job = (async () => {
+      let heavyNav = null;
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
@@ -7431,6 +7632,16 @@ async function activateOnce(nome, source = '', operator = '') {
           }
         }
 
+        try { connectLane.syncFromGatewayState(); } catch {}
+        try {
+          const peek = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
+          if (peek && peek.enabled === true && peek.proxyServer) {
+            connectLane.markArmed(true, 'proxy_resolved');
+          }
+        } catch {}
+        if (connectLane.isEnabled()) {
+          heavyNav = await connectLane.acquire({ kind: 'chrome_boot', nome });
+        }
         const browser = await browserHelper.openBrowser(manifest);
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
@@ -7593,6 +7804,13 @@ async function activateOnce(nome, source = '', operator = '') {
                   try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
                 }
               }
+            if (heavyNav && !heavyNav.skipped) {
+              try {
+                await waitHeavyNavBootLanding(nome, ctrl);
+              } catch {}
+              try { await connectLane.release(heavyNav); } catch {}
+              heavyNav = null;
+            }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
               // Bootstrap ultra enterprise:
@@ -7655,6 +7873,8 @@ async function activateOnce(nome, source = '', operator = '') {
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
       } finally {
+        try { await connectLane.release(heavyNav); } catch {}
+        heavyNav = null;
         activationLocks.delete(nome);
       }
     })();
@@ -12812,7 +13032,9 @@ const handlers = {
                   ? 'https://www.facebook.com/marketplace/create/vehicle'
                   : 'https://www.facebook.com/marketplace/create/item';
               }
-              await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await connectLane.withHeavyNav({ kind: 'login_remediate_fb_goto', nome }, async () => {
+                await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+              }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
           } catch {}
@@ -17443,6 +17665,42 @@ function maybeBypassReopenWaitForOpenAll(nome, desiredHint = null) {
   }
 }
 
+async function waitHeavyNavBootLanding(nome, ctrl) {
+  try {
+    if (!connectLane.isEnabled()) return { skipped: true };
+    if (!ctrl || !ctrl.browser) return { ok: false, reason: 'no_browser' };
+    const listed = await listPagesBounded(ctrl.browser, 3500);
+    const pages = listed.pages || [];
+    let page = null;
+    for (const p of pages) {
+      let u = '';
+      try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch { u = ''; }
+      if (u && !isJunkUrl(u)) { page = p; break; }
+    }
+    if (!page) page = pages[0] || null;
+    if (!page) return { ok: false, reason: 'no_page' };
+    const settleMs = connectLane.bootSettleMs();
+    const land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
+    if (land && land.reason === 'net_error') {
+      try { connectLane.noteFailure('boot_net_error'); } catch {}
+    }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'connect_lane_boot_landing',
+        nome: String(nome || ''),
+        ok: !!(land && land.ok),
+        reason: String((land && land.reason) || '').slice(0, 80),
+        settleMs,
+        url: String((land && land.url) || '').slice(0, 180)
+      });
+    } catch {}
+    return land;
+  } catch (e) {
+    return { ok: false, reason: String((e && e.message) || e || 'wait_err').slice(0, 80) };
+  }
+}
+
 async function profileHasSettledOpenLanding(nome, ctrl) {
   try {
     if (!ctrl || !ctrl.browser) return { settled: false, reason: 'no_browser' };
@@ -17464,8 +17722,10 @@ async function profileHasSettledOpenLanding(nome, ctrl) {
       let dead = false;
       try { dead = await pageLooksLikeChromeNetError(p); } catch { dead = false; }
       if (dead) continue;
-      if (facebookNavHosts.isLiveMessagesUrl(u)) return { settled: true, reason: 'messages_live', url: u.slice(0, 180) };
       if (facebookNavHosts.isFacebookLoginOrGateUrl(u)) return { settled: true, reason: 'login_or_gate', url: u.slice(0, 180) };
+      if (facebookNavHosts.isLiveMessagesUrl(u)) {
+        return { settled: true, reason: 'messages_live', url: u.slice(0, 180) };
+      }
     }
     return { settled: false, reason: 'waiting_messages_live' };
   } catch {
@@ -17483,6 +17743,12 @@ async function openAllShouldWaitBeforeActivate(nextNome) {
     const inflight = Object.keys(opening || {}).filter((n) => n && opening[n] && n !== skip);
     if (inflight.length) {
       return { wait: true, waitingFor: inflight[0], reason: 'opening' };
+    }
+    if (connectLane.isEnabled()) {
+      if (connectLane.isHeld()) {
+        return { wait: true, waitingFor: 'host', reason: 'connect_lane_held' };
+      }
+      return { wait: false };
     }
     let oaStartedAt = 0;
     try {
@@ -19978,12 +20244,16 @@ try {
   if (!isDeltaMotorEnabledRuntime()) {
     loadReloadManager().startReloadManager(controllers, robeMeta);
   } else {
-    try { logger.info('[DELTA_BYPASS] reloadManager desativado no motor delta'); } catch {}
+    try { logger.info('[DELTA_BYPASS] reloadManager 2h calendar desativado — liveness Lightspeed no lugar'); } catch {}
   }
 } catch {
-  // Fail-safe: se o check falhar por qualquer motivo, mantém o comportamento legado.
-  try { loadReloadManager().startReloadManager(controllers, robeMeta); } catch {}
+  try {
+    if (!isDeltaMotorEnabledRuntime()) loadReloadManager().startReloadManager(controllers, robeMeta);
+  } catch {}
 }
+try {
+  setInterval(() => { __deltaWsLivenessTick().catch(() => {}); }, DELTA_WS_LIVENESS_TICK_MS);
+} catch {}
 
 // =========================
 // DELTA (OUVIDO): CDP + fila JSONL + ingest HTTP stateless (migrado do virtusDelta.js)
@@ -27293,6 +27563,7 @@ async function __deltaAttachCdpEar(nome, page) {
         ctrl.deltaNetworkEvidenceAt = now;
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].deltaNetworkEvidenceAt = now;
+        try { __deltaClearWsStaleHold(nome); } catch {}
       }
       return hadLead;
     };
@@ -27433,6 +27704,7 @@ async function __deltaAttachCdpEar(nome, page) {
       try {
         __deltaIncFrameTelemetry('telemetry_frames_total', 1);
         ctrl.deltaNetworkEvidenceAt = Date.now();
+        try { __deltaClearWsStaleHold(nome); } catch {}
         const response = event && event.response ? event.response : {};
         const requestId = String(event && event.requestId || '').trim();
         const wsMeta = ensureWsMeta(requestId, '');

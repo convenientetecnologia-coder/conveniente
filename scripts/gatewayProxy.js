@@ -457,6 +457,7 @@ function applyGatewayPayload(payload) {
   next.plannerVersion = ASSIGNMENT_PLANNER_VERSION;
   next.updatedAt = Date.now();
   writeJsonAtomic(STATE_PATH, next);
+  try { require("./connectLane").syncFromGatewayState(); } catch {}
   return { ok: true, slotsCount: next.slots.length, inventoryVersion: next.inventoryVersion };
 }
 
@@ -752,6 +753,11 @@ async function reportProxyIssue({ resolved, reason, context } = {}) {
       body: JSON.stringify(body)
     });
     if (!resp.ok) return { ok: false, skipped: false, reason: `http_${resp.status}` };
+    try {
+      if (/tunnel/i.test(String(reason || ""))) {
+        require("./connectLane").noteFailure(String(reason || "").slice(0, 160));
+      }
+    } catch {}
     return { ok: true };
   } catch (e) {
     return { ok: false, skipped: false, reason: (e && e.message) ? String(e.message) : String(e) };

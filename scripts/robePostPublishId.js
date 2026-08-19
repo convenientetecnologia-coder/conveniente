@@ -643,7 +643,10 @@ async function ensureSellingFeed(page, { deadlineAt } = {}) {
     onSelling = false;
   }
   if (!onSelling) {
-    await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    const connectLane = require('./connectLane.js');
+    await connectLane.withHeavyNav({ kind: 'id_selling_goto' }, async () => {
+      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    });
   }
   // DOM do selling é bem pesado — settle gordo.
   await sleep(Math.max(WAIT_FEED_SETTLE_MS, 14000));

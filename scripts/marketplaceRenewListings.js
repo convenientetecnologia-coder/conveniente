@@ -330,7 +330,10 @@ async function ensureSelling(page, { onProgress } = {}) {
     onSelling = false;
   }
   if (!onSelling) {
-    await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    const connectLane = require('./connectLane.js');
+    await connectLane.withHeavyNav({ kind: 'renew_selling_goto' }, async () => {
+      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    });
   }
   // Espera readiness real: botão Gerenciar (ou já em manage mode com Selecionar tudo).
   const ready = await waitForLabel(
@@ -1345,7 +1348,10 @@ async function waitBackToSelling(page, { onProgress, timeoutMs = 90000 } = {}) {
     await sleep(1000);
   }
   try {
-    await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    const connectLane = require('./connectLane.js');
+    await connectLane.withHeavyNav({ kind: 'renew_back_selling_goto' }, async () => {
+      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    });
     await waitForLabel(
       page,
       ['Gerenciar classificados', 'Manage listings', 'Selecionar tudo', 'Select all'],
@@ -1563,7 +1569,10 @@ async function runMarketplaceRenewListings({
       await progress(page, onProgress, 'none', 'Nenhum classificado renovável (após espera).');
       // Volta ao selling best-effort
       try {
-        await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        const connectLane = require('./connectLane.js');
+        await connectLane.withHeavyNav({ kind: 'renew_none_selling_goto' }, async () => {
+          await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        });
       } catch {}
       return { ok: true, renewedCount: 0, reason: 'none_renewable' };
     }

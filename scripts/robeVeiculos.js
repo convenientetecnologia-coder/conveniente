@@ -37,6 +37,7 @@ const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const gatewayProxy = require('./gatewayProxy.js');
+const connectLane = require('./connectLane.js');
 const serverConfig = require('./serverConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const robePostPublishRenew = require('./robePostPublishRenew.js');
@@ -1375,6 +1376,7 @@ async function preencherLocalizacao(page, cidade) {
 
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
+  return await connectLane.withHeavyNav({ kind: 'robe_vehicle_create', nome }, async () => {
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     let p = null;
@@ -1516,6 +1518,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
   if (lastError && lastError.CHROME_SICK === true) throw lastError;
   throw new Error('nav_create_timeout');
+  });
 }
 
 // —————— NOVO: Rotina publicação e fechamento 5s como solicitado ——————
@@ -1626,7 +1629,9 @@ async function waitPublishedEvidence(page, titulo, {maxMs=15000}={}) {
 
 async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
   try {
-    await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await connectLane.withHeavyNav({ kind: 'robe_vehicle_verify_selling_goto' }, async () => {
+      await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    });
     await sleep(800);
     // Busca pelo título
     const found = await page.evaluate((t) => {
@@ -2246,7 +2251,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       if (typeof page.isClosed === 'function' && page.isClosed()) {
         throw new Error('page_closed_before_body');
       }
-      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 }); } catch {}
+      try {
+        await connectLane.withHeavyNav({ kind: 'robe_vehicle_body_reload', nome }, async () => {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 });
+        });
+      } catch {}
       return await page.waitForFunction(() => !!(document && document.body), { timeout: 5000 }).catch(()=>false) || false;
     };
     const hasBody = await waitBody();

@@ -5,7 +5,7 @@ const manifestStore = require('./manifestStore.js');
 const browserHelper = require('./browser.js');
 const utils = require('./utils.js');
 
-const RELOAD_INTERVAL_MS = parseInt(process.env.RELOAD_INTERVAL_MS || '7200000', 10); // 2h
+const RELOAD_INTERVAL_MS = parseInt(process.env.RELOAD_INTERVAL_MS || '7200000', 10); // 2h — SÓ legado. Delta não usa.
 const RELOAD_BATCH_SIZE = parseInt(process.env.RELOAD_BATCH_SIZE || '3', 10);        // 3 por vez
 const RELOAD_BATCH_DELAY_MS = parseInt(process.env.RELOAD_BATCH_DELAY_MS || '5000', 10); // 5s entre batches
 const RELOAD_TIMEOUT_MS = parseInt(process.env.RELOAD_TIMEOUT_MS || '60000', 10);    // 60s timeout por troca

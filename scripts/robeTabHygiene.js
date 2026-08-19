@@ -96,7 +96,7 @@ async function pageLooksLikeChromeNetError(page) {
   ]);
   try {
     if (typeof page.title === "function") {
-      const t = await withTimeout(page.title(), 800, "");
+      const t = await withTimeout(page.title(), 2200, "");
       if (isChromeErrorUiText(t)) return true;
     }
   } catch {}
@@ -115,7 +115,7 @@ async function pageLooksLikeChromeNetError(page) {
             return { dom: false, text: "" };
           }
         }),
-        800,
+        2200,
         { dom: false, text: "" }
       );
       if (probe && probe.dom === true) return true;
@@ -123,6 +123,111 @@ async function pageLooksLikeChromeNetError(page) {
     }
   } catch {}
   return false;
+}
+
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function pageLooksLikeMessengerShell(page) {
+  if (!page) return false;
+  try {
+    if (typeof page.isClosed === "function" && page.isClosed()) return false;
+  } catch {}
+  const u = pageUrlOf(page);
+  if (!facebookNavHosts.isLiveMessagesUrl(u)) return false;
+  try {
+    if (await pageLooksLikeChromeNetError(page)) return false;
+  } catch {}
+  const withTimeout = (p, ms, fallback) => Promise.race([
+    Promise.resolve(p).catch(() => fallback),
+    new Promise((r) => setTimeout(() => r(fallback), ms))
+  ]);
+  try {
+    const hit = await withTimeout(
+      page.evaluate(() => {
+        try {
+          const tablist = !!document.querySelector('[role="tablist"]');
+          const inboxSearch =
+            !!document.querySelector('input[aria-label*="Pesquisar no Messenger"]') ||
+            !!document.querySelector('input[aria-label*="Search in Messenger"]');
+          const threads = document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length;
+          const composer = document.querySelectorAll('div[data-lexical-editor="true"]').length > 0;
+          return !!(tablist || inboxSearch || threads > 0 || composer);
+        } catch {
+          return false;
+        }
+      }),
+      2200,
+      false
+    );
+    return !!hit;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForMessengerShellOrGate(page, { timeoutMs = 55000, pollMs = 750 } = {}) {
+  const t0 = Date.now();
+  const maxMs = Math.max(5000, Number(timeoutMs || 55000) || 55000);
+  const step = Math.max(200, Number(pollMs || 750) || 750);
+  while ((Date.now() - t0) < maxMs) {
+    try {
+      if (typeof page.isClosed === "function" && page.isClosed()) {
+        return { ok: false, reason: "closed" };
+      }
+    } catch {}
+    let dead = false;
+    try { dead = await pageLooksLikeChromeNetError(page); } catch { dead = false; }
+    if (dead) return { ok: false, reason: "net_error" };
+    const u = pageUrlOf(page);
+    if (facebookNavHosts.isFacebookLoginOrGateUrl(u)) {
+      return { ok: true, reason: "login_or_gate", url: u.slice(0, 180) };
+    }
+    try {
+      if (await pageLooksLikeMessengerShell(page)) {
+        return { ok: true, reason: "messages_ui", url: u.slice(0, 180) };
+      }
+    } catch {}
+    await sleepMs(step);
+  }
+  return { ok: false, reason: "timeout", url: pageUrlOf(page).slice(0, 180) };
+}
+
+/**
+ * Fim da rajada CONNECT: tempo fixo + chrome-error + login/gate.
+ * Shell Messenger só encerra cedo. Não é requisito.
+ */
+async function waitForHeavyNavLanding(page, { timeoutMs = 14000, pollMs = 400 } = {}) {
+  const t0 = Date.now();
+  const maxMs = Math.max(3000, Number(timeoutMs || 14000) || 14000);
+  const step = Math.max(200, Number(pollMs || 400) || 400);
+  let lastUrl = pageUrlOf(page);
+  while ((Date.now() - t0) < maxMs) {
+    try {
+      if (typeof page.isClosed === "function" && page.isClosed()) {
+        return { ok: false, reason: "closed", url: lastUrl.slice(0, 180) };
+      }
+    } catch {}
+    let dead = false;
+    try { dead = await pageLooksLikeChromeNetError(page); } catch { dead = false; }
+    lastUrl = pageUrlOf(page);
+    if (dead) return { ok: false, reason: "net_error", url: lastUrl.slice(0, 180) };
+    if (facebookNavHosts.isFacebookLoginOrGateUrl(lastUrl)) {
+      return { ok: true, reason: "login_or_gate", url: lastUrl.slice(0, 180) };
+    }
+    try {
+      if (await pageLooksLikeMessengerShell(page)) {
+        return { ok: true, reason: "messages_ui", url: lastUrl.slice(0, 180) };
+      }
+    } catch {}
+    await sleepMs(step);
+  }
+  lastUrl = pageUrlOf(page);
+  let deadEnd = false;
+  try { deadEnd = await pageLooksLikeChromeNetError(page); } catch { deadEnd = false; }
+  if (deadEnd) return { ok: false, reason: "net_error", url: lastUrl.slice(0, 180) };
+  return { ok: true, reason: "settle_elapsed", url: lastUrl.slice(0, 180) };
 }
 
 async function classifyPageNavState(page) {
@@ -647,10 +752,13 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
       const browserMod = require("./browser.js");
       if (typeof browserMod.blindarPaginaDaConta !== "function") throw new Error("cure_goto_no_gate");
       await browserMod.blindarPaginaDaConta(candidate, nome, { source: "cure_goto_existing" });
-      await Promise.race([
-        candidate.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("cure_goto_timeout")), 28000))
-      ]);
+      const connectLane = require("./connectLane.js");
+      await connectLane.withHeavyNav({ kind: "cure_goto_messages", nome }, async () => {
+        await Promise.race([
+          candidate.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("cure_goto_timeout")), 28000))
+        ]);
+      });
       after = await probeBrowserHealth(browser, { nome });
       if (after.ok || after.live >= 1) {
         await sweepAboutBlankPages(browser, { keepPage: candidate, nome });
@@ -681,10 +789,13 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
       browserMod.newPageDaConta(browser, nome, { source: "cure_messages" }),
       new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_timeout")), 28000))
     ]);
-    await Promise.race([
-      p.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_goto_timeout")), 28000))
-    ]);
+    const connectLane = require("./connectLane.js");
+    await connectLane.withHeavyNav({ kind: "cure_newpage_messages", nome }, async () => {
+      await Promise.race([
+        p.goto(messagesUrl, { waitUntil: "domcontentloaded", timeout: 25000 }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("cure_newpage_goto_timeout")), 28000))
+      ]);
+    });
     await sweepAboutBlankPages(browser, { keepPage: p, nome });
     after = await probeBrowserHealth(browser, { nome });
     if (after.ok || after.live >= 1) {
@@ -725,6 +836,9 @@ module.exports = {
   probeBrowserHealth,
   cureBrowserInPlace,
   pageLooksLikeChromeNetError,
+  pageLooksLikeMessengerShell,
+  waitForMessengerShellOrGate,
+  waitForHeavyNavLanding,
   classifyPageNavState,
   pickVirtusKeepPage,
   pickVirtusKeepPageAsync,
