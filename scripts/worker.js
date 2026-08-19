@@ -247,8 +247,11 @@ const {
   ensurePageBirth,
   sweepAboutBlankPages,
   probeBrowserHealth,
-  cureBrowserInPlace
+  cureBrowserInPlace,
+  pageLooksLikeChromeNetError,
+  pickVirtusKeepPageAsync
 } = require('./robeTabHygiene.js');
+const facebookNavHosts = require('./facebookNavHosts.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
@@ -3598,6 +3601,11 @@ function isProxyTunnelLikeError(msg) {
   return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|Navigation timeout|timed out|proxy/i.test(m);
 }
 
+function isRetryableEntryNavError(msg) {
+  const m = String(msg || '');
+  return isProxyTunnelLikeError(m) || /ERR_BLOCKED_BY_CLIENT|blockedbyclient|chrome_net_error_page/i.test(m);
+}
+
 async function reportWorkerProxyIssueByName(nome, reason, context = {}) {
   try {
     if (!nome) return;
@@ -3769,7 +3777,35 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       if (/messenger\.com\/marketplace/i.test(String(targetUrl || ''))) {
         await __gotoMarketplaceTracked(p0, { nome, source: 'ensure_human_non_blank_entry', timeoutMs: 45000, swallow: false });
       } else {
-        await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        let lastNavErr = null;
+        const attempts = 3;
+        for (let i = 1; i <= attempts; i++) {
+          try {
+            await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            let dead = false;
+            try {
+              dead = await pageLooksLikeChromeNetError(p0);
+            } catch {
+              dead = false;
+            }
+            if (dead) {
+              lastNavErr = new Error('chrome_net_error_page');
+              if (i < attempts) {
+                await sleep(Math.min(8000, 1500 * i));
+                continue;
+              }
+              throw lastNavErr;
+            }
+            lastNavErr = null;
+            break;
+          } catch (eNav) {
+            lastNavErr = eNav;
+            const em = (eNav && eNav.message) ? String(eNav.message) : String(eNav || '');
+            if (!isRetryableEntryNavError(em) || i >= attempts) throw eNav;
+            await sleep(Math.min(8000, 1500 * i));
+          }
+        }
+        if (lastNavErr) throw lastNavErr;
       }
     } catch (eNav) {
       const em = (eNav && eNav.message) ? String(eNav.message) : String(eNav || '');
@@ -9094,7 +9130,11 @@ function getWorkingProfileNames() {
   return nomes;
 }
 
-function __pickKeepPage(stablePages, mainPage) {
+async function __pickKeepPage(stablePages, mainPage) {
+  try {
+    const picked = await pickVirtusKeepPageAsync(stablePages, mainPage);
+    if (picked) return picked;
+  } catch {}
   try {
     const pages = Array.isArray(stablePages) ? stablePages : [];
     const isLive = (pg) => {
@@ -9154,7 +9194,7 @@ async function closeExtraPages(browser, mainPage, nome) {
 
     const stablePages = Array.isArray(pages) ? pages : [];
     // Main page pode ficar stale/detached após trocas internas; nesse caso, preserve uma aba real.
-    const keepPage = __pickKeepPage(stablePages, mainPage);
+    const keepPage = await __pickKeepPage(stablePages, mainPage);
 
     if (Number(browser && browser._convenienteGateInFlight || 0) > 0) return;
 
@@ -9168,7 +9208,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
-        const dead = isDeadTabUrl(url);
+        const dead = isDeadTabUrl(url) || (await pageLooksLikeChromeNetError(p).catch(() => false));
         const blank = isBlankUrl(url);
         if (!dead && !blank) continue;
         if (!dead && protectedCtx) {
@@ -9195,7 +9235,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         again = [];
       }
       const stableAgain = Array.isArray(again) ? again : [];
-      const keep2 = __pickKeepPage(stableAgain, mainPage);
+      const keep2 = await __pickKeepPage(stableAgain, mainPage);
       for (const p of stableAgain) {
         try {
           if (keep2 && p === keep2) continue;
@@ -16425,6 +16465,7 @@ function shouldSkipNurseBlockDetectDelta({ robeRunning = false, isCreateOrSeller
 }
 
 const MAX_OPEN_CONCURRENCY = 1;
+const OPEN_ALL_SETTLE_MS = Math.max(15_000, Math.min(90_000, Number(process.env.OPEN_ALL_SETTLE_MS || 55000) || 55000));
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
 const SUPERVISOR_SLOT_HOLD_MS = Math.max(5000, parseInt(process.env.SUPERVISOR_SLOT_HOLD_MS || '30000', 10) || 30000);
@@ -17396,6 +17437,77 @@ function maybeBypassReopenWaitForOpenAll(nome, desiredHint = null) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function profileHasSettledOpenLanding(nome, ctrl) {
+  try {
+    if (!ctrl || !ctrl.browser) return { settled: false, reason: 'no_browser' };
+    if (ctrl.humanControl === true) return { settled: true, reason: 'human' };
+    const rm = robeMeta[nome] || {};
+    if (rm.banned === true || rm.twoFactor === true || rm.marketplaceDisabled === true) {
+      return { settled: true, reason: 'terminal_hold' };
+    }
+    const why = String(rm.whyNotOpen || '');
+    if (/banned|two_factor|captcha_checkpoint|marketplace_disabled/i.test(why)) {
+      return { settled: true, reason: 'terminal_hold' };
+    }
+    const listed = await listPagesBounded(ctrl.browser, 3500);
+    const pages = listed.pages || [];
+    for (const p of pages) {
+      let u = '';
+      try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch { u = ''; }
+      if (!u || isJunkUrl(u)) continue;
+      let dead = false;
+      try { dead = await pageLooksLikeChromeNetError(p); } catch { dead = false; }
+      if (dead) continue;
+      if (facebookNavHosts.isLiveMessagesUrl(u)) return { settled: true, reason: 'messages_live', url: u.slice(0, 180) };
+      if (facebookNavHosts.isFacebookLoginOrGateUrl(u)) return { settled: true, reason: 'login_or_gate', url: u.slice(0, 180) };
+    }
+    return { settled: false, reason: 'waiting_messages_live' };
+  } catch {
+    return { settled: false, reason: 'probe_failed' };
+  }
+}
+
+let _openAllWaitLogAt = 0;
+let _openAllWaitLogKey = '';
+
+async function openAllShouldWaitBeforeActivate(nextNome) {
+  try {
+    if (!isOpenAllSessionActive()) return { wait: false };
+    const skip = String(nextNome || '');
+    const inflight = Object.keys(opening || {}).filter((n) => n && opening[n] && n !== skip);
+    if (inflight.length) {
+      return { wait: true, waitingFor: inflight[0], reason: 'opening' };
+    }
+    let oaStartedAt = 0;
+    try {
+      const d = readDesiredForNurse();
+      oaStartedAt = Number(d && d._openAll && d._openAll.startedAt) || 0;
+    } catch {
+      oaStartedAt = 0;
+    }
+    const now = Date.now();
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!nome || nome === skip) continue;
+      const actAt = Number((robeMeta[nome] && robeMeta[nome].activatedAt) || 0) || 0;
+      if (!actAt) continue;
+      if (oaStartedAt && actAt < (oaStartedAt - 2000)) continue;
+      const age = now - actAt;
+      if (age > OPEN_ALL_SETTLE_MS) continue;
+      const land = await profileHasSettledOpenLanding(nome, ctrl);
+      if (land && land.settled) continue;
+      return {
+        wait: true,
+        waitingFor: nome,
+        reason: (land && land.reason) || 'waiting_messages_live',
+        ageMs: age
+      };
+    }
+    return { wait: false };
+  } catch {
+    return { wait: false };
   }
 }
 
@@ -18472,6 +18584,29 @@ async function nurseTick() {
                 marketplaceDisabled: !!(robeMeta[nome] && robeMeta[nome].marketplaceDisabled)
               });
             } catch {}
+            continue;
+          }
+        }
+
+        if (isOpenAllSessionActive(desired)) {
+          const waitPrev = await openAllShouldWaitBeforeActivate(nome);
+          if (waitPrev && waitPrev.wait) {
+            const key = `${String(waitPrev.waitingFor || '')}|${String(waitPrev.reason || '')}`;
+            const nowWait = Date.now();
+            if (key !== _openAllWaitLogKey || (nowWait - _openAllWaitLogAt) > 10000) {
+              _openAllWaitLogKey = key;
+              _openAllWaitLogAt = nowWait;
+              try {
+                provisionAudit.append({
+                  ts: nowWait,
+                  event: 'open_all_wait_messages_live',
+                  nome: String(nome || ''),
+                  waitingFor: String(waitPrev.waitingFor || ''),
+                  reason: String(waitPrev.reason || '').slice(0, 80),
+                  ageMs: Number(waitPrev.ageMs || 0) || 0
+                });
+              } catch {}
+            }
             continue;
           }
         }
@@ -27840,7 +27975,7 @@ async function periodicAboutBlankCleanup() {
         }
         if (pages.length <= 1) continue;
 
-        const mainPage = ctrl.mainPage || pages[0];
+        const keepPage = await __pickKeepPage(pages, ctrl.mainPage || pages[0]);
 
         // Se há create item, não limpa abas reais — mas lixo órfão (idade) ainda pode sair.
         const hasCreateItem = pages.some(pg => {
@@ -27854,15 +27989,15 @@ async function periodicAboutBlankCleanup() {
 
         for (const p of pages) {
           try {
-            if (p === mainPage) continue;
-            if (!mainPage && p === pages[0]) continue;
+            if (keepPage && p === keepPage) continue;
+            if (!keepPage && p === pages[0]) continue;
             if (p && p._convenienteBlindarPromise) continue;
             if (Number(ctrl.browser && ctrl.browser._convenienteGateInFlight || 0) > 0) continue;
 
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
             if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
-            const dead = isDeadTabUrl(url);
+            const dead = isDeadTabUrl(url) || (await pageLooksLikeChromeNetError(p).catch(() => false));
             const blank = isBlankUrl(url);
             if (!dead && !blank) continue;
 

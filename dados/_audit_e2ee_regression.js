@@ -6,16 +6,18 @@ const fs = require("fs");
 const path = require("path");
 
 const SRC = path.join(__dirname, "..", "scripts", "virtusDelta.js");
+const NAV = path.join(__dirname, "..", "scripts", "facebookNavHosts.js");
 const src = fs.readFileSync(SRC, "utf8");
+const navSrc = fs.readFileSync(NAV, "utf8");
 const issues = [];
 const oks = [];
 
-function mustInclude(label, re) {
-  if (!re.test(src)) issues.push({ severity: "fail", label, detail: "missing_pattern" });
+function mustInclude(label, re, hay = src) {
+  if (!re.test(hay)) issues.push({ severity: "fail", label, detail: "missing_pattern" });
   else oks.push(label);
 }
-function mustNotInclude(label, re) {
-  if (re.test(src)) issues.push({ severity: "fail", label, detail: "forbidden_pattern_present" });
+function mustNotInclude(label, re, hay = src) {
+  if (re.test(hay)) issues.push({ severity: "fail", label, detail: "forbidden_pattern_present" });
   else oks.push(label);
 }
 function count(re) {
@@ -78,9 +80,12 @@ else {
 
 // 11) DELTA_GUARD: E2EE precisa de fbsbx/maw_proxy + messenger (não só facebook.com)
 mustInclude("nav_firewall_helper", /function __deltaIsAllowedNavigationUrl\s*\(/);
-mustInclude("nav_allows_fbsbx_maw_proxy", /host === "www\.fbsbx\.com" \|\| host === "fbsbx\.com"/);
-mustInclude("nav_allows_messenger", /host === "www\.messenger\.com" \|\| host === "messenger\.com"/);
+mustInclude("nav_hosts_module", /require\("\.\/facebookNavHosts\.js"\)/);
+mustInclude("nav_allows_fbsbx_maw_proxy", /host === "www\.fbsbx\.com" \|\| host === "fbsbx\.com"/, navSrc);
+mustInclude("nav_allows_messenger", /host === "www\.messenger\.com" \|\| host === "messenger\.com"/, navSrc);
+mustInclude("nav_allows_web_facebook", /h === "web\.facebook\.com"/, navSrc);
 mustInclude("nav_firewall_uses_helper", /const isAllowedNavUrl = __deltaIsAllowedNavigationUrl/);
+mustNotInclude("no_star_facebook_wildcard", /\*\.facebook\.com/, navSrc);
 // Regressão: allowlist antiga só facebook.com (sem fbsbx) não pode voltar como único gate
 mustNotInclude(
   "no_facebook_only_nav_allowlist",

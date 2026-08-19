@@ -13,6 +13,7 @@
 const provisionAudit = (() => {
   try { return require("./provisionAudit.js"); } catch { return null; }
 })();
+const facebookNavHosts = require("./facebookNavHosts.js");
 
 function isBlankUrl(url) {
   const u = String(url || "").trim();
@@ -55,14 +56,118 @@ function pageUrlOf(page) {
   }
 }
 
-/** Uma aba Virtus: prefere /messages, depois Facebook/Messenger vivo, depois a preferida. */
+function isChromeErrorUiText(s) {
+  const t = String(s || "");
+  if (!t) return false;
+  return /ERR_BLOCKED_BY_CLIENT|ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_EMPTY_RESPONSE|ERR_NAME_NOT_RESOLVED|esta p[aá]gina da web foi bloqueada|esta pagina foi bloqueada|n[aã]o [eé] poss[ií]vel acessar esse site|this site can.?t be reached|this page has been blocked|took too long to respond/i.test(t);
+}
+
+async function pageLooksLikeChromeNetError(page) {
+  if (!page) return false;
+  try {
+    if (typeof page.isClosed === "function" && page.isClosed()) return false;
+  } catch {}
+  const u = pageUrlOf(page);
+  if (isDeadTabUrl(u)) return true;
+  const withTimeout = (p, ms, fallback) => Promise.race([
+    Promise.resolve(p).catch(() => fallback),
+    new Promise((r) => setTimeout(() => r(fallback), ms))
+  ]);
+  try {
+    if (typeof page.title === "function") {
+      const t = await withTimeout(page.title(), 800, "");
+      if (isChromeErrorUiText(t)) return true;
+    }
+  } catch {}
+  try {
+    if (typeof page.evaluate === "function") {
+      const txt = await withTimeout(
+        page.evaluate(() => {
+          try {
+            const title = String((document && document.title) || "");
+            const body = String((document && document.body && document.body.innerText) || "");
+            return (title + "\n" + body).slice(0, 800);
+          } catch {
+            return "";
+          }
+        }),
+        800,
+        ""
+      );
+      if (isChromeErrorUiText(txt)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function classifyPageNavState(page) {
+  const url = pageUrlOf(page);
+  const junkUrl = isJunkUrl(url);
+  let deadContent = junkUrl;
+  if (!deadContent) {
+    try {
+      deadContent = await pageLooksLikeChromeNetError(page);
+    } catch {
+      deadContent = false;
+    }
+  }
+  const liveMessages = !deadContent && facebookNavHosts.isLiveMessagesUrl(url);
+  const loginGate = !deadContent && facebookNavHosts.isFacebookLoginOrGateUrl(url);
+  const liveWork = !deadContent && isLiveWorkUrl(url) && !isCreateMarketplaceUrl(url);
+  return { url, junkUrl, deadContent, liveMessages, loginGate, liveWork };
+}
+
+function pickVirtusKeepPageFromStates(pages, preferred, states) {
+  const list = Array.isArray(pages) ? pages.filter(Boolean) : [];
+  if (!list.length) return null;
+  const st = (p) => (states && states.get(p)) || {};
+  const prefOk = !!(preferred && list.includes(preferred));
+  const liveMsg = list.filter((p) => st(p).liveMessages);
+  if (prefOk && liveMsg.includes(preferred)) return preferred;
+  if (liveMsg.length) return liveMsg[0];
+  const login = list.filter((p) => st(p).loginGate);
+  if (prefOk && login.includes(preferred)) return preferred;
+  if (login.length) return login[0];
+  const liveWork = list.filter((p) => st(p).liveWork);
+  if (prefOk && liveWork.includes(preferred)) return preferred;
+  if (liveWork.length) return liveWork[0];
+  if (prefOk) return preferred;
+  return list[0];
+}
+
+async function pickVirtusKeepPageAsync(pages, preferred) {
+  const list = Array.isArray(pages) ? pages.filter(Boolean) : [];
+  if (!list.length) return null;
+  const states = new Map();
+  for (const p of list) {
+    try {
+      states.set(p, await classifyPageNavState(p));
+    } catch {
+      states.set(p, {
+        url: pageUrlOf(p),
+        junkUrl: true,
+        deadContent: true,
+        liveMessages: false,
+        loginGate: false,
+        liveWork: false
+      });
+    }
+  }
+  return pickVirtusKeepPageFromStates(list, preferred, states);
+}
+
+/** Uma aba Virtus: prefere /messages vivo, depois Facebook/Messenger vivo, depois a preferida. */
 function pickVirtusKeepPage(pages, preferred) {
   const list = Array.isArray(pages) ? pages.filter(Boolean) : [];
   if (!list.length) return null;
   const prefOk = preferred && list.includes(preferred);
-  if (prefOk && /facebook\.com\/messages/i.test(pageUrlOf(preferred))) return preferred;
+  const isMsg = (p) => {
+    const u = pageUrlOf(p);
+    return !isJunkUrl(u) && facebookNavHosts.isLiveMessagesUrl(u);
+  };
+  if (prefOk && isMsg(preferred)) return preferred;
   for (const p of list) {
-    if (/facebook\.com\/messages/i.test(pageUrlOf(p))) return p;
+    if (isMsg(p)) return p;
   }
   if (prefOk && isLiveWorkUrl(pageUrlOf(preferred)) && !isCreateMarketplaceUrl(pageUrlOf(preferred))) {
     return preferred;
@@ -77,7 +182,8 @@ function pickVirtusKeepPage(pages, preferred) {
 
 /**
  * Contrato: 1 aba Virtus. Create do Robe fica. Blank nascendo no portão fica.
- * Sem Virtus vivo ainda (só blank no launch): não corta — o Chrome ainda está nascendo.
+ * Aba morta (chrome-error / ERR_TUNNEL / ERR_BLOCKED) fecha mesmo com Virtus trabalhando.
+ * Segunda aba /messages viva fecha. A última aba fica para retry na mesma page.
  */
 async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", reason = "" } = {}) {
   if (!browser) return { ok: false, closed: 0, error: "no_browser" };
@@ -87,25 +193,39 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   if (pages.length <= 1) return { ok: true, closed: 0, kept: pages.length };
 
   const gateBusy = Number(browser._convenienteGateInFlight || 0) > 0;
-  const virtusLive = [];
+  const states = new Map();
   for (const p of pages) {
-    const u = pageUrlOf(p);
-    if (isLiveWorkUrl(u) && !isCreateMarketplaceUrl(u)) virtusLive.push(p);
+    try {
+      states.set(p, await classifyPageNavState(p));
+    } catch {
+      states.set(p, {
+        url: pageUrlOf(p),
+        junkUrl: isJunkUrl(pageUrlOf(p)),
+        deadContent: true,
+        liveMessages: false,
+        loginGate: false,
+        liveWork: false
+      });
+    }
   }
-  if (virtusLive.length < 1) {
-    return { ok: true, closed: 0, skipped: "no_live_virtus_yet" };
-  }
+  const virtusLive = pages.filter((p) => {
+    const s = states.get(p);
+    return !!(s && (s.liveMessages || s.liveWork || s.loginGate));
+  });
 
-  const keep = pickVirtusKeepPage(pages, keepPage || virtusLive[0]);
+  const keep = virtusLive.length
+    ? pickVirtusKeepPageFromStates(pages, keepPage || virtusLive[0], states)
+    : (keepPage && pages.includes(keepPage) ? keepPage : pages[0]);
   let closed = 0;
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
-    const u = pageUrlOf(p);
+    const s = states.get(p) || {};
+    const u = s.url || pageUrlOf(p);
     if (isCreateMarketplaceUrl(u)) continue;
-    const junk = isJunkUrl(u);
     const blinding = !!(p && p._convenienteBlindarPromise);
-    if (junk && (gateBusy || blinding)) continue;
+    if (isBlankUrl(u) && (gateBusy || blinding)) continue;
+    if (!virtusLive.length && !(s.deadContent || s.junkUrl)) continue;
     try {
       const r = await safeClosePage(p, { nome, reason: reason || "redundant_virtus_tab" });
       if (r && (r.closed || r.ok)) {
@@ -580,6 +700,7 @@ module.exports = {
   isJunkUrl,
   isCreateMarketplaceUrl,
   isLiveWorkUrl,
+  isChromeErrorUiText,
   isChromeProtocolSickError,
   pagesLookAllJunk,
   listPagesBounded,
@@ -592,6 +713,9 @@ module.exports = {
   closeJunkCdpTargets,
   probeBrowserHealth,
   cureBrowserInPlace,
+  pageLooksLikeChromeNetError,
+  classifyPageNavState,
   pickVirtusKeepPage,
+  pickVirtusKeepPageAsync,
   closeRedundantVirtusTabs
 };

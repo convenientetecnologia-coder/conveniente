@@ -1455,9 +1455,16 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
   if (!page0) throw new Error('bindAccountIdentity_no_page0');
 
   const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
-  const keep = (hygiene && typeof hygiene.pickVirtusKeepPage === 'function')
-    ? (hygiene.pickVirtusKeepPage(all, page0) || page0)
-    : page0;
+  let keep = page0;
+  try {
+    if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
+      keep = (await hygiene.pickVirtusKeepPageAsync(all, page0)) || page0;
+    } else if (hygiene && typeof hygiene.pickVirtusKeepPage === 'function') {
+      keep = hygiene.pickVirtusKeepPage(all, page0) || page0;
+    }
+  } catch {
+    keep = page0;
+  }
 
   browser._convenienteGateInFlight = (Number(browser._convenienteGateInFlight || 0) || 0) + 1;
   try {
@@ -1947,15 +1954,29 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
   //    (a aba do portão nasce blank; fechar aqui mata a cola no meio).
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (_browserGateBusy(browser)) return;
+  const hygiene = (() => { try { return require('./robeTabHygiene.js'); } catch { return null; } })();
   try {
     const pages = await browser.pages();
+    let keep = mainPage || (pages && pages[0]) || null;
+    try {
+      if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
+        keep = (await hygiene.pickVirtusKeepPageAsync(pages, mainPage)) || keep;
+      }
+    } catch {}
     for (const p of pages) {
       try {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (keep && p === keep) continue;
+        if (!keep && pages[0] && p === pages[0]) continue;
         if (_pageIsBlinding(p)) continue;
         let u = ''; try { u = p.url(); } catch {}
-        if (!u || u === 'about:blank') {
+        let dead = !u || u === 'about:blank';
+        if (!dead && hygiene && typeof hygiene.isDeadTabUrl === 'function') {
+          dead = hygiene.isDeadTabUrl(u);
+        }
+        if (!dead && hygiene && typeof hygiene.pageLooksLikeChromeNetError === 'function') {
+          dead = await hygiene.pageLooksLikeChromeNetError(p).catch(() => false);
+        }
+        if (dead) {
           await p.close({ runBeforeUnload: false }).catch(()=>{});
         }
       } catch {}
@@ -2087,7 +2108,8 @@ function installOneTabGuard(browser, nome, {
         if (!Array.isArray(pages) || pages.length < 1) return;
 
         const closedUrls = [];
-        // Sempre fecha chrome-error/Aw Snap extras. A última aba morta fica para a cura (goto), não zera o browser.
+        // Sempre fecha chrome-error/Aw Snap extras (URL ou conteúdo ERR_*), mesmo com lim>1.
+        // A última aba morta fica para a cura (goto), não zera o browser.
         let pageCount = pages.length;
         for (let i = pages.length - 1; i >= 0; i--) {
           if (pageCount <= 1) break;
@@ -2095,7 +2117,11 @@ function installOneTabGuard(browser, nome, {
           if (_pageIsBlinding(p)) continue;
           let u = '';
           try { u = await p.url().catch(()=>''); } catch {}
-          if (!isDead(u)) continue;
+          let dead = isDead(u);
+          if (!dead && hygiene && typeof hygiene.pageLooksLikeChromeNetError === 'function') {
+            dead = await hygiene.pageLooksLikeChromeNetError(p).catch(() => false);
+          }
+          if (!dead) continue;
           if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
           try { closedUrls.push(String(u || '')); } catch {}
           try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
@@ -2104,12 +2130,21 @@ function installOneTabGuard(browser, nome, {
 
         const afterJunk = await browser.pages();
         const livePages = Array.isArray(afterJunk) ? afterJunk : [];
-        let keepIdx = livePages.findIndex((p) => {
-          try {
-            const u = (typeof p.url === 'function') ? String(p.url() || '') : '';
-            return u && !isJunk(u);
-          } catch { return false; }
-        });
+        let keepPage = livePages[0] || null;
+        try {
+          if (hygiene && typeof hygiene.pickVirtusKeepPageAsync === 'function') {
+            keepPage = (await hygiene.pickVirtusKeepPageAsync(livePages, livePages[0])) || livePages[0] || null;
+          }
+        } catch {}
+        let keepIdx = keepPage ? livePages.indexOf(keepPage) : -1;
+        if (keepIdx < 0) {
+          keepIdx = livePages.findIndex((p) => {
+            try {
+              const u = (typeof p.url === 'function') ? String(p.url() || '') : '';
+              return u && !isJunk(u);
+            } catch { return false; }
+          });
+        }
         if (keepIdx < 0) keepIdx = 0;
 
         if (livePages.length > lim) {
