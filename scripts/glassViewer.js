@@ -36,6 +36,22 @@ function num(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function snapZoomToPixels(z, presetW, presetH, glassW, glassH) {
+  let z0 = num(z, 1);
+  if (z0 >= 0.999) return 1;
+  const pw = Math.max(1, num(presetW, 1));
+  const ph = Math.max(1, num(presetH, 1));
+  const gw = Math.max(1, num(glassW, pw));
+  const gh = Math.max(1, num(glassH, ph));
+  z0 = Math.min(1, z0, gw / pw, gh / ph);
+  const w = Math.max(1, Math.floor(pw * z0 + 1e-9));
+  z0 = w / pw;
+  const h = Math.max(1, Math.floor(ph * z0 + 1e-9));
+  z0 = Math.min(z0, h / ph);
+  if (!Number.isFinite(z0) || z0 <= 0) return 1;
+  return Math.max(MIN_FIT, z0);
+}
+
 function computeFitZoom(presetW, presetH, glassW, glassH) {
   const pw = Math.max(1, num(presetW, 1));
   const ph = Math.max(1, num(presetH, 1));
@@ -43,7 +59,7 @@ function computeFitZoom(presetW, presetH, glassW, glassH) {
   const gh = Math.max(1, num(glassH, 1));
   const z = Math.min(1, gw / pw, gh / ph);
   if (!Number.isFinite(z) || z <= 0) return 1;
-  return Math.max(MIN_FIT, z);
+  return snapZoomToPixels(z, pw, ph, gw, gh);
 }
 
 function toLayoutCoords(visualX, visualY, zoom, panX, panY) {
@@ -201,7 +217,8 @@ function paintScript(st) {
     if (!html) return;
     var none = (z === 1 && px === 0 && py === 0);
     html.style.transformOrigin = '0 0';
-    html.style.transform = none ? 'none' : ('scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+    html.style.backfaceVisibility = none ? '' : 'hidden';
+    html.style.transform = none ? 'none' : ('translateZ(0) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
     window.__ctGlassViewerState = {
       zoom: z, panX: px, panY: py,
       glassW: ${gw}, glassH: ${gh},
@@ -235,12 +252,13 @@ function pageInstallRuntime() {
         const z = Number(st.zoom) || 1;
         const px = Number(st.panX) || 0;
         const py = Number(st.panY) || 0;
-        const none = (z === 1 && px === 0 && py === 0);
-        const want = none ? 'none' : ('scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
-        if (html.style.transform !== want) {
-          html.style.transformOrigin = '0 0';
-          html.style.transform = want;
-        }
+          const none = (z === 1 && px === 0 && py === 0);
+          const want = none ? 'none' : ('translateZ(0) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+          if (html.style.transform !== want) {
+            html.style.transformOrigin = '0 0';
+            html.style.backfaceVisibility = none ? '' : 'hidden';
+            html.style.transform = want;
+          }
       } catch (e) {}
     };
     try {
@@ -438,7 +456,13 @@ async function refreshGeometry(page, { light = false } = {}) {
   const prev = readState(page);
   let zoom = fitZoom;
   if (prev && prev.userZoom === true) {
-    zoom = Math.min(MAX_ZOOM, Math.max(fitZoom, num(prev.zoom, fitZoom)));
+    zoom = snapZoomToPixels(
+      Math.min(MAX_ZOOM, Math.max(fitZoom, num(prev.zoom, fitZoom))),
+      geo.presetW,
+      geo.presetH,
+      geo.glassW,
+      geo.glassH
+    );
   }
   const pan = clampPan(
     prev ? prev.panX : 0,
@@ -469,7 +493,8 @@ async function handleHudCommand(page, cmd) {
     let st = readState(page) || await refreshGeometry(page);
     if (op === 'zoomBy') {
       const delta = num(cmd.delta, 0);
-      const next = Math.min(MAX_ZOOM, Math.max(st.fitZoom, num(st.zoom, 1) + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
+      const raw = Math.min(MAX_ZOOM, Math.max(st.fitZoom, num(st.zoom, 1) + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
+      const next = snapZoomToPixels(raw, st.presetW, st.presetH, st.glassW, st.glassH);
       st = writeState(page, { zoom: next, userZoom: Math.abs(next - st.fitZoom) > 0.001 });
     } else if (op === 'fit') {
       st = writeState(page, { zoom: st.fitZoom, panX: 0, panY: 0, userZoom: false });
