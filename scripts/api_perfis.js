@@ -170,7 +170,10 @@ module.exports = (app, workerClient, fileStore) => {
         meta: {
           source: effective.source,
           path: serverConfig.CONFIG_PATH,
-          totalMemMB
+          totalMemMB,
+          itemTitlesPacks: (typeof serverConfig.listItemTitlesPacks === "function")
+            ? serverConfig.listItemTitlesPacks()
+            : []
         }
       });
     } catch (e) {

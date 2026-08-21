@@ -8,6 +8,38 @@ const utils = require("./utils.js");
 const CONFIG_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.json");
 const CONFIG_VERSION = 1;
 
+const ITEM_TITLES_PACK_DEFAULT = "titulos";
+const ITEM_TITLES_PACKS = Object.freeze({
+  titulos: { file: "titulos.json", label: "Padrão" },
+  titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico" }
+});
+
+function isItemTitlesPackId(id) {
+  return Object.prototype.hasOwnProperty.call(ITEM_TITLES_PACKS, String(id || "").trim());
+}
+
+function normalizeItemTitlesPack(id) {
+  const key = String(id || "").trim();
+  return isItemTitlesPackId(key) ? key : ITEM_TITLES_PACK_DEFAULT;
+}
+
+function listItemTitlesPacks() {
+  return Object.keys(ITEM_TITLES_PACKS).map((id) => ({
+    id,
+    file: ITEM_TITLES_PACKS[id].file,
+    label: ITEM_TITLES_PACKS[id].label
+  }));
+}
+
+function resolveItemTitlesPath(packId) {
+  const spec = ITEM_TITLES_PACKS[normalizeItemTitlesPack(packId)] || ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT];
+  const file = String((spec && spec.file) || ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT].file);
+  if (file !== path.basename(file) || file.indexOf("..") >= 0) {
+    return path.join(__dirname, "..", "dados", ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT].file);
+  }
+  return path.join(__dirname, "..", "dados", file);
+}
+
 const DEFAULTS = Object.freeze({
   version: CONFIG_VERSION,
   updatedAt: 0,
@@ -56,6 +88,7 @@ const DEFAULTS = Object.freeze({
       prefetchMax: 20
     },
     photoDeletePolicy: "after_all_working_posted",
+    itemTitlesPack: ITEM_TITLES_PACK_DEFAULT,
     cidadesExtrasGlobais: [
       "Anápolis",
       "Aracaju",
@@ -326,6 +359,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
     ? "after_first_confirmed_post"
     : "after_all_working_posted";
+  const itemTitlesPack = normalizeItemTitlesPack(robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack);
 
   let governorEnterMb = clamp(Math.floor(toNum(memRaw.governorEnterMb, DEFAULTS.memory.governorEnterMb)), 256, 32768);
   let governorExitMb = clamp(Math.floor(toNum(memRaw.governorExitMb, DEFAULTS.memory.governorExitMb)), 256, 32768);
@@ -427,6 +461,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
         prefetchMax: v2PrefetchMax
       },
       photoDeletePolicy,
+      itemTitlesPack,
       cidadesExtrasGlobais
     },
     networkRotation: {
@@ -586,6 +621,11 @@ function validateServerConfigPayload(payload) {
       const wm = String(robe.workMode || "").trim().toLowerCase();
       if (!["v1", "v2_auto", "v3_pmg"].includes(wm)) {
         errors.push("robe.workMode_invalido");
+      }
+    }
+    if (robe.itemTitlesPack !== undefined) {
+      if (!isItemTitlesPackId(robe.itemTitlesPack)) {
+        errors.push("robe.itemTitlesPack_invalido");
       }
     }
     if (robe.cidadesExtrasGlobais !== undefined) {
@@ -825,6 +865,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       workMode: v.normalized.robe.workMode,
       v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
+      itemTitlesPack: v.normalized.robe.itemTitlesPack,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     },
     networkRotation: {
@@ -904,11 +945,17 @@ function readServerConfigEffective({ totalMemMB = getTotalMemMB() } = {}) {
 module.exports = {
   CONFIG_PATH,
   DEFAULTS,
+  ITEM_TITLES_PACKS,
+  ITEM_TITLES_PACK_DEFAULT,
   getTotalMemMB,
   readServerConfigRaw,
   readServerConfigEffective,
   validateServerConfigPayload,
   writeServerConfigAtomic,
-  calcMaxAccountsEffective
+  calcMaxAccountsEffective,
+  isItemTitlesPackId,
+  normalizeItemTitlesPack,
+  listItemTitlesPacks,
+  resolveItemTitlesPath
 };
 

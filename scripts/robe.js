@@ -445,6 +445,29 @@ async function ensureXPathPolyfill(page) {
 function readJsonSafe(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
+
+function pickRandomItemTitulo() {
+  let pack = 'titulos';
+  try {
+    const cfg = serverConfig.readServerConfigEffective();
+    pack = String((cfg && cfg.robe && cfg.robe.itemTitlesPack) || 'titulos');
+  } catch {}
+  const fallbackPath = path.join(__dirname, '..', 'dados', 'titulos.json');
+  let primary = fallbackPath;
+  try {
+    if (typeof serverConfig.resolveItemTitlesPath === 'function') {
+      primary = serverConfig.resolveItemTitlesPath(pack);
+    }
+  } catch {}
+  let titulos = readJsonSafe(primary, []);
+  if (!Array.isArray(titulos) || titulos.length === 0) {
+    if (primary !== fallbackPath) titulos = readJsonSafe(fallbackPath, []);
+  }
+  const list = Array.isArray(titulos)
+    ? titulos.map((s) => String(s || '').trim()).filter(Boolean)
+    : [];
+  return list.length ? list[Math.floor(Math.random() * list.length)] : 'Título padrão';
+}
 function writeJsonAtomic(file, dataObj) {
   try {
     const dir = path.dirname(file);
@@ -3932,8 +3955,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     await sleep(jitter(250, 450));
 
     // TÍTULO
-    const titulos = readJsonSafe(path.join(__dirname, '..', 'dados', 'titulos.json'), []);
-    const titulo = titulos.length ? titulos[Math.floor(Math.random()*titulos.length)] : 'Título padrão';
+    const titulo = pickRandomItemTitulo();
     await waitBeforeComposeAction(composePlan, 'before_title', { nome, attId });
     await preencherTitulo(page, titulo);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'title_ok', value: titulo });
