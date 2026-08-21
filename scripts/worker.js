@@ -3277,8 +3277,17 @@ async function _installOverlayOnPage(nome, page) {
             setScrollButtonState();
 
             // Persistência leve da posição (sem dependências)
-            const POS_KEY = 'ctHumanOverlayPosV1';
-            const readPos = () => { try { return JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch { return null; } };
+            const POS_KEY = 'ctHumanOverlayPosV2';
+            const POS_KEY_LEGACY = 'ctHumanOverlayPosV1';
+            const readPos = () => {
+              try {
+                const v2 = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+                if (v2 && typeof v2 === 'object') return v2;
+                const v1 = JSON.parse(localStorage.getItem(POS_KEY_LEGACY) || 'null');
+                if (v1 && typeof v1 === 'object' && v1.mode && v1.mode !== 'free') return v1;
+                return null;
+              } catch { return null; }
+            };
             const savePos = (p) => { try { localStorage.setItem(POS_KEY, JSON.stringify(p || {})); } catch {} };
             const visibleGlass = () => {
               try {
