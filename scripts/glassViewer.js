@@ -322,9 +322,14 @@ function hudScript() {
     var needPanX = st.needPanX === true;
     var needPanY = st.needPanY === true;
     var host = document.getElementById(ID);
+    if (host && host.getAttribute('data-ct-hud') !== '2') {
+      try { host.remove(); } catch (e) {}
+      host = null;
+    }
     if (!host) {
       host = document.createElement('div');
       host.id = ID;
+      host.setAttribute('data-ct-hud', '2');
       host.style.zIndex = '2147483646';
       host.style.pointerEvents = 'none';
       host.style.userSelect = 'none';
@@ -337,10 +342,34 @@ function hudScript() {
         + '</style>'
         + '<div class="hbar" id="hbar"><div class="hthumb" id="hthumb"></div></div>'
         + '<div class="vbar" id="vbar"><div class="vthumb" id="vthumb"></div></div>';
-      var drag = null;
+      var panFromPointer = function(kind, ev){
+        var s = window.__ctGlassViewerState || {};
+        var zz = Number(s.zoom) || 1;
+        if (zz <= 0) zz = 1;
+        var visW = (Number(s.glassW) || 0) / zz;
+        var visH = (Number(s.glassH) || 0) / zz;
+        var maxX = Math.max(1, (Number(s.presetW) || visW) - visW);
+        var maxY = Math.max(1, (Number(s.presetH) || visH) - visH);
+        if (kind === 'v') {
+          var br = shadow.getElementById('vbar').getBoundingClientRect();
+          var th = shadow.getElementById('vthumb').getBoundingClientRect().height;
+          var travel = Math.max(1, br.height - th);
+          var t = (ev.clientY - br.top - th / 2) / travel;
+          if (t < 0) t = 0; if (t > 1) t = 1;
+          window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({ op: 'panTo', panY: t * maxY });
+        } else {
+          var brh = shadow.getElementById('hbar').getBoundingClientRect();
+          var tw = shadow.getElementById('hthumb').getBoundingClientRect().width;
+          var travelh = Math.max(1, brh.width - tw);
+          var thz = (ev.clientX - brh.left - tw / 2) / travelh;
+          if (thz < 0) thz = 0; if (thz > 1) thz = 1;
+          window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({ op: 'panTo', panX: thz * maxX });
+        }
+      };
       var startDrag = function(kind, ev){
-        drag = { kind: kind, x: ev.clientX, y: ev.clientY };
+        drag = { kind: kind };
         ev.preventDefault();
+        panFromPointer(kind, ev);
       };
       shadow.getElementById('hbar').addEventListener('mousedown', function(ev){ startDrag('h', ev); });
       shadow.getElementById('vbar').addEventListener('mousedown', function(ev){ startDrag('v', ev); });
@@ -348,16 +377,7 @@ function hudScript() {
       shadow.getElementById('vthumb').addEventListener('mousedown', function(ev){ startDrag('v', ev); });
       window.addEventListener('mousemove', function(ev){
         if (!drag) return;
-        var s = window.__ctGlassViewerState || {};
-        var zz = Number(s.zoom) || 1;
-        var dx = (ev.clientX - drag.x) / zz;
-        var dy = (ev.clientY - drag.y) / zz;
-        drag.x = ev.clientX; drag.y = ev.clientY;
-        window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({
-          op: 'panBy',
-          dx: drag.kind === 'h' ? dx : 0,
-          dy: drag.kind === 'v' ? dy : 0
-        });
+        panFromPointer(drag.kind, ev);
       });
       window.addEventListener('mouseup', function(){ drag = null; });
     }
@@ -443,26 +463,35 @@ async function refreshGeometry(page, { light = false } = {}) {
 
 async function handleHudCommand(page, cmd) {
   if (pageClosed(page)) return;
-  const op = String((cmd && cmd.op) || '');
-  let st = readState(page) || await refreshGeometry(page);
-  if (op === 'zoomBy') {
-    const delta = num(cmd.delta, 0);
-    const next = Math.min(MAX_ZOOM, Math.max(st.fitZoom, num(st.zoom, 1) + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
-    st = writeState(page, { zoom: next, userZoom: Math.abs(next - st.fitZoom) > 0.001 });
-  } else if (op === 'fit') {
-    st = writeState(page, { zoom: st.fitZoom, panX: 0, panY: 0, userZoom: false });
-  } else if (op === 'panBy') {
-    st = writeState(page, {
-      panX: num(st.panX, 0) + num(cmd.dx, 0),
-      panY: num(st.panY, 0) + num(cmd.dy, 0)
-    });
-  } else {
-    return;
-  }
-  const pan = clampPan(st.panX, st.panY, st.zoom, st.presetW, st.presetH, st.glassW, st.glassH);
-  writeState(page, pan);
-  await paint(page);
-  await paintHud(page);
+  page._ctGlassHudTail = Promise.resolve(page._ctGlassHudTail).then(async () => {
+    if (pageClosed(page)) return;
+    const op = String((cmd && cmd.op) || '');
+    let st = readState(page) || await refreshGeometry(page);
+    if (op === 'zoomBy') {
+      const delta = num(cmd.delta, 0);
+      const next = Math.min(MAX_ZOOM, Math.max(st.fitZoom, num(st.zoom, 1) + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
+      st = writeState(page, { zoom: next, userZoom: Math.abs(next - st.fitZoom) > 0.001 });
+    } else if (op === 'fit') {
+      st = writeState(page, { zoom: st.fitZoom, panX: 0, panY: 0, userZoom: false });
+    } else if (op === 'panBy') {
+      st = writeState(page, {
+        panX: num(st.panX, 0) + num(cmd.dx, 0),
+        panY: num(st.panY, 0) + num(cmd.dy, 0)
+      });
+    } else if (op === 'panTo') {
+      const patch = {};
+      if (Object.prototype.hasOwnProperty.call(cmd, 'panX')) patch.panX = num(cmd.panX, 0);
+      if (Object.prototype.hasOwnProperty.call(cmd, 'panY')) patch.panY = num(cmd.panY, 0);
+      st = writeState(page, patch);
+    } else {
+      return;
+    }
+    const pan = clampPan(st.panX, st.panY, st.zoom, st.presetW, st.presetH, st.glassW, st.glassH);
+    writeState(page, pan);
+    await paint(page);
+    await paintHud(page);
+  }).catch(() => {});
+  return page._ctGlassHudTail;
 }
 
 async function applyGlassViewerOnce(page, opts = {}) {
