@@ -3258,8 +3258,13 @@ async function computeVisibleThreadCardClickPlan(cardElement) {
       return { left, top, right, bottom, width, height, area: width * height };
     }
 
-    const vw = Math.max(0, Number(window.innerWidth || 0));
-    const vh = Math.max(0, Number(window.innerHeight || 0));
+    const stGlass = window.__ctGlassViewerState;
+    const vw = Math.max(0, (stGlass && Number(stGlass.glassW) > 0)
+      ? Math.min(Number(window.innerWidth || 0), Number(stGlass.glassW))
+      : Number(window.innerWidth || 0));
+    const vh = Math.max(0, (stGlass && Number(stGlass.glassH) > 0)
+      ? Math.min(Number(window.innerHeight || 0), Number(stGlass.glassH))
+      : Number(window.innerHeight || 0));
     const row = el.closest('div[role="row"]') || el.closest('[role="row"]');
     const rowParent = row && row.parentElement ? row.parentElement : null;
     const targets = uniq([el, row, rowParent, el.parentElement]);

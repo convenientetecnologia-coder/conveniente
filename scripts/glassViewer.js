@@ -109,7 +109,36 @@ function writeState(page, patch) {
   return page._ctGlassViewer;
 }
 
+async function isAuxiliaryWindow(page) {
+  try {
+    const opener = await page.opener();
+    if (opener) return true;
+  } catch {}
+  try {
+    const browser = typeof page.browser === 'function' ? page.browser() : null;
+    if (!browser || typeof browser.pages !== 'function') return false;
+    const pages = await browser.pages();
+    const main = pages && pages[0];
+    if (!main || main === page) return false;
+    const client = await page.target().createCDPSession();
+    try {
+      const wPage = await client.send('Browser.getWindowForTarget');
+      const client0 = await main.target().createCDPSession();
+      try {
+        const wMain = await client0.send('Browser.getWindowForTarget');
+        return Number(wPage && wPage.windowId) !== Number(wMain && wMain.windowId);
+      } finally {
+        try { await client0.detach(); } catch {}
+      }
+    } finally {
+      try { await client.detach(); } catch {}
+    }
+  } catch {}
+  return false;
+}
+
 async function maximizeWindow(page) {
+  if (await isAuxiliaryWindow(page)) return null;
   const client = await page.target().createCDPSession();
   try {
     const { windowId } = await client.send('Browser.getWindowForTarget');

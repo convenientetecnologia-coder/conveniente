@@ -2871,8 +2871,8 @@ async function _installOverlayOnPage(nome, page) {
             host.id = HOST_ID;
             host.style.position = 'fixed';
             host.style.top = '12px';
-            host.style.right = '12px';
-            host.style.left = 'auto';
+            host.style.left = '12px';
+            host.style.right = 'auto';
             host.style.bottom = 'auto';
             host.style.zIndex = '2147483647';
             host.style.pointerEvents = 'auto';
@@ -3385,12 +3385,21 @@ async function _installOverlayOnPage(nome, page) {
               let dragging = false;
               let dx = 0, dy = 0;
               const hdr = shadow.querySelector('.hdr');
+              const visualToLayout = (vx, vy) => {
+                const g = visibleGlass();
+                const z = (g && Number(g.z) > 0) ? Number(g.z) : 1;
+                return {
+                  x: (Number(vx) || 0) / z + (Number(g.x) || 0),
+                  y: (Number(vy) || 0) / z + (Number(g.y) || 0)
+                };
+              };
               const onMove = (ev) => {
                 if (!dragging) return;
-                const x = (ev && typeof ev.clientX === 'number') ? ev.clientX - dx : 12;
-                const y = (ev && typeof ev.clientY === 'number') ? ev.clientY - dy : 12;
-                applyFree(x, y);
-                savePos({ mode:'free', x, y });
+                const visX = (ev && typeof ev.clientX === 'number') ? ev.clientX - dx : 12;
+                const visY = (ev && typeof ev.clientY === 'number') ? ev.clientY - dy : 12;
+                const lay = visualToLayout(visX, visY);
+                applyFree(lay.x, lay.y);
+                savePos({ mode:'free', x: lay.x, y: lay.y });
               };
               const onUp = () => { dragging = false; };
               hdr && hdr.addEventListener('mousedown', (ev) => {
@@ -3399,7 +3408,8 @@ async function _installOverlayOnPage(nome, page) {
                   const r = host.getBoundingClientRect();
                   dx = ev.clientX - r.left;
                   dy = ev.clientY - r.top;
-                  savePos({ mode:'free', x: r.left, y: r.top });
+                  const lay = visualToLayout(r.left, r.top);
+                  savePos({ mode:'free', x: lay.x, y: lay.y });
                   try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'drag_begin' }); } catch {}
                 } catch {}
               });
