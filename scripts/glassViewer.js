@@ -8,7 +8,8 @@
  * 2) Vidro: janela maximizada na MAE (cobre os outros Chromes).
  * 3) Visor: se o preset cabe no vidro, zoom=1 (1:1, conteudo menor).
  *    Se nao cabe, zoom=fit < 1 (encolhe so o desenho). Zoom do operador
- *    (Ctrl +/- / botoes) pode passar do vidro; ai pan com barras.
+ *    (Ctrl +/- / roda com Ctrl) pode passar do vidro; ai pan com barras
+ *    e com a roda (sem Ctrl).
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
@@ -20,7 +21,10 @@
 
 const logger = require('./logger.js');
 
-const CHROME_UI_DIP = 96;
+const CHROME_TOOLBAR_DIP = 90;
+const CHROME_INFOBAR_DIP = 40;
+const CHROME_SAFE_DIP = 6;
+const CHROME_UI_DIP = CHROME_TOOLBAR_DIP + CHROME_INFOBAR_DIP + CHROME_SAFE_DIP;
 const WIN_MAX_CHROME_DIP = 16;
 const MIN_FIT = 0.12;
 const MAX_ZOOM = 3;
@@ -262,11 +266,26 @@ function pageInstallRuntime() {
     }, true);
     window.addEventListener('wheel', (ev) => {
       try {
-        if (!(ev.ctrlKey || ev.metaKey)) return;
+        const st = window.__ctGlassViewerState;
+        if (ev.ctrlKey || ev.metaKey) {
+          ev.preventDefault();
+          window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({
+            op: 'zoomBy',
+            delta: ev.deltaY < 0 ? 1 : -1
+          });
+          return;
+        }
+        if (!st || st.needPan !== true) return;
         ev.preventDefault();
+        const z = Number(st.zoom) > 0 ? Number(st.zoom) : 1;
+        let dx = Number(ev.deltaX) || 0;
+        let dy = Number(ev.deltaY) || 0;
+        if (ev.deltaMode === 1) { dx *= 24; dy *= 24; }
+        if (ev.shiftKey && !dx) { dx = dy; dy = 0; }
         window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({
-          op: 'zoomBy',
-          delta: ev.deltaY < 0 ? 1 : -1
+          op: 'panBy',
+          dx: dx / z,
+          dy: dy / z
         });
       } catch (e) {}
     }, { capture: true, passive: false });
@@ -323,6 +342,8 @@ function hudScript() {
         drag = { kind: kind, x: ev.clientX, y: ev.clientY };
         ev.preventDefault();
       };
+      shadow.getElementById('hbar').addEventListener('mousedown', function(ev){ startDrag('h', ev); });
+      shadow.getElementById('vbar').addEventListener('mousedown', function(ev){ startDrag('v', ev); });
       shadow.getElementById('hthumb').addEventListener('mousedown', function(ev){ startDrag('h', ev); });
       shadow.getElementById('vthumb').addEventListener('mousedown', function(ev){ startDrag('v', ev); });
       window.addEventListener('mousemove', function(ev){
