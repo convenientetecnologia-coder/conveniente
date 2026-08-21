@@ -13,6 +13,7 @@ const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
 const fileStore = require('./fileStore.js');
+const glassViewer = require('./glassViewer.js');
 
 // Stealth permanece LIGADO (webdriver, plugins, permissions, codecs, chrome.*).
 // user-agent-override continua off (a UA da conta é o patchPage).
@@ -115,6 +116,7 @@ async function bringWindowToFront(page) {
     if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) — skip maximizar', { err: msg.slice(0, 80) });
     try { await page.bringToFront(); } catch {}
   }
+  try { await glassViewer.applyGlassViewer(page, { source: 'bringWindowToFront' }); } catch {}
 }
 
 /**
@@ -1145,6 +1147,7 @@ async function _blindarOnce(page, nome) {
   page._convenientePatched = true;
   page._convenientePatchedNome = String(nome);
   page._convenientePatchedAt = Date.now();
+  try { await glassViewer.applyGlassViewer(page, { source: 'blindar' }); } catch {}
 }
 
 async function blindarPaginaDaConta(page, nome, opts = {}) {
@@ -2433,6 +2436,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
 
     // Operador: vidro maximizado. Identidade da página continua o setViewport do preset (já colado no portão).
+    // Visor: 1:1 se o preset cabe; encaixa se nao cabe. Nao altera innerWidth.
     try {
       const pagesNow = await browser.pages();
       const firstMax = pagesNow && pagesNow[0];
@@ -2440,6 +2444,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         const clientMax = await firstMax.target().createCDPSession();
         const { windowId } = await clientMax.send('Browser.getWindowForTarget');
         await clientMax.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+        try { await glassViewer.applyGlassViewer(firstMax, { source: 'openBrowser' }); } catch {}
       }
     } catch (e) {
       logger.warn('[BROWSER] Falha ao maximizar janela do operador (seguindo): ' + ((e && e.message) || e));

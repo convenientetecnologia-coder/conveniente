@@ -3280,21 +3280,69 @@ async function _installOverlayOnPage(nome, page) {
             const POS_KEY = 'ctHumanOverlayPosV1';
             const readPos = () => { try { return JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch { return null; } };
             const savePos = (p) => { try { localStorage.setItem(POS_KEY, JSON.stringify(p || {})); } catch {} };
+            const visibleGlass = () => {
+              try {
+                const st = window.__ctGlassViewerState;
+                const innerW = window.innerWidth || 0;
+                const innerH = window.innerHeight || 0;
+                const outerW = window.outerWidth || innerW;
+                const outerH = window.outerHeight || innerH;
+                if (st && Number(st.glassW) > 0 && Number(st.zoom) > 0) {
+                  const z = Number(st.zoom);
+                  return {
+                    x: Number(st.panX) || 0,
+                    y: Number(st.panY) || 0,
+                    w: Math.min(innerW, Number(st.glassW) / z),
+                    h: Math.min(innerH, Number(st.glassH) / z),
+                    z
+                  };
+                }
+                return {
+                  x: 0,
+                  y: 0,
+                  w: Math.max(1, Math.min(innerW, outerW) || innerW),
+                  h: Math.max(1, Math.min(innerH, Math.max(1, outerH - 96)) || innerH),
+                  z: 1
+                };
+              } catch {
+                return { x: 0, y: 0, w: Math.max(1, window.innerWidth || 800), h: Math.max(1, window.innerHeight || 600), z: 1 };
+              }
+            };
             const applyDock = (dock) => {
               try {
-                host.style.left = 'auto'; host.style.right = 'auto'; host.style.top = 'auto'; host.style.bottom = 'auto';
-                if (dock === 'tl') { host.style.top = '12px'; host.style.left = '12px'; }
-                else if (dock === 'br') { host.style.bottom = '12px'; host.style.right = '12px'; }
-                else if (dock === 'bl') { host.style.bottom = '12px'; host.style.left = '12px'; }
-                else { host.style.top = '12px'; host.style.right = '12px'; } // tr default
+                const g = visibleGlass();
+                const pad = 12;
+                const approxW = 372;
+                const approxH = 280;
+                host.style.right = 'auto';
+                host.style.bottom = 'auto';
+                host.style.position = 'fixed';
+                let left = g.x + pad;
+                let top = g.y + pad;
+                if (dock === 'tr') {
+                  left = g.x + Math.max(pad, g.w - approxW - pad);
+                  top = g.y + pad;
+                } else if (dock === 'br') {
+                  left = g.x + Math.max(pad, g.w - approxW - pad);
+                  top = g.y + Math.max(pad, g.h - approxH - pad);
+                } else if (dock === 'bl') {
+                  left = g.x + pad;
+                  top = g.y + Math.max(pad, g.h - approxH - pad);
+                } else {
+                  left = g.x + pad;
+                  top = g.y + pad;
+                }
+                host.style.left = `${Math.round(left)}px`;
+                host.style.top = `${Math.round(top)}px`;
               } catch {}
             };
             const applyFree = (x, y) => {
               try {
+                const g = visibleGlass();
                 host.style.right = 'auto';
                 host.style.bottom = 'auto';
-                host.style.left = `${Math.max(6, Math.min(window.innerWidth - 60, x))}px`;
-                host.style.top  = `${Math.max(6, Math.min(window.innerHeight - 60, y))}px`;
+                host.style.left = `${Math.max(g.x + 6, Math.min(g.x + g.w - 60, x))}px`;
+                host.style.top  = `${Math.max(g.y + 6, Math.min(g.y + g.h - 60, y))}px`;
               } catch {}
             };
             // Restaura posição
@@ -3302,6 +3350,16 @@ async function _installOverlayOnPage(nome, page) {
               const p = readPos();
               if (p && p.mode === 'free' && typeof p.x === 'number' && typeof p.y === 'number') applyFree(p.x, p.y);
               else if (p && p.mode && typeof p.mode === 'string') applyDock(p.mode);
+              else applyDock('tr');
+            } catch { try { applyDock('tr'); } catch {} }
+            try {
+              window.addEventListener('ct-glass-viewer', () => {
+                try {
+                  const p = readPos();
+                  if (p && p.mode === 'free' && typeof p.x === 'number' && typeof p.y === 'number') applyFree(p.x, p.y);
+                  else applyDock((p && p.mode) ? String(p.mode) : 'tr');
+                } catch {}
+              });
             } catch {}
 
             // Botão Mover (dock cycle)
