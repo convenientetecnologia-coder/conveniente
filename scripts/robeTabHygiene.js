@@ -4,8 +4,10 @@
  * Contrato preto-no-branco (Virtus + Robe):
  * - Sem Robe: 1 aba (messages/Virtus). Aba 1+ fecha, qualquer URL, qualquer ERR_*.
  * - Com Robe: aba 0 messages, aba 1 create/item|vehicle. Aba 2+ fecha.
- * - Restore de sessão do Chrome não é aba de trabalho.
- * - Teto por contagem. Não filtra tipo de erro. pages() timeout cai nos targets CDP.
+ * - A aba 1 nasce about:blank no portao. Nao fecha blank/blinding enquanto o
+ *   gate esta colando (senao o pruner mata o create antes do goto).
+ * - Restore de sessao do Chrome nao e aba de trabalho.
+ * - Teto por contagem. Nao filtra tipo de erro. pages() timeout cai nos targets CDP.
  */
 
 const provisionAudit = (() => {
@@ -452,6 +454,7 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   if (swapping && pages.length <= 2) {
     return { ok: true, closed: 0, kept: pages.length, reason: "virtus_swap" };
   }
+  const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
 
   const keep = (keepPage && pages.includes(keepPage))
     ? keepPage
@@ -462,7 +465,9 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
+    if (p && p._convenienteBlindarPromise) continue;
     const u = pageUrlOf(p);
+    if (robeOn && gateBusy && isBlankUrl(u) && !isDeadTabUrl(u)) continue;
     if (robeOn && isCreateMarketplaceUrl(u)) {
       if (!createKept) {
         createKept = p;

@@ -2042,6 +2042,24 @@ async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = 
 // END -- PRUNING PATCH
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
+/**
+ * Teto do guard. Contrato: Virtus=1. Robe=2 (messages + create).
+ * A aba create nasce about:blank; capar em 1 so porque ainda nao tem
+ * /marketplace/create fecha a aba 1 no targetcreated (log MAE1 2026-08-26:
+ * reason=robe lim=1 + Target.attachToTarget).
+ */
+function resolveOneTabHardCap({ allow, limOpt, robeOn, hasCreate, gateBusy } = {}) {
+  const opt = Number(limOpt);
+  const allowed = Math.max(1, Number.isFinite(opt) && opt >= 1 ? opt : 2);
+  let lim = allow ? allowed : 1;
+  if (robeOn && (hasCreate === true || gateBusy === true)) {
+    lim = Math.max(lim, 2);
+  } else if (robeOn && hasCreate !== true && gateBusy !== true) {
+    lim = 1;
+  }
+  return Math.max(1, lim);
+}
+
 function installOneTabGuard(browser, nome, {
   allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
   maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
@@ -2077,10 +2095,10 @@ function installOneTabGuard(browser, nome, {
         const beforeCount = Array.isArray(pages) ? pages.length : 0;
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
         if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
-        let lim = (allow && allow()) ? limOpt : 1;
         if (!Array.isArray(pages) || pages.length <= 1) return;
 
         const robeOn = !!(browser && browser._robeActiveFor);
+        const gateBusy = _browserGateBusy(browser);
         let hasCreate = false;
         try {
           hasCreate = pages.some((pg) => {
@@ -2089,7 +2107,13 @@ function installOneTabGuard(browser, nome, {
             return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u);
           });
         } catch {}
-        if (robeOn && !hasCreate) lim = 1;
+        const lim = resolveOneTabHardCap({
+          allow: !!(allow && allow()),
+          limOpt,
+          robeOn,
+          hasCreate,
+          gateBusy
+        });
         if (pages.length <= lim) return;
 
         let keepIdx = 0;
@@ -2108,6 +2132,7 @@ function installOneTabGuard(browser, nome, {
           if (remaining <= lim) break;
           if (i === keepIdx) continue;
           const p = pages[i];
+          if (_pageIsBlinding(p)) continue;
           let u = '';
           try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
           if (robeOn && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) {
@@ -7942,6 +7967,7 @@ module.exports = {
   gptRemediateFbUi,
   ensureFbUiUnblocked,
   installOneTabGuard,
+  resolveOneTabHardCap,
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
