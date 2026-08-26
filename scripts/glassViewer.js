@@ -9,7 +9,8 @@
  * 3) Visor: se o preset cabe no vidro, zoom=1 (1:1, conteudo menor).
  *    Se nao cabe, zoom=fit < 1 (encolhe so o desenho). Zoom do operador
  *    (Ctrl +/- / roda com Ctrl) pode passar do vidro; ai pan com barras
- *    e com a roda (sem Ctrl).
+ *    e com a roda (sem Ctrl). Snap de pixel nao pode capar o zoom do
+ *    operador no fit/vidro — isso prende Ctrl+scroll e as barras nunca nascem.
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
@@ -36,20 +37,17 @@ function num(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function snapZoomToPixels(z, presetW, presetH, glassW, glassH) {
-  let z0 = num(z, 1);
-  if (z0 >= 0.999) return 1;
-  const pw = Math.max(1, num(presetW, 1));
-  const ph = Math.max(1, num(presetH, 1));
-  const gw = Math.max(1, num(glassW, pw));
-  const gh = Math.max(1, num(glassH, ph));
-  z0 = Math.min(1, z0, gw / pw, gh / ph);
-  const w = Math.max(1, Math.floor(pw * z0 + 1e-9));
-  z0 = w / pw;
-  const h = Math.max(1, Math.floor(ph * z0 + 1e-9));
-  z0 = Math.min(z0, h / ph);
+function snapZoomToPixels(z, presetW, presetH) {
+  const z0 = num(z, 1);
   if (!Number.isFinite(z0) || z0 <= 0) return 1;
-  return Math.max(MIN_FIT, z0);
+  if (Math.abs(z0 - 1) < 0.0005) return 1;
+  const pw = Math.max(1, num(presetW, 1));
+  const w = Math.max(1, Math.round(pw * z0));
+  const snapped = w / pw;
+  if (!Number.isFinite(snapped) || snapped <= 0) {
+    return Math.max(MIN_FIT, Math.min(MAX_ZOOM, z0));
+  }
+  return Math.max(MIN_FIT, Math.min(MAX_ZOOM, snapped));
 }
 
 function computeFitZoom(presetW, presetH, glassW, glassH) {
@@ -59,7 +57,20 @@ function computeFitZoom(presetW, presetH, glassW, glassH) {
   const gh = Math.max(1, num(glassH, 1));
   const z = Math.min(1, gw / pw, gh / ph);
   if (!Number.isFinite(z) || z <= 0) return 1;
-  return snapZoomToPixels(z, pw, ph, gw, gh);
+  if (z >= 0.999) return 1;
+  const w = Math.max(1, Math.floor(pw * z + 1e-9));
+  const zSnap = w / pw;
+  return Math.max(MIN_FIT, Math.min(z, Number.isFinite(zSnap) && zSnap > 0 ? zSnap : z));
+}
+
+function stepOperatorZoom(currentZoom, delta, fitZoom, presetW, presetH) {
+  const fit = num(fitZoom, 1);
+  const cur = num(currentZoom, 1);
+  const raw = Math.min(MAX_ZOOM, Math.max(fit, cur + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
+  let next = snapZoomToPixels(raw, presetW, presetH);
+  if (delta > 0 && next <= cur + 1e-9 && raw > cur + 1e-9) next = raw;
+  if (delta < 0 && next >= cur - 1e-9 && raw < cur - 1e-9) next = raw;
+  return Math.max(fit, Math.min(MAX_ZOOM, next));
 }
 
 function toLayoutCoords(visualX, visualY, zoom, panX, panY) {
@@ -459,9 +470,7 @@ async function refreshGeometry(page, { light = false } = {}) {
     zoom = snapZoomToPixels(
       Math.min(MAX_ZOOM, Math.max(fitZoom, num(prev.zoom, fitZoom))),
       geo.presetW,
-      geo.presetH,
-      geo.glassW,
-      geo.glassH
+      geo.presetH
     );
   }
   const pan = clampPan(
@@ -492,9 +501,7 @@ async function handleHudCommand(page, cmd) {
     const op = String((cmd && cmd.op) || '');
     let st = readState(page) || await refreshGeometry(page);
     if (op === 'zoomBy') {
-      const delta = num(cmd.delta, 0);
-      const raw = Math.min(MAX_ZOOM, Math.max(st.fitZoom, num(st.zoom, 1) + (delta > 0 ? ZOOM_STEP : -ZOOM_STEP)));
-      const next = snapZoomToPixels(raw, st.presetW, st.presetH, st.glassW, st.glassH);
+      const next = stepOperatorZoom(st.zoom, num(cmd.delta, 0), st.fitZoom, st.presetW, st.presetH);
       st = writeState(page, { zoom: next, userZoom: Math.abs(next - st.fitZoom) > 0.001 });
     } else if (op === 'fit') {
       st = writeState(page, { zoom: st.fitZoom, panX: 0, panY: 0, userZoom: false });
@@ -583,9 +590,13 @@ async function applyGlassViewer(page, opts = {}) {
 module.exports = {
   applyGlassViewer,
   computeFitZoom,
+  snapZoomToPixels,
+  stepOperatorZoom,
   toLayoutCoords,
   clampPan,
   visibleNeedsPan,
   panAxes,
-  CHROME_UI_DIP
+  CHROME_UI_DIP,
+  ZOOM_STEP,
+  MAX_ZOOM
 };
