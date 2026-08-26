@@ -465,7 +465,7 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
-    if (p && p._convenienteBlindarPromise) continue;
+    if (p && p._convenienteBlinding === true) continue;
     const u = pageUrlOf(p);
     if (robeOn && gateBusy && isBlankUrl(u) && !isDeadTabUrl(u)) continue;
     if (robeOn && isCreateMarketplaceUrl(u)) {
@@ -682,7 +682,7 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         let u = "";
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
         if (isCreateMarketplaceUrl(u)) continue;
-        if (p && p._convenienteBlindarPromise) continue;
+        if (p && p._convenienteBlinding === true) continue;
         let junk = isJunkUrl(u);
         if (!junk) {
           try { junk = await pageLooksLikeChromeNetError(p); } catch { junk = false; }
@@ -738,7 +738,7 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
         ]);
       } catch {}
       if (page) {
-        if (page._convenienteBlindarPromise) continue;
+        if (page._convenienteBlinding === true) continue;
         const r = await safeClosePage(page, { nome, reason: "junk_cdp_target_page" });
         if (r && r.closed) { closed++; continue; }
       }

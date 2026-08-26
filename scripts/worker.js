@@ -4107,7 +4107,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
         const ps = await ctrl.browser.pages().catch(()=>[]);
         for (const pg of (ps || [])) {
           if (!pg || pg === p0) continue;
-          if (pg && pg._convenienteBlindarPromise) continue;
+          if (pg && pg._convenienteBlinding === true) continue;
           const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
           if (!uu || uu === 'about:blank') {
             try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
@@ -9490,7 +9490,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     for (const p of stablePages) {
       try {
         if (keepPage && p === keepPage) continue;
-        if (p && p._convenienteBlindarPromise) continue;
+        if (p && p._convenienteBlinding === true) continue;
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (inRobe && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
@@ -14164,6 +14164,7 @@ const handlers = {
 
       ctrl.configurando = false;
       stopPruneLoop(nome);
+      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};

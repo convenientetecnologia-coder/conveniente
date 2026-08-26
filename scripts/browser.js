@@ -1104,7 +1104,7 @@ function _browserGateBusy(browser) {
 }
 
 function _pageIsBlinding(page) {
-  return !!(page && page._convenienteBlindarPromise);
+  return !!(page && page._convenienteBlinding === true);
 }
 
 async function _safeCloseAccountPage(page) {
@@ -1168,7 +1168,7 @@ async function blindarPaginaDaConta(page, nome, opts = {}) {
   const source = String((opts && opts.source) || 'blindar').slice(0, 80);
   const tries = Math.max(1, Math.min(5, Number((opts && opts.tries) || BLINDAR_TRIES) || BLINDAR_TRIES));
 
-  page._convenienteBlindarPromise = (async () => {
+  const inflight = (async () => {
     const errors = [];
     for (let attempt = 1; attempt <= tries; attempt++) {
       if (_isAccountPageClosed(page)) throw new Error('blindar_page_closed');
@@ -1192,11 +1192,17 @@ async function blindarPaginaDaConta(page, nome, opts = {}) {
     throw new Error(`blindar_failed:${who}:${joined}`.slice(0, 500));
   })();
 
+  page._convenienteBlinding = true;
+  page._convenienteBlindarPromise = inflight;
   try {
-    return await page._convenienteBlindarPromise;
+    return await inflight;
   } catch (e) {
-    try { page._convenienteBlindarPromise = null; } catch {}
     throw e;
+  } finally {
+    page._convenienteBlinding = false;
+    try {
+      if (page._convenienteBlindarPromise === inflight) page._convenienteBlindarPromise = null;
+    } catch {}
   }
 }
 
@@ -1396,6 +1402,11 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
             }
           }
         }
+        try {
+          if (typeof browser._convenienteEnforceHardCap === 'function') {
+            await browser._convenienteEnforceHardCap();
+          }
+        } catch {}
       } catch {}
     });
     _installForceCloseExtras(browser);
@@ -2175,6 +2186,8 @@ function installOneTabGuard(browser, nome, {
         await reportNum();
       }
     }
+
+    browser._convenienteEnforceHardCap = enforceHardCap;
 
     browser.on('targetcreated', async (t) => {
       try {
@@ -7968,6 +7981,7 @@ module.exports = {
   ensureFbUiUnblocked,
   installOneTabGuard,
   resolveOneTabHardCap,
+  pageIsBlinding: _pageIsBlinding,
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
