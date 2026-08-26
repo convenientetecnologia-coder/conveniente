@@ -2054,20 +2054,15 @@ async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = 
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
 /**
- * Teto do guard. Contrato: Virtus=1. Robe=2 (messages + create).
- * A aba create nasce about:blank; capar em 1 so porque ainda nao tem
- * /marketplace/create fecha a aba 1 no targetcreated (log MAE1 2026-08-26:
- * reason=robe lim=1 + Target.attachToTarget).
+ * Teto do guard. Contrato: Virtus=1. Robe=2 o ciclo inteiro.
+ * A aba create nasce about:blank; capar em 1 no vao portao->goto fecha a aba 1
+ * (abrir/fechar na hora de postar).
  */
-function resolveOneTabHardCap({ allow, limOpt, robeOn, hasCreate, gateBusy } = {}) {
+function resolveOneTabHardCap({ allow, limOpt, robeOn } = {}) {
   const opt = Number(limOpt);
   const allowed = Math.max(1, Number.isFinite(opt) && opt >= 1 ? opt : 2);
   let lim = allow ? allowed : 1;
-  if (robeOn && (hasCreate === true || gateBusy === true)) {
-    lim = Math.max(lim, 2);
-  } else if (robeOn && hasCreate !== true && gateBusy !== true) {
-    lim = 1;
-  }
+  if (robeOn) lim = Math.max(lim, 2);
   return Math.max(1, lim);
 }
 
@@ -2109,21 +2104,10 @@ function installOneTabGuard(browser, nome, {
         if (!Array.isArray(pages) || pages.length <= 1) return;
 
         const robeOn = !!(browser && browser._robeActiveFor);
-        const gateBusy = _browserGateBusy(browser);
-        let hasCreate = false;
-        try {
-          hasCreate = pages.some((pg) => {
-            let u = '';
-            try { u = typeof pg.url === 'function' ? String(pg.url() || '') : ''; } catch {}
-            return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u);
-          });
-        } catch {}
         const lim = resolveOneTabHardCap({
           allow: !!(allow && allow()),
           limOpt,
-          robeOn,
-          hasCreate,
-          gateBusy
+          robeOn
         });
         if (pages.length <= lim) return;
 
@@ -2139,6 +2123,7 @@ function installOneTabGuard(browser, nome, {
         const closedUrls = [];
         let remaining = pages.length;
         let createKept = false;
+        let blankKept = false;
         for (let i = pages.length - 1; i >= 0; i--) {
           if (remaining <= lim) break;
           if (i === keepIdx) continue;
@@ -2149,6 +2134,12 @@ function installOneTabGuard(browser, nome, {
           if (robeOn && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) {
             if (!createKept) {
               createKept = true;
+              continue;
+            }
+          }
+          if (robeOn && (!u || u === 'about:blank')) {
+            if (!blankKept) {
+              blankKept = true;
               continue;
             }
           }

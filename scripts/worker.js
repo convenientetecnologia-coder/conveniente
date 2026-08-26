@@ -9497,7 +9497,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         const deadUrl = isDeadTabUrl(url);
         const blank = isBlankUrl(url);
         if (!deadUrl && !blank) continue;
-        if (gateBusy && blank && !deadUrl) continue;
+        if ((gateBusy || inRobe) && blank && !deadUrl) continue;
         await Promise.race([
           p.close({ runBeforeUnload: false }).catch(() => {}),
           new Promise((r) => setTimeout(r, 2500))

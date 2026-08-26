@@ -355,6 +355,7 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
   }
   let closed = 0;
   let createKept = false;
+  let blankKept = false;
   let swapExtraKept = false;
   let session = null;
   for (let i = pageTargets.length - 1; i >= 0; i--) {
@@ -365,6 +366,12 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
     if (robeOn && isCreateMarketplaceUrl(u)) {
       if (!createKept) {
         createKept = true;
+        continue;
+      }
+    }
+    if (robeOn && isBlankUrl(u) && !isDeadTabUrl(u)) {
+      if (!blankKept) {
+        blankKept = true;
         continue;
       }
     }
@@ -454,20 +461,25 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   if (swapping && pages.length <= 2) {
     return { ok: true, closed: 0, kept: pages.length, reason: "virtus_swap" };
   }
-  const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
 
   const keep = (keepPage && pages.includes(keepPage))
     ? keepPage
     : (pickVirtusKeepPage(pages, pages[0]) || pages[0]);
   let closed = 0;
   let createKept = null;
+  let blankKept = null;
   let swapExtraKept = null;
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
     if (p && p._convenienteBlinding === true) continue;
     const u = pageUrlOf(p);
-    if (robeOn && gateBusy && isBlankUrl(u) && !isDeadTabUrl(u)) continue;
+    if (robeOn && isBlankUrl(u) && !isDeadTabUrl(u)) {
+      if (!blankKept) {
+        blankKept = p;
+        continue;
+      }
+    }
     if (robeOn && isCreateMarketplaceUrl(u)) {
       if (!createKept) {
         createKept = p;
