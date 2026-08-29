@@ -22,6 +22,8 @@ $EventLog = Join-Path $DataDir 'process_sentinel.jsonl'
 $StatePath = Join-Path $DataDir 'process_sentinel_state.json'
 $IncidentPath = Join-Path $DataDir 'process_sentinel_last_incident.json'
 $InstallPath = Join-Path $DataDir 'process_sentinel_install.json'
+$HeartbeatPath = Join-Path $DataDir 'index_heartbeat.json'
+$BootContextPath = Join-Path $DataDir 'index_boot_context.json'
 $DeepScript = Join-Path $PSScriptRoot 'windowsForensicDeep.ps1'
 $MaxLogBytes = 20MB
 
@@ -120,27 +122,94 @@ function Get-ProcessRecord([int]$ProcessId) {
     }
 }
 
+function Read-JsonSafe([string]$Path) {
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        return (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Add-ProcessAncestors([object]$Record, [int]$FallbackParentPid = 0) {
+    if (-not $Record) { return $null }
+    $ancestors = @()
+    $parentPid = [int]$Record.ppid
+    if ($parentPid -le 0) { $parentPid = $FallbackParentPid }
+    for ($depth = 0; $depth -lt 4 -and $parentPid -gt 0; $depth++) {
+        $parent = Get-ProcessRecord $parentPid
+        if (-not $parent) { break }
+        $ancestors += $parent
+        $parentPid = [int]$parent.ppid
+    }
+    $Record | Add-Member -NotePropertyName ancestors -NotePropertyValue $ancestors -Force
+    return $Record
+}
+
+function Get-MasterFromBootEvidence {
+    $boot = Read-JsonSafe $BootContextPath
+    $heartbeat = Read-JsonSafe $HeartbeatPath
+    $candidateIds = @()
+    if ($boot -and [int]$boot.pid -gt 0) { $candidateIds += [int]$boot.pid }
+    if ($heartbeat -and [int]$heartbeat.pid -gt 0) { $candidateIds += [int]$heartbeat.pid }
+    foreach ($candidatePid in @($candidateIds | Select-Object -Unique)) {
+        try {
+            $process = Get-Process -Id $candidatePid -ErrorAction Stop
+            if ([string]$process.ProcessName -ine 'node') { continue }
+
+            $creationMatches = $false
+            if ($boot -and [int]$boot.pid -eq $candidatePid -and [int64]$boot.ts -gt 0) {
+                try {
+                    $createdMs = [DateTimeOffset]$process.StartTime.ToUniversalTime()
+                    $createdEpochMs = $createdMs.ToUnixTimeMilliseconds()
+                    $creationMatches = [math]::Abs($createdEpochMs - [int64]$boot.ts) -le 120000
+                } catch {}
+            }
+            $heartbeatFresh = $false
+            if ($heartbeat -and [int]$heartbeat.pid -eq $candidatePid -and [int64]$heartbeat.ts -gt 0) {
+                $ageMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]$heartbeat.ts
+                $heartbeatFresh = ($ageMs -ge 0 -and $ageMs -le 90000)
+            }
+            if (-not $creationMatches -and -not $heartbeatFresh) { continue }
+
+            $record = Get-ProcessRecord $candidatePid
+            if (-not $record) {
+                $createdUtc = $null
+                $executable = $null
+                try { $createdUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
+                try { $executable = Redact-Text $process.Path 320 } catch {}
+                $record = [pscustomobject]@{
+                    name = 'node.exe'
+                    pid = $candidatePid
+                    ppid = if ($boot -and [int]$boot.pid -eq $candidatePid) { [int]$boot.ppid } else { 0 }
+                    sessionId = [int]$process.SessionId
+                    createdUtc = $createdUtc
+                    command = $null
+                    executable = $executable
+                }
+            }
+            $record | Add-Member -NotePropertyName evidence -NotePropertyValue 'boot_context_or_heartbeat' -Force
+            $fallbackParent = if ($boot -and [int]$boot.pid -eq $candidatePid) { [int]$boot.ppid } else { 0 }
+            return (Add-ProcessAncestors $record $fallbackParent)
+        } catch {}
+    }
+    return $null
+}
+
 function Find-Master {
     try {
         foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'")) {
             $cmd = [string]$p.CommandLine
-            if ($cmd -match '(?i)(^|[\\/"\s])conveniente[\\/]index\.js([\"\s]|$)') {
+            if ($cmd -match '(?i)[\\/]conveniente[\\/]index\.js(?:["\s]|$)') {
                 $record = Get-ProcessRecord ([int]$p.ProcessId)
-                if (-not $record) { return $null }
-                $ancestors = @()
-                $parentPid = [int]$record.ppid
-                for ($depth = 0; $depth -lt 4 -and $parentPid -gt 0; $depth++) {
-                    $parent = Get-ProcessRecord $parentPid
-                    if (-not $parent) { break }
-                    $ancestors += $parent
-                    $parentPid = [int]$parent.ppid
+                if ($record) {
+                    $record | Add-Member -NotePropertyName evidence -NotePropertyValue 'command_line' -Force
+                    return (Add-ProcessAncestors $record)
                 }
-                $record | Add-Member -NotePropertyName ancestors -NotePropertyValue $ancestors -Force
-                return $record
             }
         }
     } catch {}
-    return $null
+    return (Get-MasterFromBootEvidence)
 }
 
 function Get-MemorySnapshot {
