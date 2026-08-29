@@ -212,14 +212,14 @@ async function isAuxiliaryWindow(page) {
   return false;
 }
 
-async function maximizeWindow(page) {
-  if (await isAuxiliaryWindow(page)) return null;
+async function maximizeWindow(page, { skipMaximize = false } = {}) {
+  const auxiliary = await isAuxiliaryWindow(page);
   const client = await page.target().createCDPSession();
   try {
     const { windowId } = await client.send('Browser.getWindowForTarget');
     let info = await client.send('Browser.getWindowBounds', { windowId });
     const state = String((info && info.bounds && info.bounds.windowState) || '');
-    if (state !== 'maximized') {
+    if (!skipMaximize && !auxiliary && state !== 'maximized') {
       await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
       await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
       await sleep(150);
@@ -229,6 +229,62 @@ async function maximizeWindow(page) {
   } finally {
     try { await client.detach(); } catch {}
   }
+}
+
+function resolveGlassDimensions({
+  boundsW = 0,
+  boundsH = 0,
+  outerW = 0,
+  outerH = 0,
+  visualW = 0,
+  visualH = 0,
+  presetW = 0,
+  presetH = 0
+} = {}) {
+  const bw = num(boundsW, 0);
+  const bh = num(boundsH, 0);
+  const ow = num(outerW, 0);
+  const oh = num(outerH, 0);
+  const vw = num(visualW, 0);
+  const vh = num(visualH, 0);
+  const pw = Math.max(1, num(presetW, 1));
+  const ph = Math.max(1, num(presetH, 1));
+  let glassW = 0;
+  let glassH = 0;
+  let source = 'preset_fallback';
+
+  // Browser.getWindowBounds é a medida física do vidro. O viewport emulado
+  // pode continuar devolvendo exatamente o preset mesmo quando metade dele
+  // está fora da tela; nesse caso usar visualViewport recria o recorte.
+  if (bw >= 400 && bh >= 300) {
+    glassW = Math.max(320, bw - WIN_MAX_CHROME_DIP);
+    glassH = Math.max(240, bh - WIN_MAX_CHROME_DIP - CHROME_UI_DIP);
+    source = 'window_bounds';
+  } else if (ow >= 400 && oh >= 300) {
+    glassW = Math.max(320, ow - WIN_MAX_CHROME_DIP);
+    glassH = Math.max(240, oh - CHROME_UI_DIP);
+    source = 'outer_window';
+  } else if (vw >= 400 && vh >= 300) {
+    glassW = vw;
+    glassH = vh;
+    source = 'visual_viewport';
+  } else {
+    glassW = Math.max(320, vw || pw);
+    glassH = Math.max(240, vh || ph);
+  }
+
+  const visualLooksPreset = vw > 0 && vh > 0
+    && Math.abs(vw - pw) <= 4
+    && Math.abs(vh - ph) <= 4;
+  const visualDiffersFromGlass = vw > 0 && vh > 0
+    && (Math.abs(vw - glassW) > 8 || Math.abs(vh - glassH) > 8);
+
+  return {
+    glassW,
+    glassH,
+    source,
+    locked: visualLooksPreset && visualDiffersFromGlass
+  };
 }
 
 async function unlockVisibleSize(page) {
@@ -290,40 +346,33 @@ async function measureGlass(page, bounds) {
   const presetH = Math.max(1, num(vp.height, 0) || num(js.innerH, 1));
   const visW = num(cssVis.clientWidth, 0) || num(cssVis.width, 0) || num(js.vvW, 0);
   const visH = num(cssVis.clientHeight, 0) || num(cssVis.height, 0) || num(js.vvH, 0);
-  let winW = num(js.outerW, 0);
-  let winH = num(js.outerH, 0);
-  if (bounds && num(bounds.width, 0) >= 400 && num(bounds.height, 0) >= 300) {
-    winW = Math.max(winW, num(bounds.width, 0));
-    winH = Math.max(winH, num(bounds.height, 0));
-  }
-  const locked = visW > 0 && visH > 0
-    && Math.abs(visW - presetW) <= 4
-    && Math.abs(visH - presetH) <= 4
-    && winW > presetW + 80
-    && winH > presetH + 80;
-  let glassW;
-  let glassH;
-  if (!locked && visW >= 400 && visH >= 300) {
-    glassW = visW;
-    glassH = visH;
-  } else if (!locked && winW >= 400 && winH >= 300) {
-    glassW = Math.max(320, winW - WIN_MAX_CHROME_DIP);
-    const fromBounds = winH - WIN_MAX_CHROME_DIP - CHROME_UI_DIP;
-    glassH = fromBounds >= 200 ? fromBounds : Math.max(240, winH - CHROME_UI_DIP);
-  } else {
-    glassW = Math.max(320, visW || presetW);
-    glassH = Math.max(240, visH || presetH);
-  }
+  const boundsW = num(bounds && bounds.width, 0);
+  const boundsH = num(bounds && bounds.height, 0);
+  const resolved = resolveGlassDimensions({
+    boundsW,
+    boundsH,
+    outerW: js.outerW,
+    outerH: js.outerH,
+    visualW: visW,
+    visualH: visH,
+    presetW,
+    presetH
+  });
   return {
     presetW,
     presetH,
-    glassW,
-    glassH,
+    glassW: resolved.glassW,
+    glassH: resolved.glassH,
     innerW: js.innerW,
     innerH: js.innerH,
     outerW: js.outerW,
     outerH: js.outerH,
-    locked
+    visualW: visW,
+    visualH: visH,
+    boundsW,
+    boundsH,
+    glassSource: resolved.source,
+    locked: resolved.locked
   };
 }
 
@@ -643,7 +692,9 @@ async function paintHud(page) {
 }
 
 async function refreshGeometry(page, { light = false } = {}) {
-  const bounds = light ? null : await maximizeWindow(page);
+  // Mesmo em navegação leve precisamos reler o vidro físico; usar apenas o
+  // visualViewport emulado faz o fit voltar para 1 e recorta a página.
+  const bounds = await maximizeWindow(page, { skipMaximize: light });
   const unlocked = await unlockVisibleSize(page);
   if (unlocked && !light) await sleep(80);
   const geo = await measureGlass(page, bounds);
@@ -680,7 +731,12 @@ async function refreshGeometry(page, { light = false } = {}) {
     offsetX: box.offsetX,
     offsetY: box.offsetY,
     unlocked: allowUpscale,
-    locked: geo.locked === true
+    locked: geo.locked === true,
+    visualW: geo.visualW,
+    visualH: geo.visualH,
+    boundsW: geo.boundsW,
+    boundsH: geo.boundsH,
+    glassSource: geo.glassSource
   });
 }
 
@@ -771,15 +827,32 @@ async function applyGlassViewerOnce(page, opts = {}) {
   writeState(page, { collapsed: false, disabled: false });
   await paint(page);
   await paintHud(page);
-  if (process.env.BROWSER_DEBUG === '1') {
-    logger.debug('[GLASS] visor aplicado', {
-      source,
-      zoom: st.zoom,
-      fit: st.fitZoom,
-      glass: `${Math.round(st.glassW)}x${Math.round(st.glassH)}`,
-      preset: `${Math.round(st.presetW)}x${Math.round(st.presetH)}`,
-      unlocked: st.unlocked === true
-    });
+  const logSig = [
+    Math.round(st.zoom * 10000),
+    Math.round(st.glassW),
+    Math.round(st.glassH),
+    Math.round(st.presetW),
+    Math.round(st.presetH),
+    st.glassSource,
+    st.locked ? 1 : 0
+  ].join(':');
+  if (page._ctGlassGeometryLogSig !== logSig) {
+    page._ctGlassGeometryLogSig = logSig;
+    try {
+      logger.info('[GLASS] visor aplicado', {
+        source,
+        nome: String(page._convenientePatchedNome || '').slice(0, 120) || null,
+        zoom: st.zoom,
+        fit: st.fitZoom,
+        glass: `${Math.round(st.glassW)}x${Math.round(st.glassH)}`,
+        preset: `${Math.round(st.presetW)}x${Math.round(st.presetH)}`,
+        bounds: `${Math.round(st.boundsW || 0)}x${Math.round(st.boundsH || 0)}`,
+        visual: `${Math.round(st.visualW || 0)}x${Math.round(st.visualH || 0)}`,
+        glassSource: st.glassSource || null,
+        metricsLocked: st.locked === true,
+        unlocked: st.unlocked === true
+      });
+    } catch {}
   }
   return st;
 }
@@ -820,6 +893,7 @@ module.exports = {
   geometryLooksCollapsed,
   computeFitZoom,
   computeLetterbox,
+  resolveGlassDimensions,
   snapZoomToPixels,
   stepOperatorZoom,
   toLayoutCoords,
