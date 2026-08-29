@@ -428,6 +428,40 @@ function Get-SentinelStatus {
     }
 }
 
+function Stop-StaleSentinelProcesses {
+    $stopped = @()
+    $errors = @()
+    try {
+        $scriptPattern = [regex]::Escape([string]$PSCommandPath)
+        foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'")) {
+            $processId = [int]$process.ProcessId
+            if ($processId -le 0 -or $processId -eq $PID) { continue }
+            $command = [string]$process.CommandLine
+            if ($command -notmatch "(?i)$scriptPattern") { continue }
+            if ($command -notmatch '(?i)(?:^|\s)-Mode\s+Run(?:\s|"|$)') { continue }
+            try {
+                Stop-Process -Id $processId -Force -ErrorAction Stop
+                $stopped += $processId
+            } catch {
+                $errors += [pscustomobject]@{
+                    pid = $processId
+                    error = Redact-Text $_.Exception.Message 220
+                }
+            }
+        }
+    } catch {
+        $errors += [pscustomobject]@{
+            pid = $null
+            error = Redact-Text $_.Exception.Message 220
+        }
+    }
+    return [pscustomobject]@{
+        ok = $errors.Count -eq 0
+        stoppedPids = @($stopped)
+        errors = @($errors)
+    }
+}
+
 function Install-Sentinel {
     Ensure-Dirs
     $isAdmin = Test-IsAdministrator
@@ -447,6 +481,12 @@ function Install-Sentinel {
         if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
             throw 'scheduled_tasks_module_unavailable'
         }
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 300
+        $staleCleanup = Stop-StaleSentinelProcesses
+        $taskResult.stoppedPreviousPids = @($staleCleanup.stoppedPids)
+        $taskResult.stopErrors = @($staleCleanup.errors)
+        Start-Sleep -Milliseconds 500
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
         Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
         $action = New-ScheduledTaskAction -Execute $psExe -Argument $args -WorkingDirectory $Repo -ErrorAction Stop
@@ -538,6 +578,10 @@ function Uninstall-Sentinel {
             & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
             & schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
         }
+        Start-Sleep -Milliseconds 300
+        $cleanup = Stop-StaleSentinelProcesses
+        $result.stoppedPids = @($cleanup.stoppedPids)
+        $result.stopErrors = @($cleanup.errors)
         $result.ok = $true
     } catch {
         $result.error = Redact-Text $_.Exception.Message 260
