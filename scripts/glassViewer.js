@@ -18,6 +18,10 @@
  * Prova empirica (Chrome headful): setPageScaleFactor nao encolhe;
  * DeviceMetricsOverride recorta o canto superior esquerdo; transform/scale
  * no html encaixa compositor + TR.
+ *
+ * Isolamento no codigo (nao e config): GLASS_VIEWER_ACTIVE=false desliga
+ * scale/HUD/roda. Maximize e setViewport continuam. Geometria colapsada
+ * (fit < 0.40 ou vidro minusculo) tambem nao aplica scale se religar.
  */
 
 const logger = require('./logger.js');
@@ -28,6 +32,9 @@ const CHROME_SAFE_DIP = 6;
 const CHROME_UI_DIP = CHROME_TOOLBAR_DIP + CHROME_INFOBAR_DIP + CHROME_SAFE_DIP;
 const WIN_MAX_CHROME_DIP = 16;
 const MIN_FIT = 0.12;
+const MIN_SANE_FIT = 0.40;
+const MIN_SANE_GLASS_W = 500;
+const MIN_SANE_GLASS_H = 400;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.12;
 const HUD_ID = 'ct-glass-viewer-hud';
@@ -35,6 +42,21 @@ const HUD_ID = 'ct-glass-viewer-hud';
 function num(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+// Teste do compositor: visor DESLIGADO no codigo. Sem checkbox, sem config.
+const GLASS_VIEWER_ACTIVE = false;
+
+function isGlassViewerEnabled() {
+  return GLASS_VIEWER_ACTIVE === true;
+}
+
+function geometryLooksCollapsed(st) {
+  if (!st) return false;
+  const fit = num(st.fitZoom, 1);
+  const gw = num(st.glassW, 0);
+  const gh = num(st.glassH, 0);
+  return (fit + 1e-9) < MIN_SANE_FIT || gw < MIN_SANE_GLASS_W || gh < MIN_SANE_GLASS_H;
 }
 
 function snapZoomToPixels(z, presetW, presetH) {
@@ -243,10 +265,34 @@ function paintScript(st) {
   })()`;
 }
 
+async function clearGlassPaint(page) {
+  if (pageClosed(page)) return;
+  await page.evaluate(() => {
+    try {
+      const html = document.documentElement;
+      if (html) {
+        html.style.transform = 'none';
+        html.style.transformOrigin = '';
+        html.style.backfaceVisibility = '';
+      }
+      const hud = document.getElementById('ct-glass-viewer-hud');
+      if (hud) hud.remove();
+      window.__ctGlassViewerState = null;
+    } catch (e) {}
+  }).catch(() => {});
+}
+
 async function paint(page) {
   if (pageClosed(page)) return;
+  if (!isGlassViewerEnabled()) {
+    await clearGlassPaint(page);
+    return;
+  }
   const st = readState(page);
-  if (!st) return;
+  if (!st || st.collapsed || st.disabled || geometryLooksCollapsed(st)) {
+    await clearGlassPaint(page);
+    return;
+  }
   await page.evaluate(paintScript(st)).catch(() => {});
 }
 
@@ -457,6 +503,18 @@ function hudScript() {
 
 async function paintHud(page) {
   if (pageClosed(page)) return;
+  if (!isGlassViewerEnabled()) {
+    await clearGlassPaint(page);
+    return;
+  }
+  const st = readState(page);
+  if (!st || st.collapsed || st.disabled || geometryLooksCollapsed(st)) {
+    await page.evaluate(() => {
+      const hud = document.getElementById('ct-glass-viewer-hud');
+      if (hud) try { hud.remove(); } catch (e) {}
+    }).catch(() => {});
+    return;
+  }
   await page.evaluate(hudScript()).catch(() => {});
 }
 
@@ -496,6 +554,10 @@ async function refreshGeometry(page, { light = false } = {}) {
 
 async function handleHudCommand(page, cmd) {
   if (pageClosed(page)) return;
+  if (!isGlassViewerEnabled()) {
+    await clearGlassPaint(page);
+    return;
+  }
   page._ctGlassHudTail = Promise.resolve(page._ctGlassHudTail).then(async () => {
     if (pageClosed(page)) return;
     const op = String((cmd && cmd.op) || '');
@@ -529,7 +591,6 @@ async function handleHudCommand(page, cmd) {
 async function applyGlassViewerOnce(page, opts = {}) {
   const source = String((opts && opts.source) || 'apply').slice(0, 80);
   const light = source === 'framenavigated';
-  await installRuntime(page);
   if (!page._ctGlassNavHook) {
     page._ctGlassNavHook = true;
     page.on('framenavigated', (frame) => {
@@ -542,7 +603,33 @@ async function applyGlassViewerOnce(page, opts = {}) {
       } catch {}
     });
   }
+  if (!isGlassViewerEnabled()) {
+    await clearGlassPaint(page);
+    return writeState(page, {
+      zoom: 1, panX: 0, panY: 0, userZoom: false, disabled: true, collapsed: false
+    });
+  }
+  await installRuntime(page);
   const st = await refreshGeometry(page, { light });
+  if (geometryLooksCollapsed(st)) {
+    const next = writeState(page, {
+      zoom: 1, panX: 0, panY: 0, userZoom: false, collapsed: true, disabled: false
+    });
+    await clearGlassPaint(page);
+    if (!page._ctGlassCollapsedLogged) {
+      page._ctGlassCollapsedLogged = true;
+      try {
+        logger.warn('[GLASS] geometria colapsada — visor nao aplicado', {
+          source,
+          fit: st.fitZoom,
+          glass: `${Math.round(st.glassW)}x${Math.round(st.glassH)}`,
+          preset: `${Math.round(st.presetW)}x${Math.round(st.presetH)}`
+        });
+      } catch {}
+    }
+    return next;
+  }
+  writeState(page, { collapsed: false, disabled: false });
   await paint(page);
   await paintHud(page);
   if (process.env.BROWSER_DEBUG === '1') {
@@ -589,6 +676,8 @@ async function applyGlassViewer(page, opts = {}) {
 
 module.exports = {
   applyGlassViewer,
+  isGlassViewerEnabled,
+  geometryLooksCollapsed,
   computeFitZoom,
   snapZoomToPixels,
   stepOperatorZoom,
