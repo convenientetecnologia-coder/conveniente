@@ -113,6 +113,7 @@ function Get-FileEvidence([string]$Path) {
 function Get-DumpInventory {
     $rows = @()
     $dirs = @(
+        (Join-Path $env:ProgramData 'ConvenienteForensics\wer'),
         (Join-Path $DataDir 'forensic_dumps'),
         (Join-Path $DataDir 'forensic_node_reports'),
         (Join-Path $env:LOCALAPPDATA 'CrashDumps')
@@ -573,7 +574,11 @@ $events = [ordered]@{
     application = @(Get-EventRows -LogName 'Application' -Ids @(1000,1001,1002) -Bag 'app_crash_hang' -Limit $MaxEvents)
     power = @(Get-EventRows -LogName 'System' -Ids @(41,1074,6005,6006,6008,6009) -Bag 'power' -Limit $MaxEvents)
     resourceExhaustion = @(Get-EventRows -LogName 'System' -Ids @(2004) -Bag 'resource_exhaustion' -ProviderRegex 'Resource-Exhaustion' -Limit $MaxEvents)
+    resourceExhaustionOperational = @(Get-EventRows -LogName 'Microsoft-Windows-Resource-Exhaustion-Detector/Operational' -Ids @(2004) -Bag 'resource_exhaustion_operational' -Limit $MaxEvents)
     hardwareDiskDisplay = @(Get-EventRows -LogName 'System' -Ids @(1,5,7,9,11,15,17,18,19,20,47,51,55,129,153,157,4101) -Bag 'hardware_disk_display' -ProviderRegex '(?i)WHEA|Display|nvlddmkm|amdkmdag|Disk|Ntfs|stor|volmgr' -Limit $MaxEvents)
+    dxgKrnl = @(Get-EventRows -LogName 'Microsoft-Windows-DxgKrnl/Operational' -Bag 'dxgkrnl' -Limit ([math]::Min($MaxEvents, 60)))
+    ntfsOperational = @(Get-EventRows -LogName 'Microsoft-Windows-Ntfs/Operational' -Bag 'ntfs_operational' -Limit ([math]::Min($MaxEvents, 60)))
+    storportOperational = @(Get-EventRows -LogName 'Microsoft-Windows-Storage-Storport/Operational' -Bag 'storport_operational' -Limit ([math]::Min($MaxEvents, 60)))
     services = @(Get-EventRows -LogName 'System' -Ids @(7000,7001,7002,7009,7011,7023,7031,7034,7040,7045) -Bag 'service' -Limit $MaxEvents)
     defender = @(Get-EventRows -LogName 'Microsoft-Windows-Windows Defender/Operational' -Ids @(1006,1007,1008,1009,1116,1117,1118,1119,1121,1122,1129,5001,5004,5007,5010,5012) -Bag 'defender' -Limit $MaxEvents)
     taskScheduler = @(Get-EventRows -LogName 'Microsoft-Windows-TaskScheduler/Operational' -Ids @(100,101,102,106,107,110,111,118,119,129,140,141,142,200,201,202,203,311,319,323,327,328,329) -Bag 'task_scheduler' -Limit $MaxEvents)

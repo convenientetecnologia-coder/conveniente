@@ -2938,6 +2938,12 @@ app.post('/api/infra/command-bus', async (req, res) => {
 
     for (let i = 0; i < incoming.length; i++) {
       const cmd = incoming[i] && typeof incoming[i] === 'object' ? incoming[i] : {};
+      // O CT push-only transporta o corpo em `data`; handlers legados usam
+      // `payload`. Normalize uma vez antes de qualquer dispatch para que
+      // comandos administrativos não percam seus parâmetros silenciosamente.
+      if (!cmd.payload && cmd.data && typeof cmd.data === 'object') {
+        cmd.payload = cmd.data;
+      }
       const t = String(cmd.type || '').trim();
       if (t === 'delta_reject') {
         const nome = String(cmd.nome || cmd.account_login || cmd.profile || cmd.profileName || '').trim();

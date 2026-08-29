@@ -1,6 +1,7 @@
 # Sentinela independente da árvore cmd -> node -> workers -> chrome.
 # Modos:
-#   Install   registra tarefa SYSTEM, configura dumps WER e inicia agora
+#   Install   usa SYSTEM quando elevado; sem elevação usa tarefa do usuário
+#             logado. WER/auditoria global ficam explicitamente indisponíveis.
 #   Status    retorna estado sem alterar nada
 #   Run       loop da tarefa SYSTEM
 #   Uninstall remove somente esta tarefa (não remove evidências)
@@ -15,7 +16,8 @@ $TaskName = 'ConvenienteForensicSentinel'
 $Repo = Split-Path -Parent $PSScriptRoot
 $DataDir = Join-Path $Repo 'dados'
 $EvidenceDir = Join-Path $DataDir 'forensic_process'
-$DumpDir = Join-Path $DataDir 'forensic_dumps'
+$ForensicRoot = Join-Path $env:ProgramData 'ConvenienteForensics'
+$DumpDir = Join-Path $ForensicRoot 'wer'
 $EventLog = Join-Path $DataDir 'process_sentinel.jsonl'
 $StatePath = Join-Path $DataDir 'process_sentinel_state.json'
 $IncidentPath = Join-Path $DataDir 'process_sentinel_last_incident.json'
@@ -41,8 +43,18 @@ function Redact-Text([object]$Value, [int]$Max = 500) {
 }
 
 function Ensure-Dirs {
-    foreach ($dir in @($DataDir, $EvidenceDir, $DumpDir)) {
+    foreach ($dir in @($DataDir, $EvidenceDir, $ForensicRoot, $DumpDir)) {
         try { New-Item -ItemType Directory -Path $dir -Force | Out-Null } catch {}
+    }
+}
+
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return [bool]$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
     }
 }
 
@@ -182,8 +194,84 @@ function Get-ProcessCounts {
     }
 }
 
-function Configure-WerDumps {
+function Configure-ForensicEventChannels([bool]$IsAdmin) {
+    $channels = @(
+        @{ name = 'Microsoft-Windows-TaskScheduler/Operational'; size = 33554432 },
+        @{ name = 'Microsoft-Windows-Windows Defender/Operational'; size = 33554432 },
+        @{ name = 'Microsoft-Windows-TerminalServices-LocalSessionManager/Operational'; size = 16777216 },
+        @{ name = 'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'; size = 16777216 },
+        @{ name = 'Microsoft-Windows-Resource-Exhaustion-Detector/Operational'; size = 16777216 },
+        @{ name = 'Microsoft-Windows-CodeIntegrity/Operational'; size = 16777216 },
+        @{ name = 'Microsoft-Windows-Ntfs/Operational'; size = 33554432 },
+        @{ name = 'Microsoft-Windows-Storage-Storport/Operational'; size = 33554432 }
+    )
+    $results = @()
+    $wevtutil = Join-Path $env:SystemRoot 'System32\wevtutil.exe'
+    foreach ($channel in $channels) {
+        $row = [ordered]@{ name = $channel.name; size = [int64]$channel.size; ok = $false }
+        if (-not $IsAdmin) {
+            $row.skipped = $true
+            $row.error = 'requires_admin'
+            $results += [pscustomobject]$row
+            continue
+        }
+        try {
+            $probe = & $wevtutil gl $channel.name 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $row.error = 'channel_not_available'
+            } else {
+                & $wevtutil sl $channel.name /e:true "/ms:$($channel.size)" 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { $row.ok = $true }
+                else { $row.error = "wevtutil_exit_$LASTEXITCODE" }
+            }
+        } catch {
+            $row.error = Redact-Text $_.Exception.Message 240
+        }
+        $results += [pscustomobject]$row
+    }
+    return @($results)
+}
+
+function Configure-SessionAudit([bool]$IsAdmin) {
+    # Somente logon/logoff; não habilita command line/process creation global.
+    $subcategories = @(
+        '{0CCE9215-69AE-11D9-BED3-505054503030}',
+        '{0CCE9216-69AE-11D9-BED3-505054503030}',
+        '{0CCE921C-69AE-11D9-BED3-505054503030}'
+    )
+    $auditpol = Join-Path $env:SystemRoot 'System32\auditpol.exe'
+    $results = @()
+    foreach ($guid in $subcategories) {
+        $row = [ordered]@{ subcategory = $guid; ok = $false }
+        if (-not $IsAdmin) {
+            $row.skipped = $true
+            $row.error = 'requires_admin'
+            $results += [pscustomobject]$row
+            continue
+        }
+        try {
+            & $auditpol /set "/subcategory:$guid" /success:enable 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $row.ok = $true }
+            else { $row.error = "auditpol_exit_$LASTEXITCODE" }
+        } catch {
+            $row.error = Redact-Text $_.Exception.Message 240
+        }
+        $results += [pscustomobject]$row
+    }
+    return @($results)
+}
+
+function Configure-WerDumps([bool]$IsAdmin) {
     Ensure-Dirs
+    if (-not $IsAdmin) {
+        return [pscustomobject]@{
+            ok = $false
+            skipped = $true
+            reason = 'requires_admin'
+            keys = @()
+            service = [pscustomobject]@{ changed = $false; skipped = $true; reason = 'requires_admin' }
+        }
+    }
     $keys = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe'
@@ -192,14 +280,20 @@ function Configure-WerDumps {
     foreach ($key in $keys) {
         $row = [ordered]@{ path = $key; ok = $false }
         try {
-            New-Item -Path $key -Force | Out-Null
-            New-ItemProperty -Path $key -Name DumpFolder -Value $DumpDir -PropertyType ExpandString -Force | Out-Null
-            New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force | Out-Null
-            New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
-            $row.ok = $true
-            $row.dumpFolder = $DumpDir
-            $row.dumpCount = 8
-            $row.dumpType = 2
+            New-Item -Path $key -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path $key -Name DumpFolder -Value $DumpDir -PropertyType ExpandString -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            $actual = Get-ItemProperty -Path $key -ErrorAction Stop
+            $row.dumpFolder = [string]$actual.DumpFolder
+            $row.dumpCount = [int]$actual.DumpCount
+            $row.dumpType = [int]$actual.DumpType
+            $row.ok = (
+                $row.dumpFolder -eq $DumpDir -and
+                $row.dumpCount -eq 8 -and
+                $row.dumpType -eq 1
+            )
+            if (-not $row.ok) { $row.error = 'registry_verification_failed' }
         } catch {
             $row.error = Redact-Text $_.Exception.Message 260
         }
@@ -211,7 +305,7 @@ function Configure-WerDumps {
         $service.beforeState = [string]$svc.State
         $service.beforeStartMode = [string]$svc.StartMode
         if ([string]$svc.StartMode -eq 'Disabled') {
-            Set-Service -Name WerSvc -StartupType Manual
+            Set-Service -Name WerSvc -StartupType Manual -ErrorAction Stop
             $service.changed = $true
         }
         $svc2 = Get-CimInstance Win32_Service -Filter "Name='WerSvc'"
@@ -220,7 +314,12 @@ function Configure-WerDumps {
     } catch {
         $service.error = Redact-Text $_.Exception.Message 260
     }
-    return [pscustomobject]@{ keys = $results; service = [pscustomobject]$service }
+    return [pscustomobject]@{
+        ok = @($results | Where-Object { $_.ok -ne $true }).Count -eq 0
+        skipped = $false
+        keys = $results
+        service = [pscustomobject]$service
+    }
 }
 
 function Get-SentinelStatus {
@@ -262,35 +361,78 @@ function Get-SentinelStatus {
 
 function Install-Sentinel {
     Ensure-Dirs
-    $wer = Configure-WerDumps
-    $taskResult = [ordered]@{ ok = $false; taskName = $TaskName }
+    $isAdmin = Test-IsAdministrator
+    $eventChannels = Configure-ForensicEventChannels $isAdmin
+    $sessionAudit = Configure-SessionAudit $isAdmin
+    $wer = Configure-WerDumps $isAdmin
+    $taskMode = if ($isAdmin) { 'system_startup' } else { 'current_user_logon' }
+    $taskResult = [ordered]@{
+        ok = $false
+        taskName = $TaskName
+        mode = $taskMode
+        isAdmin = $isAdmin
+    }
     try {
         $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $args = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Mode Run"
-        if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-            $action = New-ScheduledTaskAction -Execute $psExe -Argument $args -WorkingDirectory $Repo
-            $trigger = New-ScheduledTaskTrigger -AtStartup
-            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            $settings = New-ScheduledTaskSettingsSet `
-                -AllowStartIfOnBatteries `
-                -DontStopIfGoingOnBatteries `
-                -ExecutionTimeLimit ([TimeSpan]::Zero) `
-                -MultipleInstances IgnoreNew `
-                -StartWhenAvailable `
-                -RestartCount 999 `
-                -RestartInterval (New-TimeSpan -Minutes 1)
-            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-            Start-ScheduledTask -TaskName $TaskName
-        } else {
-            $taskCommand = "`"$psExe`" $args"
-            & schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
-            & schtasks.exe /Create /TN $TaskName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "schtasks_create_failed:$LASTEXITCODE" }
-            & schtasks.exe /Run /TN $TaskName | Out-Null
+        if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+            throw 'scheduled_tasks_module_unavailable'
         }
-        Start-Sleep -Seconds 2
-        $taskResult.ok = $true
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
+        $action = New-ScheduledTaskAction -Execute $psExe -Argument $args -WorkingDirectory $Repo -ErrorAction Stop
+        if ($isAdmin) {
+            $trigger = New-ScheduledTaskTrigger -AtStartup -ErrorAction Stop
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        } else {
+            $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            if (-not $identityName) { throw 'current_user_identity_missing' }
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identityName -ErrorAction Stop
+            $principal = New-ScheduledTaskPrincipal -UserId $identityName -LogonType Interactive -RunLevel Limited
+        }
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) `
+            -MultipleInstances IgnoreNew `
+            -StartWhenAvailable `
+            -RestartCount 999 `
+            -RestartInterval (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Force `
+            -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+
+        $verified = $null
+        for ($attempt = 0; $attempt -lt 24; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            $verified = Get-SentinelStatus
+            $running = (
+                $verified.task -and
+                $verified.task.exists -eq $true -and
+                [string]$verified.task.state -eq 'Running'
+            )
+            if ($running -and $verified.state) { break }
+        }
+        $taskResult.registered = [bool]($verified.task -and $verified.task.exists -eq $true)
+        $taskResult.running = [bool](
+            $verified.task -and
+            [string]$verified.task.state -eq 'Running'
+        )
+        $taskResult.stateAlive = [bool]$verified.state
+        $taskResult.ok = (
+            $taskResult.registered -and
+            $taskResult.running -and
+            $taskResult.stateAlive
+        )
+        if (-not $taskResult.ok) {
+            throw "sentinel_verification_failed:registered=$($taskResult.registered),running=$($taskResult.running),state=$($taskResult.stateAlive)"
+        }
     } catch {
         $taskResult.error = Redact-Text $_.Exception.Message 300
     }
@@ -300,7 +442,17 @@ function Install-Sentinel {
         mode = 'install'
         installedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         task = [pscustomobject]$taskResult
+        eventChannels = $eventChannels
+        sessionAudit = $sessionAudit
         wer = $wer
+        capabilities = [pscustomobject]@{
+            processTrace = [bool]$taskResult.ok
+            memorySnapshots = [bool]$taskResult.ok
+            survivesNodeOrCmdExit = [bool]$taskResult.ok
+            survivesUserLogoff = [bool]($taskResult.ok -and $isAdmin)
+            systemEventConfiguration = $isAdmin
+            werLocalDumps = [bool]($isAdmin -and $wer.ok)
+        }
         status = $status
     }
     Write-JsonAtomic $InstallPath ([pscustomobject]$result) 8 | Out-Null
@@ -343,6 +495,8 @@ function Drain-TraceEvents {
                 $name = [string]$n.ProcessName
                 $pidValue = [int]$n.ProcessID
                 $kind = if ($source -eq 'ConvenienteProcStart') { 'process_start' } else { 'process_stop' }
+                $traceTimeUtc = $null
+                try { $traceTimeUtc = [DateTime]::FromFileTimeUtc([int64]$n.TIME_CREATED).ToString('o') } catch {}
                 $knownRow = $null
                 if ($kind -eq 'process_start') {
                     Start-Sleep -Milliseconds 20
@@ -374,6 +528,7 @@ function Drain-TraceEvents {
                         pid = $pidValue
                         ppid = [int]$n.ParentProcessID
                         sessionId = [int]$n.SessionID
+                        traceTimeUtc = $traceTimeUtc
                         command = Redact-Text $command 700
                     }
                     if ($kind -eq 'process_stop') {
@@ -383,6 +538,7 @@ function Drain-TraceEvents {
                     $row = [pscustomobject]([ordered]@{
                         ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                         iso = (Get-Date).ToUniversalTime().ToString('o')
+                        traceTimeUtc = $fields.traceTimeUtc
                         event = $kind
                         name = $fields.name
                         pid = $fields.pid
@@ -472,8 +628,11 @@ function Run-Sentinel {
 
     $lastMaster = Find-Master
     if ($lastMaster) { Append-Event 'master_seen' @{ master = $lastMaster } }
+    $runIsAdmin = Test-IsAdministrator
     Append-Event 'sentinel_boot' @{
-        mode = 'SYSTEM_task'
+        mode = if ($runIsAdmin) { 'SYSTEM_task' } else { 'current_user_task' }
+        identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        isAdmin = $runIsAdmin
         master = $lastMaster
         memory = Get-MemorySnapshot
         counts = Get-ProcessCounts
@@ -510,6 +669,8 @@ function Run-Sentinel {
                     updatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
                     sentinelPid = $PID
                     hostname = $env:COMPUTERNAME
+                    mode = if ($runIsAdmin) { 'SYSTEM_task' } else { 'current_user_task' }
+                    isAdmin = $runIsAdmin
                     master = $lastMaster
                     memory = Get-MemorySnapshot
                     counts = Get-ProcessCounts
@@ -528,8 +689,6 @@ function Run-Sentinel {
         try { if ($mutex) { $mutex.Dispose() } } catch {}
     }
 }
-
-Ensure-Dirs
 
 switch ($Mode) {
     'Install' {
