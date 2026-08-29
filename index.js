@@ -16,6 +16,7 @@ const {
   getActiveForensicLogPath,
 } = require('./scripts/forensicLogger.js');
 try { require('./scripts/indexLifecycle.js').install({ role: 'index' }); } catch {}
+try { require('./scripts/processDiagnostics.js').install({ role: 'index' }); } catch {}
 
 /**
  * =========================
@@ -3356,6 +3357,59 @@ app.post('/api/infra/command-bus', async (req, res) => {
           results[i] = {
             id: cmd && cmd.id ? String(cmd.id) : null,
             type: 'olhos_deus',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+        continue;
+      }
+
+      if (t === 'windows_forensic_deep') {
+        try {
+          const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+          const deepMod = require('./scripts/windowsForensicDeep.js');
+          const deep = await deepMod.collect({
+            hours: p.hours || p.windowHours || 24,
+            maxEvents: p.maxEvents || 120,
+            reason: p.reason || 'command_bus',
+            timeoutMs: p.timeoutMs || 90000
+          });
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'windows_forensic_deep',
+            ok: !!(deep && deep.ok),
+            error: deep && deep.error ? String(deep.error) : null,
+            summary: deep && deep.summary ? deep.summary : null
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'windows_forensic_deep',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+        continue;
+      }
+
+      if (t === 'forensic_sentinel') {
+        try {
+          const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+          const sentinel = require('./scripts/forensicSentinel.js');
+          const detail = await sentinel.run(p.action || 'status', {
+            timeoutMs: p.timeoutMs || 45000
+          });
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'forensic_sentinel',
+            ok: !!(detail && detail.ok),
+            error: detail && detail.error ? String(detail.error) : null,
+            detail: detail || null
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'forensic_sentinel',
             ok: false,
             error: (e && e.message) ? String(e.message) : String(e)
           };

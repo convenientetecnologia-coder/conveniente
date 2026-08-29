@@ -1048,7 +1048,16 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
 const WORKER_BUILD_TAG = '2026-01-27_provision_3tabs_v1';
-try { require('./indexLifecycle.js').install({ role: 'worker', extra: { buildTag: WORKER_BUILD_TAG } }); } catch {}
+try {
+  require('./indexLifecycle.js').install({
+    role: 'worker',
+    extra: {
+      buildTag: WORKER_BUILD_TAG,
+      shardIndex: Number(process.env.WORKER_SHARD_INDEX || 0) || 0
+    }
+  });
+} catch {}
+try { require('./processDiagnostics.js').install({ role: 'worker' }); } catch {}
 try {
   provisionAudit.append({
     ts: Date.now(),
@@ -1059,7 +1068,7 @@ try {
     cwd: process.cwd(),
     humanOverlayEnv: String(process.env.HUMAN_OVERLAY || '').trim(),
     portEnv: String(process.env.PORT || '').trim(),
-    shardEnv: String(process.env.SHARD || process.env.SHARDS || '').trim(),
+    shardEnv: String(process.env.WORKER_SHARD_INDEX || process.env.SHARD || process.env.SHARDS || '').trim(),
     ctBaseUrlConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.ctBaseUrl); } catch { return false; } })(),
     logIngestSecretConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.logIngestSecret); } catch { return false; } })()
   });

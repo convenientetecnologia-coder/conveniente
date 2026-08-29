@@ -36,6 +36,14 @@ dados/groq_config.json
 dados/build.json
 dados/provision_audit.jsonl
 dados/ct_archive_queue/
+dados/windows_forensic_deep_last.json
+dados/process_sentinel.jsonl*
+dados/process_sentinel_state.json
+dados/process_sentinel_last_incident.json
+dados/process_sentinel_install.json
+dados/forensic_process/
+dados/forensic_dumps/
+dados/forensic_node_reports/
 _backup_local_before_reset_*/
 
 # Arquivos temporários gerados pelo cluster/sistema
