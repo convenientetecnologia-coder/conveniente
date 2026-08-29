@@ -2,7 +2,7 @@
 
 /**
  * Caixa-preta do processo (index e worker).
- * Grava boot/saída/exception em disco. Não altera frota, janela, pedido, Robe.
+ * Grava boot/saída/exception/sinal em disco. Não altera frota, janela, pedido, Robe.
  * taskkill /F e crash nativo podem NÃO passar aqui — aí vale o Event Viewer.
  */
 
@@ -13,6 +13,8 @@ const path = require("path");
 const DADOS = path.join(__dirname, "..", "dados");
 const LIFE_PATH = path.join(DADOS, "index_lifecycle.jsonl");
 const HEART_PATH = path.join(DADOS, "index_heartbeat.json");
+const BOOT_CTX_PATH = path.join(DADOS, "index_boot_context.json");
+const DESIRED_PATH = path.join(DADOS, "desired.json");
 const MAX_LIFE_BYTES = 2 * 1024 * 1024;
 
 let installed = false;
@@ -37,6 +39,31 @@ function rotateIfHuge() {
     try { fs.unlinkSync(bak); } catch {}
     fs.renameSync(LIFE_PATH, bak);
   } catch {}
+}
+
+function readFleetSnap() {
+  try {
+    if (!fs.existsSync(DESIRED_PATH)) return null;
+    const j = JSON.parse(fs.readFileSync(DESIRED_PATH, "utf8"));
+    const perf = (j && j.perfis && typeof j.perfis === "object") ? j.perfis : {};
+    const keys = Object.keys(perf);
+    let active = 0;
+    let virtusOn = 0;
+    for (const k of keys) {
+      const row = perf[k];
+      if (row && row.active === true) active += 1;
+      if (row && String(row.virtus || "").toLowerCase() === "on") virtusOn += 1;
+    }
+    return {
+      n: keys.length,
+      active,
+      virtusOn,
+      startClosed: !!j._bootStartClosed,
+      openAllBy: j._openAll && j._openAll.by ? String(j._openAll.by) : null
+    };
+  } catch {
+    return null;
+  }
 }
 
 function append(event, patch) {
@@ -78,9 +105,31 @@ function writeHeartbeat() {
       uptimeSec: Math.round(process.uptime()),
       rssMB: Math.round((mem.rss || 0) / 1048576),
       freeMB: Math.round(os.freemem() / 1048576),
-      totalMB: Math.round(os.totalmem() / 1048576)
+      totalMB: Math.round(os.totalmem() / 1048576),
+      fleet: readFleetSnap()
     });
     fs.writeFileSync(HEART_PATH, body, "utf8");
+  } catch {}
+}
+
+function writeBootContext() {
+  if (role !== "index") return;
+  try {
+    ensureDir();
+    const ctx = {
+      ts: Date.now(),
+      iso: new Date().toISOString(),
+      hostname: os.hostname(),
+      pid: process.pid,
+      ppid: process.ppid || null,
+      node: process.version,
+      cwd: clip(process.cwd(), 200),
+      argv: (process.argv || []).map((x) => clip(x, 160)),
+      title: clip(process.title, 80),
+      execPath: clip(process.execPath, 200),
+      fleet: readFleetSnap()
+    };
+    fs.writeFileSync(BOOT_CTX_PATH, JSON.stringify(ctx, null, 2), "utf8");
   } catch {}
 }
 
@@ -90,38 +139,39 @@ function install(opts) {
   role = clip((opts && opts.role) || "index", 24) || "index";
   extra = (opts && opts.extra && typeof opts.extra === "object") ? opts.extra : {};
 
-  append("boot", { cwd: clip(process.cwd(), 200) });
+  append("boot", { cwd: clip(process.cwd(), 200), fleet: readFleetSnap() });
   writeHeartbeat();
+  writeBootContext();
 
   const onFatal = (event) => (err) => {
     append(event, {
       error: clip(err && err.message ? err.message : err, 240),
-      stack: clip(err && err.stack, 800)
+      stack: clip(err && err.stack, 800),
+      fleet: readFleetSnap()
     });
   };
   process.on("uncaughtException", onFatal("uncaughtException"));
   process.on("unhandledRejection", (reason) => {
     append("unhandledRejection", {
       error: clip(reason && reason.message ? reason.message : reason, 240),
-      stack: clip(reason && reason.stack, 800)
+      stack: clip(reason && reason.stack, 800),
+      fleet: readFleetSnap()
     });
   });
   process.on("exit", (code) => {
-    append("exit", { code: Number(code) || 0 });
+    append("exit", { code: Number(code) || 0, fleet: readFleetSnap() });
   });
-  // SIGINT/SIGTERM: so grava. O index/worker ja tem shutdown proprio.
-  // SIGBREAK/SIGHUP: se so escutar e nao sair, o Node deixa de encerrar no fechar do CMD.
   for (const sig of ["SIGINT", "SIGTERM"]) {
     try {
       process.on(sig, () => {
-        append("signal", { signal: sig });
+        append("signal", { signal: sig, fleet: readFleetSnap() });
       });
     } catch {}
   }
   for (const sig of ["SIGBREAK", "SIGHUP"]) {
     try {
       process.on(sig, () => {
-        append("signal", { signal: sig });
+        append("signal", { signal: sig, fleet: readFleetSnap() });
         setImmediate(() => {
           try { process.exit(1); } catch {}
         });
@@ -160,11 +210,22 @@ function readHeartbeat() {
   }
 }
 
+function readBootContext() {
+  try {
+    if (!fs.existsSync(BOOT_CTX_PATH)) return null;
+    return JSON.parse(fs.readFileSync(BOOT_CTX_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   install,
   append,
   readTail,
   readHeartbeat,
+  readBootContext,
   LIFE_PATH,
-  HEART_PATH
+  HEART_PATH,
+  BOOT_CTX_PATH
 };

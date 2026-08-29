@@ -3194,7 +3194,9 @@ function logsAllowlist() {
     service_stderr: path.join(base, 'service_stderr.log'),
     // Caixa-preta do processo-pai (morte do CMD / exception)
     index_lifecycle: path.join(base, 'index_lifecycle.jsonl'),
-    index_heartbeat: path.join(base, 'index_heartbeat.json')
+    index_heartbeat: path.join(base, 'index_heartbeat.json'),
+    index_boot_context: path.join(base, 'index_boot_context.json'),
+    windows_forensic_last: path.join(base, 'windows_forensic_last.json')
   };
   // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
   // Chaves:

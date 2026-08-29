@@ -1993,6 +1993,12 @@ module.exports = (app, workerClient, fileStore) => {
           lockOwner: String(lockOwner || '')
         });
       } catch {}
+      try {
+        require('./indexLifecycle.js').append('ui_open_all', {
+          total: eligibleNames.length,
+          skippedTerminalCount: skippedTerminal.length
+        });
+      } catch {}
 
       // 2) Ack rápido (ULTRA enterprise) + sequência estrita:
       // - Não manter o HTTP pendurado.

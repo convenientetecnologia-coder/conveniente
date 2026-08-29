@@ -3,6 +3,7 @@
 /**
  * Puxa Event Viewer (Application + System) só-leitura.
  * Não consulta Security. Não executa shutdown. Não mata processo.
+ * Grava o último laudo em disco para fetch_logs mesmo se o command-bus cortar o JSON.
  */
 
 const { execFile } = require("child_process");
@@ -11,6 +12,7 @@ const fs = require("fs");
 const os = require("os");
 
 const PS1 = path.join(__dirname, "windowsEventsForensic.ps1");
+const LAST_PATH = path.join(__dirname, "..", "dados", "windows_forensic_last.json");
 const LIFE = require("./indexLifecycle.js");
 
 function collectWindowsEvents({ hours = 24, maxEvents = 80, timeoutMs = 25000 } = {}) {
@@ -53,11 +55,19 @@ function collectWindowsEvents({ hours = 24, maxEvents = 80, timeoutMs = 25000 } 
   });
 }
 
+function persistLast(report) {
+  try {
+    const dir = path.dirname(LAST_PATH);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(LAST_PATH, JSON.stringify(report), "utf8");
+  } catch {}
+}
+
 async function buildWindowsForensicReport(opts) {
   const hours = Math.max(1, Math.min(72, Number(opts && opts.hours || 24) || 24));
   const maxEvents = Math.max(10, Math.min(120, Number(opts && opts.maxEvents || 80) || 80));
   const win = await collectWindowsEvents({ hours, maxEvents, timeoutMs: opts && opts.timeoutMs });
-  return {
+  const report = {
     ok: true,
     kind: "windows_events",
     collectedAt: Date.now(),
@@ -65,13 +75,18 @@ async function buildWindowsForensicReport(opts) {
     hostname: os.hostname(),
     pid: process.pid,
     hours,
-    lifecycleTail: LIFE.readTail(40),
+    persisted: LAST_PATH,
+    lifecycleTail: LIFE.readTail(60),
     heartbeat: LIFE.readHeartbeat(),
+    bootContext: LIFE.readBootContext(),
     windows: win
   };
+  persistLast(report);
+  return report;
 }
 
 module.exports = {
   collectWindowsEvents,
-  buildWindowsForensicReport
+  buildWindowsForensicReport,
+  LAST_PATH
 };
