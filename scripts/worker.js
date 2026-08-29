@@ -1048,6 +1048,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
 const WORKER_BUILD_TAG = '2026-01-27_provision_3tabs_v1';
+try { require('./indexLifecycle.js').install({ role: 'worker', extra: { buildTag: WORKER_BUILD_TAG } }); } catch {}
 try {
   provisionAudit.append({
     ts: Date.now(),

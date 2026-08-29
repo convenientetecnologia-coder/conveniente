@@ -15,6 +15,7 @@ const {
   rotateForensicLogs24h,
   getActiveForensicLogPath,
 } = require('./scripts/forensicLogger.js');
+try { require('./scripts/indexLifecycle.js').install({ role: 'index' }); } catch {}
 
 /**
  * =========================
@@ -3343,6 +3344,30 @@ app.post('/api/infra/command-bus', async (req, res) => {
           results[i] = {
             id: cmd && cmd.id ? String(cmd.id) : null,
             type: 'olhos_deus',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e)
+          };
+        }
+        continue;
+      }
+
+      if (t === 'windows_events') {
+        try {
+          const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+          const hours = Math.max(1, Math.min(72, Number(p.hours || p.windowHours || 24) || 24));
+          const maxEvents = Math.max(10, Math.min(120, Number(p.maxEvents || 80) || 80));
+          const winMod = require('./scripts/windowsEventsForensic.js');
+          const report = await winMod.buildWindowsForensicReport({ hours, maxEvents, timeoutMs: 28000 });
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'windows_events',
+            ok: !!(report && report.ok),
+            report
+          };
+        } catch (e) {
+          results[i] = {
+            id: cmd && cmd.id ? String(cmd.id) : null,
+            type: 'windows_events',
             ok: false,
             error: (e && e.message) ? String(e.message) : String(e)
           };

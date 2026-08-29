@@ -3191,7 +3191,10 @@ function logsAllowlist() {
     robe_v2_queue: path.join(base, 'robe_v2_queue.json'),
     // logs do serviço (quando NSSM estiver configurado)
     service_stdout: path.join(base, 'service_stdout.log'),
-    service_stderr: path.join(base, 'service_stderr.log')
+    service_stderr: path.join(base, 'service_stderr.log'),
+    // Caixa-preta do processo-pai (morte do CMD / exception)
+    index_lifecycle: path.join(base, 'index_lifecycle.jsonl'),
+    index_heartbeat: path.join(base, 'index_heartbeat.json')
   };
   // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
   // Chaves:
