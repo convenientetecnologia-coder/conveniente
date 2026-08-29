@@ -6,22 +6,23 @@
  * 1) Identidade: page.setViewport(preset) permanece. innerWidth/innerHeight/DPR
  *    nao mudam aqui.
  * 2) Vidro: janela maximizada na MAE (cobre os outros Chromes).
- * 3) Visor: se o preset cabe no vidro, zoom=1 (1:1, conteudo menor).
- *    Se nao cabe, zoom=fit < 1 (encolhe so o desenho). Zoom do operador
- *    (Ctrl +/- / roda com Ctrl) pode passar do vidro; ai pan com barras
- *    e com a roda (sem Ctrl). Snap de pixel nao pode capar o zoom do
- *    operador no fit/vidro — isso prende Ctrl+scroll e as barras nunca nascem.
+ * 3) Visor: encaixa o preset no vidro (scale up ou down, contain). Se a
+ *    proporcao nao fecha, letterbox centralizado — nao recorta o canto
+ *    superior esquerdo. Zoom do operador (Ctrl +/- / roda com Ctrl) pode
+ *    passar do vidro; ai pan com barras e com a roda (sem Ctrl). Snap de
+ *    pixel nao pode capar o zoom do operador no fit/vidro.
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
  *
  * Prova empirica (Chrome headful): setPageScaleFactor nao encolhe;
- * DeviceMetricsOverride recorta o canto superior esquerdo; transform/scale
+ * DeviceMetricsOverride recorta o canto superior esquerdo quando tambem
+ * trava o visible size no preset. Depois do setViewport, o visor reenvia
+ * as mesmas metricas com dontSetVisibleSize=true para o desenho acompanhar
+ * a janela. Sem isso a pagina vira uma telinha no canto. Transform/scale
  * no html encaixa compositor + TR.
  *
- * Isolamento no codigo (nao e config): GLASS_VIEWER_ACTIVE=false desliga
- * scale/HUD/roda. Maximize e setViewport continuam. Geometria colapsada
- * (fit < 0.40 ou vidro minusculo) tambem nao aplica scale se religar.
+ * Geometria colapsada (fit < 0.40 ou vidro minusculo) nao aplica scale.
  */
 
 const logger = require('./logger.js');
@@ -38,14 +39,14 @@ const MIN_SANE_GLASS_H = 400;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.12;
 const HUD_ID = 'ct-glass-viewer-hud';
+const HUD_MARK = '3';
 
 function num(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-// Teste do compositor: visor DESLIGADO no codigo. Sem checkbox, sem config.
-const GLASS_VIEWER_ACTIVE = false;
+const GLASS_VIEWER_ACTIVE = true;
 
 function isGlassViewerEnabled() {
   return GLASS_VIEWER_ACTIVE === true;
@@ -72,17 +73,30 @@ function snapZoomToPixels(z, presetW, presetH) {
   return Math.max(MIN_FIT, Math.min(MAX_ZOOM, snapped));
 }
 
-function computeFitZoom(presetW, presetH, glassW, glassH) {
+function computeFitZoom(presetW, presetH, glassW, glassH, opts = {}) {
   const pw = Math.max(1, num(presetW, 1));
   const ph = Math.max(1, num(presetH, 1));
   const gw = Math.max(1, num(glassW, 1));
   const gh = Math.max(1, num(glassH, 1));
-  const z = Math.min(1, gw / pw, gh / ph);
+  const allowUpscale = opts.allowUpscale !== false;
+  let z = Math.min(gw / pw, gh / ph);
   if (!Number.isFinite(z) || z <= 0) return 1;
-  if (z >= 0.999) return 1;
+  if (!allowUpscale) z = Math.min(1, z);
+  if (z >= 0.999 && z <= 1.001) return 1;
   const w = Math.max(1, Math.floor(pw * z + 1e-9));
   const zSnap = w / pw;
-  return Math.max(MIN_FIT, Math.min(z, Number.isFinite(zSnap) && zSnap > 0 ? zSnap : z));
+  const snapped = Number.isFinite(zSnap) && zSnap > 0 ? Math.min(z, zSnap) : z;
+  return Math.max(MIN_FIT, Math.min(MAX_ZOOM, snapped));
+}
+
+function computeLetterbox(presetW, presetH, glassW, glassH, zoom) {
+  const z = num(zoom, 1) > 0 ? num(zoom, 1) : 1;
+  const visW = Math.max(1, num(presetW, 1) * z);
+  const visH = Math.max(1, num(presetH, 1) * z);
+  return {
+    offsetX: Math.max(0, (num(glassW, 1) - visW) / 2),
+    offsetY: Math.max(0, (num(glassH, 1) - visH) / 2)
+  };
 }
 
 function stepOperatorZoom(currentZoom, delta, fitZoom, presetW, presetH) {
@@ -95,11 +109,11 @@ function stepOperatorZoom(currentZoom, delta, fitZoom, presetW, presetH) {
   return Math.max(fit, Math.min(MAX_ZOOM, next));
 }
 
-function toLayoutCoords(visualX, visualY, zoom, panX, panY) {
+function toLayoutCoords(visualX, visualY, zoom, panX, panY, offsetX, offsetY) {
   const z = num(zoom, 1) > 0 ? num(zoom, 1) : 1;
   return {
-    x: num(visualX, 0) / z + num(panX, 0),
-    y: num(visualY, 0) / z + num(panY, 0)
+    x: (num(visualX, 0) - num(offsetX, 0)) / z + num(panX, 0),
+    y: (num(visualY, 0) - num(offsetY, 0)) / z + num(panY, 0)
   };
 }
 
@@ -140,14 +154,8 @@ function pageClosed(page) {
   }
 }
 
-function readState(page) {
-  return page && page._ctGlassViewer && typeof page._ctGlassViewer === 'object'
-    ? page._ctGlassViewer
-    : null;
-}
-
-function writeState(page, patch) {
-  const prev = readState(page) || {
+function emptyState() {
+  return {
     zoom: 1,
     panX: 0,
     panY: 0,
@@ -156,8 +164,22 @@ function writeState(page, patch) {
     glassH: 0,
     presetW: 0,
     presetH: 0,
-    userZoom: false
+    offsetX: 0,
+    offsetY: 0,
+    userZoom: false,
+    unlocked: false,
+    locked: false
   };
+}
+
+function readState(page) {
+  return page && page._ctGlassViewer && typeof page._ctGlassViewer === 'object'
+    ? page._ctGlassViewer
+    : null;
+}
+
+function writeState(page, patch) {
+  const prev = readState(page) || emptyState();
   page._ctGlassViewer = Object.assign({}, prev, patch || {});
   return page._ctGlassViewer;
 }
@@ -209,32 +231,108 @@ async function maximizeWindow(page) {
   }
 }
 
+async function unlockVisibleSize(page) {
+  if (pageClosed(page)) return false;
+  const vp = (typeof page.viewport === 'function' ? page.viewport() : null) || {};
+  const width = Math.floor(num(vp.width, 0));
+  const height = Math.floor(num(vp.height, 0));
+  if (width < 800 || height < 600) return false;
+  const dprRaw = num(vp.deviceScaleFactor, 1);
+  const deviceScaleFactor = (dprRaw >= 1 && dprRaw <= 3) ? dprRaw : 1;
+  try {
+    const client = await page.target().createCDPSession();
+    try {
+      await client.send('Emulation.setDeviceMetricsOverride', {
+        mobile: vp.isMobile === true,
+        width,
+        height,
+        deviceScaleFactor,
+        screenOrientation: vp.isLandscape
+          ? { angle: 90, type: 'landscapePrimary' }
+          : { angle: 0, type: 'portraitPrimary' },
+        dontSetVisibleSize: true
+      });
+      return true;
+    } finally {
+      try { await client.detach(); } catch {}
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function readCssVisualViewport(page) {
+  try {
+    const client = await page.target().createCDPSession();
+    try {
+      const metrics = await client.send('Page.getLayoutMetrics');
+      return (metrics && (metrics.cssVisualViewport || metrics.visualViewport)) || {};
+    } finally {
+      try { await client.detach(); } catch {}
+    }
+  } catch {
+    return {};
+  }
+}
+
 async function measureGlass(page, bounds) {
+  const cssVis = await readCssVisualViewport(page);
   const js = await page.evaluate(() => ({
     innerW: window.innerWidth || 0,
     innerH: window.innerHeight || 0,
     outerW: window.outerWidth || 0,
-    outerH: window.outerHeight || 0
+    outerH: window.outerHeight || 0,
+    vvW: (window.visualViewport && window.visualViewport.width) || 0,
+    vvH: (window.visualViewport && window.visualViewport.height) || 0
   }));
   const vp = (typeof page.viewport === 'function' ? page.viewport() : null) || {};
   const presetW = Math.max(1, num(vp.width, 0) || num(js.innerW, 1));
   const presetH = Math.max(1, num(vp.height, 0) || num(js.innerH, 1));
-  let glassW = num(js.outerW, 0);
-  let glassH = num(js.outerH, 0) - CHROME_UI_DIP;
+  const visW = num(cssVis.clientWidth, 0) || num(cssVis.width, 0) || num(js.vvW, 0);
+  const visH = num(cssVis.clientHeight, 0) || num(cssVis.height, 0) || num(js.vvH, 0);
+  let winW = num(js.outerW, 0);
+  let winH = num(js.outerH, 0);
   if (bounds && num(bounds.width, 0) >= 400 && num(bounds.height, 0) >= 300) {
-    glassW = Math.max(glassW, num(bounds.width, 0) - WIN_MAX_CHROME_DIP);
-    const fromBounds = num(bounds.height, 0) - WIN_MAX_CHROME_DIP - CHROME_UI_DIP;
-    if (fromBounds >= 200) glassH = fromBounds;
+    winW = Math.max(winW, num(bounds.width, 0));
+    winH = Math.max(winH, num(bounds.height, 0));
   }
-  glassW = Math.max(320, glassW);
-  glassH = Math.max(240, glassH);
-  return { presetW, presetH, glassW, glassH, innerW: js.innerW, innerH: js.innerH, outerW: js.outerW, outerH: js.outerH };
+  const locked = visW > 0 && visH > 0
+    && Math.abs(visW - presetW) <= 4
+    && Math.abs(visH - presetH) <= 4
+    && winW > presetW + 80
+    && winH > presetH + 80;
+  let glassW;
+  let glassH;
+  if (!locked && visW >= 400 && visH >= 300) {
+    glassW = visW;
+    glassH = visH;
+  } else if (!locked && winW >= 400 && winH >= 300) {
+    glassW = Math.max(320, winW - WIN_MAX_CHROME_DIP);
+    const fromBounds = winH - WIN_MAX_CHROME_DIP - CHROME_UI_DIP;
+    glassH = fromBounds >= 200 ? fromBounds : Math.max(240, winH - CHROME_UI_DIP);
+  } else {
+    glassW = Math.max(320, visW || presetW);
+    glassH = Math.max(240, visH || presetH);
+  }
+  return {
+    presetW,
+    presetH,
+    glassW,
+    glassH,
+    innerW: js.innerW,
+    innerH: js.innerH,
+    outerW: js.outerW,
+    outerH: js.outerH,
+    locked
+  };
 }
 
 function paintScript(st) {
   const z = num(st.zoom, 1);
   const px = num(st.panX, 0);
   const py = num(st.panY, 0);
+  const ox = num(st.offsetX, 0);
+  const oy = num(st.offsetY, 0);
   const gw = num(st.glassW, 0);
   const gh = num(st.glassH, 0);
   const pw = num(st.presetW, 0);
@@ -246,14 +344,18 @@ function paintScript(st) {
     var z = ${z};
     var px = ${px};
     var py = ${py};
+    var ox = ${ox};
+    var oy = ${oy};
     var html = document.documentElement;
     if (!html) return;
-    var none = (z === 1 && px === 0 && py === 0);
+    var none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
     html.style.transformOrigin = '0 0';
     html.style.backfaceVisibility = none ? '' : 'hidden';
-    html.style.transform = none ? 'none' : ('translateZ(0) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+    html.style.overflow = none ? '' : 'hidden';
+    html.style.transform = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
     window.__ctGlassViewerState = {
       zoom: z, panX: px, panY: py,
+      offsetX: ox, offsetY: oy,
       glassW: ${gw}, glassH: ${gh},
       presetW: ${pw}, presetH: ${ph},
       fitZoom: ${fit},
@@ -274,6 +376,7 @@ async function clearGlassPaint(page) {
         html.style.transform = 'none';
         html.style.transformOrigin = '';
         html.style.backfaceVisibility = '';
+        html.style.overflow = '';
       }
       const hud = document.getElementById('ct-glass-viewer-hud');
       if (hud) hud.remove();
@@ -309,13 +412,16 @@ function pageInstallRuntime() {
         const z = Number(st.zoom) || 1;
         const px = Number(st.panX) || 0;
         const py = Number(st.panY) || 0;
-          const none = (z === 1 && px === 0 && py === 0);
-          const want = none ? 'none' : ('translateZ(0) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
-          if (html.style.transform !== want) {
-            html.style.transformOrigin = '0 0';
-            html.style.backfaceVisibility = none ? '' : 'hidden';
-            html.style.transform = want;
-          }
+        const ox = Number(st.offsetX) || 0;
+        const oy = Number(st.offsetY) || 0;
+        const none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
+        const want = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+        if (html.style.transform !== want) {
+          html.style.transformOrigin = '0 0';
+          html.style.backfaceVisibility = none ? '' : 'hidden';
+          html.style.overflow = none ? '' : 'hidden';
+          html.style.transform = want;
+        }
       } catch (e) {}
     };
     try {
@@ -379,32 +485,34 @@ async function installRuntime(page) {
     } catch {}
     try { await page.evaluateOnNewDocument(pageInstallRuntime); } catch {}
   }
-  // Documento novo (goto/SPA reload) perde o watch. Reinstala sempre; a funcao e idempotente.
   try { await page.evaluate(pageInstallRuntime); } catch {}
 }
 
 function hudScript() {
   return `(function(){
     var ID = '${HUD_ID}';
+    var MARK = '${HUD_MARK}';
     var st = window.__ctGlassViewerState || {};
     var z = Number(st.zoom) || 1;
     if (z <= 0) z = 1;
     var panX = Number(st.panX) || 0;
     var panY = Number(st.panY) || 0;
+    var ox = Number(st.offsetX) || 0;
+    var oy = Number(st.offsetY) || 0;
     var gw = Number(st.glassW) || 0;
     var gh = Number(st.glassH) || 0;
     var needPan = st.needPan === true;
     var needPanX = st.needPanX === true;
     var needPanY = st.needPanY === true;
     var host = document.getElementById(ID);
-    if (host && host.getAttribute('data-ct-hud') !== '2') {
+    if (host && host.getAttribute('data-ct-hud') !== MARK) {
       try { host.remove(); } catch (e) {}
       host = null;
     }
     if (!host) {
       host = document.createElement('div');
       host.id = ID;
-      host.setAttribute('data-ct-hud', '2');
+      host.setAttribute('data-ct-hud', MARK);
       host.style.zIndex = '2147483646';
       host.style.pointerEvents = 'none';
       host.style.userSelect = 'none';
@@ -412,11 +520,15 @@ function hudScript() {
       var shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = ''
         + '<style>'
-        + '.hbar,.vbar{position:absolute;background:rgba(11,18,32,.55);pointer-events:auto;border-radius:6px;}'
-        + '.hthumb,.vthumb{position:absolute;background:#93c5fd;border-radius:6px;}'
+        + '.hbar,.vbar{position:absolute;background:rgba(15,23,42,.58);pointer-events:auto;border-radius:7px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);}'
+        + '.hthumb,.vthumb{position:absolute;background:#93c5fd;border-radius:7px;box-shadow:0 0 0 1px rgba(15,23,42,.25);}'
+        + '.hbar:hover .hthumb,.vbar:hover .vthumb{background:#bfdbfe;}'
+        + '.chip{position:absolute;pointer-events:none;background:rgba(15,23,42,.72);color:#e2e8f0;font:600 11px/1.2 "Segoe UI",system-ui,sans-serif;padding:4px 8px;border-radius:999px;letter-spacing:.02em;box-shadow:0 6px 16px rgba(0,0,0,.28);}'
         + '</style>'
         + '<div class="hbar" id="hbar"><div class="hthumb" id="hthumb"></div></div>'
-        + '<div class="vbar" id="vbar"><div class="vthumb" id="vthumb"></div></div>';
+        + '<div class="vbar" id="vbar"><div class="vthumb" id="vthumb"></div></div>'
+        + '<div class="chip" id="chip"></div>';
+      var drag = null;
       var panFromPointer = function(kind, ev){
         var s = window.__ctGlassViewerState || {};
         var zz = Number(s.zoom) || 1;
@@ -468,9 +580,21 @@ function hudScript() {
     var vbar = shadow.getElementById('vbar');
     var hthumb = shadow.getElementById('hthumb');
     var vthumb = shadow.getElementById('vthumb');
+    var chip = shadow.getElementById('chip');
     var visW = gw / z;
     var visH = gh / z;
     var bar = 12 / z;
+    var originX = panX - (ox / z);
+    var originY = panY - (oy / z);
+    var pct = Math.round(z * 100);
+    if (chip) {
+      chip.style.display = 'block';
+      chip.textContent = pct + '%  ·  Ctrl+0';
+      chip.style.left = (originX + visW - (92 / z)) + 'px';
+      chip.style.top = (originY + visH - (28 / z)) + 'px';
+      chip.style.fontSize = (11 / z) + 'px';
+      chip.style.padding = (4 / z) + 'px ' + (8 / z) + 'px';
+    }
     if (!needPan) {
       hbar.style.display = 'none';
       vbar.style.display = 'none';
@@ -478,12 +602,12 @@ function hudScript() {
     }
     hbar.style.display = needPanX ? 'block' : 'none';
     vbar.style.display = needPanY ? 'block' : 'none';
-    hbar.style.left = panX + 'px';
-    hbar.style.top = (panY + visH - bar) + 'px';
+    hbar.style.left = originX + 'px';
+    hbar.style.top = (originY + visH - bar) + 'px';
     hbar.style.width = visW + 'px';
     hbar.style.height = bar + 'px';
-    vbar.style.left = (panX + visW - bar) + 'px';
-    vbar.style.top = panY + 'px';
+    vbar.style.left = (originX + visW - bar) + 'px';
+    vbar.style.top = originY + 'px';
     vbar.style.width = bar + 'px';
     vbar.style.height = visH + 'px';
     var maxX = Math.max(1, (Number(st.presetW) || visW) - visW);
@@ -520,8 +644,11 @@ async function paintHud(page) {
 
 async function refreshGeometry(page, { light = false } = {}) {
   const bounds = light ? null : await maximizeWindow(page);
+  const unlocked = await unlockVisibleSize(page);
+  if (unlocked && !light) await sleep(80);
   const geo = await measureGlass(page, bounds);
-  const fitZoom = computeFitZoom(geo.presetW, geo.presetH, geo.glassW, geo.glassH);
+  const allowUpscale = unlocked === true && geo.locked !== true;
+  const fitZoom = computeFitZoom(geo.presetW, geo.presetH, geo.glassW, geo.glassH, { allowUpscale });
   const prev = readState(page);
   let zoom = fitZoom;
   if (prev && prev.userZoom === true) {
@@ -540,6 +667,7 @@ async function refreshGeometry(page, { light = false } = {}) {
     geo.glassW,
     geo.glassH
   );
+  const box = computeLetterbox(geo.presetW, geo.presetH, geo.glassW, geo.glassH, zoom);
   return writeState(page, {
     zoom,
     panX: pan.panX,
@@ -548,7 +676,11 @@ async function refreshGeometry(page, { light = false } = {}) {
     glassW: geo.glassW,
     glassH: geo.glassH,
     presetW: geo.presetW,
-    presetH: geo.presetH
+    presetH: geo.presetH,
+    offsetX: box.offsetX,
+    offsetY: box.offsetY,
+    unlocked: allowUpscale,
+    locked: geo.locked === true
   });
 }
 
@@ -581,7 +713,8 @@ async function handleHudCommand(page, cmd) {
       return;
     }
     const pan = clampPan(st.panX, st.panY, st.zoom, st.presetW, st.presetH, st.glassW, st.glassH);
-    writeState(page, pan);
+    const box = computeLetterbox(st.presetW, st.presetH, st.glassW, st.glassH, st.zoom);
+    writeState(page, Object.assign({}, pan, box));
     await paint(page);
     await paintHud(page);
   }).catch(() => {});
@@ -606,14 +739,20 @@ async function applyGlassViewerOnce(page, opts = {}) {
   if (!isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     return writeState(page, {
-      zoom: 1, panX: 0, panY: 0, userZoom: false, disabled: true, collapsed: false
+      zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
+      userZoom: false, disabled: true, collapsed: false
     });
   }
   await installRuntime(page);
-  const st = await refreshGeometry(page, { light });
+  let st = await refreshGeometry(page, { light });
+  if (geometryLooksCollapsed(st) && !light) {
+    await sleep(180);
+    st = await refreshGeometry(page, { light: false });
+  }
   if (geometryLooksCollapsed(st)) {
     const next = writeState(page, {
-      zoom: 1, panX: 0, panY: 0, userZoom: false, collapsed: true, disabled: false
+      zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
+      userZoom: false, collapsed: true, disabled: false
     });
     await clearGlassPaint(page);
     if (!page._ctGlassCollapsedLogged) {
@@ -638,7 +777,8 @@ async function applyGlassViewerOnce(page, opts = {}) {
       zoom: st.zoom,
       fit: st.fitZoom,
       glass: `${Math.round(st.glassW)}x${Math.round(st.glassH)}`,
-      preset: `${Math.round(st.presetW)}x${Math.round(st.presetH)}`
+      preset: `${Math.round(st.presetW)}x${Math.round(st.presetH)}`,
+      unlocked: st.unlocked === true
     });
   }
   return st;
@@ -679,6 +819,7 @@ module.exports = {
   isGlassViewerEnabled,
   geometryLooksCollapsed,
   computeFitZoom,
+  computeLetterbox,
   snapZoomToPixels,
   stepOperatorZoom,
   toLayoutCoords,
