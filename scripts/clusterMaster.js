@@ -198,6 +198,33 @@ function createCluster() {
       pending.clear();
       // Respawn após 2000ms se não estiver em shutdown
       if (!isShuttingDown) {
+        // Chrome do shard morto fica órfão (hardClose não rodou). Limpa SÓ este shard
+        // antes do respawn, senão o worker novo abre em cima dos zumbis.
+        try {
+          const dyingShard = (() => {
+            try {
+              const child = children[idx];
+              if (child && child.shard) return Array.from(child.shard);
+            } catch {}
+            return blocks[idx] || [];
+          })();
+          const reap = require('./orphanReaper.js').reapShard({
+            names: dyingShard,
+            shardIdx: idx,
+            reason: 'worker_drop'
+          });
+          try {
+            require('./indexLifecycle.js').append('worker_drop_reap', {
+              idx: idx + 1,
+              code: code == null ? null : Number(code),
+              signal: signal == null ? null : String(signal),
+              shard: dyingShard.length,
+              killed: reap && reap.killed != null ? reap.killed : null
+            });
+          } catch {}
+        } catch (e) {
+          try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
+        }
         setTimeout(() => {
           if (isShuttingDown) return;
           try {

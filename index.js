@@ -397,6 +397,18 @@ async function maybeBootstrapGateBToken() {
     try {
       const { spawn } = require('child_process');
       // Não usar "cloudflared" no PATH: queremos caminho determinístico para evitar ENOENT.
+      let keepCloudflaredPid = null;
+      try {
+        if (__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null && __gateBCloudflaredChild.pid) {
+          keepCloudflaredPid = __gateBCloudflaredChild.pid;
+        }
+      } catch {}
+      try {
+        require('./scripts/orphanReaper.js').reapCloudflaredOrphans({
+          keepPid: keepCloudflaredPid,
+          reason: 'spawn_cloudflared'
+        });
+      } catch {}
       try {
         if (__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null) return true;
       } catch {}
@@ -417,10 +429,11 @@ async function maybeBootstrapGateBToken() {
         }
       });
       const args = ['tunnel', 'run', '--token', String(token)];
+      // detached+unref = túnel sobrevive à morte do CMD e empilha zumbi a cada boot.
       const child = spawn(candidate, args, {
         stdio: ['ignore', outFd != null ? outFd : 'ignore', outFd != null ? outFd : 'ignore'],
         windowsHide: true,
-        detached: true
+        detached: false
       });
       try { if (outFd != null) fs.closeSync(outFd); } catch {}
       __gateBCloudflaredChild = child;
@@ -505,7 +518,6 @@ async function maybeBootstrapGateBToken() {
           try { __gateBCloudflaredRestartTimer.unref?.(); } catch {}
         } catch {}
       });
-      try { child.unref(); } catch {}
       return true;
     } catch {
       return false;
@@ -4373,15 +4385,11 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 // Boot sequencial: bootstrap de serviço -> cluster -> listen
 (async () => {
   await maybeBootstrapService();
-  // Gate B bootstrap roda em background para nunca travar subida do sistema.
-  maybeBootstrapGateBToken().catch((e) => {
-    logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
-  });
   // Política definida (triagem inbox): após restart, começar fechado.
   // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
   // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.
+  let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
   try {
-    const startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
     if (startClosedOnBoot) {
       logger.info('[BOOT] Política start-closed ATIVA: resetando desired.active=false para todos (aguardando clique).');
       const r = await fileStore.resetDesiredAllOffOnBoot({ reason: 'triagem_inbox_policy_manual_start' });
@@ -4392,6 +4400,22 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     }
   } catch (e) {
     logger.warn('[BOOT] start-closed exceção (best-effort)', { error: (e && e.message) || String(e) });
+  }
+  // Túnel zumbi primeiro (rápido). Gate B sobe em seguida. Chrome órfão depois, antes do cluster.
+  try {
+    require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' });
+  } catch (e) {
+    try { logger.warn('[BOOT] orphan reap cloudflared falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+  }
+  maybeBootstrapGateBToken().catch((e) => {
+    logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
+  });
+  if (startClosedOnBoot) {
+    try {
+      require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
+    } catch (e) {
+      try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+    }
   }
   // Delta: coordenar endpoints (confirm-delivery) e secrets ANTES de criar workers.
   try { __deltaProvisionDeliveryConfirmEnv(); } catch {}
