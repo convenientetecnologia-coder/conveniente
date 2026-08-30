@@ -1049,7 +1049,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v2';
+const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v3';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -10300,14 +10300,24 @@ function attachPageCrashIsolate(nome, page) {
           const alreadyClosed = !!(page && typeof page.isClosed === 'function' && page.isClosed());
           const ctrl = controllers.get(nome);
           const isMain = !!(ctrl && ctrl.mainPage === page);
-          if (!isMain) {
-            if (!alreadyClosed && page && typeof page.close === 'function') {
-              try { await page.close({ runBeforeUnload: false }); } catch {}
-            }
+          const browserConnected = !!(
+            ctrl &&
+            ctrl.browser &&
+            typeof ctrl.browser.isConnected === 'function' &&
+            ctrl.browser.isConnected()
+          );
+          const action = chromeHeapFaxina.shouldRecoverCrashedPage({
+            isMain,
+            alreadyClosed,
+            browserConnected
+          });
+          if (action === 'close_tab') {
+            try { await page.close({ runBeforeUnload: false }); } catch {}
             return;
           }
-          if (alreadyClosed) return;
-          await annihilateChromeSick(nome, 'page_crash_isolate');
+          if (action === 'annihilate') {
+            await annihilateChromeSick(nome, 'page_crash_isolate');
+          }
         } catch {}
       });
     });

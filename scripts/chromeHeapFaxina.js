@@ -92,8 +92,27 @@ async function openGcSession(page) {
 
 function raceTimeout(ms, label) {
   return new Promise((_, rej) => {
-    setTimeout(() => rej(new Error(label || "gc_timeout")), ms);
+    setTimeout(() => rej(new Error(label || "gc_timeout")), Math.max(50, ms));
   });
+}
+
+function detachLater(openP) {
+  Promise.resolve(openP)
+    .then((opened) => {
+      try {
+        if (opened && opened.ephemeral && opened.session && typeof opened.session.detach === "function") {
+          return opened.session.detach();
+        }
+      } catch {}
+      return null;
+    })
+    .catch(() => {});
+}
+
+function shouldRecoverCrashedPage({ isMain, alreadyClosed, browserConnected } = {}) {
+  if (!isMain) return alreadyClosed ? "none" : "close_tab";
+  if (alreadyClosed && !browserConnected) return "none";
+  return "annihilate";
 }
 
 function enqueueSerial(fn) {
@@ -119,22 +138,28 @@ async function collectPageGarbage(page, opts = {}) {
     let session = null;
     let ephemeral = false;
     let via = null;
+    const deadline = Date.now() + GC_TIMEOUT_MS;
+    const leftMs = () => Math.max(50, deadline - Date.now());
+    const openP = openGcSession(page);
     try {
       const opened = await Promise.race([
-        openGcSession(page),
-        raceTimeout(GC_TIMEOUT_MS, "gc_session_timeout")
+        openP,
+        raceTimeout(leftMs(), "gc_session_timeout")
       ]);
       session = opened.session;
       ephemeral = !!opened.ephemeral;
       via = opened.via;
       if (!session || typeof session.send !== "function") throw new Error("no_cdp_client");
+      const sendP = session.send("HeapProfiler.collectGarbage");
+      sendP.catch(() => {});
       await Promise.race([
-        session.send("HeapProfiler.collectGarbage"),
-        raceTimeout(GC_TIMEOUT_MS, "gc_timeout")
+        sendP,
+        raceTimeout(leftMs(), "gc_timeout")
       ]);
       if (nome) lastFaxinaAtByNome.set(nome, Date.now());
       return { ok: true, via, nome, reason };
     } catch (e) {
+      if (!session) detachLater(openP);
       return {
         ok: false,
         error: String((e && e.message) || e || "gc_fail").slice(0, 180),
@@ -185,5 +210,6 @@ module.exports = {
   collectPageGarbage,
   logFaxinaOk,
   attachErrorSink,
+  shouldRecoverCrashedPage,
   _resetForTests
 };

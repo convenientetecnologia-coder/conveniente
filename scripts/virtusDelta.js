@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v2";
+const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v3";
 const chromeHeapFaxina = require("./chromeHeapFaxina.js");
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
@@ -8264,10 +8264,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       } finally {
-        const collecting = String((out && out.city_status) || "") === "collecting";
-        if (!collecting) {
-          try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
-        }
+        try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
       }
     });
   };

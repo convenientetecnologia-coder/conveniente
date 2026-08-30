@@ -179,7 +179,41 @@ faxina._resetForTests();
     check("gc_fallback_client", !!(legacyOut && legacyOut.ok && sent[0] === "HeapProfiler.collectGarbage"), legacyOut);
   }
 
-  // 12) listener real de SIGHUP via install() não chama process.exit
+  // 12) matriz de recuperação de crash — Puppeteer NÃO marca isClosed no Inspector.targetCrashed
+  {
+    const p = faxina.shouldRecoverCrashedPage;
+    check("crash_main_open", p({ isMain: true, alreadyClosed: false, browserConnected: true }) === "annihilate");
+    check("crash_main_closed_browser_up", p({ isMain: true, alreadyClosed: true, browserConnected: true }) === "annihilate");
+    check("crash_main_browser_dead", p({ isMain: true, alreadyClosed: true, browserConnected: false }) === "none");
+    check("crash_extra_open", p({ isMain: false, alreadyClosed: false, browserConnected: true }) === "close_tab");
+    check("crash_extra_closed", p({ isMain: false, alreadyClosed: true, browserConnected: true }) === "none");
+  }
+
+  // 13) createCDPSession que chega DEPOIS do timeout ainda é destachado
+  faxina._resetForTests();
+  {
+    let detached = 0;
+    let finishOpen = null;
+    const latePage = {
+      createCDPSession() {
+        return new Promise((resolve) => {
+          finishOpen = () => resolve({
+            send: async () => {},
+            detach: async () => { detached += 1; }
+          });
+        });
+      },
+      isClosed() { return false; }
+    };
+    const lateOut = await faxina.collectPageGarbage(latePage, { nome: "lateopen", reason: "t" });
+    check("late_open_timeout", !!(lateOut && /timeout/.test(String(lateOut.error || ""))), lateOut);
+    check("late_open_not_yet", detached === 0, detached);
+    if (typeof finishOpen === "function") finishOpen();
+    await new Promise((r) => setTimeout(r, 40));
+    check("late_open_detached", detached === 1, detached);
+  }
+
+  // 14) listener real de SIGHUP via install() não chama process.exit
   {
     const origExit = process.exit;
     let exitCode = null;
@@ -212,9 +246,9 @@ faxina._resetForTests();
     check("src_worker_no_bare_wipe", !/removeAllListeners\s*\(\s*\)/.test(workerSrc));
     check("src_worker_faxina_robe", workerSrc.includes("robe_cycle") && workerSrc.includes("robe_play"));
     check("src_delta_faxina_hooks", deltaSrc.includes("delta_reply") && deltaSrc.includes("delta_greeting") && deltaSrc.includes("delta_force_collect"));
-    check("src_delta_skip_collecting", deltaSrc.includes('city_status) || "") === "collecting"'));
+    check("src_delta_greeting_always_faxina", deltaSrc.includes('faxinaAposCicloPesado("delta_greeting")') && !deltaSrc.includes('out && out.city_status) || "") === "collecting"'));
     check("src_index_sigint_intact", /process\.on\(\s*'SIGINT'/.test(indexSrc) && /process\.exit\(0\)/.test(indexSrc));
-    check("src_isolate_skip_closed", workerSrc.includes("alreadyClosed"));
+    check("src_isolate_uses_policy", workerSrc.includes("shouldRecoverCrashedPage"));
   }
 
   if (fail) {
