@@ -3260,10 +3260,10 @@ async function computeVisibleThreadCardClickPlan(cardElement) {
 
     const stGlass = window.__ctGlassViewerState;
     const vw = Math.max(0, (stGlass && Number(stGlass.glassW) > 0)
-      ? Number(stGlass.glassW)
+      ? Math.min(Number(window.innerWidth || 0), Number(stGlass.glassW))
       : Number(window.innerWidth || 0));
     const vh = Math.max(0, (stGlass && Number(stGlass.glassH) > 0)
-      ? Number(stGlass.glassH)
+      ? Math.min(Number(window.innerHeight || 0), Number(stGlass.glassH))
       : Number(window.innerHeight || 0));
     const row = el.closest('div[role="row"]') || el.closest('[role="row"]');
     const rowParent = row && row.parentElement ? row.parentElement : null;
