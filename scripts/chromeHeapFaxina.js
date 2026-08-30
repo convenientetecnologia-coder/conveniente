@@ -4,7 +4,8 @@
  * Faxina de heap do renderer (CDP) + higiene de listeners.
  * Nunca fecha browser, nunca desloga, nunca dá process.exit.
  * GC é individual, sequencial (mutex global) e com cooldown por conta.
- * NÃO chama page.removeAllListeners() sem nome de evento — isso deixa o robô surdo.
+ * NÃO chama removeAllListeners sem nome de evento — isso deixa o robô surdo.
+ * GC usa sessão CDP efêmera (createCDPSession) para não enfileirar no _client() primário.
  */
 
 const SAFE_MAX_LISTENERS = 32;
@@ -79,24 +80,20 @@ function pageIsUsable(page) {
   return true;
 }
 
-async function sendCollectGarbage(page) {
+async function openGcSession(page) {
+  if (page && typeof page.createCDPSession === "function") {
+    const session = await page.createCDPSession();
+    return { session, via: "createCDPSession", ephemeral: true };
+  }
   const resolved = resolveCdpClient(page);
-  if (resolved) {
-    await resolved.client.send("HeapProfiler.collectGarbage");
-    return { via: resolved.via };
-  }
-  if (!page || typeof page.createCDPSession !== "function") {
-    throw new Error("no_cdp_client");
-  }
-  const session = await page.createCDPSession();
-  try {
-    await session.send("HeapProfiler.collectGarbage");
-    return { via: "createCDPSession" };
-  } finally {
-    try {
-      if (session && typeof session.detach === "function") await session.detach();
-    } catch {}
-  }
+  if (resolved) return { session: resolved.client, via: resolved.via, ephemeral: false };
+  throw new Error("no_cdp_client");
+}
+
+function raceTimeout(ms, label) {
+  return new Promise((_, rej) => {
+    setTimeout(() => rej(new Error(label || "gc_timeout")), ms);
+  });
 }
 
 function enqueueSerial(fn) {
@@ -119,15 +116,24 @@ async function collectPageGarbage(page, opts = {}) {
 
   return enqueueSerial(async () => {
     if (!pageIsUsable(page)) return { ok: false, skipped: true, reason: "page_busy_or_closed", nome };
+    let session = null;
+    let ephemeral = false;
+    let via = null;
     try {
-      const raced = await Promise.race([
-        sendCollectGarbage(page),
-        new Promise((_, rej) => {
-          setTimeout(() => rej(new Error("gc_timeout")), GC_TIMEOUT_MS);
-        })
+      const opened = await Promise.race([
+        openGcSession(page),
+        raceTimeout(GC_TIMEOUT_MS, "gc_session_timeout")
+      ]);
+      session = opened.session;
+      ephemeral = !!opened.ephemeral;
+      via = opened.via;
+      if (!session || typeof session.send !== "function") throw new Error("no_cdp_client");
+      await Promise.race([
+        session.send("HeapProfiler.collectGarbage"),
+        raceTimeout(GC_TIMEOUT_MS, "gc_timeout")
       ]);
       if (nome) lastFaxinaAtByNome.set(nome, Date.now());
-      return { ok: true, via: raced && raced.via, nome, reason };
+      return { ok: true, via, nome, reason };
     } catch (e) {
       return {
         ok: false,
@@ -135,6 +141,10 @@ async function collectPageGarbage(page, opts = {}) {
         nome,
         reason
       };
+    } finally {
+      if (ephemeral && session && typeof session.detach === "function") {
+        try { await session.detach(); } catch {}
+      }
     }
   });
 }

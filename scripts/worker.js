@@ -1049,7 +1049,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v1';
+const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v2';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -10297,16 +10297,16 @@ function attachPageCrashIsolate(nome, page) {
       } catch {}
       setImmediate(async () => {
         try {
+          const alreadyClosed = !!(page && typeof page.isClosed === 'function' && page.isClosed());
           const ctrl = controllers.get(nome);
           const isMain = !!(ctrl && ctrl.mainPage === page);
           if (!isMain) {
-            try {
-              if (page && typeof page.close === 'function' && (!page.isClosed || !page.isClosed())) {
-                await page.close({ runBeforeUnload: false });
-              }
-            } catch {}
+            if (!alreadyClosed && page && typeof page.close === 'function') {
+              try { await page.close({ runBeforeUnload: false }); } catch {}
+            }
             return;
           }
+          if (alreadyClosed) return;
           await annihilateChromeSick(nome, 'page_crash_isolate');
         } catch {}
       });

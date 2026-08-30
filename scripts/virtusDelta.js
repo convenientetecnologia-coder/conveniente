@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v1";
+const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v2";
 const chromeHeapFaxina = require("./chromeHeapFaxina.js");
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
@@ -7926,12 +7926,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     ticket_id,
   } = {}) => {
     return enqueue(async () => {
-      try {
       const tk = String(thread_key || "").trim();
       const ticketId = Number(ticket_id || 0) || 0;
       if (!tk) {
         return { ok: false, error: "missing_thread_key", ticket_id: ticketId || null };
       }
+      try {
       const collectorTimeout = Math.max(12_000, Number(timeoutMs || 20_000) || 20_000);
       const collectorAttempts = Math.max(1, Math.min(5, Number(attempts || 3) || 3));
       const linkAttempts = Math.max(1, Math.min(4, Number(link_attempts || 3) || 3));
@@ -8245,8 +8245,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
     return enqueue(async () => {
+      let out = null;
       try {
-        const out = await sendDeltaGreetingNow({
+        out = await sendDeltaGreetingNow({
           threadKey: thread_key,
           mensagensCliente: mensagens_cliente,
         });
@@ -8263,7 +8264,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
       } finally {
-        try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
+        const collecting = String((out && out.city_status) || "") === "collecting";
+        if (!collecting) {
+          try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
+        }
       }
     });
   };

@@ -29,19 +29,31 @@ faxina._resetForTests();
   check("cdp_via_client_fn", !!(r && r.via === "page._client()"));
 }
 
-// 2) GC usa HeapProfiler.collectGarbage no client nativo
+  // 2) GC prefere sessão efêmera (não jama o _client primário)
 (async () => {
   faxina._resetForTests();
   const sent = [];
+  let detached = 0;
+  let primaryUsed = 0;
   const page = {
     _client() {
-      return { send: async (m) => { sent.push(m); return { ok: true }; } };
+      primaryUsed += 1;
+      return { send: async () => { throw new Error("primary_should_not_run"); } };
+    },
+    async createCDPSession() {
+      return {
+        send: async (m) => { sent.push(m); return { ok: true }; },
+        detach: async () => { detached += 1; }
+      };
     },
     isClosed() { return false; }
   };
   const out = await faxina.collectPageGarbage(page, { nome: "conta_teste", reason: "unit" });
   check("gc_ok", !!(out && out.ok === true), out);
+  check("gc_via_ephemeral", !!(out && out.via === "createCDPSession"), out);
   check("gc_method", sent[0] === "HeapProfiler.collectGarbage", sent);
+  check("gc_detached", detached === 1, detached);
+  check("gc_skips_primary_client", primaryUsed === 0, primaryUsed);
 })().then(async () => {
   // 3) sequencial: segunda espera a primeira
   faxina._resetForTests();
@@ -134,6 +146,76 @@ faxina._resetForTests();
   pageEe.emit("error", new Error("tab_crash_sim"));
   check("error_sink_marks_crash", pageEe.__oxyCrashed === true);
   check("error_sink_idempotent", faxina.attachErrorSink(pageEe) === false);
+
+  // 10) timeout destacha sessão efêmera — não deixa handle órfão
+  faxina._resetForTests();
+  {
+    let detached = 0;
+    const hangPage = {
+      async createCDPSession() {
+        return {
+          send: () => new Promise(() => {}),
+          detach: async () => { detached += 1; }
+        };
+      },
+      isClosed() { return false; }
+    };
+    const t0 = Date.now();
+    const hangOut = await faxina.collectPageGarbage(hangPage, { nome: "hang", reason: "timeout" });
+    check("gc_timeout_ok_false", !!(hangOut && hangOut.ok === false && /timeout/.test(String(hangOut.error || ""))), hangOut);
+    check("gc_timeout_detached", detached === 1, detached);
+    check("gc_timeout_bounded", (Date.now() - t0) < 9000, Date.now() - t0);
+  }
+
+  // 11) fallback _client() quando não há createCDPSession (mock / page velha)
+  faxina._resetForTests();
+  {
+    const sent = [];
+    const legacy = {
+      _client() { return { send: async (m) => { sent.push(m); } }; },
+      isClosed() { return false; }
+    };
+    const legacyOut = await faxina.collectPageGarbage(legacy, { nome: "legacy", reason: "fallback" });
+    check("gc_fallback_client", !!(legacyOut && legacyOut.ok && sent[0] === "HeapProfiler.collectGarbage"), legacyOut);
+  }
+
+  // 12) listener real de SIGHUP via install() não chama process.exit
+  {
+    const origExit = process.exit;
+    let exitCode = null;
+    process.exit = (code) => { exitCode = code; };
+    try {
+      life.install({ role: "test" });
+      process.emit("SIGHUP");
+      process.emit("SIGBREAK");
+      check("install_sighup_no_exit", exitCode === null, exitCode);
+    } finally {
+      process.exit = origExit;
+    }
+  }
+
+  // 13) contrato de fonte — regressão estrutural
+  {
+    const fs = require("fs");
+    const path = require("path");
+    const root = path.join(__dirname, "..");
+    const lifeSrc = fs.readFileSync(path.join(root, "scripts", "indexLifecycle.js"), "utf8");
+    const faxinaSrc = fs.readFileSync(path.join(root, "scripts", "chromeHeapFaxina.js"), "utf8");
+    const workerSrc = fs.readFileSync(path.join(root, "scripts", "worker.js"), "utf8");
+    const deltaSrc = fs.readFileSync(path.join(root, "scripts", "virtusDelta.js"), "utf8");
+    const indexSrc = fs.readFileSync(path.join(root, "index.js"), "utf8");
+    check("src_life_no_process_exit", !/process\.exit\s*\(/.test(lifeSrc));
+    check("src_life_shield_log", lifeSrc.includes("[OXY-LOG] [SIGHUP-SHIELD]"));
+    check("src_faxina_cmd", faxinaSrc.includes("HeapProfiler.collectGarbage"));
+    check("src_faxina_ephemeral", faxinaSrc.includes("createCDPSession"));
+    check("src_faxina_no_bare_wipe", !/removeAllListeners\s*\(\s*\)/.test(faxinaSrc));
+    check("src_worker_no_bare_wipe", !/removeAllListeners\s*\(\s*\)/.test(workerSrc));
+    check("src_worker_faxina_robe", workerSrc.includes("robe_cycle") && workerSrc.includes("robe_play"));
+    check("src_delta_faxina_hooks", deltaSrc.includes("delta_reply") && deltaSrc.includes("delta_greeting") && deltaSrc.includes("delta_force_collect"));
+    check("src_delta_skip_collecting", deltaSrc.includes('city_status) || "") === "collecting"'));
+    check("src_index_sigint_intact", /process\.on\(\s*'SIGINT'/.test(indexSrc) && /process\.exit\(0\)/.test(indexSrc));
+    check("src_isolate_skip_closed", workerSrc.includes("alreadyClosed"));
+  }
 
   if (fail) {
     console.error("FAIL_COUNT", fail);
