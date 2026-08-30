@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
+const { createEnsureWorkingTick } = require('./ensureWorking.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 // ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
@@ -16316,6 +16317,7 @@ try {
   }
 
   // Anomalia por perfil: "Browser ativo" mas Virtus offline e deveria estar trabalhando.
+  // Este bloco só registra. Quem liga o motor é o tick ensureWorking (não o nurse).
   // Rate-limit por perfil: 15 min.
   const dmap = (desiredSnap && desiredSnap.perfis && typeof desiredSnap.perfis === 'object') ? desiredSnap.perfis : {};
   for (const x of activeArr) {
@@ -20312,6 +20314,38 @@ async function stockProvisionResumeTick() {
   }
 }
 
+const __ensureWorking = createEnsureWorkingTick({
+  getControllers: () => controllers,
+  readDesired: () => readDesiredForNurse({ force: false }),
+  readAccountFlags,
+  startWork: ({ nome, operator }) => handlers.start_work({ nome, operator }),
+  armVirtusOn: async (nome) => {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      const prev = d.perfis[nome] || {};
+      d.perfis[nome] = { ...prev, active: true, virtus: 'on', humanHold: false };
+      return d;
+    });
+  },
+  isOpenAllActive: () => isOpenAllSessionActive(),
+  isProvisionBlocked: () => {
+    try {
+      const cur = provisionLock.get && provisionLock.get();
+      if (!(cur && cur.active && cur.lock)) return false;
+      const owner = String(cur.lock.owner || '');
+      const kind = String((cur.lock.meta && cur.lock.meta.kind) || '');
+      if (kind === 'stock_provision' || /^stock_provision:/i.test(owner)) return false;
+      return true;
+    } catch {
+      try { return !!(provisionLock.isActive && provisionLock.isActive()); } catch { return false; }
+    }
+  },
+  isFrozen: (nome) => !!isFrozenNow(nome),
+  inShard,
+  audit: (row) => { try { provisionAudit.append(row); } catch {} }
+});
+
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Fase 2a: poller leve do kick open-intent (multi-shard; não apaga kick no consume).
@@ -20322,6 +20356,12 @@ setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
 setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
 setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
+const ENSURE_WORKING_TICK_MS = Math.max(
+  8_000,
+  Math.min(60_000, Number(process.env.ENSURE_WORKING_TICK_MS || 12_000) || 12_000)
+);
+setInterval(() => { __ensureWorking.tick().catch(()=>{}); }, ENSURE_WORKING_TICK_MS);
+setTimeout(() => { __ensureWorking.tick().catch(()=>{}); }, Math.min(4000, ENSURE_WORKING_TICK_MS));
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
