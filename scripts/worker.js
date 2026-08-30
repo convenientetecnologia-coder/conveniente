@@ -1049,7 +1049,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v4';
+const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v7';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -8997,6 +8997,9 @@ async function robeIsAutoEnqueueEligible(nome, opts = {}) {
       return { ok: false, reason: 'chrome_sick_hold' };
     }
   } catch {}
+  try {
+    if (isOxyFaxinaHold(n)) return { ok: false, reason: 'oxy_faxina_hold' };
+  } catch {}
   if (robeQueue.inQueue(n) || robeQueue.isActive(n)) return { ok: false, reason: 'queue_busy' };
   try { await unfreezeCooldownIfWorking(n); } catch {}
   const manGate = await manifestStore.read(n).catch(() => null);
@@ -10269,6 +10272,51 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
   }
 }
 
+const OXY_FAXINA_HOLD_WATCHDOG_MS = 90_000;
+
+function isRobeBusy(nome) {
+  try {
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) return true;
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl && ctrl.browser && ctrl.browser._robeActiveFor === nome) return true;
+  } catch {}
+  return false;
+}
+
+function isOxyFaxinaHold(nome) {
+  try {
+    const m = robeMeta[nome];
+    if (!m || m.oxyFaxinaHold !== true) return false;
+    const until = Number(m.oxyFaxinaHoldUntil || 0) || 0;
+    if (until && Date.now() > until) {
+      delete m.oxyFaxinaHold;
+      delete m.oxyFaxinaHoldUntil;
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armOxyFaxinaHold(nome) {
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].oxyFaxinaHold = true;
+    robeMeta[nome].oxyFaxinaHoldUntil = Date.now() + OXY_FAXINA_HOLD_WATCHDOG_MS;
+  } catch {}
+}
+
+function clearOxyFaxinaHold(nome) {
+  try {
+    if (!robeMeta[nome]) return;
+    delete robeMeta[nome].oxyFaxinaHold;
+    delete robeMeta[nome].oxyFaxinaHoldUntil;
+  } catch {}
+}
+
 async function faxinaAposCicloPesado(nome, page, reason) {
   try {
     const r = await chromeHeapFaxina.collectPageGarbage(page, {
@@ -10279,6 +10327,55 @@ async function faxinaAposCicloPesado(nome, page, reason) {
   } catch {}
 }
 
+function kickFaxinaAndMaybeResumeVirtus(nome, ctrl, opts) {
+  const reason = String((opts && opts.reason) || 'robe_cycle');
+  const virtusWasRunning = !!(opts && opts.virtusWasRunning);
+  const deltaSequentialResumeRequired = !!(opts && opts.deltaSequentialResumeRequired);
+  const resumeIssue = (opts && opts.resumeIssue) ? String(opts.resumeIssue) : '';
+  const restartIssue = (opts && opts.restartIssue) ? String(opts.restartIssue) : '';
+  armOxyFaxinaHold(nome);
+  setImmediate(() => {
+    Promise.resolve().then(async () => {
+      try {
+        await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, reason);
+        const live = controllers.get(nome);
+        if (!live || !live.browser) return;
+        try {
+          if (typeof live.browser.isConnected === 'function' && !live.browser.isConnected()) return;
+        } catch {
+          return;
+        }
+        const want = virtusWasRunning || deltaSequentialResumeRequired;
+        if (want && automationAllowed(live, { ignoreTrabalhando: true })) {
+          try {
+            if (deltaSequentialResumeRequired && resumeIssue) {
+              try { await issues.append(nome, 'mil_action', resumeIssue); } catch {}
+            }
+            if (!live.virtus) {
+              live.virtus = startVirtusByEngine(live.browser, nome, autoMode, { epoch: live.virtusEpoch || 0 });
+              if (restartIssue) {
+                try { await issues.append(nome, 'mil_action', restartIssue); } catch {}
+              }
+            }
+            live.trabalhando = true;
+            try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
+          } catch {
+            live.virtus = null;
+            live.trabalhando = false;
+          }
+        } else if (want) {
+          live.virtus = null;
+          live.trabalhando = false;
+        }
+        try { await snapshotStatusAndWrite(); } catch {}
+      } catch {}
+      finally {
+        clearOxyFaxinaHold(nome);
+      }
+    }).catch(() => { try { clearOxyFaxinaHold(nome); } catch {} });
+  });
+}
+
 function attachPageCrashIsolate(nome, page) {
   if (!page || page.__oxyCrashIsolateAttached) return;
   try {
@@ -10286,6 +10383,7 @@ function attachPageCrashIsolate(nome, page) {
     chromeHeapFaxina.elevateMaxListeners(page);
     chromeHeapFaxina.attachErrorSink(page);
     page.on('error', (err) => {
+      if (!chromeHeapFaxina.isPuppeteerPageCrash(err)) return;
       const msg = String((err && err.message) || err || 'page_crash').slice(0, 180);
       try {
         provisionAudit.append({
@@ -10561,6 +10659,8 @@ async function robeQueuedCycle(nome, source = 'auto') {
             delete ctrl.browser._suppressBlankKillUntil[nome];
           }
         } catch {}
+        // Hold ANTES de soltar emExecucao: senão o nurse religa Virtus no meio da faxina.
+        armOxyFaxinaHold(nome);
         // Contrato: libera emExecucao ANTES do prune para about:blank fechar na hora (não ficar preso em protectedCtx).
         robeUpdateMeta(nome, { emExecucao: false });
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
@@ -10568,47 +10668,23 @@ async function robeQueuedCycle(nome, source = 'auto') {
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
           try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
-          try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_cycle_limit'); } catch {}
-          if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
-            try {
-              if (deltaSequentialResumeRequired) {
-                try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_after_limit'); } catch {}
-              }
-              ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
-              ctrl.trabalhando = true;
-              await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
-              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
-            } catch {
-              ctrl.virtus = null;
-              ctrl.trabalhando = false;
-            }
-          }
-          await snapshotStatusAndWrite();
+          kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
+            reason: 'robe_cycle_limit',
+            virtusWasRunning,
+            deltaSequentialResumeRequired,
+            resumeIssue: 'delta_robe_semaphore_step3_resume_runtime_after_limit',
+            restartIssue: 'virtus_restarted_after_limit_posting'
+          });
           return;
         }
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
         try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
-        try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_cycle'); } catch {}
-
-        if (virtusWasRunning || deltaSequentialResumeRequired) {
-          if (automationAllowed(ctrl)) {
-            try {
-              if (deltaSequentialResumeRequired) {
-                try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime'); } catch {}
-              }
-              ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
-              ctrl.trabalhando = true;
-              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
-            } catch (e) {
-              ctrl.virtus = null;
-              ctrl.trabalhando = false;
-            }
-          } else {
-            ctrl.virtus = null;
-            ctrl.trabalhando = false;
-          }
-          await snapshotStatusAndWrite();
-        }
+        kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
+          reason: 'robe_cycle',
+          virtusWasRunning,
+          deltaSequentialResumeRequired,
+          resumeIssue: 'delta_robe_semaphore_step3_resume_runtime'
+        });
 
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
         try { logger.info('[WORKER][robeQueuedCycle] Robe end', { nome }); } catch {}
@@ -10988,6 +11064,7 @@ try {
     delete robeMeta[nome].reloadAttemptsWindow;
     delete robeMeta[nome].blockDetectWindow;
   }
+  clearOxyFaxinaHold(nome);
 } catch {}
 
 try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
@@ -11062,7 +11139,7 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
-function automationAllowed(ctrl, { operator } = {}) {
+function automationAllowed(ctrl, { operator, ignoreTrabalhando } = {}) {
   // Política enterprise:
   // - Locks globais (configure/login_remediate/open_all_map/close_all) podem bloquear automação.
   // - Stock provision NÃO deve bloquear Robe/Virtus do servidor (requisito do lead);
@@ -11085,7 +11162,7 @@ function automationAllowed(ctrl, { operator } = {}) {
   } catch {
     try { if (provisionLock.isActive()) return false; } catch {}
   }
-  return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
+  return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && (ignoreTrabalhando || !ctrl.trabalhando));
 }
 
 async function start_work({ nome, operator }) {
@@ -11095,6 +11172,11 @@ async function start_work({ nome, operator }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
       return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+    if (isOxyFaxinaHold(nome) || isRobeBusy(nome)) {
+      logger.info('[HANDLER] start_work skip (robe/faxina hold)', { nome });
+      return { ok: true, skipped: isOxyFaxinaHold(nome) ? 'oxy_faxina_hold' : 'robe_busy' };
+    }
 
     if (ctrl.humanControl || ctrl.configurando) {
       await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
@@ -11757,6 +11839,7 @@ const handlers = {
       delete robeMeta[nome].reloadAttemptsWindow;
       delete robeMeta[nome].blockDetectWindow;
     }
+    clearOxyFaxinaHold(nome);
   } catch {}
 
   stopPruneLoop(nome);
@@ -14840,6 +14923,7 @@ const handlers = {
       if (isFrozenNow(nome)) {
         return { ok: false, error: 'account_frozen' }
       }
+      if (isOxyFaxinaHold(nome)) return { ok: false, error: 'oxy_faxina_hold' };
       if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
       if (isDeltaEngineActiveStrict() && (!isDeltaRobeAllowed() || !isDeltaRobeManualPlayAllowed())) {
         try {
@@ -15095,6 +15179,8 @@ const handlers = {
                 delete ctrl.browser._suppressBlankKillUntil[nome];
               }
             } catch {}
+            // Hold ANTES de soltar emExecucao: senão o nurse religa Virtus no meio da faxina.
+            armOxyFaxinaHold(nome);
             // Contrato: libera emExecucao ANTES do prune para about:blank fechar na hora.
             robeUpdateMeta(nome, { emExecucao: false });
             if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
@@ -15102,49 +15188,23 @@ const handlers = {
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
               try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
-              try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_play_limit'); } catch {}
-              if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
-                try {
-                  if (deltaSequentialResumeRequired) {
-                    try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_manual_play_after_limit'); } catch {}
-                  }
-                  ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
-                  ctrl.trabalhando = true;
-                  await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
-                  try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
-                } catch {
-                  ctrl.virtus = null;
-                  ctrl.trabalhando = false;
-                }
-              }
-              await snapshotStatusAndWrite();
+              kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
+                reason: 'robe_play_limit',
+                virtusWasRunning,
+                deltaSequentialResumeRequired,
+                resumeIssue: 'delta_robe_semaphore_step3_resume_runtime_manual_play_after_limit',
+                restartIssue: 'virtus_restarted_after_limit_posting'
+              });
               return;
             }
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
             try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
-            try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_play'); } catch {}
-
-            if (virtusWasRunning || deltaSequentialResumeRequired) {
-              if (automationAllowed(ctrl)) {
-                try {
-                  if (deltaSequentialResumeRequired) {
-                    try { await issues.append(nome, 'mil_action', 'delta_robe_semaphore_step3_resume_runtime_manual_play'); } catch {}
-                  }
-                  ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
-                  ctrl.trabalhando = true;
-                  try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
-                } catch (e) {
-                  ctrl.virtus = null;
-                  ctrl.trabalhando = false;
-                }
-              } else {
-                ctrl.virtus = null;
-                ctrl.trabalhando = false;
-              }
-              await snapshotStatusAndWrite();
-            } else {
-              await snapshotStatusAndWrite();
-            }
+            kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
+              reason: 'robe_play',
+              virtusWasRunning,
+              deltaSequentialResumeRequired,
+              resumeIssue: 'delta_robe_semaphore_step3_resume_runtime_manual_play'
+            });
 
             try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
             try { logger.info('[WORKER][robe-play] Robe end', { nome }); } catch {}
@@ -16045,6 +16105,7 @@ const handlers = {
           delete robeMeta[nome].reloadAttemptsWindow;
           delete robeMeta[nome].blockDetectWindow;
         }
+        clearOxyFaxinaHold(nome);
       }
       await snapshotStatusAndWrite();
       return { ok: true, size: SHARD_SET.size, removed, deactivatedCount, maxDeactivations: MAX_SHARD_MOVE_DEACTIVATIONS };
@@ -20093,7 +20154,7 @@ async function nurseTick() {
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
-      if (want.virtus === 'on' && automationAllowed(ctrl)) {
+      if (want.virtus === 'on' && !isOxyFaxinaHold(nome) && !isRobeBusy(nome) && automationAllowed(ctrl)) {
         // Se o governor mudou de modo, reinicia o runner do Virtus para aplicar slowMode sem derrubar browser/sessão.
         try {
           const curMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
@@ -20403,6 +20464,8 @@ const __ensureWorking = createEnsureWorkingTick({
     }
   },
   isFrozen: (nome) => !!isFrozenNow(nome),
+  isRobeBusy,
+  isFaxinaHold: isOxyFaxinaHold,
   inShard,
   audit: (row) => { try { provisionAudit.append(row); } catch {} }
 });
@@ -22939,6 +23002,17 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
     if (direct && typeof direct[requiredFn] === 'function') {
       try { __deltaAttachCityCollectSettledHandler(direct); } catch {}
       return direct;
+    }
+    if (isRobeBusy(nome) || isOxyFaxinaHold(nome)) {
+      try {
+        logger.info('[DELTA][UNIFIED_BOOT] skipped_robe_or_faxina_hold', {
+          nome: String(nome || ''),
+          need: String(need || ''),
+          robeBusy: isRobeBusy(nome),
+          faxinaHold: isOxyFaxinaHold(nome)
+        });
+      } catch {}
+      return null;
     }
 
     // Imunidade de estado: se já há evidência soberana de tráfego de rede

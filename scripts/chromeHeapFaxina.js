@@ -127,6 +127,10 @@ function shouldRecoverCrashedPage({ isMain, alreadyClosed, browserConnected } = 
   return "annihilate";
 }
 
+function isPuppeteerPageCrash(err) {
+  return /page crashed/i.test(String((err && err.message) || err || ""));
+}
+
 function enqueueSerial(fn) {
   const run = faxinaTail.then(fn, fn);
   faxinaTail = run.then(() => {}, () => {});
@@ -230,5 +234,6 @@ module.exports = {
   logFaxinaOk,
   attachErrorSink,
   shouldRecoverCrashedPage,
+  isPuppeteerPageCrash,
   _resetForTests
 };

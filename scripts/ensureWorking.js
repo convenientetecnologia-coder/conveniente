@@ -39,6 +39,8 @@ function classifyEnsureWorking(input = {}) {
   if (input.wantHumanHold === true) return { action: "skip", reason: "human_hold" };
   if (input.humanControl === true) return { action: "skip", reason: "human_control" };
   if (input.configurando === true) return { action: "skip", reason: "configurando" };
+  if (input.robeBusy === true) return { action: "skip", reason: "robe_busy" };
+  if (input.faxinaHold === true) return { action: "skip", reason: "faxina_hold" };
   if (input.frozen === true) return { action: "skip", reason: "frozen" };
   if (input.browserConnected !== true) return { action: "skip", reason: "no_browser" };
 
@@ -71,6 +73,8 @@ function createEnsureWorkingTick(deps) {
     isOpenAllActive,
     isProvisionBlocked,
     isFrozen,
+    isRobeBusy,
+    isFaxinaHold,
     inShard,
     audit,
     nowMs
@@ -135,6 +139,8 @@ function createEnsureWorkingTick(deps) {
           virtusOnline: !!(ctrl && ctrl.virtus),
           humanControl: !!(ctrl && ctrl.humanControl),
           configurando: !!(ctrl && ctrl.configurando),
+          robeBusy: !!(isRobeBusy && isRobeBusy(nome)),
+          faxinaHold: !!(isFaxinaHold && isFaxinaHold(nome)),
           frozen: !!(isFrozen && isFrozen(nome)),
           flags
         });

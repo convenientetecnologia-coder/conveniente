@@ -187,6 +187,8 @@ faxina._resetForTests();
     check("crash_main_browser_dead", p({ isMain: true, alreadyClosed: true, browserConnected: false }) === "none");
     check("crash_extra_open", p({ isMain: false, alreadyClosed: false, browserConnected: true }) === "close_tab");
     check("crash_extra_closed", p({ isMain: false, alreadyClosed: true, browserConnected: true }) === "none");
+    check("crash_msg_true", faxina.isPuppeteerPageCrash(new Error("Page crashed!")) === true);
+    check("crash_msg_false", faxina.isPuppeteerPageCrash(new Error("net::ERR_ABORTED")) === false);
   }
 
   // 13) createCDPSession que chega DEPOIS do timeout ainda é destachado
@@ -270,7 +272,32 @@ faxina._resetForTests();
     check("src_delta_greeting_always_faxina", deltaSrc.includes('faxinaAposCicloPesado("delta_greeting")') && !deltaSrc.includes('out && out.city_status) || "") === "collecting"'));
     check("src_index_sigint_intact", /process\.on\(\s*'SIGINT'/.test(indexSrc) && /process\.exit\(0\)/.test(indexSrc));
     check("src_isolate_uses_policy", workerSrc.includes("shouldRecoverCrashedPage"));
+    check("src_isolate_filters_crash_msg", workerSrc.includes("isPuppeteerPageCrash"));
     check("src_deadline_cleared", faxinaSrc.includes("makeDeadlineTimer") && faxinaSrc.includes("openT.clear"));
+    check("src_kick_not_await_robe", workerSrc.includes("kickFaxinaAndMaybeResumeVirtus") && !/await faxinaAposCicloPesado\(nome, ctrl && ctrl\.mainPage, 'robe_cycle'\)/.test(workerSrc));
+    check("src_hold_before_emexecucao", workerSrc.includes("armOxyFaxinaHold") && workerSrc.includes("ignoreTrabalhando"));
+    check("src_hold_is_flag_not_just_ttl", workerSrc.includes("oxyFaxinaHold = true") && workerSrc.includes("OXY_FAXINA_HOLD_WATCHDOG_MS"));
+    check("src_start_work_respects_hold", workerSrc.includes("start_work skip (robe/faxina hold)"));
+    check("src_ensure_hold_wired", workerSrc.includes("isFaxinaHold: isOxyFaxinaHold"));
+    check("src_unified_boot_respects_hold", workerSrc.includes("skipped_robe_or_faxina_hold"));
+    check("src_kick_no_double_virtus", workerSrc.includes("if (!live.virtus)") && workerSrc.includes("kickFaxinaAndMaybeResumeVirtus"));
+    check("src_kick_abandons_dead_ctrl", /function kickFaxinaAndMaybeResumeVirtus[\s\S]{0,1800}controllers\.get\(nome\)/.test(workerSrc));
+  }
+
+  // 16) nurse/ensureWorking não atropela Robe nem a janela faxina→virtus
+  {
+    const { classifyEnsureWorking } = require("../scripts/ensureWorking.js");
+    const base = {
+      wantActive: true,
+      wantVirtus: "on",
+      browserConnected: true,
+      trabalhando: true,
+      virtusOnline: false,
+      flags: {}
+    };
+    check("ensure_robe_busy_skip", classifyEnsureWorking({ ...base, robeBusy: true }).reason === "robe_busy");
+    check("ensure_faxina_hold_skip", classifyEnsureWorking({ ...base, faxinaHold: true }).reason === "faxina_hold");
+    check("ensure_still_reconciles", classifyEnsureWorking(base).reason === "trabalhando_without_virtus");
   }
 
   if (fail) {
