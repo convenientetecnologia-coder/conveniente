@@ -3314,7 +3314,9 @@ async function _installOverlayOnPage(nome, page) {
                     y: Number(st.panY) || 0,
                     w: Math.min(innerW, Number(st.glassW) / z),
                     h: Math.min(innerH, Number(st.glassH) / z),
-                    z
+                    z,
+                    ox: Number(st.offsetX) || 0,
+                    oy: Number(st.offsetY) || 0
                   };
                 }
                 return {
@@ -3409,8 +3411,8 @@ async function _installOverlayOnPage(nome, page) {
                 const g = visibleGlass();
                 const z = (g && Number(g.z) > 0) ? Number(g.z) : 1;
                 return {
-                  x: (Number(vx) || 0) / z + (Number(g.x) || 0),
-                  y: (Number(vy) || 0) / z + (Number(g.y) || 0)
+                  x: ((Number(vx) || 0) - (Number(g.ox) || 0)) / z + (Number(g.x) || 0),
+                  y: ((Number(vy) || 0) - (Number(g.oy) || 0)) / z + (Number(g.y) || 0)
                 };
               };
               const onMove = (ev) => {
