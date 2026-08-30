@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v3";
+const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v4";
 const chromeHeapFaxina = require("./chromeHeapFaxina.js");
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");

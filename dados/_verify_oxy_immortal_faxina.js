@@ -213,7 +213,28 @@ faxina._resetForTests();
     check("late_open_detached", detached === 1, detached);
   }
 
-  // 14) listener real de SIGHUP via install() não chama process.exit
+  // 14) Promise.race vencedor NÃO deixa unhandledRejection do timer perdedor
+  {
+    let leftover = 0;
+    const onUR = () => { leftover += 1; };
+    process.on("unhandledRejection", onUR);
+    try {
+      faxina._resetForTests();
+      const clean = {
+        async createCDPSession() {
+          return { send: async () => {}, detach: async () => {} };
+        },
+        isClosed() { return false; }
+      };
+      await faxina.collectPageGarbage(clean, { nome: "norace", reason: "x" });
+      await new Promise((r) => setTimeout(r, 80));
+      check("no_race_unhandled", leftover === 0, leftover);
+    } finally {
+      process.removeListener("unhandledRejection", onUR);
+    }
+  }
+
+  // 15) listener real de SIGHUP via install() não chama process.exit
   {
     const origExit = process.exit;
     let exitCode = null;
@@ -249,6 +270,7 @@ faxina._resetForTests();
     check("src_delta_greeting_always_faxina", deltaSrc.includes('faxinaAposCicloPesado("delta_greeting")') && !deltaSrc.includes('out && out.city_status) || "") === "collecting"'));
     check("src_index_sigint_intact", /process\.on\(\s*'SIGINT'/.test(indexSrc) && /process\.exit\(0\)/.test(indexSrc));
     check("src_isolate_uses_policy", workerSrc.includes("shouldRecoverCrashedPage"));
+    check("src_deadline_cleared", faxinaSrc.includes("makeDeadlineTimer") && faxinaSrc.includes("openT.clear"));
   }
 
   if (fail) {

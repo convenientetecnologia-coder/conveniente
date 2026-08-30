@@ -90,10 +90,22 @@ async function openGcSession(page) {
   throw new Error("no_cdp_client");
 }
 
-function raceTimeout(ms, label) {
-  return new Promise((_, rej) => {
-    setTimeout(() => rej(new Error(label || "gc_timeout")), Math.max(50, ms));
+function makeDeadlineTimer(ms, label) {
+  let timer = null;
+  let settled = false;
+  const p = new Promise((_, rej) => {
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      rej(new Error(label || "gc_timeout"));
+    }, Math.max(50, ms));
   });
+  p.catch(() => {});
+  p.clear = () => {
+    settled = true;
+    try { clearTimeout(timer); } catch {}
+  };
+  return p;
 }
 
 function detachLater(openP) {
@@ -135,27 +147,32 @@ async function collectPageGarbage(page, opts = {}) {
 
   return enqueueSerial(async () => {
     if (!pageIsUsable(page)) return { ok: false, skipped: true, reason: "page_busy_or_closed", nome };
+    if (nome) {
+      const last = Number(lastFaxinaAtByNome.get(nome) || 0) || 0;
+      if (last && (Date.now() - last) < DEFAULT_COOLDOWN_MS) {
+        return { ok: false, skipped: true, reason: "cooldown", nome };
+      }
+    }
     let session = null;
     let ephemeral = false;
     let via = null;
     const deadline = Date.now() + GC_TIMEOUT_MS;
     const leftMs = () => Math.max(50, deadline - Date.now());
     const openP = openGcSession(page);
+    const openT = makeDeadlineTimer(leftMs(), "gc_session_timeout");
+    let sendT = null;
     try {
-      const opened = await Promise.race([
-        openP,
-        raceTimeout(leftMs(), "gc_session_timeout")
-      ]);
+      const opened = await Promise.race([openP, openT]);
+      openT.clear();
       session = opened.session;
       ephemeral = !!opened.ephemeral;
       via = opened.via;
       if (!session || typeof session.send !== "function") throw new Error("no_cdp_client");
       const sendP = session.send("HeapProfiler.collectGarbage");
       sendP.catch(() => {});
-      await Promise.race([
-        sendP,
-        raceTimeout(leftMs(), "gc_timeout")
-      ]);
+      sendT = makeDeadlineTimer(leftMs(), "gc_timeout");
+      await Promise.race([sendP, sendT]);
+      sendT.clear();
       if (nome) lastFaxinaAtByNome.set(nome, Date.now());
       return { ok: true, via, nome, reason };
     } catch (e) {
@@ -167,6 +184,8 @@ async function collectPageGarbage(page, opts = {}) {
         reason
       };
     } finally {
+      try { openT.clear(); } catch {}
+      try { if (sendT) sendT.clear(); } catch {}
       if (ephemeral && session && typeof session.detach === "function") {
         try { await session.detach(); } catch {}
       }

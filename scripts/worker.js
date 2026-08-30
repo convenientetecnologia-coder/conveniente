@@ -1049,7 +1049,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v3';
+const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v4';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
