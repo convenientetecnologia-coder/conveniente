@@ -14,6 +14,7 @@ const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
 const fileStore = require('./fileStore.js');
 const glassViewer = require('./glassViewer.js');
+const chromeHeapFaxina = require('./chromeHeapFaxina.js');
 
 // Stealth permanece LIGADO (webdriver, plugins, permissions, codecs, chrome.*).
 // user-agent-override continua off (a UA da conta é o patchPage).
@@ -1147,6 +1148,7 @@ async function _blindarOnce(page, nome) {
   page._convenientePatched = true;
   page._convenientePatchedNome = String(nome);
   page._convenientePatchedAt = Date.now();
+  try { chromeHeapFaxina.attachErrorSink(page); } catch {}
   try { await glassViewer.applyGlassViewer(page, { source: 'blindar' }); } catch {}
 }
 

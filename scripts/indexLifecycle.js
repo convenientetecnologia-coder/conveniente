@@ -3,6 +3,7 @@
 /**
  * Caixa-preta do processo (index e worker).
  * Grava boot/saída/exception/sinal em disco. Não altera frota, janela, pedido, Robe.
+ * SIGHUP/SIGBREAK (RDP/console) NÃO dão process.exit — pai e worker permanecem.
  * taskkill /F e crash nativo podem NÃO passar aqui — aí vale o Event Viewer.
  */
 
@@ -133,6 +134,32 @@ function writeBootContext() {
   } catch {}
 }
 
+function isConsoleSessionSignal(sig) {
+  const s = String(sig || "");
+  return s === "SIGHUP" || s === "SIGBREAK";
+}
+
+function handleConsoleSessionSignal(sig) {
+  const name = String(sig || "SIGHUP");
+  try {
+    append("signal", {
+      signal: name,
+      fleet: readFleetSnap(),
+      shielded: true,
+      keepAlive: true
+    });
+  } catch {}
+  try {
+    const now = Date.now();
+    const last = Number(handleConsoleSessionSignal._lastLogAt || 0) || 0;
+    if (!last || (now - last) >= 5000) {
+      handleConsoleSessionSignal._lastLogAt = now;
+      console.log("[OXY-LOG] [SIGHUP-SHIELD] Sinal RDP detectado. Console pai mantido ativo.");
+    }
+  } catch {}
+  return { keptAlive: true, exited: false, signal: name };
+}
+
 function install(opts) {
   if (installed) return { ok: true, already: true };
   installed = true;
@@ -171,13 +198,14 @@ function install(opts) {
   for (const sig of ["SIGBREAK", "SIGHUP"]) {
     try {
       process.on(sig, () => {
-        append("signal", { signal: sig, fleet: readFleetSnap() });
-        setImmediate(() => {
-          try { process.exit(1); } catch {}
-        });
+        handleConsoleSessionSignal(sig);
       });
     } catch {}
   }
+  try {
+    const cur = typeof process.getMaxListeners === "function" ? Number(process.getMaxListeners()) : 10;
+    if (Number.isFinite(cur) && cur !== 0 && cur < 32) process.setMaxListeners(32);
+  } catch {}
 
   if (role === "index") {
     heartTimer = setInterval(() => { writeHeartbeat(); }, 20000);
@@ -225,6 +253,8 @@ module.exports = {
   readTail,
   readHeartbeat,
   readBootContext,
+  isConsoleSessionSignal,
+  handleConsoleSessionSignal,
   LIFE_PATH,
   HEART_PATH,
   BOOT_CTX_PATH

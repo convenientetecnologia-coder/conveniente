@@ -1,7 +1,8 @@
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
-const VIRTUS_DELTA_BUILD = "2026-07-17-steel-delivery-contract-v1";
+const VIRTUS_DELTA_BUILD = "2026-08-30-oxy-faxina-cdp-v1";
+const chromeHeapFaxina = require("./chromeHeapFaxina.js");
 try { console.log("[virtusDelta][module] build=" + VIRTUS_DELTA_BUILD); } catch {}
 const crypto = require("crypto");
 
@@ -383,6 +384,7 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
   } catch (_) {
     return;
   }
+  try { chromeHeapFaxina.elevateMaxListeners(page); } catch (_) {}
 
   const isAllowedNavUrl = __deltaIsAllowedNavigationUrl;
 
@@ -6659,6 +6661,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   }
   attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
 
+  async function faxinaAposCicloPesado(reason) {
+    try {
+      const r = await chromeHeapFaxina.collectPageGarbage(page, {
+        nome: String(ACCOUNT_LOGIN || nome || ""),
+        reason: String(reason || "delta"),
+      });
+      if (r && r.ok) chromeHeapFaxina.logFaxinaOk(String(ACCOUNT_LOGIN || nome || ""));
+    } catch (_) {}
+  }
+
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {
     const u0 = String(page.url ? page.url() : "");
@@ -7914,6 +7926,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     ticket_id,
   } = {}) => {
     return enqueue(async () => {
+      try {
       const tk = String(thread_key || "").trim();
       const ticketId = Number(ticket_id || 0) || 0;
       if (!tk) {
@@ -8109,6 +8122,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             }
           : null,
       };
+      } finally {
+        try { await faxinaAposCicloPesado("delta_force_collect"); } catch (_) {}
+      }
     });
   };
 
@@ -8122,6 +8138,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     known_item_link,
   } = {}) => {
     return enqueue(async () => {
+      let ranHeavy = false;
       try {
         const tk = String(thread_key || "").trim();
         const tr = String(texto_resposta || "").replace(/\r/g, "");
@@ -8171,6 +8188,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           }
           setReplyDispatchState(cmid, "inflight", tk);
         }
+        ranHeavy = true;
         const out = await sendDeltaReplyNow({
           threadKey: tk,
           textoResposta: tr,
@@ -8217,6 +8235,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         // Exceção também é retryable via outbox — sem reverse prematuro no CT.
         if (cmid) clearReplyDispatchState(cmid);
         return { ok: false, error: err || "send_failed_exception", status: "send_failed", client_message_id: cmid };
+      } finally {
+        if (ranHeavy) {
+          try { await faxinaAposCicloPesado("delta_reply"); } catch (_) {}
+        }
       }
     });
   };
@@ -8240,6 +8262,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         return out;
       } catch (e) {
         return { ok: false, error: e && e.message ? e.message : String(e) };
+      } finally {
+        try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
       }
     });
   };

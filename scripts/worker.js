@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
+const chromeHeapFaxina = require('./chromeHeapFaxina.js');
 const { createEnsureWorkingTick } = require('./ensureWorking.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
@@ -1048,7 +1049,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-01-27_provision_3tabs_v1';
+const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v1';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -10268,6 +10269,51 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
   }
 }
 
+async function faxinaAposCicloPesado(nome, page, reason) {
+  try {
+    const r = await chromeHeapFaxina.collectPageGarbage(page, {
+      nome: String(nome || ''),
+      reason: String(reason || 'cycle')
+    });
+    if (r && r.ok) chromeHeapFaxina.logFaxinaOk(String(nome || ''));
+  } catch {}
+}
+
+function attachPageCrashIsolate(nome, page) {
+  if (!page || page.__oxyCrashIsolateAttached) return;
+  try {
+    page.__oxyCrashIsolateAttached = true;
+    chromeHeapFaxina.elevateMaxListeners(page);
+    chromeHeapFaxina.attachErrorSink(page);
+    page.on('error', (err) => {
+      const msg = String((err && err.message) || err || 'page_crash').slice(0, 180);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'page_crash_isolate',
+          nome: String(nome || ''),
+          error: msg
+        });
+      } catch {}
+      setImmediate(async () => {
+        try {
+          const ctrl = controllers.get(nome);
+          const isMain = !!(ctrl && ctrl.mainPage === page);
+          if (!isMain) {
+            try {
+              if (page && typeof page.close === 'function' && (!page.isClosed || !page.isClosed())) {
+                await page.close({ runBeforeUnload: false });
+              }
+            } catch {}
+            return;
+          }
+          await annihilateChromeSick(nome, 'page_crash_isolate');
+        } catch {}
+      });
+    });
+  } catch {}
+}
+
 async function robeQueuedCycle(nome, source = 'auto') {
   const src = String(source || 'auto').slice(0, 40);
 
@@ -10512,6 +10558,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
           try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+          try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_cycle_limit'); } catch {}
           if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
             try {
               if (deltaSequentialResumeRequired) {
@@ -10531,6 +10578,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
         }
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
         try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+        try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_cycle'); } catch {}
 
         if (virtusWasRunning || deltaSequentialResumeRequired) {
           if (automationAllowed(ctrl)) {
@@ -10872,6 +10920,7 @@ async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, wai
 }
 
 function attachBrowserLifecycle(nome, browser) {
+try { chromeHeapFaxina.elevateMaxListeners(browser); } catch {}
 browser.once('disconnected', async () => {
 try {
 logger.info('[WORKER][BROWSER] disconnected', { nome });
@@ -15043,6 +15092,7 @@ const handlers = {
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
               try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+              try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_play_limit'); } catch {}
               if ((virtusWasRunning || deltaSequentialResumeRequired) && automationAllowed(ctrl)) {
                 try {
                   if (deltaSequentialResumeRequired) {
@@ -15062,6 +15112,7 @@ const handlers = {
             }
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
             try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+            try { await faxinaAposCicloPesado(nome, ctrl && ctrl.mainPage, 'robe_play'); } catch {}
 
             if (virtusWasRunning || deltaSequentialResumeRequired) {
               if (automationAllowed(ctrl)) {
@@ -26902,6 +26953,7 @@ async function __deltaAttachCdpEar(nome, page) {
 
   try {
     const cdp = await page.target().createCDPSession();
+    try { chromeHeapFaxina.elevateMaxListeners(cdp); } catch {}
     await cdp.send('Network.enable');
     __deltaEnsureFrameTelemetryState();
 
@@ -27984,14 +28036,19 @@ async function wirePageObservers(nome, page) {
 
   // Fase 3c.1: no Delta, não registra (nem wipe) listeners Puppeteer só-health.
   // healthTick já é no-op — requestfinished/failed seriam custo puro.
+  try { chromeHeapFaxina.elevateMaxListeners(page); } catch {}
+  try { attachPageCrashIsolate(nome, page); } catch {}
+
   if (!skipHealthListeners) {
     try {
-      page.removeAllListeners && page.removeAllListeners('domcontentloaded');
-      page.removeAllListeners && page.removeAllListeners('framenavigated');
-      page.removeAllListeners && page.removeAllListeners('requestfinished');
-      page.removeAllListeners && page.removeAllListeners('requestfailed');
-      page.removeAllListeners && page.removeAllListeners('console');
-      page.removeAllListeners && page.removeAllListeners('pageerror');
+      chromeHeapFaxina.sanitizeListenCycle(page, [
+        'domcontentloaded',
+        'framenavigated',
+        'requestfinished',
+        'requestfailed',
+        'console',
+        'pageerror'
+      ]);
     } catch {}
     page.on('domcontentloaded', async () => {
       const st = getHealth(nome);
