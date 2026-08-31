@@ -247,6 +247,9 @@ function sync(opts) {
     loopAlive,
     tasksOk: tasksPresent
   });
+  // Index boot: o .ps1 no disco nao muda o PowerShell ja em memoria.
+  // Sempre recicla o loop pra nao ficar v5.1.13 vivo com arquivo nomem.
+  if (reason === "index_boot") plan.restartLoop = true;
   result.plan = plan;
 
   try {

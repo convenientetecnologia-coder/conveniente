@@ -79,6 +79,9 @@ check("plan_already_ok_idle", ok.copy === false && ok.restartLoop === false && o
 const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: false, tasksOk: true });
 check("plan_loop_dead_restarts", dead.copy === false && dead.restartLoop === true && dead.installTasks === false);
 
+const src = fs.readFileSync(syncJs, "utf8");
+check("sync_index_boot_always_restarts_loop", /reason === ['\"]index_boot['\"]/.test(src) && /plan\.restartLoop = true/.test(src));
+
 if (failed) {
   console.log("FAILED " + failed);
   process.exit(1);
