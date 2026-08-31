@@ -2,7 +2,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const assert = require("assert");
 
 const root = path.join(__dirname, "..");
 const kit = path.join(root, "porteiro", "kit", "manutencao.ps1");
@@ -58,12 +57,27 @@ check("instalar_conveniente_calls_porteiro", /instalar_porteiro\.ps1/.test(instC
 check("sync_no_taskkill_node", !/taskkill/i.test(syncTxt));
 check("sync_no_do_stop", !/-Action\s+stop/.test(syncTxt) && !/taskkill/i.test(syncTxt));
 check("sync_refuses_dirty_src", /src_has_memclean_refused/.test(syncTxt));
+check("sync_installs_when_absent", /installed_fresh/.test(syncTxt) && /ensureDirs/.test(syncTxt));
+check("sync_no_skip_dest_absent", !/skipped dest_absent/.test(syncTxt));
+check("sync_asks_uac_only_if_tasks_missing", /installTasks/.test(syncTxt) && /requestTaskInstall/.test(syncTxt));
 check("index_wires_sync", /porteiroSync\.js/.test(indexTxt));
 
 check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt));
 
 check("sync_sourceIsNomem_rejects_old", sync.sourceIsNomem("Invoke-SoftMemClean DiskClean.exe /StandbyList mem_soft") === false);
 check("destLooksLikeOld", sync.destLooksLikeOldMemClean("return 'mem_soft'") === true);
+
+const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, loopAlive: false, tasksOk: false });
+check("plan_fresh_copies", fresh.copy === true && fresh.restartLoop === true && fresh.installTasks === true);
+
+const maeOld = sync.planEnsure({ destExists: true, destOld: true, hashEqual: false, loopAlive: true, tasksOk: true });
+check("plan_mae_old_no_uac", maeOld.copy === true && maeOld.restartLoop === true && maeOld.installTasks === false);
+
+const ok = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: true, tasksOk: true });
+check("plan_already_ok_idle", ok.copy === false && ok.restartLoop === false && ok.installTasks === false);
+
+const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: false, tasksOk: true });
+check("plan_loop_dead_restarts", dead.copy === false && dead.restartLoop === true && dead.installTasks === false);
 
 if (failed) {
   console.log("FAILED " + failed);

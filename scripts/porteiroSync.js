@@ -1,17 +1,15 @@
 "use strict";
 
 /**
- * Atualiza C:\auto_vigia\manutencao.ps1 a partir do kit no repo
- * (C:\conveniente\porteiro\kit\manutencao.ps1) e recicla SÓ o loop do porteiro.
+ * Dono único no boot do index: instala / atualiza / sobe o Porteiro.
  *
- * Contrato:
- *   - NÃO chama a acao stop (PARAR). NÃO mata Node. NÃO mata Chrome.
- *   - NÃO registra tarefa agendada (isso é instalar_porteiro.ps1 / admin).
- *   - Se C:\auto_vigia não existe: não inventa instalação. Só loga.
- *   - Se o kit-fonte ainda tiver DiskClean/StandbyList: recusa copiar.
- *   - Copiar o .ps1 NÃO muda o processo já em memória: precisa restart do loop.
- *   - Se o kill do loop falhar (loop elevado): arquivo novo no disco;
- *     o reboot 04:00 / próximo logon carrega v5.2.0-nomem.
+ * Servidor novo: clone + npm + node index.js → cria C:\auto_vigia, copia o kit,
+ * sobe o loop. Se as tarefas ao logon ainda não existem, pede admin UMA vez
+ * (UAC) sem travar o painel. Não espera o clique.
+ *
+ * MAE já com Porteiro: se o .ps1 estiver velho (mem_soft) ou hash diferente,
+ * copia v5.2.0-nomem e recicla SÓ o loop. Não mata Node. Não mata Chrome.
+ * Não pede UAC se ConvenientePorteiro + ConvenienteNetBoot já existem.
  *
  * Kill switch: PORTEIRO_SYNC_DISABLED=1
  */
@@ -24,8 +22,12 @@ const { spawn, spawnSync } = require("child_process");
 const AUTO_VIGIA = "C:\\auto_vigia";
 const DEST_PS1 = path.join(AUTO_VIGIA, "manutencao.ps1");
 const LOCK_FILE = path.join(AUTO_VIGIA, "porteiro.lock");
+const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
+const INSTALLER_PS1 = path.join(__dirname, "..", "instalar_porteiro.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+const TASK_LOOP = "ConvenientePorteiro";
+const TASK_NET = "ConvenienteNetBoot";
 
 function envDisabled() {
   return String(process.env.PORTEIRO_SYNC_DISABLED || "").trim() === "1";
@@ -33,6 +35,17 @@ function envDisabled() {
 
 function oxyLog(line) {
   try { console.log(String(line)); } catch {}
+}
+
+function persistLog(row) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    const rec = Object.assign({ ts: new Date().toISOString() }, row || {});
+    fs.appendFileSync(LOG_FILE, JSON.stringify(rec) + "\n", "utf8");
+  } catch {}
+  const action = (row && row.action) || "";
+  const extra = (row && (row.detail || row.error)) || "";
+  oxyLog("[OXY-LOG] [PORTEIRO-SYNC] " + action + (extra ? " " + extra : ""));
 }
 
 function md5File(filePath) {
@@ -52,6 +65,66 @@ function sourceIsNomem(text) {
 
 function destLooksLikeOldMemClean(text) {
   return /Invoke-SoftMemClean/.test(text) || /DiskClean\.exe/i.test(text) || /ArgumentList\s+['"]\/StandbyList['"]/.test(text) || /\bmem_soft\b/.test(text);
+}
+
+function planEnsure({ destExists, destOld, hashEqual, loopAlive, tasksOk }) {
+  const copy = !destExists || !!destOld || !hashEqual;
+  const restartLoop = copy || !loopAlive;
+  const installTasks = !tasksOk;
+  return { copy, restartLoop, installTasks };
+}
+
+function taskExists(name) {
+  if (process.platform !== "win32") return false;
+  try {
+    const r = spawnSync("schtasks.exe", ["/Query", "/TN", String(name)], {
+      windowsHide: true,
+      timeout: 8000,
+      encoding: "utf8"
+    });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function tasksOk() {
+  return taskExists(TASK_LOOP) && taskExists(TASK_NET);
+}
+
+function loopLooksAlive() {
+  if (process.platform !== "win32") return false;
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$alive = $false",
+    "$lock = 'C:\\auto_vigia\\porteiro.lock'",
+    "if (Test-Path -LiteralPath $lock) {",
+    "  try {",
+    "    $old = [int]((Get-Content -LiteralPath $lock -Raw).Trim())",
+    "    if ($old -gt 0) {",
+    "      $proc = Get-CimInstance Win32_Process -Filter \"ProcessId=$old\" -ErrorAction SilentlyContinue",
+    "      if ($proc -and ([string]$proc.CommandLine) -match 'auto_vigia\\\\manutencao') { $alive = $true }",
+    "    }",
+    "  } catch {}",
+    "}",
+    "if (-not $alive) {",
+    "  $hit = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
+    "    $_.CommandLine -and ($_.CommandLine -match 'manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop')",
+    "  } | Select-Object -First 1",
+    "  if ($hit) { $alive = $true }",
+    "}",
+    "if ($alive) { 'ALIVE' } else { 'DEAD' }"
+  ].join("; ");
+  try {
+    const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      windowsHide: true,
+      timeout: 15000,
+      encoding: "utf8"
+    });
+    return /ALIVE/.test(String(r.stdout || ""));
+  } catch {
+    return false;
+  }
 }
 
 function stopLoopOnly() {
@@ -97,77 +170,142 @@ function startLoop() {
   return { pid: child.pid || 0 };
 }
 
+function requestTaskInstall() {
+  if (!fs.existsSync(INSTALLER_PS1)) {
+    return { ok: false, error: "installer_missing" };
+  }
+  const fileArg = INSTALLER_PS1.replace(/'/g, "''");
+  const psArg = PS_EXE.replace(/'/g, "''");
+  const cmd =
+    "Start-Process -FilePath '" + psArg + "' -Verb RunAs -ArgumentList " +
+    "'-NoProfile -ExecutionPolicy Bypass -File \"" + fileArg + "\"'";
+  const child = spawn(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false
+  });
+  child.unref();
+  return { ok: true, pid: child.pid || 0 };
+}
+
+function ensureDirs() {
+  fs.mkdirSync(path.join(AUTO_VIGIA, "logs"), { recursive: true });
+}
+
 function sync(opts) {
   const reason = (opts && opts.reason) || "manual";
   const result = { ok: false, action: "none", reason };
 
   if (envDisabled()) {
     result.action = "disabled";
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] skipped disabled");
+    persistLog(result);
+    return result;
+  }
+
+  if (process.platform !== "win32") {
+    result.action = "not_windows";
+    persistLog(result);
     return result;
   }
 
   if (!fs.existsSync(SRC_PS1)) {
     result.action = "src_missing";
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] skipped src_missing");
+    persistLog(result);
     return result;
   }
 
   const srcText = fs.readFileSync(SRC_PS1, "utf8");
   if (!sourceIsNomem(srcText)) {
     result.action = "src_has_memclean_refused";
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] REFUSED src still has mem clean");
+    persistLog(result);
     return result;
   }
 
-  if (!fs.existsSync(AUTO_VIGIA) || !fs.existsSync(DEST_PS1)) {
-    result.action = "dest_absent";
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] skipped dest_absent (rode instalar_porteiro.ps1 como admin)");
-    return result;
-  }
-
+  const destExists = fs.existsSync(DEST_PS1);
+  let destOld = false;
+  let hashEqual = false;
   const srcHash = md5File(SRC_PS1);
-  const destHash = md5File(DEST_PS1);
-  const destText = fs.readFileSync(DEST_PS1, "utf8");
-  const destOld = destLooksLikeOldMemClean(destText);
-
-  if (srcHash === destHash && !destOld) {
-    result.ok = true;
-    result.action = "already_nomem";
-    result.hash = srcHash.slice(0, 8);
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] already_nomem hash=" + result.hash);
-    return result;
+  if (destExists) {
+    try {
+      destOld = destLooksLikeOldMemClean(fs.readFileSync(DEST_PS1, "utf8"));
+      hashEqual = md5File(DEST_PS1) === srcHash;
+    } catch {
+      destOld = true;
+      hashEqual = false;
+    }
   }
 
+  let loopAlive = false;
+  let tasksPresent = false;
+  try { loopAlive = loopLooksAlive(); } catch {}
+  try { tasksPresent = tasksOk(); } catch {}
+
+  const plan = planEnsure({
+    destExists,
+    destOld,
+    hashEqual,
+    loopAlive,
+    tasksOk: tasksPresent
+  });
+  result.plan = plan;
+
   try {
-    fs.copyFileSync(SRC_PS1, DEST_PS1);
+    ensureDirs();
   } catch (e) {
-    result.action = "copy_failed";
+    result.action = "mkdir_failed";
     result.error = (e && e.message) || String(e);
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] copy_failed " + result.error);
+    persistLog(result);
     return result;
   }
 
-  const afterHash = md5File(DEST_PS1);
-  const stop = stopLoopOnly();
-  let start = { pid: 0 };
-  try {
-    start = startLoop();
-  } catch (e) {
-    result.action = "copied_start_failed";
-    result.hash = afterHash.slice(0, 8);
+  if (plan.copy) {
+    try {
+      fs.copyFileSync(SRC_PS1, DEST_PS1);
+    } catch (e) {
+      result.action = "copy_failed";
+      result.error = (e && e.message) || String(e);
+      persistLog(result);
+      return result;
+    }
+  }
+
+  if (plan.restartLoop) {
+    const stop = stopLoopOnly();
     result.stop = stop;
-    result.error = (e && e.message) || String(e);
-    oxyLog("[OXY-LOG] [PORTEIRO-SYNC] copied_start_failed hash=" + result.hash + " — loop novo no proximo reboot 04:00");
-    return result;
+    try {
+      const start = startLoop();
+      result.loopPid = start.pid;
+    } catch (e) {
+      result.action = "copied_start_failed";
+      result.hash = md5File(DEST_PS1).slice(0, 8);
+      result.error = (e && e.message) || String(e);
+      persistLog(result);
+      return result;
+    }
+  }
+
+  if (plan.installTasks) {
+    const asked = requestTaskInstall();
+    result.uac = asked;
   }
 
   result.ok = true;
-  result.action = destOld ? "upgraded_nomem" : "updated";
-  result.hash = afterHash.slice(0, 8);
-  result.stop = stop;
-  result.loopPid = start.pid;
-  oxyLog("[OXY-LOG] [PORTEIRO-SYNC] " + result.action + " hash=" + result.hash + " reason=" + reason);
+  result.hash = (fs.existsSync(DEST_PS1) ? md5File(DEST_PS1) : srcHash).slice(0, 8);
+  if (!destExists && plan.copy) result.action = "installed_fresh";
+  else if (destOld) result.action = "upgraded_nomem";
+  else if (plan.copy) result.action = "updated";
+  else if (plan.restartLoop) result.action = "loop_restarted";
+  else result.action = "already_nomem";
+  if (plan.installTasks) result.action += "+tasks_uac";
+
+  persistLog({
+    action: result.action,
+    hash: result.hash,
+    reason,
+    plan,
+    tasksPresent,
+    loopAliveBefore: loopAlive
+  });
   return result;
 }
 
@@ -176,6 +314,9 @@ module.exports = {
   envDisabled,
   sourceIsNomem,
   destLooksLikeOldMemClean,
+  planEnsure,
   SRC_PS1,
-  DEST_PS1
+  DEST_PS1,
+  TASK_LOOP,
+  TASK_NET
 };

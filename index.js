@@ -4522,8 +4522,8 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     // Retoma cadastros aceitos e ainda pendentes após restart.
     try { __edgeKickStockProvisionPump(); } catch {}
 
-    // Porteiro: se C:\auto_vigia ainda tem o limpador, copia v5.2.0-nomem e recicla o loop.
-    // Nao mata Node. Se o loop estiver elevado, o arquivo novo entra no reboot 04:00.
+    // Porteiro: o index e o dono. Se nao tem, instala. Se ta velho, corrige e sobe o loop.
+    // Nao mata Node. Tarefas ao logon: UAC uma vez so se ainda nao existirem.
     try {
       setImmediate(() => {
         try {
