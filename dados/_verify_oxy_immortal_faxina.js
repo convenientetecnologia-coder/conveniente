@@ -14,6 +14,17 @@ function check(name, cond, extra) {
   }
 }
 
+function srcHasPrimaryClientDetach(src) {
+  return /_client\s*\(\s*\)\s*\.detach\s*\(/.test(src)
+    || /page\._client\s*\(\s*\)[\s\S]{0,80}\.detach\s*\(/.test(src);
+}
+
+function glassCreateDetachPaired(src) {
+  const creates = (src.match(/createCDPSession\s*\(/g) || []).length;
+  const detaches = (src.match(/\.detach\s*\(\s*\)/g) || []).length;
+  return creates === 5 && detaches === 5;
+}
+
 faxina._resetForTests();
 
 // 1) Puppeteer 24: _client é método
@@ -261,6 +272,10 @@ faxina._resetForTests();
     const workerSrc = fs.readFileSync(path.join(root, "scripts", "worker.js"), "utf8");
     const deltaSrc = fs.readFileSync(path.join(root, "scripts", "virtusDelta.js"), "utf8");
     const indexSrc = fs.readFileSync(path.join(root, "index.js"), "utf8");
+    const browserSrc = fs.readFileSync(path.join(root, "scripts", "browser.js"), "utf8");
+    const robeSrc = fs.readFileSync(path.join(root, "scripts", "robeTabHygiene.js"), "utf8");
+    const pulseSrc = fs.readFileSync(path.join(root, "scripts", "winHandlePulse.js"), "utf8");
+    const glassSrc = fs.readFileSync(path.join(root, "scripts", "glassViewer.js"), "utf8");
     check("src_life_no_process_exit", !/process\.exit\s*\(/.test(lifeSrc));
     check("src_life_shield_log", lifeSrc.includes("[OXY-LOG] [SIGHUP-SHIELD]"));
     check("src_faxina_cmd", faxinaSrc.includes("HeapProfiler.collectGarbage"));
@@ -282,6 +297,81 @@ faxina._resetForTests();
     check("src_unified_boot_respects_hold", workerSrc.includes("skipped_robe_or_faxina_hold"));
     check("src_kick_no_double_virtus", workerSrc.includes("if (!live.virtus)") && workerSrc.includes("kickFaxinaAndMaybeResumeVirtus"));
     check("src_kick_abandons_dead_ctrl", /function kickFaxinaAndMaybeResumeVirtus[\s\S]{0,1800}controllers\.get\(nome\)/.test(workerSrc));
+    check("src_ephemeral_helper", faxinaSrc.includes("withEphemeralCdpSession") && faxinaSrc.includes("async function detachCdpSession"));
+    check("src_helper_never_uses_client", /async function withEphemeralCdpSession[\s\S]{0,500}_client\s*\(/.test(faxinaSrc) === false);
+    check("src_browser_no_raw_cdp_session", !browserSrc.includes("createCDPSession"));
+    check("src_browser_uses_ephemeral", (browserSrc.match(/withEphemeralCdpSession/g) || []).length >= 4);
+    check("src_browser_ua_ch_no_silent_skip", browserSrc.includes("patchPage_ua_ch_no_cdp"));
+    check("src_robe_detach_helper", robeSrc.includes("detachEphemeralCdp") && robeSrc.includes("detachCdpWhenSettled"));
+    check("src_robe_extra_targets_finally", /function closeExtraPageTargets[\s\S]{0,4500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
+    check("src_robe_junk_finally", /function closeJunkCdpTargets[\s\S]{0,3500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
+    check("src_robe_stoploading_finally", /stopLoading[\s\S]{0,900}finally \{\s*await detachEphemeralCdp\(stopClient\)/.test(robeSrc));
+    check("src_worker_tag_standby", workerSrc.includes("2026-08-31_standby_sweep_consciente_v1"));
+    check("src_trace_finally_detach", /function collectChromePidsViaTracing[\s\S]{0,5000}finally \{\s*try \{ await chromeHeapFaxina\.detachCdpSession\(session\)/.test(workerSrc));
+    check("src_ear_fail_orphan_detach", workerSrc.includes("detachCdpSession(cdp)"));
+    check("src_ear_detach_sites", (workerSrc.match(/__deltaDetachCdpSession/g) || []).length === 6);
+    check("src_delta_module_has_no_cdp_session", !deltaSrc.includes("createCDPSession") && !deltaSrc.includes("deltaCdpSession"));
+    check("src_life_installs_pulse", lifeSrc.includes("winHandlePulse.js"));
+    check("src_pulse_log", pulseSrc.includes("[OXY-LOG] [HANDLES]") && pulseSrc.includes("handle_pulse"));
+    check("src_pulse_no_powershell", !/powershell\.exe/i.test(pulseSrc) && pulseSrc.includes("WMIC"));
+    check("src_pulse_no_kill_chrome", !/taskkill|browser\.close/i.test(pulseSrc));
+    check("src_no_primary_client_detach", !srcHasPrimaryClientDetach(workerSrc) && !srcHasPrimaryClientDetach(browserSrc) && !srcHasPrimaryClientDetach(robeSrc) && !srcHasPrimaryClientDetach(faxinaSrc));
+    check("src_glass_all_sessions_detach", glassCreateDetachPaired(glassSrc));
+    check("src_sweep_module", fs.existsSync(path.join(root, "scripts", "chromeMemorySweep.js")));
+    check("src_sweep_standbylist", fs.readFileSync(path.join(root, "scripts", "chromeMemorySweep.js"), "utf8").includes("/StandbyList"));
+    check("src_sweep_no_os_metrics", !/require\(\s*['\"]os['\"]\s*\)/.test(fs.readFileSync(path.join(root, "scripts", "chromeMemorySweep.js"), "utf8")));
+    check("src_sweep_handlers", workerSrc.includes("standby-sweep-probe") && workerSrc.includes("standby-sweep-arm") && workerSrc.includes("standby-sweep-release"));
+    check("src_sweep_master", fs.readFileSync(path.join(root, "scripts", "clusterMaster.js"), "utf8").includes("attachHostCoordinator"));
+  }
+
+  // 17) sessão EXTRA: detach no sucesso e no throw; pulso de handles não mata Chrome
+  {
+    let detached = 0;
+    let primary = 0;
+    const page = {
+      _client() {
+        primary += 1;
+        return { send: async () => {}, detach: async () => { throw new Error("must_not_detach_primary"); } };
+      },
+      target() {
+        return {
+          async createCDPSession() {
+            return {
+              send: async () => {},
+              detach: async () => { detached += 1; }
+            };
+          }
+        };
+      }
+    };
+    const ok = await faxina.withEphemeralCdpSession(page, async (s) => {
+      check("ephemeral_got_session", !!(s && typeof s.send === "function"));
+      return "ok";
+    });
+    check("ephemeral_ok_value", ok === "ok");
+    check("ephemeral_ok_detached", detached === 1, detached);
+    check("ephemeral_skips_primary", primary === 0, primary);
+
+    let boomDetached = 0;
+    const boomTarget = {
+      async createCDPSession() {
+        return { detach: async () => { boomDetached += 1; } };
+      }
+    };
+    let threw = false;
+    try {
+      await faxina.withEphemeralCdpSession(boomTarget, async () => { throw new Error("boom"); });
+    } catch (e) {
+      threw = String(e && e.message) === "boom";
+    }
+    check("ephemeral_throw_reraises", threw);
+    check("ephemeral_throw_detached", boomDetached === 1, boomDetached);
+    const none = await faxina.withEphemeralCdpSession(null, async () => "x");
+    check("ephemeral_null_target", none == null);
+
+    const pulse = require("../scripts/winHandlePulse.js");
+    const uv = pulse.uvHandleCount();
+    check("handle_pulse_uv_number", uv == null || (Number.isFinite(uv) && uv >= 0), uv);
   }
 
   // 16) nurse/ensureWorking não atropela Robe nem a janela faxina→virtus
@@ -298,6 +388,13 @@ faxina._resetForTests();
     check("ensure_robe_busy_skip", classifyEnsureWorking({ ...base, robeBusy: true }).reason === "robe_busy");
     check("ensure_faxina_hold_skip", classifyEnsureWorking({ ...base, faxinaHold: true }).reason === "faxina_hold");
     check("ensure_still_reconciles", classifyEnsureWorking(base).reason === "trabalhando_without_virtus");
+  }
+
+  {
+    const { execFileSync } = require("child_process");
+    const path = require("path");
+    execFileSync(process.execPath, [path.join(__dirname, "_verify_standby_sweep.js")], { stdio: "inherit" });
+    check("standby_sweep_unit", true);
   }
 
   if (fail) {

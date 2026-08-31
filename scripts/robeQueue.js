@@ -20,12 +20,20 @@ class RobeQueue {
     this.executando = null;    // { nome, startedAt }
     this._tickRunning = false;
     this._pausePredicate = null;
-    this._pausedUntil = 0;
+    this._idleHook = null;
   }
 
   setPausePredicate(fn) {
     // fn(): boolean — quando true, não inicia novas execuções (mantém fila intacta).
     this._pausePredicate = (typeof fn === 'function') ? fn : null;
+  }
+
+  setIdleHook(fn) {
+    this._idleHook = (typeof fn === 'function') ? fn : null;
+  }
+
+  _emitIdle() {
+    try { if (this._idleHook) this._idleHook(); } catch {}
   }
 
   enqueue(nome, cb) {
@@ -78,15 +86,17 @@ class RobeQueue {
         try {
           const paused = !!(this._pausePredicate && this._pausePredicate());
           if (paused) {
-            this._pausedUntil = Date.now() + 1500;
+            // Event-driven: o release chama tick(). Sem poll de 1500ms.
             this._tickRunning = false;
-            setTimeout(() => { try { this.tick(); } catch {} }, 1500);
             return;
           }
         } catch {}
 
         // 1 por worker: se já tem execução local, não puxa a próxima.
-        if (this.executando || this.fila.length === 0) return;
+        if (this.executando || this.fila.length === 0) {
+          if (!this.executando) this._emitIdle();
+          return;
+        }
 
         const next = this.fila.shift();
         if (!next) return;
@@ -107,6 +117,7 @@ class RobeQueue {
           this.executando = null;
         }
         this._tickRunning = false;
+        this._emitIdle();
         this.tick();
         return;
       } finally {

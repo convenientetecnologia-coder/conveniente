@@ -232,6 +232,14 @@ const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
 const fotos        = require('./fotos.js');
 
+let standbySweepHeld = false;
+let standbySweepWatchdog = null;
+let standbySweepIdleHintTimer = null;
+const STANDBY_SWEEP_WATCHDOG_MS = Math.max(
+  60_000,
+  Math.min(30 * 60 * 1000, Number(process.env.STANDBY_SWEEP_WORKER_WATCHDOG_MS || (20 * 60 * 1000)) || (20 * 60 * 1000))
+);
+
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const {
@@ -1027,7 +1035,18 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
       try { logger.info('[ENGINE_SWITCH] Perfil inicializado no MOTOR DELTA (HTTP stateless + fila JSONL em disco).', { nome }); } catch {}
       const started = deltaVirtus.startVirtusDeltaRuntime(browser, nome, baseCfg);
       Promise.resolve(started)
-        .then((runner) => { try { __deltaAttachCityCollectSettledHandler(runner); } catch {} })
+        .then((runner) => {
+          try {
+            const c = controllers.get(nome);
+            if (c) c._deltaRunnerResolved = runner;
+          } catch {}
+          try { __deltaAttachCityCollectSettledHandler(runner); } catch {}
+          try {
+            if (standbySweepHeld && runner && typeof runner.setSweepPause === 'function') {
+              runner.setSweepPause(true);
+            }
+          } catch {}
+        })
         .catch(() => {});
       return started;
     }
@@ -1049,7 +1068,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-30_oxy_immortal_faxina_v7';
+const WORKER_BUILD_TAG = '2026-08-31_standby_sweep_consciente_v1';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -9823,11 +9842,12 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
   }
   markHeavyCdpStart(Date.now());
   _ramDiagCounters.heavyBudgetStarts = Number(_ramDiagCounters.heavyBudgetStarts || 0) + 1;
+  let session = null;
   try {
     if (!browser || !browser.isConnected || (browser.isConnected && browser.isConnected() === false)) return [];
     const target = browser.target();
     if (!target || !target.createCDPSession) return [];
-    const session = await target.createCDPSession();
+    session = await target.createCDPSession();
     const pids = new Set();
     const tracingComplete = new Promise((resolve) => {
       const onComplete = async (ev) => {
@@ -9865,7 +9885,6 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
       tracingComplete,
       new Promise((resolve) => setTimeout(() => resolve(timeoutSentinel), timeoutMs))
     ]);
-    try { await session.detach && session.detach().catch(()=>{}); } catch {}
     if (res === timeoutSentinel) {
       _ramDiagCounters.heavyTraceTimeouts = Number(_ramDiagCounters.heavyTraceTimeouts || 0) + 1;
       markHeavyCdpFailure(Date.now());
@@ -9877,6 +9896,8 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
     _ramDiagCounters.heavyTraceErrors = Number(_ramDiagCounters.heavyTraceErrors || 0) + 1;
     markHeavyCdpFailure(Date.now());
     return [];
+  } finally {
+    try { await chromeHeapFaxina.detachCdpSession(session); } catch {}
   }
 }
 
@@ -10371,6 +10392,7 @@ function kickFaxinaAndMaybeResumeVirtus(nome, ctrl, opts) {
       } catch {}
       finally {
         clearOxyFaxinaHold(nome);
+        try { maybeStandbySweepIdleHint(); } catch {}
       }
     }).catch(() => { try { clearOxyFaxinaHold(nome); } catch {} });
   });
@@ -11427,7 +11449,180 @@ async function start_work({ nome, operator }) {
   });
 }
 
+function peekDeltaSweepRunner(ctrl) {
+  if (!ctrl) return null;
+  try {
+    if (ctrl.virtus && typeof ctrl.virtus.then === 'function') return { pending: true };
+  } catch {}
+  try {
+    if (ctrl.virtus && typeof ctrl.virtus.getSweepBusy === 'function') return ctrl.virtus;
+  } catch {}
+  try {
+    if (ctrl.virtus && ctrl._deltaRunnerResolved && typeof ctrl._deltaRunnerResolved.getSweepBusy === 'function') {
+      return ctrl._deltaRunnerResolved;
+    }
+  } catch {}
+  try {
+    if (ctrl.virtus && typeof ctrl.virtus.setSweepPause === 'function') return ctrl.virtus;
+  } catch {}
+  return null;
+}
+
+function collectStandbySweepBusy() {
+  const reasons = [];
+  try {
+    if (robeQueue && typeof robeQueue.activeCount === 'function' && robeQueue.activeCount() > 0) {
+      reasons.push('robe_exec');
+    }
+  } catch {}
+  try {
+    if (opening) {
+      for (const k of Object.keys(opening)) {
+        if (k && opening[k]) {
+          reasons.push('opening');
+          break;
+        }
+      }
+    }
+  } catch {}
+  try {
+    if (connectLane && typeof connectLane.isHeld === 'function' && connectLane.isHeld()) {
+      reasons.push('connect_lane_held');
+    }
+  } catch {}
+
+  try {
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!nome) continue;
+      try { if (typeof isOxyFaxinaHold === 'function' && isOxyFaxinaHold(nome)) reasons.push('faxina_hold:' + nome); } catch {}
+      try { if (ctrl && ctrl.humanControl === true) reasons.push('human:' + nome); } catch {}
+      try { if (ctrl && ctrl.configurando === true) reasons.push('config:' + nome); } catch {}
+      try { if (ctrl && ctrl._virtusStarting) reasons.push('virtus_starting:' + nome); } catch {}
+      try {
+        if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
+          reasons.push('send_lock:' + nome);
+        }
+      } catch {}
+      try {
+        if (ctrl && ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) > 0) {
+          reasons.push('gate_inflight:' + nome);
+        }
+      } catch {}
+      try {
+        if (ctrl && ctrl.mainPage && ctrl.mainPage.__virtusDeltaReplyInFlight) {
+          reasons.push('delta_inflight:' + nome);
+        }
+      } catch {}
+      try {
+        const runner = peekDeltaSweepRunner(ctrl);
+        if (runner && runner.pending) {
+          reasons.push('virtus_pending:' + nome);
+        } else if (runner && typeof runner.getSweepBusy === 'function') {
+          const b = runner.getSweepBusy() || {};
+          if (b.busy) {
+            const rs = Array.isArray(b.reasons) && b.reasons.length ? b.reasons.join(',') : 'delta_busy';
+            reasons.push(rs + ':' + nome);
+          }
+        } else if (runner && typeof runner.getQueueDepth === 'function') {
+          const d = Number(runner.getQueueDepth() || 0) || 0;
+          const paused = typeof runner.isSweepPaused === 'function' && runner.isSweepPaused();
+          if (d > 0 && !paused) reasons.push('delta_queue:' + nome);
+        }
+      } catch {}
+      if (reasons.length >= 24) {
+        reasons.push('truncated');
+        break;
+      }
+    }
+  } catch {}
+  return { busy: reasons.length > 0, reasons };
+}
+
+function applyStandbySweepArm() {
+  standbySweepHeld = true;
+  try { robeQueue.setPausePredicate(() => standbySweepHeld); } catch {}
+  try {
+    for (const [, ctrl] of controllers.entries()) {
+      const runner = peekDeltaSweepRunner(ctrl);
+      if (runner && typeof runner.setSweepPause === 'function') runner.setSweepPause(true);
+    }
+  } catch {}
+  try { if (standbySweepWatchdog) clearTimeout(standbySweepWatchdog); } catch {}
+  standbySweepWatchdog = setTimeout(() => {
+    standbySweepWatchdog = null;
+    try { applyStandbySweepRelease({ reason: 'watchdog' }); } catch {}
+  }, STANDBY_SWEEP_WATCHDOG_MS);
+  try { if (standbySweepWatchdog && typeof standbySweepWatchdog.unref === 'function') standbySweepWatchdog.unref(); } catch {}
+}
+
+function applyStandbySweepRelease() {
+  standbySweepHeld = false;
+  try { if (standbySweepWatchdog) clearTimeout(standbySweepWatchdog); } catch {}
+  standbySweepWatchdog = null;
+  try { robeQueue.setPausePredicate(null); } catch {}
+  try {
+    for (const [, ctrl] of controllers.entries()) {
+      const runner = peekDeltaSweepRunner(ctrl);
+      if (runner && typeof runner.setSweepPause === 'function') runner.setSweepPause(false);
+    }
+  } catch {}
+  try { robeQueue.tick(); } catch {}
+}
+
+function maybeStandbySweepIdleHint() {
+  if (!standbySweepHeld) return;
+  try {
+    const snap = collectStandbySweepBusy();
+    if (snap.busy) return;
+  } catch {}
+  if (typeof process.send !== 'function') return;
+  if (standbySweepIdleHintTimer) return;
+  standbySweepIdleHintTimer = setTimeout(() => {
+    standbySweepIdleHintTimer = null;
+    if (!standbySweepHeld) return;
+    try {
+      const again = collectStandbySweepBusy();
+      if (again.busy) return;
+      process.send({ type: 'standby-sweep-idle-hint' });
+    } catch {}
+  }, 50);
+  try { if (standbySweepIdleHintTimer && typeof standbySweepIdleHintTimer.unref === 'function') standbySweepIdleHintTimer.unref(); } catch {}
+}
+
+try {
+  robeQueue.setIdleHook(() => { try { maybeStandbySweepIdleHint(); } catch {} });
+} catch {}
+
 const handlers = {
+  async ['standby-sweep-probe']() {
+    const snap = collectStandbySweepBusy();
+    return {
+      ok: true,
+      busy: !!snap.busy,
+      reasons: snap.reasons || [],
+      held: !!standbySweepHeld,
+      shard: Number(process.env.WORKER_SHARD_INDEX || 0) || 0
+    };
+  },
+  async ['standby-sweep-arm']() {
+    applyStandbySweepArm();
+    const snap = collectStandbySweepBusy();
+    return {
+      ok: true,
+      busy: !!snap.busy,
+      reasons: snap.reasons || [],
+      held: true,
+      shard: Number(process.env.WORKER_SHARD_INDEX || 0) || 0
+    };
+  },
+  async ['standby-sweep-release']() {
+    applyStandbySweepRelease();
+    return {
+      ok: true,
+      held: false,
+      shard: Number(process.env.WORKER_SHARD_INDEX || 0) || 0
+    };
+  },
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
@@ -23210,6 +23405,16 @@ function __deltaHandleCityCollectSettled(payload) {
 
 function __deltaAttachCityCollectSettledHandler(runner) {
   try {
+    if (runner && typeof runner.setSweepPause === 'function' && standbySweepHeld) {
+      runner.setSweepPause(true);
+    }
+  } catch {}
+  try {
+    if (runner && typeof runner.setSweepIdleHook === 'function') {
+      runner.setSweepIdleHook(() => { try { maybeStandbySweepIdleHint(); } catch {} });
+    }
+  } catch {}
+  try {
     if (!runner || typeof runner.setCityCollectSettledHandler !== 'function') return false;
     runner.setCityCollectSettledHandler((payload) => {
       try {
@@ -27035,8 +27240,9 @@ async function __deltaAttachCdpEar(nome, page) {
     return;
   }
 
+  let cdp = null;
   try {
-    const cdp = await page.target().createCDPSession();
+    cdp = await page.target().createCDPSession();
     try { chromeHeapFaxina.elevateMaxListeners(cdp); } catch {}
     await cdp.send('Network.enable');
     __deltaEnsureFrameTelemetryState();
@@ -28096,6 +28302,14 @@ async function __deltaAttachCdpEar(nome, page) {
     try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ear_cdp_attached', { nome: String(nome || '') }); } catch {}
     __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: Date.now(), lastError: null });
   } catch (err) {
+    try {
+      const ctrlFail = controllers.get(nome);
+      if (cdp && ctrlFail && ctrlFail.deltaCdpSession === cdp) {
+        try { await __deltaDetachCdpSession(nome); } catch {}
+      } else {
+        try { await chromeHeapFaxina.detachCdpSession(cdp); } catch {}
+      }
+    } catch {}
     try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
     __deltaMarkBootEarState(nome, { earAttached: false, lastError: err && err.message ? String(err.message) : String(err) });
     try { page.__deltaCdpEarAttached = false; } catch {}

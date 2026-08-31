@@ -5063,13 +5063,15 @@ async function collectCityFromItemLinkUsingGlobalCollector({
   }
 }
 
-function createSerialQueue() {
+function createSerialQueue(opts) {
   // Fila de ação canônica (MÃOS):
   // - FIFO estrita por ordem de chegada
   // - sem preferências entre dashboard e chat novo
   // - execução 1 por vez para evitar atropelo de DOM
+  const onJobIdle = (opts && typeof opts.onJobIdle === "function") ? opts.onJobIdle : null;
   const fifoQueue = [];
   let running = false;
+  let paused = false;
   let depth = 0;
   let maxDepth = 0;
   let lastEnqueueAt = 0;
@@ -5078,6 +5080,7 @@ function createSerialQueue() {
 
   const drain = () => {
     if (running) return;
+    if (paused) return;
     const item = fifoQueue.shift();
     if (!item) return;
     running = true;
@@ -5098,6 +5101,7 @@ function createSerialQueue() {
         depth = Math.max(0, depth - 1);
         lastDoneAt = Date.now();
         running = false;
+        try { if (onJobIdle) onJobIdle(); } catch {}
         drain();
       });
   };
@@ -5114,7 +5118,13 @@ function createSerialQueue() {
   };
   enqueue.getDepth = () => depth;
   enqueue.getMaxDepth = () => maxDepth;
-  enqueue.getMeta = () => ({ depth, maxDepth, lastEnqueueAt, lastDequeueAt, lastDoneAt });
+  enqueue.getMeta = () => ({ depth, maxDepth, lastEnqueueAt, lastDequeueAt, lastDoneAt, running, paused });
+  enqueue.isRunning = () => !!running;
+  enqueue.isPaused = () => !!paused;
+  enqueue.setPaused = (v) => {
+    paused = !!v;
+    if (!paused) drain();
+  };
   return enqueue;
 }
 
@@ -5297,7 +5307,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   const startUrl = String((cfg && cfg.startUrl) || process.env.VIRTUS_DELTA_START_URL || "https://www.facebook.com/messages").trim();
 
   let running = true;
-  const enqueue = createSerialQueue();
+  let sweepIdleHook = null;
+  const enqueue = createSerialQueue({
+    onJobIdle: () => { try { if (typeof sweepIdleHook === "function") sweepIdleHook(); } catch {} }
+  });
   const replyDispatchStateByClientId = new Map(); // client_message_id -> { state, at, thread_key }
   const REPLY_DISPATCH_ID_TTL_MS = Math.max(
     60_000,
@@ -8280,6 +8293,30 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     },
     getQueueMaxDepth: () => {
       try { return (typeof enqueue.getMaxDepth === "function") ? enqueue.getMaxDepth() : null; } catch (_) { return null; }
+    },
+    setSweepPause: (v) => {
+      try { if (typeof enqueue.setPaused === "function") enqueue.setPaused(!!v); } catch (_) {}
+      return true;
+    },
+    isSweepPaused: () => {
+      try { return typeof enqueue.isPaused === "function" ? !!enqueue.isPaused() : false; } catch (_) { return false; }
+    },
+    setSweepIdleHook: (fn) => {
+      sweepIdleHook = typeof fn === "function" ? fn : null;
+      return true;
+    },
+    getSweepBusy: () => {
+      const reasons = [];
+      try { if (typeof enqueue.isRunning === "function" && enqueue.isRunning()) reasons.push("delta_queue_running"); } catch (_) {}
+      try {
+        const d = (typeof enqueue.getDepth === "function") ? Number(enqueue.getDepth() || 0) || 0 : 0;
+        const pausedNow = typeof enqueue.isPaused === "function" && enqueue.isPaused();
+        if (d > 0 && !pausedNow) reasons.push("delta_queue");
+      } catch (_) {}
+      try { if (cityCollectBgInFlight && cityCollectBgInFlight.size > 0) reasons.push("city_collect_bg"); } catch (_) {}
+      try { if (cityCollectBgTimers && cityCollectBgTimers.size > 0) reasons.push("city_collect_bg_timer"); } catch (_) {}
+      try { if (page && page.__virtusDeltaReplyInFlight) reasons.push("delta_inflight"); } catch (_) {}
+      return { busy: reasons.length > 0, reasons };
     },
     setCityCollectSettledHandler: (fn) => {
       cityCollectSettledHandler = typeof fn === "function" ? fn : null;

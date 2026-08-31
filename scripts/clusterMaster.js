@@ -8,6 +8,7 @@ const fileStore = require('./fileStore.js');
 const logger = require('./logger.js');
 const supervisor = require('./supervisor.js');
 const provisionLock = require('./provisionLock.js');
+const chromeMemorySweep = require('./chromeMemorySweep.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -60,6 +61,7 @@ function createCluster() {
   const children = [];
   const route = {};
   let isShuttingDown = false;
+  let standbySweep = null;
 
   // Rebuild route from a block array (idx->name list)
   function routeRebuildFromBlocks(blocksArr) {
@@ -119,6 +121,12 @@ function createCluster() {
         const { resolve } = pending.get(msg.replyTo);
         pending.delete(msg.replyTo);
         return resolve(msg.data);
+      }
+      if (msg && msg.type === 'standby-sweep-idle-hint') {
+        try {
+          if (standbySweep && typeof standbySweep.idleHint === 'function') standbySweep.idleHint();
+        } catch {}
+        return;
       }
       // ===== perfis.json master-only writes (blindagem máxima) =====
       // Workers NÃO escrevem perfis.json; pedem mutação ao master via IPC.
@@ -262,6 +270,24 @@ function createCluster() {
     nodes: blocks.length,
     assigned: Object.keys(route).length
   });
+
+  try {
+    standbySweep = chromeMemorySweep.attachHostCoordinator({
+      sendToAll: (type, payload, timeoutMs) => Promise.all(
+        children.map((_, i) => sendTo(i, type, payload || {}, { timeoutMs: timeoutMs || 8000 }))
+      ),
+      shardCount: () => children.length
+    });
+    logger.info('[CLUSTER][STANDBY-SWEEP] coordinator on', {
+      disabled: chromeMemorySweep.envDisabled(),
+      minMs: chromeMemorySweep.MIN_INTERVAL_MS,
+      timeoutMs: chromeMemorySweep.TIMEOUT_MS,
+      settleMs: chromeMemorySweep.SETTLE_MS
+    });
+  } catch (e) {
+    standbySweep = null;
+    try { logger.warn('[CLUSTER][STANDBY-SWEEP] coordinator off', { error: e && e.message || e }); } catch {}
+  }
 
   function findChildByPerfil(nome) {
     const i = route[nome];
@@ -615,8 +641,12 @@ function createCluster() {
         const cleared = results.reduce((s, r) => s + (Number(r && r.cleared || 0) || 0), 0);
         const awaitingKept = results.reduce((s, r) => s + (Number(r && r.awaitingKept || 0) || 0), 0);
         const stillPronto = [];
+        const blockedLimitPosting = [];
         for (const r of results) {
           if (r && Array.isArray(r.stillPronto)) stillPronto.push(...r.stillPronto);
+          if (r && Array.isArray(r.blockedLimitPosting)) {
+            blockedLimitPosting.push(...r.blockedLimitPosting);
+          }
         }
         try {
           logger.info('[CLUSTER] robes-release-all aggregate', {
@@ -624,19 +654,21 @@ function createCluster() {
             cleared,
             awaitingKept,
             stillPronto: stillPronto.length,
+            blockedLimitPosting: blockedLimitPosting.length,
             nodes: results.map((r, i) => ({
               node: i + 1,
               ok: !!(r && r.ok !== false),
               enqueued: Number(r && r.enqueued || 0) || 0,
               working: Number(r && r.working || 0) || 0,
               stillPronto: Array.isArray(r && r.stillPronto) ? r.stillPronto.length : null,
+              blockedLimitPosting: Array.isArray(r && r.blockedLimitPosting) ? r.blockedLimitPosting.length : null,
               error: r && r.error ? String(r.error).slice(0, 80) : null
             }))
           });
         } catch {}
         return allOk
-          ? { ok: true, enqueued, cleared, awaitingKept, stillPronto, nodes: results.length, results }
-          : { ok: false, error: 'partial_fail', enqueued, cleared, awaitingKept, stillPronto, results };
+          ? { ok: true, enqueued, cleared, awaitingKept, stillPronto, blockedLimitPosting, nodes: results.length, results }
+          : { ok: false, error: 'partial_fail', enqueued, cleared, awaitingKept, stillPronto, blockedLimitPosting, results };
       }
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
@@ -657,6 +689,7 @@ function createCluster() {
 
   async function kill() {
     isShuttingDown = true;
+    try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
     // ============= BEGIN PATCH: close perfisWatcher before killing =============
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     // ============= END PATCH: close perfisWatcher before killing ===============
