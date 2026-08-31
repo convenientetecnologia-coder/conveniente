@@ -720,6 +720,47 @@ function shouldThrottleIssue(slotId, minMs) {
   return false;
 }
 
+function probeSlotConnect(resolved, { destHost = "www.facebook.com", destPort = 443, timeoutMs = 8000 } = {}) {
+  const slotProxy = resolved && resolved.slot && resolved.slot.proxy && typeof resolved.slot.proxy === "object"
+    ? resolved.slot.proxy
+    : null;
+  const proxyHost = String(slotProxy && slotProxy.host || "").trim();
+  const proxyPort = Number(slotProxy && slotProxy.port || 0) || 0;
+  const user = String(slotProxy && slotProxy.username || "").trim();
+  const pass = String(slotProxy && slotProxy.password || "").trim();
+  if (!proxyHost || proxyPort <= 0 || !user || !pass) {
+    return Promise.resolve({ ok: false, skipped: true, detail: "missing_proxy_creds" });
+  }
+  const net = require("net");
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const s = net.connect({ host: proxyHost, port: proxyPort, timeout: timeoutMs });
+    let buf = "";
+    const done = (ok, detail) => {
+      try { s.destroy(); } catch {}
+      resolve({ ok: !!ok, ms: Date.now() - t0, detail: String(detail || "").slice(0, 120) });
+    };
+    s.on("timeout", () => done(false, "timeout"));
+    s.on("error", (e) => done(false, (e && e.code) || e.message));
+    s.on("connect", () => {
+      const token = Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
+      s.write(
+        `CONNECT ${destHost}:${destPort} HTTP/1.1\r\n` +
+        `Host: ${destHost}:${destPort}\r\n` +
+        `Proxy-Authorization: Basic ${token}\r\n` +
+        `Proxy-Connection: Keep-Alive\r\n\r\n`
+      );
+    });
+    s.on("data", (d) => {
+      buf += d.toString("utf8");
+      if (buf.indexOf("\r\n\r\n") >= 0) {
+        const first = buf.split(/\r\n/)[0] || "";
+        done(/HTTP\/1\.[01] 200/i.test(first), first);
+      }
+    });
+  });
+}
+
 async function reportProxyIssue({ resolved, reason, context } = {}) {
   try {
     const slot = resolved && resolved.slot ? resolved.slot : null;

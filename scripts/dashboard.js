@@ -3203,22 +3203,6 @@ function logsAllowlist() {
     process_sentinel_incident: path.join(base, 'process_sentinel_last_incident.json'),
     process_sentinel_install: path.join(base, 'process_sentinel_install.json')
   };
-  // Relatório nativo mais recente do Node (fatal error/OOM), sem expor diretório arbitrário.
-  try {
-    const reportDir = path.join(base, 'forensic_node_reports');
-    if (fsSync.existsSync(reportDir)) {
-      const latest = fsSync.readdirSync(reportDir, { withFileTypes: true })
-        .filter(ent => ent && ent.isFile && ent.isFile() && /^report\..+\.json$/i.test(String(ent.name || '')))
-        .map(ent => {
-          const fp = path.join(reportDir, ent.name);
-          let mtimeMs = 0;
-          try { mtimeMs = Number(fsSync.statSync(fp).mtimeMs || 0) || 0; } catch {}
-          return { fp, mtimeMs };
-        })
-        .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
-      if (latest && latest.fp) allow.node_report_latest = latest.fp;
-    }
-  } catch {}
   // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
   // Chaves:
   // - virtus_step_<perfil>: dados/perfis/<perfil>/virtus-step.log

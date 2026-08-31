@@ -212,6 +212,15 @@ function install(opts) {
     try { heartTimer.unref(); } catch {}
   }
 
+  try {
+    require("./winHandlePulse.js").install({
+      role,
+      append,
+      intervalMs: 5 * 60 * 1000,
+      firstDelayMs: 45 * 1000
+    });
+  } catch {}
+
   return { ok: true, path: LIFE_PATH };
 }
 

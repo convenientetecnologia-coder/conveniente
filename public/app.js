@@ -8,7 +8,14 @@ const api = {
   configure:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST' }).then(r => r.json()),
   startWork:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method: 'POST' }).then(r => r.json()),
   invokeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/invoke-human`, { method: 'POST' }).then(r => r.json()),
-  robePlay:        (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-play`, { method: 'POST' }).then(r => r.json()),
+  robePlay: async (nome) => {
+    const res = await fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-play`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data || data.ok !== true) {
+      throw new Error((data && data.error) || `robe_play_http_${res.status}`);
+    }
+    return data;
+  },
   robePause24h:    (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-24h`,   { method: 'POST' }).then(r => r.json()),
   criarPerfil:     (dados) => fetch('/api/perfis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dados) }).then(r => r.json()),
   listarCidades:   () => fetch('/api/cidades').then(r=>r.json()).then(d => (d && Array.isArray(d.cidades) ? d.cidades : [])),

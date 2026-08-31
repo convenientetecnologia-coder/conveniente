@@ -121,6 +121,43 @@ function detachLater(openP) {
     .catch(() => {});
 }
 
+/**
+ * Só sessão EXTRA (createCDPSession). NUNCA page._client() — isso é o fio
+ * primário do Puppeteer; detach nele deixa a page surda.
+ * O ouvido Delta (ctrl.deltaCdpSession) NÃO passa por aqui: é 1/conta e
+ * vive com a page; quem fecha é __deltaDetachCdpSession.
+ */
+async function detachCdpSession(session) {
+  try {
+    if (session && typeof session.detach === "function") await session.detach();
+  } catch {}
+}
+
+function resolveCdpTarget(targetOrPage) {
+  if (targetOrPage && typeof targetOrPage.createCDPSession === "function" && typeof targetOrPage.target !== "function") {
+    return targetOrPage;
+  }
+  try {
+    if (targetOrPage && typeof targetOrPage.target === "function") {
+      const t = targetOrPage.target();
+      if (t && typeof t.createCDPSession === "function") return t;
+    }
+  } catch {}
+  return null;
+}
+
+async function withEphemeralCdpSession(targetOrPage, fn) {
+  let session = null;
+  try {
+    const target = resolveCdpTarget(targetOrPage);
+    if (!target) return null;
+    session = await target.createCDPSession();
+    return await fn(session);
+  } finally {
+    await detachCdpSession(session);
+  }
+}
+
 function shouldRecoverCrashedPage({ isMain, alreadyClosed, browserConnected } = {}) {
   if (!isMain) return alreadyClosed ? "none" : "close_tab";
   if (alreadyClosed && !browserConnected) return "none";
@@ -235,5 +272,7 @@ module.exports = {
   attachErrorSink,
   shouldRecoverCrashedPage,
   isPuppeteerPageCrash,
+  detachCdpSession,
+  withEphemeralCdpSession,
   _resetForTests
 };

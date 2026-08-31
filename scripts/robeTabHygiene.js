@@ -14,6 +14,26 @@ const provisionAudit = (() => {
   try { return require("./provisionAudit.js"); } catch { return null; }
 })();
 const facebookNavHosts = require("./facebookNavHosts.js");
+const chromeHeapFaxina = (() => {
+  try { return require("./chromeHeapFaxina.js"); } catch { return null; }
+})();
+
+async function detachEphemeralCdp(session) {
+  try {
+    if (chromeHeapFaxina && typeof chromeHeapFaxina.detachCdpSession === "function") {
+      await chromeHeapFaxina.detachCdpSession(session);
+      return;
+    }
+    if (session && typeof session.detach === "function") await session.detach();
+  } catch {}
+}
+
+function detachCdpWhenSettled(openP) {
+  if (!openP || typeof openP.then !== "function") return;
+  Promise.resolve(openP)
+    .then((s) => detachEphemeralCdp(s))
+    .catch(() => {});
+}
 
 function isBlankUrl(url) {
   const u = String(url || "").trim();
@@ -358,6 +378,7 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
   let blankKept = false;
   let swapExtraKept = false;
   let session = null;
+  try {
   for (let i = pageTargets.length - 1; i >= 0; i--) {
     if (i === keepIdx) continue;
     const t = pageTargets[i];
@@ -401,10 +422,16 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
     if (!tid) continue;
     try {
       if (!session) {
-        session = await Promise.race([
-          browser.target().createCDPSession(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 1500))
-        ]);
+        const openP = browser.target().createCDPSession();
+        try {
+          session = await Promise.race([
+            openP,
+            new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 1500))
+          ]);
+        } catch (e) {
+          detachCdpWhenSettled(openP);
+          throw e;
+        }
       }
       await Promise.race([
         session.send("Target.closeTarget", { targetId: tid }),
@@ -427,6 +454,9 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
     } catch {}
   }
   return { closed };
+  } finally {
+    await detachEphemeralCdp(session);
+  }
 }
 
 /**
@@ -625,17 +655,27 @@ async function safeClosePage(page, { nome = "", reason = "" } = {}) {
     } catch {}
   }
 
-  // 2) stopLoading com teto
+  // 2) stopLoading com teto — sessão EXTRA; detach no finally (nunca page._client())
+  let stopClient = null;
+  const stopOpenP = (() => {
+    try { return page.target().createCDPSession(); } catch { return null; }
+  })();
   try {
-    const client = await Promise.race([
-      page.target().createCDPSession(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_timeout")), 1500))
-    ]);
-    await Promise.race([
-      client.send("Page.stopLoading").catch(() => {}),
-      new Promise((r) => setTimeout(r, 800))
-    ]);
-  } catch {}
+    if (stopOpenP) {
+      stopClient = await Promise.race([
+        stopOpenP,
+        new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_timeout")), 1500))
+      ]);
+      await Promise.race([
+        stopClient.send("Page.stopLoading").catch(() => {}),
+        new Promise((r) => setTimeout(r, 800))
+      ]);
+    }
+  } catch {
+    if (!stopClient) detachCdpWhenSettled(stopOpenP);
+  } finally {
+    await detachEphemeralCdp(stopClient);
+  }
 
   // 3) close direto + verificação (CDP pendurado não pode mentir sucesso)
   let closed = false;
@@ -729,12 +769,12 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
   if (Number(browser._convenienteGateInFlight || 0) > 0) return { closed: 0, failed: 0 };
   let closed = 0;
   let failed = 0;
+  let session = null;
   try {
     const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
     const pageTargets = targets.filter((t) => {
       try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
     });
-    let session = null;
     for (const t of pageTargets) {
       let u = "";
       try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
@@ -757,10 +797,16 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
       try {
         if (!tid) { failed++; continue; }
         if (!session) {
-          session = await Promise.race([
-            browser.target().createCDPSession(),
-            new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 2000))
-          ]);
+          const openP = browser.target().createCDPSession();
+          try {
+            session = await Promise.race([
+              openP,
+              new Promise((_, rej) => setTimeout(() => rej(new Error("cdp_session_timeout")), 2000))
+            ]);
+          } catch (e) {
+            detachCdpWhenSettled(openP);
+            throw e;
+          }
         }
         await Promise.race([
           session.send("Target.closeTarget", { targetId: tid }),
@@ -784,7 +830,10 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
         }
       } catch {}
     }
-  } catch {}
+  } catch {
+  } finally {
+    await detachEphemeralCdp(session);
+  }
   return { closed, failed };
 }
 

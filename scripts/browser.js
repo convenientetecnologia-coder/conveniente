@@ -108,10 +108,11 @@ async function bringWindowToFront(page) {
   try {
     await page.bringToFront();
     if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) return;
-    const client = await page.target().createCDPSession();
-    const { windowId } = await client.send('Browser.getWindowForTarget');
-    await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-    await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+    await chromeHeapFaxina.withEphemeralCdpSession(page, async (client) => {
+      const { windowId } = await client.send('Browser.getWindowForTarget');
+      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+    });
   } catch (e) {
     const msg = (e && e.message) || String(e);
     if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) — skip maximizar', { err: msg.slice(0, 80) });
@@ -862,11 +863,14 @@ async function patchPage(nome, page, coords) {
   }
   await page.setUserAgent(ua);
   if (uaCh && uaCh.brands) {
-    const client = await page.target().createCDPSession();
-    await client.send('Network.setUserAgentOverride', {
-      userAgent: ua,
-      userAgentMetadata: uaCh,
+    const sent = await chromeHeapFaxina.withEphemeralCdpSession(page, async (client) => {
+      await client.send('Network.setUserAgentOverride', {
+        userAgent: ua,
+        userAgentMetadata: uaCh,
+      });
+      return true;
     });
+    if (!sent) throw new Error('patchPage_ua_ch_no_cdp');
   }
 
   // Viewport/DPR do preset (antes era lido e descartado — tela virava a da MAE).
@@ -2423,17 +2427,18 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // 2) Janela = preset (não maximizar no monitor da MAE)
     try {
       const first = (await browser.pages())[0];
-      const client = await first.target().createCDPSession();
-      const { windowId } = await client.send('Browser.getWindowForTarget');
-      await client.send('Browser.setWindowBounds', {
-        windowId,
-        bounds: {
-          windowState: 'normal',
-          left: windowBounds.left,
-          top: windowBounds.top,
-          width: windowBounds.width,
-          height: windowBounds.height
-        }
+      await chromeHeapFaxina.withEphemeralCdpSession(first, async (client) => {
+        const { windowId } = await client.send('Browser.getWindowForTarget');
+        await client.send('Browser.setWindowBounds', {
+          windowId,
+          bounds: {
+            windowState: 'normal',
+            left: windowBounds.left,
+            top: windowBounds.top,
+            width: windowBounds.width,
+            height: windowBounds.height
+          }
+        });
       });
       if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela no preset [OK]');
     } catch (e) {
@@ -2472,9 +2477,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       const pagesNow = await browser.pages();
       const firstMax = pagesNow && pagesNow[0];
       if (firstMax) {
-        const clientMax = await firstMax.target().createCDPSession();
-        const { windowId } = await clientMax.send('Browser.getWindowForTarget');
-        await clientMax.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+        await chromeHeapFaxina.withEphemeralCdpSession(firstMax, async (clientMax) => {
+          const { windowId } = await clientMax.send('Browser.getWindowForTarget');
+          await clientMax.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+        });
         try { await glassViewer.applyGlassViewer(firstMax, { source: 'openBrowser' }); } catch {}
       }
     } catch (e) {
