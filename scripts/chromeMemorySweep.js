@@ -100,9 +100,10 @@ function runStandbySweep(opts) {
         done({ ok: false, error: String((e && e.message) || e || "spawn_error").slice(0, 180) });
       });
       proc.on("close", (code, signal) => {
+        const codeN = code == null ? null : Number(code);
         done({
-          ok: true,
-          code: code == null ? null : Number(code),
+          ok: codeN === 0,
+          code: codeN,
           signal: signal == null ? null : String(signal),
           killed: false
         });
@@ -167,6 +168,7 @@ function attachHostCoordinator(opts) {
   let waitingIdle = false;
   let hostArmed = false;
   let busyRetryMs = 15_000;
+  let failStreak = 0;
   let stopped = false;
 
   function clearTimers() {
@@ -287,6 +289,9 @@ function attachHostCoordinator(opts) {
       if (!confirm.allIdle) {
         jsonlFn({ event: "skip_race", reason, dueAgeMin: ageMin(), reasons: confirm.reasons });
         logFn("[OXY-LOG] [STANDBY-SWEEP] skip_race reasons=" + confirm.reasons.join("|"));
+        if (!busyNeedsStitch(confirm.reasons)) {
+          await releaseHost("skip_race_no_stitch");
+        }
         waitingIdle = true;
         scheduleBusyRetry();
         return { skipped: true, reason: "skip_race", reasons: confirm.reasons };
@@ -321,15 +326,45 @@ function attachHostCoordinator(opts) {
       if (!(sweep && sweep.error === "exe_missing")) {
         await settleFn(SETTLE_MS);
       }
-      await releaseHost("release", { sweepOk: !!(sweep && sweep.ok) });
-      logFn("[OXY-LOG] [ESTEIRA-LIBERADA] RAM limpa com sucesso. Retomando fluxo. settleMs=" + SETTLE_MS);
-      jsonlFn({ event: "release", ok: !!(sweep && sweep.ok), settleMs: SETTLE_MS, shards });
+      const sweepOk = !!(sweep && sweep.ok);
+      await releaseHost("release", { sweepOk });
+      if (sweepOk) {
+        logFn("[OXY-LOG] [ESTEIRA-LIBERADA] RAM limpa com sucesso. Retomando fluxo. settleMs=" + SETTLE_MS);
+      } else {
+        logFn("[OXY-LOG] [ESTEIRA-LIBERADA] Retomando fluxo. settleMs=" + SETTLE_MS);
+      }
+      jsonlFn({ event: "release", ok: sweepOk, settleMs: SETTLE_MS, shards });
 
-      lastOkAt = nowFn();
-      waitingIdle = false;
-      busyRetryMs = 15_000;
-      scheduleDue();
-      return { ok: !!(sweep && sweep.ok), sweep };
+      if (sweepOk || (sweep && sweep.error === "exe_missing")) {
+        failStreak = 0;
+        lastOkAt = nowFn();
+        waitingIdle = false;
+        busyRetryMs = 15_000;
+        try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
+        busyRetryTimer = null;
+        scheduleDue();
+        return { ok: sweepOk, sweep };
+      }
+
+      failStreak += 1;
+      if (failStreak >= 2) {
+        failStreak = 0;
+        lastOkAt = nowFn();
+        waitingIdle = false;
+        busyRetryMs = 15_000;
+        try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
+        busyRetryTimer = null;
+        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail_give_up nextDueMin=15");
+        jsonlFn({ event: "exe_fail_give_up", error: (sweep && sweep.error) || "fail", shards });
+        scheduleDue();
+        return { ok: false, sweep, retried: true };
+      }
+
+      busyRetryMs = 30_000;
+      logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail_retry waitMs=30000");
+      jsonlFn({ event: "exe_fail_retry", error: (sweep && sweep.error) || "fail", shards });
+      scheduleBusyRetry();
+      return { ok: false, sweep, retry: true };
     } catch (e) {
       try { await releaseHost("exception"); } catch {}
       jsonlFn({ event: "exception", error: String((e && e.message) || e || "fail").slice(0, 180) });

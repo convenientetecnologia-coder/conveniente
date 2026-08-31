@@ -78,6 +78,20 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
 
   {
     const out = await sweep.runStandbySweep({
+      exe: "mock-fail",
+      timeoutMs: 800,
+      spawnFn: () => {
+        const ee = new EventEmitter();
+        ee.kill = () => {};
+        setTimeout(() => ee.emit("close", 1, null), 15);
+        return ee;
+      }
+    });
+    check("exe_nonzero_not_ok", !!(out && out.ok === false && out.code === 1), out);
+  }
+
+  {
+    const out = await sweep.runStandbySweep({
       exe: "mock-hang",
       timeoutMs: 1000,
       spawnFn: () => {
@@ -259,6 +273,70 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
     const r = await coord.tryAttempt("empty");
     check("no_shards_skips", !!(r && r.skipped && r.reason === "no_shards") && sweeps === 0, r);
     check("no_shards_no_250_spin", coord._test.dueWaitMs() >= 400, coord._test.dueWaitMs());
+    coord.stop();
+  }
+
+  {
+    let sweeps = 0;
+    let held = false;
+    let probes = 0;
+    let now = 110_000;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async (type) => {
+        if (type === "standby-sweep-probe") {
+          probes += 1;
+          if (probes === 1) return [{ ok: true, busy: false }];
+          return [{ ok: true, busy: true, reasons: ["human:op"] }];
+        }
+        if (type === "standby-sweep-arm") { held = true; return [{ ok: true }]; }
+        if (type === "standby-sweep-release") { held = false; return [{ ok: true }]; }
+        return [{ ok: true }];
+      },
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 1 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    const r = await coord.tryAttempt("race_human");
+    check("skip_race_human_no_sweep", !!(r && r.skipped && r.reason === "skip_race") && sweeps === 0, r);
+    check("skip_race_human_releases", held === false && coord._test.hostArmed === false);
+    coord.stop();
+  }
+
+  {
+    let runs = 0;
+    let now = 120_000;
+    const lastOkBefore = now - 2000;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async (type) => {
+        if (type === "standby-sweep-probe") return [{ ok: true, busy: false }];
+        if (type === "standby-sweep-arm") return [{ ok: true }];
+        if (type === "standby-sweep-release") return [{ ok: true }];
+        return [{ ok: true }];
+      },
+      shardCount: () => 1,
+      runSweep: async () => {
+        runs += 1;
+        if (runs === 1) return { ok: false, error: "exe_timeout", killed: true, elapsedMs: 30 };
+        return { ok: true, elapsedMs: 4 };
+      },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = lastOkBefore;
+    const first = await coord.tryAttempt("fail1");
+    check("exe_fail_releases_and_retries", !!(first && first.retry === true && first.ok === false) && coord._test.hostArmed === false, first);
+    check("exe_fail_does_not_advance_clock", coord._test.lastOkAt === lastOkBefore, coord._test.lastOkAt);
+    const second = await coord.tryAttempt("fail_retry");
+    check("exe_fail_retry_succeeds", !!(second && second.ok === true) && runs === 2, second);
+    check("exe_ok_rearms_15min_clock", coord._test.lastOkAt === now && coord._test.dueWaitMs() === 1000, coord._test.dueWaitMs());
     coord.stop();
   }
 
