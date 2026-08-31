@@ -15,6 +15,8 @@
  *   - Teto de segurança 30s + kill se travar. SETTLE_MS=2000 DEPOIS do exe.
  *
  * NÃO lê métricas de sistema (CPU, RAM livre, load). Gatilho = relógio + ociosidade.
+ *
+ * Porteiro v5.2.0-nomem NÃO dispara DiskClean. Este módulo é o dono único no host.
  */
 
 const { spawn } = require("child_process");

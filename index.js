@@ -4521,6 +4521,18 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     } catch {}
     // Retoma cadastros aceitos e ainda pendentes após restart.
     try { __edgeKickStockProvisionPump(); } catch {}
+
+    // Porteiro: se C:\auto_vigia ainda tem o limpador, copia v5.2.0-nomem e recicla o loop.
+    // Nao mata Node. Se o loop estiver elevado, o arquivo novo entra no reboot 04:00.
+    try {
+      setImmediate(() => {
+        try {
+          require('./scripts/porteiroSync.js').sync({ reason: 'index_boot' });
+        } catch (e) {
+          try { logger.warn('[PORTEIRO-SYNC] falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+        }
+      });
+    } catch {}
   });
 })();
 

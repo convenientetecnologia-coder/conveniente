@@ -61,8 +61,22 @@ $Shortcut.IconLocation = "$PWD\icon.png"
 $Shortcut.Save()
 Log "Atalho criado na Área de Trabalho: Iniciar Conveniente"
 
-# 6. Pronto!
+# 6. Porteiro (reboot 04:00, lixeira, AUTO_BOOT). StandbyList NAO entra no Porteiro.
+$porteiro = Join-Path $PWD "instalar_porteiro.ps1"
+if (Test-Path -LiteralPath $porteiro) {
+    Log "Instalando Porteiro v5.2.0-nomem (MemClean=OFF; pede admin uma vez)..."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $porteiro
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        Log "AVISO: Porteiro nao instalou (codigo $LASTEXITCODE). Rode depois: $porteiro"
+    } else {
+        Log "Porteiro instalado (C:\auto_vigia). RAM/StandbyList fica no Conveniente."
+    }
+} else {
+    Log "AVISO: instalar_porteiro.ps1 ausente neste clone."
+}
+
+# 7. Pronto!
 Log "INSTALAÇÃO FINALIZADA!"
 Log "Para rodar, basta clicar 2x no ícone 'Iniciar Conveniente' na sua Área de Trabalho!"
 Start-Sleep -Seconds 2
-[System.Windows.MessageBox]::Show("Conveniente instalado!\nClique no ícone 'Iniciar Conveniente' na Área de Trabalho.", "Conveniente — Instalado", 0, 64)
+[System.Windows.MessageBox]::Show("Conveniente + Porteiro instalados.`nClique no icone 'Iniciar Conveniente'.`nRAM: Conveniente. Reboot 04:00: Porteiro.", "Conveniente — Instalado", 0, 64)

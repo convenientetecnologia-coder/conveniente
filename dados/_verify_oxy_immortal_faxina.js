@@ -395,6 +395,8 @@ faxina._resetForTests();
     const path = require("path");
     execFileSync(process.execPath, [path.join(__dirname, "_verify_standby_sweep.js")], { stdio: "inherit" });
     check("standby_sweep_unit", true);
+    execFileSync(process.execPath, [path.join(__dirname, "_verify_porteiro_nomem.js")], { stdio: "inherit" });
+    check("porteiro_nomem_unit", true);
   }
 
   if (fail) {

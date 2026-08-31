@@ -1,0 +1,76 @@
+========================================
+MANUTENCAO WINDOWS v5.2.0-nomem
+========================================
+
+NAO altera C:\conveniente.
+NAO limpa StandbyList / RAM. Isso ficou no Conveniente
+(scripts\chromeMemorySweep.js no processo index).
+
+FONTE CANONICA (servidor novo e MAE):
+  C:\conveniente\porteiro\   (repo GitHub do Conveniente)
+  Instalador: C:\conveniente\instalar_porteiro.ps1
+
+INSTALAR / ATUALIZAR NO SERVIDOR (caminho novo — junto com o Conveniente):
+  1) irm https://raw.githubusercontent.com/convenientetecnologia-coder/conveniente/main/instalar_conveniente.ps1 | iex
+  2) Fecha o PowerShell, reabre, cola o bloco SERVIDOR NOVO (veja CONTRATO.txt
+     em C:\conveniente\porteiro\CONTRATO.txt). Esse bloco clona, npm install
+     E instala o Porteiro (pede admin uma vez, para as tarefas ao logon).
+
+INSTALAR / ATUALIZAR SO O PORTEIRO (MAE que ja tem Conveniente):
+  powershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\instalar_porteiro.ps1
+  STATUS deve mostrar:
+       Ver=v5.2.0-nomem
+       MemClean=OFF
+       RebootDaily=04:00-04:20
+  O Setup NAO reinicia o PC (reboot so na janela 04:00).
+  Nao apague C:\conveniente.
+
+CAMINHO ANTIGO (esta pasta na area de trabalho):
+  1) Botao direito em Setup_Manutencao.bat -> Executar como administrador
+  Continua valido. O kit aqui e o mesmo v5.2.0-nomem, sem limpador.
+
+DESLIGAR REBOOT EM 1 PC (ex.: notebook de trabalho):
+  Crie o arquivo: C:\auto_vigia\NO_REBOOT.flag
+  STATUS deve mostrar: RebootDaily=DESLIGADO
+  (servidores SEM esse arquivo continuam reiniciando)
+
+CONTEUDO DESTA PASTA:
+  Setup_Manutencao.bat   <- instalador local
+  LEIA-ME.txt
+  INICIAR_SISTEMA.bat
+  PARAR_SISTEMA.bat
+  STATUS.bat
+  kit\manutencao.ps1     <- porteiro (sem DiskClean)
+  kit\install.ps1        <- usado pelo Setup
+
+O QUE O SETUP INSTALA:
+  C:\auto_vigia\manutencao.ps1
+  Tarefa: ConvenientePorteiro (ao logon)
+  Tarefa: ConvenienteNetBoot (startup SYSTEM - checa rede em TODO boot)
+  Atalhos no Desktop: PARAR / INICIAR / STATUS
+
+REBOOT DIARIO:
+  - So entre 04:00 e 04:20: limpa TEMP+Lixeira e reinicia (1x/dia)
+  - Instalar de tarde/noite NAO dispara reboot
+
+GUARDA DE REDE (TODO BOOT) — remedio = so reiniciar:
+  - Espera 4 min apos ligar
+  - Testa internet 4 vezes (nao reinicia por 1 ping falho)
+  - So reinicia se a placa sumiu de verdade (lista vazia)
+  - Max 1 reboot extra por dia; se ainda falhar, para
+  - ConvenienteNetBoot (SYSTEM) + porteiro no logon
+
+MEMORIA (StandbyList):
+  - REMOVIDO deste loop. Nao chama DiskClean.exe.
+  - Dono: Conveniente (index), a cada 15 min se a fazenda estiver ociosa.
+  - No log do porteiro: ACTION=...mem_off (prova de que nao limpou RAM)
+
+DISCO:
+  - Madrugada: 1x/dia 04:30-06:00 (horario diferente por maquina)
+  - Emergencia de dia: so se livre < 4 GB (max 5h+offset, CPU <= 40%)
+  - TEMP + Lixeira apenas (nao mata Chrome)
+
+AUTO_BOOT:
+  - Se o Conveniente estiver down 2 ciclos (~6 min), sobe de novo.
+  - Se JA estiver ligado, NUNCA sobe segundo index.js.
+  - PARAR / INICIAR / STATUS continuam iguais.
