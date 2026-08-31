@@ -72,25 +72,30 @@ check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.
 check("sync_sourceIsNomem_rejects_old", sync.sourceIsNomem("Invoke-SoftMemClean DiskClean.exe /StandbyList mem_soft") === false);
 check("destLooksLikeOld", sync.destLooksLikeOldMemClean("return 'mem_soft'") === true);
 
-const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, loopAlive: false, tasksOk: false });
+const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, taskRunning: false, tasksOk: false });
 check("plan_fresh_copies", fresh.copy === true && fresh.restartLoop === true && fresh.installTasks === true);
 
-const maeOld = sync.planEnsure({ destExists: true, destOld: true, hashEqual: false, loopAlive: true, tasksOk: true });
+const maeOld = sync.planEnsure({ destExists: true, destOld: true, hashEqual: false, taskRunning: true, tasksOk: true });
 check("plan_mae_old_no_uac", maeOld.copy === true && maeOld.restartLoop === true && maeOld.installTasks === false);
 
-const ok = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: true, tasksOk: true, runningNomem: true });
+const ok = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: true });
 check("plan_already_ok_idle", ok.copy === false && ok.restartLoop === false && ok.installTasks === false);
 
-const staleMem = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: true, tasksOk: true, runningNomem: false });
+const staleMem = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: false });
 check("plan_stale_inmemory_restarts", staleMem.copy === false && staleMem.restartLoop === true && staleMem.installTasks === false);
 
-const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: false, tasksOk: true, runningNomem: false });
+const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: false, tasksOk: true, runningNomem: false });
 check("plan_loop_dead_restarts", dead.copy === false && dead.restartLoop === true && dead.installTasks === false);
 
-const unknownLog = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, loopAlive: true, tasksOk: true, runningNomem: null });
+const unknownLog = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: null });
 check("plan_unknown_log_does_not_kill_alive", unknownLog.copy === false && unknownLog.restartLoop === false && unknownLog.installTasks === false);
 
 check("sync_windows_owns_loop", /schtasks\.exe/.test(syncTxt) && /\/Run/.test(syncTxt));
+check("sync_ends_task_before_run", /\/End/.test(syncTxt) && /ConvenientePorteiro/.test(syncTxt));
+check("sync_deletes_old_limpeza_task", /LimpezaAutomaticaConveniente/.test(syncTxt));
+check("sync_kills_old_kit", /porteiro_loop/.test(syncTxt) && /limpeza_memoria/.test(syncTxt) && /vigia\.bat/.test(syncTxt));
+check("kit_rival_kill", /function Stop-RivalVigia/.test(kitTxt) && /rival_kill/.test(kitTxt));
+check("kit_no_exit_if_lock_held", !/exit 0/.test(kitTxt.split("function Do-Loop")[1] || ""));
 check("sync_no_always_restart_on_index_boot", !/index_boot['\"]\) plan\.restartLoop = true/.test(syncTxt) && !/always recicla o loop/.test(syncTxt));
 check("last_boot_nomem_true", sync.lastBootLineIsNomem("2026-08-31 18:00:00 [X][v5.2.0-nomem] BOOT v5.2.0-nomem reboot=04:00") === true);
 check("last_boot_old_false", sync.lastBootLineIsNomem("2026-08-31 17:42:31 [X][v5.1.13-reboot] BOOT v5.1.13-reboot reboot=04:00") === false);

@@ -561,20 +561,36 @@ function Do-Status {
     Write-Host "Log=C:\auto_vigia\logs\porteiro.log"
 }
 
+function Stop-RivalVigia {
+    # Este loop e Highest. O index comum NAO consegue matar o velho.
+    # Qualquer outro vigia auto_vigia (loop, porteiro_loop, vigia.bat, limpeza_memoria) morre aqui.
+    $my = $PID
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessId -ne $my -and $_.CommandLine -and (
+            $_.CommandLine -match 'porteiro_loop\.ps1|limpeza_memoria\.ps1|auto_vigia\\vigia\.bat|manutencao\.ps1 -Action loop|manutencao\.ps1" -Action loop'
+        ) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install)')
+    } | ForEach-Object {
+        $rid = [int]$_.ProcessId
+        Stop-Process -Id $rid -Force -ErrorAction SilentlyContinue
+        Write-Log "rival_kill pid=$rid"
+    }
+}
+
 function Do-Loop {
     Ensure-Dirs
-    # instancia unica — so conta se o PID do lock ainda e o porteiro (anti reuso de PID apos reboot)
+    Stop-RivalVigia
     if (Test-Path $LockFile) {
         try {
             $old = [int]((Get-Content $LockFile -Raw).Trim())
-            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
-            if ($proc -and ([string]$proc.CommandLine) -match 'auto_vigia\\manutencao') {
-                exit 0
+            if ($old -gt 0 -and $old -ne $PID) {
+                Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
+                if ($old -ne $PID) { Write-Log "lock_kill pid=$old" }
             }
         } catch {}
         Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
     }
     $PID | Set-Content $LockFile -Encoding ASCII
+    Stop-RivalVigia
 
     Set-MaxPerf
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }

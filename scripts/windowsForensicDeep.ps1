@@ -159,7 +159,7 @@ function Get-PorteiroHistory {
             $result.modifiedUtc = $item.LastWriteTimeUtc.ToString('o')
             $lines = @(Get-Content -LiteralPath $candidate -Tail 20000 -ErrorAction SilentlyContinue)
             $hits = @($lines | Where-Object {
-                $_ -match '(?i)BOOT|down_wait|AUTO start|AUTO_BOOT|MANUAL start|MANUAL stop|PARADO|mem_soft|reboot|ERROR'
+                $_ -match '(?i)BOOT|down_wait|AUTO start|AUTO_BOOT|MANUAL start|MANUAL stop|PARADO|mem_soft|mem_off|rival_kill|reboot|ERROR'
             } | Select-Object -Last 2000)
             $rows = @()
             foreach ($line in $hits) {
@@ -171,6 +171,8 @@ function Get-PorteiroHistory {
                 elseif ($text -match '(?i)MANUAL start') { $kind = 'manual_start' }
                 elseif ($text -match '(?i)MANUAL stop|PARADO') { $kind = 'manual_stop' }
                 elseif ($text -match '(?i)mem_soft') { $kind = 'mem_soft' }
+                elseif ($text -match '(?i)mem_off') { $kind = 'mem_off' }
+                elseif ($text -match '(?i)rival_kill') { $kind = 'rival_kill' }
                 elseif ($text -match '(?i)\bBOOT\b') { $kind = 'porteiro_boot' }
                 elseif ($text -match '(?i)reboot') { $kind = 'reboot' }
                 elseif ($text -match '(?i)ERROR') { $kind = 'error' }

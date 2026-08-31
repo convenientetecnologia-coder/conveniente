@@ -7,9 +7,10 @@
  * O index NÃO é o dono do Porteiro. O index só CORRIGE a versão uma vez:
  *   - arquivo errado/velho (mem_soft) → copia v5.2.0-nomem
  *   - loop morto → dispara a tarefa Windows (não fica filho do Node)
- *   - loop vivo ainda no BOOT v5.1.13 (script novo no disco, processo velho
- *     em memória) → mata SÓ o loop e a tarefa Windows sobe o correto
- *   - já nomem e vivo → NÃO mexe. O vigia continua sem o Conveniente.
+ *   - loop vivo ainda no BOOT v5.1.13 → schtasks /End + o loop novo (Highest)
+ *     mata qualquer rival (porteiro_loop, vigia.bat, limpeza_memoria, outro loop)
+ *   - já nomem, tarefa Running, último BOOT nomem → NÃO recicla o loop.
+ *     Ainda apaga kit velho (LimpezaAutomaticaConveniente, vigia.bat, …).
  *
  * Tarefas ao logon/startup ausentes: UAC uma vez (install.ps1). Sem isso o
  * reboot do PC não religa o Porteiro.
@@ -24,7 +25,6 @@ const { spawn, spawnSync } = require("child_process");
 
 const AUTO_VIGIA = "C:\\auto_vigia";
 const DEST_PS1 = path.join(AUTO_VIGIA, "manutencao.ps1");
-const LOCK_FILE = path.join(AUTO_VIGIA, "porteiro.lock");
 const PORTEIRO_LOG = path.join(AUTO_VIGIA, "logs", "porteiro.log");
 const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
@@ -101,13 +101,36 @@ function runningLoopIsNomem() {
   return lastBootLineIsNomem(readTail(PORTEIRO_LOG, 120000));
 }
 
-function planEnsure({ destExists, destOld, hashEqual, loopAlive, tasksOk, runningNomem }) {
+function planEnsure({ destExists, destOld, hashEqual, taskRunning, tasksOk, runningNomem }) {
   const copy = !destExists || !!destOld || !hashEqual;
-  // Log sem BOOT nao e prova de versao velha — nao mata um loop nomem saudavel.
-  const staleInMemory = !!loopAlive && runningNomem === false;
-  const restartLoop = copy || !loopAlive || staleInMemory;
+  const staleInMemory = runningNomem === false;
+  const restartLoop = copy || !taskRunning || staleInMemory;
   const installTasks = !tasksOk;
-  return { copy, restartLoop, installTasks };
+  const scrubOldKit = true;
+  return { copy, restartLoop, installTasks, scrubOldKit };
+}
+
+function taskState(name) {
+  if (process.platform !== "win32") return "MISSING";
+  const tn = String(name || "").replace(/'/g, "''");
+  try {
+    const r = spawnSync(PS_EXE, [
+      "-NoProfile",
+      "-Command",
+      "try { [string]((Get-ScheduledTask -TaskName '" + tn + "' -ErrorAction Stop).State) } catch { 'MISSING' }"
+    ], {
+      windowsHide: true,
+      timeout: 12000,
+      encoding: "utf8"
+    });
+    return String((r && r.stdout) || "").trim() || "MISSING";
+  } catch {
+    return "MISSING";
+  }
+}
+
+function taskIsRunning(name) {
+  return /^Running$/i.test(taskState(name));
 }
 
 function taskExists(name) {
@@ -128,64 +151,81 @@ function tasksOk() {
   return taskExists(TASK_LOOP) && taskExists(TASK_NET);
 }
 
-function loopLooksAlive() {
-  if (process.platform !== "win32") return false;
-  const script = [
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    "$alive = $false",
-    "$lock = 'C:\\auto_vigia\\porteiro.lock'",
-    "if (Test-Path -LiteralPath $lock) {",
-    "  try {",
-    "    $old = [int]((Get-Content -LiteralPath $lock -Raw).Trim())",
-    "    if ($old -gt 0) {",
-    "      $proc = Get-CimInstance Win32_Process -Filter \"ProcessId=$old\" -ErrorAction SilentlyContinue",
-    "      if ($proc -and ([string]$proc.CommandLine) -match 'auto_vigia\\\\manutencao') { $alive = $true }",
-    "    }",
-    "  } catch {}",
-    "}",
-    "if (-not $alive) {",
-    "  $hit = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-    "    $_.CommandLine -and ($_.CommandLine -match 'manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop')",
-    "  } | Select-Object -First 1",
-    "  if ($hit) { $alive = $true }",
-    "}",
-    "if ($alive) { 'ALIVE' } else { 'DEAD' }"
-  ].join("; ");
+function schtasksEnd(name) {
   try {
-    const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    spawnSync("schtasks.exe", ["/End", "/TN", String(name)], {
       windowsHide: true,
       timeout: 15000,
       encoding: "utf8"
     });
-    return /ALIVE/.test(String(r.stdout || ""));
-  } catch {
-    return false;
+  } catch {}
+}
+
+function schtasksDelete(name) {
+  try {
+    spawnSync("schtasks.exe", ["/Delete", "/TN", String(name), "/F"], {
+      windowsHide: true,
+      timeout: 15000,
+      encoding: "utf8"
+    });
+  } catch {}
+}
+
+const OLD_TASKS = ["LimpezaAutomaticaConveniente"];
+const OLD_FILES = [
+  "vigia.bat", "porteiro_loop.ps1", "node_control.ps1", "node_control_cli.ps1",
+  "lib_metrics.ps1", "lib_system.ps1", "limpeza_disco.ps1", "limpeza_memoria.ps1",
+  "iniciar_sistema.bat", "parar_sistema.bat", "status_sistema.bat", "aplicar_agora.ps1"
+];
+
+function scrubOldKitFiles() {
+  for (let i = 0; i < OLD_FILES.length; i++) {
+    try { fs.unlinkSync(path.join(AUTO_VIGIA, OLD_FILES[i])); } catch {}
   }
 }
 
-function stopLoopOnly() {
+function stopOldVigia({ endMainLoop }) {
+  for (let i = 0; i < OLD_TASKS.length; i++) {
+    schtasksEnd(OLD_TASKS[i]);
+    schtasksDelete(OLD_TASKS[i]);
+  }
+  if (endMainLoop) schtasksEnd(TASK_LOOP);
+
+  const endMain = !!endMainLoop;
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$lock = 'C:\\auto_vigia\\porteiro.lock'",
-    "if (Test-Path -LiteralPath $lock) {",
-    "  try {",
-    "    $old = [int]((Get-Content -LiteralPath $lock -Raw).Trim())",
-    "    if ($old -gt 0) { Stop-Process -Id $old -Force -ErrorAction SilentlyContinue }",
-    "  } catch {}",
-    "  Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue",
-    "}",
+    endMain ? [
+      "if (Test-Path -LiteralPath $lock) {",
+      "  try {",
+      "    $old = [int]((Get-Content -LiteralPath $lock -Raw).Trim())",
+      "    if ($old -gt 0) { Stop-Process -Id $old -Force -ErrorAction SilentlyContinue }",
+      "  } catch {}",
+      "  Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue",
+      "}"
+    ].join(" ") : "",
+    "$re = 'porteiro_loop\\.ps1|limpeza_memoria\\.ps1|auto_vigia\\\\vigia\\.bat|node_control\\.ps1'",
+    endMain ? "$re = $re + '|manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop|auto_vigia\\\\manutencao\\.ps1 -Action loop'" : "",
     "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-    "  $_.CommandLine -and ($_.CommandLine -match 'manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop')",
-    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-  ].join("; ");
+    "  $_.CommandLine -and ($_.CommandLine -match $re) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install)')",
+    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    endMain ? [
+      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
+      "  $_.Name -match '(?i)^DiskClean\\.exe$' -or ([string]$_.CommandLine -match '/StandbyList')",
+      "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    ].join(" ") : ""
+  ].filter(Boolean).join("; ");
+
   const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
     windowsHide: true,
     timeout: 20000,
     encoding: "utf8"
   });
+  try { scrubOldKitFiles(); } catch {}
   return {
     ok: !r.error && (r.status === 0 || r.status == null),
     status: r.status,
+    endMainLoop: endMain,
     error: r.error ? String(r.error.message || r.error) : null
   };
 }
@@ -294,10 +334,10 @@ function sync(opts) {
     }
   }
 
-  let loopAlive = false;
+  let taskRunning = false;
   let tasksPresent = false;
   let runningNomem = false;
-  try { loopAlive = loopLooksAlive(); } catch {}
+  try { taskRunning = taskIsRunning(TASK_LOOP); } catch {}
   try { tasksPresent = tasksOk(); } catch {}
   try { runningNomem = runningLoopIsNomem(); } catch {}
 
@@ -305,7 +345,7 @@ function sync(opts) {
     destExists,
     destOld,
     hashEqual,
-    loopAlive,
+    taskRunning,
     tasksOk: tasksPresent,
     runningNomem
   });
@@ -331,8 +371,10 @@ function sync(opts) {
     }
   }
 
+  try { stopOldVigia({ endMainLoop: false }); } catch {}
+
   if (plan.restartLoop) {
-    const stop = stopLoopOnly();
+    const stop = stopOldVigia({ endMainLoop: true });
     result.stop = stop;
     try { sleepMs(800); } catch {}
     try {
@@ -369,7 +411,7 @@ function sync(opts) {
     reason,
     plan,
     tasksPresent,
-    loopAliveBefore: loopAlive,
+    taskRunningBefore: taskRunning,
     runningNomemBefore: runningNomem,
     start: result.start || null
   });
