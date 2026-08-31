@@ -143,6 +143,11 @@ function armFailed(results) {
   return list.some((r) => !r || r.ok === false);
 }
 
+function busyNeedsStitch(reasons) {
+  const s = (Array.isArray(reasons) ? reasons : []).join(" ");
+  return /\brobe_exec\b|\bdelta_inflight\b|\bdelta_queue_running\b|\bdelta_queue\b|\bsend_lock\b|\bgate_inflight\b|\bcity_collect_bg\b|\bvirtus_starting\b/.test(s);
+}
+
 function attachHostCoordinator(opts) {
   const sendToAll = opts && opts.sendToAll;
   const shardCount = opts && opts.shardCount;
@@ -248,11 +253,20 @@ function attachHostCoordinator(opts) {
     try {
       if (shards < 1) {
         jsonlFn({ event: "skip_no_shards", reason });
+        lastOkAt = nowFn();
         scheduleDue();
         return { skipped: true, reason: "no_shards" };
       }
 
       const probe = collectBusy(await broadcast("standby-sweep-probe", { reason: "probe" }, 8000));
+      if (!probe.allIdle && !busyNeedsStitch(probe.reasons)) {
+        jsonlFn({ event: "waiting_idle", reason, dueAgeMin: ageMin(), reasons: probe.reasons, shards: probe.shards, armed: false });
+        logFn("[OXY-LOG] [STANDBY-SWEEP] waiting_idle no_arm dueAgeMin=" + ageMin() + " reasons=" + probe.reasons.join("|"));
+        waitingIdle = true;
+        scheduleBusyRetry();
+        return { skipped: true, reason: "waiting_idle", reasons: probe.reasons, armed: false };
+      }
+
       if (!await ensureArmed(shards)) {
         jsonlFn({ event: "abort_arm", reason, dueAgeMin: ageMin(), reasons: probe.reasons });
         logFn("[OXY-LOG] [STANDBY-SWEEP] abort_arm dueAgeMin=" + ageMin());
@@ -262,11 +276,11 @@ function attachHostCoordinator(opts) {
       }
 
       if (!probe.allIdle) {
-        jsonlFn({ event: "waiting_idle", reason, dueAgeMin: ageMin(), reasons: probe.reasons, shards: probe.shards });
+        jsonlFn({ event: "waiting_idle", reason, dueAgeMin: ageMin(), reasons: probe.reasons, shards: probe.shards, armed: true });
         logFn("[OXY-LOG] [STANDBY-SWEEP] waiting_idle dueAgeMin=" + ageMin() + " reasons=" + probe.reasons.join("|"));
         waitingIdle = true;
         scheduleBusyRetry();
-        return { skipped: true, reason: "waiting_idle", reasons: probe.reasons };
+        return { skipped: true, reason: "waiting_idle", reasons: probe.reasons, armed: true };
       }
 
       const confirm = collectBusy(await broadcast("standby-sweep-probe", { reason: "confirm" }, 8000));
@@ -355,7 +369,8 @@ function attachHostCoordinator(opts) {
       set waitingIdle(v) { waitingIdle = !!v; },
       get inFlight() { return inFlight; },
       get hostArmed() { return hostArmed; },
-      get minInterval() { return minInterval; }
+      get minInterval() { return minInterval; },
+      dueWaitMs() { return Math.max(250, lastOkAt + minInterval - nowFn()); }
     }
   };
 }
@@ -373,6 +388,7 @@ module.exports = {
   appendJsonl,
   oxyLog,
   collectBusy,
+  busyNeedsStitch,
   attachHostCoordinator,
   envDisabled
 };

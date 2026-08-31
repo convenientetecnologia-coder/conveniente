@@ -45,6 +45,9 @@ check("src_delta_busy", deltaSrc.includes("getSweepBusy") && deltaSrc.includes("
 check("src_robe_no_1500_poll", !/setTimeout\(\s*\(\)\s*=>\s*\{\s*try\s*\{\s*this\.tick\(\)/.test(robeSrc));
 check("src_robe_idle_hook", robeSrc.includes("setIdleHook") && robeSrc.includes("_emitIdle"));
 check("src_tag", workerSrc.includes("2026-08-31_standby_sweep_consciente_v1"));
+check("src_diskclean_spawn_only_sweep", /spawnFn\(exe/.test(sweepSrc) && !/DiskClean/.test(workerSrc) && !/DiskClean/.test(deltaSrc));
+check("src_arm_no_stopVirtus", !/async \['standby-sweep-arm'\][\s\S]{0,500}stopVirtus/.test(workerSrc));
+check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.includes("busyNeedsStitch"));
 
 (async () => {
   {
@@ -155,6 +158,107 @@ check("src_tag", workerSrc.includes("2026-08-31_standby_sweep_consciente_v1"));
     await sleep(450);
     check("idle_hint_sweeps", sweeps === 1, sweeps);
     check("hint_releases", workers[0].held === false);
+    coord.stop();
+  }
+
+  {
+    check("stitch_robe", sweep.busyNeedsStitch(["shard_0:robe_exec"]) === true);
+    check("stitch_delta", sweep.busyNeedsStitch(["shard_1:delta_inflight:conta"]) === true);
+    check("no_stitch_human", sweep.busyNeedsStitch(["shard_0:human:conta"]) === false);
+    check("no_stitch_config", sweep.busyNeedsStitch(["shard_0:config:conta"]) === false);
+    check("no_stitch_opening", sweep.busyNeedsStitch(["shard_0:opening"]) === false);
+    check("no_stitch_city_timer", sweep.busyNeedsStitch(["shard_0:city_collect_bg_timer"]) === false);
+    check("stitch_city_inflight", sweep.busyNeedsStitch(["shard_0:city_collect_bg"]) === true);
+  }
+
+  {
+    const now = 0;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 15 * 60 * 1000,
+      sendToAll: async () => [{ ok: true, busy: false }],
+      shardCount: () => 1,
+      runSweep: async () => ({ ok: true, elapsedMs: 1 }),
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    check("clock_first_due_15min", coord._test.dueWaitMs() === 15 * 60 * 1000, coord._test.dueWaitMs());
+    check("clock_not_250ms_spin", coord._test.dueWaitMs() > 60_000);
+    coord.stop();
+  }
+
+  {
+    let sweeps = 0;
+    let armCalls = 0;
+    let now = 80_000;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async (type) => {
+        if (type === "standby-sweep-arm") armCalls += 1;
+        return [{ ok: true, busy: true, reasons: ["human:op"] }];
+      },
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 1 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    const r = await coord.tryAttempt("human");
+    check("human_skips_without_arm", !!(r && r.skipped && r.armed === false) && armCalls === 0 && sweeps === 0, r);
+    check("human_does_not_freeze", coord._test.hostArmed === false);
+    coord.stop();
+  }
+
+  {
+    let sweeps = 0;
+    let now = 90_000;
+    const workers = [{ busy: false, held: false }];
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async (type) => workers.map((w) => {
+        if (type === "standby-sweep-probe") return { ok: true, busy: !!w.busy, reasons: [] };
+        if (type === "standby-sweep-arm") { w.held = true; return { ok: true }; }
+        if (type === "standby-sweep-release") { w.held = false; return { ok: true }; }
+        return { ok: true };
+      }),
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 2 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    await coord.tryAttempt("once");
+    check("one_sweep_on_due", sweeps === 1, sweeps);
+    coord._test.waitingIdle = true;
+    for (let i = 0; i < 30; i++) coord.idleHint();
+    await sleep(500);
+    check("hint_spam_does_not_resweep", sweeps === 1, sweeps);
+    const early = await coord.tryAttempt("again");
+    check("second_attempt_not_due", !!(early && early.skipped && early.reason === "not_due") && sweeps === 1, early);
+    coord.stop();
+  }
+
+  {
+    let sweeps = 0;
+    const coord = sweep.attachHostCoordinator({
+      now: () => 1000,
+      minIntervalMs: 500,
+      sendToAll: async () => [],
+      shardCount: () => 0,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 1 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = 0;
+    const r = await coord.tryAttempt("empty");
+    check("no_shards_skips", !!(r && r.skipped && r.reason === "no_shards") && sweeps === 0, r);
+    check("no_shards_no_250_spin", coord._test.dueWaitMs() >= 400, coord._test.dueWaitMs());
     coord.stop();
   }
 
