@@ -1,4 +1,4 @@
-﻿# C:\auto_vigia\manutencao.ps1  (fonte: kit\manutencao.ps1)
+# C:\auto_vigia\manutencao.ps1  (fonte: kit\manutencao.ps1)
 # TUDO-EM-UM: porteiro + start/stop/status
 # Nao altera C:\conveniente
 # Regra: se JA estiver ligado, NUNCA sobe de novo.

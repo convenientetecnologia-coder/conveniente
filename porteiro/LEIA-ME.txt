@@ -8,14 +8,17 @@ NAO limpa StandbyList / RAM. Isso ficou no Conveniente
 
 FONTE CANONICA (servidor novo e MAE):
   C:\conveniente\porteiro\   (repo GitHub do Conveniente)
-  Dono: o index.js. Voce so inicia o Conveniente.
+  Dono: o WINDOWS (tarefa ConvenientePorteiro ao logon).
+  O index.js NAO e o dono. Ele so CORRIGE a versao se o arquivo/loop
+  for o velho (mem_soft / v5.1.13). Se ja for v5.2.0-nomem e estiver
+  vivo, o index NAO mexe. O Porteiro continua com o Conveniente desligado.
 
 INSTALAR / ATUALIZAR:
   1) irm https://raw.githubusercontent.com/convenientetecnologia-coder/conveniente/main/instalar_conveniente.ps1 | iex
   2) Fecha o PowerShell, reabre, clona + npm (CONTRATO.txt).
-  3) Inicia o index. Ele instala o Porteiro se faltar, ou corrige se estiver velho.
-     Servidor novo: Windows pode pedir admin UMA vez (tarefas ao ligar).
-     MAE ja com Porteiro: sem UAC; so recicla o loop.
+  3) Inicia o index UMA vez pra gravar/corrigir o kit. Windows pode pedir
+     admin UMA vez se as tarefas ao ligar ainda nao existirem.
+     MAE ja com Porteiro correto: o index nao mexe no loop.
 
 CAMINHO ANTIGO (esta pasta na area de trabalho):
   1) Botao direito em Setup_Manutencao.bat -> Executar como administrador

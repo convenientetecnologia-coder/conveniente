@@ -1,15 +1,18 @@
 "use strict";
 
 /**
- * Dono único no boot do index: instala / atualiza / sobe o Porteiro.
+ * Porteiro = sistema WINDOWS à parte (tarefa ao logon + loop PowerShell).
+ * Vive sem o index.js: reboot 04:00, lixeira, AUTO_BOOT do Conveniente.
  *
- * Servidor novo: clone + npm + node index.js → cria C:\auto_vigia, copia o kit,
- * sobe o loop. Se as tarefas ao logon ainda não existem, pede admin UMA vez
- * (UAC) sem travar o painel. Não espera o clique.
+ * O index NÃO é o dono do Porteiro. O index só CORRIGE a versão uma vez:
+ *   - arquivo errado/velho (mem_soft) → copia v5.2.0-nomem
+ *   - loop morto → dispara a tarefa Windows (não fica filho do Node)
+ *   - loop vivo ainda no BOOT v5.1.13 (script novo no disco, processo velho
+ *     em memória) → mata SÓ o loop e a tarefa Windows sobe o correto
+ *   - já nomem e vivo → NÃO mexe. O vigia continua sem o Conveniente.
  *
- * MAE já com Porteiro: se o .ps1 estiver velho (mem_soft) ou hash diferente,
- * copia v5.2.0-nomem e recicla SÓ o loop. Não mata Node. Não mata Chrome.
- * Não pede UAC se ConvenientePorteiro + ConvenienteNetBoot já existem.
+ * Tarefas ao logon/startup ausentes: UAC uma vez (install.ps1). Sem isso o
+ * reboot do PC não religa o Porteiro.
  *
  * Kill switch: PORTEIRO_SYNC_DISABLED=1
  */
@@ -22,12 +25,14 @@ const { spawn, spawnSync } = require("child_process");
 const AUTO_VIGIA = "C:\\auto_vigia";
 const DEST_PS1 = path.join(AUTO_VIGIA, "manutencao.ps1");
 const LOCK_FILE = path.join(AUTO_VIGIA, "porteiro.lock");
+const PORTEIRO_LOG = path.join(AUTO_VIGIA, "logs", "porteiro.log");
 const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
 const INSTALLER_PS1 = path.join(__dirname, "..", "instalar_porteiro.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const TASK_LOOP = "ConvenientePorteiro";
 const TASK_NET = "ConvenienteNetBoot";
+const WANT_BOOT = "BOOT v5.2.0-nomem";
 
 function envDisabled() {
   return String(process.env.PORTEIRO_SYNC_DISABLED || "").trim() === "1";
@@ -67,9 +72,40 @@ function destLooksLikeOldMemClean(text) {
   return /Invoke-SoftMemClean/.test(text) || /DiskClean\.exe/i.test(text) || /ArgumentList\s+['"]\/StandbyList['"]/.test(text) || /\bmem_soft\b/.test(text);
 }
 
-function planEnsure({ destExists, destOld, hashEqual, loopAlive, tasksOk }) {
+function lastBootLineIsNomem(text) {
+  let last = "";
+  String(text || "").split(/\r?\n/).forEach((line) => {
+    if (/\bBOOT v/.test(line)) last = line;
+  });
+  if (!last) return null;
+  return last.indexOf(WANT_BOOT) >= 0;
+}
+
+function readTail(filePath, maxBytes) {
+  try {
+    const st = fs.statSync(filePath);
+    const size = Number(st.size || 0) || 0;
+    const n = Math.min(Math.max(4096, Number(maxBytes) || 80000), size);
+    const start = Math.max(0, size - n);
+    const buf = Buffer.alloc(n);
+    const fd = fs.openSync(filePath, "r");
+    try { fs.readSync(fd, buf, 0, n, start); } finally { try { fs.closeSync(fd); } catch {} }
+    return buf.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function runningLoopIsNomem() {
+  if (!fs.existsSync(PORTEIRO_LOG)) return null;
+  return lastBootLineIsNomem(readTail(PORTEIRO_LOG, 120000));
+}
+
+function planEnsure({ destExists, destOld, hashEqual, loopAlive, tasksOk, runningNomem }) {
   const copy = !destExists || !!destOld || !hashEqual;
-  const restartLoop = copy || !loopAlive;
+  // Log sem BOOT nao e prova de versao velha — nao mata um loop nomem saudavel.
+  const staleInMemory = !!loopAlive && runningNomem === false;
+  const restartLoop = copy || !loopAlive || staleInMemory;
   const installTasks = !tasksOk;
   return { copy, restartLoop, installTasks };
 }
@@ -154,7 +190,7 @@ function stopLoopOnly() {
   };
 }
 
-function startLoop() {
+function startLoopSpawn() {
   const child = spawn(PS_EXE, [
     "-NoProfile",
     "-WindowStyle", "Hidden",
@@ -167,7 +203,21 @@ function startLoop() {
     windowsHide: true
   });
   child.unref();
-  return { pid: child.pid || 0 };
+  return { via: "spawn", pid: child.pid || 0 };
+}
+
+function startLoopOwnedByWindows() {
+  if (taskExists(TASK_LOOP)) {
+    try {
+      const r = spawnSync("schtasks.exe", ["/Run", "/TN", TASK_LOOP], {
+        windowsHide: true,
+        timeout: 20000,
+        encoding: "utf8"
+      });
+      if (r.status === 0) return { via: "schtasks", ok: true };
+    } catch {}
+  }
+  return startLoopSpawn();
 }
 
 function requestTaskInstall() {
@@ -190,6 +240,15 @@ function requestTaskInstall() {
 
 function ensureDirs() {
   fs.mkdirSync(path.join(AUTO_VIGIA, "logs"), { recursive: true });
+}
+
+function sleepMs(ms) {
+  const n = Math.max(0, Math.min(5000, Number(ms) || 0));
+  if (n <= 0) return;
+  spawnSync(PS_EXE, ["-NoProfile", "-Command", "Start-Sleep -Milliseconds " + n], {
+    windowsHide: true,
+    timeout: n + 4000
+  });
 }
 
 function sync(opts) {
@@ -237,19 +296,19 @@ function sync(opts) {
 
   let loopAlive = false;
   let tasksPresent = false;
+  let runningNomem = false;
   try { loopAlive = loopLooksAlive(); } catch {}
   try { tasksPresent = tasksOk(); } catch {}
+  try { runningNomem = runningLoopIsNomem(); } catch {}
 
   const plan = planEnsure({
     destExists,
     destOld,
     hashEqual,
     loopAlive,
-    tasksOk: tasksPresent
+    tasksOk: tasksPresent,
+    runningNomem
   });
-  // Index boot: o .ps1 no disco nao muda o PowerShell ja em memoria.
-  // Sempre recicla o loop pra nao ficar v5.1.13 vivo com arquivo nomem.
-  if (reason === "index_boot") plan.restartLoop = true;
   result.plan = plan;
 
   try {
@@ -275,9 +334,10 @@ function sync(opts) {
   if (plan.restartLoop) {
     const stop = stopLoopOnly();
     result.stop = stop;
+    try { sleepMs(800); } catch {}
     try {
-      const start = startLoop();
-      result.loopPid = start.pid;
+      const start = startLoopOwnedByWindows();
+      result.start = start;
     } catch (e) {
       result.action = "copied_start_failed";
       result.hash = md5File(DEST_PS1).slice(0, 8);
@@ -294,9 +354,11 @@ function sync(opts) {
 
   result.ok = true;
   result.hash = (fs.existsSync(DEST_PS1) ? md5File(DEST_PS1) : srcHash).slice(0, 8);
+  result.runningNomemBefore = runningNomem;
   if (!destExists && plan.copy) result.action = "installed_fresh";
   else if (destOld) result.action = "upgraded_nomem";
   else if (plan.copy) result.action = "updated";
+  else if (plan.restartLoop && !runningNomem) result.action = "loop_loaded_nomem";
   else if (plan.restartLoop) result.action = "loop_restarted";
   else result.action = "already_nomem";
   if (plan.installTasks) result.action += "+tasks_uac";
@@ -307,7 +369,9 @@ function sync(opts) {
     reason,
     plan,
     tasksPresent,
-    loopAliveBefore: loopAlive
+    loopAliveBefore: loopAlive,
+    runningNomemBefore: runningNomem,
+    start: result.start || null
   });
   return result;
 }
@@ -317,6 +381,7 @@ module.exports = {
   envDisabled,
   sourceIsNomem,
   destLooksLikeOldMemClean,
+  lastBootLineIsNomem,
   planEnsure,
   SRC_PS1,
   DEST_PS1,

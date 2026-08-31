@@ -4522,8 +4522,8 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     // Retoma cadastros aceitos e ainda pendentes após restart.
     try { __edgeKickStockProvisionPump(); } catch {}
 
-    // Porteiro: o index e o dono. Se nao tem, instala. Se ta velho, corrige e sobe o loop.
-    // Nao mata Node. Tarefas ao logon: UAC uma vez so se ainda nao existirem.
+    // Porteiro e o vigia do Windows (tarefa ao logon). O index so corrige a versao.
+    // Nao mata Node. Se o loop ja e v5.2.0-nomem e esta vivo, nao mexe.
     try {
       setImmediate(() => {
         try {

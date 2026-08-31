@@ -1,49 +1,37 @@
-CONTRATO BLINDADO — Porteiro no boot do index
-============================================
-Data: 2026-08-31  (ensure no index)
+CONTRATO — Porteiro e o vigia do WINDOWS, nao filho do index
+============================================================
+Data: 2026-08-31
 
-O dono e o index.js. Voce nao roda comando extra do Porteiro.
+O Porteiro (C:\auto_vigia, tarefa ConvenientePorteiro ao logon) e um
+sistema a parte. Ele TEM que funcionar com o Conveniente DESLIGADO:
+  - reboot 04:00-04:20 + TEMP + Lixeira
+  - AUTO_BOOT: se o index nao estiver no ar, o Porteiro sobe o CMD
+  - NetGuard / ConvenienteNetBoot no startup
 
-1. SERVIDOR NOVO (MAE 8, 9, ...)
-   Passo A:
-     irm https://raw.githubusercontent.com/convenientetecnologia-coder/conveniente/main/instalar_conveniente.ps1 | iex
+O index.js NAO e o dono. O index so CORRIGE a versao quando voce liga
+o Conveniente:
+  - se o arquivo/loop for o velho (mem_soft / v5.1.13) → instala v5.2.0-nomem
+    e a TAREFA DO WINDOWS sobe o loop (schtasks /Run). Nao fica filho do Node.
+  - se ja for o correto e estiver vivo → o index NAO mexe.
 
-   Passo B — fecha o PowerShell, abre de novo, cola ISTO (igual ao de sempre):
+RAM/StandbyList: so o Conveniente (chromeMemorySweep no index).
 
+1. SERVIDOR NOVO
+   irm ... | iex
+   fecha, reabre:
      cd \
      if (Test-Path "C:\conveniente") { Remove-Item -Path "C:\conveniente" -Recurse -Force }
      git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
      cd C:\conveniente
      npm install
+   Inicia o index. Primeira vez: Windows pode pedir admin UMA vez (gravar
+   as tarefas ao ligar). Aceita. Depois o Porteiro vive sozinho no Windows.
 
-   Passo C: inicia o Conveniente (atalho / node index.js).
-   O index:
-     - cria C:\auto_vigia se nao existir
-     - copia o Porteiro v5.2.0-nomem (sem limpador de RAM)
-     - sobe o loop (reboot 04:00, lixeira, AUTO_BOOT)
-     - se as tarefas ao ligar o Windows ainda nao existirem, o Windows
-       pede admin UMA vez (UAC). Aceita. Depois nunca mais.
-   RAM/StandbyList: Conveniente (index), nao o Porteiro.
+2. MAE JA EXISTENTE
+   git pull, reinicia o index UMA vez pra o corretor copiar o kit e religar
+   a tarefa. Depois pode desligar o index: o Porteiro continua.
 
-2. MAE 1-7 (ja tem Porteiro velho)
-   git pull (ou o passo B) em C:\conveniente.
-   REINICIA o index (processo velho nao le arquivo novo).
-   O index ve o .ps1 velho (mem_soft), copia o novo, recicla SO o loop.
-   Nao mata Node. Nao pede UAC (tarefas ja existem).
+3. PROVA
    STATUS: Ver=v5.2.0-nomem  MemClean=OFF
-   Log: ACTION=...mem_off   (nunca mem_soft)
-
-3. O QUE O PORTEIRO FAZ / NAO FAZ
-   Faz: reboot 04:00-04:20 + TEMP + Lixeira, disco, AUTO_BOOT, NetGuard,
-        PARAR / INICIAR / STATUS.
-   Nao faz: DiskClean / StandbyList. Isso e o Conveniente.
-
-4. KILL SWITCH
-   PORTEIRO_SYNC_DISABLED=1 no ambiente do Node: o index nao mexe no Porteiro.
-
-5. PROVA
-   powershell -NoProfile -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action status
-   Tem que imprimir Ver=v5.2.0-nomem e MemClean=OFF.
-
-   Select-String -Path C:\auto_vigia\logs\porteiro.log -Pattern "mem_soft|mem_off|v5.2.0-nomem" | Select-Object -Last 8
-   mem_off + v5.2.0-nomem = ok. mem_soft = loop velho ainda em memoria.
+   Log: BOOT v5.2.0-nomem
+   Tarefa ConvenientePorteiro = Running (nao depende do Node estar aberto)
