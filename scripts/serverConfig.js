@@ -11,7 +11,8 @@ const CONFIG_VERSION = 1;
 const ITEM_TITLES_PACK_DEFAULT = "titulos";
 const ITEM_TITLES_PACKS = Object.freeze({
   titulos: { file: "titulos.json", label: "Padrão" },
-  titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico" }
+  titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico" },
+  titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve" }
 });
 
 function isItemTitlesPackId(id) {
