@@ -37,8 +37,8 @@ check("src_not_hard_12s", !/TIMEOUT_MS[^\n]*12000/.test(sweepSrc) && sweep.TIMEO
 check("src_settle_2000", sweep.SETTLE_MS === 2000, sweep.SETTLE_MS);
 check("src_min_15min", sweep.MIN_INTERVAL_MS === 15 * 60 * 1000, sweep.MIN_INTERVAL_MS);
 check("src_master_wires", masterSrc.includes("chromeMemorySweep") && masterSrc.includes("standby-sweep-idle-hint"));
-check("src_master_chrome_alive", masterSrc.includes("chromeAliveFromSentinel") && masterSrc.includes("chromeAlive:"));
-check("src_diskclean_off", /disabled:\s*true/.test(masterSrc) && masterSrc.includes("diskclean_disabled"));
+check("src_master_diskclean_on", masterSrc.includes("coordinator on") && !masterSrc.includes("diskclean_disabled"));
+check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
 check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));
 check("src_skip_chrome_alive", sweepSrc.includes("skip_chrome_alive"));
 check("src_master_uses_sendTo", /sendTo\(i, type, payload/.test(masterSrc));

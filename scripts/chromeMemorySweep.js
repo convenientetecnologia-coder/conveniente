@@ -6,9 +6,8 @@
  *
  * Relógio:
  *   - 1 timer de 15 min (due). Enquanto o timer corre, Robe e Virtus seguem a full.
- *   - Due chegou → se tiver chrome.exe vivo, NÃO dispara DiskClean (frota a full;
- *     RAM da fazenda = EmptyWorkingSet). Só StandbyList com Chrome zerado.
- *   - Sem Chrome: probe. Se ocupado, NÃO arma a esteira: espera a folga natural.
+ *   - Due chegou → probe. Se ocupado (Robe/Delta/gate), NÃO arma a esteira: espera a folga.
+ *   - Chrome aberto NÃO bloqueia. /StandbyList é RAM cache do Windows, não mata processo.
  *   - Folga apareceu → ARM só uns segundos (exe destacado + settle 2s) → solta.
  *   - Fez limpeza → lastOkAt = agora → próxima só daqui a 15 min, de novo sem trava.
  *
