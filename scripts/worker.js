@@ -1070,7 +1070,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-31_ws_shrink_nativo_v1';
+const WORKER_BUILD_TAG = '2026-09-01_ws_shrink_chrome_tree_v2';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',

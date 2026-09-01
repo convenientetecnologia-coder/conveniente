@@ -306,7 +306,7 @@ faxina._resetForTests();
     check("src_robe_extra_targets_finally", /function closeExtraPageTargets[\s\S]{0,4500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
     check("src_robe_junk_finally", /function closeJunkCdpTargets[\s\S]{0,3500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
     check("src_robe_stoploading_finally", /stopLoading[\s\S]{0,900}finally \{\s*await detachEphemeralCdp\(stopClient\)/.test(robeSrc));
-    check("src_worker_tag_standby", workerSrc.includes("2026-08-31_ws_shrink_nativo_v1"));
+    check("src_worker_tag_standby", workerSrc.includes("2026-09-01_ws_shrink_chrome_tree_v2"));
     check("src_trace_finally_detach", /function collectChromePidsViaTracing[\s\S]{0,5000}finally \{\s*try \{ await chromeHeapFaxina\.detachCdpSession\(session\)/.test(workerSrc));
     check("src_ear_fail_orphan_detach", workerSrc.includes("detachCdpSession(cdp)"));
     check("src_ear_detach_sites", (workerSrc.match(/__deltaDetachCdpSession/g) || []).length === 6);

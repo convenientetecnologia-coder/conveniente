@@ -6712,8 +6712,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   } catch (_) {
     earReadyOk = false;
   }
-  // Portão 1: EmptyWorkingSet no rootPid só com DOM estável E ouvido pronto.
-  // Timeout/false NÃO dispara. Não usa CDP neste módulo.
+  // Portão 1: EmptyWorkingSet no Chrome da conta (raiz+filhos daquele rootPid)
+  // só com DOM estável E ouvido pronto. Timeout/false NÃO dispara. Não usa CDP neste módulo.
   if (bootStableOk === true && earReadyOk === true && cfg && typeof cfg.onMessagesBootStableShrink === "function") {
     try {
       await cfg.onMessagesBootStableShrink({

@@ -54,7 +54,7 @@ check("src_timeout_12s", shrink.TIMEOUT_MS === 12_000, shrink.TIMEOUT_MS);
 check("src_lane_acquire_8s", shrink.LANE_ACQUIRE_MS === 8000, shrink.LANE_ACQUIRE_MS);
 
 check("src_worker_require", workerSrc.includes("chromeWorkingSetShrink"));
-check("src_worker_tag", workerSrc.includes("2026-08-31_ws_shrink_nativo_v1"));
+check("src_worker_tag", workerSrc.includes("2026-09-01_ws_shrink_chrome_tree_v2"));
 check("src_worker_no_ews_inline", !/EmptyWorkingSet/.test(workerSrc));
 check("src_worker_no_execfilesync", !/execFileSync/.test(workerSrc));
 check("src_worker_no_broken_oneliner", !/\[psapi\]::EmptyWorkingSet/.test(workerSrc));
@@ -62,6 +62,12 @@ check("src_worker_boot_hook", workerSrc.includes("onMessagesBootStableShrink") &
 check("src_worker_lane_kind", workerSrc.includes("ws_shrink_boot"));
 check("src_worker_dedup_pid", workerSrc.includes("wsShrinkBootPid"));
 check("src_delta_and_gate", deltaSrc.includes("bootStableOk === true && earReadyOk === true") && deltaSrc.includes("onMessagesBootStableShrink"));
+check("src_tree_max_64", shrink.TREE_MAX_PIDS === 64, shrink.TREE_MAX_PIDS);
+check("src_tree_ppid", shrinkSrc.includes("ParentProcessId") && shrinkSrc.includes("Win32_Process"));
+check("src_tree_chrome_only", shrinkSrc.includes("chrome.exe") && shrinkSrc.includes("chromium.exe"));
+check("src_no_tracing", !/collectChromePidsViaTracing/.test(shrinkSrc) && !/\bTracing\b/.test(shrinkSrc));
+check("src_no_stopprocess", !/Stop-Process/.test(shrinkSrc));
+check("src_forbid_list", typeof shrink.forbiddenPidList === "function" && shrink.forbiddenPidList().includes(process.pid));
 check("src_delta_no_cdp", !deltaSrc.includes("createCDPSession") && !deltaSrc.includes("deltaCdpSession"));
 check("src_delta_captures_stable", deltaSrc.includes('waitForMessagesBootStable(page, "messages_ready_worker")') && deltaSrc.includes("bootStableOk"));
 check("src_kick_not_await_faxina", workerSrc.includes("kickFaxinaAndMaybeResumeVirtus") && !/await faxinaAposCicloPesado\(nome, ctrl && ctrl\.mainPage, 'robe_cycle'\)/.test(workerSrc));
@@ -82,10 +88,16 @@ check("src_forbidden_pid", shrinkSrc.includes("forbidden_pid"));
   const ps = shrink.buildPsCommand(4242);
   check("ps_has_ews", ps.includes("EmptyWorkingSet"));
   check("ps_has_openprocess", ps.includes("OpenProcess"));
-  check("ps_has_pid", /OpenProcess\([^\n]*, \$false, 4242\)/.test(ps), ps.slice(0, 240));
+  check("ps_has_root", /\$root = 4242\b/.test(ps), ps.slice(0, 280));
+  check("ps_openprocess_eid", /OpenProcess\([^\n]*, \$false, \$eid\)/.test(ps), ps.slice(-220));
+  check("ps_tree_walk", /ParentProcessId/.test(ps) && /HashSet\[int\]/.test(ps));
   check("ps_chrome_name_guard", /ProcessName -ne 'chrome'/.test(ps) && /ProcessName -ne 'chromium'/.test(ps));
+  check("ps_chrome_wmi_filter", /Name = 'chrome\.exe'/.test(ps) && /Name = 'chromium\.exe'/.test(ps));
+  check("ps_forbid", /\$forbid = @\(/.test(ps));
+  check("ps_no_autovar_pid", !/foreach \(\$pid\b/.test(ps) && !/\$pid\s*=/.test(ps));
   check("ps_no_getbyid", !/GetProcessById/.test(ps));
   check("ps_no_taskkill", !/taskkill/.test(ps));
+  check("ps_no_stopprocess", !/Stop-Process/.test(ps));
   check("ps_reject_bad", shrink.buildPsCommand("1;exit") === "");
 }
 
@@ -200,7 +212,8 @@ check("src_forbidden_pid", shrinkSrc.includes("forbidden_pid"));
     check("boot_windows_hide", !!(calls[0] && calls[0].opts && calls[0].opts.windowsHide === true));
     const script = decodeSpawnScript(calls[0]);
     check("boot_encoded_ews", script.includes("EmptyWorkingSet"), script.slice(0, 120));
-    check("boot_encoded_pid", /,\s*4242\)/.test(script), script.slice(-180));
+    check("boot_encoded_root", /\$root = 4242\b/.test(script), script.slice(0, 200));
+    check("boot_encoded_tree", /ParentProcessId/.test(script) && /\$eid/.test(script));
     check("boot_log", logs.some((l) => l.includes("[OXY-LOG] [SHRINK-BOOT]") && l.includes("conta_teste")), logs);
   }
 
@@ -279,7 +292,7 @@ check("src_forbidden_pid", shrinkSrc.includes("forbidden_pid"));
     }
     check("robe_ok", !!(out && out.ok === true && out.gate === "robe"), out);
     check("robe_spawn_once", calls.length === 1, calls.length);
-    check("robe_log", logs.some((l) => l === "[OXY-LOG] [SHRINK-ROBE] Aba 1 descartada. Pó de postagem limpo no rootPid."), logs);
+    check("robe_log", logs.some((l) => l === "[OXY-LOG] [SHRINK-ROBE] Aba 1 descartada. Pó de postagem limpo no Chrome da conta (raiz+filhos)."), logs);
   }
 
   {

@@ -1,11 +1,17 @@
 "use strict";
 
 /**
- * Encolhedor nativo do Chrome browser process (rootPid).
+ * Encolhedor nativo do Chrome daquela conta (browser process + filhos chrome/chromium).
  *
- * Alvo: EmptyWorkingSet(OpenProcess(rootPid)).
+ * Alvo: EmptyWorkingSet em cada chrome.exe/chromium.exe descendente de
+ * browser.process().pid (rootPid), incluindo a raiz. Um único powershell async.
+ * Árvore = ParentProcessId (Win32_Process). Não usa CDP memory-infra. Não é lista
+ * cega de userDataDir (não atravessa outra conta).
+ *
  * Não é HeapProfiler. Não é DiskClean/StandbyList. Não é binding FFI.
  * Não é PID de aba (Puppeteer v24 não expõe page.process()).
+ * Nunca Node: recusa process.pid/ppid no JS; o PS recusa nome ≠ chrome/chromium
+ * e PIDs proibidos (worker/index).
  *
  * Chamada: spawn async de powershell.exe. NUNCA filho síncrono no worker
  * (congelaria o laço de eventos do shard e o ouvido Delta).
@@ -27,6 +33,7 @@ const LANE_ACQUIRE_MS = Math.max(
   1000,
   Math.min(30_000, Number(process.env.EMPTY_WORKING_SET_LANE_ACQUIRE_MS || 8000) || 8000)
 );
+const TREE_MAX_PIDS = 64;
 
 const PROCESS_QUERY_INFORMATION = 0x0400;
 const PROCESS_SET_QUOTA = 0x0100;
@@ -74,6 +81,15 @@ function resolveRootPid(browser, fallback) {
   return parseRootPid(fallback);
 }
 
+function forbiddenPidList() {
+  const out = [];
+  const self = parseRootPid(process.pid);
+  const parent = parseRootPid(process.ppid);
+  if (self) out.push(self);
+  if (parent && parent !== self) out.push(parent);
+  return out;
+}
+
 function isBootInterlockReleased(page) {
   try {
     const st = page && page.__deltaBootInterlock;
@@ -114,7 +130,7 @@ function accountLabel(nome) {
 function logShrinkBoot(nome) {
   try {
     console.log(
-      `[OXY-LOG] [SHRINK-BOOT] Conta ${accountLabel(nome)} estabilizada. RAM de inicialização encolhida no rootPid.`
+      `[OXY-LOG] [SHRINK-BOOT] Conta ${accountLabel(nome)} estabilizada. RAM de inicialização encolhida no Chrome da conta (raiz+filhos).`
     );
   } catch {}
 }
@@ -122,7 +138,7 @@ function logShrinkBoot(nome) {
 function logShrinkRobe(nome) {
   try {
     console.log(
-      `[OXY-LOG] [SHRINK-ROBE] Aba 1 descartada. Pó de postagem limpo no rootPid.`
+      `[OXY-LOG] [SHRINK-ROBE] Aba 1 descartada. Pó de postagem limpo no Chrome da conta (raiz+filhos).`
     );
   } catch {}
 }
@@ -130,6 +146,8 @@ function logShrinkRobe(nome) {
 function buildPsCommand(pid) {
   const n = parseRootPid(pid);
   if (!n) return "";
+  const forbid = forbiddenPidList().filter((x) => x !== n);
+  const forbidLit = forbid.length ? forbid.join(",") : "0";
   return [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -TypeDefinition @'",
@@ -144,15 +162,54 @@ function buildPsCommand(pid) {
     "  public static extern bool CloseHandle(IntPtr h);",
     "}",
     "'@",
-    `$proc = Get-Process -Id ${n} -ErrorAction Stop`,
-    "if ($proc.ProcessName -ne 'chrome' -and $proc.ProcessName -ne 'chromium') { exit 4 }",
-    `$h = [ConvenienteEmptyWS]::OpenProcess([uint32]${OPEN_PROCESS_ACCESS}, $false, ${n})`,
-    "if ($h -eq [IntPtr]::Zero) { exit 2 }",
+    "$ErrorActionPreference = 'Continue'",
+    `$root = ${n}`,
+    `$forbid = @(${forbidLit})`,
+    `$treeMax = ${TREE_MAX_PIDS}`,
+    "if ($forbid -contains $root) { exit 4 }",
+    "$rootProc = Get-Process -Id $root -ErrorAction Stop",
+    "if ($rootProc.ProcessName -ne 'chrome' -and $rootProc.ProcessName -ne 'chromium') { exit 4 }",
+    "$flt = \"Name = 'chrome.exe' OR Name = 'chromium.exe'\"",
+    "$rows = @()",
     "try {",
-    "  if (-not [ConvenienteEmptyWS]::EmptyWorkingSet($h)) { exit 3 }",
-    "} finally {",
-    "  [void][ConvenienteEmptyWS]::CloseHandle($h)",
+    "  $rows = @(Get-CimInstance Win32_Process -Filter $flt -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId)",
+    "} catch {",
+    "  $rows = @()",
     "}",
+    "$want = New-Object 'System.Collections.Generic.HashSet[int]'",
+    "[void]$want.Add($root)",
+    "$changed = $true",
+    "$guard = 0",
+    "while ($changed -and $guard -lt 32) {",
+    "  $changed = $false",
+    "  $guard++",
+    "  foreach ($r in $rows) {",
+    "    if ($want.Count -ge $treeMax) { break }",
+    "    $eid = [int]$r.ProcessId",
+    "    $pp = [int]$r.ParentProcessId",
+    "    if ($eid -le 0) { continue }",
+    "    if ($want.Contains($pp) -and -not $want.Contains($eid)) {",
+    "      [void]$want.Add($eid)",
+    "      $changed = $true",
+    "    }",
+    "  }",
+    "}",
+    "$ok = 0",
+    "foreach ($eid in @($want)) {",
+    "  if ($eid -le 0) { continue }",
+    "  if ($forbid -contains $eid) { continue }",
+    "  $proc = Get-Process -Id $eid -ErrorAction SilentlyContinue",
+    "  if (-not $proc) { continue }",
+    "  if ($proc.ProcessName -ne 'chrome' -and $proc.ProcessName -ne 'chromium') { continue }",
+    `$h = [ConvenienteEmptyWS]::OpenProcess([uint32]${OPEN_PROCESS_ACCESS}, $false, $eid)`,
+    "  if ($h -eq [IntPtr]::Zero) { continue }",
+    "  try {",
+    "    if ([ConvenienteEmptyWS]::EmptyWorkingSet($h)) { $ok++ }",
+    "  } finally {",
+    "    [void][ConvenienteEmptyWS]::CloseHandle($h)",
+    "  }",
+    "}",
+    "if ($ok -lt 1) { exit 3 }",
     "exit 0"
   ].join("\n");
 }
@@ -403,11 +460,13 @@ module.exports = {
   BOOT_SETTLE_MS,
   TIMEOUT_MS,
   LANE_ACQUIRE_MS,
+  TREE_MAX_PIDS,
   OPEN_PROCESS_ACCESS,
   envDisabled,
   parseRootPid,
   processAlive,
   resolveRootPid,
+  forbiddenPidList,
   isBootInterlockReleased,
   pageBlocksShrink,
   bootPredicatesMet,
