@@ -44,7 +44,7 @@ check("src_delta_pause", deltaSrc.includes("enqueue.setPaused") && deltaSrc.incl
 check("src_delta_busy", deltaSrc.includes("getSweepBusy") && deltaSrc.includes("city_collect_bg"));
 check("src_robe_no_1500_poll", !/setTimeout\(\s*\(\)\s*=>\s*\{\s*try\s*\{\s*this\.tick\(\)/.test(robeSrc));
 check("src_robe_idle_hook", robeSrc.includes("setIdleHook") && robeSrc.includes("_emitIdle"));
-check("src_tag", workerSrc.includes("2026-08-31_standby_sweep_consciente_v1"));
+check("src_tag", workerSrc.includes("2026-08-31_ws_shrink_nativo_v1"));
 check("src_diskclean_spawn_only_sweep", /spawnFn\(exe/.test(sweepSrc) && !/DiskClean/.test(workerSrc) && !/DiskClean/.test(deltaSrc));
 check("src_arm_no_stopVirtus", !/async \['standby-sweep-arm'\][\s\S]{0,500}stopVirtus/.test(workerSrc));
 check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.includes("busyNeedsStitch"));

@@ -257,7 +257,12 @@ async function acquire(meta = {}) {
   const kind = String(meta.kind || "heavy_nav").slice(0, 40);
   const nome = String(meta.nome || "").slice(0, 120);
   const t0 = Date.now();
-  while ((Date.now() - t0) < ACQUIRE_MS) {
+  const waitCap = (() => {
+    const cap = Number(meta && meta.acquireMs);
+    if (Number.isFinite(cap) && cap >= 1000) return Math.min(ACQUIRE_MS, cap);
+    return ACQUIRE_MS;
+  })();
+  while ((Date.now() - t0) < waitCap) {
     const remain = coolRemainingMs();
     if (remain > 0) {
       await sleep(Math.min(remain, Math.max(POLL_MS * 8, 400)));

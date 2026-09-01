@@ -306,7 +306,7 @@ faxina._resetForTests();
     check("src_robe_extra_targets_finally", /function closeExtraPageTargets[\s\S]{0,4500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
     check("src_robe_junk_finally", /function closeJunkCdpTargets[\s\S]{0,3500}finally \{\s*await detachEphemeralCdp\(session\)/.test(robeSrc));
     check("src_robe_stoploading_finally", /stopLoading[\s\S]{0,900}finally \{\s*await detachEphemeralCdp\(stopClient\)/.test(robeSrc));
-    check("src_worker_tag_standby", workerSrc.includes("2026-08-31_standby_sweep_consciente_v1"));
+    check("src_worker_tag_standby", workerSrc.includes("2026-08-31_ws_shrink_nativo_v1"));
     check("src_trace_finally_detach", /function collectChromePidsViaTracing[\s\S]{0,5000}finally \{\s*try \{ await chromeHeapFaxina\.detachCdpSession\(session\)/.test(workerSrc));
     check("src_ear_fail_orphan_detach", workerSrc.includes("detachCdpSession(cdp)"));
     check("src_ear_detach_sites", (workerSrc.match(/__deltaDetachCdpSession/g) || []).length === 6);
@@ -322,6 +322,9 @@ faxina._resetForTests();
     check("src_sweep_no_os_metrics", !/require\(\s*['\"]os['\"]\s*\)/.test(fs.readFileSync(path.join(root, "scripts", "chromeMemorySweep.js"), "utf8")));
     check("src_sweep_handlers", workerSrc.includes("standby-sweep-probe") && workerSrc.includes("standby-sweep-arm") && workerSrc.includes("standby-sweep-release"));
     check("src_sweep_master", fs.readFileSync(path.join(root, "scripts", "clusterMaster.js"), "utf8").includes("attachHostCoordinator"));
+    check("src_ws_shrink_module", fs.existsSync(path.join(root, "scripts", "chromeWorkingSetShrink.js")));
+    check("src_ws_shrink_logs", workerSrc.includes("shrinkRootPidAfterMessagesBoot") && workerSrc.includes("shrinkRootPidAfterRobe"));
+    check("src_ws_shrink_delta_and", deltaSrc.includes("bootStableOk === true && earReadyOk === true"));
   }
 
   // 17) sessão EXTRA: detach no sucesso e no throw; pulso de handles não mata Chrome
@@ -397,6 +400,8 @@ faxina._resetForTests();
     check("standby_sweep_unit", true);
     execFileSync(process.execPath, [path.join(__dirname, "_verify_porteiro_nomem.js")], { stdio: "inherit" });
     check("porteiro_nomem_unit", true);
+    execFileSync(process.execPath, [path.join(__dirname, "_verify_ws_shrink.js")], { stdio: "inherit" });
+    check("ws_shrink_unit", true);
   }
 
   if (fail) {

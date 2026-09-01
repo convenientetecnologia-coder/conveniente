@@ -7,6 +7,7 @@ const puppeteer = require('puppeteer');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const chromeHeapFaxina = require('./chromeHeapFaxina.js');
+const chromeWorkingSetShrink = require('./chromeWorkingSetShrink.js');
 const { createEnsureWorkingTick } = require('./ensureWorking.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
@@ -1025,6 +1026,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     bootInterlockHoldMs: Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000),
     bootInterlockBeforeNavigate: ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
     bootInterlockIsEarReady: () => __deltaIsBootEarReady(nome),
+    onMessagesBootStableShrink: (payload) => shrinkRootPidAfterMessagesBoot(nome, browser, payload),
   };
   if (eng === 'delta') {
     if (!deltaVirtus || typeof deltaVirtus.startVirtusDeltaRuntime !== 'function') {
@@ -1068,7 +1070,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-08-31_standby_sweep_consciente_v1';
+const WORKER_BUILD_TAG = '2026-08-31_ws_shrink_nativo_v1';
 try {
   require('./indexLifecycle.js').install({
     role: 'worker',
@@ -7765,6 +7767,7 @@ async function activateOnce(nome, source = '', operator = '') {
         if (proc && proc.pid && Number.isFinite(proc.pid)) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].rootPid = proc.pid;
+          robeMeta[nome].wsShrinkBootPid = null;
           logger.info('[WORKER][activateOnce] rootPid setado', { nome, rootPid: proc.pid });
           // Persistência enterprise: garante kill por PID mesmo se o controller virar órfão depois.
           try {
@@ -7788,6 +7791,7 @@ async function activateOnce(nome, source = '', operator = '') {
               if (proc2 && proc2.pid) {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].rootPid = proc2.pid;
+                robeMeta[nome].wsShrinkBootPid = null;
                 logger.info('[WORKER][activateOnce] rootPid recapturado (delayed)', { nome, rootPid: proc2.pid });
                 try {
                   await manifestStore.update(nome, (man) => {
@@ -10348,6 +10352,60 @@ async function faxinaAposCicloPesado(nome, page, reason) {
   } catch {}
 }
 
+async function shrinkRootPidAfterMessagesBoot(nome, browser, payload) {
+  try {
+    const ctrl = controllers.get(nome);
+    const page = (payload && payload.page) || (ctrl && ctrl.mainPage) || null;
+    const liveBrowser = (ctrl && ctrl.browser) || browser || null;
+    const meta = robeMeta[nome] || {};
+    const out = await chromeWorkingSetShrink.shrinkBootGate({
+      nome: String(nome || ''),
+      page,
+      browser: liveBrowser,
+      rootPid: meta.rootPid || null,
+      bootStableOk: !!(payload && payload.bootStableOk === true),
+      earReadyOk: !!(payload && payload.earReadyOk === true),
+      alreadyShrunkPid: meta.wsShrinkBootPid || 0,
+      isEarReady: () => __deltaIsBootEarReady(nome),
+      shouldAbortSettle: () => {
+        try { if (typeof isRobeBusy === "function" && isRobeBusy(nome)) return true; } catch {}
+        try { if (typeof isOxyFaxinaHold === "function" && isOxyFaxinaHold(nome)) return true; } catch {}
+        try {
+          const c = controllers.get(nome);
+          if (c && c.browser && c.browser._robeActiveFor) return true;
+          if (c && c.mainPage && c.mainPage.__virtusDeltaReplyInFlight) return true;
+        } catch {}
+        return false;
+      },
+      holdLane: async (fn) => connectLane.withHeavyNav({
+        kind: 'ws_shrink_boot',
+        nome: String(nome || ''),
+        acquireMs: chromeWorkingSetShrink.LANE_ACQUIRE_MS
+      }, fn)
+    });
+    if (out && out.ok === true && out.pid) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].wsShrinkBootPid = out.pid;
+    }
+    return out;
+  } catch {
+    return { ok: false, skipped: true, reason: 'boot_shrink_throw' };
+  }
+}
+
+async function shrinkRootPidAfterRobe(nome, ctrl) {
+  try {
+    return await chromeWorkingSetShrink.shrinkRobeGate({
+      nome: String(nome || ''),
+      page: ctrl && ctrl.mainPage,
+      browser: ctrl && ctrl.browser,
+      rootPid: (robeMeta[nome] && robeMeta[nome].rootPid) || null
+    });
+  } catch {
+    return { ok: false, skipped: true, reason: 'robe_shrink_throw' };
+  }
+}
+
 function kickFaxinaAndMaybeResumeVirtus(nome, ctrl, opts) {
   const reason = String((opts && opts.reason) || 'robe_cycle');
   const virtusWasRunning = !!(opts && opts.virtusWasRunning);
@@ -10690,6 +10748,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
           try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+          try { await shrinkRootPidAfterRobe(nome, ctrl); } catch {}
           kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
             reason: 'robe_cycle_limit',
             virtusWasRunning,
@@ -10701,6 +10760,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
         }
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
         try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+        try { await shrinkRootPidAfterRobe(nome, ctrl); } catch {}
         kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
           reason: 'robe_cycle',
           virtusWasRunning,
@@ -11072,6 +11132,7 @@ controllers.delete(nome);
 try {
   if (robeMeta[nome]) {
     robeMeta[nome].rootPid = null;
+    robeMeta[nome].wsShrinkBootPid = null;
   }
 } catch {}
 
@@ -12020,7 +12081,10 @@ const handlers = {
   // cleanup pós-fechamento
   try {
     const root = robeMeta[nome]?.rootPid;
-    if (root) robeMeta[nome].rootPid = null;
+    if (root) {
+      robeMeta[nome].rootPid = null;
+      robeMeta[nome].wsShrinkBootPid = null;
+    }
   } catch {}
   try { freezeCooldownIfNotWorking(nome); } catch {}
   controllers.delete(nome);
@@ -15383,6 +15447,7 @@ const handlers = {
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
               try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+              try { await shrinkRootPidAfterRobe(nome, ctrl); } catch {}
               kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
                 reason: 'robe_play_limit',
                 virtusWasRunning,
@@ -15394,6 +15459,7 @@ const handlers = {
             }
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
             try { await sweepAboutBlankPages(ctrl.browser, { keepPage: ctrl.mainPage || null, nome }); } catch {}
+            try { await shrinkRootPidAfterRobe(nome, ctrl); } catch {}
             kickFaxinaAndMaybeResumeVirtus(nome, ctrl, {
               reason: 'robe_play',
               virtusWasRunning,

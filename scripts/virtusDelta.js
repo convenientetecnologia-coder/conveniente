@@ -6698,9 +6698,32 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       });
     }
   } catch (_) {}
+  let bootStableOk = false;
   try {
-    await waitForMessagesBootStable(page, "messages_ready_worker");
-  } catch (_) {}
+    bootStableOk = (await waitForMessagesBootStable(page, "messages_ready_worker")) === true;
+  } catch (_) {
+    bootStableOk = false;
+  }
+  let earReadyOk = false;
+  try {
+    if (cfg && typeof cfg.bootInterlockIsEarReady === "function") {
+      earReadyOk = (await Promise.resolve(cfg.bootInterlockIsEarReady())) === true;
+    }
+  } catch (_) {
+    earReadyOk = false;
+  }
+  // Portão 1: EmptyWorkingSet no rootPid só com DOM estável E ouvido pronto.
+  // Timeout/false NÃO dispara. Não usa CDP neste módulo.
+  if (bootStableOk === true && earReadyOk === true && cfg && typeof cfg.onMessagesBootStableShrink === "function") {
+    try {
+      await cfg.onMessagesBootStableShrink({
+        page,
+        nome,
+        bootStableOk: true,
+        earReadyOk: true
+      });
+    } catch (_) {}
+  }
   try {
     // Cura vitalícia do freeze por seleção: injeta CSS global anti-seleção logo após o boot.
     await __injectAntiSelectionCss(page, { profileName: ACCOUNT_LOGIN || nome, reason: "boot_worker" });
