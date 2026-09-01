@@ -39,6 +39,7 @@ check("src_min_15min", sweep.MIN_INTERVAL_MS === 15 * 60 * 1000, sweep.MIN_INTER
 check("src_master_wires", masterSrc.includes("chromeMemorySweep") && masterSrc.includes("standby-sweep-idle-hint"));
 check("src_master_diskclean_on", masterSrc.includes("coordinator on") && !masterSrc.includes("diskclean_disabled"));
 check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
+check("src_clock_free_default", /const requireIdle = opts && opts.requireIdle === true/.test(sweepSrc) && !/requireIdle:\s*true/.test(masterSrc));
 check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));
 check("src_skip_chrome_alive", sweepSrc.includes("skip_chrome_alive"));
 check("src_master_uses_sendTo", /sendTo\(i, type, payload/.test(masterSrc));
@@ -144,10 +145,34 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     const ok = await coord.tryAttempt("due");
     coord.stop();
     check("due_sweeps", !!(ok && ok.ok && sweeps === 1), ok);
-    check("log_travada", logs.some((l) => l.includes("[ESTEIRA-TRAVADA]") && l.includes("shards=1")), logs);
-    check("log_liberada", logs.some((l) => l.includes("[ESTEIRA-LIBERADA]") && l.includes("settleMs=2000")), logs);
-    check("worker_released", workers[0].held === false);
+    check("clock_does_not_arm", workers[0].held === false && coord._test.hostArmed === false);
+    check("log_clock_spawn", logs.some((l) => l.includes("[STANDBY-SWEEP] spawn exe=/StandbyList")), logs);
+    check("log_no_esteira", !logs.some((l) => l.includes("[ESTEIRA-TRAVADA]")), logs);
     check("jsonl_has_sweep", jsonl.some((r) => r && r.event === "sweep"), jsonl.map((r) => r && r.event));
+  }
+
+  {
+    let sweeps = 0;
+    let armCalls = 0;
+    let now = 25_000;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async (type) => {
+        if (type === "standby-sweep-arm") armCalls += 1;
+        return [{ ok: true, busy: true, reasons: ["robe_exec:x"] }];
+      },
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 3 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    const r = await coord.tryAttempt("busy_clock");
+    check("busy_still_sweeps", !!(r && r.ok && sweeps === 1), r);
+    check("busy_clock_no_arm", armCalls === 0 && coord._test.hostArmed === false);
+    coord.stop();
   }
 
   {
@@ -157,6 +182,7 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     const coord = sweep.attachHostCoordinator({
       now: () => now,
       minIntervalMs: 1000,
+      requireIdle: true,
       chromeAlive: () => true,
       sendToAll: async (type) => {
         if (type === "standby-sweep-arm") armCalls += 1;
@@ -183,6 +209,7 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     const coord = sweep.attachHostCoordinator({
       now: () => now,
       minIntervalMs: 1000,
+      requireIdle: true,
       sendToAll: async (type) => workers.map((w) => {
         if (type === "standby-sweep-probe") return { ok: true, busy: !!w.busy, reasons: w.busy ? ["delta_inflight"] : [] };
         if (type === "standby-sweep-arm") { w.held = true; return { ok: true }; }
@@ -243,6 +270,7 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     const coord = sweep.attachHostCoordinator({
       now: () => now,
       minIntervalMs: 1000,
+      requireIdle: true,
       sendToAll: async (type) => {
         if (type === "standby-sweep-arm") armCalls += 1;
         return [{ ok: true, busy: true, reasons: ["human:op"] }];
@@ -318,6 +346,7 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     const coord = sweep.attachHostCoordinator({
       now: () => now,
       minIntervalMs: 1000,
+      requireIdle: true,
       sendToAll: async (type) => {
         if (type === "standby-sweep-probe") {
           probes += 1;

@@ -4,12 +4,10 @@
  * Faxina OS-wide: DiskClean.exe /StandbyList.
  * Roda SÓ no processo index/clusterMaster. Um spawn por host. Zero CPU/RAM. Zero CDP.
  *
- * Relógio:
- *   - 1 timer de 15 min (due). Enquanto o timer corre, Robe e Virtus seguem a full.
- *   - Due chegou → probe. Se ocupado (Robe/Delta/gate), NÃO arma a esteira: espera a folga.
- *   - Chrome aberto NÃO bloqueia. /StandbyList é RAM cache do Windows, não mata processo.
- *   - Folga apareceu → ARM só uns segundos (exe destacado + settle 2s) → solta.
- *   - Fez limpeza → lastOkAt = agora → próxima só daqui a 15 min, de novo sem trava.
+ * Relógio (produção, requireIdle=false):
+ *   - 1 timer de 15 min. Robe e Virtus seguem. Due → DiskClean /StandbyList na hora.
+ *   - Não espera folga. Não pausa fila. Não fecha Chrome. Cache do Windows, não aba.
+ *   - requireIdle=true (teste/legado): probe/arm/confirm ocioso antes do exe.
  *
  * Exe (dono > auditor 12s fixos):
  *   - Espera o processo terminar de verdade (2s, 10s, 15s: tanto faz).
@@ -174,6 +172,7 @@ function attachHostCoordinator(opts) {
   const settleFn = (opts && opts.settle) || settle;
   const minInterval = Math.max(1, Number((opts && opts.minIntervalMs) || MIN_INTERVAL_MS) || MIN_INTERVAL_MS);
   const disabled = envDisabled() || !!(opts && opts.disabled);
+  const requireIdle = opts && opts.requireIdle === true;
   const logFn = (opts && opts.log) || oxyLog;
   const jsonlFn = (opts && opts.jsonl) || appendJsonl;
   const chromeAliveFn = opts && opts.chromeAlive;
@@ -278,6 +277,66 @@ function attachHostCoordinator(opts) {
         return { skipped: true, reason: "no_shards" };
       }
 
+      async function executeSweep() {
+        logFn("[OXY-LOG] [STANDBY-SWEEP] spawn exe=" + DISKCLEAN_ARG + " timeoutMs=" + TIMEOUT_MS);
+        const sweep = await runSweep();
+        if (sweep && sweep.ok) {
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_ok elapsedMs=" + Number(sweep.elapsedMs || 0));
+        } else if (sweep && sweep.error === "exe_missing") {
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_missing path=" + DISKCLEAN_EXE);
+        } else if (sweep && sweep.error === "exe_timeout") {
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_timeout killed=1 elapsedMs=" + Number(sweep.elapsedMs || 0));
+        } else {
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail error=" + String((sweep && sweep.error) || "unknown"));
+        }
+        jsonlFn({
+          event: "sweep",
+          ok: !!(sweep && sweep.ok),
+          error: (sweep && sweep.error) || null,
+          elapsedMs: Number((sweep && sweep.elapsedMs) || 0) || 0,
+          killed: !!(sweep && sweep.killed),
+          dueAgeMin: ageMin(),
+          shards,
+          requireIdle
+        });
+        if (!(sweep && sweep.error === "exe_missing")) {
+          await settleFn(SETTLE_MS);
+        }
+        return sweep;
+      }
+
+      function rearmClock() {
+        failStreak = 0;
+        lastOkAt = nowFn();
+        waitingIdle = false;
+        busyRetryMs = 15_000;
+        try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
+        busyRetryTimer = null;
+        scheduleDue();
+      }
+
+      if (!requireIdle) {
+        const sweep = await executeSweep();
+        const sweepOk = !!(sweep && sweep.ok);
+        jsonlFn({ event: "clock_done", ok: sweepOk, settleMs: SETTLE_MS, shards });
+        if (sweepOk || (sweep && sweep.error === "exe_missing")) {
+          rearmClock();
+          return { ok: sweepOk, sweep };
+        }
+        failStreak += 1;
+        if (failStreak >= 2) {
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail_give_up nextDueMin=15");
+          jsonlFn({ event: "exe_fail_give_up", error: (sweep && sweep.error) || "fail", shards });
+          rearmClock();
+          return { ok: false, sweep, retried: true };
+        }
+        busyRetryMs = 30_000;
+        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail_retry waitMs=30000");
+        jsonlFn({ event: "exe_fail_retry", error: (sweep && sweep.error) || "fail", shards });
+        scheduleBusyRetry();
+        return { ok: false, sweep, retry: true };
+      }
+
       if (typeof chromeAliveFn === "function") {
         let chromeAlive = true;
         try { chromeAlive = chromeAliveFn() === true; } catch { chromeAlive = true; }
@@ -323,30 +382,7 @@ function attachHostCoordinator(opts) {
       try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
       busyRetryTimer = null;
 
-      logFn("[OXY-LOG] [STANDBY-SWEEP] spawn exe=" + DISKCLEAN_ARG + " timeoutMs=" + TIMEOUT_MS);
-      const sweep = await runSweep();
-      if (sweep && sweep.ok) {
-        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_ok elapsedMs=" + Number(sweep.elapsedMs || 0));
-      } else if (sweep && sweep.error === "exe_missing") {
-        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_missing path=" + DISKCLEAN_EXE);
-      } else if (sweep && sweep.error === "exe_timeout") {
-        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_timeout killed=1 elapsedMs=" + Number(sweep.elapsedMs || 0));
-      } else {
-        logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail error=" + String((sweep && sweep.error) || "unknown"));
-      }
-      jsonlFn({
-        event: "sweep",
-        ok: !!(sweep && sweep.ok),
-        error: (sweep && sweep.error) || null,
-        elapsedMs: Number((sweep && sweep.elapsedMs) || 0) || 0,
-        killed: !!(sweep && sweep.killed),
-        dueAgeMin: ageMin(),
-        shards
-      });
-
-      if (!(sweep && sweep.error === "exe_missing")) {
-        await settleFn(SETTLE_MS);
-      }
+      const sweep = await executeSweep();
       const sweepOk = !!(sweep && sweep.ok);
       await releaseHost("release", { sweepOk });
       if (sweepOk) {
@@ -357,27 +393,15 @@ function attachHostCoordinator(opts) {
       jsonlFn({ event: "release", ok: sweepOk, settleMs: SETTLE_MS, shards });
 
       if (sweepOk || (sweep && sweep.error === "exe_missing")) {
-        failStreak = 0;
-        lastOkAt = nowFn();
-        waitingIdle = false;
-        busyRetryMs = 15_000;
-        try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
-        busyRetryTimer = null;
-        scheduleDue();
+        rearmClock();
         return { ok: sweepOk, sweep };
       }
 
       failStreak += 1;
       if (failStreak >= 2) {
-        failStreak = 0;
-        lastOkAt = nowFn();
-        waitingIdle = false;
-        busyRetryMs = 15_000;
-        try { if (busyRetryTimer) clearTimeout(busyRetryTimer); } catch {}
-        busyRetryTimer = null;
         logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail_give_up nextDueMin=15");
         jsonlFn({ event: "exe_fail_give_up", error: (sweep && sweep.error) || "fail", shards });
-        scheduleDue();
+        rearmClock();
         return { ok: false, sweep, retried: true };
       }
 
