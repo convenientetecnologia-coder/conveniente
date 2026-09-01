@@ -11631,7 +11631,6 @@ function applyStandbySweepRelease() {
 }
 
 function maybeStandbySweepIdleHint() {
-  if (!standbySweepHeld) return;
   try {
     const snap = collectStandbySweepBusy();
     if (snap.busy) return;
@@ -11640,7 +11639,6 @@ function maybeStandbySweepIdleHint() {
   if (standbySweepIdleHintTimer) return;
   standbySweepIdleHintTimer = setTimeout(() => {
     standbySweepIdleHintTimer = null;
-    if (!standbySweepHeld) return;
     try {
       const again = collectStandbySweepBusy();
       if (again.busy) return;

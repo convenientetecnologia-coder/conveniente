@@ -76,12 +76,14 @@ check("parse_pid_neg", shrink.parseRootPid(-1) === 0);
 check("parse_pid_inject", shrink.parseRootPid("1234; taskkill") === 0);
 check("parse_pid_float", shrink.parseRootPid(12.5) === 0);
 check("parse_pid_empty", shrink.parseRootPid("") === 0);
+check("src_forbidden_pid", shrinkSrc.includes("forbidden_pid"));
 
 {
   const ps = shrink.buildPsCommand(4242);
   check("ps_has_ews", ps.includes("EmptyWorkingSet"));
   check("ps_has_openprocess", ps.includes("OpenProcess"));
   check("ps_has_pid", /OpenProcess\([^\n]*, \$false, 4242\)/.test(ps), ps.slice(0, 240));
+  check("ps_chrome_name_guard", /ProcessName -ne 'chrome'/.test(ps) && /ProcessName -ne 'chromium'/.test(ps));
   check("ps_no_getbyid", !/GetProcessById/.test(ps));
   check("ps_no_taskkill", !/taskkill/.test(ps));
   check("ps_reject_bad", shrink.buildPsCommand("1;exit") === "");
@@ -328,6 +330,12 @@ check("parse_pid_empty", shrink.parseRootPid("") === 0);
       }
     });
     check("lane_held_then_released", !!(out && out.ok && held && released), { held, released, out });
+  }
+
+  {
+    const calls = [];
+    const out = await shrink.emptyWorkingSetPid(process.pid, { spawnFn: mockSpawnOk(calls) });
+    check("refuse_self_pid", !!(out && out.skipped === true && out.reason === "forbidden_pid") && calls.length === 0, out);
   }
 
   if (fail) {

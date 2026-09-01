@@ -37,6 +37,10 @@ check("src_not_hard_12s", !/TIMEOUT_MS[^\n]*12000/.test(sweepSrc) && sweep.TIMEO
 check("src_settle_2000", sweep.SETTLE_MS === 2000, sweep.SETTLE_MS);
 check("src_min_15min", sweep.MIN_INTERVAL_MS === 15 * 60 * 1000, sweep.MIN_INTERVAL_MS);
 check("src_master_wires", masterSrc.includes("chromeMemorySweep") && masterSrc.includes("standby-sweep-idle-hint"));
+check("src_master_chrome_alive", masterSrc.includes("chromeAliveFromSentinel") && masterSrc.includes("chromeAlive:"));
+check("src_diskclean_off", /disabled:\s*true/.test(masterSrc) && masterSrc.includes("diskclean_disabled"));
+check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));
+check("src_skip_chrome_alive", sweepSrc.includes("skip_chrome_alive"));
 check("src_master_uses_sendTo", /sendTo\(i, type, payload/.test(masterSrc));
 check("src_worker_handlers", workerSrc.includes("standby-sweep-probe") && workerSrc.includes("standby-sweep-arm") && workerSrc.includes("standby-sweep-release"));
 check("src_worker_no_stopVirtus_in_arm", !/standby-sweep-arm[\s\S]{0,400}stopVirtus/.test(workerSrc));
@@ -48,6 +52,8 @@ check("src_tag", workerSrc.includes("2026-08-31_ws_shrink_nativo_v1"));
 check("src_diskclean_spawn_only_sweep", /spawnFn\(exe/.test(sweepSrc) && !/DiskClean/.test(workerSrc) && !/DiskClean/.test(deltaSrc));
 check("src_arm_no_stopVirtus", !/async \['standby-sweep-arm'\][\s\S]{0,500}stopVirtus/.test(workerSrc));
 check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.includes("busyNeedsStitch"));
+check("src_no_arm_until_idle", /if \(!probe\.allIdle\) \{[\s\S]{0,400}armed: false[\s\S]{0,200}return \{ skipped: true, reason: "waiting_idle"/.test(sweepSrc));
+check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if \(!standbySweepHeld\) return;/.test(workerSrc));
 
 (async () => {
   {
@@ -62,10 +68,12 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
 
   {
     const t0 = Date.now();
+    let lastOpts = null;
     const out = await sweep.runStandbySweep({
       exe: "mock-exe",
       timeoutMs: 800,
-      spawnFn: () => {
+      spawnFn: (cmd, args, opts) => {
+        lastOpts = opts || null;
         const ee = new EventEmitter();
         ee.kill = () => { ee.killed = true; };
         setTimeout(() => ee.emit("close", 0, null), 25);
@@ -74,6 +82,7 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
     });
     check("exe_waits_real_close", !!(out && out.ok && out.killed !== true && out.elapsedMs < 400), out);
     check("exe_not_padded_to_30s", (Date.now() - t0) < 400);
+    check("exe_spawn_detached", !!(lastOpts && lastOpts.detached === true), lastOpts);
   }
 
   {
@@ -142,6 +151,31 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
   }
 
   {
+    let sweeps = 0;
+    let armCalls = 0;
+    let now = 40_000;
+    const coord = sweep.attachHostCoordinator({
+      now: () => now,
+      minIntervalMs: 1000,
+      chromeAlive: () => true,
+      sendToAll: async (type) => {
+        if (type === "standby-sweep-arm") armCalls += 1;
+        return [{ ok: true, busy: false }];
+      },
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 1 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    const r = await coord.tryAttempt("chrome_up");
+    check("chrome_alive_skips_sweep", !!(r && r.skipped && r.reason === "chrome_alive") && sweeps === 0, r);
+    check("chrome_alive_does_not_arm", armCalls === 0 && coord._test.hostArmed === false);
+    coord.stop();
+  }
+
+  {
     const logs = [];
     let sweeps = 0;
     let now = 50_000;
@@ -164,9 +198,9 @@ check("src_no_arm_human", sweepSrc.includes("waiting_idle no_arm") && sweepSrc.i
     coord._test.lastOkAt = now - 2000;
     const busy = await coord.tryAttempt("due_busy");
     check("busy_does_not_sweep", !!(busy && busy.skipped && busy.reason === "waiting_idle") && sweeps === 0, busy);
-    check("busy_still_armed", workers[0].held === true && coord._test.hostArmed === true);
+    check("busy_does_not_arm", workers[0].held === false && coord._test.hostArmed === false && busy.armed === false);
     check("busy_waiting_flag", coord._test.waitingIdle === true);
-    check("log_waiting", logs.some((l) => l.includes("waiting_idle")), logs);
+    check("log_waiting", logs.some((l) => l.includes("waiting_idle no_arm")), logs);
     workers[0].busy = false;
     coord.idleHint();
     await sleep(450);

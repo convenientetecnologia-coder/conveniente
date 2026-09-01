@@ -4,11 +4,13 @@
  * Faxina OS-wide: DiskClean.exe /StandbyList.
  * Roda SÓ no processo index/clusterMaster. Um spawn por host. Zero CPU/RAM. Zero CDP.
  *
- * Relógio (dono > auditor 5s):
- *   - 1 timer de 15 min (due). Não há varredura de 5 em 5s.
- *   - Due chegou → 1 probe. Se ocupado, ARM (trava o PRÓXIMO job, o atual termina)
- *     e espera idle-hint dos workers. Safety retry 15s/30s/60s só se o hint se perder.
- *   - Fez limpeza → lastOkAt = agora → só libera a próxima daqui a 15 min.
+ * Relógio:
+ *   - 1 timer de 15 min (due). Enquanto o timer corre, Robe e Virtus seguem a full.
+ *   - Due chegou → se tiver chrome.exe vivo, NÃO dispara DiskClean (frota a full;
+ *     RAM da fazenda = EmptyWorkingSet). Só StandbyList com Chrome zerado.
+ *   - Sem Chrome: probe. Se ocupado, NÃO arma a esteira: espera a folga natural.
+ *   - Folga apareceu → ARM só uns segundos (exe destacado + settle 2s) → solta.
+ *   - Fez limpeza → lastOkAt = agora → próxima só daqui a 15 min, de novo sem trava.
  *
  * Exe (dono > auditor 12s fixos):
  *   - Espera o processo terminar de verdade (2s, 10s, 15s: tanto faz).
@@ -39,6 +41,18 @@ const JSONL_PATH = path.join(LOG_DIR, "standby_sweep.jsonl");
 
 function envDisabled() {
   return String(process.env.STANDBY_SWEEP_DISABLED || "").trim() === "1";
+}
+
+function chromeAliveFromSentinel(filePath) {
+  const p = filePath || path.join(__dirname, "..", "dados", "process_sentinel_state.json");
+  try {
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    const n = Number(j && j.counts && j.counts.chrome && j.counts.chrome.count);
+    if (!Number.isFinite(n)) return true;
+    return n > 0;
+  } catch {
+    return true;
+  }
 }
 
 function oxyLog(line) {
@@ -89,7 +103,8 @@ function runStandbySweep(opts) {
     try {
       proc = spawnFn(exe, [arg], {
         windowsHide: true,
-        stdio: "ignore"
+        stdio: "ignore",
+        detached: true
       });
     } catch (e) {
       return done({ ok: false, error: String((e && e.message) || e || "spawn_fail").slice(0, 180) });
@@ -97,6 +112,7 @@ function runStandbySweep(opts) {
     if (!proc || typeof proc.on !== "function") {
       return done({ ok: false, error: "spawn_invalid" });
     }
+    try { if (typeof proc.unref === "function") proc.unref(); } catch {}
     try {
       proc.on("error", (e) => {
         done({ ok: false, error: String((e && e.message) || e || "spawn_error").slice(0, 180) });
@@ -161,6 +177,7 @@ function attachHostCoordinator(opts) {
   const disabled = envDisabled() || !!(opts && opts.disabled);
   const logFn = (opts && opts.log) || oxyLog;
   const jsonlFn = (opts && opts.jsonl) || appendJsonl;
+  const chromeAliveFn = opts && opts.chromeAlive;
 
   let lastOkAt = nowFn();
   let dueTimer = null;
@@ -262,8 +279,21 @@ function attachHostCoordinator(opts) {
         return { skipped: true, reason: "no_shards" };
       }
 
+      if (typeof chromeAliveFn === "function") {
+        let chromeAlive = true;
+        try { chromeAlive = chromeAliveFn() === true; } catch { chromeAlive = true; }
+        if (chromeAlive) {
+          jsonlFn({ event: "skip_chrome_alive", reason, dueAgeMin: ageMin(), shards });
+          logFn("[OXY-LOG] [STANDBY-SWEEP] skip_chrome_alive dueAgeMin=" + ageMin() + " shards=" + shards);
+          lastOkAt = nowFn();
+          waitingIdle = false;
+          scheduleDue();
+          return { skipped: true, reason: "chrome_alive", armed: false };
+        }
+      }
+
       const probe = collectBusy(await broadcast("standby-sweep-probe", { reason: "probe" }, 8000));
-      if (!probe.allIdle && !busyNeedsStitch(probe.reasons)) {
+      if (!probe.allIdle) {
         jsonlFn({ event: "waiting_idle", reason, dueAgeMin: ageMin(), reasons: probe.reasons, shards: probe.shards, armed: false });
         logFn("[OXY-LOG] [STANDBY-SWEEP] waiting_idle no_arm dueAgeMin=" + ageMin() + " reasons=" + probe.reasons.join("|"));
         waitingIdle = true;
@@ -279,21 +309,11 @@ function attachHostCoordinator(opts) {
         return { skipped: true, reason: "abort_arm" };
       }
 
-      if (!probe.allIdle) {
-        jsonlFn({ event: "waiting_idle", reason, dueAgeMin: ageMin(), reasons: probe.reasons, shards: probe.shards, armed: true });
-        logFn("[OXY-LOG] [STANDBY-SWEEP] waiting_idle dueAgeMin=" + ageMin() + " reasons=" + probe.reasons.join("|"));
-        waitingIdle = true;
-        scheduleBusyRetry();
-        return { skipped: true, reason: "waiting_idle", reasons: probe.reasons, armed: true };
-      }
-
       const confirm = collectBusy(await broadcast("standby-sweep-probe", { reason: "confirm" }, 8000));
       if (!confirm.allIdle) {
         jsonlFn({ event: "skip_race", reason, dueAgeMin: ageMin(), reasons: confirm.reasons });
         logFn("[OXY-LOG] [STANDBY-SWEEP] skip_race reasons=" + confirm.reasons.join("|"));
-        if (!busyNeedsStitch(confirm.reasons)) {
-          await releaseHost("skip_race_no_stitch");
-        }
+        await releaseHost("skip_race");
         waitingIdle = true;
         scheduleBusyRetry();
         return { skipped: true, reason: "skip_race", reasons: confirm.reasons };
@@ -427,5 +447,6 @@ module.exports = {
   collectBusy,
   busyNeedsStitch,
   attachHostCoordinator,
-  envDisabled
+  envDisabled,
+  chromeAliveFromSentinel
 };

@@ -276,10 +276,12 @@ function createCluster() {
       sendToAll: (type, payload, timeoutMs) => Promise.all(
         children.map((_, i) => sendTo(i, type, payload || {}, { timeoutMs: timeoutMs || 8000 }))
       ),
-      shardCount: () => children.length
+      shardCount: () => children.length,
+      chromeAlive: () => chromeMemorySweep.chromeAliveFromSentinel(),
+      disabled: true
     });
-    logger.info('[CLUSTER][STANDBY-SWEEP] coordinator on', {
-      disabled: chromeMemorySweep.envDisabled(),
+    logger.info('[CLUSTER][STANDBY-SWEEP] coordinator off diskclean_disabled', {
+      disabled: true,
       minMs: chromeMemorySweep.MIN_INTERVAL_MS,
       timeoutMs: chromeMemorySweep.TIMEOUT_MS,
       settleMs: chromeMemorySweep.SETTLE_MS

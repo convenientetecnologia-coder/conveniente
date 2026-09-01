@@ -144,6 +144,8 @@ function buildPsCommand(pid) {
     "  public static extern bool CloseHandle(IntPtr h);",
     "}",
     "'@",
+    `$proc = Get-Process -Id ${n} -ErrorAction Stop`,
+    "if ($proc.ProcessName -ne 'chrome' -and $proc.ProcessName -ne 'chromium') { exit 4 }",
     `$h = [ConvenienteEmptyWS]::OpenProcess([uint32]${OPEN_PROCESS_ACCESS}, $false, ${n})`,
     "if ($h -eq [IntPtr]::Zero) { exit 2 }",
     "try {",
@@ -166,6 +168,9 @@ function emptyWorkingSetPid(pid, opts) {
 
   if (!n) {
     return Promise.resolve({ ok: false, skipped: true, reason: "bad_pid", pid: 0, elapsedMs: 0 });
+  }
+  if (n === process.pid || n === Number(process.ppid) || n === process.ppid) {
+    return Promise.resolve({ ok: false, skipped: true, reason: "forbidden_pid", pid: n, elapsedMs: 0 });
   }
   if (envDisabled()) {
     return Promise.resolve({ ok: false, skipped: true, reason: "disabled", pid: n, elapsedMs: 0 });
