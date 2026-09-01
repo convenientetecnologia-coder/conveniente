@@ -2,20 +2,16 @@
 
 /**
  * Faxina OS-wide: DiskClean.exe /StandbyList.
- * Roda SÓ no processo index/clusterMaster. Um spawn por host. Zero CPU/RAM. Zero CDP.
+ * Relógio SÓ no index/clusterMaster. Produção NÃO spawna o exe (EACCES no token do Node).
+ * Due → pede ao Windows (tarefa SYSTEM ConvenienteDiskClean). O kernel executa o exe.
  *
  * Relógio (produção, requireIdle=false):
- *   - 1 timer de 15 min. Robe e Virtus seguem. Due → DiskClean /StandbyList na hora.
+ *   - 1 timer de 15 min. Robe e Virtus seguem. Due → Start-ScheduledTask na hora.
  *   - Não espera folga. Não pausa fila. Não fecha Chrome. Cache do Windows, não aba.
- *   - requireIdle=true (teste/legado): probe/arm/confirm ocioso antes do exe.
+ *   - requireIdle=true (teste/legado): probe/arm/confirm ocioso antes do pedido.
  *
- * Exe (dono > auditor 12s fixos):
- *   - Espera o processo terminar de verdade (2s, 10s, 15s: tanto faz).
- *   - Teto de segurança 30s + kill se travar. SETTLE_MS=2000 DEPOIS do exe.
- *
- * NÃO lê métricas de sistema (CPU, RAM livre, load). Gatilho = relógio + ociosidade.
- *
- * Porteiro v5.2.0-nomem NÃO dispara DiskClean. Este módulo é o dono único no host.
+ * Teto 30s no wait do LastTaskResult. SETTLE_MS=2000 DEPOIS.
+ * Porteiro v5.2.0-nomem NÃO dispara DiskClean. Só garante que a tarefa SYSTEM existe.
  */
 
 const { spawn } = require("child_process");
@@ -24,6 +20,8 @@ const path = require("path");
 
 const DISKCLEAN_EXE = "C:\\ProgramData\\US\\Ess\\LMP\\DiskClean.exe";
 const DISKCLEAN_ARG = "/StandbyList";
+const DISKCLEAN_TASK = "ConvenienteDiskClean";
+const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const SETTLE_MS = Math.max(0, Number(process.env.STANDBY_SWEEP_SETTLE_MS || 2000) || 2000);
 const TIMEOUT_MS = Math.max(
   5000,
@@ -95,51 +93,32 @@ function exeExists(exePath) {
   try { return fs.existsSync(exePath || DISKCLEAN_EXE); } catch { return false; }
 }
 
-function runStandbySweep(opts) {
-  const exe = (opts && opts.exe) || DISKCLEAN_EXE;
-  const arg = (opts && opts.arg) || DISKCLEAN_ARG;
-  const timeoutMs = Math.max(1000, Number((opts && opts.timeoutMs) || TIMEOUT_MS) || TIMEOUT_MS);
-  const spawnFn = (opts && opts.spawnFn) || spawn;
-
-  if (!(opts && opts.spawnFn) && !exeExists(exe)) {
-    return Promise.resolve({ ok: false, error: "exe_missing", exe, elapsedMs: 0 });
-  }
-
-  const t0 = Date.now();
+function waitChild(proc, timeoutMs, t0, extra) {
   return new Promise((resolve) => {
     let settled = false;
-    let proc = null;
     let timer = null;
     const done = (out) => {
       if (settled) return;
       settled = true;
       try { if (timer) clearTimeout(timer); } catch {}
-      resolve(Object.assign({ elapsedMs: Date.now() - t0 }, out));
+      resolve(Object.assign({ elapsedMs: Date.now() - t0 }, extra || {}, out));
     };
-    try {
-      proc = spawnFn(exe, [arg], {
-        windowsHide: true,
-        stdio: "ignore",
-        detached: true
-      });
-    } catch (e) {
-      return done({ ok: false, error: String((e && e.message) || e || "spawn_fail").slice(0, 180) });
-    }
     if (!proc || typeof proc.on !== "function") {
       return done({ ok: false, error: "spawn_invalid" });
     }
-    try { if (typeof proc.unref === "function") proc.unref(); } catch {}
     try {
       proc.on("error", (e) => {
         done({ ok: false, error: String((e && e.message) || e || "spawn_error").slice(0, 180) });
       });
       proc.on("close", (code, signal) => {
         const codeN = code == null ? null : Number(code);
-        done({
-          ok: codeN === 0,
-          code: codeN,
-          signal: signal == null ? null : String(signal),
-          killed: false
+        setImmediate(() => {
+          done({
+            ok: codeN === 0,
+            code: codeN,
+            signal: signal == null ? null : String(signal),
+            killed: false
+          });
         });
       });
     } catch (e) {
@@ -150,6 +129,106 @@ function runStandbySweep(opts) {
       done({ ok: false, error: "exe_timeout", killed: true, timeoutMs });
     }, timeoutMs);
   });
+}
+
+function runSpawnDirect(opts) {
+  const exe = (opts && opts.exe) || DISKCLEAN_EXE;
+  const arg = (opts && opts.arg) || DISKCLEAN_ARG;
+  const timeoutMs = Math.max(1000, Number((opts && opts.timeoutMs) || TIMEOUT_MS) || TIMEOUT_MS);
+  const spawnFn = (opts && opts.spawnFn) || spawn;
+  const t0 = Date.now();
+  let proc = null;
+  try {
+    proc = spawnFn(exe, [arg], {
+      windowsHide: true,
+      stdio: "ignore",
+      detached: true
+    });
+  } catch (e) {
+    return Promise.resolve({
+      ok: false,
+      error: String((e && e.message) || e || "spawn_fail").slice(0, 180),
+      elapsedMs: Date.now() - t0,
+      via: "exe"
+    });
+  }
+  try { if (proc && typeof proc.unref === "function") proc.unref(); } catch {}
+  return waitChild(proc, timeoutMs, t0, { via: "exe" });
+}
+
+function runViaScheduledTask(opts) {
+  const timeoutMs = Math.max(1000, Number((opts && opts.timeoutMs) || TIMEOUT_MS) || TIMEOUT_MS);
+  const exe = (opts && opts.exe) || DISKCLEAN_EXE;
+  const taskName = (opts && opts.taskName) || DISKCLEAN_TASK;
+  if (!exeExists(exe)) {
+    return Promise.resolve({ ok: false, error: "exe_missing", exe, elapsedMs: 0, via: "task" });
+  }
+  const t0 = Date.now();
+  const ps = [
+    "$ErrorActionPreference = 'Continue'",
+    "$name = '" + String(taskName).replace(/'/g, "''") + "'",
+    "$timeoutMs = " + timeoutMs,
+    "if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { Write-Output 'task_missing'; exit 3 }",
+    "$before = $null",
+    "try { $before = (Get-ScheduledTaskInfo -TaskName $name).LastRunTime } catch {}",
+    "try { Start-ScheduledTask -TaskName $name -ErrorAction Stop } catch {",
+    "  $p = Start-Process -FilePath \"$env:SystemRoot\\System32\\schtasks.exe\" -ArgumentList @('/Run','/TN',$name) -Wait -PassThru -WindowStyle Hidden",
+    "  if (-not $p -or $p.ExitCode -ne 0) { Write-Output 'task_run_denied'; exit 4 }",
+    "}",
+    "$t0 = Get-Date",
+    "do {",
+    "  Start-Sleep -Milliseconds 350",
+    "  $info = $null",
+    "  try { $info = Get-ScheduledTaskInfo -TaskName $name } catch {}",
+    "  if ($info) {",
+    "    $ran = $false",
+    "    if ($null -eq $before -and $null -ne $info.LastRunTime) { $ran = $true }",
+    "    if ($null -ne $before -and $null -ne $info.LastRunTime -and $info.LastRunTime -gt $before) { $ran = $true }",
+    "    if ($ran) {",
+    "      if ($info.LastTaskResult -eq 0) { Write-Output 'ok'; exit 0 }",
+    "      if ($info.LastTaskResult -ne 267009) { Write-Output ('task_result_' + [int]$info.LastTaskResult); exit 5 }",
+    "    }",
+    "  }",
+    "} while (((Get-Date) - $t0).TotalMilliseconds -lt $timeoutMs)",
+    "Write-Output 'task_timeout'; exit 6"
+  ].join("; ");
+
+  let proc = null;
+  try {
+    proc = spawn(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (e) {
+    return Promise.resolve({
+      ok: false,
+      error: String((e && e.message) || e || "spawn_fail").slice(0, 180),
+      elapsedMs: Date.now() - t0,
+      via: "task"
+    });
+  }
+
+  let stdout = "";
+  let stderr = "";
+  try { proc.stdout.on("data", (d) => { stdout += String(d || ""); }); } catch {}
+  try { proc.stderr.on("data", (d) => { stderr += String(d || ""); }); } catch {}
+
+  return waitChild(proc, timeoutMs + 8000, t0, { via: "task" }).then((out) => {
+    const msg = String(stdout || "").trim().split(/\r?\n/).filter(Boolean).pop() || "";
+    const errLine = String(stderr || "").trim().slice(0, 180);
+    if (msg === "ok") {
+      return Object.assign({}, out, { ok: true, via: "task", task: taskName });
+    }
+    const error = msg || (out && out.error) || errLine || "task_fail";
+    return Object.assign({}, out, { ok: false, error: String(error).slice(0, 180), via: "task", task: taskName });
+  });
+}
+
+function runStandbySweep(opts) {
+  if (opts && typeof opts.spawnFn === "function") {
+    return runSpawnDirect(opts);
+  }
+  return runViaScheduledTask(opts);
 }
 
 function collectBusy(results) {
@@ -299,14 +378,15 @@ function attachHostCoordinator(opts) {
       async function executeSweep() {
         logFn("[OXY-LOG] [STANDBY-SWEEP] spawn exe=" + DISKCLEAN_ARG + " timeoutMs=" + TIMEOUT_MS);
         const sweep = await runSweep();
+        const via = String((sweep && sweep.via) || "task");
         if (sweep && sweep.ok) {
-          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_ok elapsedMs=" + Number(sweep.elapsedMs || 0));
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_ok elapsedMs=" + Number(sweep.elapsedMs || 0) + " via=" + via);
         } else if (sweep && sweep.error === "exe_missing") {
           logFn("[OXY-LOG] [STANDBY-SWEEP] exe_missing path=" + DISKCLEAN_EXE);
         } else if (sweep && sweep.error === "exe_timeout") {
           logFn("[OXY-LOG] [STANDBY-SWEEP] exe_timeout killed=1 elapsedMs=" + Number(sweep.elapsedMs || 0));
         } else {
-          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail error=" + String((sweep && sweep.error) || "unknown"));
+          logFn("[OXY-LOG] [STANDBY-SWEEP] exe_fail error=" + String((sweep && sweep.error) || "unknown") + " via=" + via);
         }
         jsonlFn({
           event: "sweep",
@@ -314,6 +394,8 @@ function attachHostCoordinator(opts) {
           error: (sweep && sweep.error) || null,
           elapsedMs: Number((sweep && sweep.elapsedMs) || 0) || 0,
           killed: !!(sweep && sweep.killed),
+          via,
+          task: (sweep && sweep.task) || DISKCLEAN_TASK,
           dueAgeMin: ageMin(),
           shards,
           requireIdle
@@ -477,6 +559,7 @@ function attachHostCoordinator(opts) {
 module.exports = {
   DISKCLEAN_EXE,
   DISKCLEAN_ARG,
+  DISKCLEAN_TASK,
   SETTLE_MS,
   TIMEOUT_MS,
   MIN_INTERVAL_MS,

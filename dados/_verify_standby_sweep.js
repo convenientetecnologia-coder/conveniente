@@ -46,6 +46,8 @@ check("src_master_diskclean_on", masterSrc.includes("coordinator on") && !master
 check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
 check("src_clock_free_default", /const requireIdle = opts && opts.requireIdle === true/.test(sweepSrc) && !/requireIdle:\s*true/.test(masterSrc));
 check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));
+check("src_prod_uses_task", /ConvenienteDiskClean/.test(sweepSrc) && /Start-ScheduledTask/.test(sweepSrc) && /runViaScheduledTask/.test(sweepSrc));
+check("src_task_name", sweep.DISKCLEAN_TASK === "ConvenienteDiskClean", sweep.DISKCLEAN_TASK);
 check("src_skip_chrome_alive", sweepSrc.includes("skip_chrome_alive"));
 check("src_master_uses_sendTo", /sendTo\(i, type, payload/.test(masterSrc));
 check("src_worker_handlers", workerSrc.includes("standby-sweep-probe") && workerSrc.includes("standby-sweep-arm") && workerSrc.includes("standby-sweep-release"));
@@ -103,6 +105,14 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
       }
     });
     check("exe_nonzero_not_ok", !!(out && out.ok === false && out.code === 1), out);
+  }
+
+  {
+    const out = await sweep.runStandbySweep({
+      exe: "C:\\no_such_diskclean_xyz.exe",
+      timeoutMs: 800
+    });
+    check("task_path_exe_missing", !!(out && out.ok === false && out.error === "exe_missing" && out.via === "task"), out);
   }
 
   {

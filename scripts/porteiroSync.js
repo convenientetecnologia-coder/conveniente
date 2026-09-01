@@ -9,8 +9,9 @@
  *   - loop morto → dispara a tarefa Windows (não fica filho do Node)
  *   - loop vivo ainda no BOOT v5.1.13 → schtasks /End + o loop novo (Highest)
  *     mata qualquer rival (porteiro_loop, vigia.bat, limpeza_memoria, outro loop)
- *   - já nomem, tarefa Running, último BOOT nomem → NÃO recicla o loop.
+ *   - ja nomem, tarefa Running, ultimo BOOT nomem → NAO recicla o loop.
  *     Ainda apaga kit velho (LimpezaAutomaticaConveniente, vigia.bat, …).
+ *   - garante ConvenienteDiskClean (SYSTEM). O loop NAO dispara o exe.
  *
  * Tarefas ao logon/startup ausentes: UAC uma vez (install.ps1). Sem isso o
  * reboot do PC não religa o Porteiro.
@@ -60,16 +61,18 @@ function md5File(filePath) {
 
 function sourceIsNomem(text) {
   if (/Invoke-SoftMemClean/.test(text)) return false;
-  if (/DiskClean\.exe/i.test(text)) return false;
-  if (/ArgumentList\s+['"]\/StandbyList['"]/.test(text)) return false;
   if (/\bmem_soft\b/.test(text)) return false;
+  if (/Start-Process[\s\S]{0,240}DiskClean\.exe/i.test(text)) return false;
+  if (/ArgumentList\s+['"]\/StandbyList['"]/.test(text)) return false;
   if (!/v5\.2\.0-nomem/.test(text)) return false;
   if (!/MemClean=OFF/.test(text)) return false;
+  if (!/ConvenienteDiskClean/.test(text)) return false;
+  if (!/function Ensure-DiskCleanTask/.test(text)) return false;
   return true;
 }
 
 function destLooksLikeOldMemClean(text) {
-  return /Invoke-SoftMemClean/.test(text) || /DiskClean\.exe/i.test(text) || /ArgumentList\s+['"]\/StandbyList['"]/.test(text) || /\bmem_soft\b/.test(text);
+  return /Invoke-SoftMemClean/.test(text) || /\bmem_soft\b/.test(text) || /Start-Process[\s\S]{0,240}DiskClean\.exe/i.test(text) || /ArgumentList\s+['"]\/StandbyList['"]/.test(text);
 }
 
 function lastBootLineIsNomem(text) {
@@ -207,13 +210,8 @@ function stopOldVigia({ endMainLoop }) {
     "$re = 'porteiro_loop\\.ps1|limpeza_memoria\\.ps1|auto_vigia\\\\vigia\\.bat|node_control\\.ps1'",
     endMain ? "$re = $re + '|manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop|auto_vigia\\\\manutencao\\.ps1 -Action loop'" : "",
     "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-    "  $_.CommandLine -and ($_.CommandLine -match $re) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install)')",
-    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-    endMain ? [
-      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-      "  $_.Name -match '(?i)^DiskClean\\.exe$' -or ([string]$_.CommandLine -match '/StandbyList')",
-      "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-    ].join(" ") : ""
+    "  $_.CommandLine -and ($_.CommandLine -match $re) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install|ensure_diskclean)')",
+    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
   ].filter(Boolean).join("; ");
 
   const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {

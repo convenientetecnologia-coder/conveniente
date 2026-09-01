@@ -35,13 +35,14 @@ CONTEUDO DESTA PASTA:
   INICIAR_SISTEMA.bat
   PARAR_SISTEMA.bat
   STATUS.bat
-  kit\manutencao.ps1     <- porteiro (sem DiskClean)
+  kit\manutencao.ps1     <- porteiro (loop MemClean=OFF; cria ConvenienteDiskClean)
   kit\install.ps1        <- usado pelo Setup
 
 O QUE O SETUP INSTALA:
   C:\auto_vigia\manutencao.ps1
   Tarefa: ConvenientePorteiro (ao logon)
   Tarefa: ConvenienteNetBoot (startup SYSTEM - checa rede em TODO boot)
+  Tarefa: ConvenienteDiskClean (SYSTEM, on-demand — o Conveniente dispara)
   Atalhos no Desktop: PARAR / INICIAR / STATUS
 
 REBOOT DIARIO:
@@ -56,9 +57,10 @@ GUARDA DE REDE (TODO BOOT) — remedio = so reiniciar:
   - ConvenienteNetBoot (SYSTEM) + porteiro no logon
 
 MEMORIA (StandbyList):
-  - REMOVIDO deste loop. Nao chama DiskClean.exe.
-  - Dono: Conveniente (index), a cada 15 min se a fazenda estiver ociosa.
-  - No log do porteiro: ACTION=...mem_off (prova de que nao limpou RAM)
+  - Loop do Porteiro NAO dispara DiskClean.exe (MemClean=OFF / mem_off).
+  - Porteiro so cria a tarefa SYSTEM ConvenienteDiskClean (on-demand).
+  - Dono do relogio: Conveniente (index), a cada 15 min pede o Run ao Windows.
+  - No log do porteiro: ACTION=...mem_off (prova de que o loop nao limpou RAM)
 
 DISCO:
   - Madrugada: 1x/dia 04:30-06:00 (horario diferente por maquina)

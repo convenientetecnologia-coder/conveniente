@@ -128,6 +128,11 @@ try {
     }
 }
 
+Write-Host '[4b] Tarefa ConvenienteDiskClean (SYSTEM, on-demand)...'
+& $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action ensure_diskclean
+if ($LASTEXITCODE -eq 0) { Write-Host '  OK ConvenienteDiskClean' }
+else { Write-Host '  [!] ConvenienteDiskClean pode precisar de Setup como Admin' }
+
 Write-Host '[5] Atalhos Desktop...'
 $desk = [Environment]::GetFolderPath('Desktop')
 $sh = New-Object -ComObject WScript.Shell

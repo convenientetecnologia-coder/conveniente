@@ -2,11 +2,12 @@
 # TUDO-EM-UM: porteiro + start/stop/status
 # Nao altera C:\conveniente
 # Regra: se JA estiver ligado, NUNCA sobe de novo.
-# RAM (StandbyList) NAO vive aqui (v5.2.0-nomem). Dono unico:
-#   C:\conveniente\scripts\chromeMemorySweep.js  (processo index)
+# RAM (StandbyList) NAO vive neste loop (v5.2.0-nomem).
+# Este script so GARANTE a tarefa SYSTEM ConvenienteDiskClean (on-demand).
+# Quem cronometra 15 min e pede o Run e o Conveniente (chromeMemorySweep.js).
 
 param(
-    [ValidateSet('loop','start','stop','status','install','netboot')]
+    [ValidateSet('loop','start','stop','status','install','netboot','ensure_diskclean')]
     [string]$Action = 'status'
 )
 
@@ -557,8 +558,66 @@ function Do-Status {
         Write-Host ("NetGuardTodoBoot={0} min / {1} testes (placa sumiu = 1 reboot extra max/dia)" -f $NetCheckWaitMin, $NetConfirmTries)
     }
     Write-Host 'MemClean=OFF (StandbyList no Conveniente, nao neste loop)'
+    $dcTask = Get-ScheduledTask -TaskName 'ConvenienteDiskClean' -ErrorAction SilentlyContinue
+    if ($null -ne $dcTask) { Write-Host 'DiskCleanTask=ConvenienteDiskClean (SYSTEM, on-demand)' }
+    else { Write-Host 'DiskCleanTask=AUSENTE' }
     Write-Host "Power=$pwr"
     Write-Host "Log=C:\auto_vigia\logs\porteiro.log"
+}
+
+function Ensure-DiskCleanTask {
+    # Cria/repara a tarefa SYSTEM. NAO dispara o exe. O loop permanece MemClean=OFF.
+    $name = 'ConvenienteDiskClean'
+    $exe = 'C:\ProgramData\US\Ess\LMP\DiskClean.exe'
+    if (-not (Test-Path -LiteralPath $exe)) {
+        Write-Log 'diskclean_task fail exe_missing'
+        return 'fail'
+    }
+    try {
+        $need = $true
+        $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($null -ne $existing) {
+            $act = $null
+            try { $act = @($existing.Actions)[0] } catch {}
+            if ($null -ne $act) {
+                $exeOk = ([string]$act.Execute -ieq $exe)
+                $argOk = ([string]$act.Arguments -match '(?i)/StandbyList')
+                if ($exeOk -and $argOk) { $need = $false }
+            }
+        }
+        if ($need) {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+            $action = New-ScheduledTaskAction -Execute $exe -Argument '/StandbyList'
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -StartWhenAvailable
+            try {
+                Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+            } catch {
+                $created = $false
+                try {
+                    & schtasks.exe /Create /TN $name /TR "$exe /StandbyList" /SC ONCE /ST 23:59 /SD 01/01/2099 /RU SYSTEM /RL HIGHEST /F | Out-Null
+                    if ($LASTEXITCODE -eq 0) { $created = $true }
+                } catch {}
+                if (-not $created) { throw }
+            }
+        }
+        $sddl = 'D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)'
+        $sddlOk = $false
+        try {
+            $svc = New-Object -ComObject 'Schedule.Service'
+            $svc.Connect()
+            $fld = $svc.GetFolder('\')
+            $t = $fld.GetTask($name)
+            $t.SetSecurityDescriptor($sddl, 0)
+            $sddlOk = $true
+        } catch {}
+        if ($sddlOk) { Write-Log 'diskclean_task ok' }
+        else { Write-Log 'diskclean_task ok_no_sddl' }
+        return 'ok'
+    } catch {
+        Write-Log ("diskclean_task fail {0}" -f $_.Exception.Message)
+        return 'fail'
+    }
 }
 
 function Stop-RivalVigia {
@@ -568,7 +627,7 @@ function Stop-RivalVigia {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.ProcessId -ne $my -and $_.CommandLine -and (
             $_.CommandLine -match 'porteiro_loop\.ps1|limpeza_memoria\.ps1|auto_vigia\\vigia\.bat|manutencao\.ps1 -Action loop|manutencao\.ps1" -Action loop'
-        ) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install)')
+        ) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install|ensure_diskclean)')
     } | ForEach-Object {
         $rid = [int]$_.ProcessId
         Stop-Process -Id $rid -Force -ErrorAction SilentlyContinue
@@ -595,6 +654,7 @@ function Do-Loop {
     Set-MaxPerf
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
     else { Write-Log (("BOOT $Version reboot={0:D2}:{1:D2}" -f $RebootHour, $RebootMinute)) }
+    try { [void](Ensure-DiskCleanTask) } catch {}
 
     # Critico empresa: PARAR nao pode deixar a VM muda apos reinicio diario.
     # PAUSED vale so na sessao atual; apos boot o porteiro libera e sobe o Conveniente.
@@ -705,6 +765,10 @@ switch ($Action) {
     'status'  { Do-Status }
     'loop'    { Do-Loop }
     'netboot' { Do-NetBoot }
+    'ensure_diskclean' {
+        $r = Ensure-DiskCleanTask
+        if ($r -ne 'ok') { exit 1 }
+    }
     'install' {
         Write-Host 'Use Setup_Manutencao.bat para instalar.'
     }

@@ -14,7 +14,9 @@ o Conveniente:
     e a TAREFA DO WINDOWS sobe o loop (schtasks /Run). Nao fica filho do Node.
   - se ja for o correto e estiver vivo → o index NAO mexe.
 
-RAM/StandbyList: so o Conveniente (chromeMemorySweep no index).
+RAM/StandbyList: o Conveniente cronometra (chromeMemorySweep no index) e
+pede ao Windows a tarefa SYSTEM ConvenienteDiskClean. O loop do Porteiro
+NAO dispara o exe (MemClean=OFF).
 
 1. SERVIDOR NOVO
    irm ... | iex

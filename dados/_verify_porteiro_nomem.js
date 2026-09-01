@@ -34,11 +34,15 @@ const sync = require("../scripts/porteiroSync.js");
 check("kit_exists", fs.existsSync(kit));
 check("kit_version", /v5\.2\.0-nomem/.test(kitTxt));
 check("kit_no_invoke_soft", !/Invoke-SoftMemClean/.test(kitTxt));
-check("kit_no_diskclean_exe", !/DiskClean\.exe/i.test(kitTxt));
-check("kit_no_standbylist_arg", !/ArgumentList\s+['"]\/StandbyList['"]/.test(kitTxt));
+check("kit_no_start_process_diskclean", !/Start-Process[\s\S]{0,240}DiskClean\.exe/i.test(kitTxt));
+check("kit_no_standbylist_arglist", !/ArgumentList\s+['"]\/StandbyList['"]/.test(kitTxt));
 check("kit_no_mem_soft", !/\bmem_soft\b/.test(kitTxt));
 check("kit_status_mem_off", /MemClean=OFF/.test(kitTxt));
 check("kit_loop_mem_off", /mem_off/.test(kitTxt));
+check("kit_diskclean_task", /ConvenienteDiskClean/.test(kitTxt) && /function Ensure-DiskCleanTask/.test(kitTxt));
+check("kit_diskclean_task_system", /UserId 'SYSTEM'/.test(kitTxt) && /ensure_diskclean/.test(kitTxt));
+check("kit_loop_ensures_task", /Ensure-DiskCleanTask/.test(kitTxt.split("function Do-Loop")[1] || ""));
+check("kit_loop_does_not_run_task", !/Start-ScheduledTask/.test(kitTxt) && !/schtasks\.exe \/Run/.test(kitTxt));
 check("kit_reboot_04", /\$RebootHour\s*=\s*4/.test(kitTxt) && /Invoke-DailyReboot/.test(kitTxt));
 check("kit_lixeira_or_temp", /Lixeira|Recycle|TEMP/i.test(kitTxt));
 check("kit_auto_boot", /AUTO_BOOT/.test(kitTxt) && /Do-Start/.test(kitTxt));
@@ -46,7 +50,8 @@ check("kit_do_stop_exists", /function Do-Stop/.test(kitTxt));
 check("kit_sourceIsNomem", sync.sourceIsNomem(kitTxt) === true);
 
 check("install_kit_version", /v5\.2\.0-nomem/.test(instKitTxt));
-check("install_kit_no_diskclean", !/DiskClean\.exe/i.test(instKitTxt));
+check("install_kit_no_diskclean_exe", !/DiskClean\.exe/i.test(instKitTxt));
+check("install_calls_ensure_diskclean", /ensure_diskclean/.test(instKitTxt));
 check("install_does_not_do_stop", !/Do-Stop|-Action stop/.test(instKitTxt));
 
 check("instalar_porteiro_exists", fs.existsSync(instPorteiro));
@@ -67,10 +72,13 @@ check("leia_index_not_owner", !/Dono: o index\.js/.test(leiaTxt));
 check("leia_windows_owns", /tarefa ConvenientePorteiro/.test(leiaTxt) && /so CORRIGE/.test(leiaTxt));
 check("contrato_index_not_owner", /NAO e o dono/.test(contratoTxt) && /sistema a parte/.test(contratoTxt));
 
-check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt));
+check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt) && /ConvenienteDiskClean/.test(sweepTxt) && /runViaScheduledTask/.test(sweepTxt));
+check("sweep_prod_asks_windows", /function runStandbySweep[\s\S]{0,220}runViaScheduledTask/.test(sweepTxt));
+check("sync_no_kill_diskclean", !/\^DiskClean/.test(syncTxt) && !/CommandLine -match '\/StandbyList'/.test(syncTxt));
 
 check("sync_sourceIsNomem_rejects_old", sync.sourceIsNomem("Invoke-SoftMemClean DiskClean.exe /StandbyList mem_soft") === false);
 check("destLooksLikeOld", sync.destLooksLikeOldMemClean("return 'mem_soft'") === true);
+check("destLooksLikeOld_kit_is_new", sync.destLooksLikeOldMemClean(kitTxt) === false);
 
 const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, taskRunning: false, tasksOk: false });
 check("plan_fresh_copies", fresh.copy === true && fresh.restartLoop === true && fresh.installTasks === true);
