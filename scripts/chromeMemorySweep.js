@@ -35,6 +35,7 @@ const MIN_INTERVAL_MS = Math.max(
 );
 const LOG_DIR = path.join(__dirname, "..", "dados", "logs");
 const JSONL_PATH = path.join(LOG_DIR, "standby_sweep.jsonl");
+const LAST_PATH = path.join(__dirname, "..", "dados", "standby_sweep_last.json");
 
 function envDisabled() {
   return String(process.env.STANDBY_SWEEP_DISABLED || "").trim() === "1";
@@ -56,11 +57,29 @@ function oxyLog(line) {
   try { console.log(String(line)); } catch {}
 }
 
+function appendLifecycle(rec) {
+  try {
+    const life = require("./indexLifecycle");
+    if (!life || typeof life.append !== "function") return;
+    life.append("standby_sweep", {
+      sweepEvent: rec && rec.event ? String(rec.event).slice(0, 48) : null,
+      ok: rec && rec.ok,
+      error: rec && rec.error ? String(rec.error).slice(0, 180) : null,
+      elapsedMs: rec && rec.elapsedMs != null ? Number(rec.elapsedMs) || 0 : null,
+      shards: rec && rec.shards != null ? Number(rec.shards) || 0 : null,
+      requireIdle: rec && rec.requireIdle === true,
+      dueAgeMin: rec && rec.dueAgeMin != null ? Number(rec.dueAgeMin) || 0 : null
+    });
+  } catch {}
+}
+
 function appendJsonl(row) {
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const rec = Object.assign({ ts: Date.now(), iso: new Date().toISOString() }, row || {});
     fs.appendFileSync(JSONL_PATH, JSON.stringify(rec) + "\n", "utf8");
+    try { fs.writeFileSync(LAST_PATH, JSON.stringify(rec), "utf8"); } catch {}
+    appendLifecycle(rec);
   } catch {}
 }
 

@@ -3178,6 +3178,9 @@ function logsAllowlist() {
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     // Governor RAM/light/full monitoring (1/min) — para análise 48h via CT fetch_logs
     governor_snapshots: path.join(base, 'governor_snapshots.jsonl'),
+    // DiskClean /StandbyList — CT precisa puxar sozinho (não mandar operador abrir arquivo na MAE)
+    standby_sweep: path.join(base, 'logs', 'standby_sweep.jsonl'),
+    standby_sweep_last: path.join(base, 'standby_sweep_last.json'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
     // Evidência de versão (para auditoria E2E): prova qual commit está no disco

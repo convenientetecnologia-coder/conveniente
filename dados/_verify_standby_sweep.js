@@ -24,6 +24,7 @@ function sleep(ms) {
 const root = path.join(__dirname, "..");
 const sweepSrc = fs.readFileSync(path.join(root, "scripts", "chromeMemorySweep.js"), "utf8");
 const masterSrc = fs.readFileSync(path.join(root, "scripts", "clusterMaster.js"), "utf8");
+const dashSrc = fs.readFileSync(path.join(root, "scripts", "dashboard.js"), "utf8");
 const workerSrc = fs.readFileSync(path.join(root, "scripts", "worker.js"), "utf8");
 const deltaSrc = fs.readFileSync(path.join(root, "scripts", "virtusDelta.js"), "utf8");
 const robeSrc = fs.readFileSync(path.join(root, "scripts", "robeQueue.js"), "utf8");
@@ -37,6 +38,10 @@ check("src_not_hard_12s", !/TIMEOUT_MS[^\n]*12000/.test(sweepSrc) && sweep.TIMEO
 check("src_settle_2000", sweep.SETTLE_MS === 2000, sweep.SETTLE_MS);
 check("src_min_15min", sweep.MIN_INTERVAL_MS === 15 * 60 * 1000, sweep.MIN_INTERVAL_MS);
 check("src_master_wires", masterSrc.includes("chromeMemorySweep") && masterSrc.includes("standby-sweep-idle-hint"));
+check("src_allowlist_standby_sweep", /standby_sweep:\s*path\.join\(base,\s*'logs',\s*'standby_sweep\.jsonl'\)/.test(dashSrc));
+check("src_allowlist_standby_last", dashSrc.includes("standby_sweep_last"));
+check("src_lifecycle_dual_write", sweepSrc.includes('append("standby_sweep"') || sweepSrc.includes("life.append(\"standby_sweep\""));
+check("src_coordinator_lifecycle", masterSrc.includes("standby_sweep_on"));
 check("src_master_diskclean_on", masterSrc.includes("coordinator on") && !masterSrc.includes("diskclean_disabled"));
 check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
 check("src_clock_free_default", /const requireIdle = opts && opts.requireIdle === true/.test(sweepSrc) && !/requireIdle:\s*true/.test(masterSrc));

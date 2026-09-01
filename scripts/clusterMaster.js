@@ -284,9 +284,22 @@ function createCluster() {
       timeoutMs: chromeMemorySweep.TIMEOUT_MS,
       settleMs: chromeMemorySweep.SETTLE_MS
     });
+    try {
+      require("./indexLifecycle").append("standby_sweep_on", {
+        disabled: chromeMemorySweep.envDisabled(),
+        minMs: chromeMemorySweep.MIN_INTERVAL_MS,
+        timeoutMs: chromeMemorySweep.TIMEOUT_MS,
+        settleMs: chromeMemorySweep.SETTLE_MS
+      });
+    } catch {}
   } catch (e) {
     standbySweep = null;
     try { logger.warn('[CLUSTER][STANDBY-SWEEP] coordinator off', { error: e && e.message || e }); } catch {}
+    try {
+      require("./indexLifecycle").append("standby_sweep_off", {
+        error: String((e && e.message) || e || "fail").slice(0, 180)
+      });
+    } catch {}
   }
 
   function findChildByPerfil(nome) {
