@@ -7,7 +7,10 @@
 # Uso (admin via UAC):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\instalar_porteiro.ps1
 #
-# NAO mata o Node do Conveniente (nao chama Do-Stop). So recicla o loop do porteiro.
+# -NoSelfElevate: quem chama ja pediu UAC. Se nao for admin, sai 3. Nao abre segundo PowerShell.
+param(
+    [switch]$NoSelfElevate
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
@@ -47,6 +50,10 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )
 if (-not $isAdmin) {
+    if ($NoSelfElevate) {
+        Write-Host '[ERRO] Precisa de administrador. Porteiro NAO instalado.'
+        exit 3
+    }
     Write-Host '[ADMIN] Pedindo administrador para gravar tarefas ConvenientePorteiro / ConvenienteNetBoot...'
     $p = $null
     try {

@@ -69,6 +69,10 @@ check("instalar_porteiro_uac_cancel_exits", /Admin recusado/.test(instPTxt) && /
 
 check("ensure_script_exists", fs.existsSync(ensurePs1));
 check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt));
+check("ensure_installer_no_self_elevate", /NoSelfElevate/.test(ensureTxt));
+check("installer_no_self_elevate_exits_3", /\$NoSelfElevate/.test(instPTxt) && /Precisa de administrador/.test(instPTxt));
+check("iniciar_self_elevates", /AlreadyElevated/.test(iniciarTxt) && /Request-AdminRelaunch/.test(iniciarTxt) && /MessageBox/.test(iniciarTxt));
+check("iniciar_dest_same_process", /& \$destStart -Action start/.test(iniciarTxt) && !/& \$ps .*destStart/.test(iniciarTxt));
 check("ensure_uac_same_process", /param\(\[switch\]\$ReturnOnly\)/.test(ensureTxt) && /function Invoke-PorteiroEnsureMain/.test(ensureTxt));
 check("ensure_inprocess_if_admin", /Test-IsAdmin/.test(ensureTxt) && /inprocess_admin/.test(ensureTxt));
 check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));

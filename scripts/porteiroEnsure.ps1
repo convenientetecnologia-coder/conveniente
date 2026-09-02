@@ -174,7 +174,7 @@ function Start-PorteiroLoopNow {
 }
 
 function Invoke-PorteiroInstaller {
-    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$Installer`""
+    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$Installer`" -NoSelfElevate"
     $p = $null
     if (Test-IsAdmin) {
         Write-Host 'Ja sou admin. Instalando o Porteiro (ConvenienteNetBoot + loop) sem pedir de novo.'
@@ -190,10 +190,19 @@ function Invoke-PorteiroInstaller {
     }
 
     Write-Host 'Porteiro incompleto. Falta tarefa de rede (net) e/ou o loop.'
-    Write-Host 'O Windows vai pedir administrador AGORA. A tela pode escurecer. Clique SIM.'
+    Write-Host 'Clique OK, depois SIM na janela do Windows.'
     Write-EnsureLog 'NEED_INSTALL asking_uac'
     try {
-        $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -WindowStyle Normal -ArgumentList $arg
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Clique OK. Na proxima tela o Windows pede administrador. Clique SIM.',
+            'Porteiro',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        )
+    } catch {}
+    try {
+        $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -WindowStyle Normal -WorkingDirectory $env:SystemRoot -ArgumentList $arg
     } catch {
         Write-Host '[ERRO] Admin recusado ou UAC cancelado. Clique Iniciar de novo e aceite.'
         Write-EnsureLog ("FAIL uac_exception " + $_.Exception.Message)
