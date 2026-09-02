@@ -1,5 +1,5 @@
-# Garante o Porteiro 100% no clique HUMANO de Iniciar.
-# Nao e dono do Conveniente. Nao mata Node. Nao limpa RAM.
+# Garante o Porteiro 100% no Setup / instalar_porteiro (admin).
+# O clique INICIAR NAO chama este script. Iniciar e silencio, sem UAC.
 # Pronto = kit git v5.2.0-nomem (hash) + tarefas Windows CERTAS + loop vivo.
 # Se o kit/tarefas ja estao certos e so o loop morreu: religa SEM admin.
 # Se faltar kit ou tarefa: pede admin UMA vez (UAC -Wait) e confere de novo.
@@ -189,20 +189,9 @@ function Invoke-PorteiroInstaller {
         return [int]$p.ExitCode
     }
 
-    Write-Host 'Porteiro incompleto. Falta tarefa de rede (net) e/ou o loop.'
-    Write-Host 'Clique OK, depois SIM na janela do Windows.'
     Write-EnsureLog 'NEED_INSTALL asking_uac'
     try {
-        Add-Type -AssemblyName System.Windows.Forms | Out-Null
-        [void][System.Windows.Forms.MessageBox]::Show(
-            'Clique OK. Na proxima tela o Windows pede administrador. Clique SIM.',
-            'Porteiro',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
-    } catch {}
-    try {
-        $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -WindowStyle Normal -WorkingDirectory $env:SystemRoot -ArgumentList $arg
+        $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -ArgumentList $arg
     } catch {
         Write-Host '[ERRO] Admin recusado ou UAC cancelado. Clique Iniciar de novo e aceite.'
         Write-EnsureLog ("FAIL uac_exception " + $_.Exception.Message)

@@ -3201,6 +3201,8 @@ function logsAllowlist() {
     index_boot_context: path.join(base, 'index_boot_context.json'),
     windows_forensic_last: path.join(base, 'windows_forensic_last.json'),
     windows_forensic_deep_last: path.join(base, 'windows_forensic_deep_last.json'),
+    porteiro_log: 'C:\\auto_vigia\\logs\\porteiro.log',
+    porteiro_ensure_log: 'C:\\auto_vigia\\logs\\porteiro_ensure.log',
     process_sentinel: path.join(base, 'process_sentinel.jsonl'),
     process_sentinel_state: path.join(base, 'process_sentinel_state.json'),
     process_sentinel_incident: path.join(base, 'process_sentinel_last_incident.json'),

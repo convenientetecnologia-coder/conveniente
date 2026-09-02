@@ -16,11 +16,9 @@ FONTE CANONICA (servidor novo e MAE):
 INSTALAR / ATUALIZAR:
   1) irm https://raw.githubusercontent.com/convenientetecnologia-coder/conveniente/main/instalar_conveniente.ps1 | iex
   2) Fecha o PowerShell, reabre, clona + npm (CONTRATO.txt).
-  3) Clique INICIAR (porteiro\INICIAR_SISTEMA.bat ou atalho Iniciar Conveniente).
-     Se o Porteiro nao estiver 100%, o Windows pede admin UMA vez. Aceite.
-     Se ja estiver certo (kit + tarefas certas + loop vivo), so sobe o Conveniente.
-     Se o kit/tarefas estiverem certos e so o loop morreu: religa o loop SEM admin.
-     AUTO/AUTO_BOOT (04h) NAO pedem UAC.
+  3) Clique INICIAR (porteiro\INICIAR_SISTEMA.vbs / .bat ou atalho Iniciar Conveniente).
+     Sobe o Conveniente. Sem admin. Sem OK. Se o loop do Porteiro estiver morto,
+     religa em silencio. AUTO/AUTO_BOOT (04h) NAO pedem UAC.
 
 CAMINHO ANTIGO (esta pasta na area de trabalho):
   1) Botao direito em Setup_Manutencao.bat -> Executar como administrador

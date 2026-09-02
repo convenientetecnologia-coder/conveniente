@@ -64,15 +64,17 @@ check("instalar_porteiro_exists", fs.existsSync(instPorteiro));
 check("instalar_porteiro_refuses_mem", /Invoke-SoftMemClean/.test(instPTxt) && /exit 2/.test(instPTxt));
 check("instalar_porteiro_calls_install", /porteiro\\kit\\install\.ps1/.test(instPTxt));
 check("instalar_conveniente_calls_porteiro", /instalar_porteiro\.ps1/.test(instCTxt));
-check("instalar_conveniente_iniciar_ensure", /iniciarSistema\.ps1/.test(instCTxt));
+check("instalar_conveniente_iniciar_vbs", /INICIAR_SISTEMA\.vbs/.test(instCTxt) && /wscript\.exe/.test(instCTxt));
 check("instalar_porteiro_uac_cancel_exits", /Admin recusado/.test(instPTxt) && /exit 3/.test(instPTxt));
 
 check("ensure_script_exists", fs.existsSync(ensurePs1));
 check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt));
 check("ensure_installer_no_self_elevate", /NoSelfElevate/.test(ensureTxt));
 check("installer_no_self_elevate_exits_3", /\$NoSelfElevate/.test(instPTxt) && /Precisa de administrador/.test(instPTxt));
-check("iniciar_self_elevates", /AlreadyElevated/.test(iniciarTxt) && /Request-AdminRelaunch/.test(iniciarTxt) && /MessageBox/.test(iniciarTxt));
-check("iniciar_dest_same_process", /& \$destStart -Action start/.test(iniciarTxt) && !/& \$ps .*destStart/.test(iniciarTxt));
+check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
+check("iniciar_starts_node_direct", /title Conveniente_Node/.test(iniciarTxt) && /Start-Process cmd\.exe/.test(iniciarTxt));
+check("iniciar_silent_copy", /Copy-KitSilent/.test(iniciarTxt) && /Copy-Item/.test(iniciarTxt));
+check("iniciar_loop_silent", /Start-LoopSilent/.test(iniciarTxt) && /WindowStyle Hidden/.test(iniciarTxt));
 check("ensure_uac_same_process", /param\(\[switch\]\$ReturnOnly\)/.test(ensureTxt) && /function Invoke-PorteiroEnsureMain/.test(ensureTxt));
 check("ensure_inprocess_if_admin", /Test-IsAdmin/.test(ensureTxt) && /inprocess_admin/.test(ensureTxt));
 check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
@@ -81,19 +83,17 @@ check("ensure_arms_loop_without_uac", /Test-FilesAndTasksOk/.test(ensureTxt) && 
 check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/return 10/g) || []).length >= 2);
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
-check("iniciar_calls_ensure_then_start", /porteiroEnsure\.ps1/.test(iniciarTxt) && /-Action start/.test(iniciarTxt));
-check("iniciar_same_process_ensure", /& \$ensure -ReturnOnly/.test(iniciarTxt));
-check("iniciar_aborts_if_ensure_fails", /ensureCode -ne 0/.test(iniciarTxt));
-check("iniciar_waits_autoboot_after_install", /ensureCode -eq 10/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
+check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
 check("install_exits_if_tasks_fail", /if \(-not \$okTask -or -not \$okNet\) \{ exit 1 \}/.test(instKitTxt) && /exit 0/.test(instKitTxt));
-check("iniciar_bat_uses_git_script", /iniciarSistema\.ps1/.test(iniciarBatTxt));
-check("iniciar_bat_no_always_pause", /if errorlevel 1 pause/.test(iniciarBatTxt) && !/^pause\s*$/m.test(iniciarBatTxt.replace(/\r/g, "")));
-check("install_kit_iniciar_uses_git_script", /iniciarSistema\.ps1/.test(instKitTxt));
-check("kit_manual_ensure", /function Invoke-PorteiroEnsure/.test(kitTxt) && /\$Reason -eq 'MANUAL'/.test(kitTxt));
-check("kit_ensure_same_process", /& \$ensure -ReturnOnly/.test(kitTxt));
-check("kit_ensure_accepts_exit_10", /\$ens -ne 10/.test(kitTxt) && /\$ens -eq 10/.test(kitTxt));
+const iniciarVbs = path.join(root, "porteiro", "INICIAR_SISTEMA.vbs");
+check("iniciar_vbs_exists", fs.existsSync(iniciarVbs));
+check("iniciar_vbs_hidden", /WindowStyle Hidden/.test(fs.readFileSync(iniciarVbs, "utf8")) && /iniciarSistema\.ps1/.test(fs.readFileSync(iniciarVbs, "utf8")));
+check("iniciar_bat_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(iniciarBatTxt) && /wscript/.test(iniciarBatTxt));
+check("iniciar_bat_no_always_pause", !/pause/i.test(iniciarBatTxt));
+check("install_kit_iniciar_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(instKitTxt) && /wscript\.exe/.test(instKitTxt));
 const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
-check("kit_ensure_only_inside_manual", /if \(\$Reason -eq 'MANUAL'\)[\s\S]{0,800}Invoke-PorteiroEnsure/.test(doStartBody));
+check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
+check("kit_ensure_function_gone", !/function Invoke-PorteiroEnsure/.test(kitTxt));
 check("kit_ensure_not_in_auto", !/Invoke-PorteiroEnsure/.test((kitTxt.split("function Do-Loop")[1] || "").split("function ")[0]));
 
 check("sync_no_taskkill_node", !/taskkill/i.test(syncTxt));
@@ -108,7 +108,7 @@ const contratoTxt = fs.readFileSync(path.join(root, "porteiro", "CONTRATO.txt"),
 check("leia_index_not_owner", !/Dono: o index\.js/.test(leiaTxt));
 check("leia_windows_owns", /tarefa ConvenientePorteiro/.test(leiaTxt) && /so CORRIGE/.test(leiaTxt));
 check("contrato_index_not_owner", /NAO e o dono/.test(contratoTxt) && /sistema a parte/.test(contratoTxt));
-check("contrato_iniciar_fecha_furo", /Clique INICIAR/.test(contratoTxt) && /pede admin UMA vez/.test(contratoTxt));
+check("contrato_iniciar_silencio", /Clique INICIAR/.test(contratoTxt) && /Sem admin/.test(contratoTxt) && /sem OK/.test(contratoTxt));
 check("sync_loop_via_start_process", /start_process/.test(syncTxt));
 
 check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt) && /ConvenienteDiskClean/.test(sweepTxt) && /runViaScheduledTask/.test(sweepTxt));

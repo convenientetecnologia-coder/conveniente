@@ -1,18 +1,31 @@
-# Clique Iniciar: arma o Porteiro se faltar, depois sobe o Conveniente.
-# Se faltar admin: relanca ESTE script com UAC ANTES do check lento.
-# O .bat/CMD come o "clique"; um OK na cara restaura o direito de pedir SIM.
-param(
-    [switch]$AlreadyElevated
-)
+# Clique Iniciar: sobe o Conveniente. Arma o loop em silencio se faltar.
+# Sem admin. Sem OK. Sem PowerShell visivel. Uma janela: Conveniente_Node.
+# Armado = dest nomem + loop vivo. Hash/NetBoot NAO bloqueiam o clique.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ensure = Join-Path $here 'porteiroEnsure.ps1'
-$destStart = 'C:\auto_vigia\manutencao.ps1'
+try {
+    Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -ErrorAction SilentlyContinue
+    $hwnd = [Native.Win]::GetConsoleWindow()
+    if ($hwnd -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwnd, 0) }
+} catch {}
+
 $kitSrc = 'C:\conveniente\porteiro\kit\manutencao.ps1'
+$destDir = 'C:\auto_vigia'
+$destPs1 = Join-Path $destDir 'manutencao.ps1'
+$pauseFlag = Join-Path $destDir 'PAUSED.flag'
+$logFile = Join-Path $destDir 'logs\porteiro_ensure.log'
+$indexJs = 'C:\conveniente\index.js'
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+function Write-StartLog([string]$Line) {
+    try {
+        New-Item -ItemType Directory -Path (Split-Path $logFile) -Force | Out-Null
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -LiteralPath $logFile -Value "$ts INICIAR $Line" -Encoding ASCII
+    } catch {}
+}
 
 function Test-ConvenienteUp {
     try {
@@ -26,84 +39,134 @@ function Test-ConvenienteUp {
     return $false
 }
 
-function Test-NeedAdminFast {
-    if (-not (Test-Path -LiteralPath $kitSrc)) { return $true }
-    if (-not (Test-Path -LiteralPath $destStart)) { return $true }
-    try {
-        $a = (Get-FileHash -LiteralPath $kitSrc -Algorithm MD5).Hash
-        $b = (Get-FileHash -LiteralPath $destStart -Algorithm MD5).Hash
-        if ($a -ne $b) { return $true }
-    } catch {
-        return $true
+function Test-NomemFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $t = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrEmpty($t)) { return $false }
+    if ($t -match 'Invoke-SoftMemClean') { return $false }
+    if ($t -match '\bmem_soft\b') { return $false }
+    if ($t -match "ArgumentList '/StandbyList'") { return $false }
+    if ($t -match 'Start-Process[\s\S]{0,240}DiskClean\.exe') { return $false }
+    if ($t -notmatch 'v5\.2\.0-nomem') { return $false }
+    if ($t -notmatch 'MemClean=OFF') { return $false }
+    if ($t -notmatch 'ConvenienteDiskClean') { return $false }
+    if ($t -notmatch 'function Ensure-DiskCleanTask') { return $false }
+    return $true
+}
+
+function Test-LoopAlive {
+    $lock = Join-Path $destDir 'porteiro.lock'
+    if (Test-Path -LiteralPath $lock) {
+        try {
+            $id = [int]((Get-Content -LiteralPath $lock -Raw).Trim())
+            if ($id -gt 0) {
+                $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+                if ($cim -and $cim.CommandLine -and ($cim.CommandLine -match 'manutencao\.ps1') -and ($cim.CommandLine -match '-Action loop')) {
+                    return $true
+                }
+            }
+        } catch {}
     }
-    & schtasks.exe /Query /TN 'ConvenienteNetBoot' 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { return $true }
-    & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { return $true }
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)) {
+        $c = [string]$p.CommandLine
+        if ($c -and ($c -match 'manutencao\.ps1') -and ($c -match '-Action loop')) {
+            return $true
+        }
+    }
     return $false
 }
 
-function Request-AdminRelaunch {
-    Write-Host 'Porteiro incompleto. Clique OK, depois SIM na janela do Windows.'
+function Copy-KitSilent {
+    if (-not (Test-Path -LiteralPath $kitSrc)) {
+        Write-StartLog 'kit_missing'
+        return
+    }
+    if (-not (Test-NomemFile $kitSrc)) {
+        Write-StartLog 'kit_not_nomem'
+        return
+    }
     try {
-        Add-Type -AssemblyName System.Windows.Forms | Out-Null
-        [void][System.Windows.Forms.MessageBox]::Show(
-            'Clique OK. Na proxima tela o Windows pede administrador. Clique SIM.',
-            'Porteiro',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $destDir 'logs') -Force | Out-Null
+        $need = $true
+        if (Test-Path -LiteralPath $destPs1) {
+            try {
+                $a = (Get-FileHash -LiteralPath $kitSrc -Algorithm MD5).Hash
+                $b = (Get-FileHash -LiteralPath $destPs1 -Algorithm MD5).Hash
+                if ($a -eq $b) { $need = $false }
+            } catch {}
+        }
+        if ($need) {
+            Copy-Item -LiteralPath $kitSrc -Destination $destPs1 -Force
+            Write-StartLog 'copied_dest'
+        } else {
+            Write-StartLog 'dest_already_kit'
+        }
     } catch {
-        Start-Sleep -Milliseconds 200
+        Write-StartLog ('copy_fail ' + $_.Exception.Message)
     }
-    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -AlreadyElevated"
+}
+
+function Start-LoopSilent {
+    if (Test-LoopAlive) {
+        Write-StartLog 'loop_alive'
+        return
+    }
+    & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
+    Start-Sleep -Milliseconds 800
+    if (Test-LoopAlive) {
+        Write-StartLog 'loop_via_schtasks'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $destPs1)) {
+        Write-StartLog 'loop_no_dest'
+        return
+    }
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $destPs1, '-Action', 'loop'
+    ) | Out-Null
+    Start-Sleep -Milliseconds 800
+    if (Test-LoopAlive) { Write-StartLog 'loop_via_start_process' } else { Write-StartLog 'loop_start_attempted' }
+}
+
+function Ensure-LogonTaskSilent {
+    & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-StartLog 'task_loop_exists'
+        return
+    }
+    $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
+    & schtasks.exe /create /tn ConvenientePorteiro /tr $tr /sc onlogon /f 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_loop_created' } else { Write-StartLog 'task_loop_create_skip' }
+}
+
+function Start-ConvenienteNode {
+    if (Test-ConvenienteUp) {
+        Write-StartLog 'already_up'
+        return 0
+    }
     try {
-        $p = Start-Process -FilePath $ps -Verb RunAs -Wait -PassThru -WindowStyle Normal -WorkingDirectory $env:SystemRoot -ArgumentList $arg
-    } catch {
-        Write-Host '[ERRO] Admin recusado. Clique Iniciar de novo e aceite.'
-        return 3
+        if (Test-Path -LiteralPath $pauseFlag) { Remove-Item -LiteralPath $pauseFlag -Force -ErrorAction SilentlyContinue }
+    } catch {}
+    if (-not (Test-Path -LiteralPath $indexJs)) {
+        Write-StartLog 'index_missing'
+        return 1
     }
-    if ($null -eq $p) { return 3 }
-    return [int]$p.ExitCode
-}
-
-if (-not $AlreadyElevated) {
-    if (Test-NeedAdminFast) {
-        $rc = Request-AdminRelaunch
-        exit $rc
+    $node = $null
+    try { $node = (Get-Command node -ErrorAction SilentlyContinue).Source } catch {}
+    if (-not $node) {
+        Write-StartLog 'node_missing'
+        return 1
     }
+    $arg = "/c title Conveniente_Node & `"$node`" `"$indexJs`""
+    Start-Process cmd.exe -ArgumentList $arg -WorkingDirectory 'C:\conveniente' -WindowStyle Minimized | Out-Null
+    Write-StartLog 'started_node'
+    return 0
 }
 
-if (-not (Test-Path -LiteralPath $ensure)) {
-    Write-Host '[ERRO] scripts\porteiroEnsure.ps1 ausente. Dê git pull em C:\conveniente.'
-    exit 1
-}
-
-$ensureCode = & $ensure -ReturnOnly
-if ($ensureCode -is [Array]) { $ensureCode = $ensureCode[-1] }
-if ($null -eq $ensureCode) { $ensureCode = 0 }
-$ensureCode = [int]$ensureCode
-
-if (($ensureCode -ne 0) -and ($ensureCode -ne 10)) {
-    Write-Host ''
-    Write-Host 'Porteiro nao ficou 100%. Aceite o administrador e clique Iniciar de novo.'
-    exit $ensureCode
-}
-
-if ($ensureCode -eq 10) {
-    Write-Host 'Porteiro recem-armado. Esperando o Conveniente (AUTO_BOOT) pra nao abrir dois.'
-    for ($i = 0; $i -lt 20; $i++) {
-        Start-Sleep -Seconds 1
-        if (Test-ConvenienteUp) { break }
-    }
-}
-
-if (-not (Test-Path -LiteralPath $destStart)) {
-    Write-Host '[ERRO] C:\auto_vigia\manutencao.ps1 ausente apos o ensure.'
-    exit 1
-}
-
-& $destStart -Action start
-$st = $LASTEXITCODE
-if ($null -eq $st) { $st = 0 }
-exit [int]$st
+Write-StartLog 'click'
+Copy-KitSilent
+Start-LoopSilent
+Ensure-LogonTaskSilent
+$code = Start-ConvenienteNode
+exit $code

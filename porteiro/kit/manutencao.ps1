@@ -505,45 +505,9 @@ function Do-Stop {
     Write-Log "MANUAL stop killed=$killed"
 }
 
-function Invoke-PorteiroEnsure {
-    # So no clique humano. AUTO/AUTO_BOOT nao podem ficar presos no UAC as 04h.
-    # 0 = ja pronto. 10 = acabou de instalar (loop vai AUTO_BOOT).
-    $ensure = 'C:\conveniente\scripts\porteiroEnsure.ps1'
-    if (-not (Test-Path -LiteralPath $ensure)) {
-        Write-Host 'ERRO: C:\conveniente\scripts\porteiroEnsure.ps1 ausente. Dê git pull.'
-        Write-Log 'porteiro_ensure missing_script'
-        return 1
-    }
-    $code = & $ensure -ReturnOnly
-    if ($code -is [Array]) { $code = $code[-1] }
-    if ($null -eq $code) { $code = 0 }
-    $code = [int]$code
-    if (($code -ne 0) -and ($code -ne 10)) {
-        Write-Log ("porteiro_ensure failed exit=" + $code)
-        return $code
-    }
-    Write-Log ("porteiro_ensure ok exit=" + $code)
-    return $code
-}
-
 function Do-Start {
     param([string]$Reason = 'MANUAL') # MANUAL | AUTO | AUTO_BOOT
     if (-not (Test-Path $IndexJs)) { Write-Host 'ERRO: C:\conveniente\index.js ausente'; return }
-    if ($Reason -eq 'MANUAL') {
-        $ens = Invoke-PorteiroEnsure
-        if (($ens -ne 0) -and ($ens -ne 10)) {
-            Write-Host 'PORTEIRO NAO INSTALADO. Aceite o admin e clique INICIAR de novo.'
-            Write-Log "$Reason start aborted porteiro_ensure_failed"
-            return
-        }
-        if ($ens -eq 10) {
-            Write-Host 'Porteiro recem-armado. Esperando AUTO_BOOT pra nao abrir dois.'
-            for ($i = 0; $i -lt 20; $i++) {
-                Start-Sleep -Seconds 1
-                if ((Get-SystemState).Up) { break }
-            }
-        }
-    }
     Set-PausedFlag $false
     Set-MaxPerf
 

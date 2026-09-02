@@ -70,7 +70,7 @@ try {
     "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action $($_.a)`r`npause`r`n" |
         Set-Content (Join-Path $Dest $_.n) -Encoding ASCII
 }
-"@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\scripts\iniciarSistema.ps1`r`nif errorlevel 1 pause`r`n" |
+"@echo off`r`nwscript //nologo `"C:\conveniente\porteiro\INICIAR_SISTEMA.vbs`"`r`n" |
     Set-Content (Join-Path $Dest 'INICIAR.bat') -Encoding ASCII
 
 Write-Host '[3] Desempenho Maximo...'
@@ -137,13 +137,13 @@ else { Write-Host '  [!] ConvenienteDiskClean pode precisar de Setup como Admin'
 Write-Host '[5] Atalhos Desktop...'
 $desk = [Environment]::GetFolderPath('Desktop')
 $sh = New-Object -ComObject WScript.Shell
-$iniciarGit = 'C:\conveniente\scripts\iniciarSistema.ps1'
 $scIn = $sh.CreateShortcut((Join-Path $desk 'INICIAR_SISTEMA.lnk'))
-$scIn.TargetPath = $PsExe
-$scIn.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$iniciarGit`""
+$scIn.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$scIn.Arguments = '//nologo "C:\conveniente\porteiro\INICIAR_SISTEMA.vbs"'
 $scIn.WorkingDirectory = $Dest
+$scIn.WindowStyle = 7
 $scIn.Save()
-Write-Host '  INICIAR_SISTEMA.lnk (ensure+start)'
+Write-Host '  INICIAR_SISTEMA.lnk (silencio)'
 foreach ($x in @(
     @{ n = 'PARAR_SISTEMA.lnk'; a = 'stop' },
     @{ n = 'STATUS_SISTEMA.lnk'; a = 'status' }

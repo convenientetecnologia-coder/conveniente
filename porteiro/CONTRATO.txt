@@ -26,19 +26,16 @@ NAO dispara o exe (MemClean=OFF).
      git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
      cd C:\conveniente
      npm install
-   Clique INICIAR. O Iniciar CONFERE o Porteiro:
-     - se ja estiver 100% (kit certo + tarefas Windows CERTAS + loop vivo) → so sobe o Conveniente
-     - se kit/tarefas certos e so o loop morreu → religa o loop SEM admin, sobe o Conveniente
-     - se faltar kit ou tarefa → pede admin UMA vez, instala, arma, depois sobe o Conveniente
-   Se o admin for recusado, NAO finge e NAO sobe. Clique Iniciar de novo e aceite.
-   O irm pode nao pedir admin (some em silencio). Tudo bem: o Iniciar fecha o furo.
-   AUTO/AUTO_BOOT (04h) NAO pedem UAC.
+   Clique INICIAR. Sobe o Conveniente. Sem admin, sem OK, sem janela extra.
+   Se o loop do Porteiro estiver morto, o Iniciar religa em silencio
+   (copia o kit se faltar, sobe o loop hidden, tenta a tarefa ao logon).
+   NetBoot SYSTEM (boot frio) fica no Setup / instalar_porteiro como admin —
+   nao no clique. AUTO/AUTO_BOOT (04h) NAO pedem UAC.
 
 2. MAE JA EXISTENTE
-   git pull, clique INICIAR (C:\conveniente\porteiro\INICIAR_SISTEMA.bat
-   ou o atalho Iniciar Conveniente). O Iniciar confere igual ao servidor novo.
-   Atalho velho do Desktop (dest -Action start) tambem confere DEPOIS que o
-   dest for o kit novo. No primeiro clique apos o pull, use o .bat do git.
+   git pull, clique INICIAR (C:\conveniente\porteiro\INICIAR_SISTEMA.vbs
+   ou o atalho Iniciar Conveniente). Igual ao servidor novo: silencio.
+   Copia velha do .bat na area de trabalho: apaga e copia de novo da pasta porteiro.
 
 3. PROVA
    STATUS: Ver=v5.2.0-nomem  MemClean=OFF
