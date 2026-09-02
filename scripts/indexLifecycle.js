@@ -2,7 +2,9 @@
 
 /**
  * Caixa-preta do processo (index e worker).
- * Grava boot/saída/exception/sinal em disco. Não altera frota, janela, pedido, Robe.
+ * Grava boot/saída/exception/sinal em disco. handle_pulse vai para
+ * index_handle_pulse.jsonl (nao infla a caixa-preta de morte).
+ * Não altera frota, janela, pedido, Robe.
  * SIGHUP/SIGBREAK (RDP/console) NÃO dão process.exit — pai e worker permanecem.
  * taskkill /F e crash nativo podem NÃO passar aqui — aí vale o Event Viewer.
  */
@@ -11,12 +13,21 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const DADOS = path.join(__dirname, "..", "dados");
+const DADOS = (function resolveDados() {
+  const env = String(process.env.CONVENIENTE_DADOS_DIR || "").trim();
+  return env ? path.resolve(env) : path.join(__dirname, "..", "dados");
+})();
 const LIFE_PATH = path.join(DADOS, "index_lifecycle.jsonl");
+const LIFE_PREV_PATH = path.join(DADOS, "index_lifecycle.prev.jsonl");
+const PULSE_PATH = path.join(DADOS, "index_handle_pulse.jsonl");
+const PULSE_PREV_PATH = path.join(DADOS, "index_handle_pulse.prev.jsonl");
 const HEART_PATH = path.join(DADOS, "index_heartbeat.json");
 const BOOT_CTX_PATH = path.join(DADOS, "index_boot_context.json");
 const DESIRED_PATH = path.join(DADOS, "desired.json");
+const ARCH_DIR = path.join(DADOS, "logs");
 const MAX_LIFE_BYTES = 2 * 1024 * 1024;
+const MAX_PULSE_BYTES = 2 * 1024 * 1024;
+const KEEP_ARCH = 40;
 
 let installed = false;
 let role = "index";
@@ -32,13 +43,62 @@ function clip(v, n) {
   return s.length <= n ? s : s.slice(0, n);
 }
 
-function rotateIfHuge() {
+function archiveStamp() {
+  const ts = new Date();
+  return (
+    String(ts.getFullYear()) +
+    String(ts.getMonth() + 1).padStart(2, "0") +
+    String(ts.getDate()).padStart(2, "0") + "-" +
+    String(ts.getHours()).padStart(2, "0") +
+    String(ts.getMinutes()).padStart(2, "0") +
+    String(ts.getSeconds()).padStart(2, "0")
+  );
+}
+
+function pruneArchives(prefix) {
   try {
-    const st = fs.statSync(LIFE_PATH);
-    if (!st || st.size < MAX_LIFE_BYTES) return;
-    const bak = path.join(DADOS, "index_lifecycle.prev.jsonl");
-    try { fs.unlinkSync(bak); } catch {}
-    fs.renameSync(LIFE_PATH, bak);
+    if (!fs.existsSync(ARCH_DIR)) return;
+    const re = new RegExp(
+      "^" + String(prefix || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.\\d{8}-\\d{6}\\.jsonl$"
+    );
+    const hits = fs.readdirSync(ARCH_DIR)
+      .filter((n) => re.test(String(n || "")))
+      .map((name) => {
+        const full = path.join(ARCH_DIR, name);
+        let mtimeMs = 0;
+        try { mtimeMs = Number(fs.statSync(full).mtimeMs || 0) || 0; } catch {}
+        return { name, full, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const row of hits.slice(KEEP_ARCH)) {
+      try { fs.unlinkSync(row.full); } catch {}
+    }
+  } catch {}
+}
+
+function archiveBeforeOverwrite(prevPath, prefix) {
+  try {
+    if (!prevPath || !fs.existsSync(prevPath)) return;
+    try { fs.mkdirSync(ARCH_DIR, { recursive: true }); } catch {}
+    const dest = path.join(ARCH_DIR, `${prefix}.${archiveStamp()}.jsonl`);
+    try {
+      fs.renameSync(prevPath, dest);
+    } catch {
+      try { fs.copyFileSync(prevPath, dest); } catch {}
+      try { fs.unlinkSync(prevPath); } catch {}
+    }
+    pruneArchives(prefix);
+  } catch {}
+}
+
+function rotateIfHuge(filePath, prevPath, prefix, maxBytes) {
+  try {
+    const st = fs.statSync(filePath);
+    const cap = Math.max(64 * 1024, Number(maxBytes || MAX_LIFE_BYTES) || MAX_LIFE_BYTES);
+    if (!st || st.size < cap) return;
+    archiveBeforeOverwrite(prevPath, prefix);
+    try { fs.unlinkSync(prevPath); } catch {}
+    fs.renameSync(filePath, prevPath);
   } catch {}
 }
 
@@ -67,29 +127,42 @@ function readFleetSnap() {
   }
 }
 
+function buildRow(event, patch) {
+  const mem = process.memoryUsage();
+  return {
+    ts: Date.now(),
+    iso: new Date().toISOString(),
+    event: clip(event, 48),
+    role,
+    pid: process.pid,
+    ppid: process.ppid || null,
+    node: process.version,
+    hostname: os.hostname(),
+    uptimeSec: Math.round(process.uptime()),
+    rssMB: Math.round((mem.rss || 0) / 1048576),
+    heapMB: Math.round((mem.heapUsed || 0) / 1048576),
+    argv0: clip(process.argv && process.argv[0], 160),
+    title: clip(process.title, 80),
+    ...extra,
+    ...(patch && typeof patch === "object" ? patch : {})
+  };
+}
+
+function appendTo(filePath, prevPath, prefix, maxBytes, event, patch) {
+  ensureDir();
+  rotateIfHuge(filePath, prevPath, prefix, maxBytes);
+  fs.appendFileSync(filePath, JSON.stringify(buildRow(event, patch)) + "\n", "utf8");
+}
+
 function append(event, patch) {
   try {
-    ensureDir();
-    rotateIfHuge();
-    const mem = process.memoryUsage();
-    const row = {
-      ts: Date.now(),
-      iso: new Date().toISOString(),
-      event: clip(event, 48),
-      role,
-      pid: process.pid,
-      ppid: process.ppid || null,
-      node: process.version,
-      hostname: os.hostname(),
-      uptimeSec: Math.round(process.uptime()),
-      rssMB: Math.round((mem.rss || 0) / 1048576),
-      heapMB: Math.round((mem.heapUsed || 0) / 1048576),
-      argv0: clip(process.argv && process.argv[0], 160),
-      title: clip(process.title, 80),
-      ...extra,
-      ...(patch && typeof patch === "object" ? patch : {})
-    };
-    fs.appendFileSync(LIFE_PATH, JSON.stringify(row) + "\n", "utf8");
+    appendTo(LIFE_PATH, LIFE_PREV_PATH, "index_lifecycle", MAX_LIFE_BYTES, event, patch);
+  } catch {}
+}
+
+function appendPulse(event, patch) {
+  try {
+    appendTo(PULSE_PATH, PULSE_PREV_PATH, "index_handle_pulse", MAX_PULSE_BYTES, event || "handle_pulse", patch);
   } catch {}
 }
 
@@ -215,7 +288,7 @@ function install(opts) {
   try {
     require("./winHandlePulse.js").install({
       role,
-      append,
+      append: appendPulse,
       intervalMs: 5 * 60 * 1000,
       firstDelayMs: 45 * 1000
     });
@@ -259,12 +332,18 @@ function readBootContext() {
 module.exports = {
   install,
   append,
+  appendPulse,
   readTail,
   readHeartbeat,
   readBootContext,
   isConsoleSessionSignal,
   handleConsoleSessionSignal,
   LIFE_PATH,
+  LIFE_PREV_PATH,
+  PULSE_PATH,
+  PULSE_PREV_PATH,
   HEART_PATH,
-  BOOT_CTX_PATH
+  BOOT_CTX_PATH,
+  MAX_LIFE_BYTES,
+  MAX_PULSE_BYTES
 };

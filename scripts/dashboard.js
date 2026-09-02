@@ -15,6 +15,7 @@ const fileStore = require('./fileStore.js');
 const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqConfig');
 const gatewayProxy = require('./gatewayProxy');
 const { buildServerCardAggs } = require('./serverCardAgg');
+const logsFetchCore = require('./logsFetchCore');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
@@ -3195,8 +3196,12 @@ function logsAllowlist() {
     // logs do serviço (quando NSSM estiver configurado)
     service_stdout: path.join(base, 'service_stdout.log'),
     service_stderr: path.join(base, 'service_stderr.log'),
-    // Caixa-preta do processo-pai (morte do CMD / exception)
+    // Caixa-preta do processo-pai (morte do CMD / exception).
+    // Pulso de handle NÃO mora aqui — arquivo próprio, senão o tail estoura.
     index_lifecycle: path.join(base, 'index_lifecycle.jsonl'),
+    index_lifecycle_prev: path.join(base, 'index_lifecycle.prev.jsonl'),
+    index_handle_pulse: path.join(base, 'index_handle_pulse.jsonl'),
+    index_handle_pulse_prev: path.join(base, 'index_handle_pulse.prev.jsonl'),
     index_heartbeat: path.join(base, 'index_heartbeat.json'),
     index_boot_context: path.join(base, 'index_boot_context.json'),
     windows_forensic_last: path.join(base, 'windows_forensic_last.json'),
@@ -3225,27 +3230,36 @@ function logsAllowlist() {
   for (let i = 1; i <= statusNodeMax; i += 1) {
     allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
   }
+  addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_lifecycle', 'life_arch', 16);
+  addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_handle_pulse', 'pulse_arch', 16);
   return allow;
 }
-function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
+function addArchivedLogKeys(allow, dir, filePrefix, keyPrefix, maxN) {
   try {
-    if (!fsSync.existsSync(filePath)) return { ok:false, error:'not_found', filePath };
-    const st = fsSync.statSync(filePath);
-    const size = Number(st.size || 0) || 0;
-    const readBytes = Math.min(maxBytes, size);
-    const start = Math.max(0, size - readBytes);
-    const buf = Buffer.alloc(readBytes);
-    const fd = fsSync.openSync(filePath, 'r');
-    try { fsSync.readSync(fd, buf, 0, readBytes, start); }
-    finally { try { fsSync.closeSync(fd); } catch {} }
-    const txt = buf.toString('utf8');
-    const lines = txt.split(/\r?\n/);
-    const tail = lines.slice(Math.max(0, lines.length - maxLines));
-    const truncated = (start > 0) || (lines.length > maxLines);
-    return { ok:true, filePath, bytes: readBytes, lines: tail.length, truncated, text: tail.join('\n') };
-  } catch (e) {
-    return { ok:false, error: (e && e.message) || String(e), filePath };
-  }
+    if (!allow || !dir || !fsSync.existsSync(dir)) return;
+    const re = new RegExp(
+      '^' + String(filePrefix || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.\\d{8}-\\d{6}\\.jsonl$'
+    );
+    const cap = Math.max(1, Math.min(32, Number(maxN || 16) || 16));
+    const hits = fsSync.readdirSync(dir)
+      .filter((n) => re.test(String(n || '')))
+      .map((name) => {
+        const full = path.join(dir, name);
+        let mtimeMs = 0;
+        try { mtimeMs = Number(fsSync.statSync(full).mtimeMs || 0) || 0; } catch {}
+        return { name, full, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, cap);
+    for (const row of hits) {
+      const stamp = String(row.name || '').replace(/^.*\.(\d{8}-\d{6})\.jsonl$/i, '$1');
+      const key = `${keyPrefix}_${stamp}`;
+      if (!allow[key]) allow[key] = row.full;
+    }
+  } catch {}
+}
+function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
+  return logsFetchCore.tailFileLines(filePath, maxLines, maxBytes);
 }
 
 function tailFileGrep(filePath, { patterns = [], maxBytes = 10_000_000, maxMatches = 600 } = {}) {
@@ -3408,20 +3422,13 @@ function maybeAutoRotateCriticalJsonl() {
     return { ok:false, error: (e && e.message) || String(e) };
   }
 }
-async function postLogsToNotifier({ requestId, items }) {
+async function postLogsIngestOnce(body, timeoutMs) {
   const base = notifierBaseFromEndpoints();
   if (!base) throw new Error('notifier_base_unavailable');
-  let hostId = String(hostIdCache || '').trim();
-  if (!hostId) {
-    try {
-      hostId = String(await getOrCreateHostId() || '').trim();
-      if (hostId) hostIdCache = hostId;
-    } catch {}
-  }
-  if (!hostId) throw new Error('hostId_unavailable');
   const sec = logsSecret();
-  const controller = new (global.AbortController || require('node-abort-controller'))();
-  const t = setTimeout(() => { try { controller.abort(); } catch {} }, 8000);
+  const AbortCtrl = global.AbortController || require('node-abort-controller');
+  const controller = new AbortCtrl();
+  const t = setTimeout(() => { try { controller.abort(); } catch {} }, Math.max(8000, Number(timeoutMs || logsFetchCore.INGEST_TIMEOUT_MS) || logsFetchCore.INGEST_TIMEOUT_MS));
   try {
     const resp = await fetch(`${base}/api/logs/ingest`, {
       method: 'POST',
@@ -3429,13 +3436,7 @@ async function postLogsToNotifier({ requestId, items }) {
         'Content-Type': 'application/json',
         ...(sec ? { 'X-Log-Secret': sec } : {})
       },
-      body: JSON.stringify({
-        hostId,
-        hostname: (os && os.hostname) ? os.hostname() : '',
-        requestId,
-        sentAt: Date.now(),
-        items
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal
     });
     if (!resp || !resp.ok) {
@@ -3446,22 +3447,86 @@ async function postLogsToNotifier({ requestId, items }) {
     clearTimeout(t);
   }
 }
+async function postLogsToNotifier({ requestId, items }) {
+  let hostId = String(hostIdCache || '').trim();
+  if (!hostId) {
+    try {
+      hostId = String(await getOrCreateHostId() || '').trim();
+      if (hostId) hostIdCache = hostId;
+    } catch {}
+  }
+  if (!hostId) throw new Error('hostId_unavailable');
+  const packets = logsFetchCore.buildIngestPackets(items);
+  const errors = [];
+  for (let i = 0; i < packets.length; i += 1) {
+    let lastErr = null;
+    const body = {
+      hostId,
+      hostname: (os && os.hostname) ? os.hostname() : '',
+      requestId,
+      sentAt: Date.now(),
+      merge: packets.length > 1,
+      packetIndex: i,
+      packetTotal: packets.length,
+      items: packets[i]
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await postLogsIngestOnce(body, logsFetchCore.INGEST_TIMEOUT_MS);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (lastErr) {
+      errors.push({ packet: i, keys: (packets[i] || []).map((x) => x && x.key).filter(Boolean), error: String((lastErr && lastErr.message) || lastErr) });
+    }
+  }
+  if (errors.length && errors.length === packets.length) {
+    throw new Error('logs_ingest_all_packets_failed:' + String(errors[0] && errors[0].error || 'unknown'));
+  }
+  return { ok: errors.length === 0, packets: packets.length, errors };
+}
 async function execFetchLogs(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const requestId = String(payload.requestId || '').trim();
   const keys = Array.isArray(payload.keys) ? payload.keys.map(x => String(x||'').trim()).filter(Boolean) : [];
   const tailLines = Math.max(50, Math.min(8000, Number(payload.tailLines || 1200) || 1200));
+  const maxBytes = logsFetchCore.clampMaxBytes(payload.maxBytes || 1_200_000);
+  const fromStart = payload.fromStart === true || payload.fromEnd === false || String(payload.from || '').toLowerCase() === 'start';
+  const byteOffsetRaw = Number(payload.byteOffset);
+  const byteOffset = Number.isFinite(byteOffsetRaw) && byteOffsetRaw >= 0 ? Math.floor(byteOffsetRaw) : null;
   if (!requestId) throw new Error('missing_requestId');
   if (!keys.length) throw new Error('missing_keys');
   const allow = logsAllowlist();
   const items = [];
-  for (const key of keys.slice(0, 8)) {
+  for (const key of keys.slice(0, logsFetchCore.FETCH_KEYS_MAX)) {
     const fp = allow[key];
     if (!fp) { items.push({ key, ok:false, error:'not_allowed' }); continue; }
-    const r = tailFileLines(fp, tailLines);
+    const r = logsFetchCore.sliceLogFile(fp, { maxLines: tailLines, maxBytes, fromStart, byteOffset });
     items.push({ key, ...r });
   }
-  await postLogsToNotifier({ requestId, items });
+  let ingest = null;
+  try {
+    ingest = await postLogsToNotifier({ requestId, items });
+  } catch (e) {
+    ingest = { ok: false, error: String((e && e.message) || e) };
+  }
+  return {
+    ok: !!(ingest && ingest.ok !== false),
+    requestId,
+    keys: items.map((x) => x && x.key).filter(Boolean),
+    ingest,
+    cursor: items.map((it) => ({
+      key: it && it.key,
+      ok: !!(it && it.ok),
+      fileBytes: it && it.fileBytes,
+      nextByte: it && it.nextByte,
+      eof: it && it.eof,
+      truncated: !!(it && it.truncated)
+    }))
+  };
 }
 
 async function execFetchLogsQuery(cmd) {
@@ -3482,7 +3547,13 @@ async function execFetchLogsQuery(cmd) {
     ...r,
     meta: { key, patterns: patterns.map(x => String(x||'').slice(0, 120)), maxBytes, maxMatches }
   }];
-  await postLogsToNotifier({ requestId, items });
+  let ingest = null;
+  try {
+    ingest = await postLogsToNotifier({ requestId, items });
+  } catch (e) {
+    ingest = { ok: false, error: String((e && e.message) || e) };
+  }
+  return { ok: !!(ingest && ingest.ok !== false), requestId, key, ingest, lines: Number(r && r.lines || 0) || 0 };
 }
 
 /**
@@ -4361,8 +4432,8 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_relink_orphans') { details = await execProfilesRelinkOrphans(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'repair_perfis_json') { details = await execRepairPerfisJson(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'profiles_backfill_labels') { details = await execProfilesBackfillLabels(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
-      else if (c.type === 'fetch_logs')       { await execFetchLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
-      else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'fetch_logs')       { details = await execFetchLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'fetch_logs_query') { details = await execFetchLogsQuery(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'delta_force_city_collect') {
         details = await execDeltaForceCityCollect(c);
         results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok === true), details: details || null, error: (details && details.ok) ? null : String((details && details.error) || 'city_collect_failed') });
