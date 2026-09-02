@@ -48,10 +48,20 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 )
 if (-not $isAdmin) {
     Write-Host '[ADMIN] Pedindo administrador para gravar tarefas ConvenientePorteiro / ConvenienteNetBoot...'
-    $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-        -Verb RunAs -Wait -PassThru `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($p -and $p.ExitCode -ne 0) { exit $p.ExitCode }
+    $p = $null
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -Verb RunAs -Wait -PassThru `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    } catch {
+        Write-Host '[ERRO] Admin recusado ou UAC cancelado. Porteiro NAO instalado.'
+        exit 3
+    }
+    if ($null -eq $p) {
+        Write-Host '[ERRO] Admin recusado. Porteiro NAO instalado.'
+        exit 3
+    }
+    if ($p.ExitCode -ne 0) { exit $p.ExitCode }
     exit 0
 }
 

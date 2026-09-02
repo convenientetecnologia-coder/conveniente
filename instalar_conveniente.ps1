@@ -50,16 +50,16 @@ if (!(Test-Path $FotosDir)) {
     mkdir $FotosDir -Force | Out-Null
 }
 
-# 5. Criar atalho na área de trabalho para rodar o sistema
+# 5. Atalho Iniciar: arma o Porteiro (UAC se faltar) e sobe o Conveniente
 $wsh = New-Object -ComObject WScript.Shell
 $Shortcut = $wsh.CreateShortcut("$env:USERPROFILE\Desktop\Iniciar Conveniente.lnk")
-$Shortcut.TargetPath = "powershell.exe"
-$Shortcut.Arguments = '-NoExit -WindowStyle Hidden -Command "Set-Location ''C:\conveniente''; node index.js"'
+$Shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$Shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\conveniente\scripts\iniciarSistema.ps1"'
 $Shortcut.WorkingDirectory = "C:\conveniente"
 $Shortcut.WindowStyle = 1
 $Shortcut.IconLocation = "$PWD\icon.png"
 $Shortcut.Save()
-Log "Atalho criado na Área de Trabalho: Iniciar Conveniente"
+Log "Atalho criado na Área de Trabalho: Iniciar Conveniente (ensure+start)"
 
 # 6. Porteiro (reboot 04:00, lixeira, AUTO_BOOT). StandbyList NAO entra no Porteiro.
 $porteiro = Join-Path $PWD "instalar_porteiro.ps1"

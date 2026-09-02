@@ -1,3 +1,3 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\auto_vigia\manutencao.ps1" -Action start
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\conveniente\scripts\iniciarSistema.ps1"
 pause

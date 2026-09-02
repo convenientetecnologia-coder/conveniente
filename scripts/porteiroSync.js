@@ -229,19 +229,22 @@ function stopOldVigia({ endMainLoop }) {
 }
 
 function startLoopSpawn() {
-  const child = spawn(PS_EXE, [
-    "-NoProfile",
-    "-WindowStyle", "Hidden",
-    "-ExecutionPolicy", "Bypass",
-    "-File", DEST_PS1,
-    "-Action", "loop"
-  ], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
+  const psArg = PS_EXE.replace(/'/g, "''");
+  const fileArg = DEST_PS1.replace(/'/g, "''");
+  const cmd =
+    "Start-Process -FilePath '" + psArg + "' -WindowStyle Hidden -ArgumentList " +
+    "'-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','" + fileArg + "','-Action','loop'";
+  const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], {
+    windowsHide: true,
+    timeout: 15000,
+    encoding: "utf8"
   });
-  child.unref();
-  return { via: "spawn", pid: child.pid || 0 };
+  return {
+    via: "start_process",
+    ok: !r.error && (r.status === 0 || r.status == null),
+    status: r.status,
+    error: r.error ? String(r.error.message || r.error) : null
+  };
 }
 
 function startLoopOwnedByWindows() {

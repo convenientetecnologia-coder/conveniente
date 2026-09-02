@@ -26,12 +26,19 @@ NAO dispara o exe (MemClean=OFF).
      git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
      cd C:\conveniente
      npm install
-   Inicia o index. Primeira vez: Windows pode pedir admin UMA vez (gravar
-   as tarefas ao ligar). Aceita. Depois o Porteiro vive sozinho no Windows.
+   Clique INICIAR. O Iniciar CONFERE o Porteiro:
+     - se ja estiver 100% (kit certo + tarefas Windows CERTAS + loop vivo) → so sobe o Conveniente
+     - se kit/tarefas certos e so o loop morreu → religa o loop SEM admin, sobe o Conveniente
+     - se faltar kit ou tarefa → pede admin UMA vez, instala, arma, depois sobe o Conveniente
+   Se o admin for recusado, NAO finge e NAO sobe. Clique Iniciar de novo e aceite.
+   O irm pode nao pedir admin (some em silencio). Tudo bem: o Iniciar fecha o furo.
+   AUTO/AUTO_BOOT (04h) NAO pedem UAC.
 
 2. MAE JA EXISTENTE
-   git pull, reinicia o index UMA vez pra o corretor copiar o kit e religar
-   a tarefa. Depois pode desligar o index: o Porteiro continua.
+   git pull, clique INICIAR (C:\conveniente\porteiro\INICIAR_SISTEMA.bat
+   ou o atalho Iniciar Conveniente). O Iniciar confere igual ao servidor novo.
+   Atalho velho do Desktop (dest -Action start) tambem confere DEPOIS que o
+   dest for o kit novo. No primeiro clique apos o pull, use o .bat do git.
 
 3. PROVA
    STATUS: Ver=v5.2.0-nomem  MemClean=OFF

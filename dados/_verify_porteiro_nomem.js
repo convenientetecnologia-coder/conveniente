@@ -9,6 +9,9 @@ const installKit = path.join(root, "porteiro", "kit", "install.ps1");
 const instPorteiro = path.join(root, "instalar_porteiro.ps1");
 const instConv = path.join(root, "instalar_conveniente.ps1");
 const syncJs = path.join(root, "scripts", "porteiroSync.js");
+const ensurePs1 = path.join(root, "scripts", "porteiroEnsure.ps1");
+const iniciarPs1 = path.join(root, "scripts", "iniciarSistema.ps1");
+const iniciarBat = path.join(root, "porteiro", "INICIAR_SISTEMA.bat");
 const indexJs = path.join(root, "index.js");
 const sweepJs = path.join(root, "scripts", "chromeMemorySweep.js");
 
@@ -27,6 +30,9 @@ const instKitTxt = fs.readFileSync(installKit, "utf8");
 const instPTxt = fs.readFileSync(instPorteiro, "utf8");
 const instCTxt = fs.readFileSync(instConv, "utf8");
 const syncTxt = fs.readFileSync(syncJs, "utf8");
+const ensureTxt = fs.readFileSync(ensurePs1, "utf8");
+const iniciarTxt = fs.readFileSync(iniciarPs1, "utf8");
+const iniciarBatTxt = fs.readFileSync(iniciarBat, "utf8");
 const indexTxt = fs.readFileSync(indexJs, "utf8");
 const sweepTxt = fs.readFileSync(sweepJs, "utf8");
 const sync = require("../scripts/porteiroSync.js");
@@ -58,6 +64,28 @@ check("instalar_porteiro_exists", fs.existsSync(instPorteiro));
 check("instalar_porteiro_refuses_mem", /Invoke-SoftMemClean/.test(instPTxt) && /exit 2/.test(instPTxt));
 check("instalar_porteiro_calls_install", /porteiro\\kit\\install\.ps1/.test(instPTxt));
 check("instalar_conveniente_calls_porteiro", /instalar_porteiro\.ps1/.test(instCTxt));
+check("instalar_conveniente_iniciar_ensure", /iniciarSistema\.ps1/.test(instCTxt));
+check("instalar_porteiro_uac_cancel_exits", /Admin recusado/.test(instPTxt) && /exit 3/.test(instPTxt));
+
+check("ensure_script_exists", fs.existsSync(ensurePs1));
+check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt));
+check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
+check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
+check("ensure_arms_loop_without_uac", /Test-FilesAndTasksOk/.test(ensureTxt) && /Start-PorteiroLoopNow/.test(ensureTxt) && /schtasks\.exe \/Run/.test(ensureTxt) && /loop_armed_no_uac/.test(ensureTxt));
+check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/exit 10/g) || []).length >= 2);
+check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
+check("iniciar_script_exists", fs.existsSync(iniciarPs1));
+check("iniciar_calls_ensure_then_start", /porteiroEnsure\.ps1/.test(iniciarTxt) && /-Action start/.test(iniciarTxt));
+check("iniciar_aborts_if_ensure_fails", /LASTEXITCODE/.test(iniciarTxt));
+check("iniciar_waits_autoboot_after_install", /ensureCode -eq 10/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
+check("install_exits_if_tasks_fail", /if \(-not \$okTask -or -not \$okNet\) \{ exit 1 \}/.test(instKitTxt) && /exit 0/.test(instKitTxt));
+check("iniciar_bat_uses_git_script", /iniciarSistema\.ps1/.test(iniciarBatTxt));
+check("install_kit_iniciar_uses_git_script", /iniciarSistema\.ps1/.test(instKitTxt));
+check("kit_manual_ensure", /function Invoke-PorteiroEnsure/.test(kitTxt) && /\$Reason -eq 'MANUAL'/.test(kitTxt));
+check("kit_ensure_accepts_exit_10", /\$ens -ne 10/.test(kitTxt) && /\$ens -eq 10/.test(kitTxt));
+const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
+check("kit_ensure_only_inside_manual", /if \(\$Reason -eq 'MANUAL'\)[\s\S]{0,800}Invoke-PorteiroEnsure/.test(doStartBody));
+check("kit_ensure_not_in_auto", !/Invoke-PorteiroEnsure/.test((kitTxt.split("function Do-Loop")[1] || "").split("function ")[0]));
 
 check("sync_no_taskkill_node", !/taskkill/i.test(syncTxt));
 check("sync_no_do_stop", !/-Action\s+stop/.test(syncTxt) && !/taskkill/i.test(syncTxt));
@@ -71,6 +99,8 @@ const contratoTxt = fs.readFileSync(path.join(root, "porteiro", "CONTRATO.txt"),
 check("leia_index_not_owner", !/Dono: o index\.js/.test(leiaTxt));
 check("leia_windows_owns", /tarefa ConvenientePorteiro/.test(leiaTxt) && /so CORRIGE/.test(leiaTxt));
 check("contrato_index_not_owner", /NAO e o dono/.test(contratoTxt) && /sistema a parte/.test(contratoTxt));
+check("contrato_iniciar_fecha_furo", /Clique INICIAR/.test(contratoTxt) && /pede admin UMA vez/.test(contratoTxt));
+check("sync_loop_via_start_process", /start_process/.test(syncTxt));
 
 check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt) && /ConvenienteDiskClean/.test(sweepTxt) && /runViaScheduledTask/.test(sweepTxt));
 check("sweep_prod_asks_windows", /function runStandbySweep[\s\S]{0,220}runViaScheduledTask/.test(sweepTxt));

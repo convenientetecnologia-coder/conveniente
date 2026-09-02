@@ -65,12 +65,13 @@ try {
 
 @(
     @{ n = 'PARAR.bat'; a = 'stop' },
-    @{ n = 'INICIAR.bat'; a = 'start' },
     @{ n = 'STATUS.bat'; a = 'status' }
 ) | ForEach-Object {
     "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action $($_.a)`r`npause`r`n" |
         Set-Content (Join-Path $Dest $_.n) -Encoding ASCII
 }
+"@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\scripts\iniciarSistema.ps1`r`npause`r`n" |
+    Set-Content (Join-Path $Dest 'INICIAR.bat') -Encoding ASCII
 
 Write-Host '[3] Desempenho Maximo...'
 foreach ($g in @('808ffb3b-6e1f-4fb0-910c-53827e1f97ca','8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c')) {
@@ -136,9 +137,15 @@ else { Write-Host '  [!] ConvenienteDiskClean pode precisar de Setup como Admin'
 Write-Host '[5] Atalhos Desktop...'
 $desk = [Environment]::GetFolderPath('Desktop')
 $sh = New-Object -ComObject WScript.Shell
+$iniciarGit = 'C:\conveniente\scripts\iniciarSistema.ps1'
+$scIn = $sh.CreateShortcut((Join-Path $desk 'INICIAR_SISTEMA.lnk'))
+$scIn.TargetPath = $PsExe
+$scIn.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$iniciarGit`""
+$scIn.WorkingDirectory = $Dest
+$scIn.Save()
+Write-Host '  INICIAR_SISTEMA.lnk (ensure+start)'
 foreach ($x in @(
     @{ n = 'PARAR_SISTEMA.lnk'; a = 'stop' },
-    @{ n = 'INICIAR_SISTEMA.lnk'; a = 'start' },
     @{ n = 'STATUS_SISTEMA.lnk'; a = 'status' }
 )) {
     $sc = $sh.CreateShortcut((Join-Path $desk $x.n))
@@ -165,3 +172,5 @@ Write-Host 'Arquivo unico: C:\auto_vigia\manutencao.ps1'
 & $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action status
 if (-not $okTask) { Write-Host '[AVISO] Tarefa ao logon pode precisar de Setup como Admin' }
 if (-not $okNet) { Write-Host '[AVISO] ConvenienteNetBoot pode precisar de Setup como Admin' }
+if (-not $okTask -or -not $okNet) { exit 1 }
+exit 0
