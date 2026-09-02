@@ -69,19 +69,24 @@ check("instalar_porteiro_uac_cancel_exits", /Admin recusado/.test(instPTxt) && /
 
 check("ensure_script_exists", fs.existsSync(ensurePs1));
 check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt));
+check("ensure_uac_same_process", /param\(\[switch\]\$ReturnOnly\)/.test(ensureTxt) && /function Invoke-PorteiroEnsureMain/.test(ensureTxt));
+check("ensure_inprocess_if_admin", /Test-IsAdmin/.test(ensureTxt) && /inprocess_admin/.test(ensureTxt));
 check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
 check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
 check("ensure_arms_loop_without_uac", /Test-FilesAndTasksOk/.test(ensureTxt) && /Start-PorteiroLoopNow/.test(ensureTxt) && /schtasks\.exe \/Run/.test(ensureTxt) && /loop_armed_no_uac/.test(ensureTxt));
-check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/exit 10/g) || []).length >= 2);
+check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/return 10/g) || []).length >= 2);
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
 check("iniciar_calls_ensure_then_start", /porteiroEnsure\.ps1/.test(iniciarTxt) && /-Action start/.test(iniciarTxt));
-check("iniciar_aborts_if_ensure_fails", /LASTEXITCODE/.test(iniciarTxt));
+check("iniciar_same_process_ensure", /& \$ensure -ReturnOnly/.test(iniciarTxt));
+check("iniciar_aborts_if_ensure_fails", /ensureCode -ne 0/.test(iniciarTxt));
 check("iniciar_waits_autoboot_after_install", /ensureCode -eq 10/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
 check("install_exits_if_tasks_fail", /if \(-not \$okTask -or -not \$okNet\) \{ exit 1 \}/.test(instKitTxt) && /exit 0/.test(instKitTxt));
 check("iniciar_bat_uses_git_script", /iniciarSistema\.ps1/.test(iniciarBatTxt));
+check("iniciar_bat_no_always_pause", /if errorlevel 1 pause/.test(iniciarBatTxt) && !/^pause\s*$/m.test(iniciarBatTxt.replace(/\r/g, "")));
 check("install_kit_iniciar_uses_git_script", /iniciarSistema\.ps1/.test(instKitTxt));
 check("kit_manual_ensure", /function Invoke-PorteiroEnsure/.test(kitTxt) && /\$Reason -eq 'MANUAL'/.test(kitTxt));
+check("kit_ensure_same_process", /& \$ensure -ReturnOnly/.test(kitTxt));
 check("kit_ensure_accepts_exit_10", /\$ens -ne 10/.test(kitTxt) && /\$ens -eq 10/.test(kitTxt));
 const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
 check("kit_ensure_only_inside_manual", /if \(\$Reason -eq 'MANUAL'\)[\s\S]{0,800}Invoke-PorteiroEnsure/.test(doStartBody));

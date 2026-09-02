@@ -70,7 +70,7 @@ try {
     "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action $($_.a)`r`npause`r`n" |
         Set-Content (Join-Path $Dest $_.n) -Encoding ASCII
 }
-"@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\scripts\iniciarSistema.ps1`r`npause`r`n" |
+"@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\scripts\iniciarSistema.ps1`r`nif errorlevel 1 pause`r`n" |
     Set-Content (Join-Path $Dest 'INICIAR.bat') -Encoding ASCII
 
 Write-Host '[3] Desempenho Maximo...'

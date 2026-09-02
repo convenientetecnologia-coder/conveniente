@@ -1,7 +1,6 @@
 # Clique Iniciar: arma o Porteiro se faltar, depois sobe o Conveniente.
 # Fonte no git (nao depende do C:\auto_vigia estar atualizado).
-# Se o ensure acabou de instalar (exit 10), o loop faz AUTO_BOOT.
-# Espera o Conveniente subir sozinho pra nao abrir dois CMD no mesmo clique.
+# Ensure no MESMO processo do clique: senao o Windows engole o UAC.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
@@ -27,9 +26,10 @@ if (-not (Test-Path -LiteralPath $ensure)) {
     exit 1
 }
 
-& $ps -NoProfile -ExecutionPolicy Bypass -File $ensure
-$ensureCode = $LASTEXITCODE
+$ensureCode = & $ensure -ReturnOnly
+if ($ensureCode -is [Array]) { $ensureCode = $ensureCode[-1] }
 if ($null -eq $ensureCode) { $ensureCode = 0 }
+$ensureCode = [int]$ensureCode
 
 if (($ensureCode -ne 0) -and ($ensureCode -ne 10)) {
     Write-Host ''
@@ -51,4 +51,6 @@ if (-not (Test-Path -LiteralPath $destStart)) {
 }
 
 & $ps -NoProfile -ExecutionPolicy Bypass -File $destStart -Action start
-exit $LASTEXITCODE
+$st = $LASTEXITCODE
+if ($null -eq $st) { $st = 0 }
+exit [int]$st

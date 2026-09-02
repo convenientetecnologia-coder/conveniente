@@ -514,10 +514,10 @@ function Invoke-PorteiroEnsure {
         Write-Log 'porteiro_ensure missing_script'
         return 1
     }
-    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $ps -NoProfile -ExecutionPolicy Bypass -File $ensure
-    $code = $LASTEXITCODE
+    $code = & $ensure -ReturnOnly
+    if ($code -is [Array]) { $code = $code[-1] }
     if ($null -eq $code) { $code = 0 }
+    $code = [int]$code
     if (($code -ne 0) -and ($code -ne 10)) {
         Write-Log ("porteiro_ensure failed exit=" + $code)
         return $code

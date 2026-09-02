@@ -3,9 +3,14 @@
 # Pronto = kit git v5.2.0-nomem (hash) + tarefas Windows CERTAS + loop vivo.
 # Se o kit/tarefas ja estao certos e so o loop morreu: religa SEM admin.
 # Se faltar kit ou tarefa: pede admin UMA vez (UAC -Wait) e confere de novo.
-# Exit 0 = ja estava pronto (ou loop religado sem install).
-# Exit 10 = acabou de instalar/armar (o loop vai AUTO_BOOT o Conveniente).
-# Exit 1/2/3 = falhou. Nao finja. Nao suba o Conveniente.
+# Exit/return 0 = ja estava pronto.
+# Exit/return 10 = acabou de instalar/armar (o loop vai AUTO_BOOT o Conveniente).
+# Exit/return 1/2/3 = falhou. Nao finja. Nao suba o Conveniente.
+#
+# -ReturnOnly: o caller (& deste script) recebe o codigo SEM dar exit no processo.
+# Assim o UAC nasce no mesmo processo do clique (senao o Windows engole o pedido).
+param([switch]$ReturnOnly)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
@@ -23,6 +28,15 @@ function Write-EnsureLog([string]$Line) {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         Add-Content -LiteralPath $LogFile -Value "$ts $Line" -Encoding ASCII
     } catch {}
+}
+
+function Test-IsAdmin {
+    try {
+        $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return [bool]$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
 }
 
 function Test-NomemFile([string]$Path) {
@@ -159,72 +173,94 @@ function Start-PorteiroLoopNow {
     return 'start_process'
 }
 
-$before = Get-PorteiroSnapshot
-Write-Snapshot 'ANTES' $before
-
-if (Test-PorteiroReady) {
-    Write-Host 'Porteiro 100%: kit certo, tarefas Windows certas, loop vivo. Nao mexe. Sobe o Conveniente.'
-    Write-EnsureLog 'READY skip_install'
-    exit 0
-}
-
-if (Test-FilesAndTasksOk) {
-    Write-Host 'Porteiro certo, loop morto. Religa o loop (sem admin).'
-    $via = Start-PorteiroLoopNow
-    Write-EnsureLog ("ARM_LOOP via=" + $via)
-    if (Wait-PorteiroReady 25) {
-        Write-Snapshot 'DEPOIS' (Get-PorteiroSnapshot)
-        Write-Host 'Loop do Porteiro religado.'
-        Write-EnsureLog 'OK loop_armed_no_uac'
-        exit 10
+function Invoke-PorteiroInstaller {
+    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$Installer`""
+    $p = $null
+    if (Test-IsAdmin) {
+        Write-Host 'Ja sou admin. Instalando o Porteiro (ConvenienteNetBoot + loop) sem pedir de novo.'
+        Write-EnsureLog 'INSTALL inprocess_admin'
+        try {
+            $p = Start-Process -FilePath $PsExe -Wait -PassThru -WindowStyle Normal -ArgumentList $arg
+        } catch {
+            Write-EnsureLog ("FAIL admin_start " + $_.Exception.Message)
+            return 2
+        }
+        if ($null -eq $p) { return 2 }
+        return [int]$p.ExitCode
     }
-    Write-EnsureLog 'ARM_LOOP failed_still_dead'
+
+    Write-Host 'Porteiro incompleto. Falta tarefa de rede (net) e/ou o loop.'
+    Write-Host 'O Windows vai pedir administrador AGORA. A tela pode escurecer. Clique SIM.'
+    Write-EnsureLog 'NEED_INSTALL asking_uac'
+    try {
+        $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -WindowStyle Normal -ArgumentList $arg
+    } catch {
+        Write-Host '[ERRO] Admin recusado ou UAC cancelado. Clique Iniciar de novo e aceite.'
+        Write-EnsureLog ("FAIL uac_exception " + $_.Exception.Message)
+        return 3
+    }
+    if ($null -eq $p) {
+        Write-Host '[ERRO] Admin recusado. Clique Iniciar de novo e aceite o UAC.'
+        Write-EnsureLog 'FAIL uac_null'
+        return 3
+    }
+    return [int]$p.ExitCode
 }
 
-if (-not (Test-Path -LiteralPath $Installer)) {
-    Write-Host '[ERRO] C:\conveniente\instalar_porteiro.ps1 ausente. Dê git pull no Conveniente.'
-    Write-EnsureLog 'FAIL installer_missing'
-    exit 1
-}
-if (-not (Test-Path -LiteralPath $KitSrc)) {
-    Write-Host '[ERRO] Kit do Porteiro ausente em C:\conveniente\porteiro\kit\manutencao.ps1'
-    Write-EnsureLog 'FAIL kit_missing'
-    exit 1
-}
+function Invoke-PorteiroEnsureMain {
+    $before = Get-PorteiroSnapshot
+    Write-Snapshot 'ANTES' $before
 
-Write-Host 'Porteiro incompleto. Windows vai pedir administrador UMA vez. Aceite.'
-Write-EnsureLog 'NEED_INSTALL asking_uac'
+    if (Test-PorteiroReady) {
+        Write-Host 'Porteiro 100%: kit certo, tarefas Windows certas, loop vivo. Nao mexe. Sobe o Conveniente.'
+        Write-EnsureLog 'READY skip_install'
+        return 0
+    }
 
-$p = $null
-try {
-    $p = Start-Process -FilePath $PsExe -Verb RunAs -Wait -PassThru -ArgumentList (
-        "-NoProfile -ExecutionPolicy Bypass -File `"$Installer`""
-    )
-} catch {
-    Write-Host '[ERRO] Admin recusado ou UAC cancelado. Clique Iniciar de novo e aceite.'
-    Write-EnsureLog ("FAIL uac_exception " + $_.Exception.Message)
-    exit 3
-}
+    if (Test-FilesAndTasksOk) {
+        Write-Host 'Porteiro certo, loop morto. Religa o loop (sem admin).'
+        $via = Start-PorteiroLoopNow
+        Write-EnsureLog ("ARM_LOOP via=" + $via)
+        if (Wait-PorteiroReady 25) {
+            Write-Snapshot 'DEPOIS' (Get-PorteiroSnapshot)
+            Write-Host 'Loop do Porteiro religado.'
+            Write-EnsureLog 'OK loop_armed_no_uac'
+            return 10
+        }
+        Write-EnsureLog 'ARM_LOOP failed_still_dead'
+    }
 
-if ($null -eq $p) {
-    Write-Host '[ERRO] Admin recusado. Clique Iniciar de novo e aceite o UAC.'
-    Write-EnsureLog 'FAIL uac_null'
-    exit 3
-}
-if ($p.ExitCode -ne 0) {
-    Write-Host ("[ERRO] Instalacao do Porteiro falhou exit=" + $p.ExitCode)
-    Write-EnsureLog ("FAIL installer_exit=" + $p.ExitCode)
-    exit 2
-}
+    if (-not (Test-Path -LiteralPath $Installer)) {
+        Write-Host '[ERRO] C:\conveniente\instalar_porteiro.ps1 ausente. Dê git pull no Conveniente.'
+        Write-EnsureLog 'FAIL installer_missing'
+        return 1
+    }
+    if (-not (Test-Path -LiteralPath $KitSrc)) {
+        Write-Host '[ERRO] Kit do Porteiro ausente em C:\conveniente\porteiro\kit\manutencao.ps1'
+        Write-EnsureLog 'FAIL kit_missing'
+        return 1
+    }
 
-if (-not (Wait-PorteiroReady 25)) {
+    $instExit = Invoke-PorteiroInstaller
+    if ($instExit -ne 0) {
+        Write-Host ("[ERRO] Instalacao do Porteiro falhou exit=" + $instExit)
+        Write-EnsureLog ("FAIL installer_exit=" + $instExit)
+        return $(if ($instExit -eq 3) { 3 } else { 2 })
+    }
+
+    if (-not (Wait-PorteiroReady 25)) {
+        Write-Snapshot 'DEPOIS' (Get-PorteiroSnapshot)
+        Write-Host '[ERRO] Porteiro ainda nao esta 100% depois do admin. Nao vou fingir.'
+        Write-EnsureLog 'FAIL still_not_ready'
+        return 2
+    }
+
     Write-Snapshot 'DEPOIS' (Get-PorteiroSnapshot)
-    Write-Host '[ERRO] Porteiro ainda nao esta 100% depois do admin. Nao vou fingir.'
-    Write-EnsureLog 'FAIL still_not_ready'
-    exit 2
+    Write-Host 'Porteiro instalado e armado (v5.2.0-nomem).'
+    Write-EnsureLog 'OK installed_ready'
+    return 10
 }
 
-Write-Snapshot 'DEPOIS' (Get-PorteiroSnapshot)
-Write-Host 'Porteiro instalado e armado (v5.2.0-nomem).'
-Write-EnsureLog 'OK installed_ready'
-exit 10
+$code = Invoke-PorteiroEnsureMain
+if ($ReturnOnly) { return $code }
+exit $code
