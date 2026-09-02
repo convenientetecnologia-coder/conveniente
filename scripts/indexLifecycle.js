@@ -5,7 +5,7 @@
  * Grava boot/saída/exception/sinal em disco. handle_pulse vai para
  * index_handle_pulse.jsonl (nao infla a caixa-preta de morte).
  * Não altera frota, janela, pedido, Robe.
- * SIGHUP/SIGBREAK (RDP/console) NÃO dão process.exit — pai e worker permanecem.
+ * SIGHUP/SIGBREAK (RDP/console PowerShell) NÃO dão process.exit — pai e worker permanecem.
  * taskkill /F e crash nativo podem NÃO passar aqui — aí vale o Event Viewer.
  */
 
@@ -238,6 +238,12 @@ function install(opts) {
   installed = true;
   role = clip((opts && opts.role) || "index", 24) || "index";
   extra = (opts && opts.extra && typeof opts.extra === "object") ? opts.extra : {};
+
+  if (role === "index") {
+    try {
+      if (process.platform === "win32") process.title = "Conveniente_Node";
+    } catch {}
+  }
 
   append("boot", { cwd: clip(process.cwd(), 200), fleet: readFleetSnap() });
   writeHeartbeat();

@@ -471,23 +471,58 @@ function Do-NetBoot {
     }
 }
 
+# ---------------- console host (powershell nativo; cmd.exe so no leftover do PARAR) ----------------
+function Get-ConvenientePsHost {
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $psExe) { return $psExe }
+    return 'powershell.exe'
+}
+
+function Test-IsConvenienteNodeHost([string]$CommandLine) {
+    $c = [string]$CommandLine
+    if ([string]::IsNullOrWhiteSpace($c)) { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
+}
+
+function Stop-ConvenienteConsoleHosts {
+    $killed = 0
+    foreach ($name in @('powershell.exe', 'cmd.exe')) {
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='$name'")) {
+            if (-not (Test-IsConvenienteNodeHost ([string]$p.CommandLine))) { continue }
+            & taskkill.exe /F /PID $p.ProcessId /T 2>$null | Out-Null
+            $killed++
+        }
+    }
+    return $killed
+}
+
+function Start-ConvenienteNodeHost {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeExe,
+        [Parameter(Mandatory = $true)][string]$IndexPath,
+        [Parameter(Mandatory = $true)][string]$WorkDir
+    )
+    $psExe = Get-ConvenientePsHost
+    $nodeQ = $NodeExe.Replace("'", "''")
+    $idxQ = $IndexPath.Replace("'", "''")
+    $inner = '& { $Host.UI.RawUI.WindowTitle=''Conveniente_Node''; [Console]::Title=''Conveniente_Node''; & ''' + $nodeQ + ''' ''' + $idxQ + ''' }'
+    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+    return Start-Process -FilePath $psExe -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
+}
+
 # ---------------- actions ----------------
 function Do-Stop {
     Set-PausedFlag $true
     $killed = 0
+    $killed += [int](Stop-ConvenienteConsoleHosts)
+    Start-Sleep -Milliseconds 400
     foreach ($id in @(Get-MasterIndexPids)) {
         & taskkill.exe /F /PID $id /T 2>$null | Out-Null
         $killed++
     }
-    Start-Sleep -Milliseconds 400
     foreach ($n in @(Get-Process -Name node -ErrorAction SilentlyContinue)) {
         & taskkill.exe /F /PID $n.Id /T 2>$null | Out-Null
-        $killed++
-    }
-    Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object {
-        ([string]$_.CommandLine) -match 'Conveniente_Node|conveniente\\index\.js'
-    } | ForEach-Object {
-        & taskkill.exe /F /PID $_.ProcessId /T 2>$null | Out-Null
         $killed++
     }
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
@@ -517,11 +552,12 @@ function Do-Start {
         return
     }
 
+    [void](Stop-ConvenienteConsoleHosts)
+
     $node = (Get-Command node -ErrorAction SilentlyContinue).Source
     if (-not $node) { Write-Host 'ERRO: node nao esta no PATH'; return }
 
-    $arg = "/c title Conveniente_Node & `"$node`" `"$IndexJs`""
-    $p = Start-Process cmd.exe -ArgumentList $arg -WorkingDirectory $Conveniente -WindowStyle Minimized -PassThru
+    $p = Start-ConvenienteNodeHost -NodeExe $node -IndexPath $IndexJs -WorkDir $Conveniente
     if ($p) {
         try { $p.PriorityClass = 'AboveNormal' } catch {}
         "$($p.Id)" | Set-Content $PidFile -Encoding ASCII

@@ -70,4 +70,5 @@ DISCO:
 AUTO_BOOT:
   - Se o Conveniente estiver down 2 ciclos (~6 min), sobe de novo.
   - Se JA estiver ligado, NUNCA sobe segundo index.js.
+  - Sobe powershell nativo (titulo Conveniente_Node). Nao usa cmd.exe.
   - PARAR / INICIAR / STATUS continuam iguais.

@@ -1,5 +1,5 @@
 # Clique Iniciar: sobe o Conveniente. Arma o loop em silencio se faltar.
-# Sem admin. Sem OK. Sem PowerShell visivel. Uma janela: Conveniente_Node.
+# Sem admin. Sem OK. Launcher some. Uma janela visivel: Conveniente_Node (powershell nativo).
 # Armado = dest nomem v5.2.1-clean-cpu + loop vivo. Hash/NetBoot NAO bloqueiam o clique.
 # Recusa kit com Get-CpuAvg / Win32_Processor.
 
@@ -164,6 +164,38 @@ function Ensure-LogonTaskSilent {
     if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_loop_created' } else { Write-StartLog 'task_loop_create_skip' }
 }
 
+function Test-IsConvenienteNodeHost([string]$CommandLine) {
+    $c = [string]$CommandLine
+    if ([string]::IsNullOrWhiteSpace($c)) { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
+}
+
+function Stop-ConvenienteConsoleHosts {
+    $killed = 0
+    foreach ($name in @('powershell.exe', 'cmd.exe')) {
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='$name'" -ErrorAction SilentlyContinue)) {
+            if (-not (Test-IsConvenienteNodeHost ([string]$p.CommandLine))) { continue }
+            try { & taskkill.exe /F /PID $p.ProcessId /T 2>$null | Out-Null } catch {}
+            $killed++
+        }
+    }
+    return $killed
+}
+
+function Start-ConvenienteNodeHost {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeExe,
+        [Parameter(Mandatory = $true)][string]$IndexPath,
+        [Parameter(Mandatory = $true)][string]$WorkDir
+    )
+    $nodeQ = $NodeExe.Replace("'", "''")
+    $idxQ = $IndexPath.Replace("'", "''")
+    $inner = '& { $Host.UI.RawUI.WindowTitle=''Conveniente_Node''; [Console]::Title=''Conveniente_Node''; & ''' + $nodeQ + ''' ''' + $idxQ + ''' }'
+    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+    return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
+}
+
 function Start-ConvenienteNode {
     if (Test-ConvenienteUp) {
         Write-StartLog 'already_up'
@@ -182,8 +214,8 @@ function Start-ConvenienteNode {
         Write-StartLog 'node_missing'
         return 1
     }
-    $arg = "/c title Conveniente_Node & `"$node`" `"$indexJs`""
-    Start-Process cmd.exe -ArgumentList $arg -WorkingDirectory 'C:\conveniente' -WindowStyle Minimized | Out-Null
+    [void](Stop-ConvenienteConsoleHosts)
+    [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0
 }
