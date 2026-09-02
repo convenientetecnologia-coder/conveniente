@@ -11,7 +11,6 @@ const instConv = path.join(root, "instalar_conveniente.ps1");
 const syncJs = path.join(root, "scripts", "porteiroSync.js");
 const ensurePs1 = path.join(root, "scripts", "porteiroEnsure.ps1");
 const iniciarPs1 = path.join(root, "scripts", "iniciarSistema.ps1");
-const iniciarBat = path.join(root, "porteiro", "INICIAR_SISTEMA.bat");
 const indexJs = path.join(root, "index.js");
 const sweepJs = path.join(root, "scripts", "chromeMemorySweep.js");
 
@@ -32,7 +31,6 @@ const instCTxt = fs.readFileSync(instConv, "utf8");
 const syncTxt = fs.readFileSync(syncJs, "utf8");
 const ensureTxt = fs.readFileSync(ensurePs1, "utf8");
 const iniciarTxt = fs.readFileSync(iniciarPs1, "utf8");
-const iniciarBatTxt = fs.readFileSync(iniciarBat, "utf8");
 const indexTxt = fs.readFileSync(indexJs, "utf8");
 const sweepTxt = fs.readFileSync(sweepJs, "utf8");
 const sync = require("../scripts/porteiroSync.js");
@@ -88,8 +86,7 @@ check("install_exits_if_tasks_fail", /if \(-not \$okTask -or -not \$okNet\) \{ e
 const iniciarVbs = path.join(root, "porteiro", "INICIAR_SISTEMA.vbs");
 check("iniciar_vbs_exists", fs.existsSync(iniciarVbs));
 check("iniciar_vbs_hidden", /WindowStyle Hidden/.test(fs.readFileSync(iniciarVbs, "utf8")) && /iniciarSistema\.ps1/.test(fs.readFileSync(iniciarVbs, "utf8")));
-check("iniciar_bat_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(iniciarBatTxt) && /wscript/.test(iniciarBatTxt));
-check("iniciar_bat_no_always_pause", !/pause/i.test(iniciarBatTxt));
+check("iniciar_bat_removed", !fs.existsSync(path.join(root, "porteiro", "INICIAR_SISTEMA.bat")));
 check("install_kit_iniciar_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(instKitTxt) && /wscript\.exe/.test(instKitTxt));
 const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
