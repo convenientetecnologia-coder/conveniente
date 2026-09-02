@@ -100,6 +100,8 @@ check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action sto
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
 check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
 check("iniciar_swaps_version", /version_swap/.test(iniciarTxt) && /Stop-LoopOnly/.test(iniciarTxt));
+const iniciarTail = iniciarTxt.split("Write-StartLog 'click'")[1] || "";
+check("iniciar_node_before_loop", /Start-ConvenienteNode/.test(iniciarTail) && /Wait-ConvenienteUp/.test(iniciarTail) && iniciarTail.indexOf("Start-ConvenienteNode") < iniciarTail.indexOf("Start-LoopSilent") && iniciarTail.indexOf("Start-ConvenienteNode") < iniciarTail.indexOf("version_swap"));
 check("install_ok_without_netboot", !/-not \$okTask -or -not \$okNet/.test(instKitTxt) && /exit 0/.test(instKitTxt));
 const iniciarVbs = path.join(root, "porteiro", "INICIAR_SISTEMA.vbs");
 check("iniciar_vbs_exists", fs.existsSync(iniciarVbs));

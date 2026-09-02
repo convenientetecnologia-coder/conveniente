@@ -536,8 +536,11 @@ function Do-Start {
     Set-PausedFlag $false
     Set-MaxPerf
 
+    $st = $null
+    $st2 = $null
+    $st3 = $null
     $st = Get-SystemState
-    if ($st.Up) {
+    if ($st -and $st.Up) {
         Write-Host "JA LIGADO why=$($st.Why) masters=$($st.Masters) nodes=$($st.Nodes) port=$($st.Port) — nao subi de novo"
         Write-Log "$Reason start skipped already_up=$($st.Why)"
         return
@@ -546,7 +549,7 @@ function Do-Start {
     # Confirmacao dupla (anti falso-negativo)
     Start-Sleep -Seconds 2
     $st2 = Get-SystemState
-    if ($st2.Up) {
+    if ($st2 -and $st2.Up) {
         Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) — nao subi de novo"
         Write-Log "$Reason start skipped already_up2=$($st2.Why)"
         return
@@ -564,8 +567,18 @@ function Do-Start {
     }
     Start-Sleep -Seconds 3
     $st3 = Get-SystemState
-    Write-Host "INICIADO up=$($st3.Up) why=$($st3.Why) masters=$($st3.Masters) nodes=$($st3.Nodes)"
-    Write-Log "$Reason start done up=$($st3.Up) why=$($st3.Why)"
+    $up3 = $false
+    $why3 = 'down'
+    $masters3 = 0
+    $nodes3 = 0
+    if ($st3) {
+        $up3 = [bool]$st3.Up
+        $why3 = [string]$st3.Why
+        $masters3 = [int]$st3.Masters
+        $nodes3 = [int]$st3.Nodes
+    }
+    Write-Host "INICIADO up=$up3 why=$why3 masters=$masters3 nodes=$nodes3"
+    Write-Log "$Reason start done up=$up3 why=$why3"
 }
 
 function Do-Status {

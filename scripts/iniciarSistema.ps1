@@ -137,10 +137,12 @@ function Start-LoopSilent {
         return
     }
     & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
-    Start-Sleep -Milliseconds 800
-    if (Test-LoopAlive) {
-        Write-StartLog 'loop_via_schtasks'
-        return
+    for ($i = 0; $i -lt 8; $i++) {
+        Start-Sleep -Milliseconds 400
+        if (Test-LoopAlive) {
+            Write-StartLog 'loop_via_schtasks'
+            return
+        }
     }
     if (-not (Test-Path -LiteralPath $destPs1)) {
         Write-StartLog 'loop_no_dest'
@@ -196,6 +198,19 @@ function Start-ConvenienteNodeHost {
     return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
+function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
+    $deadline = (Get-Date).AddSeconds([math]::Max(1, $TimeoutSec))
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ConvenienteUp) {
+            Write-StartLog 'wait_up_ok'
+            return $true
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Write-StartLog 'wait_up_timeout'
+    return $false
+}
+
 function Start-ConvenienteNode {
     if (Test-ConvenienteUp) {
         Write-StartLog 'already_up'
@@ -224,11 +239,13 @@ Write-StartLog 'click'
 $copied = $false
 try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
 Ensure-LogonTaskSilent
+# Node primeiro. Se o porteiro reciclar agora, o AUTO_BOOT ve already_up e nao abre 2a janela.
+$code = Start-ConvenienteNode
+[void](Wait-ConvenienteUp 4)
 if ($copied) {
     Write-StartLog 'version_swap'
     Stop-LoopOnly
     Start-Sleep -Milliseconds 400
 }
 Start-LoopSilent
-$code = Start-ConvenienteNode
 exit $code
