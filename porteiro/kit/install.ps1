@@ -81,9 +81,7 @@ foreach ($g in @('808ffb3b-6e1f-4fb0-910c-53827e1f97ca','8c5e7fda-e8bf-4a96-9a85
 
 Write-Host '[4] Tarefas (logon + netboot no startup)...'
 Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-Unregister-ScheduledTask -TaskName $TaskNet -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 & schtasks.exe /delete /tn LimpezaAutomaticaConveniente /f 2>$null | Out-Null
-& schtasks.exe /delete /tn $TaskNet /f 2>$null | Out-Null
 
 $okTask = $false
 $okNet = $false
@@ -91,14 +89,14 @@ try {
     $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
     $action = New-ScheduledTaskAction -Execute $PsExe -Argument $arg
     $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
     $okTask = $true
     Write-Host "  OK $Task (ao logon)"
 } catch {
     $tr = "$PsExe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
-    & schtasks.exe /create /tn $Task /tr $tr /sc onlogon /rl highest /f 2>$null | Out-Null
+    & schtasks.exe /create /tn $Task /tr $tr /sc onlogon /f 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         $okTask = $true
         Write-Host "  OK $Task (schtasks)"
@@ -170,7 +168,7 @@ Write-Host 'STATUS: Ver=v5.2.0-nomem | MemClean=OFF | RebootDaily=04:00-04:20 | 
 Write-Host 'So isso: PARAR / INICIAR / STATUS'
 Write-Host 'Arquivo unico: C:\auto_vigia\manutencao.ps1'
 & $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action status
-if (-not $okTask) { Write-Host '[AVISO] Tarefa ao logon pode precisar de Setup como Admin' }
-if (-not $okNet) { Write-Host '[AVISO] ConvenienteNetBoot pode precisar de Setup como Admin' }
-if (-not $okTask -or -not $okNet) { exit 1 }
+if (-not $okTask) { Write-Host '[AVISO] Tarefa ao logon: o clique Iniciar cria em silencio' }
+if (-not $okNet) { Write-Host '[INFO] ConvenienteNetBoot extra (SYSTEM) nao gravou. O vigia ao logon basta.' }
+if (-not (Test-Path (Join-Path $Dest 'manutencao.ps1'))) { exit 1 }
 exit 0

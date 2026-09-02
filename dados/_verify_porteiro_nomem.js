@@ -63,12 +63,12 @@ check("instalar_porteiro_refuses_mem", /Invoke-SoftMemClean/.test(instPTxt) && /
 check("instalar_porteiro_calls_install", /porteiro\\kit\\install\.ps1/.test(instPTxt));
 check("instalar_conveniente_calls_porteiro", /instalar_porteiro\.ps1/.test(instCTxt));
 check("instalar_conveniente_iniciar_vbs", /INICIAR_SISTEMA\.vbs/.test(instCTxt) && /wscript\.exe/.test(instCTxt));
-check("instalar_porteiro_uac_cancel_exits", /Admin recusado/.test(instPTxt) && /exit 3/.test(instPTxt));
+check("instalar_porteiro_no_runas", !/Verb RunAs/.test(instPTxt) && /Sem admin/.test(instPTxt));
 
 check("ensure_script_exists", fs.existsSync(ensurePs1));
 check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt));
 check("ensure_installer_no_self_elevate", /NoSelfElevate/.test(ensureTxt));
-check("installer_no_self_elevate_exits_3", /\$NoSelfElevate/.test(instPTxt) && /Precisa de administrador/.test(instPTxt));
+check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UAC/.test(instPTxt));
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
 check("iniciar_starts_node_direct", /title Conveniente_Node/.test(iniciarTxt) && /Start-Process cmd\.exe/.test(iniciarTxt));
 check("iniciar_silent_copy", /Copy-KitSilent/.test(iniciarTxt) && /Copy-Item/.test(iniciarTxt));
@@ -82,7 +82,8 @@ check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
 check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
-check("install_exits_if_tasks_fail", /if \(-not \$okTask -or -not \$okNet\) \{ exit 1 \}/.test(instKitTxt) && /exit 0/.test(instKitTxt));
+check("iniciar_swaps_version", /version_swap/.test(iniciarTxt) && /Stop-LoopOnly/.test(iniciarTxt));
+check("install_ok_without_netboot", !/-not \$okTask -or -not \$okNet/.test(instKitTxt) && /exit 0/.test(instKitTxt));
 const iniciarVbs = path.join(root, "porteiro", "INICIAR_SISTEMA.vbs");
 check("iniciar_vbs_exists", fs.existsSync(iniciarVbs));
 check("iniciar_vbs_hidden", /WindowStyle Hidden/.test(fs.readFileSync(iniciarVbs, "utf8")) && /iniciarSistema\.ps1/.test(fs.readFileSync(iniciarVbs, "utf8")));
@@ -98,14 +99,15 @@ check("sync_no_do_stop", !/-Action\s+stop/.test(syncTxt) && !/taskkill/i.test(sy
 check("sync_refuses_dirty_src", /src_has_memclean_refused/.test(syncTxt));
 check("sync_installs_when_absent", /installed_fresh/.test(syncTxt) && /ensureDirs/.test(syncTxt));
 check("sync_no_skip_dest_absent", !/skipped dest_absent/.test(syncTxt));
-check("sync_asks_uac_only_if_tasks_missing", /installTasks/.test(syncTxt) && /requestTaskInstall/.test(syncTxt));
+check("sync_no_runas", !/Verb RunAs/.test(syncTxt) && !/requestTaskInstall/.test(syncTxt));
+check("sync_logon_task_silent", /ensureLogonTaskSilent/.test(syncTxt) && /onlogon/.test(syncTxt));
 check("index_wires_sync", /porteiroSync\.js/.test(indexTxt));
 const leiaTxt = fs.readFileSync(path.join(root, "porteiro", "LEIA-ME.txt"), "utf8");
 const contratoTxt = fs.readFileSync(path.join(root, "porteiro", "CONTRATO.txt"), "utf8");
 check("leia_index_not_owner", !/Dono: o index\.js/.test(leiaTxt));
 check("leia_windows_owns", /tarefa ConvenientePorteiro/.test(leiaTxt) && /so CORRIGE/.test(leiaTxt));
 check("contrato_index_not_owner", /NAO e o dono/.test(contratoTxt) && /sistema a parte/.test(contratoTxt));
-check("contrato_iniciar_silencio", /Clique INICIAR/.test(contratoTxt) && /Sem admin/.test(contratoTxt) && /sem OK/.test(contratoTxt));
+check("contrato_iniciar_silencio", /Clique o S/.test(contratoTxt) && /Sem admin/.test(contratoTxt));
 check("sync_loop_via_start_process", /start_process/.test(syncTxt));
 
 check("sweep_still_owns_standby", /\/StandbyList/.test(sweepTxt) && /DiskClean\.exe/.test(sweepTxt) && /ConvenienteDiskClean/.test(sweepTxt) && /runViaScheduledTask/.test(sweepTxt));

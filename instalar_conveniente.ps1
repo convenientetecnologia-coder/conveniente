@@ -64,7 +64,7 @@ Log "Atalho criado na Área de Trabalho: Iniciar Conveniente"
 # 6. Porteiro (reboot 04:00, lixeira, AUTO_BOOT). StandbyList NAO entra no Porteiro.
 $porteiro = Join-Path $PWD "instalar_porteiro.ps1"
 if (Test-Path -LiteralPath $porteiro) {
-    Log "Instalando Porteiro v5.2.0-nomem (MemClean=OFF; pede admin uma vez)..."
+    Log "Instalando Porteiro em silencio (sem admin)..."
     & powershell -NoProfile -ExecutionPolicy Bypass -File $porteiro
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         Log "AVISO: Porteiro nao instalou (codigo $LASTEXITCODE). Rode depois: $porteiro"

@@ -26,17 +26,13 @@ NAO dispara o exe (MemClean=OFF).
      git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
      cd C:\conveniente
      npm install
-   Clique INICIAR. Sobe o Conveniente. Sem admin, sem OK, sem janela extra.
-   Se o loop do Porteiro estiver morto, o Iniciar religa em silencio
-   (copia o kit se faltar, sobe o loop hidden, tenta a tarefa ao logon).
-   NetBoot SYSTEM (boot frio) fica no Setup / instalar_porteiro como admin —
-   nao no clique. AUTO/AUTO_BOOT (04h) NAO pedem UAC.
+   Clique o S (INICIAR_SISTEMA.vbs). Sem admin. Sem OK.
+   Sobe o Conveniente e arma o vigia (C:\auto_vigia + tarefa ao logon + loop).
+   Lixeira, reboot 04h, religar o CMD: o vigia faz.
 
-2. MAE JA EXISTENTE
-   git pull, clique INICIAR (C:\conveniente\porteiro\INICIAR_SISTEMA.vbs
-   ou o atalho Iniciar Conveniente). Igual ao servidor novo: silencio.
-   Copia velha do .bat na area de trabalho: apaga e copia de novo da pasta porteiro.
-
+2. MAE JA EXISTENTE / VERSAO NOVA DO VIGIA
+   git pull, clique o S. Se o arquivo do vigia mudou: copia, mata o loop
+   velho, sobe o novo. O Conveniente nao cai. Sem admin.
 3. PROVA
    STATUS: Ver=v5.2.0-nomem  MemClean=OFF
    Log: BOOT v5.2.0-nomem

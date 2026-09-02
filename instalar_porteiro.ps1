@@ -4,10 +4,10 @@
 # StandbyList: tarefa SYSTEM ConvenienteDiskClean (o loop NAO dispara).
 # Dono do relogio: Conveniente chromeMemorySweep.js
 #
-# Uso (admin via UAC):
+# Uso (sem admin):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File C:\conveniente\instalar_porteiro.ps1
 #
-# -NoSelfElevate: quem chama ja pediu UAC. Se nao for admin, sai 3. Nao abre segundo PowerShell.
+# -NoSelfElevate: aceito e ignorado (compat). Nao pede UAC.
 param(
     [switch]$NoSelfElevate
 )
@@ -50,26 +50,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )
 if (-not $isAdmin) {
-    if ($NoSelfElevate) {
-        Write-Host '[ERRO] Precisa de administrador. Porteiro NAO instalado.'
-        exit 3
-    }
-    Write-Host '[ADMIN] Pedindo administrador para gravar tarefas ConvenientePorteiro / ConvenienteNetBoot...'
-    $p = $null
-    try {
-        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-            -Verb RunAs -Wait -PassThru `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    } catch {
-        Write-Host '[ERRO] Admin recusado ou UAC cancelado. Porteiro NAO instalado.'
-        exit 3
-    }
-    if ($null -eq $p) {
-        Write-Host '[ERRO] Admin recusado. Porteiro NAO instalado.'
-        exit 3
-    }
-    if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-    exit 0
+    Write-Host '[INFO] Sem admin. Copia o vigia e a tarefa ao logon. Nao pede UAC.'
 }
 
 Write-Host '=== instalar_porteiro.ps1 (v5.2.0-nomem, MemClean=OFF) ==='

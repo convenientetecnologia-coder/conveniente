@@ -99,11 +99,31 @@ function Copy-KitSilent {
         if ($need) {
             Copy-Item -LiteralPath $kitSrc -Destination $destPs1 -Force
             Write-StartLog 'copied_dest'
-        } else {
-            Write-StartLog 'dest_already_kit'
+            return $true
         }
+        Write-StartLog 'dest_already_kit'
+        return $false
     } catch {
         Write-StartLog ('copy_fail ' + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Stop-LoopOnly {
+    & schtasks.exe /End /TN 'ConvenientePorteiro' 1>$null 2>$null
+    $lock = Join-Path $destDir 'porteiro.lock'
+    if (Test-Path -LiteralPath $lock) {
+        try {
+            $id = [int]((Get-Content -LiteralPath $lock -Raw).Trim())
+            if ($id -gt 0) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+        } catch {}
+        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)) {
+        $c = [string]$p.CommandLine
+        if ($c -and ($c -match 'manutencao\.ps1') -and ($c -match '-Action loop')) {
+            try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+        }
     }
 }
 
@@ -165,8 +185,14 @@ function Start-ConvenienteNode {
 }
 
 Write-StartLog 'click'
-Copy-KitSilent
-Start-LoopSilent
+$copied = $false
+try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
 Ensure-LogonTaskSilent
+if ($copied) {
+    Write-StartLog 'version_swap'
+    Stop-LoopOnly
+    Start-Sleep -Milliseconds 400
+}
+Start-LoopSilent
 $code = Start-ConvenienteNode
 exit $code

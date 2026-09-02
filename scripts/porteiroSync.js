@@ -13,8 +13,8 @@
  *     Ainda apaga kit velho (LimpezaAutomaticaConveniente, vigia.bat, …).
  *   - garante ConvenienteDiskClean (SYSTEM). O loop NAO dispara o exe.
  *
- * Tarefas ao logon/startup ausentes: UAC uma vez (install.ps1). Sem isso o
- * reboot do PC não religa o Porteiro.
+ * Tarefa ao logon ausente: cria em silencio (schtasks onlogon). Sem UAC.
+ * NetBoot SYSTEM e extra; nao bloqueia e nao pede admin.
  *
  * Kill switch: PORTEIRO_SYNC_DISABLED=1
  */
@@ -22,14 +22,13 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { spawn, spawnSync } = require("child_process");
+const { spawnSync } = require("child_process");
 
 const AUTO_VIGIA = "C:\\auto_vigia";
 const DEST_PS1 = path.join(AUTO_VIGIA, "manutencao.ps1");
 const PORTEIRO_LOG = path.join(AUTO_VIGIA, "logs", "porteiro.log");
 const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
-const INSTALLER_PS1 = path.join(__dirname, "..", "instalar_porteiro.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const TASK_LOOP = "ConvenientePorteiro";
 const TASK_NET = "ConvenienteNetBoot";
@@ -151,7 +150,22 @@ function taskExists(name) {
 }
 
 function tasksOk() {
-  return taskExists(TASK_LOOP) && taskExists(TASK_NET);
+  return taskExists(TASK_LOOP);
+}
+
+function ensureLogonTaskSilent() {
+  if (taskExists(TASK_LOOP)) return { ok: true, existed: true };
+  const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action loop";
+  try {
+    const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_LOOP, "/tr", tr, "/sc", "onlogon", "/f"], {
+      windowsHide: true,
+      timeout: 15000,
+      encoding: "utf8"
+    });
+    return { ok: r.status === 0, existed: false, status: r.status };
+  } catch (e) {
+    return { ok: false, existed: false, error: (e && e.message) || String(e) };
+  }
 }
 
 function schtasksEnd(name) {
@@ -259,24 +273,6 @@ function startLoopOwnedByWindows() {
     } catch {}
   }
   return startLoopSpawn();
-}
-
-function requestTaskInstall() {
-  if (!fs.existsSync(INSTALLER_PS1)) {
-    return { ok: false, error: "installer_missing" };
-  }
-  const fileArg = INSTALLER_PS1.replace(/'/g, "''");
-  const psArg = PS_EXE.replace(/'/g, "''");
-  const cmd =
-    "Start-Process -FilePath '" + psArg + "' -Verb RunAs -ArgumentList " +
-    "'-NoProfile -ExecutionPolicy Bypass -File \"" + fileArg + "\"'";
-  const child = spawn(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: false
-  });
-  child.unref();
-  return { ok: true, pid: child.pid || 0 };
 }
 
 function ensureDirs() {
@@ -391,8 +387,7 @@ function sync(opts) {
   }
 
   if (plan.installTasks) {
-    const asked = requestTaskInstall();
-    result.uac = asked;
+    result.logonTask = ensureLogonTaskSilent();
   }
 
   result.ok = true;
@@ -404,7 +399,7 @@ function sync(opts) {
   else if (plan.restartLoop && !runningNomem) result.action = "loop_loaded_nomem";
   else if (plan.restartLoop) result.action = "loop_restarted";
   else result.action = "already_nomem";
-  if (plan.installTasks) result.action += "+tasks_uac";
+  if (plan.installTasks) result.action += "+logon_task";
 
   persistLog({
     action: result.action,
