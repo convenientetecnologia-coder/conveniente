@@ -4523,7 +4523,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     try { __edgeKickStockProvisionPump(); } catch {}
 
     // Porteiro e o vigia do Windows (tarefa ao logon). O index so corrige a versao.
-    // Nao mata Node. Se o loop ja e v5.2.0-nomem e esta vivo, nao mexe.
+    // Nao mata Node. Se o loop ja e v5.2.1-clean-cpu e esta vivo, nao mexe.
     try {
       setImmediate(() => {
         try {

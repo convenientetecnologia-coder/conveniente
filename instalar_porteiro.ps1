@@ -37,8 +37,16 @@ if ($kitTxt -match 'Start-Process[\s\S]{0,240}DiskClean\.exe') {
     Write-Host '[ERRO] kit ainda spawna DiskClean no loop. Recuse instalar. Avise o agente.'
     exit 2
 }
-if ($kitTxt -notmatch 'v5\.2\.0-nomem') {
-    Write-Host '[ERRO] kit sem versao v5.2.0-nomem. Recuse instalar.'
+if ($kitTxt -match 'function Get-CpuAvg' -or $kitTxt -match 'Get-CimInstance[\s\S]{0,80}Win32_Processor') {
+    Write-Host '[ERRO] kit ainda mede CPU (Get-CpuAvg / Win32_Processor). Recuse instalar.'
+    exit 2
+}
+if ($kitTxt -notmatch 'v5\.2\.1-clean-cpu') {
+    Write-Host '[ERRO] kit sem versao v5.2.1-clean-cpu. Recuse instalar.'
+    exit 2
+}
+if ($kitTxt -notmatch '\$cpu\s*=\s*0') {
+    Write-Host '[ERRO] kit sem CPU estatico 0. Recuse instalar.'
     exit 2
 }
 if ($kitTxt -notmatch 'ConvenienteDiskClean' -or $kitTxt -notmatch 'function Ensure-DiskCleanTask') {
@@ -53,6 +61,6 @@ if (-not $isAdmin) {
     Write-Host '[INFO] Sem admin. Copia o vigia e a tarefa ao logon. Nao pede UAC.'
 }
 
-Write-Host '=== instalar_porteiro.ps1 (v5.2.0-nomem, MemClean=OFF) ==='
+Write-Host '=== instalar_porteiro.ps1 (v5.2.1-clean-cpu, MemClean=OFF) ==='
 & $install
 exit $LASTEXITCODE

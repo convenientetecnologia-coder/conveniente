@@ -5,7 +5,7 @@
  * Vive sem o index.js: reboot 04:00, lixeira, AUTO_BOOT do Conveniente.
  *
  * O index NÃO é o dono do Porteiro. O index só CORRIGE a versão uma vez:
- *   - arquivo errado/velho (mem_soft) → copia v5.2.0-nomem
+ *   - arquivo errado/velho (mem_soft / Get-CpuAvg) → copia v5.2.1-clean-cpu
  *   - loop morto → dispara a tarefa Windows (não fica filho do Node)
  *   - loop vivo ainda no BOOT v5.1.13 → schtasks /End + o loop novo (Highest)
  *     mata qualquer rival (porteiro_loop, vigia.bat, limpeza_memoria, outro loop)
@@ -32,7 +32,7 @@ const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const TASK_LOOP = "ConvenientePorteiro";
 const TASK_NET = "ConvenienteNetBoot";
-const WANT_BOOT = "BOOT v5.2.0-nomem";
+const WANT_BOOT = "BOOT v5.2.1-clean-cpu";
 
 function envDisabled() {
   return String(process.env.PORTEIRO_SYNC_DISABLED || "").trim() === "1";
@@ -63,7 +63,10 @@ function sourceIsNomem(text) {
   if (/\bmem_soft\b/.test(text)) return false;
   if (/Start-Process[\s\S]{0,240}DiskClean\.exe/i.test(text)) return false;
   if (/ArgumentList\s+['"]\/StandbyList['"]/.test(text)) return false;
-  if (!/v5\.2\.0-nomem/.test(text)) return false;
+  if (/function Get-CpuAvg/.test(text)) return false;
+  if (/Get-CimInstance[\s\S]{0,80}Win32_Processor/.test(text)) return false;
+  if (!/v5\.2\.1-clean-cpu/.test(text)) return false;
+  if (!/\$cpu\s*=\s*0/.test(text)) return false;
   if (!/MemClean=OFF/.test(text)) return false;
   if (!/ConvenienteDiskClean/.test(text)) return false;
   if (!/function Ensure-DiskCleanTask/.test(text)) return false;

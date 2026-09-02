@@ -10,13 +10,15 @@ sistema a parte. Ele TEM que funcionar com o Conveniente DESLIGADO:
 
 O index.js NAO e o dono. O index so CORRIGE a versao quando voce liga
 o Conveniente:
-  - se o arquivo/loop for o velho (mem_soft / v5.1.13) → instala v5.2.0-nomem
+  - se o arquivo/loop for o velho (mem_soft / v5.1.13 / Get-CpuAvg) → instala v5.2.1-clean-cpu
     e a TAREFA DO WINDOWS sobe o loop (schtasks /Run). Nao fica filho do Node.
   - se ja for o correto e estiver vivo → o index NAO mexe.
 
 RAM/StandbyList: o Conveniente cronometra (chromeMemorySweep no index) e
 pede ao Windows a tarefa SYSTEM ConvenienteDiskClean. O loop do Porteiro
 NAO dispara o exe (MemClean=OFF).
+CPU: o loop NAO le carga de hardware. Disco (TEMP+Lixeira) no relogio,
+sem gate de CPU.
 
 1. SERVIDOR NOVO
    irm ... | iex
@@ -34,6 +36,6 @@ NAO dispara o exe (MemClean=OFF).
    git pull, clique o S. Se o arquivo do vigia mudou: copia, mata o loop
    velho, sobe o novo. O Conveniente nao cai. Sem admin.
 3. PROVA
-   STATUS: Ver=v5.2.0-nomem  MemClean=OFF
-   Log: BOOT v5.2.0-nomem
+   STATUS: Ver=v5.2.1-clean-cpu  MemClean=OFF
+   Log: BOOT v5.2.1-clean-cpu
    Tarefa ConvenientePorteiro = Running (nao depende do Node estar aberto)

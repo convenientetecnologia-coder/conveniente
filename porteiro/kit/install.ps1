@@ -1,4 +1,4 @@
-# install.ps1 - plug and play v5.2.0-nomem (MemClean=OFF)
+# install.ps1 - plug and play v5.2.1-clean-cpu (MemClean=OFF)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
@@ -8,7 +8,7 @@ $Task = 'ConvenientePorteiro'
 $TaskNet = 'ConvenienteNetBoot'
 $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
-Write-Host '=== SETUP v5.2.0-nomem ==='
+Write-Host '=== SETUP v5.2.1-clean-cpu ==='
 
 if (-not (Test-Path 'C:\conveniente\index.js')) {
     Write-Host '[ERRO] C:\conveniente\index.js nao encontrado'
@@ -158,13 +158,13 @@ foreach ($old in @('PORTEIRO_REDECOLAR.lnk','REDECOLAR_SISTEMA.lnk')) {
     if (Test-Path $p) { Remove-Item $p -Force -ErrorAction SilentlyContinue }
 }
 
-Write-Host '[6] Iniciando porteiro v5.2.0-nomem...'
+Write-Host '[6] Iniciando porteiro v5.2.1-clean-cpu...'
 Start-Process $PsExe -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','C:\auto_vigia\manutencao.ps1','-Action','loop' -WindowStyle Hidden
 Start-Sleep 2
 
 Write-Host ''
 Write-Host '=== PRONTO ==='
-Write-Host 'STATUS: Ver=v5.2.0-nomem | MemClean=OFF | RebootDaily=04:00-04:20 | NetGuard=4min+4testes | NetBoot=ConvenienteNetBoot | AutoStartAposBoot=SIM'
+Write-Host 'STATUS: Ver=v5.2.1-clean-cpu | MemClean=OFF | RebootDaily=04:00-04:20 | NetGuard=4min+4testes | NetBoot=ConvenienteNetBoot | AutoStartAposBoot=SIM'
 Write-Host 'So isso: PARAR / INICIAR / STATUS'
 Write-Host 'Arquivo unico: C:\auto_vigia\manutencao.ps1'
 & $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action status

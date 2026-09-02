@@ -1,6 +1,7 @@
 # Clique Iniciar: sobe o Conveniente. Arma o loop em silencio se faltar.
 # Sem admin. Sem OK. Sem PowerShell visivel. Uma janela: Conveniente_Node.
-# Armado = dest nomem + loop vivo. Hash/NetBoot NAO bloqueiam o clique.
+# Armado = dest nomem v5.2.1-clean-cpu + loop vivo. Hash/NetBoot NAO bloqueiam o clique.
+# Recusa kit com Get-CpuAvg / Win32_Processor.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
@@ -47,7 +48,10 @@ function Test-NomemFile([string]$Path) {
     if ($t -match '\bmem_soft\b') { return $false }
     if ($t -match "ArgumentList '/StandbyList'") { return $false }
     if ($t -match 'Start-Process[\s\S]{0,240}DiskClean\.exe') { return $false }
-    if ($t -notmatch 'v5\.2\.0-nomem') { return $false }
+    if ($t -match 'function Get-CpuAvg') { return $false }
+    if ($t -match 'Get-CimInstance[\s\S]{0,80}Win32_Processor') { return $false }
+    if ($t -notmatch 'v5\.2\.1-clean-cpu') { return $false }
+    if ($t -notmatch '\$cpu\s*=\s*0') { return $false }
     if ($t -notmatch 'MemClean=OFF') { return $false }
     if ($t -notmatch 'ConvenienteDiskClean') { return $false }
     if ($t -notmatch 'function Ensure-DiskCleanTask') { return $false }

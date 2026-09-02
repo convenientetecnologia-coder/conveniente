@@ -11,7 +11,7 @@
  *   - requireIdle=true (teste/legado): probe/arm/confirm ocioso antes do pedido.
  *
  * Teto 30s no wait do LastTaskResult. SETTLE_MS=2000 DEPOIS.
- * Porteiro v5.2.0-nomem NÃO dispara DiskClean. Só garante que a tarefa SYSTEM existe.
+ * Porteiro v5.2.1-clean-cpu NÃO dispara DiskClean. Só garante que a tarefa SYSTEM existe.
  */
 
 const { spawn } = require("child_process");

@@ -2,9 +2,10 @@
 # TUDO-EM-UM: porteiro + start/stop/status
 # Nao altera C:\conveniente
 # Regra: se JA estiver ligado, NUNCA sobe de novo.
-# RAM (StandbyList) NAO vive neste loop (v5.2.0-nomem).
+# RAM (StandbyList) NAO vive neste loop (v5.2.1-clean-cpu).
 # Este script so GARANTE a tarefa SYSTEM ConvenienteDiskClean (on-demand).
 # Quem cronometra 15 min e pede o Run e o Conveniente (chromeMemorySweep.js).
+# CPU: o Conveniente opera em 90-100%. Este script NAO mede carga de hardware.
 
 param(
     [ValidateSet('loop','start','stop','status','install','netboot','ensure_diskclean')]
@@ -23,7 +24,7 @@ $LockFile    = Join-Path $Root 'porteiro.lock'
 $LogFile     = Join-Path $Root 'logs\porteiro.log'
 $PidFile     = Join-Path $Root 'master.pid'
 $PanelPort   = 8088
-$Version     = 'v5.2.0-nomem'
+$Version     = 'v5.2.1-clean-cpu'
 
 # Reboot diario (1x/dia): limpeza TEMP+Lixeira e reinicia. Producao = 04:00.
 # So dispara DENTRO da janela (ex.: 04:00-04:20). Nunca "atrasado" ao instalar de tarde.
@@ -152,17 +153,6 @@ function Get-DiskFreeGB {
     [math]::Round($d.FreeSpace / 1GB, 2)
 }
 
-function Get-CpuAvg {
-    $vals = @()
-    for ($i = 0; $i -lt 2; $i++) {
-        $a = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
-        if ($null -ne $a) { $vals += [double]$a }
-        if ($i -lt 1) { Start-Sleep -Seconds 1 }
-    }
-    if ($vals.Count -eq 0) { return 100 }
-    [math]::Round(($vals | Measure-Object -Average).Average, 1)
-}
-
 function Get-EstadoPath { Join-Path $Root 'estado.json' }
 
 function Get-Estado {
@@ -265,7 +255,7 @@ function Test-InDiskDailyWindow {
 
 function Test-DiskEmergencyDue {
     param($DiskGB)
-    # Regra usuario: disco < 4 GB, no max a cada 5h+offset, CPU calma no loop
+    # Regra usuario: disco < 4 GB, no max a cada 5h+offset. Sem gate de CPU.
     # ANTI-LOOP: so libera de novo depois de 5h+offset (gravado em lastDiskEmergencyUtc)
     if ($null -eq $DiskGB -or $DiskGB -ge 4) { return $false }
     if (Test-InDiskDailyWindow) { return $false }
@@ -550,7 +540,7 @@ function Do-Status {
     Write-Host "Paused=$($st.Paused) Up=$($st.Up) Why=$($st.Why) Masters=$($st.Masters) Nodes=$($st.Nodes) Chrome=$($st.Chrome) Port8088=$($st.Port) DiskGB=$disk"
     Write-Host "Host=$env:COMPUTERNAME Ver=$Version"
     Write-Host "DiskDaily=$($sch.RunAt.ToString('HH:mm')) (janela 04:30-06:00, 1x/dia)"
-    Write-Host "DiskEmerg=<4GB / max 5h+offset $($sch.OffsetMin) min / CPU<=40% (sem loop)"
+    Write-Host "DiskEmerg=<4GB / max 5h+offset $($sch.OffsetMin) min (sem gate de CPU)"
     if (Test-NoReboot) {
         Write-Host 'RebootDaily=DESLIGADO (arquivo C:\auto_vigia\NO_REBOOT.flag)'
     } else {
@@ -685,7 +675,7 @@ function Do-Loop {
 
     while ($true) {
         try {
-            $cpu = Get-CpuAvg
+            $cpu = 0
             $disk = Get-DiskFreeGB
             $st = Get-SystemState
             $actions = @()
@@ -724,21 +714,13 @@ function Do-Loop {
                 continue
             }
 
-            # Disco madrugada: 1x/dia 04:30-06:00, horario diferente por VM
+            # Disco madrugada: 1x/dia 04:30-06:00, horario diferente por VM. Sem gate de CPU.
             if (Test-DiskDailyDue) {
-                if ($cpu -le 50) {
-                    $actions += (Invoke-DiskDailyClean)
-                } else {
-                    $actions += 'disk_daily_wait_cpu'
-                }
+                $actions += (Invoke-DiskDailyClean)
             }
-            # Disco emergencia (dia): <4GB, max 5h+offset, CPU<=40%, SEM LOOP
+            # Disco emergencia (dia): <4GB, max 5h+offset. Sem gate de CPU.
             elseif (Test-DiskEmergencyDue -DiskGB $disk) {
-                if ($cpu -le 40) {
-                    $actions += (Invoke-DiskEmergencyClean)
-                } else {
-                    $actions += 'disk_emergency_wait_cpu'
-                }
+                $actions += (Invoke-DiskEmergencyClean)
             }
             elseif ($null -ne $disk -and $disk -lt 4) {
                 $actions += 'disk_warn'

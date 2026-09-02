@@ -35,17 +35,26 @@ const indexTxt = fs.readFileSync(indexJs, "utf8");
 const sweepTxt = fs.readFileSync(sweepJs, "utf8");
 const sync = require("../scripts/porteiroSync.js");
 
+const loopBody = kitTxt.split("function Do-Loop")[1] || "";
+
 check("kit_exists", fs.existsSync(kit));
-check("kit_version", /v5\.2\.0-nomem/.test(kitTxt));
+check("kit_version", /v5\.2\.1-clean-cpu/.test(kitTxt) && /\$Version\s*=\s*'v5\.2\.1-clean-cpu'/.test(kitTxt));
 check("kit_no_invoke_soft", !/Invoke-SoftMemClean/.test(kitTxt));
 check("kit_no_start_process_diskclean", !/Start-Process[\s\S]{0,240}DiskClean\.exe/i.test(kitTxt));
 check("kit_no_standbylist_arglist", !/ArgumentList\s+['"]\/StandbyList['"]/.test(kitTxt));
 check("kit_no_mem_soft", !/\bmem_soft\b/.test(kitTxt));
+check("kit_no_get_cpu_avg", !/function Get-CpuAvg/.test(kitTxt) && !/\bGet-CpuAvg\b/.test(kitTxt));
+check("kit_no_win32_processor", !/Win32_Processor/.test(kitTxt));
+check("kit_cpu_static_zero", /\$cpu\s*=\s*0/.test(kitTxt));
+check("kit_no_cpu_gate", !/\$cpu\s*-le\s*(40|50)/.test(kitTxt) && !/disk_(daily|emergency)_wait_cpu/.test(kitTxt));
+check("kit_loop_no_taskkill", !/taskkill/i.test(loopBody));
+check("kit_loop_disk_daily_ungated", /Test-DiskDailyDue/.test(loopBody) && /Invoke-DiskDailyClean/.test(loopBody));
+check("kit_loop_disk_emerg_ungated", /Test-DiskEmergencyDue/.test(loopBody) && /Invoke-DiskEmergencyClean/.test(loopBody));
 check("kit_status_mem_off", /MemClean=OFF/.test(kitTxt));
 check("kit_loop_mem_off", /mem_off/.test(kitTxt));
 check("kit_diskclean_task", /ConvenienteDiskClean/.test(kitTxt) && /function Ensure-DiskCleanTask/.test(kitTxt));
 check("kit_diskclean_task_system", /UserId 'SYSTEM'/.test(kitTxt) && /ensure_diskclean/.test(kitTxt));
-check("kit_loop_ensures_task", /Ensure-DiskCleanTask/.test(kitTxt.split("function Do-Loop")[1] || ""));
+check("kit_loop_ensures_task", /Ensure-DiskCleanTask/.test(loopBody));
 check("kit_loop_does_not_run_task", !/Start-ScheduledTask/.test(kitTxt) && !/schtasks\.exe \/Run/.test(kitTxt));
 check("kit_reboot_04", /\$RebootHour\s*=\s*4/.test(kitTxt) && /Invoke-DailyReboot/.test(kitTxt));
 check("kit_lixeira_or_temp", /Lixeira|Recycle|TEMP/i.test(kitTxt));
@@ -53,7 +62,11 @@ check("kit_auto_boot", /AUTO_BOOT/.test(kitTxt) && /Do-Start/.test(kitTxt));
 check("kit_do_stop_exists", /function Do-Stop/.test(kitTxt));
 check("kit_sourceIsNomem", sync.sourceIsNomem(kitTxt) === true);
 
-check("install_kit_version", /v5\.2\.0-nomem/.test(instKitTxt));
+check("install_kit_version", /v5\.2\.1-clean-cpu/.test(instKitTxt));
+check("instalar_porteiro_refuses_cpu", /function Get-CpuAvg/.test(instPTxt) && /Win32_Processor/.test(instPTxt) && /v5\.2\.1-clean-cpu/.test(instPTxt));
+check("iniciar_refuses_cpu", /function Get-CpuAvg/.test(iniciarTxt) && /Win32_Processor/.test(iniciarTxt) && /v5\.2\.1-clean-cpu/.test(iniciarTxt));
+check("ensure_refuses_cpu", /function Get-CpuAvg/.test(ensureTxt) && /Win32_Processor/.test(ensureTxt) && /v5\.2\.1-clean-cpu/.test(ensureTxt));
+check("sync_want_boot", /BOOT v5\.2\.1-clean-cpu/.test(syncTxt));
 check("install_kit_no_diskclean_exe", !/DiskClean\.exe/i.test(instKitTxt));
 check("install_calls_ensure_diskclean", /ensure_diskclean/.test(instKitTxt));
 check("install_does_not_do_stop", !/Do-Stop|-Action stop/.test(instKitTxt));
@@ -115,6 +128,8 @@ check("sweep_prod_asks_windows", /function runStandbySweep[\s\S]{0,220}runViaSch
 check("sync_no_kill_diskclean", !/\^DiskClean/.test(syncTxt) && !/CommandLine -match '\/StandbyList'/.test(syncTxt));
 
 check("sync_sourceIsNomem_rejects_old", sync.sourceIsNomem("Invoke-SoftMemClean DiskClean.exe /StandbyList mem_soft") === false);
+check("sync_sourceIsNomem_rejects_cpu", sync.sourceIsNomem("MemClean=OFF ConvenienteDiskClean function Ensure-DiskCleanTask $cpu = 0 v5.2.1-clean-cpu function Get-CpuAvg") === false);
+check("sync_sourceIsNomem_rejects_old_ver", sync.sourceIsNomem("MemClean=OFF ConvenienteDiskClean function Ensure-DiskCleanTask $cpu = 0 v5.2.0-nomem") === false);
 check("destLooksLikeOld", sync.destLooksLikeOldMemClean("return 'mem_soft'") === true);
 check("destLooksLikeOld_kit_is_new", sync.destLooksLikeOldMemClean(kitTxt) === false);
 
@@ -143,7 +158,8 @@ check("sync_kills_old_kit", /porteiro_loop/.test(syncTxt) && /limpeza_memoria/.t
 check("kit_rival_kill", /function Stop-RivalVigia/.test(kitTxt) && /rival_kill/.test(kitTxt));
 check("kit_no_exit_if_lock_held", !/exit 0/.test(kitTxt.split("function Do-Loop")[1] || ""));
 check("sync_no_always_restart_on_index_boot", !/index_boot['\"]\) plan\.restartLoop = true/.test(syncTxt) && !/always recicla o loop/.test(syncTxt));
-check("last_boot_nomem_true", sync.lastBootLineIsNomem("2026-08-31 18:00:00 [X][v5.2.0-nomem] BOOT v5.2.0-nomem reboot=04:00") === true);
+check("last_boot_nomem_true", sync.lastBootLineIsNomem("2026-09-02 18:00:00 [X][v5.2.1-clean-cpu] BOOT v5.2.1-clean-cpu reboot=04:00") === true);
+check("last_boot_old_nomem_false", sync.lastBootLineIsNomem("2026-08-31 18:00:00 [X][v5.2.0-nomem] BOOT v5.2.0-nomem reboot=04:00") === false);
 check("last_boot_old_false", sync.lastBootLineIsNomem("2026-08-31 17:42:31 [X][v5.1.13-reboot] BOOT v5.1.13-reboot reboot=04:00") === false);
 check("last_boot_empty_unknown", sync.lastBootLineIsNomem("") === null);
 

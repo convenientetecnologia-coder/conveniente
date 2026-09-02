@@ -2,7 +2,7 @@
 setlocal
 cls
 echo ========================================================
-echo   SETUP MANUTENCAO v5.2.0-nomem
+echo   SETUP MANUTENCAO v5.2.1-clean-cpu
 echo   (nao altera C:\conveniente)
 echo ========================================================
 echo.

@@ -1,5 +1,5 @@
 ========================================
-MANUTENCAO WINDOWS v5.2.0-nomem
+MANUTENCAO WINDOWS v5.2.1-clean-cpu
 ========================================
 
 NAO altera C:\conveniente.
@@ -10,7 +10,7 @@ FONTE CANONICA (servidor novo e MAE):
   C:\conveniente\porteiro\   (repo GitHub do Conveniente)
   Dono: o WINDOWS (tarefa ConvenientePorteiro ao logon).
   O index.js NAO e o dono. Ele so CORRIGE a versao se o arquivo/loop
-  for o velho (mem_soft / v5.1.13). Se ja for v5.2.0-nomem e estiver
+  for o velho (mem_soft / v5.1.13 / Get-CpuAvg). Se ja for v5.2.1-clean-cpu e estiver
   vivo, o index NAO mexe. O Porteiro continua com o Conveniente desligado.
 
 INSTALAR / ATUALIZAR:
@@ -22,7 +22,7 @@ INSTALAR / ATUALIZAR:
 
 CAMINHO ANTIGO (esta pasta na area de trabalho):
   1) Botao direito em Setup_Manutencao.bat -> Executar como administrador
-  Continua valido. O kit aqui e o mesmo v5.2.0-nomem, sem limpador.
+  Continua valido. O kit aqui e o mesmo v5.2.1-clean-cpu, sem limpador e sem medida de CPU.
 
 DESLIGAR REBOOT EM 1 PC (ex.: notebook de trabalho):
   Crie o arquivo: C:\auto_vigia\NO_REBOOT.flag
@@ -64,7 +64,7 @@ MEMORIA (StandbyList):
 
 DISCO:
   - Madrugada: 1x/dia 04:30-06:00 (horario diferente por maquina)
-  - Emergencia de dia: so se livre < 4 GB (max 5h+offset, CPU <= 40%)
+  - Emergencia de dia: so se livre < 4 GB (max 5h+offset). Sem gate de CPU.
   - TEMP + Lixeira apenas (nao mata Chrome)
 
 AUTO_BOOT:
