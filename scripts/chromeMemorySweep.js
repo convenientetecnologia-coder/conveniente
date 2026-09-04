@@ -12,6 +12,9 @@
  *
  * Teto 30s no wait do LastTaskResult. SETTLE_MS=2000 DEPOIS.
  * Porteiro v5.2.1-clean-cpu NÃO dispara DiskClean. Só garante que a tarefa SYSTEM existe.
+ *
+ * 2026-09-04: produção NÃO dispara DiskClean. clusterMaster passa disabled
+ * via prodDiskCleanDisabled(). Porteiro (lixeira / reboot 04h / AUTO_BOOT) intacto.
  */
 
 const { spawn } = require("child_process");
@@ -34,6 +37,13 @@ const MIN_INTERVAL_MS = Math.max(
 const LOG_DIR = path.join(__dirname, "..", "dados", "logs");
 const JSONL_PATH = path.join(LOG_DIR, "standby_sweep.jsonl");
 const LAST_PATH = path.join(__dirname, "..", "dados", "standby_sweep_last.json");
+
+// Hard-off do exe. Testes unitários NÃO leem isto — só o clusterMaster.
+const PROD_DISKCLEAN_DISABLED = true;
+
+function prodDiskCleanDisabled() {
+  return PROD_DISKCLEAN_DISABLED === true;
+}
 
 function envDisabled() {
   return String(process.env.STANDBY_SWEEP_DISABLED || "").trim() === "1";
@@ -573,5 +583,7 @@ module.exports = {
   busyNeedsStitch,
   attachHostCoordinator,
   envDisabled,
+  prodDiskCleanDisabled,
+  PROD_DISKCLEAN_DISABLED,
   chromeAliveFromSentinel
 };

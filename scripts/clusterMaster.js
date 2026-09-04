@@ -272,21 +272,25 @@ function createCluster() {
   });
 
   try {
+    const diskcleanOff = chromeMemorySweep.prodDiskCleanDisabled() || chromeMemorySweep.envDisabled();
     standbySweep = chromeMemorySweep.attachHostCoordinator({
       sendToAll: (type, payload, timeoutMs) => Promise.all(
         children.map((_, i) => sendTo(i, type, payload || {}, { timeoutMs: timeoutMs || 8000 }))
       ),
-      shardCount: () => children.length
+      shardCount: () => children.length,
+      disabled: diskcleanOff
     });
-    logger.info('[CLUSTER][STANDBY-SWEEP] coordinator on', {
-      disabled: chromeMemorySweep.envDisabled(),
+    logger.info('[CLUSTER][STANDBY-SWEEP] diskclean_disabled', {
+      disabled: diskcleanOff,
+      reason: 'diskclean_off_keep_porteiro',
       minMs: chromeMemorySweep.MIN_INTERVAL_MS,
       timeoutMs: chromeMemorySweep.TIMEOUT_MS,
       settleMs: chromeMemorySweep.SETTLE_MS
     });
     try {
       require("./indexLifecycle").append("standby_sweep_on", {
-        disabled: chromeMemorySweep.envDisabled(),
+        disabled: diskcleanOff,
+        reason: 'diskclean_off_keep_porteiro',
         minMs: chromeMemorySweep.MIN_INTERVAL_MS,
         timeoutMs: chromeMemorySweep.TIMEOUT_MS,
         settleMs: chromeMemorySweep.SETTLE_MS

@@ -42,7 +42,8 @@ check("src_allowlist_standby_sweep", /standby_sweep:\s*path\.join\(base,\s*'logs
 check("src_allowlist_standby_last", dashSrc.includes("standby_sweep_last"));
 check("src_lifecycle_dual_write", sweepSrc.includes('append("standby_sweep"') || sweepSrc.includes("life.append(\"standby_sweep\""));
 check("src_coordinator_lifecycle", masterSrc.includes("standby_sweep_on"));
-check("src_master_diskclean_on", masterSrc.includes("coordinator on") && !masterSrc.includes("diskclean_disabled"));
+check("flag_prod_diskclean_off", sweep.PROD_DISKCLEAN_DISABLED === true && sweep.prodDiskCleanDisabled() === true);
+check("src_master_diskclean_off", masterSrc.includes("diskclean_disabled") && masterSrc.includes("prodDiskCleanDisabled()") && /disabled:\s*diskcleanOff/.test(masterSrc) && !masterSrc.includes("coordinator on"));
 check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
 check("src_clock_free_default", /const requireIdle = opts && opts.requireIdle === true/.test(sweepSrc) && !/requireIdle:\s*true/.test(masterSrc));
 check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));
@@ -164,6 +165,26 @@ check("src_hint_without_hold", !/function maybeStandbySweepIdleHint\(\) \{\s*if 
     check("log_clock_spawn", logs.some((l) => l.includes("[STANDBY-SWEEP] spawn exe=/StandbyList")), logs);
     check("log_no_esteira", !logs.some((l) => l.includes("[ESTEIRA-TRAVADA]")), logs);
     check("jsonl_has_sweep", jsonl.some((r) => r && r.event === "sweep"), jsonl.map((r) => r && r.event));
+  }
+
+  {
+    let sweeps = 0;
+    let now = 15_000;
+    const coord = sweep.attachHostCoordinator({
+      disabled: true,
+      now: () => now,
+      minIntervalMs: 1000,
+      sendToAll: async () => [{ ok: true, busy: false }],
+      shardCount: () => 1,
+      runSweep: async () => { sweeps += 1; return { ok: true, elapsedMs: 1 }; },
+      settle: async () => {},
+      log: () => {},
+      jsonl: () => {}
+    });
+    coord._test.lastOkAt = now - 2000;
+    const r = await coord.tryAttempt("due_while_off");
+    coord.stop();
+    check("disabled_never_sweeps", sweeps === 0 && !!(r && r.skipped), r);
   }
 
   {
