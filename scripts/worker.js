@@ -7376,7 +7376,8 @@ async function tryCureAccountBrowser(nome, { source = 'nurse' } = {}) {
       action: (result && result.action) || null,
       needReopen: !!(result && result.needReopen),
       skipped: !!(result && result.skipped),
-      healthReason: (result && result.health && result.health.reason) || null
+      healthReason: (result && result.health && result.health.reason) || null,
+      error: (result && result.error) ? String(result.error).slice(0, 180) : null
     });
   } catch {}
   if (result && result.ok) {
@@ -7399,9 +7400,12 @@ async function tryCureAccountBrowser(nome, { source = 'nurse' } = {}) {
   return result || { ok: false, needReopen: true };
 }
 
-async function annihilateChromeSick(nome, source = 'chrome_sick') {
+async function annihilateChromeSick(nome, source = 'chrome_sick', extra) {
   const n = String(nome || '');
   if (!n) return { ok: false, reason: 'no_nome' };
+  const detail = extra && typeof extra === 'object' ? extra : {};
+  const errTxt = detail.error != null ? String(detail.error).slice(0, 180) : '';
+  const viaTxt = detail.via != null ? String(detail.via).slice(0, 40) : '';
   robeMeta[n] = robeMeta[n] || {};
   const now = Date.now();
   const last = Number(robeMeta[n].lastChromeSickReopenAt || 0) || 0;
@@ -7412,6 +7416,8 @@ async function annihilateChromeSick(nome, source = 'chrome_sick') {
         event: 'chrome_sick_reopen_backoff',
         nome: n,
         source: String(source || ''),
+        via: viaTxt || null,
+        error: errTxt || null,
         ageMs: now - last,
         minMs: CHROME_SICK_REOPEN_MIN_MS
       });
@@ -7431,7 +7437,9 @@ async function annihilateChromeSick(nome, source = 'chrome_sick') {
       ts: now,
       event: 'chrome_sick_annihilate',
       nome: n,
-      source: String(source || '')
+      source: String(source || ''),
+      via: viaTxt || null,
+      error: errTxt || null
     });
   } catch {}
   try { await issues.append(n, 'mil_action', `chrome_sick_annihilate source=${String(source || '').slice(0, 60)}`); } catch {}
@@ -9571,6 +9579,15 @@ async function closeExtraPages(browser, mainPage, nome) {
     if (closed > 0) {
       logger.info('[PRUNER] Fechou abas extras', { nome, closed });
       try { await issues.append(nome, 'mil_action', `pruner_closed_extras n=${closed}`); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'tab_prune',
+          nome: String(nome || ''),
+          closed,
+          inRobe: !!inRobe
+        });
+      } catch {}
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {
@@ -10361,6 +10378,47 @@ async function faxinaAposCicloPesado(nome, page, reason) {
       reason: String(reason || 'cycle')
     });
     if (r && r.ok) chromeHeapFaxina.logFaxinaOk(String(nome || ''));
+    if (r && r.skipped) return r;
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'faxina_cdp',
+        nome: String(nome || ''),
+        reason: String(reason || 'cycle').slice(0, 48),
+        ok: !!(r && r.ok),
+        via: r && r.via ? String(r.via).slice(0, 40) : null,
+        error: r && r.error ? String(r.error).slice(0, 180) : null
+      });
+    } catch {}
+    return r;
+  } catch (e) {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'faxina_cdp',
+        nome: String(nome || ''),
+        reason: String(reason || 'cycle').slice(0, 48),
+        ok: false,
+        error: String((e && e.message) || e || 'faxina_throw').slice(0, 180)
+      });
+    } catch {}
+    return { ok: false, error: String((e && e.message) || e || 'faxina_throw') };
+  }
+}
+
+function auditWsShrink(nome, phase, out) {
+  try {
+    if (!out || out.skipped === true) return;
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'ws_shrink',
+      nome: String(nome || ''),
+      phase: String(phase || '').slice(0, 16),
+      ok: out.ok === true,
+      reason: String(out.reason || '').slice(0, 80),
+      pid: Number(out.pid || 0) || null,
+      error: out.error ? String(out.error).slice(0, 180) : null
+    });
   } catch {}
 }
 
@@ -10399,6 +10457,7 @@ async function shrinkRootPidAfterMessagesBoot(nome, browser, payload) {
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].wsShrinkBootPid = out.pid;
     }
+    auditWsShrink(nome, 'boot', out);
     return out;
   } catch {
     return { ok: false, skipped: true, reason: 'boot_shrink_throw' };
@@ -10407,12 +10466,14 @@ async function shrinkRootPidAfterMessagesBoot(nome, browser, payload) {
 
 async function shrinkRootPidAfterRobe(nome, ctrl) {
   try {
-    return await chromeWorkingSetShrink.shrinkRobeGate({
+    const out = await chromeWorkingSetShrink.shrinkRobeGate({
       nome: String(nome || ''),
       page: ctrl && ctrl.mainPage,
       browser: ctrl && ctrl.browser,
       rootPid: (robeMeta[nome] && robeMeta[nome].rootPid) || null
     });
+    auditWsShrink(nome, 'robe', out);
+    return out;
   } catch {
     return { ok: false, skipped: true, reason: 'robe_shrink_throw' };
   }
@@ -10506,7 +10567,7 @@ function attachPageCrashIsolate(nome, page) {
             return;
           }
           if (action === 'annihilate') {
-            await annihilateChromeSick(nome, 'page_crash_isolate');
+            await annihilateChromeSick(nome, 'page_crash_isolate', { error: msg });
           }
         } catch {}
       });
@@ -10567,7 +10628,10 @@ async function robeQueuedCycle(nome, source = 'auto') {
             const cure = await tryCureAccountBrowser(nome, { source: 'robe_pre_start' });
             if (!(cure && cure.ok)) {
               if (cure && (cure.needReopen || (pre && pre.needReopen))) {
-                const ann = await annihilateChromeSick(nome, 'robe_pre_start');
+                const ann = await annihilateChromeSick(nome, 'robe_pre_start', {
+                  via: (cure && cure.action) || null,
+                  error: (cure && cure.error) || (pre && pre.reason) || null
+                });
                 chromeAnnihilated = !(ann && ann.skipped);
               }
               if (chromeAnnihilated) {
@@ -10675,7 +10739,12 @@ async function robeQueuedCycle(nome, source = 'auto') {
             return;
           }
           if (e && e.CHROME_SICK === true) {
-            try { await annihilateChromeSick(nome, 'robe_open_create_throw'); } catch {}
+            try {
+              await annihilateChromeSick(nome, 'robe_open_create_throw', {
+                via: src,
+                error: (e && e.message) || e
+              });
+            } catch {}
             virtusWasRunning = false;
             deltaSequentialResumeRequired = false;
             try {
@@ -10705,7 +10774,12 @@ async function robeQueuedCycle(nome, source = 'auto') {
         }
 
         if (res && res.chromeSick === true) {
-          try { await annihilateChromeSick(nome, 'robe_open_create'); } catch {}
+          try {
+            await annihilateChromeSick(nome, 'robe_open_create', {
+              via: src,
+              error: (res && res.error) || null
+            });
+          } catch {}
           virtusWasRunning = false;
           deltaSequentialResumeRequired = false;
           try {
@@ -19525,7 +19599,7 @@ async function nurseTick() {
         if (!robeMeta[nome].lastNoPagesAt) robeMeta[nome].lastNoPagesAt = Date.now();
         try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
         await appendIssueNurseDebounced(nome, 'suspect_chrome_cdp_timeout', 'pages() timed out', 'suspect_chrome_cdp_timeout');
-        await annihilateChromeSick(nome, 'nurse.pages_timeout');
+        await annihilateChromeSick(nome, 'nurse.pages_timeout', { error: 'pages() timed out' });
         continue;
       }
 
@@ -19535,7 +19609,7 @@ async function nurseTick() {
           await new Promise(r=>setTimeout(r,400));
           const retryListed = await listPagesBounded(ctrl.browser, 4000);
           if (retryListed.timedOut) {
-            await annihilateChromeSick(nome, 'nurse.pages_timeout_retry');
+            await annihilateChromeSick(nome, 'nurse.pages_timeout_retry', { error: 'pages() timed out on retry' });
             continue;
           }
           pages = retryListed.pages || [];
@@ -19603,7 +19677,10 @@ async function nurseTick() {
             const age = robeMeta[nome].lastNoPagesAt ? (now - robeMeta[nome].lastNoPagesAt) : 0;
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
             if (age >= DELTA_NO_PAGES_HARD_MS || (cure && cure.needReopen)) {
-              await annihilateChromeSick(nome, 'nurse.unusable');
+              await annihilateChromeSick(nome, 'nurse.unusable', {
+                via: (cure && cure.action) || null,
+                error: (cure && cure.error) || 'no_usable_page'
+              });
               continue;
             }
             if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
@@ -20396,12 +20473,17 @@ async function nurseTick() {
             const ageZ = robeMeta[nome].lastNoPagesAt ? (Date.now() - robeMeta[nome].lastNoPagesAt) : 0;
             if (cureZ && cureZ.needReopen) {
               try { registerFailure(nome, 'zombie', 'external'); } catch {}
-              await annihilateChromeSick(nome, 'nurse.page_zombie_cdp');
+              await annihilateChromeSick(nome, 'nurse.page_zombie_cdp', {
+                via: (cureZ && cureZ.action) || null,
+                error: (cureZ && cureZ.error) || null
+              });
               continue;
             }
             if (ageZ >= DELTA_NO_PAGES_HARD_MS) {
               try { registerFailure(nome, 'zombie', 'external'); } catch {}
-              await annihilateChromeSick(nome, 'nurse.page_zombie');
+              await annihilateChromeSick(nome, 'nurse.page_zombie', {
+                error: 'no_usable_page_hard'
+              });
               continue;
             }
             if (shouldBypassNurseZombie(nome, 'nurse.page_zombie')) {
