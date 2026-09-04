@@ -47,6 +47,21 @@ check("kit_fires_boot", /Invoke-WinTuningSilent/.test(kit) && /-Boot/.test(kit))
 const install = fs.readFileSync(path.join(root, "porteiro", "kit", "install.ps1"), "utf8");
 check("install_apply_not_watch", /winTuningMaster\.ps1/.test(install) && /-Apply/.test(install) && !/-Boot/.test(install) && !/-Watch/.test(install));
 
+check("tune_adendo_visualfx", /VisualFXSetting/.test(tune) && /VisualEffects/.test(tune) && /Want 2/.test(tune));
+check("tune_adendo_minanimate", /MinAnimate/.test(tune) && /WindowMetrics/.test(tune) && /Want '0'/.test(tune) && /Type String/.test(tune));
+check("tune_adendo_win32pri", /Win32PrioritySeparation/.test(tune) && /Want 24/.test(tune) && /0x18/.test(tune) && /NeedAdmin/.test(tune));
+check("tune_adendo_stamp", /\[TUNING_ADENDO_OK\] Efeitos visuais mitigados e Prioridade de Background injetada via Registro com sucesso\./.test(tune));
+check("tune_adendo_trycatch", /Invoke-Step 'reg_visualfx'/.test(tune) && /Invoke-Step 'reg_minanimate'/.test(tune) && /Invoke-Step 'reg_win32priority'/.test(tune));
+check("tune_forensic_jsonl", /windows_tuning\.forensic\.jsonl/.test(tune) && /function Write-Forensic/.test(tune) && /event = 'begin'/.test(tune) && /event = 'adendo'/.test(tune));
+check("tune_forensic_before_after", /before=/.test(tune) && /Write-Forensic/.test(tune) && /priority_backup/.test(tune));
+check("tune_no_explorer_kill", !/Stop-Process.*explorer/i.test(tune) && !/taskkill.*explorer/i.test(tune));
+
+const dash = fs.readFileSync(path.join(root, "scripts", "dashboard.js"), "utf8");
+check("dash_tune_allowlist", /windows_tuning:/.test(dash) && /windows_tuning_forensic:/.test(dash) && /windows_tuning_state:/.test(dash));
+
+const olhos = fs.readFileSync(path.join(root, "scripts", "diag_olhos_deus.js"), "utf8");
+check("olhos_tune_section", /windows_tuning\.forensic\.jsonl/.test(olhos) && /windowsTuning/.test(olhos));
+
 if (failed) {
   console.log("FAILED " + failed);
   process.exit(1);

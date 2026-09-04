@@ -27,6 +27,9 @@ const NURSE_KICK = path.join(DADOS, 'desired.nurse.kick');
 const QUEUE = path.join(DADOS, 'mensagens_pendentes.jsonl');
 const CURSOR = path.join(DADOS, 'mensagens_pendentes.cursor.json');
 const HOSTID_PATH = path.join(DADOS, '.telemetry_hostid');
+const TUNE_STATE = path.join(DADOS, 'logs', 'windows_tuning.state.json');
+const TUNE_LOG = path.join(DADOS, 'logs', 'windows_tuning.log');
+const TUNE_FORE = path.join(DADOS, 'logs', 'windows_tuning.forensic.jsonl');
 
 const WATCH_EVENTS = [
   'nurse_wake_tick', 'nurse_open_attempt', 'nurse_open_denied',
@@ -240,6 +243,31 @@ function buildOlhosDeusReport(opts = {}) {
   if (countsWatch.wire_health_listeners_skip_delta) push('OK', 'wire health skip Delta');
   if (countsWatch.dom_health_idle_skip) push('OK', 'dom idle skip');
 
+  const tuneState = readJsonSafe(TUNE_STATE, null);
+  const tuneFore = tailJsonl(TUNE_FORE, 120);
+  const tuneSteps = (tuneState && Array.isArray(tuneState.steps)) ? tuneState.steps : [];
+  const lastAdendo = (() => {
+    for (let i = tuneFore.length - 1; i >= 0; i--) {
+      if (tuneFore[i] && tuneFore[i].event === 'adendo') return tuneFore[i];
+    }
+    return null;
+  })();
+  const lastForeSteps = tuneFore.filter((e) => e && e.event === 'step').slice(-24);
+  if (!tuneState) {
+    push('WARN', 'windows_tuning.state.json ausente (tuning ainda nao rodou neste host)');
+  } else {
+    const st = String(tuneState.stamp || '');
+    const ad = String(tuneState.adendoStamp || '');
+    if (st.includes('TUNING_OK')) push('OK', `windows tuning ${st}`);
+    else if (st.includes('PARTIAL')) push('WARN', `windows tuning ${st}`);
+    if (ad.includes('TUNING_ADENDO_OK')) push('OK', ad);
+    else if (ad.includes('PARTIAL') || ad.includes('DRYRUN') || ad.includes('FAIL')) push('WARN', ad || 'adendo sem stamp');
+    const failedSteps = tuneSteps.filter((s) => s && s.ok !== true && s.skipped !== true);
+    if (failedSteps.length) {
+      push('WARN', 'windows tuning passos recusados: ' + failedSteps.map((s) => s.name + '=' + (s.detail || s.error || '')).join('; '));
+    }
+  }
+
   const failN = verdicts.filter((v) => v.level === 'FAIL').length;
   const warnN = verdicts.filter((v) => v.level === 'WARN').length;
   const summary = failN ? 'FAIL' : (warnN ? 'WARN' : 'OK');
@@ -290,6 +318,21 @@ function buildOlhosDeusReport(opts = {}) {
       mode: govLast.mode
     } : null,
     statusExists: fs.existsSync(STATUS),
+    windowsTuning: {
+      state: fileInfo(TUNE_STATE),
+      log: fileInfo(TUNE_LOG),
+      forensic: fileInfo(TUNE_FORE),
+      stamp: tuneState && tuneState.stamp || null,
+      adendoStamp: tuneState && tuneState.adendoStamp || null,
+      admin: tuneState && tuneState.admin,
+      dryRun: tuneState && tuneState.dryRun,
+      host: tuneState && tuneState.host || null,
+      runId: tuneState && tuneState.runId || null,
+      os: tuneState && tuneState.os || null,
+      steps: tuneSteps,
+      lastAdendo,
+      lastForensicSteps: lastForeSteps
+    },
     verdicts
   };
 
@@ -335,6 +378,13 @@ function renderText(report) {
   lines.push(`## DESIRED engine=${report.desired.engine} active=${report.desired.activeCount}`);
   lines.push(`## AUDIT counts ${JSON.stringify(report.audit.countsWatch)}`);
   lines.push(`## GOVERNOR ${JSON.stringify(report.governorLast)}`);
+  if (report.windowsTuning) {
+    lines.push(`## WINDOWS_TUNING stamp=${report.windowsTuning.stamp || '-'} adendo=${report.windowsTuning.adendoStamp || '-'}`);
+    const wtSteps = report.windowsTuning.steps || [];
+    for (const s of wtSteps) {
+      lines.push(`  ${s.name} ok=${s.ok} skip=${s.skipped} before=${s.before} after=${s.after} want=${s.want} ${s.detail || ''}`);
+    }
+  }
   return lines.join('\n');
 }
 
