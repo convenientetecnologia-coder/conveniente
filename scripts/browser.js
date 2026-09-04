@@ -5854,7 +5854,28 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
             return;
           }
 
-          // Fora de Robe e sem suppress => mata imediatamente
+          // Fora de Robe/suppress: blank nascendo espera; zumbi (idade >= settle) fecha.
+          let settleMs = ABOUTBLANK_MAX_AGE_MS;
+          try {
+            const hy = require('./robeTabHygiene.js');
+            if (hy && Number(hy.PAGE_SETTLE_MS) > 0) settleMs = Number(hy.PAGE_SETTLE_MS);
+          } catch {}
+          if (!birth) {
+            try {
+              browser._pageBirth[key] = now;
+              page.__convenienteBirth = now;
+            } catch {}
+            rearmed = true;
+            const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
+            timers.set(key, t2);
+            return;
+          }
+          if (age < settleMs) {
+            rearmed = true;
+            const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
+            timers.set(key, t2);
+            return;
+          }
           try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
         } finally {

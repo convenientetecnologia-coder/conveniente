@@ -8,6 +8,9 @@
  *   gate esta colando (senao o pruner mata o create antes do goto).
  * - Restore de sessao do Chrome nao e aba de trabalho.
  * - Teto por contagem. Nao filtra tipo de erro. pages() timeout cai nos targets CDP.
+ * - Blank nascendo != lixo. Morta de verdade = chrome-error / Aw Snap / crash.
+ * - Cura nao navega em aba que ainda esta nascendo, nem no meio do Robe.
+ * - "Navigating frame was detached" nao e Chrome doente: espera, nao reabre.
  */
 
 const provisionAudit = (() => {
@@ -67,6 +70,65 @@ function isLiveWorkUrl(url) {
   if (isJunkUrl(u)) return false;
   const host = facebookNavHosts.hostnameOf(u);
   return facebookNavHosts.isOfficialFacebookNavHost(host) || facebookNavHosts.isOfficialMessengerNavHost(host);
+}
+
+const PAGE_SETTLE_MS = Math.max(
+  15_000,
+  Math.min(90_000, Number(process.env.PAGE_SETTLE_MS || 45_000) || 45_000)
+);
+
+function isRobeHold(browser, nome) {
+  try {
+    return !!(browser && nome && browser._robeActiveFor === String(nome));
+  } catch {
+    return false;
+  }
+}
+
+function isGateBusy(browser) {
+  try {
+    return Number(browser && browser._convenienteGateInFlight || 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isBlankSuppressed(browser, nome) {
+  try {
+    const until = browser && browser._suppressBlankKillUntil && nome
+      ? Number(browser._suppressBlankKillUntil[nome] || 0)
+      : 0;
+    return until > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function isNavDetachedError(msg) {
+  return /Navigating frame was detached|frame was detached|Execution context was destroyed/i.test(String(msg || ""));
+}
+
+function isNewbornBlank(page, { browser = null, nome = "" } = {}) {
+  const u = pageUrlOf(page);
+  if (isDeadTabUrl(u)) return false;
+  if (!isBlankUrl(u)) return false;
+  try {
+    if (page && page._convenienteBlinding === true) return true;
+  } catch {}
+  if (isGateBusy(browser)) return true;
+  if (isRobeHold(browser, nome)) return true;
+  if (isBlankSuppressed(browser, nome)) return true;
+  return pageAgeMs(browser, page) < PAGE_SETTLE_MS;
+}
+
+function classifyTabKind(page, ctx) {
+  const u = pageUrlOf(page);
+  if (isDeadTabUrl(u)) return "dead";
+  if (isCreateMarketplaceUrl(u) || isLiveWorkUrl(u)) return "live";
+  if (u && !isJunkUrl(u)) return "live";
+  if (isBlankUrl(u) && isNewbornBlank(page, ctx || {})) return "newborn";
+  if (isBlankUrl(u)) return "zombie_blank";
+  return "other";
 }
 
 function pageUrlOf(page) {
@@ -551,13 +613,15 @@ function isChromeProtocolSickError(msg) {
   return /Network\.enable timed out|Network\.enable|Protocol error \(Runtime|Protocol error \(Network|Page crashed|Runtime\.callFunctionOn timed out|cdp_timeout|pages_timeout|cure_goto_timeout|cure_newpage_timeout|cure_newpage_goto_timeout/i.test(s);
 }
 
-function pagesLookAllJunk(pages) {
+function pagesLookAllJunk(pages, ctx) {
   if (!Array.isArray(pages) || pages.length < 1) return true;
+  let sawNewborn = false;
   for (const p of pages) {
-    let u = "";
-    try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
-    if (u && !isJunkUrl(u)) return false;
+    const kind = classifyTabKind(p, ctx || {});
+    if (kind === "live" || kind === "other") return false;
+    if (kind === "newborn") sawNewborn = true;
   }
+  if (sawNewborn) return false;
   return true;
 }
 
@@ -717,7 +781,7 @@ async function safeClosePage(page, { nome = "", reason = "" } = {}) {
  * Fecha about:blank / chrome-error / Aw Snap, preservando keepPage (Virtus/messages).
  * Nunca toca create/item|vehicle real.
  */
-async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}) {
+async function sweepAboutBlankPages(browser, { keepPage = null, nome = "", deadOnly = false } = {}) {
   if (!browser) return { ok: false, closed: 0 };
   let closed = 0;
   let failed = 0;
@@ -735,11 +799,17 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "" } = {}
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
         if (isCreateMarketplaceUrl(u)) continue;
         if (p && p._convenienteBlinding === true) continue;
+        if (isNewbornBlank(p, { browser, nome })) continue;
         let junk = isJunkUrl(u);
         if (!junk) {
           try { junk = await pageLooksLikeChromeNetError(p); } catch { junk = false; }
         }
         if (!junk) continue;
+        if (deadOnly === true) {
+          let net = false;
+          try { net = await pageLooksLikeChromeNetError(p); } catch { net = false; }
+          if (!isDeadTabUrl(u) && !net) continue;
+        }
         const r = await safeClosePage(p, { nome, reason: "sweep_junk_tab" });
         if (r && r.closed) closed++;
         else failed++;
@@ -779,6 +849,9 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
       let u = "";
       try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
       if (!isJunkUrl(u)) continue;
+      if (isBlankUrl(u) && !isDeadTabUrl(u)) {
+        if (isGateBusy(browser) || isRobeHold(browser, nome) || isBlankSuppressed(browser, nome)) continue;
+      }
       let tid = "";
       try { tid = String(t._targetId || (t._targetInfo && t._targetInfo.targetId) || ""); } catch { tid = ""; }
       if (keepTargetId && tid && String(keepTargetId) === tid) continue;
@@ -791,6 +864,7 @@ async function closeJunkCdpTargets(browser, { nome = "", keepTargetId = null } =
       } catch {}
       if (page) {
         if (page._convenienteBlinding === true) continue;
+        if (isNewbornBlank(page, { browser, nome })) continue;
         const r = await safeClosePage(page, { nome, reason: "junk_cdp_target_page" });
         if (r && r.closed) { closed++; continue; }
       }
@@ -864,34 +938,54 @@ async function probeBrowserHealth(browser, { nome = "", timeoutMs = 4000 } = {})
     for (const t of pageTargets) {
       let u = "";
       try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
-      if (isJunkUrl(u)) junkTargets++;
+      if (isDeadTabUrl(u)) junkTargets++;
     }
   } catch {}
 
   let live = 0;
   let junk = 0;
+  let newborn = 0;
+  let dead = 0;
+  let zombie = 0;
+  const ctx = { browser, nome };
   for (const p of pages) {
-    let u = "";
-    try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
-    if (isJunkUrl(u)) junk++;
-    else if (isLiveWorkUrl(u) || (u && !isJunkUrl(u))) live++;
+    const kind = classifyTabKind(p, ctx);
+    if (kind === "live" || kind === "other") live++;
+    else if (kind === "newborn") { newborn++; junk++; }
+    else if (kind === "dead") { dead++; junk++; }
+    else if (kind === "zombie_blank") { zombie++; junk++; }
   }
 
   const splitBrain = targetsCount > (pages.length + 1);
-  const extraJunkTargets = junkTargets > junk;
+  const extraJunkTargets = junkTargets > dead;
+  const base = {
+    live,
+    junk,
+    newborn,
+    dead,
+    zombie,
+    junkTargets,
+    pages: pages.length,
+    targets: targetsCount,
+    nome: String(nome || "")
+  };
 
-  if (live >= 1 && junk === 0 && !extraJunkTargets && !splitBrain) {
+  if (live >= 1 && dead === 0 && zombie === 0) {
     return {
       ok: true,
-      reason: "healthy",
+      reason: newborn >= 1 ? "healthy_settling" : "healthy",
       needReopen: false,
       canCure: false,
-      live,
-      junk,
-      junkTargets,
-      pages: pages.length,
-      targets: targetsCount,
-      nome: String(nome || "")
+      ...base
+    };
+  }
+  if (live < 1 && newborn >= 1) {
+    return {
+      ok: false,
+      reason: "settling",
+      needReopen: false,
+      canCure: false,
+      ...base
     };
   }
   if (live >= 1) {
@@ -900,11 +994,7 @@ async function probeBrowserHealth(browser, { nome = "", timeoutMs = 4000 } = {})
       reason: extraJunkTargets || splitBrain ? "split_brain_junk" : "junk_tabs",
       needReopen: false,
       canCure: true,
-      live,
-      junk,
-      junkTargets,
-      pages: pages.length,
-      targets: targetsCount
+      ...base
     };
   }
   return {
@@ -912,18 +1002,43 @@ async function probeBrowserHealth(browser, { nome = "", timeoutMs = 4000 } = {})
     reason: pages.length ? "all_junk" : "no_pages",
     needReopen: false,
     canCure: true,
-    live,
-    junk,
-    junkTargets,
-    pages: pages.length,
-    targets: targetsCount
+    ...base
   };
 }
 
 async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) {
+  if (isGateBusy(browser)) {
+    return { ok: false, skipped: true, needReopen: false, action: "gate_busy" };
+  }
+
   const health0 = await probeBrowserHealth(browser, { nome });
   if (health0.ok) return { ok: true, action: "already_healthy", health: health0 };
   if (health0.needReopen) return { ok: false, needReopen: true, action: "cdp_dead", health: health0 };
+  if (health0.canCure === false) {
+    return {
+      ok: false,
+      skipped: true,
+      needReopen: false,
+      action: health0.reason === "settling" ? "settle_newborn" : "hold_no_cure",
+      health: health0
+    };
+  }
+
+  if (isRobeHold(browser, nome)) {
+    const sweep = await sweepAboutBlankPages(browser, { keepPage, nome, deadOnly: true });
+    if (sweep && sweep.timedOut) {
+      return { ok: false, needReopen: true, action: "sweep_pages_timeout", health: health0, sweep };
+    }
+    const afterHold = await probeBrowserHealth(browser, { nome });
+    return {
+      ok: !!(afterHold && afterHold.ok),
+      skipped: !(afterHold && afterHold.ok),
+      needReopen: false,
+      action: "robe_hold",
+      health: afterHold,
+      sweep
+    };
+  }
 
   let tunnelCool = false;
   try {
@@ -992,6 +1107,18 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
       }
     } catch (e) {
       const msg = String((e && e.message) || e || "");
+      if (isNavDetachedError(msg) && !isChromeProtocolSickError(msg)) {
+        return {
+          ok: false,
+          skipped: true,
+          needReopen: false,
+          action: "nav_detached_wait",
+          error: msg.slice(0, 220),
+          health: after,
+          sweep,
+          closedTargets
+        };
+      }
       if (isChromeProtocolSickError(msg) || /cure_goto_timeout/i.test(msg)) {
         return {
           ok: false,
@@ -1028,11 +1155,24 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
       return { ok: true, action: "newpage_messages", health: after, sweep, closedTargets };
     }
   } catch (e) {
+    const msg = String((e && e.message) || e || "");
+    if (isNavDetachedError(msg) && !isChromeProtocolSickError(msg)) {
+      return {
+        ok: false,
+        skipped: true,
+        needReopen: false,
+        action: "nav_detached_wait",
+        error: msg.slice(0, 220),
+        health: after,
+        sweep,
+        closedTargets
+      };
+    }
     return {
       ok: false,
       needReopen: true,
       action: "newpage_failed",
-      error: String((e && e.message) || e || "").slice(0, 220),
+      error: msg.slice(0, 220),
       health: after,
       sweep,
       closedTargets
@@ -1043,6 +1183,7 @@ async function cureBrowserInPlace(browser, { nome = "", keepPage = null } = {}) 
 }
 
 module.exports = {
+  PAGE_SETTLE_MS,
   isBlankUrl,
   isDeadTabUrl,
   isJunkUrl,
@@ -1050,6 +1191,9 @@ module.exports = {
   isLiveWorkUrl,
   isChromeErrorUiText,
   isChromeProtocolSickError,
+  isNavDetachedError,
+  isNewbornBlank,
+  classifyTabKind,
   pagesLookAllJunk,
   listPagesBounded,
   ensurePageBirth,

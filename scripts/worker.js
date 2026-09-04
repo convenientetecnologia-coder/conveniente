@@ -7366,6 +7366,9 @@ async function tryCureAccountBrowser(nome, { source = 'nurse' } = {}) {
       error: String((e && e.message) || e || '').slice(0, 220)
     };
   }
+  if (result && result.skipped) {
+    robeMeta[n].lastChromeCureAt = last;
+  }
   try {
     provisionAudit.append({
       ts: Date.now(),
@@ -19603,7 +19606,9 @@ async function nurseTick() {
         continue;
       }
 
-      if (!pages[0] || pagesLookAllJunk(pages)) {
+      if (opening[nome]) continue;
+      const tabCtx = { browser: ctrl.browser, nome };
+      if (!pages[0] || pagesLookAllJunk(pages, tabCtx)) {
         let retryFailed = true;
         if (!pages[0] && ctrl.browser.isConnected?.()) {
           await new Promise(r=>setTimeout(r,400));
@@ -19613,13 +19618,13 @@ async function nurseTick() {
             continue;
           }
           pages = retryListed.pages || [];
-          retryFailed = !pages[0] || pagesLookAllJunk(pages);
-        } else if (pages[0] && pagesLookAllJunk(pages)) {
+          retryFailed = !pages[0] || pagesLookAllJunk(pages, tabCtx);
+        } else if (pages[0] && pagesLookAllJunk(pages, tabCtx)) {
           retryFailed = true;
         } else if (!ctrl.browser.isConnected?.()) {
           retryFailed = true;
         } else {
-          retryFailed = !pages[0] || pagesLookAllJunk(pages);
+          retryFailed = !pages[0] || pagesLookAllJunk(pages, tabCtx);
         }
         if (retryFailed) {
           // Mesmo sem páginas, registre um snapshot leve quando a flag LR já está setada.
@@ -19660,6 +19665,11 @@ async function nurseTick() {
 
           const cure = await tryCureAccountBrowser(nome, { source: 'nurse.unusable' });
           if (cure && cure.ok) {
+            continue;
+          }
+          if (cure && cure.skipped && /settle_newborn|gate_busy|robe_hold|nav_detached_wait|hold_no_cure/.test(String(cure.action || ''))) {
+            robeMeta[nome].noPagesStrikes = 0;
+            robeMeta[nome].lastNoPagesAt = 0;
             continue;
           }
 
@@ -29026,8 +29036,14 @@ async function periodicAboutBlankCleanup() {
 
         const pagesListed = await listPagesBounded(ctrl.browser, 4000);
         const pages = pagesListed.pages || [];
-        if (!pagesListed.timedOut && Array.isArray(pages) && pages.length > 0 && pagesLookAllJunk(pages)) {
-          await tryCureAccountBrowser(nome, { source: 'periodic_junk_only' });
+        if (opening[nome]) continue;
+        const inRobe = !!(ctrl.browser._robeActiveFor === nome || (robeMeta[nome] && robeMeta[nome].emExecucao === true));
+        const gateBusy = Number(ctrl.browser._convenienteGateInFlight || 0) > 0;
+        const tabCtx = { browser: ctrl.browser, nome };
+        if (!pagesListed.timedOut && Array.isArray(pages) && pages.length > 0 && pagesLookAllJunk(pages, tabCtx)) {
+          if (!inRobe && !gateBusy) {
+            await tryCureAccountBrowser(nome, { source: 'periodic_junk_only' });
+          }
         }
         try {
           const cap = await closeRedundantVirtusTabs(ctrl.browser, {
