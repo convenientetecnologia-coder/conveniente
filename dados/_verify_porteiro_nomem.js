@@ -83,6 +83,8 @@ check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt
 check("ensure_installer_no_self_elevate", /NoSelfElevate/.test(ensureTxt));
 check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UAC/.test(instPTxt));
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
+check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("winTuningMaster.ps1") < iniciarTxt.indexOf("Write-StartLog 'click'"));
+check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /\$Host\.UI\.RawUI\.WindowTitle/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
 const lifeTxt = fs.readFileSync(path.join(root, "scripts", "indexLifecycle.js"), "utf8");
 check("life_sighup_listeners", /SIGBREAK/.test(lifeTxt) && /SIGHUP/.test(lifeTxt) && /handleConsoleSessionSignal/.test(lifeTxt));
@@ -114,6 +116,8 @@ check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTx
 check("kit_do_stop_powershell_host", /function Stop-ConvenienteConsoleHosts/.test(kitTxt) && /powershell\.exe/.test(kitTxt) && /Stop-ConvenienteConsoleHosts/.test(doStopBody) && /index\.js/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_stop_cmd_leftover", /cmd\.exe/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
+check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /Invoke-WinTuningSilent/.test(doStartBody) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
+check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_ensure_function_gone", !/function Invoke-PorteiroEnsure/.test(kitTxt));
 check("kit_ensure_not_in_auto", !/Invoke-PorteiroEnsure/.test((kitTxt.split("function Do-Loop")[1] || "").split("function ")[0]));
 

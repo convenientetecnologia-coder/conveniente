@@ -78,6 +78,15 @@ foreach ($g in @('808ffb3b-6e1f-4fb0-910c-53827e1f97ca','8c5e7fda-e8bf-4a96-9a85
     & powercfg /setactive $g 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { Write-Host "  power OK"; break }
 }
+$tune = 'C:\conveniente\scripts\winTuningMaster.ps1'
+if (Test-Path -LiteralPath $tune) {
+    try {
+        & $PsExe -NoProfile -ExecutionPolicy Bypass -File $tune -Apply
+        Write-Host '  tuning Apply OK'
+    } catch {
+        Write-Host '  tuning Apply skip'
+    }
+}
 
 Write-Host '[4] Tarefas (logon + netboot no startup)...'
 Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue | Out-Null

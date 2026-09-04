@@ -481,7 +481,7 @@ function Get-ConvenientePsHost {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
@@ -530,8 +530,20 @@ function Do-Stop {
     Write-Log "MANUAL stop killed=$killed"
 }
 
+function Invoke-WinTuningSilent {
+    $tune = Join-Path $Conveniente 'scripts\winTuningMaster.ps1'
+    if (-not (Test-Path -LiteralPath $tune)) { return }
+    try {
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Start-Process -FilePath $psExe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $tune, '-Boot'
+        ) | Out-Null
+    } catch {}
+}
+
 function Do-Start {
     param([string]$Reason = 'MANUAL') # MANUAL | AUTO | AUTO_BOOT
+    Invoke-WinTuningSilent
     if (-not (Test-Path $IndexJs)) { Write-Host 'ERRO: C:\conveniente\index.js ausente'; return }
     Set-PausedFlag $false
     Set-MaxPerf
@@ -691,6 +703,7 @@ function Do-Loop {
     Stop-RivalVigia
 
     Set-MaxPerf
+    Invoke-WinTuningSilent
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
     else { Write-Log (("BOOT $Version reboot={0:D2}:{1:D2}" -f $RebootHour, $RebootMinute)) }
     try { [void](Ensure-DiskCleanTask) } catch {}

@@ -6,6 +6,16 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
+# Tuning do host: dispara e segue. Sem Wait. Sem RunAs. Nao atrasa o Node.
+try {
+    $tune = 'C:\conveniente\scripts\winTuningMaster.ps1'
+    if (Test-Path -LiteralPath $tune) {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $tune, '-Boot'
+        ) | Out-Null
+    }
+} catch {}
+
 try {
     Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -ErrorAction SilentlyContinue
     $hwnd = [Native.Win]::GetConsoleWindow()
@@ -169,7 +179,7 @@ function Ensure-LogonTaskSilent {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
