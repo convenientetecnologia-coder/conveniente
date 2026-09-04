@@ -6155,7 +6155,13 @@ const SHARD_PROFILES = (() => { try { return JSON.parse(process.env.SHARD_PROFIL
 let SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []);
 const STATUS_FILE_NAME = process.env.STATUS_FILE_NAME || 'status.json';
 
-function inShard(nome) { return SHARD_SET.size === 0 ? true : SHARD_SET.has(nome); }
+function inShard(nome) {
+  if (SHARD_SET.size > 0) return SHARD_SET.has(nome);
+  // Sem lista: processo único (sem índice de shard) aceita todos.
+  // Worker de cluster com shard vazio não é dono de conta nenhuma.
+  const shardIdx = process.env.WORKER_SHARD_INDEX;
+  return shardIdx == null || shardIdx === '';
+}
 
 async function isLimitPostingActive(nome) {
   try {
@@ -6593,7 +6599,8 @@ const AUTO_CFG = {
 const ramPolicy = require('./ramPolicy.js');
 
 // RAM mínima dinâmica (ultra enterprise):
-// - Operação normal: hostBaseMb + (reservePer8GbMb × nós), nós = ceil(totalGB/16) — ver ramPolicy.js + server_runtime_config.memory
+// - Operação normal: hostBaseMb + (reservePer8GbMb × nós),
+//   nós = ceil(totalGB/workerRamDivisorGb) — ver ramPolicy.js + server_runtime_config.memory
 // - Durante provision (somente dono do lock): hostBaseMb + provisionSpikeMb
 function getOpenMinFreeMB(operator = '') {
   const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
@@ -6776,6 +6783,7 @@ function isPidAlive(pid) {
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
   const t0 = Date.now();
   const flowId = newFlowId('hard_close');
+  try { if (ctrl) ctrl.deltaCdpClosing = true; } catch {}
   try {
     provisionAudit.append({
       ts: Date.now(),
@@ -6787,6 +6795,10 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
       allowKillUserDataDir: !!allowKillUserDataDir
     });
   } catch {}
+  // O ouvido CDP pertence ao ciclo de vida do controller. Desliga listeners e
+  // destaca a sessão antes de fechar/matar o browser; a função zera as
+  // referências somente depois da tentativa de detach.
+  try { await __deltaDetachCdpSession(nome, { expectedCtrl: ctrl }); } catch {}
   let rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
   try {
     if (!rootPid && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
@@ -7611,7 +7623,7 @@ async function activateOnce(nome, source = '', operator = '') {
     } catch {}
   }
   try {
-    if (SHARD_SET.size && !inShard(nome)) {
+    if (!inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
       logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=false size=${SHARD_SET.size}`);
       return { ok: false, error: 'wrong_shard' };
@@ -8007,7 +8019,7 @@ function sendReply(msgId, data) {
 function loadPerfisJson() {
   try {
     const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
-    if (!SHARD_SET.size) return arr;
+    if (!Array.isArray(arr)) return [];
     return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
@@ -11106,6 +11118,7 @@ if (ctrl && ctrl.browser === browser) {
   } catch {}
 }
 if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
+try { if (ctrl) ctrl.deltaCdpClosing = true; } catch {}
 try {
   provisionAudit.append({
     ts: Date.now(),
@@ -11126,6 +11139,13 @@ try {
 
 try { freezeCooldownIfNotWorking(nome); } catch {}
 
+// Reconnect falhou: expurga o ouvido antes de remover o controller.
+try { await __deltaDetachCdpSession(nome, { expectedCtrl: ctrl }); } catch {}
+if (controllers.get(nome) !== ctrl) {
+  // Outro fluxo já instalou um controller novo enquanto o callback antigo
+  // aguardava reconnect/cleanup. O callback velho não pode removê-lo.
+  return;
+}
 controllers.delete(nome);
 
 // LIMPA rootPid para evitar consultas em PIDs órfãos (WMI-free+ps-tree)
@@ -15543,7 +15563,7 @@ const handlers = {
     const workingNames = [];
     try {
       for (const nome of controllers.keys()) {
-        if (SHARD_SET.size && !inShard(nome)) continue;
+        if (!inShard(nome)) continue;
         if (limitBlockedNames.has(nome)) continue;
         workingNames.push(String(nome));
       }
@@ -16308,6 +16328,20 @@ const handlers = {
     } catch (e) {
       return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
     }
+  },
+
+  async ['shard-busy-count']() {
+    let connected = 0;
+    try {
+      for (const [, ctrl] of controllers) {
+        try {
+          if (ctrl && ctrl.browser && (typeof ctrl.browser.isConnected === 'function' ? ctrl.browser.isConnected() : true)) {
+            connected += 1;
+          }
+        } catch {}
+      }
+    } catch {}
+    return { ok: true, connected };
   },
 
   async ['set-shard']({ names }) {
@@ -17283,6 +17317,9 @@ function installAccountTabGuards(nome, browser) {
 async function tryReconnectAfterDisconnected(nome, prevCtrl) {
   const startedAt = Date.now();
   const flowId = newFlowId('reconnect');
+  if (_shuttingDown || (prevCtrl && prevCtrl.deltaCdpClosing)) {
+    return { ok: false, reason: 'controller_closing', flowId };
+  }
   if (!CDP_RECONNECT_CFG.enabled) return { ok: false, reason: 'disabled', flowId };
   const wsEndpoint = (
     (robeMeta[nome] && typeof robeMeta[nome].wsEndpoint === 'string' && robeMeta[nome].wsEndpoint) ||
@@ -17296,6 +17333,9 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
   }
 
   for (let attempt = 1; attempt <= CDP_RECONNECT_CFG.attempts; attempt++) {
+    if (_shuttingDown || (prevCtrl && prevCtrl.deltaCdpClosing)) {
+      return { ok: false, reason: 'controller_closing', flowId, attempt };
+    }
     const delayMs = CDP_RECONNECT_CFG.delaysMs[Math.min(CDP_RECONNECT_CFG.delaysMs.length - 1, Math.max(0, attempt - 1))];
     try {
       provisionAudit.append({
@@ -17322,6 +17362,28 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
           await browserHelper.bindAccountIdentity(b, nome, { source: 'cdp_reconnect' });
           const pages = await b.pages().catch(() => []);
           const current = controllers.get(nome);
+          if (!current || current !== prevCtrl || current.deltaCdpClosing || _shuttingDown) {
+            try { if (b && typeof b.disconnect === 'function') await b.disconnect(); } catch {}
+            return {
+              ok: false,
+              reason: current !== prevCtrl ? 'controller_replaced' : 'controller_closing',
+              flowId,
+              attempt
+            };
+          }
+          // O novo Browser/controller só assume depois que o ouvido da conexão
+          // anterior foi desregistrado. A checagem seguinte impede overwrite
+          // caso outro fluxo substitua o controller durante o await.
+          try { await __deltaDetachCdpSession(nome, { expectedCtrl: current }); } catch {}
+          if (controllers.get(nome) !== current || current.deltaCdpClosing || _shuttingDown) {
+            try { if (b && typeof b.disconnect === 'function') await b.disconnect(); } catch {}
+            return {
+              ok: false,
+              reason: controllers.get(nome) !== current ? 'controller_replaced_during_detach' : 'controller_closing',
+              flowId,
+              attempt
+            };
+          }
           const nextCtrl = Object.assign({}, (current || prevCtrl || {}), { browser: b });
           controllers.set(nome, nextCtrl);
           try { attachBrowserLifecycle(nome, b); } catch {}
@@ -18749,7 +18811,7 @@ async function nurseTick() {
           for (const n0 of q) {
             const n = String(n0 || '');
             if (!n) continue;
-            if (SHARD_SET.size && !inShard(n)) continue;
+            if (!inShard(n)) continue;
             const want = desired.perfis[n] || {};
             if (want.active !== true || controllers.has(n)) continue;
             try {
@@ -18868,7 +18930,7 @@ async function nurseTick() {
       for (const n of names0) {
         try {
           if (!n) continue;
-          if (SHARD_SET.size && !inShard(n)) continue;
+          if (!inShard(n)) continue;
           const want0 = desired.perfis[n] || {};
           if (want0.active !== true) continue;
           if (controllers.has(n)) continue;
@@ -18901,7 +18963,7 @@ async function nurseTick() {
 
     for (const nome of Object.keys(desired.perfis || {})) {
       const ctrlExisting = controllers.get(nome);
-      if (SHARD_SET.size && !inShard(nome) && !ctrlExisting) {
+      if (!inShard(nome) && !ctrlExisting) {
         // Debug enterprise (P0 gaps): se o perfil está desired.active=true mas não está no shard,
         // ele fica "órfão" e nunca abre. Logar com debounce para evidência irrefutável.
         try {
@@ -20634,7 +20696,7 @@ async function stockProvisionResumeTick() {
     if (w.humanHold === true) continue;
     const v = String(w.virtus || '').toLowerCase();
     if (v === 'off') continue;
-    if (SHARD_SET.size && !inShard(nome)) continue;
+    if (!inShard(nome)) continue;
     candidates.push(String(nome));
   }
 
@@ -27185,11 +27247,23 @@ function __deltaExtractHttpMessageEvents(bodyText, sourceUrl = '', accountUserId
   }));
 }
 
-async function __deltaDetachCdpSession(nome) {
+async function __deltaDetachCdpSession(
+  nome,
+  { expectedCtrl = null, expectedSession = null, preserveAttachGeneration = false } = {}
+) {
   try {
     const ctrl = controllers.get(nome);
     if (!ctrl) return false;
+    // Um callback atrasado de browser/controller antigo não pode desligar o
+    // ouvido de um controller novo que já assumiu o mesmo perfil.
+    if (expectedCtrl && ctrl !== expectedCtrl) return false;
     const s = ctrl.deltaCdpSession;
+    if (expectedSession && s !== expectedSession) return false;
+    // Fechamento/desconexão invalida createCDPSession que ainda esteja em voo.
+    // O próprio fluxo de attach usa preserveAttachGeneration na troca ordenada.
+    if (!preserveAttachGeneration) {
+      ctrl.deltaCdpAttachGeneration = (Number(ctrl.deltaCdpAttachGeneration) || 0) + 1;
+    }
     const onFrame = ctrl.deltaCdpOnFrame;
     const onWsCreated = ctrl.deltaCdpOnWsCreated;
     const onWsHandshakeReq = ctrl.deltaCdpOnWsHandshakeReq;
@@ -27205,8 +27279,11 @@ async function __deltaDetachCdpSession(nome) {
       try { if (onResponseReceived) s.removeListener('Network.responseReceived', onResponseReceived); } catch {}
     }
     if (s && typeof s.detach === 'function') {
-      try { await s.detach().catch(() => {}); } catch {}
+      try { await chromeHeapFaxina.detachCdpSession(s); } catch {}
     }
+    // Compare-and-swap: se outra rotina já instalou nova sessão neste mesmo
+    // objeto enquanto o detach antigo aguardava, não apaga as referências novas.
+    if (s && ctrl.deltaCdpSession !== s) return false;
     ctrl.deltaCdpSession = null;
     ctrl.deltaCdpOnFrame = null;
     ctrl.deltaCdpOnWsCreated = null;
@@ -27220,8 +27297,17 @@ async function __deltaDetachCdpSession(nome) {
       const pagesToClear = [];
       if (ctrl.deltaCdpEarPage) pagesToClear.push(ctrl.deltaCdpEarPage);
       if (ctrl.mainPage && ctrl.mainPage !== ctrl.deltaCdpEarPage) pagesToClear.push(ctrl.mainPage);
+      const replacementCtrl = controllers.get(nome);
       for (const p of pagesToClear) {
-        try { if (p) p.__deltaCdpEarAttached = false; } catch {}
+        try {
+          const pageAlreadyOwnedByReplacement = !!(
+            p &&
+            replacementCtrl &&
+            replacementCtrl !== ctrl &&
+            (replacementCtrl.deltaCdpEarPage === p || replacementCtrl.mainPage === p)
+          );
+          if (p && !pageAlreadyOwnedByReplacement) p.__deltaCdpEarAttached = false;
+        } catch {}
       }
       ctrl.deltaCdpEarPage = null;
     } catch {}
@@ -27240,7 +27326,12 @@ async function __deltaAttachCdpEar(nome, page) {
       const sessionAlive = !!(ctrl0 && ctrl0.deltaCdpSession);
       const samePage = !!(ctrl0 && ctrl0.deltaCdpEarPage === page);
       // Só early-return se a sessão CDP ainda existe nesta page (anti flag stale pós-probe/detach).
-      if (sessionAlive && (samePage || !ctrl0.deltaCdpEarPage)) {
+      if (
+        sessionAlive &&
+        (samePage || !ctrl0.deltaCdpEarPage) &&
+        !ctrl0.deltaCdpClosing &&
+        !_shuttingDown
+      ) {
         if (ctrl0 && !ctrl0.deltaCdpEarPage) {
           try { ctrl0.deltaCdpEarPage = page; } catch {}
         }
@@ -27253,11 +27344,36 @@ async function __deltaAttachCdpEar(nome, page) {
   } catch {}
   __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs, lastError: null });
 
+  const ctrl = controllers.get(nome);
+  if (!ctrl) {
+    try { page.__deltaCdpEarAttached = false; } catch {}
+    return;
+  }
+  if (ctrl.deltaCdpClosing || _shuttingDown) {
+    try { page.__deltaCdpEarAttached = false; } catch {}
+    return;
+  }
+  // Token monotônico no próprio controller: somente a tentativa mais recente
+  // pode publicar sessão/listeners. Tentativas antigas destacam sua sessão local.
+  const attachGeneration = (Number(ctrl.deltaCdpAttachGeneration) || 0) + 1;
+  ctrl.deltaCdpAttachGeneration = attachGeneration;
+  const clearPageFlagIfAbandoned = () => {
+    try {
+      const currentCtrl = controllers.get(nome);
+      const ownedByReplacement = !!(
+        currentCtrl &&
+        currentCtrl !== ctrl &&
+        (currentCtrl.deltaCdpEarPage === page || currentCtrl.mainPage === page)
+      );
+      if (!ownedByReplacement) page.__deltaCdpEarAttached = false;
+    } catch {}
+  };
+
   const deltaRuntimeEnabled = (() => {
     try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; }
   })();
   if (!deltaRuntimeEnabled) {
-    try { await __deltaDetachCdpSession(nome); } catch {}
+    try { await __deltaDetachCdpSession(nome, { expectedCtrl: ctrl }); } catch {}
     try { page.__deltaCdpEarAttached = false; } catch {}
     __deltaMarkBootEarState(nome, { earAttached: false, lastError: 'delta_engine_disabled' });
     return;
@@ -27294,21 +27410,54 @@ async function __deltaAttachCdpEar(nome, page) {
     }
   } catch {}
 
-  try { await __deltaDetachCdpSession(nome); } catch {}
-  // Detach limpa flags — reafirma lock nesta page antes de criar a sessão.
-  try { page.__deltaCdpEarAttached = true; } catch {}
-
-  const ctrl = controllers.get(nome);
-  if (!ctrl) {
-    try { page.__deltaCdpEarAttached = false; } catch {}
+  if (
+    controllers.get(nome) !== ctrl ||
+    ctrl.deltaCdpAttachGeneration !== attachGeneration ||
+    ctrl.deltaCdpClosing ||
+    _shuttingDown
+  ) {
+    if (controllers.get(nome) !== ctrl || ctrl.deltaCdpClosing || _shuttingDown) {
+      clearPageFlagIfAbandoned();
+    }
     return;
   }
+  try {
+    await __deltaDetachCdpSession(nome, {
+      expectedCtrl: ctrl,
+      preserveAttachGeneration: true
+    });
+  } catch {}
+  if (
+    controllers.get(nome) !== ctrl ||
+    ctrl.deltaCdpAttachGeneration !== attachGeneration ||
+    ctrl.deltaCdpClosing ||
+    _shuttingDown
+  ) {
+    if (controllers.get(nome) !== ctrl || ctrl.deltaCdpClosing || _shuttingDown) {
+      clearPageFlagIfAbandoned();
+    }
+    return;
+  }
+  // Detach limpa flags — reafirma lock nesta page antes de criar a sessão.
+  try { page.__deltaCdpEarAttached = true; } catch {}
 
   let cdp = null;
   try {
     cdp = await page.target().createCDPSession();
     try { chromeHeapFaxina.elevateMaxListeners(cdp); } catch {}
     await cdp.send('Network.enable');
+    if (
+      controllers.get(nome) !== ctrl ||
+      ctrl.deltaCdpAttachGeneration !== attachGeneration ||
+      ctrl.deltaCdpClosing ||
+      _shuttingDown
+    ) {
+      try { await chromeHeapFaxina.detachCdpSession(cdp); } catch {}
+      if (controllers.get(nome) !== ctrl || ctrl.deltaCdpClosing || _shuttingDown) {
+        clearPageFlagIfAbandoned();
+      }
+      return;
+    }
     __deltaEnsureFrameTelemetryState();
 
     const wsState = {
@@ -28183,6 +28332,10 @@ async function __deltaAttachCdpEar(nome, page) {
           wsState.selectedRichWsId = '';
           wsState.selectedRichScore = -999;
         }
+        // O CDP não reutiliza requestId de um WebSocket encerrado. Manter os
+        // metadados e a assinatura de heartbeat só retém estado morto.
+        wsState.byId.delete(requestId);
+        wsState.heartbeatBySocket.delete(requestId);
       } catch {}
     };
 
@@ -28366,21 +28519,37 @@ async function __deltaAttachCdpEar(nome, page) {
     try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'ear_cdp_attached', { nome: String(nome || '') }); } catch {}
     __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: Date.now(), lastError: null });
   } catch (err) {
+    const ctrlCurrent = controllers.get(nome);
+    const ownsAttachGeneration = (
+      ctrlCurrent === ctrl &&
+      ctrl.deltaCdpAttachGeneration === attachGeneration
+    );
     try {
-      const ctrlFail = controllers.get(nome);
-      if (cdp && ctrlFail && ctrlFail.deltaCdpSession === cdp) {
-        try { await __deltaDetachCdpSession(nome); } catch {}
+      if (cdp && ownsAttachGeneration && ctrl.deltaCdpSession === cdp) {
+        try {
+          await __deltaDetachCdpSession(nome, {
+            expectedCtrl: ctrl,
+            expectedSession: cdp
+          });
+        } catch {}
       } else {
         try { await chromeHeapFaxina.detachCdpSession(cdp); } catch {}
       }
     } catch {}
-    try { logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', { nome, error: err && err.message ? err.message : String(err) }); } catch {}
-    __deltaMarkBootEarState(nome, { earAttached: false, lastError: err && err.message ? String(err.message) : String(err) });
-    try { page.__deltaCdpEarAttached = false; } catch {}
     try {
-      const ctrlFail = controllers.get(nome);
-      if (ctrlFail && ctrlFail.deltaCdpEarPage === page) ctrlFail.deltaCdpEarPage = null;
+      logger.error('[DELTA_CDP_ERROR] Falha ao ligar ouvido', {
+        nome,
+        staleAttach: !ownsAttachGeneration,
+        error: err && err.message ? err.message : String(err)
+      });
     } catch {}
+    if (ownsAttachGeneration) {
+      __deltaMarkBootEarState(nome, { earAttached: false, lastError: err && err.message ? String(err.message) : String(err) });
+      try { page.__deltaCdpEarAttached = false; } catch {}
+      try {
+        if (ctrl.deltaCdpEarPage === page) ctrl.deltaCdpEarPage = null;
+      } catch {}
+    }
     try {
       if (typeof forensicLog === 'function') {
         forensicLog('DELTA', 'ear_cdp_attach_failed', { nome: String(nome || ''), error: err && err.message ? String(err.message) : String(err) });
@@ -28826,9 +28995,17 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 let _shuttingDown = false;
+const WORKER_SHUTDOWN_FAILSAFE_MS = Math.max(
+  10_000,
+  Math.min(120_000, Number(process.env.WORKER_SHUTDOWN_FAILSAFE_MS || 60_000) || 60_000)
+);
 async function gracefulShutdown(reason) {
   if (_shuttingDown) return;
   _shuttingDown = true;
+  const shutdownFailsafe = setTimeout(() => {
+    try { logger.error('[WORKER] gracefulShutdown failsafe', { reason, timeoutMs: WORKER_SHUTDOWN_FAILSAFE_MS }); } catch {}
+    process.exit(0);
+  }, WORKER_SHUTDOWN_FAILSAFE_MS);
   try {
     logger.info('[WORKER] gracefulShutdown start', { reason });
     try {
@@ -28841,12 +29018,23 @@ async function gracefulShutdown(reason) {
       });
     } catch {}
     try { robeQueue.clear(); } catch {}
-    for (const [nome, ctrl] of controllers) {
+    const shutdownEntries = Array.from(controllers.entries());
+    for (const [, ctrl] of shutdownEntries) {
+      try { if (ctrl) ctrl.deltaCdpClosing = true; } catch {}
+    }
+    try {
+      await Promise.allSettled(
+        shutdownEntries.map(([nome, ctrl]) =>
+          __deltaDetachCdpSession(nome, { expectedCtrl: ctrl })
+        )
+      );
+    } catch {}
+    for (const [nome, ctrl] of shutdownEntries) {
       try {
         if (ctrl && ctrl.virtus) await _stopVirtusRunnerMaybePromise(ctrl.virtus);
       } catch {}
     }
-    for (const [nome, ctrl] of controllers) {
+    for (const [nome, ctrl] of shutdownEntries) {
       try {
         if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
           await ctrl.browser.close().catch(()=>{});
@@ -28882,6 +29070,7 @@ async function gracefulShutdown(reason) {
   } catch (e) {
     try { logger.error('[WORKER] gracefulShutdown exception', { reason, error: e && e.message || e }, e); } catch {}
   } finally {
+    try { clearTimeout(shutdownFailsafe); } catch {}
     setTimeout(() => process.exit(0), 500);
   }
 }

@@ -182,6 +182,13 @@ module.exports = (app, workerClient, fileStore) => {
   });
 
   app.post('/api/server-config', async (req, res) => {
+    let postWriteMeta = {
+      configSaved: false,
+      config: null,
+      workerRamDivisorChanged: false,
+      workerTopologyRestartRequired: false,
+      workerTopologyApply: 'unchanged'
+    };
     try {
       const operator = String(req.headers['x-operator'] || 'dashboard').slice(0, 180);
       const payload = (req.body && typeof req.body === 'object')
@@ -192,6 +199,8 @@ module.exports = (app, workerClient, fileStore) => {
       const previousVirtusEngine = readDesiredVirtusEngine();
       let engineChanged = false;
       let renewReplanResult = null;
+      let workerRamDivisorChanged = false;
+      let previousWorkerRamDivisorGb = null;
       const hasConfigFields = hasServerConfigFields(payload);
       try {
         provisionAudit.append({
@@ -208,10 +217,24 @@ module.exports = (app, workerClient, fileStore) => {
         const previousCfg = (() => {
           try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
         })();
+        previousWorkerRamDivisorGb = Number(
+          previousCfg && previousCfg.memory && previousCfg.memory.workerRamDivisorGb
+        ) || 16;
         const previousTc = (previousCfg && previousCfg.terminalAccountCleanup) ? previousCfg.terminalAccountCleanup : null;
         const previousRenew = (previousCfg && previousCfg.marketplaceRenew) ? previousCfg.marketplaceRenew : null;
         const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
         if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
+        const nextWorkerRamDivisorGb = Number(
+          wr.saved && wr.saved.memory && wr.saved.memory.workerRamDivisorGb
+        ) || 16;
+        workerRamDivisorChanged = nextWorkerRamDivisorGb !== previousWorkerRamDivisorGb;
+        postWriteMeta = {
+          configSaved: true,
+          config: wr.saved || null,
+          workerRamDivisorChanged,
+          workerTopologyRestartRequired: workerRamDivisorChanged,
+          workerTopologyApply: workerRamDivisorChanged ? 'next_index_restart' : 'unchanged'
+        };
         try {
           const nextTc = (wr.saved && wr.saved.terminalAccountCleanup)
             ? wr.saved.terminalAccountCleanup
@@ -297,7 +320,14 @@ module.exports = (app, workerClient, fileStore) => {
           });
         }
         if (!desiredOk) {
-          return res.json({ ok: false, error: 'virtus_engine_persist_failed' });
+          return res.json({
+            ok: false,
+            error: 'virtus_engine_persist_failed',
+            ...postWriteMeta,
+            config: postWriteMeta.config
+              ? { ...postWriteMeta.config, virtusEngine: previousVirtusEngine || 'delta' }
+              : null
+          });
         }
         engineChanged = requestedVirtusEngine !== previousVirtusEngine;
         try {
@@ -316,6 +346,7 @@ module.exports = (app, workerClient, fileStore) => {
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });
       const virtusEngine = readDesiredVirtusEngine();
       const effectiveWithVirtusEngine = { ...effective, virtusEngine };
+      postWriteMeta.config = effectiveWithVirtusEngine;
       const shouldEngineRollover = !!(engineChanged || (applyNow && requestedVirtusEngine));
       try {
         provisionAudit.append({
@@ -326,6 +357,10 @@ module.exports = (app, workerClient, fileStore) => {
           virtusEngine,
           capacityMode: effective && effective.capacity ? effective.capacity.mode : null,
           maxAccountsEffective: effective && effective.capacity ? effective.capacity.maxAccountsEffective : null,
+          workerRamDivisorGb: effective && effective.memory ? effective.memory.workerRamDivisorGb : null,
+          previousWorkerRamDivisorGb,
+          workerRamDivisorChanged,
+          workerTopologyApply: workerRamDivisorChanged ? 'next_index_restart' : 'unchanged',
           applyNowRequested: applyNow
         });
       } catch {}
@@ -395,6 +430,7 @@ module.exports = (app, workerClient, fileStore) => {
         } catch {}
         return res.json({
           ok: true,
+          ...postWriteMeta,
           config: effectiveWithVirtusEngine,
           applyNowResult: result || null,
           renewReplanResult: renewReplanResult || null,
@@ -404,7 +440,7 @@ module.exports = (app, workerClient, fileStore) => {
       };
       if (!applyNow) return finish(null);
       if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
-        return res.json({ ok: false, error: 'worker_client_unavailable', configSaved: true, config: effectiveWithVirtusEngine });
+        return res.json({ ok: false, error: 'worker_client_unavailable', ...postWriteMeta });
       }
       try {
         const r = await workerClient.sendWorkerCommand('robe-replan-all', {
@@ -417,12 +453,11 @@ module.exports = (app, workerClient, fileStore) => {
           ok: false,
           error: 'apply_now_failed',
           details: (e && e.message) || String(e),
-          configSaved: true,
-          config: effectiveWithVirtusEngine
+          ...postWriteMeta
         });
       }
     } catch (e) {
-      return res.json({ ok: false, error: (e && e.message) || String(e) });
+      return res.json({ ok: false, error: (e && e.message) || String(e), ...postWriteMeta });
     }
   });
 
@@ -680,8 +715,27 @@ module.exports = (app, workerClient, fileStore) => {
         return desired;
       });
 
+      // Cadastro já está no disco. Grow/assign não pode segurar a próxima conta.
+      // activate/ensureAssigned espera a mesma fila se o Worker ainda não nasceu.
+      try {
+        if (workerClient && typeof workerClient.rebalance === 'function') {
+          setImmediate(() => {
+            Promise.resolve()
+              .then(() => workerClient.rebalance('api_perfis_create:' + nome))
+              .catch((eGrow) => {
+                try {
+                  logger.warn('[API][perfis] grow após criar perfil falhou', {
+                    nome,
+                    error: (eGrow && eGrow.message) || String(eGrow)
+                  });
+                } catch {}
+              });
+          });
+        }
+      } catch {}
+
       logger.info('Perfil criado com sucesso', { nome, cidade });
-      res.json({ ok: true, perfil: perfilObj });
+      res.json({ ok: true, perfil: perfilObj, clusterGrowQueued: true });
     } catch (e) {
       logger.error('Erro fatal na rota criação de perfil', { rota: '/api/perfis', cidade: req.body && req.body.cidade, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
@@ -1877,6 +1931,16 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
       }
 
+      let clusterReshuffle = null;
+      try {
+        if (workerClient && typeof workerClient.reshuffleFairIfIdle === 'function') {
+          clusterReshuffle = await workerClient.reshuffleFairIfIdle('open_all_24h');
+        }
+      } catch (eReshuffle) {
+        clusterReshuffle = { ok: false, reshuffled: false, error: (eReshuffle && eReshuffle.message) || String(eReshuffle) };
+        try { logger.warn('[API][open-all] fair reshuffle falhou; abre no mapa atual', { error: clusterReshuffle.error }); } catch {}
+      }
+
       const perfisArr = fileStore.loadPerfisJson() || [];
 
       // Flags terminais (ban / 2FA): Abrir Todos IGNORA — não entram na fila, não recebem active=true.
@@ -1990,7 +2054,9 @@ module.exports = (app, workerClient, fileStore) => {
           event: 'open_all_started',
           total: eligibleNames.length,
           skippedTerminalCount: skippedTerminal.length,
-          lockOwner: String(lockOwner || '')
+          lockOwner: String(lockOwner || ''),
+          clusterReshuffled: !!(clusterReshuffle && clusterReshuffle.reshuffled),
+          clusterReshuffleNodes: clusterReshuffle && clusterReshuffle.nodes ? clusterReshuffle.nodes : null
         });
       } catch {}
       try {
@@ -2009,7 +2075,8 @@ module.exports = (app, workerClient, fileStore) => {
         ok: true,
         total: eligibleNames.length,
         skippedTerminal: skippedTerminal.length,
-        lockOwner
+        lockOwner,
+        clusterReshuffle
       });
 
     } catch (e) {

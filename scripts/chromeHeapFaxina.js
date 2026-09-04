@@ -17,6 +17,10 @@ const GC_TIMEOUT_MS = Math.max(
   1500,
   Math.min(8000, Number(process.env.OXY_FAXINA_TIMEOUT_MS || 4000) || 4000)
 );
+const CDP_DETACH_TIMEOUT_MS = Math.max(
+  250,
+  Math.min(5000, Number(process.env.CDP_DETACH_TIMEOUT_MS || 1500) || 1500)
+);
 
 const lastFaxinaAtByNome = new Map();
 let faxinaTail = Promise.resolve();
@@ -113,7 +117,7 @@ function detachLater(openP) {
     .then((opened) => {
       try {
         if (opened && opened.ephemeral && opened.session && typeof opened.session.detach === "function") {
-          return opened.session.detach();
+          return detachCdpSession(opened.session);
         }
       } catch {}
       return null;
@@ -124,13 +128,22 @@ function detachLater(openP) {
 /**
  * Só sessão EXTRA (createCDPSession). NUNCA page._client() — isso é o fio
  * primário do Puppeteer; detach nele deixa a page surda.
- * O ouvido Delta (ctrl.deltaCdpSession) NÃO passa por aqui: é 1/conta e
- * vive com a page; quem fecha é __deltaDetachCdpSession.
+ * O ouvido Delta (ctrl.deltaCdpSession) só usa esta função após remover seus
+ * listeners; a posse/referências continuam sob __deltaDetachCdpSession.
  */
-async function detachCdpSession(session) {
+async function detachCdpSession(session, { timeoutMs = CDP_DETACH_TIMEOUT_MS } = {}) {
+  let timer = null;
   try {
-    if (session && typeof session.detach === "function") await session.detach();
-  } catch {}
+    if (!session || typeof session.detach !== "function") return;
+    const detachP = Promise.resolve().then(() => session.detach()).catch(() => {});
+    const timeoutP = new Promise((resolve) => {
+      timer = setTimeout(resolve, Math.max(50, Number(timeoutMs) || CDP_DETACH_TIMEOUT_MS));
+    });
+    await Promise.race([detachP, timeoutP]);
+  } catch {
+  } finally {
+    try { if (timer) clearTimeout(timer); } catch {}
+  }
 }
 
 function resolveCdpTarget(targetOrPage) {

@@ -51,8 +51,10 @@ const DEFAULTS = Object.freeze({
     maxAccountsOverride: null
   },
   // Política de RAM (governor + reserva mínima livre para abrir navegador).
-  // Valores em MB. Lidas em runtime a cada tick — salvar no dashboard já vale sem restart.
+  // Campos *Mb em MB. workerRamDivisorGb define o bloco físico por Worker em GB.
+  // Governor/reservas são lidos a cada tick; a topologia de Workers vale no próximo boot.
   memory: {
+    workerRamDivisorGb: 16,
     governorEnterMb: 2048,
     governorExitMb: 2048,
     hostBaseMb: 2048,
@@ -362,6 +364,11 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     : "after_all_working_posted";
   const itemTitlesPack = normalizeItemTitlesPack(robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack);
 
+  const workerRamDivisorGb = clamp(
+    Math.floor(toNum(memRaw.workerRamDivisorGb, DEFAULTS.memory.workerRamDivisorGb)),
+    4,
+    32
+  );
   let governorEnterMb = clamp(Math.floor(toNum(memRaw.governorEnterMb, DEFAULTS.memory.governorEnterMb)), 256, 32768);
   let governorExitMb = clamp(Math.floor(toNum(memRaw.governorExitMb, DEFAULTS.memory.governorExitMb)), 256, 32768);
   if (governorExitMb < governorEnterMb) governorExitMb = governorEnterMb;
@@ -426,6 +433,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       maxAccountsEffective: 0
     },
     memory: {
+      workerRamDivisorGb,
       governorEnterMb,
       governorExitMb,
       hostBaseMb,
@@ -667,11 +675,17 @@ function validateServerConfigPayload(payload) {
     }
   }
   if (mem) {
-    const intFields = ["governorEnterMb", "governorExitMb", "hostBaseMb", "reservePer8GbMb", "provisionSpikeMb"];
+    const intFields = ["workerRamDivisorGb", "governorEnterMb", "governorExitMb", "hostBaseMb", "reservePer8GbMb", "provisionSpikeMb"];
     for (const f of intFields) {
       if (mem[f] !== undefined) {
         const n = toNum(mem[f], NaN);
         if (!Number.isFinite(n)) errors.push(`memory.${f}_invalido`);
+      }
+    }
+    if (mem.workerRamDivisorGb !== undefined) {
+      const n = toNum(mem.workerRamDivisorGb, NaN);
+      if (Number.isFinite(n) && !Number.isInteger(n)) {
+        errors.push("memory.workerRamDivisorGb_deve_ser_inteiro");
       }
     }
   }
@@ -845,6 +859,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       maxAccountsOverride: v.normalized.capacity.maxAccountsOverride
     },
     memory: {
+      workerRamDivisorGb: v.normalized.memory.workerRamDivisorGb,
       governorEnterMb: v.normalized.memory.governorEnterMb,
       governorExitMb: v.normalized.memory.governorExitMb,
       hostBaseMb: v.normalized.memory.hostBaseMb,

@@ -1213,6 +1213,11 @@
         body: JSON.stringify({ ...(payload || {}), applyNow: !!applyNow })
       }).then(x => x.json()).catch(() => null);
       if (!r || r.ok !== true || !r.config) {
+        // A configuração pode ter sido persistida antes de uma etapa secundária
+        // (ex.: desired/apply-now) falhar. Não reporte falso rollback ao operador.
+        if (r && r.configSaved === true && r.config) {
+          return { ...r, partialFailure: true };
+        }
         const base = (r && r.error) ? String(r.error) : 'server_config_save_failed';
         const details = Array.isArray(r && r.details) ? r.details.join(', ') : '';
         throw new Error(details ? `${base} (${details})` : base);
@@ -1289,7 +1294,12 @@
             <input type="number" id="srvMemHostBase" min="256" max="16384" step="128" />
           </div>
           <div class="form-row">
-            <label>RAM — extra por bloco de 16 GB de RAM física (MB, × ceil(GB÷16))</label>
+            <label>Workers — 1 processo Worker a cada bloco de RAM física (GB)</label>
+            <input type="number" id="srvMemWorkerDivisor" min="4" max="32" step="1" />
+            <div class="muted" style="margin-top:6px;">Fábrica: 16 GB. Faixa: 4–32. Salvar já vale para a próxima conta nova: se o teto novo couber, nasce Worker extra e essa conta fica nele; os Workers atuais não são mexidos. Reiniciar o <code>index.js</code> redistribui todas as contas iguais entre os Workers do plano novo.</div>
+          </div>
+          <div class="form-row">
+            <label>RAM — extra por Worker/bloco calculado (MB, × ceil(RAM GB ÷ divisor acima))</label>
             <input type="number" id="srvMemPer8" min="0" max="8192" step="128" />
           </div>
           <div class="form-row">
@@ -1515,8 +1525,10 @@
       const memGovEnterEl = box.querySelector('#srvMemGovEnter');
       const memGovExitEl = box.querySelector('#srvMemGovExit');
       const memHostBaseEl = box.querySelector('#srvMemHostBase');
+      const memWorkerDivisorEl = box.querySelector('#srvMemWorkerDivisor');
       const memPer8El = box.querySelector('#srvMemPer8');
       const memProvSpikeEl = box.querySelector('#srvMemProvisionSpike');
+      let workerDivisorSupported = false;
       const workModeEl = box.querySelector('#srvRobeWorkMode');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
@@ -1728,10 +1740,20 @@
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
         if (memGovExitEl) memGovExitEl.value = Number(mem.governorExitMb != null ? mem.governorExitMb : 2048);
         if (memHostBaseEl) memHostBaseEl.value = Number(mem.hostBaseMb != null ? mem.hostBaseMb : 2048);
+        workerDivisorSupported = Object.prototype.hasOwnProperty.call(mem, 'workerRamDivisorGb');
+        if (memWorkerDivisorEl) {
+          memWorkerDivisorEl.value = Number(mem.workerRamDivisorGb != null ? mem.workerRamDivisorGb : 16);
+          memWorkerDivisorEl.disabled = !workerDivisorSupported;
+          memWorkerDivisorEl.title = workerDivisorSupported
+            ? 'Salva agora; aplica a topologia no próximo reinício do index.js.'
+            : 'Reinicie o index.js uma vez para carregar o backend que suporta este campo.';
+        }
         if (memPer8El) memPer8El.value = Number(mem.reservePer8GbMb != null ? mem.reservePer8GbMb : 768);
         if (memProvSpikeEl) memProvSpikeEl.value = Number(mem.provisionSpikeMb != null ? mem.provisionSpikeMb : 1536);
         infoEl.className = 'pill info';
-        infoEl.innerHTML = `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — RAM: lida do disco a cada tick (sem reinício).`;
+        infoEl.innerHTML = workerDivisorSupported
+          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Divisor de Workers (${Number(mem.workerRamDivisorGb || 16)} GB): conta nova já usa o valor salvo; redistribuição igual só no próximo reinício do index.js.`
+          : `<span class="dot"></span>Backend anterior detectado. Reinicie o index.js uma vez para habilitar a configuração do divisor de Workers; os demais campos continuam operacionais.`;
         renderGlobalCities();
       };
 
@@ -1990,10 +2012,17 @@
           const governorEnterMb = Math.floor(Number(memGovEnterEl && memGovEnterEl.value));
           const governorExitMb = Math.floor(Number(memGovExitEl && memGovExitEl.value));
           const hostBaseMb = Math.floor(Number(memHostBaseEl && memHostBaseEl.value));
+          const workerRamDivisorGb = workerDivisorSupported
+            ? Number(memWorkerDivisorEl && memWorkerDivisorEl.value)
+            : 16;
           const reservePer8GbMb = Math.floor(Number(memPer8El && memPer8El.value));
           const provisionSpikeMb = Math.floor(Number(memProvSpikeEl && memProvSpikeEl.value));
-          if (![governorEnterMb, governorExitMb, hostBaseMb, reservePer8GbMb, provisionSpikeMb].every((n) => Number.isFinite(n))) {
+          if (![workerRamDivisorGb, governorEnterMb, governorExitMb, hostBaseMb, reservePer8GbMb, provisionSpikeMb].every((n) => Number.isFinite(n))) {
             await showSystemMessageModal({ title: 'RAM inválida', message: 'Preencha todos os campos de RAM com números válidos.', tone: 'bad' });
+            return;
+          }
+          if (workerDivisorSupported && (!Number.isInteger(workerRamDivisorGb) || workerRamDivisorGb < 4 || workerRamDivisorGb > 32)) {
+            await showSystemMessageModal({ title: 'Divisor inválido', message: 'Workers: use um divisor inteiro entre 4 e 32 GB.', tone: 'bad' });
             return;
           }
           if (governorEnterMb < 256 || governorEnterMb > 32768 || governorExitMb < 256 || governorExitMb > 32768) {
@@ -2005,7 +2034,7 @@
             return;
           }
           if (reservePer8GbMb < 0 || reservePer8GbMb > 8192) {
-            await showSystemMessageModal({ title: 'RAM inválida', message: 'Extra por 16 GB: use entre 0 e 8192 MB.', tone: 'bad' });
+            await showSystemMessageModal({ title: 'RAM inválida', message: `Extra por Worker/bloco de ${workerRamDivisorGb} GB: use entre 0 e 8192 MB.`, tone: 'bad' });
             return;
           }
           if (provisionSpikeMb < 256 || provisionSpikeMb > 8192) {
@@ -2014,6 +2043,7 @@
           }
           const payload = {
             memory: {
+              ...(workerDivisorSupported ? { workerRamDivisorGb } : {}),
               governorEnterMb,
               governorExitMb,
               hostBaseMb,
@@ -2086,6 +2116,7 @@
           setBtnLoading(saveBtn, true, 'Salvando...');
           const r = await saveServerConfig(payload, { applyNow: false });
           fillFromConfig(r.config);
+          const partialFailure = !!(r && r.partialFailure);
           const renewReplan = r && r.renewReplanResult;
           const renewReplanFailed = !!(renewReplan && renewReplan.ok === false);
           const renewReplanMsg = renewReplan && renewReplan.ok === true
@@ -2093,10 +2124,16 @@
             : (renewReplan && renewReplan.ok === false
               ? ` Config salva, mas o replanejamento da renovação falhou: ${String(renewReplan.error || 'erro')}.`
               : '');
+          const workerRestartMsg = r && r.workerRamDivisorChanged
+            ? ' O novo divisor já vale para a próxima conta nova (pode nascer Worker extra). Os Workers e navegadores atuais ficam como estão; no próximo reinício do index.js as contas se dividem iguais no plano novo.'
+            : '';
+          const partialFailureMsg = partialFailure
+            ? ` Uma etapa secundária falhou depois da persistência (${String(r.error || 'erro desconhecido')}); a configuração acima não foi revertida.`
+            : '';
           await showSystemMessageModal({
-            title: renewReplanFailed ? 'Configuração salva com alerta' : 'Configuração salva',
-            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + renewReplanMsg,
-            tone: renewReplanFailed ? 'bad' : 'good'
+            title: (renewReplanFailed || partialFailure) ? 'Configuração salva com alerta' : 'Configuração salva',
+            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + workerRestartMsg + renewReplanMsg + partialFailureMsg,
+            tone: (renewReplanFailed || partialFailure) ? 'bad' : 'good'
           });
           try { await reloadPerfis(); } catch {}
         } catch (e) {

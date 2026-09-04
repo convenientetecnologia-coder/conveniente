@@ -4396,7 +4396,21 @@ async function bootCluster() {
 // ===================== FIM CLUSTER MULTI-NODE =====================
 
 // API endpoints (militar por arquivo de rota, modular, fácil de achar)
-const apiClient = { sendWorkerCommand: (...args) => clusterClient.sendWorkerCommand(...args) };
+const apiClient = {
+  sendWorkerCommand: (...args) => clusterClient.sendWorkerCommand(...args),
+  rebalance: (...args) => {
+    if (!clusterClient || typeof clusterClient.rebalance !== 'function') {
+      return Promise.resolve({ ok: false, error: 'cluster_not_ready' });
+    }
+    return clusterClient.rebalance(...args);
+  },
+  reshuffleFairIfIdle: (...args) => {
+    if (!clusterClient || typeof clusterClient.reshuffleFairIfIdle !== 'function') {
+      return Promise.resolve({ ok: false, error: 'cluster_not_ready', reshuffled: false });
+    }
+    return clusterClient.reshuffleFairIfIdle(...args);
+  }
+};
 require('./scripts/api_status.js')(app, apiClient, fileStore);
 require('./scripts/api_perfis.js')(app, apiClient, fileStore);
 require('./scripts/api_robes.js')(app, apiClient, fileStore);

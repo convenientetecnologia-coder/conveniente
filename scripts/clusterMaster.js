@@ -3,7 +3,7 @@
 const { fork } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { planMemoryAndShards } = require('./memoryPlan.js');
+const { planMemoryAndShards, planStickyGrow, calcLiveDesiredWorkerNodes, planFairReshuffle } = require('./memoryPlan.js');
 const fileStore = require('./fileStore.js');
 const logger = require('./logger.js');
 const supervisor = require('./supervisor.js');
@@ -15,13 +15,7 @@ function newMsgId() { return Math.random().toString(36).slice(2); }
 // NOVO: Algoritmo determinístico, justo, distribui round-robin lexicográfico.
 // Balanceamento perfeito, diferença máxima 1 entre nodes.
 function splitRoundRobinFair(names, blocks) {
-  if (blocks < 1) return [names.slice()];
-  const sorted = names.slice().sort((a, b) => a.localeCompare(b, 'pt-BR', {sensitivity:'base'}));
-  const out = Array.from({ length: blocks }, () => []);
-  sorted.forEach((name, idx) => {
-    out[idx % blocks].push(name);
-  });
-  return out;
+  return planFairReshuffle({ names, nodes: Math.max(1, Number(blocks) || 1) }).nextShards;
 }
 
 // REMOVIDO splitInBlocks
@@ -50,6 +44,9 @@ function createCluster() {
     cushionMB: plan.cushionMB,
     usableMB: plan.usableMB,
     nodes: plan.nodes,
+    hardwareNodes: plan.serverConfig.hardwareNodes,
+    workerRamDivisorGb: plan.serverConfig.workerRamDivisorGb,
+    nodeSegmentMB: plan.budgets.nodeSegmentMB,
     perNodeMax: plan.perNode.maxChromes,
     reservedForOverheadMB: plan.budgets.reservedForOverheadMB,
     remainingForChromesMB: plan.budgets.remainingForChromesMB,
@@ -62,6 +59,9 @@ function createCluster() {
   const route = {};
   let isShuttingDown = false;
   let standbySweep = null;
+  let rebalanceTail = Promise.resolve();
+  const bootHardwareNodes = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || 1);
+  const bootDivisorGb = Math.max(4, Number(plan.serverConfig && plan.serverConfig.workerRamDivisorGb) || 16);
 
   // Rebuild route from a block array (idx->name list)
   function routeRebuildFromBlocks(blocksArr) {
@@ -334,87 +334,104 @@ function createCluster() {
 
   // -------- HOT REBALANCE/HOT WATCHING ---------
 
-  // Aplica shards diretamente em todos os workers e reconstrói as rotas internas (route)
+  function shardKey(names) {
+    return (Array.isArray(names) ? names : [])
+      .map((n) => String(n || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }))
+      .join('\n');
+  }
+
+  // Só manda set-shard onde a lista mudou. Worker novo já nasce com SHARD_PROFILES.
   async function applyShardsToWorkers(blocksArr, reason = 'rebalance') {
-    logger.info('[CLUSTER][REB] applyShardsToWorkers', { reason, nodes: blocksArr.length });
+    logger.info('[CLUSTER][REB] applyShardsToWorkers', { reason, nodes: blocksArr.length, children: children.length });
     const tasks = [];
     for (let i = 0; i < children.length; i++) {
-      const shardNames = blocksArr[i] || [];
+      const shardNames = Array.isArray(blocksArr[i]) ? blocksArr[i] : [];
+      const prevNames = Array.from((children[i] && children[i].shard) ? children[i].shard : []);
       children[i].shard = new Set(shardNames);
+      if (shardKey(prevNames) === shardKey(shardNames)) continue;
       tasks.push(sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }));
     }
-    await Promise.all(tasks);
-    // reconstrói rota
+    if (tasks.length) await Promise.all(tasks);
     for (const k of Object.keys(route)) delete route[k];
     routeRebuildFromBlocks(blocksArr);
   }
 
-  // Garante rebalanceamento justo (diferença <= 1) sob evento ou demanda
-  async function rebalance(reason = 'watcher') {
-    // Ultra enterprise / mínimo impacto:
-    // NÃO mover perfis já atribuídos entre workers (isso causa "storm" de shard_moved e fecha dezenas).
-    // Em vez disso:
-    // - Remove perfis deletados
-    // - Atribui apenas perfis NOVOS ao worker com menor shard atual
+  async function rebalanceOnce(reason = 'watcher') {
+    if (isShuttingDown) return { ok: false, error: 'shutting_down' };
     const perfis = fileStore.loadPerfisJson() || [];
-    const namesNow = perfis.map(p => p && p.nome).filter(Boolean);
-    const nowSet = new Set(namesNow);
+    const namesNow = perfis.map((p) => p && p.nome).filter(Boolean);
+    const livePlan = planMemoryAndShards({ totalProfiles: namesNow.length });
+    const desiredNodes = calcLiveDesiredWorkerNodes({
+      totalMB: livePlan.totalMB,
+      divisorGb: livePlan.serverConfig && livePlan.serverConfig.workerRamDivisorGb,
+      totalProfiles: namesNow.length
+    });
+    const currentShards = children.map((ch) => Array.from((ch && ch.shard) ? ch.shard : []));
+    const growPlan = planStickyGrow({
+      currentShards,
+      namesNow,
+      desiredNodes
+    });
 
-    // Conjunto atual atribuído
-    const assignedSet = new Set();
-    for (const ch of children) {
-      for (const n of (ch && ch.shard) ? ch.shard : []) assignedSet.add(n);
+    for (const idx of growPlan.newWorkerIndexes) {
+      const shardNames = growPlan.nextShards[idx] || [];
+      const { proc, pending } = spawnWorker(idx, shardNames);
+      children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
+      logger.info('[CLUSTER] Worker nascido ao vivo', {
+        reason: String(reason || ''),
+        idx: idx + 1,
+        perfis: shardNames.length,
+        names: shardNames.slice(0, 8),
+        desiredNodes,
+        liveHardwareNodes: livePlan.serverConfig.hardwareNodes,
+        liveDivisorGb: livePlan.serverConfig.workerRamDivisorGb,
+        bootHardwareNodes,
+        bootDivisorGb
+      });
     }
 
-    // Remover nomes que não existem mais
-    const removed = [];
-    for (const n of assignedSet) {
-      if (!nowSet.has(n)) removed.push(n);
-    }
-    if (removed.length) {
-      for (const n of removed) {
-        try {
-          const idx = route[n];
-          if (typeof idx === 'number' && children[idx] && children[idx].shard) {
-            children[idx].shard.delete(n);
-          } else {
-            // fallback: remove de qualquer shard set
-            for (const ch of children) {
-              try { ch && ch.shard && ch.shard.delete(n); } catch {}
-            }
-          }
-        } catch {}
-        try { delete route[n]; } catch {}
+    try {
+      plan.nodes = children.length;
+      if (plan.serverConfig) {
+        plan.serverConfig.hardwareNodes = livePlan.serverConfig.hardwareNodes;
+        plan.serverConfig.workerRamDivisorGb = livePlan.serverConfig.workerRamDivisorGb;
       }
-      logger.info('[CLUSTER][REB] removed profiles from shards (sticky)', { reason, removed: removed.length });
-    }
+    } catch {}
 
-    // Adicionar nomes novos (não atribuídos ainda)
-    const added = [];
-    for (const n of nowSet) {
-      if (!assignedSet.has(n)) added.push(n);
-    }
-    if (added.length) {
-      // ordem determinística para estabilidade
-      added.sort((a, b) => String(a).localeCompare(String(b), 'pt-BR', { sensitivity: 'base' }));
-      for (const n of added) {
-        // escolher o worker com menos nomes
-        let bestIdx = 0;
-        let bestSize = Infinity;
-        for (let i = 0; i < children.length; i++) {
-          const sz = children[i] && children[i].shard ? children[i].shard.size : 0;
-          if (sz < bestSize) { bestSize = sz; bestIdx = i; }
-        }
-        if (!children[bestIdx].shard) children[bestIdx].shard = new Set();
-        children[bestIdx].shard.add(n);
-        route[n] = bestIdx;
-      }
-      logger.info('[CLUSTER][REB] assigned new profiles to shards (sticky)', { reason, added: added.length });
-    }
+    await applyShardsToWorkers(growPlan.nextShards, String(reason || 'rebalance') + ':sticky_grow');
+    logger.info('[CLUSTER][REB] sticky_grow', {
+      reason: String(reason || ''),
+      added: growPlan.added.length,
+      grew: growPlan.grew,
+      nodes: children.length,
+      desiredNodes,
+      liveHardwareNodes: livePlan.serverConfig.hardwareNodes,
+      liveDivisorGb: livePlan.serverConfig.workerRamDivisorGb,
+      bootHardwareNodes,
+      bootDivisorGb
+    });
+    return {
+      ok: true,
+      added: growPlan.added,
+      grew: growPlan.grew,
+      nodes: children.length,
+      desiredNodes,
+      liveHardwareNodes: livePlan.serverConfig.hardwareNodes,
+      liveDivisorGb: livePlan.serverConfig.workerRamDivisorGb,
+      bootHardwareNodes,
+      bootDivisorGb
+    };
+  }
 
-    // Aplicar shards atuais (sem reshuffle) para os workers
-    const blocksArr = children.map(ch => Array.from((ch && ch.shard) ? ch.shard : []));
-    await applyShardsToWorkers(blocksArr, reason + ':sticky');
+  function rebalance(reason = 'watcher') {
+    const run = rebalanceTail.then(
+      () => rebalanceOnce(reason),
+      () => rebalanceOnce(reason)
+    );
+    rebalanceTail = run.then(() => {}, () => {});
+    return run;
   }
 
   // Fallback para caso especial: novo perfil não roteado ainda
@@ -711,29 +728,69 @@ function createCluster() {
     }
   }
 
-  // Watcher hot/rebalance em perfis.json
+  // Watcher: conta nova / conta apagada. Grow ao vivo; não reshuffle.
+  // CLUSTER_AUTO_REBALANCE=0 desliga. Default ligado.
   (function watchPerfisJson(){
     const perfisFile = path.join(__dirname, '..', 'dados', 'perfis.json');
-    if (process.env.CLUSTER_AUTO_REBALANCE === '1') {
-      let timer = null;
-      try {
-        // =================== BEGIN PATCH: hold watcher handle ===================
-        perfisWatcher = fs.watch(perfisFile, { persistent: false }, () => {
-          clearTimeout(timer);
-          timer = setTimeout(() => {
-            rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
-          }, 150);
-        });
-        // ==================== END PATCH: hold watcher handle ====================
-      } catch (e) {
-        logger.warn('[CLUSTER] fs.watch perfis.json falhou; prossegue sem watcher.', { error: e && e.message || e });
-      }
-    } else {
-      logger.info('[CLUSTER][REB] watcher disabled (CLUSTER_AUTO_REBALANCE!=1)');
+    const enabled = String(process.env.CLUSTER_AUTO_REBALANCE || '1') !== '0';
+    if (!enabled) {
+      logger.info('[CLUSTER][REB] watcher disabled (CLUSTER_AUTO_REBALANCE=0)');
+      return;
+    }
+    let timer = null;
+    try {
+      perfisWatcher = fs.watch(perfisFile, { persistent: false }, () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
+        }, 150);
+      });
+    } catch (e) {
+      logger.warn('[CLUSTER] fs.watch perfis.json falhou; cadastro ainda cresce via API/ensureAssigned.', { error: e && e.message || e });
     }
   })();
 
-  return { plan, children, sendWorkerCommand, kill, rebalance };
+  async function reshuffleFairIfIdle(reason = 'open_all') {
+    if (isShuttingDown) return { ok: false, error: 'shutting_down', reshuffled: false };
+    const checks = await Promise.all(
+      children.map((_, i) => sendTo(i, 'shard-busy-count', {}, { timeoutMs: 8000 }))
+    );
+    let connected = 0;
+    let unknown = 0;
+    for (const r of checks) {
+      if (!r || r.ok === false) unknown += 1;
+      else connected += Math.max(0, Number(r.connected) || 0);
+    }
+    if (unknown > 0 || connected > 0) {
+      logger.info('[CLUSTER][REB] fair_reshuffle skipped', {
+        reason: String(reason || ''),
+        connected,
+        unknown,
+        nodes: children.length
+      });
+      return { ok: true, reshuffled: false, connected, unknown, nodes: children.length };
+    }
+    const namesNow = (fileStore.loadPerfisJson() || []).map((p) => p && p.nome).filter(Boolean);
+    const fair = planFairReshuffle({ names: namesNow, nodes: Math.max(1, children.length) });
+    await applyShardsToWorkers(fair.nextShards, String(reason || 'open_all') + ':fair_idle');
+    logger.info('[CLUSTER][REB] fair_reshuffle', {
+      reason: String(reason || ''),
+      accounts: fair.accounts,
+      nodes: fair.nodes,
+      sizes: fair.nextShards.map((s) => s.length)
+    });
+    return {
+      ok: true,
+      reshuffled: true,
+      connected: 0,
+      unknown: 0,
+      accounts: fair.accounts,
+      nodes: fair.nodes,
+      sizes: fair.nextShards.map((s) => s.length)
+    };
+  }
+
+  return { plan, children, sendWorkerCommand, kill, rebalance, reshuffleFairIfIdle };
 }
 
 module.exports = { createCluster };
