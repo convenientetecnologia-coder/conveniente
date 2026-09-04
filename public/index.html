@@ -346,6 +346,8 @@
     // Quando um comando remoto (via notificador) dispara "close_all", o lock precisa refletir aqui também.
     let stopAllRemoteLock = false;
     let massMiscLock = false; // Novo lock para ações de massa diversas (invoke/resume)
+    window.__openAllWatchedThisPage = false;
+    window.__openAllPartialHint = '';
     function isMassActionRunning(){ return startAllLock || stopAllLock || massMiscLock; }
     function alertMassActionRunning(msg){
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
@@ -2519,6 +2521,7 @@
       try {
         const oa = st && st.openAll ? st.openAll : null;
         const startBtn = document.getElementById('startAllBtn');
+        if (oa && oa.active === true) window.__openAllWatchedThisPage = true;
         if (startBtn) {
           if (oa && oa.active === true && Array.isArray(oa.queue) && oa.queue.length) {
             // Progresso: conta quantos nomes do queue estão active=true
@@ -2535,23 +2538,23 @@
             startBtn.style.cursor = 'not-allowed';
             startBtn.textContent = `Abrindo (modo seguro)... ${opened}/${total}`;
             startBtn.title = (oa.lastError ? ('OpenAll: ' + String(oa.lastError)) : '') + (oa.lastOpened ? (` | último: ${oa.lastOpened}`) : '');
+            window.__openAllPartialHint = '';
           } else {
-            // Se acabou e foi parcial, avisar 1x por doneAt (sem spam).
-            const doneAt = oa && typeof oa.doneAt === 'number' ? oa.doneAt : 0;
-            if (doneAt && doneAt !== (window.__lastOpenAllDoneAt || 0)) {
-              window.__lastOpenAllDoneAt = doneAt;
-              if (oa && oa.lastError === 'partial_ram') {
-                const opened = (typeof oa.partialOpened === 'number') ? oa.partialOpened : null;
-                const total = (typeof oa.partialTotal === 'number') ? oa.partialTotal : null;
-                try { alert(`Abrir Todos concluído (parcial por RAM). ${opened!=null&&total!=null?`${opened}/${total}`:'Veja detalhes no painel.'}`); } catch {}
-              }
+            // NUNCA alert() de job antigo. lastError/partial_ram vive em desired.json e
+            // o ack (__lastOpenAllDoneAt) morria no F5/reboot — o modal voltava sozinho.
+            // Só anota no title se esta aba viu o Abrir Todos ativo e ele acabou agora.
+            if (window.__openAllWatchedThisPage === true && oa && oa.lastError === 'partial_ram') {
+              const opened = (typeof oa.partialOpened === 'number') ? oa.partialOpened : null;
+              const total = (typeof oa.partialTotal === 'number') ? oa.partialTotal : null;
+              window.__openAllPartialHint = (opened != null && total != null)
+                ? (`Abrir Todos: parcial por RAM ${opened}/${total}`)
+                : 'Abrir Todos: parcial por RAM';
             }
-            // Estado normal
             startBtn.disabled = false;
             startBtn.style.opacity = '';
             startBtn.style.cursor = '';
             startBtn.textContent = 'Abrir Todos 24h';
-            startBtn.title = '';
+            startBtn.title = window.__openAllPartialHint || '';
           }
         }
       } catch {}

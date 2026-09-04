@@ -1149,6 +1149,21 @@ function isPerfilAtivo(nome) {
 }
 
 //// RESETAR desired TODOS OFF ao boot ////
+// Cadáver de "Abrir Todos" (ex.: lastError=partial_ram + doneAt antigo) não pode
+// reaparecer no dashboard como se tivesse acabado agora. O painel antigo avisava
+// 1x por doneAt só em memória da aba — F5/reboot zera o ack e o alert volta.
+function neutralizeOpenAllAfterBoot(openAll, { nowMs } = {}) {
+  const now = (typeof nowMs === 'number' && nowMs > 0) ? nowMs : Date.now();
+  if (!openAll || typeof openAll !== 'object') return openAll || null;
+  if (openAll.active === true) {
+    return { ...openAll, active: false, doneAt: now, lastError: 'boot_reset' };
+  }
+  if (openAll.lastError || openAll.partial === true) {
+    return { ...openAll, active: false, lastError: null, partial: false };
+  }
+  return openAll;
+}
+
 async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
   // Importante: precisa ser awaited no boot para não haver corrida com workers lendo desired.json.
   // Também não deve estourar unhandled rejection (lock timeout) => try/catch.
@@ -1175,10 +1190,10 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
         desired.perfis[nome] = next;
         if (cur.active !== false || String(cur.virtus || '') !== 'off' || cur.humanHold === true) changed++;
       }
-      // Cancela open_all pendente (política: nunca auto-abrir após restart).
+      // Cancela open_all pendente E apaga lastError de job já morto (política: nunca auto-abrir após restart).
       try {
-        if (desired._openAll && desired._openAll.active === true) {
-          desired._openAll = { ...(desired._openAll || {}), active: false, doneAt: Date.now(), lastError: 'boot_reset' };
+        if (desired._openAll) {
+          desired._openAll = neutralizeOpenAllAfterBoot(desired._openAll, { nowMs: Date.now() });
         }
       } catch {}
       desired._boot = { ...(desired._boot || {}), ts: Date.now(), reason: String(reason || '').slice(0, 120) };
@@ -1297,7 +1312,7 @@ module.exports = {
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
   findChromeStablePath, readInstalledChromeVersion, alignUaToInstalledChrome, extractChromeMajorFromUa,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
-  resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
+  resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
