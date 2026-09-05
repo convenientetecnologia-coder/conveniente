@@ -186,6 +186,28 @@ function writeHeartbeat() {
   } catch {}
 }
 
+function noteUnexpectedDead() {
+  if (role !== "index") return;
+  let prev = null;
+  try { prev = readHeartbeat(); } catch { prev = null; }
+  const prevPid = prev && Number(prev.pid);
+  if (!prevPid || prevPid === process.pid) return;
+  const tail = readTail(120);
+  const hadExit = (tail || []).some((e) =>
+    e && e.event === "exit" && (!e.role || e.role === "index") && Number(e.pid) === prevPid
+  );
+  if (hadExit) return;
+  const prevTs = Number(prev.ts) || 0;
+  append("unexpected_dead", {
+    prevPid,
+    prevHbIso: prev.iso || null,
+    prevUptimeSec: prev.uptimeSec != null ? Number(prev.uptimeSec) : null,
+    gapSec: prevTs ? Math.round((Date.now() - prevTs) / 1000) : null,
+    prevFleet: prev.fleet || null,
+    reason: "prev_index_sem_exit"
+  });
+}
+
 function writeBootContext() {
   if (role !== "index") return;
   try {
@@ -245,6 +267,7 @@ function install(opts) {
     } catch {}
   }
 
+  noteUnexpectedDead();
   append("boot", { cwd: clip(process.cwd(), 200), fleet: readFleetSnap() });
   writeHeartbeat();
   writeBootContext();

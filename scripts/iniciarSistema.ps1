@@ -201,10 +201,13 @@ function Start-ConvenienteNodeHost {
         [Parameter(Mandatory = $true)][string]$IndexPath,
         [Parameter(Mandatory = $true)][string]$WorkDir
     )
-    $nodeQ = $NodeExe.Replace("'", "''")
-    $idxQ = $IndexPath.Replace("'", "''")
-    $inner = '& { $Host.UI.RawUI.WindowTitle=''Conveniente_Node''; [Console]::Title=''Conveniente_Node''; & ''' + $nodeQ + ''' ''' + $idxQ + ''' }'
-    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+    $hostPs1 = 'C:\conveniente\scripts\convenienteNodeHost.ps1'
+    $arg = @(
+        '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $hostPs1,
+        '-NodeExe', $NodeExe,
+        '-IndexPath', $IndexPath
+    )
     return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
