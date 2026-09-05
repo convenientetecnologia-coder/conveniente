@@ -1,15 +1,18 @@
-# Host visivel do index. Se o node morrer e esta janela ficar, grava o codigo.
+# Host visivel do index. Resolve o node sozinho (Program Files tem espaco).
+# Se o node morrer e esta janela ficar, grava o codigo.
 # Se a janela sumir junto, nao grava — morte da arvore (X / sessao / taskkill).
-param(
-    [Parameter(Mandatory = $true)][string]$NodeExe,
-    [Parameter(Mandatory = $true)][string]$IndexPath
-)
 $ErrorActionPreference = 'Continue'
 try {
     $Host.UI.RawUI.WindowTitle = 'Conveniente_Node'
     [Console]::Title = 'Conveniente_Node'
 } catch {}
-& $NodeExe $IndexPath
+$node = $null
+try { $node = (Get-Command node -ErrorAction SilentlyContinue).Source } catch {}
+if (-not $node) { $node = 'C:\Program Files\nodejs\node.exe' }
+$idx = 'C:\conveniente\index.js'
+if (-not (Test-Path -LiteralPath $node)) { throw "node_missing: $node" }
+if (-not (Test-Path -LiteralPath $idx)) { throw "index_missing: $idx" }
+& $node $idx
 $ec = 0
 try { $ec = [int]$LASTEXITCODE } catch { $ec = -1 }
 $hex = 'na'

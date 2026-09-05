@@ -202,12 +202,7 @@ function Start-ConvenienteNodeHost {
         [Parameter(Mandatory = $true)][string]$WorkDir
     )
     $hostPs1 = 'C:\conveniente\scripts\convenienteNodeHost.ps1'
-    $arg = @(
-        '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', $hostPs1,
-        '-NodeExe', $NodeExe,
-        '-IndexPath', $IndexPath
-    )
+    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -File "' + $hostPs1 + '"'
     return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
