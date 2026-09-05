@@ -2131,6 +2131,8 @@ async function ensureTerminalHumanHoldOnce(nome, { reason = 'human_mode' } = {})
   if (ctrl && isLiveBrowserCtrl(ctrl)) {
     if (!isHumanAlreadyInvoked(nome, ctrl)) {
       await enterHumanMode(nome, ctrl, { reason: String(reason || 'human_mode') });
+    } else {
+      try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'terminal_already_human', onlyIfReady: true }); } catch {}
     }
     return { ok: true, invoked: true };
   }
@@ -2142,6 +2144,10 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
   const invoked = !!(live && ctrl && ctrl.humanControl === true && want && want.humanHold === true);
   if (live && !invoked) {
     try { await enterHumanMode(nome, ctrl, { reason: String(reason || 'human_mode') }); } catch {}
+    return;
+  }
+  if (live && invoked) {
+    try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'nurse_already_human', onlyIfReady: true }); } catch {}
   }
 }
 
@@ -2288,6 +2294,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
       if (ctrl) {
         ctrl.trabalhando = false;
         try { await stopVirtus(nome); } catch {}
+        try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'enter_human_mode_already', onlyIfReady: true }); } catch {}
       }
     } catch {}
     return;
@@ -2315,6 +2322,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
           });
         } catch {}
       }
+      try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'enter_human_mode', onlyIfReady: true }); } catch {}
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
@@ -10595,6 +10603,7 @@ async function robeQueuedCycle(nome, source = 'auto') {
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         return;
       }
+      try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'robe_cycle', onlyIfArmed: true }); } catch {}
 
       try { logger.info('[WORKER][robeQueuedCycle] Robe start', { nome, source: src }); } catch {}
       try { await reportAction(nome, 'robe_start', `Iniciando Robe via fila global (${src})`); } catch {}
@@ -11363,6 +11372,8 @@ async function start_work({ nome, operator }) {
       logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
       return { ok: false, error: 'profile_in_human_or_config' };
     }
+
+    try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'start_work', onlyIfArmed: true }); } catch {}
 
     // Guardrail enterprise: se flags persistentes indicam PIL, bloquear automação SEMPRE.
     // Isso garante que "Recurso em análise" (appealSubmitted) e "Conta suspensa" não voltem a ficar Virtus Online após restart/open-all.
@@ -13310,6 +13321,7 @@ const handlers = {
 
         if (shouldInvoke) {
           try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0,80)}` }); } catch {}
+          try { await enterHumanMode(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0, 80)}` }); } catch {}
           try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: why.slice(0, 160) }); } catch {}
         }
 
@@ -14752,6 +14764,8 @@ const handlers = {
         try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_err', nome: String(nome || ''), error: String((e && e.message) || e).slice(0, 160) }); } catch {}
       }
 
+      try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'invoke_human', onlyIfReady: true }); } catch {}
+
       await snapshotStatusAndWrite();
 
       logger.info('[HANDLER] invoke_human ok', { nome });
@@ -14913,6 +14927,7 @@ const handlers = {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
+      try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'human_resume' }); } catch {}
       // Libera browser para o motor: limpa flag + timers de "fora do inbox" antes de qualquer nav/boot.
       try { await syncDeltaHumanHoldBrowserGuard(nome, false, { reason: 'human_resume' }); } catch {}
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.

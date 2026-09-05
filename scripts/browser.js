@@ -101,24 +101,102 @@ function isDeltaMotorEnabledRuntime() {
 }
 
 /**
- * Traz a janela do navegador para frente e maximiza.
- * Use SOMENTE ao injetar cookies ou invocar humano.
+ * Traz a janela do navegador para frente. Sem maximize, sem vidro.
+ * Maximize+vidro existem só em enableGlassForHuman (invocar humano).
+ * Use ao injetar cookies / focar a conta no trabalho.
  */
 async function bringWindowToFront(page) {
   try {
     await page.bringToFront();
-    if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) return;
-    await chromeHeapFaxina.withEphemeralCdpSession(page, async (client) => {
-      const { windowId } = await client.send('Browser.getWindowForTarget');
-      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
-    });
   } catch (e) {
     const msg = (e && e.message) || String(e);
-    if (/Target closed|Network\.enable|Protocol error/i.test(msg)) logger.warn('[bringWindowToFront] CDP falhou (target/timeout) — skip maximizar', { err: msg.slice(0, 80) });
+    if (/Target closed|Network\.enable|Protocol error/i.test(msg)) {
+      logger.warn('[bringWindowToFront] bringToFront falhou (target/timeout)', { err: msg.slice(0, 80) });
+    }
     try { await page.bringToFront(); } catch {}
   }
-  try { await glassViewer.applyGlassViewer(page, { source: 'bringWindowToFront' }); } catch {}
+}
+
+function resolveAccountViewportSize(manifest) {
+  const b = resolveAccountWindowBounds(manifest);
+  return { width: b.width, height: b.height };
+}
+
+async function firstLivePage(browser) {
+  if (!browser) return null;
+  let pages = [];
+  try { pages = await browser.pages(); } catch { pages = []; }
+  for (const page of pages || []) {
+    if (!page) continue;
+    try {
+      if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) continue;
+    } catch {}
+    return page;
+  }
+  return null;
+}
+
+function markBrowserGlass(browser, on) {
+  try { if (browser) browser._ctGlassHumanArmed = on === true; } catch {}
+}
+
+function syncBrowserGlassFlag(browser, pages) {
+  if (!browser) return;
+  let any = false;
+  for (const page of pages || []) {
+    if (glassViewer.isGlassArmed(page)) { any = true; break; }
+  }
+  markBrowserGlass(browser, any);
+}
+
+async function enableGlassForHumanBrowser(browser, opts = {}) {
+  const page = await firstLivePage(browser);
+  if (!page) return { ok: false, reason: 'no_page' };
+  const skipIfReady = !!(opts && (opts.onlyIfReady === true || opts.onlyIfDisarmed === true));
+  if (skipIfReady && glassViewer.isGlassReady(page)) {
+    markBrowserGlass(browser, true);
+    return { ok: true, skipped: 'already_ready' };
+  }
+  markBrowserGlass(browser, true);
+  try {
+    await glassViewer.enableGlassForHuman(page, { source: String((opts && opts.source) || 'human').slice(0, 80) });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e).slice(0, 160) };
+  }
+}
+
+async function disableGlassForWorkBrowser(browser, nome, opts = {}) {
+  if (!browser) return { ok: false, reason: 'no_browser' };
+  let manifest = null;
+  try { manifest = await manifestStore.read(nome); } catch {}
+  const windowSize = resolveAccountViewportSize(manifest || {});
+  let pages = [];
+  try { pages = await browser.pages(); } catch { pages = []; }
+  const onlyIfArmed = !!(opts && opts.onlyIfArmed === true);
+  let n = 0;
+  for (const page of pages || []) {
+    if (!page) continue;
+    try {
+      if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) continue;
+    } catch {}
+    if (onlyIfArmed && !glassViewer.isGlassArmed(page)) {
+      if (page._ctGlassRuntimeInstalled) {
+        try { await glassViewer.scrubIdleGlassPaint(page); } catch {}
+      }
+      continue;
+    }
+    try {
+      await glassViewer.disableGlassForWork(page, {
+        windowSize,
+        source: String((opts && opts.source) || 'human_resume').slice(0, 80)
+      });
+      n += 1;
+    } catch {}
+  }
+  if (!onlyIfArmed) markBrowserGlass(browser, false);
+  else syncBrowserGlassFlag(browser, pages);
+  return { ok: true, pages: n };
 }
 
 /**
@@ -1153,7 +1231,6 @@ async function _blindarOnce(page, nome) {
   page._convenientePatchedNome = String(nome);
   page._convenientePatchedAt = Date.now();
   try { chromeHeapFaxina.attachErrorSink(page); } catch {}
-  try { await glassViewer.applyGlassViewer(page, { source: 'blindar' }); } catch {}
 }
 
 async function blindarPaginaDaConta(page, nome, opts = {}) {
@@ -1378,6 +1455,14 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
             source: gateBusy ? 'targetcreated_gate' : 'targetcreated_popup',
             tries: gateBusy ? 1 : BLINDAR_TRIES
           });
+          if (browser._ctGlassHumanArmed === true) {
+            try {
+              const pagesNow = await browser.pages().catch(() => []);
+              if (pagesNow && pagesNow[0] === p) {
+                await glassViewer.enableGlassForHuman(p, { source: 'targetcreated_human_main' });
+              }
+            } catch {}
+          }
         } catch (e) {
           if (!gateBusy && !_isAccountPageClosed(p)) {
             let opener = null;
@@ -2471,21 +2556,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw e;
     }
 
-    // Operador: vidro maximizado. Identidade da página continua o setViewport do preset (já colado no portão).
-    // Visor: 1:1 se o preset cabe; encaixa se nao cabe. Nao altera innerWidth.
-    try {
-      const pagesNow = await browser.pages();
-      const firstMax = pagesNow && pagesNow[0];
-      if (firstMax) {
-        await chromeHeapFaxina.withEphemeralCdpSession(firstMax, async (clientMax) => {
-          const { windowId } = await clientMax.send('Browser.getWindowForTarget');
-          await clientMax.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
-        });
-        try { await glassViewer.applyGlassViewer(firstMax, { source: 'openBrowser' }); } catch {}
-      }
-    } catch (e) {
-      logger.warn('[BROWSER] Falha ao maximizar janela do operador (seguindo): ' + ((e && e.message) || e));
-    }
+    // Trabalho: janela fica no preset. Vidro (maximize+scale+zoom) só no invocar humano.
 
     browser.getPageCount = async () => (await browser.pages()).length;
 
@@ -5170,8 +5241,12 @@ async function invocarHumano(browser, nome, opts = {}) {
         try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
       }
       try { await withTimeout(bringWindowToFront(page), 5000); } catch {}
+      markBrowserGlass(browser, true);
+      try { await withTimeout(glassViewer.enableGlassForHuman(page, { source: 'invocarHumano' }), 8000); } catch {}
       return { ok: true, skippedNav: false };
     }
+    markBrowserGlass(browser, true);
+    try { await withTimeout(glassViewer.enableGlassForHuman(page, { source: 'invocarHumano' }), 8000); } catch {}
     return { ok: true, skippedNav: true, reason: skipNav ? 'flag_skip' : 'problem_url' };
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][invocarHumano] erro: ' + ((e && e.message) || e)); } } catch {}
@@ -7959,6 +8034,8 @@ module.exports = {
   openBrowser,
   configureProfile,
   invocarHumano,
+  enableGlassForHumanBrowser,
+  disableGlassForWorkBrowser,
   patchPage,
   blindarPaginaDaConta,
   newPageDaConta,

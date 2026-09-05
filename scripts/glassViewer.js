@@ -1,11 +1,25 @@
 'use strict';
 
 /**
- * CONTRATO VIDRO/VISOR (identidade intocada)
+ * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v2
+ *
+ * Trabalho (Abrir Tudo / Robe / Virtus / configure):
+ *   - Identidade: page.setViewport(preset) — uns maiores, outros menores.
+ *   - Janela fisica = tamanho do preset. SEM maximize, SEM scale, SEM HUD,
+ *     SEM hook de navegacao, SEM DeviceMetricsOverride de visor.
+ *   - applyGlassViewer sem arma humana e no-op (zero CDP).
+ *
+ * Humano (invocar humano / enterHumanMode):
+ *   - enableGlassForHuman arma a page e so ai monta o vidro:
+ *     janela maximizada + scale/letterbox + zoom Ctrl+/- + HUD.
+ *
+ * Retomar trabalho:
+ *   - disableGlassForWork desarma PRIMEIRO, tira o hook, apaga paint/HUD,
+ *     volta a janela para o tamanho do preset, relock do setViewport.
  *
  * 1) Identidade: page.setViewport(preset) permanece. innerWidth/innerHeight/DPR
  *    nao mudam aqui.
- * 2) Vidro: janela maximizada na MAE (cobre os outros Chromes).
+ * 2) Vidro: janela maximizada na MAE — SOMENTE com arma humana.
  * 3) Visor: encaixa o preset no vidro (scale up ou down, contain). Se a
  *    proporcao nao fecha, letterbox centralizado — nao recorta o canto
  *    superior esquerdo. Zoom do operador (Ctrl +/- / roda com Ctrl) pode
@@ -14,6 +28,7 @@
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
+ *    Sem vidro, o overlay cai no inner/outer (ja e o fallback).
  *
  * Prova empirica (Chrome headful): setPageScaleFactor nao encolhe;
  * DeviceMetricsOverride recorta o canto superior esquerdo quando tambem
@@ -23,6 +38,9 @@
  * no html encaixa compositor + TR.
  *
  * Geometria colapsada (fit < 0.40 ou vidro minusculo) nao aplica scale.
+ *
+ * GLASS_VIEWER=0: kill-switch ate no humano (nao pinta). Default 1 = vidro
+ * disponivel para humano, nao "ligado o tempo todo".
  */
 
 const logger = require('./logger.js');
@@ -50,6 +68,52 @@ const GLASS_VIEWER_ACTIVE = String(process.env.GLASS_VIEWER || '1').trim() !== '
 
 function isGlassViewerEnabled() {
   return GLASS_VIEWER_ACTIVE === true;
+}
+
+function isGlassArmed(page) {
+  return !!(page && page._ctGlassHumanArmed === true);
+}
+
+function isGlassReady(page) {
+  if (!isGlassArmed(page)) return false;
+  if (page._ctGlassPainted === true) return true;
+  const st = readState(page);
+  return !!(st && st.disabled === true);
+}
+
+function snapshotIdentityViewport(page) {
+  if (page && page._ctGlassIdentityVp && page._ctGlassIdentityVp.width >= 800 && page._ctGlassIdentityVp.height >= 600) {
+    return page._ctGlassIdentityVp;
+  }
+  if (!page || typeof page.viewport !== 'function') return null;
+  const vp = page.viewport() || {};
+  const width = Math.floor(num(vp.width, 0));
+  const height = Math.floor(num(vp.height, 0));
+  if (width < 800 || height < 600) return null;
+  const dprRaw = num(vp.deviceScaleFactor, 1);
+  const snap = {
+    width,
+    height,
+    deviceScaleFactor: (dprRaw >= 1 && dprRaw <= 3) ? dprRaw : 1,
+    isMobile: vp.isMobile === true,
+    hasTouch: vp.hasTouch === true,
+    isLandscape: vp.isLandscape === true
+  };
+  page._ctGlassIdentityVp = snap;
+  return snap;
+}
+
+function armGlass(page) {
+  if (page) page._ctGlassHumanArmed = true;
+}
+
+function disarmGlass(page) {
+  if (!page) return;
+  page._ctGlassHumanArmed = false;
+  page._ctGlassPainted = false;
+  page._ctGlassApplyQueued = '';
+  try { clearTimeout(page._ctGlassNavTimer); } catch {}
+  page._ctGlassNavTimer = null;
 }
 
 function geometryLooksCollapsed(st) {
@@ -436,7 +500,7 @@ async function clearGlassPaint(page) {
 
 async function paint(page) {
   if (pageClosed(page)) return;
-  if (!isGlassViewerEnabled()) {
+  if (!isGlassArmed(page) || !isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     return;
   }
@@ -455,8 +519,20 @@ function pageInstallRuntime() {
     const restore = () => {
       try {
         const st = window.__ctGlassViewerState;
-        if (!st) return;
         const html = document.documentElement;
+        if (!st) {
+          if (html && html.style.transform && html.style.transform !== 'none') {
+            html.style.transform = 'none';
+            html.style.transformOrigin = '';
+            html.style.backfaceVisibility = '';
+            html.style.overflow = '';
+          }
+          try {
+            const hud = document.getElementById('ct-glass-viewer-hud');
+            if (hud) hud.remove();
+          } catch (e2) {}
+          return;
+        }
         if (!html) return;
         const z = Number(st.zoom) || 1;
         const px = Number(st.panX) || 0;
@@ -481,6 +557,7 @@ function pageInstallRuntime() {
     } catch (e) {}
     window.addEventListener('keydown', (ev) => {
       try {
+        if (!window.__ctGlassViewerState) return;
         if (!(ev.ctrlKey || ev.metaKey)) return;
         if (ev.key === '+' || ev.key === '=' || ev.code === 'NumpadAdd') {
           ev.preventDefault();
@@ -497,6 +574,7 @@ function pageInstallRuntime() {
     window.addEventListener('wheel', (ev) => {
       try {
         const st = window.__ctGlassViewerState;
+        if (!st) return;
         if (ev.ctrlKey || ev.metaKey) {
           ev.preventDefault();
           window.__ctGlassViewerCmd && window.__ctGlassViewerCmd({
@@ -505,7 +583,7 @@ function pageInstallRuntime() {
           });
           return;
         }
-        if (!st || st.needPan !== true) return;
+        if (st.needPan !== true) return;
         ev.preventDefault();
         const z = Number(st.zoom) > 0 ? Number(st.zoom) : 1;
         let dx = Number(ev.deltaX) || 0;
@@ -676,7 +754,7 @@ function hudScript() {
 
 async function paintHud(page) {
   if (pageClosed(page)) return;
-  if (!isGlassViewerEnabled()) {
+  if (!isGlassArmed(page) || !isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     return;
   }
@@ -742,7 +820,7 @@ async function refreshGeometry(page, { light = false } = {}) {
 
 async function handleHudCommand(page, cmd) {
   if (pageClosed(page)) return;
-  if (!isGlassViewerEnabled()) {
+  if (!isGlassArmed(page) || !isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     return;
   }
@@ -777,33 +855,72 @@ async function handleHudCommand(page, cmd) {
   return page._ctGlassHudTail;
 }
 
+function attachNavHookIfArmed(page) {
+  if (!isGlassArmed(page)) return;
+  if (page._ctGlassNavHook) return;
+  const onNav = (frame) => {
+    try {
+      if (!isGlassArmed(page)) return;
+      if (!frame || frame !== page.mainFrame()) return;
+      try { clearTimeout(page._ctGlassNavTimer); } catch {}
+      page._ctGlassNavTimer = setTimeout(() => {
+        if (!isGlassArmed(page)) return;
+        applyGlassViewer(page, { source: 'framenavigated' }).catch(() => {});
+      }, 220);
+    } catch {}
+  };
+  page._ctGlassNavHookFn = onNav;
+  page._ctGlassNavHook = true;
+  page.on('framenavigated', onNav);
+}
+
+function detachNavHook(page) {
+  if (!page) return;
+  try { clearTimeout(page._ctGlassNavTimer); } catch {}
+  page._ctGlassNavTimer = null;
+  if (page._ctGlassNavHookFn) {
+    try { page.off('framenavigated', page._ctGlassNavHookFn); } catch {}
+    page._ctGlassNavHookFn = null;
+  }
+  page._ctGlassNavHook = false;
+}
+
 async function applyGlassViewerOnce(page, opts = {}) {
   const source = String((opts && opts.source) || 'apply').slice(0, 80);
   const light = source === 'framenavigated';
-  if (!page._ctGlassNavHook) {
-    page._ctGlassNavHook = true;
-    page.on('framenavigated', (frame) => {
-      try {
-        if (!frame || frame !== page.mainFrame()) return;
-        try { clearTimeout(page._ctGlassNavTimer); } catch {}
-        page._ctGlassNavTimer = setTimeout(() => {
-          applyGlassViewer(page, { source: 'framenavigated' }).catch(() => {});
-        }, 220);
-      } catch {}
-    });
+  if (!isGlassArmed(page)) {
+    return readState(page);
   }
   if (!isGlassViewerEnabled()) {
     await clearGlassPaint(page);
+    page._ctGlassPainted = false;
     return writeState(page, {
       zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
       userZoom: false, disabled: true, collapsed: false
     });
   }
+  attachNavHookIfArmed(page);
   await installRuntime(page);
+  if (!isGlassArmed(page)) {
+    await clearGlassPaint(page);
+    return readState(page);
+  }
   let st = await refreshGeometry(page, { light });
+  if (!isGlassArmed(page)) {
+    await clearGlassPaint(page);
+    return readState(page);
+  }
   if (geometryLooksCollapsed(st) && !light) {
     await sleep(180);
+    if (!isGlassArmed(page)) {
+      await clearGlassPaint(page);
+      return readState(page);
+    }
     st = await refreshGeometry(page, { light: false });
+  }
+  if (!isGlassArmed(page)) {
+    await clearGlassPaint(page);
+    return readState(page);
   }
   if (geometryLooksCollapsed(st)) {
     const next = writeState(page, {
@@ -811,6 +928,7 @@ async function applyGlassViewerOnce(page, opts = {}) {
       userZoom: false, collapsed: true, disabled: false
     });
     await clearGlassPaint(page);
+    page._ctGlassPainted = false;
     if (!page._ctGlassCollapsedLogged) {
       page._ctGlassCollapsedLogged = true;
       try {
@@ -827,6 +945,7 @@ async function applyGlassViewerOnce(page, opts = {}) {
   writeState(page, { collapsed: false, disabled: false });
   await paint(page);
   await paintHud(page);
+  if (isGlassArmed(page)) page._ctGlassPainted = true;
   const logSig = [
     Math.round(st.zoom * 10000),
     Math.round(st.glassW),
@@ -859,6 +978,7 @@ async function applyGlassViewerOnce(page, opts = {}) {
 
 async function applyGlassViewer(page, opts = {}) {
   if (!page || pageClosed(page)) return null;
+  if (!isGlassArmed(page)) return readState(page);
   const source = String((opts && opts.source) || 'apply').slice(0, 80);
   if (page._ctGlassApplyInflight) {
     page._ctGlassApplyQueued = source;
@@ -879,7 +999,7 @@ async function applyGlassViewer(page, opts = {}) {
       page._ctGlassApplyInflight = null;
       const queued = page._ctGlassApplyQueued;
       page._ctGlassApplyQueued = '';
-      if (queued && !pageClosed(page)) {
+      if (queued && !pageClosed(page) && isGlassArmed(page)) {
         try { await applyGlassViewer(page, { source: queued }); } catch {}
       }
     }
@@ -887,8 +1007,117 @@ async function applyGlassViewer(page, opts = {}) {
   return page._ctGlassApplyInflight;
 }
 
+async function restoreWindowToWork(page, size) {
+  if (pageClosed(page)) return false;
+  const wantW = Math.floor(num(size && size.width, 0));
+  const wantH = Math.floor(num(size && size.height, 0));
+  try {
+    const auxiliary = await isAuxiliaryWindow(page);
+    if (auxiliary) return false;
+    const client = await page.target().createCDPSession();
+    try {
+      const { windowId } = await client.send('Browser.getWindowForTarget');
+      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      await sleep(80);
+      const info = await client.send('Browser.getWindowBounds', { windowId });
+      const cur = (info && info.bounds) || {};
+      const curW = num(cur.width, 0);
+      const curH = num(cur.height, 0);
+      const stillHuge = wantW >= 800 && wantH >= 600 && (curW > wantW + 80 || curH > wantH + 80);
+      if (stillHuge) {
+        await client.send('Browser.setWindowBounds', {
+          windowId,
+          bounds: {
+            windowState: 'normal',
+            left: Math.floor(num(cur.left, 0)),
+            top: Math.floor(num(cur.top, 0)),
+            width: wantW,
+            height: wantH
+          }
+        });
+      }
+      return true;
+    } finally {
+      try { await client.detach(); } catch {}
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function relockViewportIdentity(page, identity) {
+  if (pageClosed(page)) return false;
+  const snap = (identity && identity.width >= 800 && identity.height >= 600)
+    ? identity
+    : (page._ctGlassIdentityVp || snapshotIdentityViewport(page));
+  if (!snap || snap.width < 800 || snap.height < 600) return false;
+  try {
+    await page.setViewport({
+      width: snap.width,
+      height: snap.height,
+      deviceScaleFactor: snap.deviceScaleFactor,
+      isMobile: snap.isMobile === true,
+      hasTouch: snap.hasTouch === true,
+      isLandscape: snap.isLandscape === true
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function enableGlassForHuman(page, opts = {}) {
+  if (!page || pageClosed(page)) return null;
+  snapshotIdentityViewport(page);
+  armGlass(page);
+  writeState(page, { disabled: false, collapsed: false });
+  try { await page.bringToFront(); } catch {}
+  const st = await applyGlassViewer(page, { source: String((opts && opts.source) || 'human').slice(0, 80) });
+  if (st && st.disabled !== true && st.collapsed !== true && isGlassArmed(page)) {
+    page._ctGlassPainted = true;
+  }
+  return st;
+}
+
+async function scrubIdleGlassPaint(page) {
+  if (!page || pageClosed(page) || isGlassArmed(page)) return false;
+  await clearGlassPaint(page);
+  return true;
+}
+
+async function disableGlassForWork(page, opts = {}) {
+  if (!page || pageClosed(page)) return null;
+  const identity = page._ctGlassIdentityVp || snapshotIdentityViewport(page);
+  disarmGlass(page);
+  detachNavHook(page);
+  if (page._ctGlassApplyInflight) {
+    try { await page._ctGlassApplyInflight; } catch {}
+  }
+  disarmGlass(page);
+  detachNavHook(page);
+  await clearGlassPaint(page);
+  await sleep(40);
+  await clearGlassPaint(page);
+  writeState(page, {
+    zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
+    userZoom: false, disabled: true, collapsed: false
+  });
+  const winSize = (identity && identity.width >= 800)
+    ? { width: identity.width, height: identity.height }
+    : (opts && opts.windowSize);
+  await restoreWindowToWork(page, winSize);
+  await relockViewportIdentity(page, identity);
+  return readState(page);
+}
+
 module.exports = {
   applyGlassViewer,
+  enableGlassForHuman,
+  disableGlassForWork,
+  scrubIdleGlassPaint,
+  snapshotIdentityViewport,
+  isGlassArmed,
+  isGlassReady,
   isGlassViewerEnabled,
   geometryLooksCollapsed,
   computeFitZoom,
