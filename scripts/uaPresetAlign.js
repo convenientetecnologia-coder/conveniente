@@ -157,6 +157,10 @@ function needsRealign(account, byId) {
   return { yes: false, reason: 'ok' };
 }
 
+function stillNeedsRealign(account) {
+  return needsRealign(account || {}, indexPresets(loadPresets()));
+}
+
 function applyViewportOntoRecord(rec, preset) {
   const next = Object.assign({}, rec || {});
   next.uaPresetId = String(preset.id);
@@ -295,6 +299,50 @@ async function alignAccount(nome, { persist = true, source = 'align' } = {}) {
   };
 }
 
+async function prepareManifestForOpen(nome, { source = 'activateOnce' } = {}) {
+  let last = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    last = await alignAccount(nome, { persist: true, source });
+    const man = last && last.manifest ? last.manifest : null;
+    if (last && last.ok && man) {
+      const need = stillNeedsRealign(man);
+      if (!need.yes) {
+        return {
+          ok: true,
+          changed: !!last.changed,
+          manifest: man,
+          fromId: last.fromId || null,
+          toId: last.toId || null,
+          reason: last.reason || need.reason,
+          pickReason: last.pickReason || null,
+          attempt: attempt + 1
+        };
+      }
+    }
+  }
+  const got = await readAccount(nome);
+  const need = stillNeedsRealign(got.base || {});
+  if (need.yes) {
+    return {
+      ok: false,
+      needsRealign: true,
+      error: (last && last.error) || need.reason,
+      reason: need.reason,
+      nome: String(nome || ''),
+      fromId: got.base && got.base.uaPresetId ? String(got.base.uaPresetId) : null,
+      manifest: got.man || null
+    };
+  }
+  return {
+    ok: true,
+    changed: false,
+    manifest: got.man || got.base,
+    fromId: got.base && got.base.uaPresetId ? String(got.base.uaPresetId) : null,
+    toId: got.base && got.base.uaPresetId ? String(got.base.uaPresetId) : null,
+    reason: 'ok'
+  };
+}
+
 async function alignAll({ inShard = null, persist = true, source = 'command', operator = '' } = {}) {
   const perfis = fileStore.loadPerfisJson() || [];
   const out = {
@@ -364,8 +412,10 @@ module.exports = {
   fpLooksHeavy,
   presetLooksHeavy,
   needsRealign,
+  stillNeedsRealign,
   pickReplacement,
   alignAccount,
+  prepareManifestForOpen,
   alignAll,
   loadPresets,
   loadPolicy

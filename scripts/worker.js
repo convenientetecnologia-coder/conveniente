@@ -7766,28 +7766,31 @@ async function activateOnce(nome, source = '', operator = '') {
           return { ok:false, error: 'manifest_incomplete' };
         }
         try {
-          const aligned = await uaPresetAlign.alignAccount(nome, { persist: true, source: 'activateOnce' });
-          if (aligned && aligned.ok && aligned.changed && aligned.manifest) {
-            manifest = aligned.manifest;
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'ua_preset_realign_on_activate',
-                nome: String(nome || ''),
-                fromId: aligned.fromId || null,
-                toId: aligned.toId || null,
-                reason: aligned.reason || null,
-                pickReason: aligned.pickReason || null
-              });
-            } catch {}
-          } else if (aligned && aligned.ok === false && aligned.needsRealign) {
-            await reportAction(nome, 'robe_error', 'ua preset gordo sem substituto; abertura bloqueada');
+          const prepared = await uaPresetAlign.prepareManifestForOpen(nome, { source: 'activateOnce' });
+          if (prepared && prepared.ok && prepared.manifest) {
+            manifest = prepared.manifest;
+            if (prepared.changed) {
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'ua_preset_realign_on_activate',
+                  nome: String(nome || ''),
+                  fromId: prepared.fromId || null,
+                  toId: prepared.toId || null,
+                  reason: prepared.reason || null,
+                  pickReason: prepared.pickReason || null
+                });
+              } catch {}
+            }
+          } else {
+            await reportAction(nome, 'robe_error', 'ua preset morto ou gordo; abertura bloqueada ate realinhar');
             if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
             return { ok: false, error: 'ua_preset_realign_failed' };
           }
         } catch (e) {
-          if (uaPresetAlign.fpLooksHeavy(manifest && manifest.fp)) {
-            await reportAction(nome, 'robe_error', 'ua preset gordo; realign falhou; abertura bloqueada');
+          const still = uaPresetAlign.stillNeedsRealign(manifest);
+          if (still && still.yes) {
+            await reportAction(nome, 'robe_error', 'ua preset morto ou gordo; realign falhou; abertura bloqueada');
             if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
             return { ok: false, error: 'ua_preset_realign_failed' };
           }

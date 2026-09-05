@@ -90,8 +90,10 @@ check("heavy_4k", align.fpLooksHeavy({ viewport: { width: 3840, height: 2160 }, 
 check("not_heavy_1920_125", align.fpLooksHeavy({ viewport: { width: 1920, height: 1200 }, dpr: 1.25 }) === false);
 
 check("worker_require", workerSrc.includes("require('./uaPresetAlign.js')"));
-check("worker_activate_hook", workerSrc.includes("ua_preset_realign_on_activate") && workerSrc.includes("source: 'activateOnce'"));
-check("worker_blocks_fat_open", workerSrc.includes("ua_preset_realign_failed"));
+check("worker_activate_hook", workerSrc.includes("prepareManifestForOpen") && workerSrc.includes("source: 'activateOnce'"));
+check("worker_blocks_unaligned_open", workerSrc.includes("ua_preset_realign_failed") && workerSrc.includes("stillNeedsRealign"));
+check("prepare_exported", typeof align.prepareManifestForOpen === "function");
+check("still_needs_exported", typeof align.stillNeedsRealign === "function");
 check("worker_handler", workerSrc.includes("async ['ua-presets-realign']"));
 check("cluster_broadcast", clusterSrc.includes("type === 'ua-presets-realign'"));
 check("api_route", apiSrc.includes("/api/ua-presets/realign"));
