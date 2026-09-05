@@ -29,8 +29,10 @@ check("ws_shrink_audit", /event:\s*'ws_shrink'/.test(workerSrc) && /function aud
 check("ws_shrink_skips_gates", /if \(!out \|\| out\.skipped === true\) return;/.test(workerSrc));
 check("cure_attempt_logs_error", /event:\s*'chrome_cure_attempt'[\s\S]{0,600}error:\s*\(result && result\.error\)/.test(workerSrc));
 check("crash_isolate_passes_error", /annihilateChromeSick\(nome,\s*'page_crash_isolate',\s*\{\s*error:\s*msg\s*\}/.test(workerSrc));
-check("pre_start_passes_cure_error", /annihilateChromeSick\(nome,\s*'robe_pre_start'[\s\S]{0,180}error:\s*\(cure && cure\.error\)/.test(workerSrc));
-check("nurse_timeout_passes_error", /annihilateChromeSick\(nome,\s*'nurse\.pages_timeout',\s*\{\s*error:/.test(workerSrc));
+check("pre_start_no_annihilate", !/annihilateChromeSick\(nome,\s*'robe_pre_start'/.test(workerSrc));
+check("nurse_timeout_no_annihilate", !/annihilateChromeSick\(nome,\s*'nurse\.pages_timeout'/.test(workerSrc));
+check("nurse_unusable_no_annihilate", !/annihilateChromeSick\(nome,\s*'nurse\.unusable'/.test(workerSrc));
+check("nurse_zombie_no_annihilate", !/annihilateChromeSick\(nome,\s*'nurse\.page_zombie/.test(workerSrc));
 check("gc_still_ephemeral", faxinaSrc.includes("createCDPSession") && faxinaSrc.includes("HeapProfiler.collectGarbage"));
 check("hygiene_still_detaches", hygieneSrc.includes("detachEphemeralCdp") && hygieneSrc.includes("detachCdpWhenSettled"));
 check("auto_enqueue_exists", workerSrc.includes("function robeEnqueueAuto") && workerSrc.includes("robeQueuedCycle"));

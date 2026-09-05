@@ -33,6 +33,8 @@ const ensureTxt = fs.readFileSync(ensurePs1, "utf8");
 const iniciarTxt = fs.readFileSync(iniciarPs1, "utf8");
 const indexTxt = fs.readFileSync(indexJs, "utf8");
 const sweepTxt = fs.readFileSync(sweepJs, "utf8");
+const hostPs1 = path.join(root, "scripts", "convenienteNodeHost.ps1");
+const hostTxt = fs.readFileSync(hostPs1, "utf8");
 const sync = require("../scripts/porteiroSync.js");
 
 const loopBody = kitTxt.split("function Do-Loop")[1] || "";
@@ -90,7 +92,10 @@ check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UA
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
 check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("winTuningMaster.ps1") < iniciarTxt.indexOf("Write-StartLog 'click'"));
 check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
-check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /\$Host\.UI\.RawUI\.WindowTitle/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
+check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
+check("host_node_detached", /Start-Process -FilePath \$node/.test(hostTxt) && /WindowStyle Hidden/.test(hostTxt) && !/& \$node \$idx/.test(hostTxt));
+check("host_x_does_not_kill", /Fechar o X nao mata o index/.test(hostTxt) && /\$Host\.UI\.RawUI\.WindowTitle/.test(hostTxt));
+check("host_ctrl_c_stops", /TreatControlCAsInput/.test(hostTxt) && /Stop-ConvenienteNodeTree/.test(hostTxt) && /taskkill\.exe \/F \/T \/PID/.test(hostTxt) && /Ctrl\+C para o sistema/.test(hostTxt));
 const lifeTxt = fs.readFileSync(path.join(root, "scripts", "indexLifecycle.js"), "utf8");
 check("life_sighup_listeners", /SIGBREAK/.test(lifeTxt) && /SIGHUP/.test(lifeTxt) && /handleConsoleSessionSignal/.test(lifeTxt));
 check("life_sighup_no_exit", /function handleConsoleSessionSignal[\s\S]{0,700}return \{ keptAlive: true, exited: false/.test(lifeTxt) && !/function handleConsoleSessionSignal[\s\S]{0,700}process\.exit/.test(lifeTxt));
@@ -117,7 +122,7 @@ check("iniciar_bat_removed", !fs.existsSync(path.join(root, "porteiro", "INICIAR
 check("install_kit_iniciar_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(instKitTxt) && /wscript\.exe/.test(instKitTxt));
 const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
 const doStopBody = (kitTxt.split("function Do-Stop")[1] || "").split("function Do-Start")[0];
-check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTxt) && /\$Host\.UI\.RawUI\.WindowTitle/.test(kitTxt) && /-NoExit/.test(kitTxt) && /WindowStyle Normal/.test(kitTxt) && /Start-ConvenienteNodeHost/.test(doStartBody) && !/Start-Process cmd\.exe/.test(kitTxt) && !/cmd\.exe \/c/.test(kitTxt));
+check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTxt) && /-NoExit/.test(kitTxt) && /WindowStyle Normal/.test(kitTxt) && /Start-ConvenienteNodeHost/.test(doStartBody) && !/Start-Process cmd\.exe/.test(kitTxt) && !/cmd\.exe \/c/.test(kitTxt));
 check("kit_do_stop_powershell_host", /function Stop-ConvenienteConsoleHosts/.test(kitTxt) && /powershell\.exe/.test(kitTxt) && /Stop-ConvenienteConsoleHosts/.test(doStopBody) && /index\.js/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_stop_cmd_leftover", /cmd\.exe/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));

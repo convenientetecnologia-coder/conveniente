@@ -80,9 +80,13 @@ check("empty_pages_still_junk", hy.pagesLookAllJunk([], { browser: b, nome: "x" 
 
 check("nurse_passes_tab_ctx", /pagesLookAllJunk\(pages,\s*tabCtx\)/.test(workerSrc));
 check("nurse_skips_opening", /if \(opening\[nome\]\) continue;[\s\S]{0,180}tabCtx/.test(workerSrc));
-check("nurse_clears_strikes_on_settle", /settle_newborn\|gate_busy\|robe_hold\|nav_detached_wait/.test(workerSrc));
-check("periodic_passes_tab_ctx", /pagesLookAllJunk\(pages,\s*tabCtx\)/.test(workerSrc));
-check("periodic_skips_robe_cure", /if \(!inRobe && !gateBusy\) \{\s*await tryCureAccountBrowser\(nome, \{ source: 'periodic_junk_only' \}\)/.test(workerSrc));
+check("nurse_no_trycure_unusable", !/tryCureAccountBrowser\(nome,\s*\{\s*source:\s*'nurse\.unusable'/.test(workerSrc));
+check("nurse_no_trycure_zombie", !/tryCureAccountBrowser\(nome,\s*\{\s*source:\s*'nurse\.page_zombie'/.test(workerSrc));
+check("periodic_no_trycure", !/periodic_junk_only/.test(workerSrc));
+check("periodic_blank_only", /periodic_cleanup_aboutblank/.test(workerSrc));
+check("pruner_respects_protected", /const protectedCtx = !!\(sendLockActive \|\| inRobe \|\| inConfig \|\| inHuman/.test(workerSrc));
+check("pruner_interval_2min", /function maybeStartPruneLoop[\s\S]{0,400}2 \* 60 \* 1000/.test(workerSrc));
+check("pruner_loop_no_cdp_cap", !/reason:\s*'prune_loop'/.test(workerSrc));
 check("cure_restore_throttle_on_skip", /if \(result && result\.skipped\) \{\s*robeMeta\[n\]\.lastChromeCureAt = last;/.test(workerSrc));
 check("blank_killer_waits_settle", browserSrc.includes("blank nascendo espera") && /age < settleMs/.test(browserSrc));
 check("blank_killer_still_kills_zombie", browserSrc.includes("about_blank_killed"));

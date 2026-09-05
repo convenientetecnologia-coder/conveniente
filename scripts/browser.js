@@ -2191,9 +2191,7 @@ function installOneTabGuard(browser, nome, {
           new Promise((r) => setTimeout(() => r(null), 4000))
         ]);
         if (!pagesWait) {
-          if (hygiene && typeof hygiene.closeRedundantVirtusTabs === 'function') {
-            await hygiene.closeRedundantVirtusTabs(browser, { nome, reason: 'one_tab_guard_pages_timeout' });
-          }
+          // pages() lento: espera o próximo targetcreated. Não fecha no escuro via CDP.
           return;
         }
         const pages = pagesWait;
