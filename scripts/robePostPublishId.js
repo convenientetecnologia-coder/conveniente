@@ -9,6 +9,7 @@
  * - runHumanVerifyId NUNCA marca a flag.
  * - Falha/timeout NUNCA invalida publish_ok (caller engole erros).
  * - Auto: se ID - sim → encerra na hora (sem selling/scan).
+ * - pageHandle: aba fechada != navegacao. Redirect create→selling nao e page_gone.
  * - Auto: se ID - nao → olha banner no TOPO do selling (sem scroll-hunt);
  *   tem ação → só segue se "Anunciado em" for HOJE (America/Sao_Paulo);
  *   anúncio de dia anterior → skip (falso positivo / já tratado ontem);
@@ -152,15 +153,24 @@ async function markDoneToday(nome) {
   return day;
 }
 
-async function pageAlive(page) {
+function pageHandleState(page) {
+  if (!page) return { ok: false, reason: 'no_page', url: '' };
   try {
-    if (!page) return false;
-    if (typeof page.isClosed === 'function' && page.isClosed()) return false;
-    await page.evaluate(() => true);
-    return true;
+    if (typeof page.isClosed === 'function' && page.isClosed()) {
+      return { ok: false, reason: 'closed', url: '' };
+    }
   } catch {
-    return false;
+    return { ok: false, reason: 'closed_throw', url: '' };
   }
+  let url = '';
+  try {
+    url = typeof page.url === 'function' ? String(page.url() || '') : '';
+  } catch {}
+  return { ok: true, reason: 'open', url };
+}
+
+function isSellingUrl(url) {
+  return /marketplace\/(you\/selling|you\/dashboard|profile)/i.test(String(url || ''));
 }
 
 async function clickByText(page, patterns, { withinDialog = false, exact = false } = {}) {
@@ -632,15 +642,39 @@ async function dismissTurbineUpsell(page, { deadlineAt } = {}) {
   return { ok: true, dismissed: true, via: 'escape_timeout' };
 }
 
+async function waitForSellingRedirect(page, { maxMs = 14000 } = {}) {
+  const t0 = Date.now();
+  const cap = Math.max(2000, Number(maxMs) || 14000);
+  let last = pageHandleState(page);
+  while ((Date.now() - t0) < cap) {
+    last = pageHandleState(page);
+    if (!last.ok) return last;
+    if (isSellingUrl(last.url)) return { ok: true, reason: 'redirect', url: last.url };
+    await sleep(400);
+  }
+  last = pageHandleState(page);
+  if (!last.ok) return last;
+  if (isSellingUrl(last.url)) return { ok: true, reason: 'redirect', url: last.url };
+  return { ok: false, reason: 'not_selling_yet', url: last.url };
+}
+
 async function ensureSellingFeed(page, { deadlineAt } = {}) {
   assertBudget(deadlineAt, 'selling_start');
-  let onSelling = false;
-  try {
-    onSelling = await page.evaluate(
-      () => /marketplace\/(you\/selling|you\/dashboard|profile)/.test(location.pathname || '')
-    );
-  } catch {
-    onSelling = false;
+  const handle = pageHandleState(page);
+  if (!handle.ok) {
+    const err = new Error('selling_page_closed');
+    err.code = 'ID_DOC_PAGE_CLOSED';
+    throw err;
+  }
+  let onSelling = isSellingUrl(handle.url);
+  if (!onSelling) {
+    const landed = await waitForSellingRedirect(page, { maxMs: 14000 });
+    if (!landed.ok && landed.reason !== 'not_selling_yet') {
+      const err = new Error('selling_page_closed');
+      err.code = 'ID_DOC_PAGE_CLOSED';
+      throw err;
+    }
+    onSelling = !!(landed && landed.ok);
   }
   if (!onSelling) {
     const connectLane = require('./connectLane.js');
@@ -1681,8 +1715,10 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
   const hardDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
   try {
-    if (!(await pageAlive(page))) {
-      logEvt(nome, source, 'skip_page_gone', {});
+    const handle0 = pageHandleState(page);
+    logEvt(nome, source, 'page_handle', { reason: handle0.reason, url: String(handle0.url || '').slice(0, 180) });
+    if (!handle0.ok) {
+      logEvt(nome, source, 'skip_page_gone', { why: handle0.reason });
       return { ok: true, skipped: true, reason: 'page_gone' };
     }
 
@@ -1703,8 +1739,9 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     // Budget gordo para o restante (só se ID - nao).
     const workDeadline = Math.min(hardDeadline, Date.now() + BUDGET_TOTAL_MS);
 
-    if (!(await pageAlive(page))) {
-      logEvt(nome, source, 'skip_page_gone_after_dismiss', {});
+    const handle1 = pageHandleState(page);
+    if (!handle1.ok) {
+      logEvt(nome, source, 'skip_page_gone_after_dismiss', { why: handle1.reason });
       return { ok: true, skipped: true, reason: 'page_gone' };
     }
 
@@ -1782,7 +1819,7 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
   const workDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
   try {
-    if (!(await pageAlive(page))) {
+    if (!pageHandleState(page).ok) {
       logEvt(nome, source, 'human_page_gone', {});
       return { ok: false, error: 'page_gone' };
     }
@@ -1857,5 +1894,7 @@ module.exports = {
   waitListingIdentityPrompt,
   runIdDocWizard,
   runRobeAutoId,
-  runHumanVerifyId
+  runHumanVerifyId,
+  pageHandleState,
+  isSellingUrl
 };

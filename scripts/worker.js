@@ -253,6 +253,7 @@ const {
   isJunkUrl,
   isDeadTabUrl,
   isCreateMarketplaceUrl,
+  isRobeMarketplaceWorkUrl,
   pagesLookAllJunk,
   listPagesBounded,
   pageAgeMs: hygienePageAgeMs,
@@ -929,7 +930,7 @@ async function __deltaWsLivenessTick() {
         for (const p of (listed.pages || [])) {
           let pu = '';
           try { pu = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch { pu = ''; }
-          if (isCreateMarketplaceUrl(pu)) { createTab = true; break; }
+          if (isRobeMarketplaceWorkUrl(pu) || isCreateMarketplaceUrl(pu)) { createTab = true; break; }
         }
         if (createTab) continue;
       } catch {}
@@ -9565,7 +9566,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         if (p && p._convenienteBlinding === true) continue;
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (inRobe && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(url)) continue;
+        if (inRobe && isRobeMarketplaceWorkUrl(url)) continue;
         const deadUrl = isDeadTabUrl(url);
         const blank = isBlankUrl(url);
         if (!deadUrl && !blank) continue;

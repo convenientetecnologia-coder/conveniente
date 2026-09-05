@@ -1587,7 +1587,7 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
       if (!extra || extra === keep) continue;
       let u = '';
       try { u = (typeof extra.url === 'function') ? String(extra.url() || '') : ''; } catch {}
-      if (hygiene && typeof hygiene.isCreateMarketplaceUrl === 'function' && hygiene.isCreateMarketplaceUrl(u)) continue;
+      if (hygiene && typeof hygiene.isRobeMarketplaceWorkUrl === 'function' && hygiene.isRobeMarketplaceWorkUrl(u)) continue;
       await _safeCloseAccountPage(extra);
     }
   } finally {
@@ -2230,7 +2230,7 @@ function installOneTabGuard(browser, nome, {
           if (_pageIsBlinding(p)) continue;
           let u = '';
           try { u = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
-          if (robeOn && /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) {
+          if (robeOn && hygiene && typeof hygiene.isRobeMarketplaceWorkUrl === 'function' && hygiene.isRobeMarketplaceWorkUrl(u)) {
             if (!createKept) {
               createKept = true;
               continue;

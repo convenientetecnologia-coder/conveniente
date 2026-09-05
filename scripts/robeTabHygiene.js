@@ -3,7 +3,10 @@
 /**
  * Contrato preto-no-branco (Virtus + Robe):
  * - Sem Robe: 1 aba (messages/Virtus). Aba 1+ fecha, qualquer URL, qualquer ERR_*.
- * - Com Robe: aba 0 messages, aba 1 create/item|vehicle. Aba 2+ fecha.
+ * - Com Robe: aba 0 messages, aba 1 trabalho Marketplace
+ *   (create/item|vehicle OU you/selling apos publicar). Aba 2+ fecha.
+ *   Pos-publish o Facebook redireciona create → selling. Selling e a mesma
+ *   aba de trabalho. Nao e lixo. Sem isso o prune mata o ID.
  * - A aba 1 nasce about:blank no portao. Nao fecha blank/blinding enquanto o
  *   gate esta colando (senao o pruner mata o create antes do goto).
  * - Restore de sessao do Chrome nao e aba de trabalho.
@@ -63,6 +66,13 @@ function isJunkUrl(url) {
 
 function isCreateMarketplaceUrl(url) {
   return /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(String(url || ""));
+}
+
+/** Aba 1 do Robe: composer OU selling/listing apos o Publicar. */
+function isRobeMarketplaceWorkUrl(url) {
+  return /facebook\.com\/marketplace\/(?:create\/(?:item|vehicle)|you\/selling|you\/dashboard|sell\/|listing|inventory|commerce_manager|item\/)/i.test(
+    String(url || "")
+  );
 }
 
 function isLiveWorkUrl(url) {
@@ -446,7 +456,7 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
     const t = pageTargets[i];
     let u = "";
     try { u = typeof t.url === "function" ? String(t.url() || "") : ""; } catch {}
-    if (robeOn && isCreateMarketplaceUrl(u)) {
+    if (robeOn && isRobeMarketplaceWorkUrl(u)) {
       if (!createKept) {
         createKept = true;
         continue;
@@ -572,7 +582,7 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
         continue;
       }
     }
-    if (robeOn && isCreateMarketplaceUrl(u)) {
+    if (robeOn && isRobeMarketplaceWorkUrl(u)) {
       if (!createKept) {
         createKept = p;
         continue;
@@ -779,7 +789,7 @@ async function safeClosePage(page, { nome = "", reason = "" } = {}) {
 
 /**
  * Fecha about:blank / chrome-error / Aw Snap, preservando keepPage (Virtus/messages).
- * Nunca toca create/item|vehicle real.
+ * Nunca toca create/item|vehicle nem selling pos-publish.
  */
 async function sweepAboutBlankPages(browser, { keepPage = null, nome = "", deadOnly = false } = {}) {
   if (!browser) return { ok: false, closed: 0 };
@@ -797,7 +807,7 @@ async function sweepAboutBlankPages(browser, { keepPage = null, nome = "", deadO
         } catch {}
         let u = "";
         try { u = typeof p.url === "function" ? String(p.url() || "") : ""; } catch {}
-        if (isCreateMarketplaceUrl(u)) continue;
+        if (isRobeMarketplaceWorkUrl(u)) continue;
         if (p && p._convenienteBlinding === true) continue;
         if (isNewbornBlank(p, { browser, nome })) continue;
         let junk = isJunkUrl(u);
@@ -1188,6 +1198,7 @@ module.exports = {
   isDeadTabUrl,
   isJunkUrl,
   isCreateMarketplaceUrl,
+  isRobeMarketplaceWorkUrl,
   isLiveWorkUrl,
   isChromeErrorUiText,
   isChromeProtocolSickError,

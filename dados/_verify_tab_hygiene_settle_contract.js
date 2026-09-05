@@ -89,6 +89,8 @@ check("blank_killer_still_kills_zombie", browserSrc.includes("about_blank_killed
 check("pruner_still_caps_extra", /function closeExtraPages/.test(workerSrc) && workerSrc.includes("inRobe"));
 check("auto_robe_untouched", workerSrc.includes("function robeEnqueueAuto"));
 check("ws_shrink_untouched", workerSrc.includes("function auditWsShrink"));
+check("selling_is_robe_work", hy.isRobeMarketplaceWorkUrl("https://www.facebook.com/marketplace/you/selling") === true);
+check("prune_keeps_selling_work", hygieneSrc.includes("isRobeMarketplaceWorkUrl"));
 
 if (fail) {
   console.error("FAIL_COUNT", fail);
