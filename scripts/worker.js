@@ -270,6 +270,7 @@ const robePostPublishId = require('./robePostPublishId.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
 const fileStore = require('./fileStore.js');
+const uaPresetAlign = require('./uaPresetAlign.js');
 const gatewayProxy = require('./gatewayProxy.js');
 const connectLane = require('./connectLane.js');
 const gptFallback = require('./gptFallback.js');
@@ -7757,12 +7758,39 @@ async function activateOnce(nome, source = '', operator = '') {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
-        const manifest = await ensureManifestValid(nome);
+        let manifest = await ensureManifestValid(nome);
         if (!manifest) {
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
           await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
           if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
           return { ok:false, error: 'manifest_incomplete' };
+        }
+        try {
+          const aligned = await uaPresetAlign.alignAccount(nome, { persist: true, source: 'activateOnce' });
+          if (aligned && aligned.ok && aligned.changed && aligned.manifest) {
+            manifest = aligned.manifest;
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'ua_preset_realign_on_activate',
+                nome: String(nome || ''),
+                fromId: aligned.fromId || null,
+                toId: aligned.toId || null,
+                reason: aligned.reason || null,
+                pickReason: aligned.pickReason || null
+              });
+            } catch {}
+          } else if (aligned && aligned.ok === false && aligned.needsRealign) {
+            await reportAction(nome, 'robe_error', 'ua preset gordo sem substituto; abertura bloqueada');
+            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            return { ok: false, error: 'ua_preset_realign_failed' };
+          }
+        } catch (e) {
+          if (uaPresetAlign.fpLooksHeavy(manifest && manifest.fp)) {
+            await reportAction(nome, 'robe_error', 'ua preset gordo; realign falhou; abertura bloqueada');
+            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            return { ok: false, error: 'ua_preset_realign_failed' };
+          }
         }
 
         {
@@ -16213,6 +16241,33 @@ const handlers = {
       }
       return { ok: true };
     } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+  },
+
+  async ['ua-presets-realign']({ dryRun, operator } = {}) {
+    try {
+      const persist = dryRun !== true;
+      const r = await uaPresetAlign.alignAll({
+        inShard,
+        persist,
+        source: persist ? 'command' : 'command_dry_run',
+        operator: String(operator || '').slice(0, 120)
+      });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: persist ? 'ua_preset_realign_command' : 'ua_preset_realign_dry_run',
+          ok: !!(r && r.ok),
+          scanned: Number(r && r.scanned || 0) || 0,
+          changed: Number(r && r.changed || 0) || 0,
+          skipped: Number(r && r.skipped || 0) || 0,
+          failed: Number(r && r.failed || 0) || 0,
+          operator: String(operator || '').slice(0, 120) || null
+        });
+      } catch {}
+      return r && typeof r === 'object' ? r : { ok: false, error: 'realign_failed' };
+    } catch (e) {
+      return { ok: false, error: e && e.message || String(e) };
+    }
   },
 
   async ['robe-replan-all']({ reason, operator } = {}) {

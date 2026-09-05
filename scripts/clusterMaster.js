@@ -461,6 +461,34 @@ function createCluster() {
         // Determinístico: apenas o node 1 gera o bloco/fila global (há lock em disco; evita duplicação).
         return sendTo(0, type, payload, opts);
       }
+      if (type === 'ua-presets-realign') {
+        const timeoutMs = Math.max(Number(opts && opts.timeoutMs || 0) || 0, 180000);
+        const sendOpts = Object.assign({}, opts || {}, { timeoutMs });
+        const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, sendOpts)));
+        const allOk = results.every(r => r && r.ok !== false);
+        const merged = {
+          ok: allOk,
+          scanned: 0,
+          changed: 0,
+          skipped: 0,
+          failed: 0,
+          persist: !(payload && payload.dryRun === true),
+          changes: [],
+          failures: [],
+          results
+        };
+        for (const r of results) {
+          if (!r) continue;
+          merged.scanned += Number(r.scanned || 0) || 0;
+          merged.changed += Number(r.changed || 0) || 0;
+          merged.skipped += Number(r.skipped || 0) || 0;
+          merged.failed += Number(r.failed || 0) || 0;
+          if (Array.isArray(r.changes)) merged.changes.push(...r.changes);
+          if (Array.isArray(r.failures)) merged.failures.push(...r.failures);
+        }
+        if (!allOk) merged.error = 'partial_fail';
+        return merged;
+      }
       if (type === 'robe-replan-all' || type === 'renew-replan-all') {
         // Broadcast: cada node pode limpar caches/planos; retorno agregado.
         const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));

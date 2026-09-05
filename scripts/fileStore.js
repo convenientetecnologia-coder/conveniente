@@ -1306,7 +1306,7 @@ function assertPerfilExists(fileStore, nome) {
 
 // EXPORTAÇÃO EXPANDIDA PARA FUNÇÕES MILITARES
 module.exports = {
-  dadosDir, perfisPath, perfisDir, presetsPath, desiredPath, statusPath,
+  dadosDir, perfisPath, perfisDir, presetsPath, presetsPolicyPath, desiredPath, statusPath,
   readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
   patchDesired, // agora async/lock
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,

@@ -210,8 +210,8 @@
     "hardwareConcurrency": 8
   },
   {
-    "id": "win10-chrome-127-2560x1440-029",
-    "label": "Win10 Chrome 127 (2560x1440)",
+    "id": "win10-chrome-127-1366x768-037",
+    "label": "Win10 Chrome 127 (1366x768)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -238,15 +238,15 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1366,
+      "height": 768
     },
-    "dpr": 1.5,
-    "hardwareConcurrency": 16
+    "dpr": 1,
+    "hardwareConcurrency": 8
   },
   {
-    "id": "win10-chrome-127-2560x1440-030",
-    "label": "Win10 Chrome 127 (2560x1440)",
+    "id": "win10-chrome-127-1440x900-038",
+    "label": "Win10 Chrome 127 (1440x900)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.89 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -273,10 +273,10 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1440,
+      "height": 900
     },
-    "dpr": 1.5,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -315,8 +315,8 @@
     "hardwareConcurrency": 6
   },
   {
-    "id": "win11-chrome-128-2560x1440-028",
-    "label": "Win11 Chrome 128 (2560x1440)",
+    "id": "win11-chrome-128-1536x864-039",
+    "label": "Win11 Chrome 128 (1536x864)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.85 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -343,10 +343,10 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1536,
+      "height": 864
     },
-    "dpr": 1.5,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -595,8 +595,8 @@
     "hardwareConcurrency": 16
   },
   {
-    "id": "win10-chrome-132-3840x2160-020",
-    "label": "Win10 Chrome 132 (3840x2160)",
+    "id": "win10-chrome-132-1920x1080-040",
+    "label": "Win10 Chrome 132 (1920x1080)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.196 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -623,11 +623,11 @@
       "mobile": false
     },
     "viewport": {
-      "width": 3840,
-      "height": 2160
+      "width": 1920,
+      "height": 1080
     },
-    "dpr": 2,
-    "hardwareConcurrency": 20
+    "dpr": 1,
+    "hardwareConcurrency": 8
   },
   {
     "id": "win11-chrome-133-1920x1080-017",
@@ -910,8 +910,8 @@
     "hardwareConcurrency": 8
   },
   {
-    "id": "win10-chrome-137-2560x1440-010",
-    "label": "Win10 Chrome 137 (2560x1440)",
+    "id": "win10-chrome-137-1600x900-041",
+    "label": "Win10 Chrome 137 (1600x900)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.7151.120 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -938,10 +938,10 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1600,
+      "height": 900
     },
-    "dpr": 1.5,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -1015,8 +1015,8 @@
     "hardwareConcurrency": 6
   },
   {
-    "id": "win10-chrome-138-2560x1440-009",
-    "label": "Win10 Chrome 138 (2560x1440)",
+    "id": "win10-chrome-138-1680x1050-042",
+    "label": "Win10 Chrome 138 (1680x1050)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.50 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -1043,11 +1043,11 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1680,
+      "height": 1050
     },
-    "dpr": 1.5,
-    "hardwareConcurrency": 16
+    "dpr": 1,
+    "hardwareConcurrency": 8
   },
   {
     "id": "win11-chrome-138-1366x768-006",
@@ -1120,8 +1120,8 @@
     "hardwareConcurrency": 6
   },
   {
-    "id": "win11-chrome-138-2560x1440-008",
-    "label": "Win11 Chrome 138 (2560x1440)",
+    "id": "win11-chrome-138-1920x1080-043",
+    "label": "Win11 Chrome 138 (1920x1080)",
     "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.97 Safari/537.36",
     "uaCh": {
       "brands": [
@@ -1148,10 +1148,10 @@
       "mobile": false
     },
     "viewport": {
-      "width": 2560,
-      "height": 1440
+      "width": 1920,
+      "height": 1080
     },
-    "dpr": 1.5,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {

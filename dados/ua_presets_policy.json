@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "generatedAt": 1775590497329,
   "mode": "enterprise_curated_pool_all_approved",
   "criteria": {
@@ -52,28 +52,7 @@
       "weight": 1,
       "enabledForNewProfiles": true
     },
-    "win10-chrome-127-2560x1440-029": {
-      "tier": "aprovado",
-      "major": 127,
-      "delta": 12,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
-    "win10-chrome-127-2560x1440-030": {
-      "tier": "aprovado",
-      "major": 127,
-      "delta": 12,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
     "win11-chrome-128-1366x768-027": {
-      "tier": "aprovado",
-      "major": 128,
-      "delta": 11,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
-    "win11-chrome-128-2560x1440-028": {
       "tier": "aprovado",
       "major": 128,
       "delta": 11,
@@ -123,13 +102,6 @@
       "enabledForNewProfiles": true
     },
     "win10-chrome-132-1920x1080-019": {
-      "tier": "aprovado",
-      "major": 132,
-      "delta": 7,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
-    "win10-chrome-132-3840x2160-020": {
       "tier": "aprovado",
       "major": 132,
       "delta": 7,
@@ -192,13 +164,6 @@
       "weight": 1,
       "enabledForNewProfiles": true
     },
-    "win10-chrome-137-2560x1440-010": {
-      "tier": "aprovado",
-      "major": 137,
-      "delta": 2,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
     "win10-chrome-138-1366x768-004": {
       "tier": "aprovado",
       "major": 138,
@@ -213,13 +178,6 @@
       "weight": 1,
       "enabledForNewProfiles": true
     },
-    "win10-chrome-138-2560x1440-009": {
-      "tier": "aprovado",
-      "major": 138,
-      "delta": 1,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
     "win11-chrome-138-1366x768-006": {
       "tier": "aprovado",
       "major": 138,
@@ -228,13 +186,6 @@
       "enabledForNewProfiles": true
     },
     "win11-chrome-138-1366x768-007": {
-      "tier": "aprovado",
-      "major": 138,
-      "delta": 1,
-      "weight": 1,
-      "enabledForNewProfiles": true
-    },
-    "win11-chrome-138-2560x1440-008": {
       "tier": "aprovado",
       "major": 138,
       "delta": 1,
@@ -261,11 +212,174 @@
       "delta": 0,
       "weight": 1,
       "enabledForNewProfiles": true
+    },
+    "win10-chrome-127-1366x768-037": {
+      "tier": "aprovado",
+      "major": 127,
+      "delta": 12,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-127-1440x900-038": {
+      "tier": "aprovado",
+      "major": 127,
+      "delta": 12,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-128-1536x864-039": {
+      "tier": "aprovado",
+      "major": 128,
+      "delta": 11,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-132-1920x1080-040": {
+      "tier": "aprovado",
+      "major": 132,
+      "delta": 7,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-137-1600x900-041": {
+      "tier": "aprovado",
+      "major": 137,
+      "delta": 2,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win10-chrome-138-1680x1050-042": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
+    },
+    "win11-chrome-138-1920x1080-043": {
+      "tier": "aprovado",
+      "major": 138,
+      "delta": 1,
+      "weight": 1,
+      "enabledForNewProfiles": true
     }
   },
-  "cleanedAt": 1775590507057,
+  "cleanedAt": 1788652190268,
   "originalTotal": 84,
   "cleanedTotal": 36,
   "removedTotal": 48,
-  "updatedAt": 1775590704138
+  "updatedAt": 1788652190268,
+  "retiredByPresetId": {
+    "win10-chrome-127-2560x1440-029": {
+      "replacedBy": "win10-chrome-127-1366x768-037",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1366,
+        "height": 768,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36"
+    },
+    "win10-chrome-127-2560x1440-030": {
+      "replacedBy": "win10-chrome-127-1440x900-038",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1440,
+        "height": 900,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.89 Safari/537.36"
+    },
+    "win11-chrome-128-2560x1440-028": {
+      "replacedBy": "win11-chrome-128-1536x864-039",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1536,
+        "height": 864,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.85 Safari/537.36"
+    },
+    "win10-chrome-132-3840x2160-020": {
+      "replacedBy": "win10-chrome-132-1920x1080-040",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 3840,
+        "height": 2160,
+        "dpr": 2
+      },
+      "toViewport": {
+        "width": 1920,
+        "height": 1080,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.196 Safari/537.36"
+    },
+    "win10-chrome-137-2560x1440-010": {
+      "replacedBy": "win10-chrome-137-1600x900-041",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.7151.120 Safari/537.36"
+    },
+    "win10-chrome-138-2560x1440-009": {
+      "replacedBy": "win10-chrome-138-1680x1050-042",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1680,
+        "height": 1050,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.50 Safari/537.36"
+    },
+    "win11-chrome-138-2560x1440-008": {
+      "replacedBy": "win11-chrome-138-1920x1080-043",
+      "reason": "viewport_heavy",
+      "keepUa": true,
+      "fromViewport": {
+        "width": 2560,
+        "height": 1440,
+        "dpr": 1.5
+      },
+      "toViewport": {
+        "width": 1920,
+        "height": 1080,
+        "dpr": 1
+      },
+      "uaString": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.97 Safari/537.36"
+    }
+  }
 }

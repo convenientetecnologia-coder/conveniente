@@ -1036,6 +1036,18 @@ async function execRobeReleaseAll() {
   const r = await httpJson('/api/robes/release-all', { method:'POST' });
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
 }
+async function execUaPresetsRealign(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const dryRun = (payload.dryRun === true || payload.dryRun === 1 || payload.dryRun === '1' || String(payload.dryRun || '').toLowerCase() === 'true');
+  const r = await httpJson('/api/ua-presets/realign', {
+    method: 'POST',
+    body: { dryRun },
+    timeoutMs: 180000,
+    headers: { 'x-operator': `ct_remote:${String(cmd && cmd.id || '').slice(0, 36)}` }
+  });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'ua_presets_realign_failed');
+  return r;
+}
 async function execRobeV2Recalc(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const reasonRaw = String(payload.reason || '').trim();
@@ -4419,6 +4431,10 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'ua_presets_realign' || c.type === 'ua-presets-realign') {
+        details = await execUaPresetsRealign(c);
+        results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null });
+      }
       else if (c.type === 'robe_v2_recalc')       { details = await execRobeV2Recalc(c); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
       else if (c.type === 'delete_perfis')    { details = await execDeletePerfis(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'migrate_profiles') { details = await execMigrateProfiles(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }

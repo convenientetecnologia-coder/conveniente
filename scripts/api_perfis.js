@@ -1428,6 +1428,25 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  app.post('/api/ua-presets/realign', async (req, res) => {
+    const op = String(req.headers['x-operator'] || req.body && req.body.operator || 'unknown');
+    const dryRun = !!(req.body && (req.body.dryRun === true || req.body.dryRun === 1 || req.body.dryRun === '1'));
+    logger.info('POST /api/ua-presets/realign', { dryRun, operator: op });
+    try {
+      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
+        return res.json({ ok: false, error: 'worker_client_unavailable' });
+      }
+      const resp = await workerClient.sendWorkerCommand('ua-presets-realign', {
+        dryRun,
+        operator: op
+      }, { timeoutMs: 180000 });
+      return res.json(resp && typeof resp === 'object' ? resp : { ok: false, error: 'empty_realign_response' });
+    } catch (e) {
+      logger.error('Erro na rota ua-presets/realign', { error: e && e.message }, e);
+      return res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
   // Descongelar todos os perfis
   app.post('/api/perfis/unfreeze-all', async (req, res) => {
     const op = String(req.headers['x-operator'] || 'unknown');
