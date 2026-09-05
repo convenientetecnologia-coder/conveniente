@@ -122,18 +122,28 @@ function resolveAccountViewportSize(manifest) {
   return { width: b.width, height: b.height };
 }
 
+function pageUrlLooksJunk(u) {
+  const s = String(u || '').trim().toLowerCase();
+  if (!s || s === 'about:blank') return true;
+  return /chrome-error:|chromewebdata|chrome:\/\/crash|chrome:\/\/newtab/i.test(s);
+}
+
 async function firstLivePage(browser) {
   if (!browser) return null;
   let pages = [];
   try { pages = await browser.pages(); } catch { pages = []; }
+  let fallback = null;
   for (const page of pages || []) {
     if (!page) continue;
     try {
       if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) continue;
     } catch {}
-    return page;
+    if (!fallback) fallback = page;
+    let u = '';
+    try { u = (typeof page.url === 'function') ? (page.url() || '') : ''; } catch {}
+    if (!pageUrlLooksJunk(u)) return page;
   }
-  return null;
+  return fallback;
 }
 
 function markBrowserGlass(browser, on) {
@@ -181,9 +191,7 @@ async function disableGlassForWorkBrowser(browser, nome, opts = {}) {
       if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) continue;
     } catch {}
     if (onlyIfArmed && !glassViewer.isGlassArmed(page)) {
-      if (page._ctGlassRuntimeInstalled) {
-        try { await glassViewer.scrubIdleGlassPaint(page); } catch {}
-      }
+      try { await glassViewer.scrubIdleGlassPaint(page); } catch {}
       continue;
     }
     try {
@@ -1457,8 +1465,8 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
           });
           if (browser._ctGlassHumanArmed === true) {
             try {
-              const pagesNow = await browser.pages().catch(() => []);
-              if (pagesNow && pagesNow[0] === p) {
+              const mainLive = await firstLivePage(browser);
+              if (mainLive === p) {
                 await glassViewer.enableGlassForHuman(p, { source: 'targetcreated_human_main' });
               }
             } catch {}

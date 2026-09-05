@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v3
+ * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v4
  *
  * Trabalho (Abrir Tudo / Robe / Virtus / configure):
  *   - Identidade: page.setViewport(preset) — uns maiores, outros menores.
@@ -16,6 +16,8 @@
  * Retomar trabalho:
  *   - disableGlassForWork desarma PRIMEIRO, tira o hook, apaga paint/HUD,
  *     volta a janela para o tamanho do preset, relock do setViewport.
+ *   - Robe na fila/ciclo NAO desarma vidro se humano ja esta no controle.
+ *   - Reconnect CDP: se humano, remonta vidro; se trabalho, apaga leftover.
  *
  * 1) Identidade: page.setViewport(preset) permanece. innerWidth/innerHeight/DPR
  *    nao mudam aqui.

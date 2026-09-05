@@ -2285,6 +2285,7 @@ async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
+  try { robeQueue.skip && robeQueue.skip(nome); } catch {}
   const live = isLiveBrowserCtrl(ctrl);
   const alreadyHold = readDesiredHumanHoldFlag(nome) === true;
   const alreadyCtrl = !!(live && ctrl && ctrl.humanControl === true);
@@ -10603,6 +10604,12 @@ async function robeQueuedCycle(nome, source = 'auto') {
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         return;
       }
+      if ((ctrl && ctrl.humanControl === true) || readDesiredHumanHoldFlag(nome) === true) {
+        try { await reportAction(nome, 'robe_skip', 'Robe abortado: humano no controle'); } catch {}
+        robeUpdateMeta(nome, { estado: 'idle', emExecucao: false });
+        try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+        return;
+      }
       try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'robe_cycle', onlyIfArmed: true }); } catch {}
 
       try { logger.info('[WORKER][robeQueuedCycle] Robe start', { nome, source: src }); } catch {}
@@ -14641,6 +14648,7 @@ const handlers = {
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
 
+      try { robeQueue.skip && robeQueue.skip(nome); } catch {}
       const robes = robeMeta[nome] || {};
       if (robes.emExecucao) {
         // Cap: não segurar lockProfileAction por 3min (bloqueava Fechar). Humano tem prioridade.
@@ -17336,7 +17344,8 @@ function copyAccountBrowserRuntimeState(fromBrowser, toBrowser) {
     '_aboutBlankMaxAgeMs',
     '_pageBirth',
     '_fenceEpochMap',
-    '_rootPid'
+    '_rootPid',
+    '_ctGlassHumanArmed'
   ];
   for (const k of keys) {
     try {
@@ -17491,6 +17500,17 @@ async function tryReconnectAfterDisconnected(nome, prevCtrl) {
           try {
             if (isProfileHumanHeld(nome)) {
               await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: 'cdp_reconnect' });
+            }
+          } catch {}
+          try {
+            const humanGlass = !!(
+              (nextCtrl && nextCtrl.humanControl === true) ||
+              readDesiredHumanHoldFlag(nome) === true
+            );
+            if (humanGlass) {
+              await browserHelper.enableGlassForHumanBrowser(b, { source: 'cdp_reconnect_human' });
+            } else {
+              await browserHelper.disableGlassForWorkBrowser(b, nome, { source: 'cdp_reconnect_work' });
             }
           } catch {}
           try { await snapshotStatusAndWrite(); } catch {}

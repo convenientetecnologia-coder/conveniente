@@ -18,7 +18,7 @@ function check(name, cond, extra) {
   }
 }
 
-check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v3"));
+check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v4"));
 check("armed_helper", /function isGlassArmed\(page\)/.test(glassSrc));
 check("ready_helper", /function isGlassReady\(page\)/.test(glassSrc));
 check("painted_flag", glassSrc.includes("_ctGlassPainted"));
@@ -55,7 +55,10 @@ check("invoke_enables_glass", browserSrc.includes("glassViewer.enableGlassForHum
   check("invoke_glass_after_nav", invStart > 0 && selling > invStart && firstEnable > selling);
 }
 check("first_live_scans_pages", /async function firstLivePage[\s\S]{0,400}for \(const page of pages/.test(browserSrc));
+check("first_live_skips_junk", browserSrc.includes("function pageUrlLooksJunk") && /async function firstLivePage[\s\S]{0,900}pageUrlLooksJunk/.test(browserSrc));
 check("targetcreated_human_main", browserSrc.includes("source: 'targetcreated_human_main'"));
+check("targetcreated_uses_first_live", /_ctGlassHumanArmed === true[\s\S]{0,280}firstLivePage\(browser\)/.test(browserSrc));
+check("scrub_unarmed_always", /onlyIfArmed && !glassViewer\.isGlassArmed\(page\)[\s\S]{0,180}scrubIdleGlassPaint/.test(browserSrc) && !/onlyIfArmed && !glassViewer\.isGlassArmed\(page\)[\s\S]{0,180}_ctGlassRuntimeInstalled/.test(browserSrc));
 check("browser_glass_flag", browserSrc.includes("_ctGlassHumanArmed"));
 check("browser_exports_enable", browserSrc.includes("enableGlassForHumanBrowser"));
 check("browser_exports_disable", browserSrc.includes("disableGlassForWorkBrowser"));
@@ -81,6 +84,18 @@ check("fail_fast_uses_human_door", workerSrc.includes("await enterHumanMode(nome
 check("already_human_repairs_glass", workerSrc.includes("source: 'terminal_already_human'") && workerSrc.includes("source: 'nurse_already_human'"));
 check("worker_start_work_disarm_if_armed", workerSrc.includes("source: 'start_work', onlyIfArmed: true"));
 check("worker_robe_disarm_if_armed", workerSrc.includes("source: 'robe_cycle', onlyIfArmed: true"));
+check("enter_human_skips_robe_queue", /async function enterHumanMode[\s\S]{0,220}robeQueue\.skip/.test(workerSrc));
+check("invoke_skips_robe_queue", /async invoke_human[\s\S]{0,1400}robeQueue\.skip/.test(workerSrc));
+{
+  const at = workerSrc.indexOf("async function robeQueuedCycle");
+  const slice = at >= 0 ? workerSrc.slice(at, at + 1600) : "";
+  const humanAt = slice.indexOf("humanControl === true");
+  const disableAt = slice.indexOf("disableGlassForWorkBrowser");
+  check("robe_cycle_human_abort_before_disable", humanAt > 0 && disableAt > humanAt);
+}
+check("reconnect_human_remounts_glass", workerSrc.includes("source: 'cdp_reconnect_human'"));
+check("reconnect_work_scrubs_glass", workerSrc.includes("source: 'cdp_reconnect_work'"));
+check("reconnect_copies_glass_flag", workerSrc.includes("'_ctGlassHumanArmed'"));
 check("overlay_resume_hits_handler", workerSrc.includes("await handlers['human-resume']({ nome })"));
 check("disable_only_if_armed_opt", browserSrc.includes("onlyIfArmed") && browserSrc.includes("isGlassArmed(page)"));
 
