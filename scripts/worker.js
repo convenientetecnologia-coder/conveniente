@@ -2313,8 +2313,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
       // Armar flag na page ANTES do stop/nav — fecha orphan do marketplace_enforcer.
       try { await syncDeltaHumanHoldBrowserGuard(nome, true, { reason: String(reason || 'enter_human_mode') }); } catch {}
       try { await stopVirtus(nome); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
-      // Se o humano já está no controle, só repara o hold. Não navega de novo.
+      // Vidro na tela final, overlay por último. Overlay antes do goto some na navegação.
       if (!alreadyCtrl) {
         try {
           await browserHelper.invocarHumano(ctrl.browser, nome, {
@@ -2323,6 +2322,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
         } catch {}
       }
       try { await browserHelper.enableGlassForHumanBrowser(ctrl.browser, { source: 'enter_human_mode', onlyIfReady: true }); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
@@ -13320,8 +13320,8 @@ const handlers = {
         } catch {}
 
         if (shouldInvoke) {
-          try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0,80)}` }); } catch {}
           try { await enterHumanMode(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0, 80)}` }); } catch {}
+          try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0,80)}` }); } catch {}
           try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: why.slice(0, 160) }); } catch {}
         }
 

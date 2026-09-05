@@ -18,10 +18,11 @@ function check(name, cond, extra) {
   }
 }
 
-check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v2"));
+check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v3"));
 check("armed_helper", /function isGlassArmed\(page\)/.test(glassSrc));
 check("ready_helper", /function isGlassReady\(page\)/.test(glassSrc));
 check("painted_flag", glassSrc.includes("_ctGlassPainted"));
+check("settled_flag", glassSrc.includes("_ctGlassSettled"));
 check("enable_fn", /async function enableGlassForHuman\(page/.test(glassSrc));
 check("disable_fn", /async function disableGlassForWork\(page/.test(glassSrc));
 check("apply_unarmed_noop", glassSrc.includes("if (!isGlassArmed(page)) return readState(page);"));
@@ -45,6 +46,7 @@ check("boot_no_max_glass_block", !/Operador: vidro maximizado/.test(browserSrc))
 check("blindar_no_glass", !/async function _blindarOnce[\s\S]{0,700}applyGlassViewer/.test(browserSrc));
 check("bring_no_maximize", !/async function bringWindowToFront[\s\S]{0,500}maximized/.test(browserSrc));
 check("bring_no_apply_glass", !/async function bringWindowToFront[\s\S]{0,600}applyGlassViewer/.test(browserSrc));
+check("invoke_uses_first_live", /async function invocarHumano[\s\S]{0,600}firstLivePage\(browser\)/.test(browserSrc));
 check("invoke_enables_glass", browserSrc.includes("glassViewer.enableGlassForHuman(page, { source: 'invocarHumano' })"));
 {
   const invStart = browserSrc.indexOf("async function invocarHumano");
@@ -62,6 +64,19 @@ check("worker_resume_disables", workerSrc.includes("disableGlassForWorkBrowser(c
 check("worker_invoke_enables", workerSrc.includes("enableGlassForHumanBrowser(ctrl.browser, { source: 'invoke_human'"));
 check("worker_enter_enables", workerSrc.includes("enableGlassForHumanBrowser(ctrl.browser, { source: 'enter_human_mode'"));
 check("worker_only_if_ready", workerSrc.includes("onlyIfReady: true") && !workerSrc.includes("onlyIfDisarmed: true"));
+{
+  const enterAt = workerSrc.indexOf("async function enterHumanMode");
+  const invAt = workerSrc.indexOf("invocarHumano", enterAt);
+  const glassAt = workerSrc.indexOf("source: 'enter_human_mode'", enterAt);
+  const ovAt = workerSrc.indexOf("ensureHumanOverlay(nome, ctrl, { reason })", enterAt);
+  check("enter_overlay_after_glass", enterAt > 0 && invAt > enterAt && glassAt > invAt && ovAt > glassAt);
+}
+{
+  const ff = workerSrc.indexOf("if (shouldInvoke) {");
+  const ffEnter = workerSrc.indexOf("enterHumanMode(nome, controllers.get(nome), { reason: `fail_fast:", ff);
+  const ffOv = workerSrc.indexOf("ensureHumanOverlay(nome, controllers.get(nome), { reason: `fail_fast:", ff);
+  check("fail_fast_glass_before_overlay", ff > 0 && ffEnter > ff && ffOv > ffEnter);
+}
 check("fail_fast_uses_human_door", workerSrc.includes("await enterHumanMode(nome, controllers.get(nome), { reason: `fail_fast:"));
 check("already_human_repairs_glass", workerSrc.includes("source: 'terminal_already_human'") && workerSrc.includes("source: 'nurse_already_human'"));
 check("worker_start_work_disarm_if_armed", workerSrc.includes("source: 'start_work', onlyIfArmed: true"));
@@ -135,6 +150,10 @@ function fakePage() {
   check("armed_without_paint_not_ready", glass.isGlassReady(half) === false);
   half._ctGlassPainted = true;
   check("armed_with_paint_ready", glass.isGlassReady(half) === true);
+  const col = fakePage();
+  col._ctGlassHumanArmed = true;
+  col._ctGlassViewer = { disabled: false, collapsed: true };
+  check("collapsed_counts_ready", glass.isGlassReady(col) === true);
   check("human_did_cdp", human._cdp > 0);
   check("human_nav_hook", human._onCount >= 1);
   check("human_brought_front", human._front === true);

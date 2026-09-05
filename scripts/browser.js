@@ -5209,8 +5209,7 @@ async function invocarHumano(browser, nome, opts = {}) {
     return Promise.race([Promise.resolve(p).finally(() => clearTimeout(t)), to]);
   };
   try {
-    const pages = await withTimeout(browser.pages(), 8000).catch(() => []);
-    const page = pages && pages[0];
+    const page = await withTimeout(firstLivePage(browser), 8000).catch(() => null);
     if (!page) return { ok: false, skippedNav: true, reason: 'no_page' };
     // CDP/bringToFront pode pendurar em página cativa — nunca bloquear invoke eterno.
     try { await withTimeout(bringWindowToFront(page), 5000); } catch {}

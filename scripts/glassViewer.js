@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v2
+ * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v3
  *
  * Trabalho (Abrir Tudo / Robe / Virtus / configure):
  *   - Identidade: page.setViewport(preset) — uns maiores, outros menores.
@@ -76,9 +76,9 @@ function isGlassArmed(page) {
 
 function isGlassReady(page) {
   if (!isGlassArmed(page)) return false;
-  if (page._ctGlassPainted === true) return true;
+  if (page._ctGlassPainted === true || page._ctGlassSettled === true) return true;
   const st = readState(page);
-  return !!(st && st.disabled === true);
+  return !!(st && (st.disabled === true || st.collapsed === true));
 }
 
 function snapshotIdentityViewport(page) {
@@ -111,6 +111,7 @@ function disarmGlass(page) {
   if (!page) return;
   page._ctGlassHumanArmed = false;
   page._ctGlassPainted = false;
+  page._ctGlassSettled = false;
   page._ctGlassApplyQueued = '';
   try { clearTimeout(page._ctGlassNavTimer); } catch {}
   page._ctGlassNavTimer = null;
@@ -894,6 +895,7 @@ async function applyGlassViewerOnce(page, opts = {}) {
   if (!isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     page._ctGlassPainted = false;
+    page._ctGlassSettled = true;
     return writeState(page, {
       zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
       userZoom: false, disabled: true, collapsed: false
@@ -929,6 +931,7 @@ async function applyGlassViewerOnce(page, opts = {}) {
     });
     await clearGlassPaint(page);
     page._ctGlassPainted = false;
+    page._ctGlassSettled = true;
     if (!page._ctGlassCollapsedLogged) {
       page._ctGlassCollapsedLogged = true;
       try {
@@ -945,7 +948,10 @@ async function applyGlassViewerOnce(page, opts = {}) {
   writeState(page, { collapsed: false, disabled: false });
   await paint(page);
   await paintHud(page);
-  if (isGlassArmed(page)) page._ctGlassPainted = true;
+  if (isGlassArmed(page)) {
+    page._ctGlassPainted = true;
+    page._ctGlassSettled = true;
+  }
   const logSig = [
     Math.round(st.zoom * 10000),
     Math.round(st.glassW),
