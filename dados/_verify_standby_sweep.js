@@ -42,8 +42,8 @@ check("src_allowlist_standby_sweep", /standby_sweep:\s*path\.join\(base,\s*'logs
 check("src_allowlist_standby_last", dashSrc.includes("standby_sweep_last"));
 check("src_lifecycle_dual_write", sweepSrc.includes('append("standby_sweep"') || sweepSrc.includes("life.append(\"standby_sweep\""));
 check("src_coordinator_lifecycle", masterSrc.includes("standby_sweep_on"));
-check("flag_prod_diskclean_off", sweep.PROD_DISKCLEAN_DISABLED === true && sweep.prodDiskCleanDisabled() === true);
-check("src_master_diskclean_off", masterSrc.includes("diskclean_disabled") && masterSrc.includes("prodDiskCleanDisabled()") && /disabled:\s*diskcleanOff/.test(masterSrc) && !masterSrc.includes("coordinator on"));
+check("flag_prod_diskclean_on", sweep.PROD_DISKCLEAN_DISABLED === false && sweep.prodDiskCleanDisabled() === false);
+check("src_master_diskclean_on", masterSrc.includes("coordinator on") && masterSrc.includes("prodDiskCleanDisabled()") && /disabled:\s*diskcleanOff/.test(masterSrc) && !masterSrc.includes("diskclean_off_keep_porteiro"));
 check("src_master_no_chrome_alive_gate", !/chromeAlive:\s*\(\)\s*=>\s*chromeMemorySweep\.chromeAliveFromSentinel/.test(masterSrc));
 check("src_clock_free_default", /const requireIdle = opts && opts.requireIdle === true/.test(sweepSrc) && !/requireIdle:\s*true/.test(masterSrc));
 check("src_spawn_detached", /detached:\s*true/.test(sweepSrc));

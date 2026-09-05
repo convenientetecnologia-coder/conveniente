@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v4
+ * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v5
  *
  * Trabalho (Abrir Tudo / Robe / Virtus / configure):
  *   - Identidade: page.setViewport(preset) — uns maiores, outros menores.
- *   - Janela fisica = tamanho do preset. SEM maximize, SEM scale, SEM HUD,
- *     SEM hook de navegacao, SEM DeviceMetricsOverride de visor.
+ *   - Janela fisica MAXIMIZADA no monitor (nao cascata / nao aparece a de baixo).
+ *     SEM scale, SEM HUD, SEM hook de navegacao, SEM DeviceMetricsOverride de visor.
  *   - applyGlassViewer sem arma humana e no-op (zero CDP).
  *
  * Humano (invocar humano / enterHumanMode):
@@ -15,13 +15,14 @@
  *
  * Retomar trabalho:
  *   - disableGlassForWork desarma PRIMEIRO, tira o hook, apaga paint/HUD,
- *     volta a janela para o tamanho do preset, relock do setViewport.
+ *     janela continua maximizada, relock do setViewport.
  *   - Robe na fila/ciclo NAO desarma vidro se humano ja esta no controle.
  *   - Reconnect CDP: se humano, remonta vidro; se trabalho, apaga leftover.
  *
  * 1) Identidade: page.setViewport(preset) permanece. innerWidth/innerHeight/DPR
  *    nao mudam aqui.
- * 2) Vidro: janela maximizada na MAE — SOMENTE com arma humana.
+ * 2) Vidro (scale/HUD/hook): SOMENTE com arma humana. Janela maximizada
+ *    tambem no trabalho, so pra cobrir o monitor.
  * 3) Visor: encaixa o preset no vidro (scale up ou down, contain). Se a
  *    proporcao nao fecha, letterbox centralizado — nao recorta o canto
  *    superior esquerdo. Zoom do operador (Ctrl +/- / roda com Ctrl) pode
@@ -1017,37 +1018,10 @@ async function applyGlassViewer(page, opts = {}) {
 
 async function restoreWindowToWork(page, size) {
   if (pageClosed(page)) return false;
-  const wantW = Math.floor(num(size && size.width, 0));
-  const wantH = Math.floor(num(size && size.height, 0));
+  void size;
   try {
-    const auxiliary = await isAuxiliaryWindow(page);
-    if (auxiliary) return false;
-    const client = await page.target().createCDPSession();
-    try {
-      const { windowId } = await client.send('Browser.getWindowForTarget');
-      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-      await sleep(80);
-      const info = await client.send('Browser.getWindowBounds', { windowId });
-      const cur = (info && info.bounds) || {};
-      const curW = num(cur.width, 0);
-      const curH = num(cur.height, 0);
-      const stillHuge = wantW >= 800 && wantH >= 600 && (curW > wantW + 80 || curH > wantH + 80);
-      if (stillHuge) {
-        await client.send('Browser.setWindowBounds', {
-          windowId,
-          bounds: {
-            windowState: 'normal',
-            left: Math.floor(num(cur.left, 0)),
-            top: Math.floor(num(cur.top, 0)),
-            width: wantW,
-            height: wantH
-          }
-        });
-      }
-      return true;
-    } finally {
-      try { await client.detach(); } catch {}
-    }
+    const bounds = await maximizeWindow(page);
+    return !!bounds;
   } catch {
     return false;
   }
@@ -1122,6 +1096,7 @@ module.exports = {
   applyGlassViewer,
   enableGlassForHuman,
   disableGlassForWork,
+  maximizeWindow,
   scrubIdleGlassPaint,
   snapshotIdentityViewport,
   isGlassArmed,

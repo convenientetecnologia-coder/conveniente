@@ -280,9 +280,8 @@ function createCluster() {
       shardCount: () => children.length,
       disabled: diskcleanOff
     });
-    logger.info('[CLUSTER][STANDBY-SWEEP] diskclean_disabled', {
+    logger.info('[CLUSTER][STANDBY-SWEEP] coordinator on', {
       disabled: diskcleanOff,
-      reason: 'diskclean_off_keep_porteiro',
       minMs: chromeMemorySweep.MIN_INTERVAL_MS,
       timeoutMs: chromeMemorySweep.TIMEOUT_MS,
       settleMs: chromeMemorySweep.SETTLE_MS
@@ -290,7 +289,6 @@ function createCluster() {
     try {
       require("./indexLifecycle").append("standby_sweep_on", {
         disabled: diskcleanOff,
-        reason: 'diskclean_off_keep_porteiro',
         minMs: chromeMemorySweep.MIN_INTERVAL_MS,
         timeoutMs: chromeMemorySweep.TIMEOUT_MS,
         settleMs: chromeMemorySweep.SETTLE_MS

@@ -6,7 +6,7 @@ O Porteiro (C:\auto_vigia, tarefa ConvenientePorteiro ao logon) e um
 sistema a parte. Ele TEM que funcionar com o Conveniente DESLIGADO:
   - reboot 04:00-04:20 + TEMP + Lixeira
   - AUTO_BOOT: se o index nao estiver no ar, o Porteiro sobe o PowerShell Conveniente_Node
-  - NetGuard / ConvenienteNetBoot no startup
+  - NetGuard / ConvenienteNetBoot no startup (sem net = ate 3 reboot extra/dia)
 
 O index.js NAO e o dono. O index so CORRIGE a versao quando voce liga
 o Conveniente:

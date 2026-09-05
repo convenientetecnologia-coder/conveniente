@@ -49,12 +49,14 @@ REBOOT DIARIO:
   - So entre 04:00 e 04:20: limpa TEMP+Lixeira e reinicia (1x/dia)
   - Instalar de tarde/noite NAO dispara reboot
 
-GUARDA DE REDE (TODO BOOT) — remedio = so reiniciar:
+GUARDA DE REDE (TODO BOOT) — sem internet = reboot:
   - Espera 4 min apos ligar
   - Testa internet 4 vezes (nao reinicia por 1 ping falho)
-  - So reinicia se a placa sumiu de verdade (lista vazia)
-  - Max 1 reboot extra por dia; se ainda falhar, para
+  - Sem internet (4 falhas) = reboot, placa visivel ou nao
+  - Max 3 reboots extras por dia; se ainda falhar, para
   - ConvenienteNetBoot (SYSTEM) + porteiro no logon
+  - Lock exclusivo: os dois nao decidem juntos
+  - NO_REBOOT.flag desliga (notebook)
 
 MEMORIA (StandbyList):
   - Loop do Porteiro NAO dispara DiskClean.exe (MemClean=OFF / mem_off).

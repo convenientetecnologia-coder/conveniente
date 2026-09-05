@@ -31,10 +31,12 @@ $Version     = 'v5.2.1-clean-cpu'
 $RebootHour      = 4
 $RebootMinute    = 0
 $RebootWindowMin = 20
-# Em TODO boot: espera N min, confirma sem net de verdade, 1 reboot extra max/dia.
+# Em TODO boot: espera N min, confirma sem net de verdade, ate 3 reboot extra/dia.
+# Sem internet = reboot. Com internet = segue. Placa visivel nao livra.
 $NetCheckWaitMin   = 4
 $NetConfirmTries   = 4
 $NetConfirmGapSec  = 15
+$NetRetryMax       = 3
 # So para laboratorio: forca 1 falha de rede apos o 1o reboot. Em uso normal: $false.
 $TestForceNetFailOnce = $false
 
@@ -377,85 +379,117 @@ function Invoke-DailyReboot {
     return 'reboot_daily'
 }
 
+function Get-NetRetryCountToday {
+    $todayKey = (Get-Date).ToString('yyyy-MM-dd')
+    $st = Get-Estado
+    $date = [string](Get-EstadoProp $st 'lastNetworkRetryDate')
+    if ($date -ne $todayKey) { return 0 }
+    $raw = Get-EstadoProp $st 'lastNetworkRetryCount'
+    if ($null -eq $raw -or "$raw" -eq '') { return 1 }
+    try { return [math]::Max(0, [int]$raw) } catch { return 1 }
+}
+
+function Open-NetGuardLock {
+    $path = Join-Path $Root 'netguard.lock'
+    try {
+        return [System.IO.File]::Open(
+            $path,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    } catch {
+        return $null
+    }
+}
+
 function Invoke-StartupNetworkGuard {
     # Em TODO boot: espera NetCheckWaitMin, confirma sem net.
-    # So reinicia se a placa sumiu de verdade (falha cronica). Remedio = 1 reboot max/dia.
+    # Sem internet = reboot. Com internet = segue. Placa visivel nao livra.
+    # Max NetRetryMax reboots extras no dia. Lock: NetBoot + loop nao decidem juntos.
     if (Test-NoReboot) { return $null }
 
     $bootId = Get-BootId
     $st = Get-Estado
     if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
 
-    $uptime = Get-UptimeMinutes
-    if ($uptime -lt $NetCheckWaitMin) {
-        $waitSec = [int][math]::Ceiling(($NetCheckWaitMin - $uptime) * 60)
-        $maxWait = [int]($NetCheckWaitMin * 60) + 30
-        if ($waitSec -gt 0 -and $waitSec -le $maxWait) {
-            Write-Log "net_wait ${waitSec}s uptime=${uptime}m need=${NetCheckWaitMin}m"
-            Start-Sleep -Seconds $waitSec
-            $st = Get-Estado
-            if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
-        } else {
-            return 'net_wait'
-        }
+    $lock = Open-NetGuardLock
+    if (-not $lock) {
+        Write-Log 'net_guard_busy (outro processo ja checa este boot)'
+        return 'net_busy'
     }
+    try {
+        $st = Get-Estado
+        if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
 
-    $todayKey = (Get-Date).ToString('yyyy-MM-dd')
-    $st = Get-Estado
-    $forceUsed = Get-EstadoProp $st 'testNetFailUsed'
-    $forceFail = $TestForceNetFailOnce -and ("$forceUsed" -ne 'True') -and ($forceUsed -ne $true)
+        $uptime = Get-UptimeMinutes
+        if ($uptime -lt $NetCheckWaitMin) {
+            $waitSec = [int][math]::Ceiling(($NetCheckWaitMin - $uptime) * 60)
+            $maxWait = [int]($NetCheckWaitMin * 60) + 30
+            if ($waitSec -gt 0 -and $waitSec -le $maxWait) {
+                Write-Log "net_wait ${waitSec}s uptime=${uptime}m need=${NetCheckWaitMin}m"
+                Start-Sleep -Seconds $waitSec
+                $st = Get-Estado
+                if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
+            } else {
+                return 'net_wait'
+            }
+        }
 
-    $hasNet = $false
-    $nicOk = $true
-    if ($forceFail) {
-        Save-EstadoFields @{ testNetFailUsed = $true }
-        Write-Log 'TEST force net fail (1x) - validar reboot_net_retry'
+        $todayKey = (Get-Date).ToString('yyyy-MM-dd')
+        $st = Get-Estado
+        $forceUsed = Get-EstadoProp $st 'testNetFailUsed'
+        $forceFail = $TestForceNetFailOnce -and ("$forceUsed" -ne 'True') -and ($forceUsed -ne $true)
+
         $hasNet = $false
-        $nicOk = $false
-    } else {
-        $hasNet = Test-InternetConfirmed
-        if (-not $hasNet) { $nicOk = Test-NicVisible }
-    }
-
-    if ($hasNet) {
-        Save-EstadoFields @{
-            lastNetGuardBootId = $bootId
-            lastAction         = 'net_ok_after_boot'
+        $nicOk = $true
+        if ($forceFail) {
+            Save-EstadoFields @{ testNetFailUsed = $true }
+            Write-Log 'TEST force net fail (1x) - validar reboot_net_retry'
+            $hasNet = $false
+            $nicOk = $false
+        } else {
+            $hasNet = Test-InternetConfirmed
+            $nicOk = Test-NicVisible
         }
-        Write-Log 'net_ok_after_boot'
-        return 'net_ok'
-    }
 
-    # Ping falhou mas placa ainda aparece = nao e a falha cronica (nao reinicia a toa)
-    if ($nicOk) {
-        Save-EstadoFields @{
-            lastNetGuardBootId = $bootId
-            lastAction         = 'net_fail_nic_ok'
+        $nicTxt = if ($nicOk) { 'nic_ok' } else { 'nic_missing' }
+        $used = Get-NetRetryCountToday
+
+        if ($hasNet) {
+            Save-EstadoFields @{
+                lastNetGuardBootId = $bootId
+                lastAction         = 'net_ok_after_boot'
+                lastNetworkOkUtc   = (Get-Date).ToUniversalTime().ToString('o')
+            }
+            Write-Log "net_ok_after_boot $nicTxt retryUsed=$used/$NetRetryMax"
+            return 'net_ok'
         }
-        Write-Log 'net_fail_nic_ok (ping falhou mas placa existe — nao reinicia)'
-        return 'net_fail_nic_ok'
-    }
 
-    $retryDone = Get-EstadoProp $st 'lastNetworkRetryDate'
-    if ($retryDone -eq $todayKey) {
-        Save-EstadoFields @{
-            lastNetGuardBootId = $bootId
-            lastAction         = 'net_fail_give_up'
+        if ($used -ge $NetRetryMax) {
+            Save-EstadoFields @{
+                lastNetGuardBootId = $bootId
+                lastAction         = 'net_fail_give_up'
+            }
+            Write-Log "net_fail_give_up (sem internet, ja tentou $used reboot extra hoje, max=$NetRetryMax) $nicTxt"
+            return 'net_fail_give_up'
         }
-        Write-Log 'net_fail_give_up (ja tentou 1 reboot extra hoje)'
-        return 'net_fail_give_up'
-    }
 
-    Save-EstadoFields @{
-        lastNetworkRetryDate = $todayKey
-        lastNetGuardBootId   = $bootId
-        lastAction           = 'reboot_net_retry'
+        $next = $used + 1
+        Save-EstadoFields @{
+            lastNetworkRetryDate  = $todayKey
+            lastNetworkRetryCount = $next
+            lastNetGuardBootId    = $bootId
+            lastAction            = 'reboot_net_retry'
+        }
+        Write-Log "reboot_net_retry (sem internet $nicTxt, reboot $next/$NetRetryMax)"
+        Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
+        & "$env:SystemRoot\System32\shutdown.exe" /r /t 30 /c "Porteiro: sem internet (retry $next/$NetRetryMax)"
+        Write-Log "shutdown_net_retry exit=$LASTEXITCODE n=$next"
+        return 'reboot_net_retry'
+    } finally {
+        try { if ($lock) { $lock.Close(); $lock.Dispose() } } catch {}
     }
-    Write-Log 'reboot_net_retry (placa sumiu apos boot, max 1x/dia)'
-    Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
-    & "$env:SystemRoot\System32\shutdown.exe" /r /t 30 /c "Porteiro: retry rede (1x)"
-    Write-Log "shutdown_net_retry exit=$LASTEXITCODE"
-    return 'reboot_net_retry'
 }
 
 function Do-NetBoot {
@@ -606,7 +640,7 @@ function Do-Status {
         Write-Host 'RebootDaily=DESLIGADO (arquivo C:\auto_vigia\NO_REBOOT.flag)'
     } else {
         Write-Host ("RebootDaily={0:D2}:{1:D2}-{2:D2}:{3:D2} (1x/dia; limpeza+reboot)" -f $RebootHour, $RebootMinute, $RebootHour, ($RebootMinute + $RebootWindowMin))
-        Write-Host ("NetGuardTodoBoot={0} min / {1} testes (placa sumiu = 1 reboot extra max/dia)" -f $NetCheckWaitMin, $NetConfirmTries)
+        Write-Host ("NetGuardTodoBoot={0} min / {1} testes / sem net = ate {2} reboot extra/dia" -f $NetCheckWaitMin, $NetConfirmTries, $NetRetryMax)
     }
     Write-Host 'MemClean=OFF (StandbyList no Conveniente, nao neste loop)'
     $dcTask = Get-ScheduledTask -TaskName 'ConvenienteDiskClean' -ErrorAction SilentlyContinue
@@ -716,7 +750,7 @@ function Do-Loop {
     }
 
     # Sobe Conveniente ANTES do NetGuard (nao ficar 4+ min parado sem sistema).
-    # Se a placa sumiu, o NetGuard ainda pode pedir 1 reboot extra depois.
+    # Sem internet o NetGuard ainda pode pedir ate 3 reboot extra depois.
     try {
         $stBoot = Get-SystemState
         if (-not $stBoot.Up) {
@@ -730,7 +764,7 @@ function Do-Loop {
         Write-Log "AUTO_BOOT ERROR $($_.Exception.Message)"
     }
 
-    # Em todo boot: espera NetCheckWaitMin e valida rede (max 1 retry/dia)
+    # Em todo boot: espera NetCheckWaitMin e valida rede (max 3 retry/dia)
     try { Invoke-StartupNetworkGuard | Out-Null } catch {}
 
     $downStreak = 0

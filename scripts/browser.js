@@ -101,9 +101,8 @@ function isDeltaMotorEnabledRuntime() {
 }
 
 /**
- * Traz a janela do navegador para frente. Sem maximize, sem vidro.
- * Maximize+vidro existem só em enableGlassForHuman (invocar humano).
- * Use ao injetar cookies / focar a conta no trabalho.
+ * Traz a janela do navegador para frente e maximiza no monitor.
+ * Sem vidro (scale/HUD/hook). Vidro existe só em enableGlassForHuman.
  */
 async function bringWindowToFront(page) {
   try {
@@ -115,6 +114,7 @@ async function bringWindowToFront(page) {
     }
     try { await page.bringToFront(); } catch {}
   }
+  try { await glassViewer.maximizeWindow(page); } catch {}
 }
 
 function resolveAccountViewportSize(manifest) {
@@ -2008,7 +2008,7 @@ function ensureChromeProfilePreferences(userDataDir, windowBounds) {
         top,
         right: left + width,
         bottom: top + height,
-        maximized: false
+        maximized: true
       };
     }
     writeJsonAtomic(prefsPath, prefs);
@@ -2379,8 +2379,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--disk-cache-size=104857600', // 100MB de cap em disco
       '--media-cache-size=0', // Zero cache de mídia
       `--window-size=${windowBounds.width},${windowBounds.height}`,
-      `--window-position=${windowBounds.left},${windowBounds.top}`
-      // Sem --start-maximized: a janela física tem que ser o preset, não o monitor da MAE.
+      `--window-position=${windowBounds.left},${windowBounds.top}`,
+      '--start-maximized'
     ];
 
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
@@ -2517,7 +2517,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
     // Permaneça inativo aqui.
 
-    // 2) Janela = preset (não maximizar no monitor da MAE)
+    // 2) Janela maximizada no monitor. Restore-down fica no preset da conta.
     try {
       const first = (await browser.pages())[0];
       await chromeHeapFaxina.withEphemeralCdpSession(first, async (client) => {
@@ -2532,10 +2532,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
             height: windowBounds.height
           }
         });
+        await client.send('Browser.setWindowBounds', {
+          windowId,
+          bounds: { windowState: 'maximized' }
+        });
       });
-      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela no preset [OK]');
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela maximizada [OK]');
     } catch (e) {
-      logger.warn('[BROWSER] Falha ao aplicar window bounds do preset (seguindo): ' + ((e && e.message) || e));
+      logger.warn('[BROWSER] Falha ao maximizar janela (seguindo): ' + ((e && e.message) || e));
     }
 
     // 2–5) Portão único: defaults, popup, permissões, cola aba 0/extras, forceClose.
@@ -2564,7 +2568,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw e;
     }
 
-    // Trabalho: janela fica no preset. Vidro (maximize+scale+zoom) só no invocar humano.
+    // Trabalho: janela maximizada. Vidro (scale+zoom+HUD) só no invocar humano.
 
     browser.getPageCount = async () => (await browser.pages()).length;
 

@@ -18,7 +18,7 @@ function check(name, cond, extra) {
   }
 }
 
-check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v4"));
+check("tag_contrato", glassSrc.includes("2026-09-04_glass_human_only_v5"));
 check("armed_helper", /function isGlassArmed\(page\)/.test(glassSrc));
 check("ready_helper", /function isGlassReady\(page\)/.test(glassSrc));
 check("painted_flag", glassSrc.includes("_ctGlassPainted"));
@@ -34,6 +34,7 @@ check("runtime_no_hijack_without_state", glassSrc.includes("if (!window.__ctGlas
 check("disable_disarms_first", /async function disableGlassForWork[\s\S]{0,220}disarmGlass\(page\)/.test(glassSrc));
 check("disable_relock_viewport", glassSrc.includes("async function relockViewportIdentity"));
 check("disable_restore_window", glassSrc.includes("async function restoreWindowToWork"));
+check("resume_keeps_work_maximized", /async function restoreWindowToWork[\s\S]{0,280}maximizeWindow\(page\)/.test(glassSrc));
 check("identity_snapshot", glassSrc.includes("function snapshotIdentityViewport"));
 check("runtime_wipe_when_no_state", /if \(!st\) \{[\s\S]{0,220}html\.style\.transform = 'none'/.test(glassSrc));
 check("scrub_idle", /async function scrubIdleGlassPaint/.test(glassSrc));
@@ -44,8 +45,11 @@ check("boot_no_apply_glass", !browserSrc.includes("applyGlassViewer(firstMax"));
 check("boot_bind_still_openbrowser_source", browserSrc.includes("source: 'openBrowser'"));
 check("boot_no_max_glass_block", !/Operador: vidro maximizado/.test(browserSrc));
 check("blindar_no_glass", !/async function _blindarOnce[\s\S]{0,700}applyGlassViewer/.test(browserSrc));
-check("bring_no_maximize", !/async function bringWindowToFront[\s\S]{0,500}maximized/.test(browserSrc));
-check("bring_no_apply_glass", !/async function bringWindowToFront[\s\S]{0,600}applyGlassViewer/.test(browserSrc));
+check("bring_maximizes_window", /async function bringWindowToFront[\s\S]{0,700}maximizeWindow/.test(browserSrc));
+check("bring_no_apply_glass", !/async function bringWindowToFront[\s\S]{0,700}applyGlassViewer/.test(browserSrc));
+check("boot_start_maximized", browserSrc.includes("'--start-maximized'"));
+check("boot_cdp_maximized", /windowState: 'maximized'/.test(browserSrc));
+check("prefs_maximized", /maximized:\s*true/.test(browserSrc));
 check("invoke_uses_first_live", /async function invocarHumano[\s\S]{0,600}firstLivePage\(browser\)/.test(browserSrc));
 check("invoke_enables_glass", browserSrc.includes("glassViewer.enableGlassForHuman(page, { source: 'invocarHumano' })"));
 {
