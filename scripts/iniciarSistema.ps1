@@ -147,12 +147,17 @@ function Start-LoopSilent {
         return
     }
     & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
-    for ($i = 0; $i -lt 8; $i++) {
+    for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 400
         if (Test-LoopAlive) {
             Write-StartLog 'loop_via_schtasks'
             return
         }
+    }
+    & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-StartLog 'loop_wait_schtasks'
+        return
     }
     if (-not (Test-Path -LiteralPath $destPs1)) {
         Write-StartLog 'loop_no_dest'

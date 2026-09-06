@@ -128,7 +128,8 @@ check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /In
 check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_excludes_hammer_host", /crashHammer\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_crash_dumps_fn", /function Ensure-NodeCrashDumps/.test(kitTxt) && /LocalDumps\\node\.exe/.test(kitTxt) && /DumpType/.test(kitTxt));
-check("kit_wersvc_fn", /function Ensure-WerSvc/.test(kitTxt) && /Start-Service -Name WerSvc/.test(kitTxt) && !/Stop-Service -Name WerSvc/.test(kitTxt));
+check("kit_wersvc_fn", /function Ensure-WerSvc/.test(kitTxt) && /Start-Service -Name WerSvc/.test(kitTxt) && !/Stop-Service -Name WerSvc/.test(kitTxt) && /sem_admin/.test(kitTxt));
+check("iniciar_loop_prefers_schtasks", /loop_wait_schtasks/.test(iniciarTxt) && /loop_via_schtasks/.test(iniciarTxt));
 check("kit_loop_wersvc", /Ensure-WerSvc/.test(loopBody));
 check("kit_crash_hammer_fn", /function Invoke-CrashHammer/.test(kitTxt) && /crashHammer\.ps1/.test(kitTxt));
 check("kit_loop_hammer_on_down", /Invoke-CrashHammer/.test(loopBody) && /porteiro_down/.test(loopBody) && /\$wasUp/.test(loopBody));

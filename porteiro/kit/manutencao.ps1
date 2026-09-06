@@ -492,17 +492,37 @@ function Invoke-StartupNetworkGuard {
     }
 }
 
+function Test-IsAdmin {
+    try {
+        $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return [bool]$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
 function Ensure-WerSvc {
     # Dump do FastFail some se o WerSvc estiver parado. Manual, mas LIGADO. Nunca Disabled. Nunca Stop.
+    # Sem SYSTEM/admin so tira foto. Nao grita fail. Nao tenta Set-Service.
+    $s = $null
+    try { $s = Get-Service -Name WerSvc -ErrorAction Stop } catch {}
+    if ($null -eq $s) {
+        Write-Log 'wersvc ausente'
+        return 'fail'
+    }
+    if (-not (Test-IsAdmin)) {
+        Write-Log ("wersvc foto {0}/{1} sem_admin" -f $s.Status, $s.StartType)
+        if ($s.Status -eq 'Running') { return 'ok' }
+        return 'skip'
+    }
     try {
         Set-Service -Name WerSvc -StartupType Manual -ErrorAction Stop
-        $s = Get-Service -Name WerSvc -ErrorAction Stop
-        if ($s.Status -ne 'Running') { Start-Service -Name WerSvc -ErrorAction Stop }
+        if ((Get-Service -Name WerSvc).Status -ne 'Running') { Start-Service -Name WerSvc -ErrorAction Stop }
         $s2 = Get-Service -Name WerSvc -ErrorAction Stop
         Write-Log ("wersvc {0}/{1}" -f $s2.Status, $s2.StartType)
         return 'ok'
     } catch {
-        Write-Log ("wersvc fail {0}" -f $_.Exception.Message)
+        $s3 = $null
+        try { $s3 = Get-Service -Name WerSvc -ErrorAction SilentlyContinue } catch {}
+        Write-Log ("wersvc fail {0} foto {1}/{2}" -f $_.Exception.Message, $(if ($s3) { $s3.Status } else { '?' }), $(if ($s3) { $s3.StartType } else { '?' }))
         return 'fail'
     }
 }
