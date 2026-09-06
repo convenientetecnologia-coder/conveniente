@@ -66,7 +66,7 @@
       "width": 1920,
       "height": 1200
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -486,7 +486,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 16
   },
   {
@@ -556,7 +556,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 8
   },
   {
@@ -591,7 +591,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 16
   },
   {
@@ -696,7 +696,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -766,7 +766,7 @@
       "width": 1920,
       "height": 1200
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 12
   },
   {
@@ -1221,7 +1221,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 8
   },
   {
@@ -1256,7 +1256,7 @@
       "width": 1920,
       "height": 1080
     },
-    "dpr": 1.25,
+    "dpr": 1,
     "hardwareConcurrency": 16
   }
 ]

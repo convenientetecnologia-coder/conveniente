@@ -63,8 +63,9 @@ check("zero_heavy_in_pool", heavy.length === 0, heavy.map((p) => p.id));
 const maxW = Math.max(...presets.map((p) => Number(p.viewport && p.viewport.width) || 0));
 const maxDpr = Math.max(...presets.map((p) => Number(p.dpr) || 0));
 check("max_width_1920", maxW <= 1920, maxW);
-check("max_dpr_medium", maxDpr <= 1.25, maxDpr);
-check("medium_1920_125_kept", presets.some((p) => Number(p.viewport && p.viewport.width) === 1920 && Number(p.dpr) === 1.25));
+check("max_dpr_1", maxDpr <= 1, maxDpr);
+check("no_zoom_left", presets.every((p) => (Number(p.dpr) || 1) <= 1));
+check("1920_variety_kept", presets.some((p) => Number(p.viewport && p.viewport.width) === 1920 && Number(p.viewport && p.viewport.height) === 1080 && (Number(p.dpr) || 1) === 1));
 
 for (const oldId of RETIRED) {
   const row = policy.retiredByPresetId[oldId];
@@ -78,16 +79,33 @@ for (const oldId of RETIRED) {
   check("sibling_major_" + oldId, majorId > 0 && majorId === majorUa, [majorId, majorUa]);
 }
 
-check("policy_version_4", Number(policy.version) === 4);
+check("policy_version_5", Number(policy.version) === 5);
+check("policy_dpr_1", Number(policy.dprNormalizedTo) === 1);
 check("policy_retired_7", Object.keys(policy.retiredByPresetId || {}).length === 7);
 
 const lightById = new Map([["win11-chrome-139-1920x1080-001", { id: "win11-chrome-139-1920x1080-001" }]]);
 check("need_missing_id", align.needsRealign({ uaPresetId: "win10-chrome-132-3840x2160-020", fp: { viewport: { width: 1366, height: 768 }, dpr: 1 } }, lightById).yes === true);
 check("need_heavy_fp", align.needsRealign({ uaPresetId: "win11-chrome-139-1920x1080-001", fp: { viewport: { width: 2560, height: 1440 }, dpr: 1.5 } }, lightById).yes === true);
-check("keep_medium", align.needsRealign({ uaPresetId: "win11-chrome-139-1920x1080-001", fp: { viewport: { width: 1920, height: 1200 }, dpr: 1.25 } }, lightById).yes === false);
+check("need_zoom_fp", align.needsRealign({ uaPresetId: "win11-chrome-139-1920x1080-001", fp: { viewport: { width: 1920, height: 1200 }, dpr: 1.25 } }, lightById).yes === true);
 check("keep_light", align.needsRealign({ uaPresetId: "win11-chrome-139-1920x1080-001", fp: { viewport: { width: 1366, height: 768 }, dpr: 1 } }, lightById).yes === false);
 check("heavy_4k", align.fpLooksHeavy({ viewport: { width: 3840, height: 2160 }, dpr: 2 }) === true);
 check("not_heavy_1920_125", align.fpLooksHeavy({ viewport: { width: 1920, height: 1200 }, dpr: 1.25 }) === false);
+check("zoomed_1920_125", align.fpLooksZoomed({ viewport: { width: 1920, height: 1200 }, dpr: 1.25 }) === true);
+
+const pickSame = align.pickReplacement(
+  { uaPresetId: "win11-chrome-139-1920x1080-001", fp: { viewport: { width: 1920, height: 1080 }, dpr: 1.25 } },
+  presets,
+  policy,
+  {}
+);
+check("pick_same_id_on_zoom", !!(pickSame && pickSame.reason === "same_id_normalize" && pickSame.preset && pickSame.preset.id === "win11-chrome-139-1920x1080-001"));
+const pickRet = align.pickReplacement(
+  { uaPresetId: "win10-chrome-132-3840x2160-020", uaString: policy.retiredByPresetId["win10-chrome-132-3840x2160-020"].uaString },
+  presets,
+  policy,
+  {}
+);
+check("pick_retired_still", !!(pickRet && pickRet.reason === "retired_sibling" && pickRet.preset && pickRet.preset.id === "win10-chrome-132-1920x1080-040"));
 
 check("worker_require", workerSrc.includes("require('./uaPresetAlign.js')"));
 check("worker_activate_hook", workerSrc.includes("prepareManifestForOpen") && workerSrc.includes("source: 'activateOnce'"));

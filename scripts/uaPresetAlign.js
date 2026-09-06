@@ -1,7 +1,7 @@
 'use strict';
 
-// Realinha conta cujo uaPresetId saiu do poço, ou cujo viewport ainda é gordo.
-// Não inventa UA. Não mexe em uaString/uaCh. Só viewport/DPR/HW + id novo.
+// Realinha conta cujo uaPresetId saiu do poço, cujo viewport ainda é gordo,
+// ou cujo DPR ainda tem zoom (>1). Não inventa UA. Não mexe em uaString/uaCh.
 
 const fileStore = require('./fileStore.js');
 const manifestStore = require('./manifestStore.js');
@@ -63,6 +63,11 @@ function fpLooksHeavy(fp) {
   return false;
 }
 
+function fpLooksZoomed(fp) {
+  const v = readViewport({ fp: fp || {} });
+  return v.dpr > 1;
+}
+
 function presetLooksHeavy(preset) {
   const v = readViewport(preset || {});
   if (v.width >= HEAVY_MIN_WIDTH) return true;
@@ -121,6 +126,9 @@ function pickLeastUsed(candidates, counts) {
 function pickReplacement(account, presets, policy, counts) {
   const oldId = String(account && account.uaPresetId || '').trim();
   const byId = indexPresets(presets);
+  if (oldId && byId.has(oldId) && isLightEnough(byId.get(oldId))) {
+    return { preset: byId.get(oldId), reason: 'same_id_normalize' };
+  }
   const retired = policy && policy.retiredByPresetId && oldId
     ? policy.retiredByPresetId[oldId]
     : null;
@@ -154,6 +162,7 @@ function needsRealign(account, byId) {
   if (!id || id === 'default') return { yes: true, reason: 'preset_missing' };
   if (!byId.has(id)) return { yes: true, reason: 'preset_retired' };
   if (fpLooksHeavy(account && account.fp)) return { yes: true, reason: 'viewport_heavy' };
+  if (fpLooksZoomed(account && account.fp)) return { yes: true, reason: 'viewport_zoom' };
   return { yes: false, reason: 'ok' };
 }
 
@@ -410,6 +419,7 @@ module.exports = {
   HEAVY_MIN_HEIGHT,
   HEAVY_MIN_DPR,
   fpLooksHeavy,
+  fpLooksZoomed,
   presetLooksHeavy,
   needsRealign,
   stillNeedsRealign,

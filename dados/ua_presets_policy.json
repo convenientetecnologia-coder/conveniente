@@ -1,7 +1,8 @@
 {
-  "version": 4,
+  "version": 5,
   "generatedAt": 1775590497329,
   "mode": "enterprise_curated_pool_all_approved",
+  "dprNormalizedTo": 1,
   "criteria": {
     "maxMajor": 139,
     "approvedDeltaMax": 16,
