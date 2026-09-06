@@ -1,11 +1,7 @@
-# Janela visivel. O node NAO mora nesta janela.
-# Fechar o X nao mata o index.
-# Ctrl+C: para o index e a arvore (mesmo gesto de antanho no node index.js).
+# Sobe o index Hidden. Sem janela. Sem texto de Ctrl+C.
+# Fechar qualquer X nao mata o node: ele nao mora nesta janela.
+# Parar: porteiro PARAR / update (taskkill no node).
 $ErrorActionPreference = 'Continue'
-try {
-    $Host.UI.RawUI.WindowTitle = 'Conveniente_Node'
-    [Console]::Title = 'Conveniente_Node'
-} catch {}
 $node = $null
 try { $node = (Get-Command node -ErrorAction SilentlyContinue).Source } catch {}
 if (-not $node) { $node = 'C:\Program Files\nodejs\node.exe' }
@@ -14,46 +10,9 @@ $work = 'C:\conveniente'
 if (-not (Test-Path -LiteralPath $node)) { throw "node_missing: $node" }
 if (-not (Test-Path -LiteralPath $idx)) { throw "index_missing: $idx" }
 
-try {
-    Write-Host 'Conveniente no ar.'
-    Write-Host 'Ctrl+C para o sistema. Fechar o X nao para.'
-} catch {}
-
 $p = Start-Process -FilePath $node -ArgumentList $idx -WorkingDirectory $work -WindowStyle Hidden -PassThru
 if (-not $p) { throw 'node_start_failed' }
-
-function Stop-ConvenienteNodeTree([int]$PidToKill) {
-    if ($PidToKill -le 0) { return }
-    try { & taskkill.exe /F /T /PID $PidToKill 2>$null | Out-Null } catch {}
-}
-
-$treatOk = $false
-try {
-    [Console]::TreatControlCAsInput = $true
-    $treatOk = $true
-} catch {}
-
-if ($treatOk) {
-    while ($p -and -not $p.HasExited) {
-        Start-Sleep -Milliseconds 250
-        try { $p.Refresh() } catch {}
-        if ($p.HasExited) { break }
-        $hit = $false
-        try { $hit = [Console]::KeyAvailable } catch { $hit = $false }
-        if (-not $hit) { continue }
-        $k = $null
-        try { $k = [Console]::ReadKey($true) } catch { $k = $null }
-        if (-not $k) { continue }
-        $isCtrlC = ($k.Key -eq 'C' -and (($k.Modifiers -band [ConsoleModifiers]::Control) -eq [ConsoleModifiers]::Control))
-        if ($isCtrlC) {
-            try { Write-Host 'Ctrl+C: parando o Conveniente...' } catch {}
-            Stop-ConvenienteNodeTree ([int]$p.Id)
-            break
-        }
-    }
-} else {
-    try { Wait-Process -Id $p.Id } catch {}
-}
+try { Wait-Process -Id $p.Id } catch {}
 
 try { $p.Refresh() } catch {}
 $ec = 0

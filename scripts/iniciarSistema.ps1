@@ -1,5 +1,5 @@
 # Clique Iniciar: sobe o Conveniente. Arma o loop em silencio se faltar.
-# Sem admin. Sem OK. Launcher some. Uma janela visivel: Conveniente_Node (powershell nativo).
+# Sem admin. Sem OK. Launcher some. Node Hidden: sem janela, sem Ctrl+C.
 # Armado = dest nomem v5.2.1-clean-cpu + loop vivo. Hash/NetBoot NAO bloqueiam o clique.
 # Recusa kit com Get-CpuAvg / Win32_Processor.
 
@@ -201,9 +201,7 @@ function Start-ConvenienteNodeHost {
         [Parameter(Mandatory = $true)][string]$IndexPath,
         [Parameter(Mandatory = $true)][string]$WorkDir
     )
-    $hostPs1 = 'C:\conveniente\scripts\convenienteNodeHost.ps1'
-    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -File "' + $hostPs1 + '"'
-    return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
+    return Start-Process -FilePath $NodeExe -ArgumentList $IndexPath -WorkingDirectory $WorkDir -WindowStyle Hidden -PassThru
 }
 
 function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
