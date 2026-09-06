@@ -179,7 +179,7 @@ function Ensure-LogonTaskSilent {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 

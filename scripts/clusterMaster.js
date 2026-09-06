@@ -199,6 +199,21 @@ function createCluster() {
 
     proc.on('exit', (code, signal) => {
       logger.warn('[CLUSTER] worker dropado', { idx, code, signal });
+      try {
+        require('./crashHammer.js').scheduleWorkerDrop({
+          idx: idx + 1,
+          code: code == null ? null : Number(code),
+          signal: signal == null ? null : String(signal),
+          workerPid: proc && proc.pid ? Number(proc.pid) : null,
+          shard: (() => {
+            try {
+              const child = children[idx];
+              if (child && child.shard) return child.shard.size;
+            } catch {}
+            return (blocks[idx] || []).length;
+          })()
+        });
+      } catch {}
       // Resolver pendências do pending com erro
       for (const [msgId, { resolve }] of pending.entries()) {
         try { resolve({ ok: false, error: 'worker_died' }); } catch {}

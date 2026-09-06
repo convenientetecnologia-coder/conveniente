@@ -362,6 +362,34 @@ function Set-Win32PrioritySeparation {
     return (Set-RegWanted -Path $path -Name 'Win32PrioritySeparation' -Want 24 -Type DWord -NeedAdmin -Why 'Win32PrioritySeparation=24 (0x18) perfil Background Services; fatias longas/estaveis para processos de fundo; precisa admin; nao afirma cura de FastFail' -Known @('2=Programs', '24=Background 0x18', '26=Programs 0x1A'))
 }
 
+function Set-NodeLocalDumps {
+    $folder = 'C:\conveniente\dados\crash_dumps'
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe'
+    $before = 'ausente'
+    try {
+        if (Test-Path -LiteralPath $key) {
+            $cur = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            $before = [string]$cur.DumpFolder + '/' + [string]$cur.DumpType
+        }
+    } catch {}
+    if ($DryRun) {
+        return @{ ok = $true; skipped = $true; detail = 'dryrun'; before = $before; after = $before; want = $folder; reason = 'LocalDumps node.exe mini-dump' }
+    }
+    if (-not (Test-IsAdmin)) {
+        return @{ ok = $true; skipped = $true; detail = 'sem_admin'; before = $before; after = $before; want = $folder; reason = 'HKLM LocalDumps precisa admin; NetBoot SYSTEM arma' }
+    }
+    try {
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+        New-ItemProperty -Path $key -Name DumpFolder -Value $folder -PropertyType ExpandString -Force | Out-Null
+        New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force | Out-Null
+        return @{ ok = $true; skipped = $false; detail = 'armed'; before = $before; after = $folder + '/1'; want = $folder; reason = 'mini-dump FastFail node.exe' }
+    } catch {
+        return @{ ok = $false; skipped = $false; detail = $_.Exception.Message; before = $before; after = $before; want = $folder; reason = 'LocalDumps recusou' }
+    }
+}
+
 function Set-HostServiceMitigated([string]$Name, [ValidateSet('Disabled','Manual')]$Startup) {
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if ($null -eq $svc) {
@@ -621,6 +649,7 @@ if ($Apply) {
         $steps += Invoke-Step 'diagtrack' { Set-HostServiceMitigated 'DiagTrack' 'Disabled' }
         $steps += Invoke-Step 'sysmain' { Set-HostServiceMitigated 'SysMain' 'Disabled' }
         $steps += Invoke-Step 'wersvc' { Set-HostServiceMitigated 'WerSvc' 'Manual' }
+        $steps += Invoke-Step 'node_localdumps' { Set-NodeLocalDumps }
         $steps += Invoke-Step 'power' { Set-PowerPlanMax }
         $steps += Invoke-Step 'desktop_heap' { Set-DesktopHeapIfNeeded }
     } else {

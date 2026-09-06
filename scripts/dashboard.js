@@ -3228,7 +3228,9 @@ function logsAllowlist() {
     process_sentinel: path.join(base, 'process_sentinel.jsonl'),
     process_sentinel_state: path.join(base, 'process_sentinel_state.json'),
     process_sentinel_incident: path.join(base, 'process_sentinel_last_incident.json'),
-    process_sentinel_install: path.join(base, 'process_sentinel_install.json')
+    process_sentinel_install: path.join(base, 'process_sentinel_install.json'),
+    crash_hammer: path.join(base, 'crash_hammer.jsonl'),
+    crash_hammer_last: path.join(base, 'crash_hammer_last.json')
   };
   // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
   // Chaves:

@@ -39,3 +39,21 @@ sem gate de CPU.
    STATUS: Ver=v5.2.1-clean-cpu  MemClean=OFF
    Log: BOOT v5.2.1-clean-cpu
    Tarefa ConvenientePorteiro = Running (nao depende do Node estar aberto)
+
+4. DECISAO 2026-09-05 (MAE 1) — AINDA NAO FAZER
+   Por enquanto nao mexer no Porteiro nem no botao Iniciar.
+   Se um dia for: conversa Porteiro <-> Conveniente (perguntar pro sistema
+   ligado, nao so pro Windows) e log de todo taskkill (pid, quem pediu).
+   NAO fazer: Iniciar usar o mesmo olho do loop (qualquer node = ligado =
+   nao mata). O clique do usuario TEM que ter mais poder. Caso 21:11
+   (clique em cima do AUTO_BOOT pos-reboot) foi caso a parte, nao motivo
+   pra enfraquecer o botao.
+
+5. MARTELO DA QUEDA (2026-09-06)
+   Quando worker ou index cai, gravar Windows: modulo, excecao, commit%,
+   Evento 1000/1001, WER, mini-dump do node.exe se LocalDumps estiver armado
+   (NetBoot SYSTEM ou tuning admin). Porteiro dispara se o Conveniente
+   sumir (olho de fora). Nao e cura. E o corpo da queda.
+   Arquivos: dados/crash_hammer.jsonl + crash_hammer_last.json
+   + dados/crash_dumps\*.dmp
+   Iniciar continua com mais poder. Sem misturar nurse/tinta/EWS.

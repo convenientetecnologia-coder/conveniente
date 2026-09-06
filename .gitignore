@@ -44,6 +44,9 @@ dados/process_sentinel_install.json
 dados/forensic_process/
 dados/forensic_dumps/
 dados/forensic_node_reports/
+dados/crash_dumps/
+dados/crash_hammer.jsonl
+dados/crash_hammer_last.json
 _backup_local_before_reset_*/
 
 # Arquivos temporários gerados pelo cluster/sistema

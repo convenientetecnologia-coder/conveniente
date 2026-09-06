@@ -7312,6 +7312,18 @@ function governorSnapshotTick() {
     desiredActive = a;
   } catch {}
 
+  let commitPct = null;
+  let commitUsedMB = null;
+  let commitLimitMB = null;
+  try {
+    const osMem = require('./crashHammer.js').readOsMemCached();
+    if (osMem) {
+      if (osMem.commitPct != null) commitPct = osMem.commitPct;
+      if (osMem.commitUsedMB != null) commitUsedMB = osMem.commitUsedMB;
+      if (osMem.commitLimitMB != null) commitLimitMB = osMem.commitLimitMB;
+    }
+  } catch {}
+
   appendJsonl(GOV_SNAP_JSONL, {
     ts: now,
     hostId: hostId || null,
@@ -7321,6 +7333,9 @@ function governorSnapshotTick() {
     reason: String(autoMode && autoMode.reason || ''),
     since: Number(autoMode && autoMode.since || 0) || 0,
     freeMB,
+    commitPct,
+    commitUsedMB,
+    commitLimitMB,
     lagMeanMs: Number(autoMode && autoMode.eventLoopLagMs || 0) || 0,
     lagMaxMs: Number(autoMode && autoMode.eventLoopLagMaxMs || 0) || 0,
     rssMB,

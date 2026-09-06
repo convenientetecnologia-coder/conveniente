@@ -492,9 +492,44 @@ function Invoke-StartupNetworkGuard {
     }
 }
 
+function Ensure-NodeCrashDumps {
+    # Mini-dump do node.exe. Precisa SYSTEM/admin (NetBoot). Sem isso o FastFail some sem corpo.
+    $folder = 'C:\conveniente\dados\crash_dumps'
+    try { New-Item -ItemType Directory -Path $folder -Force | Out-Null } catch {}
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe'
+    try {
+        if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+        New-ItemProperty -Path $key -Name DumpFolder -Value $folder -PropertyType ExpandString -Force | Out-Null
+        New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force | Out-Null
+        Write-Log 'crash_dumps armed'
+        return 'ok'
+    } catch {
+        Write-Log ("crash_dumps unarmed {0}" -f $_.Exception.Message)
+        return 'fail'
+    }
+}
+
+function Invoke-CrashHammer {
+    param([string]$Reason = 'porteiro_down')
+    $ps1 = 'C:\conveniente\scripts\crashHammer.ps1'
+    if (-not (Test-Path -LiteralPath $ps1)) { return }
+    try {
+        $psExe = Get-ConvenientePsHost
+        Start-Process -FilePath $psExe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+            '-File', $ps1, '-Reason', $Reason, '-Minutes', '20'
+        ) | Out-Null
+        Write-Log ("crash_hammer {0}" -f $Reason)
+    } catch {
+        Write-Log ("crash_hammer fail {0}" -f $_.Exception.Message)
+    }
+}
+
 function Do-NetBoot {
     # Startup SYSTEM: checa internet em todo boot (nao depende do logon)
     Ensure-Dirs
+    try { [void](Ensure-NodeCrashDumps) } catch {}
     Write-Log ("NETBOOT $Version uptime={0}m" -f (Get-UptimeMinutes))
     try {
         $r = Invoke-StartupNetworkGuard
@@ -515,7 +550,7 @@ function Get-ConvenientePsHost {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
@@ -736,6 +771,7 @@ function Do-Loop {
 
     Set-MaxPerf
     Invoke-WinTuningSilent
+    try { [void](Ensure-NodeCrashDumps) } catch {}
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
     else { Write-Log (("BOOT $Version reboot={0:D2}:{1:D2}" -f $RebootHour, $RebootMinute)) }
     try { [void](Ensure-DiskCleanTask) } catch {}
@@ -766,6 +802,7 @@ function Do-Loop {
     try { Invoke-StartupNetworkGuard | Out-Null } catch {}
 
     $downStreak = 0
+    $wasUp = $false
 
     while ($true) {
         try {
@@ -774,6 +811,12 @@ function Do-Loop {
             $st = Get-SystemState
             $actions = @()
             $nodeMsg = ''
+
+            if ($wasUp -and $st -and (-not $st.Up)) {
+                Invoke-CrashHammer -Reason 'porteiro_down'
+                $actions += 'crash_hammer'
+            }
+            if ($st) { $wasUp = [bool]$st.Up }
 
             if (Test-Paused) {
                 $nodeMsg = 'paused'

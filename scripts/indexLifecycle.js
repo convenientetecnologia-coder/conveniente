@@ -206,6 +206,7 @@ function noteUnexpectedDead() {
     prevFleet: prev.fleet || null,
     reason: "prev_index_sem_exit"
   });
+  try { require("./crashHammer.js").scheduleIndex("index_unexpected_dead"); } catch {}
 }
 
 function writeBootContext() {

@@ -126,6 +126,12 @@ check("kit_do_stop_cmd_leftover", /cmd\.exe/.test(kitTxt.split("function Stop-Co
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
 check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /Invoke-WinTuningSilent/.test(doStartBody) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
 check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("kit_excludes_hammer_host", /crashHammer\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("kit_crash_dumps_fn", /function Ensure-NodeCrashDumps/.test(kitTxt) && /LocalDumps\\node\.exe/.test(kitTxt) && /DumpType/.test(kitTxt));
+check("kit_crash_hammer_fn", /function Invoke-CrashHammer/.test(kitTxt) && /crashHammer\.ps1/.test(kitTxt));
+check("kit_loop_hammer_on_down", /Invoke-CrashHammer/.test(loopBody) && /porteiro_down/.test(loopBody) && /\$wasUp/.test(loopBody));
+check("kit_netboot_arms_dumps", /Ensure-NodeCrashDumps/.test((kitTxt.split("function Do-NetBoot")[1] || "").split("function ")[0]));
+check("iniciar_excludes_hammer_host", /crashHammer\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_ensure_function_gone", !/function Invoke-PorteiroEnsure/.test(kitTxt));
 check("kit_ensure_not_in_auto", !/Invoke-PorteiroEnsure/.test((kitTxt.split("function Do-Loop")[1] || "").split("function ")[0]));
 
