@@ -52,7 +52,8 @@ sem gate de CPU.
 5. MARTELO DA QUEDA (2026-09-06)
    Quando worker ou index cai, gravar Windows: modulo, excecao, commit%,
    Evento 1000/1001, WER, mini-dump do node.exe se LocalDumps estiver armado
-   (NetBoot SYSTEM ou tuning admin). Porteiro dispara se o Conveniente
+   (NetBoot SYSTEM ou tuning admin). WerSvc fica Manual e LIGADO
+   (nunca Disabled, nunca Stop) pra o dump nascer. Porteiro dispara se o Conveniente
    sumir (olho de fora). Nao e cura. E o corpo da queda.
    Arquivos: dados/crash_hammer.jsonl + crash_hammer_last.json
    + dados/crash_dumps\*.dmp

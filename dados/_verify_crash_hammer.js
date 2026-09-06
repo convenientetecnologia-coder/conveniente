@@ -49,6 +49,9 @@ check("kit_version_intact", /v5\.2\.1-clean-cpu/.test(kit) && !/function Get-Cpu
 check("kit_loop_no_taskkill", !/taskkill/i.test(loopBody));
 check("kit_hammer_outside", /Invoke-CrashHammer/.test(kit) && /Ensure-NodeCrashDumps/.test(kit));
 check("tune_localdumps", /function Set-NodeLocalDumps/.test(tune) && /node_localdumps/.test(tune));
+check("tune_wersvc_running", /function Set-WerSvcReady/.test(tune) && /Start-Service -Name WerSvc/.test(tune));
+check("tune_wersvc_not_stopped", !/Set-HostServiceMitigated 'WerSvc'/.test(tune));
+check("kit_wersvc_start", /function Ensure-WerSvc/.test(kit) && /Start-Service -Name WerSvc/.test(kit));
 check("iniciar_excludes_ps1", /crashHammer\\.ps1/.test(iniciar));
 check("contrato_martelo", /MARTELO DA QUEDA/.test(contrato));
 check("gitignore_dumps", /dados\/crash_dumps\//.test(gitignore));

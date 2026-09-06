@@ -1,6 +1,6 @@
 # Host Windows do Conveniente. Nao mexe em Robe/Virtus/frota.
 # Sem UAC. Sem Wait no Iniciar. Falha local nunca impede o Node.
-# WerSvc fica Manual: Disabled apaga dump de FastFail 0xC0000409 (WER reporta, nao causa).
+# WerSvc fica Manual e LIGADO. Disabled apaga dump. Stop tambem. FastFail 0xC0000409 precisa do servico de pe.
 # Chrome/node so do caminho C:\conveniente. Poll 5s (1ms queima CPU).
 # Adendo registro: VisualFXSetting=2, MinAnimate=0, Win32PrioritySeparation=24.
 # Cada passo grava before/after/motivo em windows_tuning.forensic.jsonl.
@@ -362,6 +362,39 @@ function Set-Win32PrioritySeparation {
     return (Set-RegWanted -Path $path -Name 'Win32PrioritySeparation' -Want 24 -Type DWord -NeedAdmin -Why 'Win32PrioritySeparation=24 (0x18) perfil Background Services; fatias longas/estaveis para processos de fundo; precisa admin; nao afirma cura de FastFail' -Known @('2=Programs', '24=Background 0x18', '26=Programs 0x1A'))
 }
 
+function Set-WerSvcReady {
+    $svc = Get-Service -Name WerSvc -ErrorAction SilentlyContinue
+    if ($null -eq $svc) {
+        return @{ ok = $true; skipped = $true; detail = 'servico_ausente'; before = 'ausente'; after = 'ausente'; want = 'Running/Manual'; reason = 'WerSvc nao existe nesta SKU' }
+    }
+    $before = ($svc.Status.ToString() + '/' + $svc.StartType.ToString())
+    if ($DryRun) {
+        return @{ ok = $true; skipped = $true; detail = 'dryrun'; before = $before; after = $before; want = 'Running/Manual'; reason = 'Manual + ligado; dump FastFail precisa do servico de pe' }
+    }
+    if (-not (Test-IsAdmin)) {
+        return @{ ok = $true; skipped = $true; detail = 'sem_admin'; before = $before; after = $before; want = 'Running/Manual'; reason = 'Start-Service WerSvc precisa admin; porteiro SYSTEM liga' }
+    }
+    try {
+        Set-Service -Name WerSvc -StartupType Manual -ErrorAction Stop
+        if ((Get-Service -Name WerSvc).Status -ne 'Running') {
+            Start-Service -Name WerSvc -ErrorAction Stop
+        }
+        $afterSvc = Get-Service -Name WerSvc -ErrorAction Stop
+        $after = ($afterSvc.Status.ToString() + '/' + $afterSvc.StartType.ToString())
+        return @{
+            ok = ($afterSvc.Status -eq 'Running')
+            skipped = $false
+            detail = ('state=' + $afterSvc.Status + ' start=' + $afterSvc.StartType)
+            before = $before
+            after = $after
+            want = 'Running/Manual'
+            reason = 'Nunca Disabled. Nunca Stop. Dump do node precisa do WerSvc de pe'
+        }
+    } catch {
+        return @{ ok = $false; skipped = $false; detail = $_.Exception.Message; before = $before; after = $before; want = 'Running/Manual'; reason = 'WerSvc recusou Start' }
+    }
+}
+
 function Set-NodeLocalDumps {
     $folder = 'C:\conveniente\dados\crash_dumps'
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe'
@@ -648,7 +681,7 @@ if ($Apply) {
     if ($admin) {
         $steps += Invoke-Step 'diagtrack' { Set-HostServiceMitigated 'DiagTrack' 'Disabled' }
         $steps += Invoke-Step 'sysmain' { Set-HostServiceMitigated 'SysMain' 'Disabled' }
-        $steps += Invoke-Step 'wersvc' { Set-HostServiceMitigated 'WerSvc' 'Manual' }
+        $steps += Invoke-Step 'wersvc' { Set-WerSvcReady }
         $steps += Invoke-Step 'node_localdumps' { Set-NodeLocalDumps }
         $steps += Invoke-Step 'power' { Set-PowerPlanMax }
         $steps += Invoke-Step 'desktop_heap' { Set-DesktopHeapIfNeeded }
@@ -670,7 +703,7 @@ try {
     $h = @($steps | Where-Object { $_.name -eq 'desktop_heap' } | Select-Object -First 1)
     if ($h -and $h.detail) { $heapNote = [string]$h.detail }
 } catch {}
-Write-TuneLog ($stamp + ' Windows host tuning. DiagTrack/SysMain mitigados se admin. WerSvc=Manual (dump FastFail preservado). Energia High/Ultimate + disco/hibernar 0. ' + $heapNote + ' Prioridade High: RDP + node Conveniente + chrome Conveniente.')
+Write-TuneLog ($stamp + ' Windows host tuning. DiagTrack/SysMain mitigados se admin. WerSvc=Running/Manual (dump FastFail). Energia High/Ultimate + disco/hibernar 0. ' + $heapNote + ' Prioridade High: RDP + node Conveniente + chrome Conveniente.')
 
 $adendoNames = @('reg_visualfx', 'reg_minanimate', 'reg_win32priority')
 $adendo = @($steps | Where-Object { $adendoNames -contains $_.name })

@@ -492,6 +492,21 @@ function Invoke-StartupNetworkGuard {
     }
 }
 
+function Ensure-WerSvc {
+    # Dump do FastFail some se o WerSvc estiver parado. Manual, mas LIGADO. Nunca Disabled. Nunca Stop.
+    try {
+        Set-Service -Name WerSvc -StartupType Manual -ErrorAction Stop
+        $s = Get-Service -Name WerSvc -ErrorAction Stop
+        if ($s.Status -ne 'Running') { Start-Service -Name WerSvc -ErrorAction Stop }
+        $s2 = Get-Service -Name WerSvc -ErrorAction Stop
+        Write-Log ("wersvc {0}/{1}" -f $s2.Status, $s2.StartType)
+        return 'ok'
+    } catch {
+        Write-Log ("wersvc fail {0}" -f $_.Exception.Message)
+        return 'fail'
+    }
+}
+
 function Ensure-NodeCrashDumps {
     # Mini-dump do node.exe. Precisa SYSTEM/admin (NetBoot). Sem isso o FastFail some sem corpo.
     $folder = 'C:\conveniente\dados\crash_dumps'
@@ -530,6 +545,7 @@ function Do-NetBoot {
     # Startup SYSTEM: checa internet em todo boot (nao depende do logon)
     Ensure-Dirs
     try { [void](Ensure-NodeCrashDumps) } catch {}
+    try { [void](Ensure-WerSvc) } catch {}
     Write-Log ("NETBOOT $Version uptime={0}m" -f (Get-UptimeMinutes))
     try {
         $r = Invoke-StartupNetworkGuard
@@ -772,6 +788,7 @@ function Do-Loop {
     Set-MaxPerf
     Invoke-WinTuningSilent
     try { [void](Ensure-NodeCrashDumps) } catch {}
+    try { [void](Ensure-WerSvc) } catch {}
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
     else { Write-Log (("BOOT $Version reboot={0:D2}:{1:D2}" -f $RebootHour, $RebootMinute)) }
     try { [void](Ensure-DiskCleanTask) } catch {}
