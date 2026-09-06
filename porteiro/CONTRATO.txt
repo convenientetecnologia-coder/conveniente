@@ -5,7 +5,7 @@ Data: 2026-08-31
 O Porteiro (C:\auto_vigia, tarefa ConvenientePorteiro ao logon) e um
 sistema a parte. Ele TEM que funcionar com o Conveniente DESLIGADO:
   - reboot 04:00-04:20 + TEMP + Lixeira
-  - AUTO_BOOT: se o index nao estiver no ar, o Porteiro sobe o node Hidden (sem janela)
+  - AUTO_BOOT: se o index nao estiver no ar, o Porteiro sobe o PowerShell Conveniente_Node
   - NetGuard / ConvenienteNetBoot no startup (sem net = ate 3 reboot extra/dia)
 
 O index.js NAO e o dono. O index so CORRIGE a versao quando voce liga
@@ -30,7 +30,7 @@ sem gate de CPU.
      npm install
    Clique o S (INICIAR_SISTEMA.vbs). Sem admin. Sem OK.
    Sobe o Conveniente e arma o vigia (C:\auto_vigia + tarefa ao logon + loop).
-   Lixeira, reboot 04h, religar o index Hidden: o vigia faz.
+   Lixeira, reboot 04h, religar o PowerShell Conveniente_Node: o vigia faz.
 
 2. MAE JA EXISTENTE / VERSAO NOVA DO VIGIA
    git pull, clique o S. Se o arquivo do vigia mudou: copia, mata o loop

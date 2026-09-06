@@ -92,11 +92,8 @@ check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UA
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
 check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("winTuningMaster.ps1") < iniciarTxt.indexOf("Write-StartLog 'click'"));
 check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
-const iniciarHostFn = (iniciarTxt.split("function Start-ConvenienteNodeHost")[1] || "").split("function ")[0];
-check("iniciar_starts_node_hidden", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /WindowStyle Hidden/.test(iniciarHostFn) && /Start-Process -FilePath \$NodeExe/.test(iniciarHostFn) && !/-NoExit/.test(iniciarHostFn) && !/WindowStyle Normal/.test(iniciarHostFn) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
-check("host_node_detached", /Start-Process -FilePath \$node/.test(hostTxt) && /WindowStyle Hidden/.test(hostTxt) && !/& \$node \$idx/.test(hostTxt));
-check("host_x_does_not_kill", /Fechar qualquer X nao mata o node/.test(hostTxt) && /WindowStyle Hidden/.test(hostTxt));
-check("host_no_ctrl_c_trap", !/TreatControlCAsInput/.test(hostTxt) && !/Stop-ConvenienteNodeTree/.test(hostTxt) && !/Ctrl\+C para o sistema/.test(hostTxt) && !/Write-Host/.test(hostTxt));
+check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
+check("host_node_in_window", /& \$node \$idx/.test(hostTxt) && /Conveniente_Node/.test(hostTxt) && !/WindowStyle Hidden/.test(hostTxt) && !/TreatControlCAsInput/.test(hostTxt));
 const lifeTxt = fs.readFileSync(path.join(root, "scripts", "indexLifecycle.js"), "utf8");
 check("life_sighup_listeners", /SIGBREAK/.test(lifeTxt) && /SIGHUP/.test(lifeTxt) && /handleConsoleSessionSignal/.test(lifeTxt));
 check("life_sighup_no_exit", /function handleConsoleSessionSignal[\s\S]{0,700}return \{ keptAlive: true, exited: false/.test(lifeTxt) && !/function handleConsoleSessionSignal[\s\S]{0,700}process\.exit/.test(lifeTxt));
@@ -123,8 +120,7 @@ check("iniciar_bat_removed", !fs.existsSync(path.join(root, "porteiro", "INICIAR
 check("install_kit_iniciar_uses_vbs", /INICIAR_SISTEMA\.vbs/.test(instKitTxt) && /wscript\.exe/.test(instKitTxt));
 const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function Do-Status")[0];
 const doStopBody = (kitTxt.split("function Do-Stop")[1] || "").split("function Do-Start")[0];
-const kitHostFn = (kitTxt.split("function Start-ConvenienteNodeHost")[1] || "").split("function ")[0];
-check("kit_do_start_node_hidden", /function Start-ConvenienteNodeHost/.test(kitTxt) && /WindowStyle Hidden/.test(kitHostFn) && /Start-Process -FilePath \$NodeExe/.test(kitHostFn) && !/-NoExit/.test(kitHostFn) && !/WindowStyle Normal/.test(kitHostFn) && /Start-ConvenienteNodeHost/.test(doStartBody) && !/Start-Process cmd\.exe/.test(kitTxt) && !/cmd\.exe \/c/.test(kitTxt));
+check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTxt) && /-NoExit/.test(kitTxt) && /WindowStyle Normal/.test(kitTxt) && /Start-ConvenienteNodeHost/.test(doStartBody) && !/Start-Process cmd\.exe/.test(kitTxt) && !/cmd\.exe \/c/.test(kitTxt));
 check("kit_do_stop_powershell_host", /function Stop-ConvenienteConsoleHosts/.test(kitTxt) && /powershell\.exe/.test(kitTxt) && /Stop-ConvenienteConsoleHosts/.test(doStopBody) && /index\.js/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_stop_cmd_leftover", /cmd\.exe/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
