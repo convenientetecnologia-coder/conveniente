@@ -2420,8 +2420,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // DEFAULT VIEWPORT: null SEMPRE
     const defaultViewport = null;
 
-    // GUARDA: Chrome Stable only
-    const executablePath = findChromeStable();
+    // Motor isolado do worker. Sem fallback ao chrome.exe unificado.
+    const chromeMotores = require('./chromeMotores.js');
+    const executablePath = chromeMotores.resolveLaunchExeOrFatal();
 
     async function tryLaunch(args, tag) {
       try {

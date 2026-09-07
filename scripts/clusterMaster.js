@@ -9,6 +9,7 @@ const logger = require('./logger.js');
 const supervisor = require('./supervisor.js');
 const provisionLock = require('./provisionLock.js');
 const chromeMemorySweep = require('./chromeMemorySweep.js');
+const chromeMotores = require('./chromeMotores.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -90,6 +91,12 @@ function createCluster() {
       'city-collector-shards',
       `w${idx + 1}`
     );
+    const motorExe = chromeMotores.motorExe(idx + 1);
+    if (!fs.existsSync(motorExe)) {
+      throw new Error('MULTI_ENGINE_FATAL: motor ausente no spawn w' + (idx + 1) + ' ' + motorExe);
+    }
+    env.CHROME_PATH = motorExe;
+    env.CHROME_MOTOR_EXE = motorExe;
 
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
 
@@ -98,6 +105,7 @@ function createCluster() {
         worker: idx + 1,
         shardSize: Array.isArray(shardNames) ? shardNames.length : 0,
         cityCollectorUserDataDir: env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR,
+        chromeMotor: motorExe,
       });
     } catch {}
 
@@ -273,6 +281,8 @@ function createCluster() {
     return { proc, pending };
   }
 
+  chromeMotores.ensureWorkers(blocks.length, { purge: true });
+
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
     const { proc, pending } = spawnWorker(idx, shardNames);
@@ -394,6 +404,9 @@ function createCluster() {
       desiredNodes
     });
 
+    if (growPlan.newWorkerIndexes && growPlan.newWorkerIndexes.length) {
+      chromeMotores.ensureWorkers(desiredNodes, { purge: false });
+    }
     for (const idx of growPlan.newWorkerIndexes) {
       const shardNames = growPlan.nextShards[idx] || [];
       const { proc, pending } = spawnWorker(idx, shardNames);

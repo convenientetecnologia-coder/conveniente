@@ -17,6 +17,9 @@ Thumbs.db
 .env
 .env.*
 
+# Clones oficiais do Chrome por worker (nao versionar binario)
+motores/
+
 # Runtime local (cada servidor tem o seu estado)
 dados/.telemetry_hostid
 dados/status.json
@@ -47,6 +50,7 @@ dados/forensic_node_reports/
 dados/crash_dumps/
 dados/crash_hammer.jsonl
 dados/crash_hammer_last.json
+dados/multi_engine_last.json
 _backup_local_before_reset_*/
 
 # Arquivos temporários gerados pelo cluster/sistema

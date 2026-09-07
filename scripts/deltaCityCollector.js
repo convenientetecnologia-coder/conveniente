@@ -1392,9 +1392,8 @@ async function createCollectorRuntime() {
   try {
     fs.mkdirSync(userDataDir, { recursive: true });
   } catch (_) {}
-  const executablePath =
-    process.env.CHROME_PATH ||
-    path.join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe");
+  const chromeMotores = require("./chromeMotores.js");
+  const executablePath = chromeMotores.resolveLaunchExeOrFatal();
 
   // Default VISÍVEL (headed): dá pra ver o Chrome de raspagem no servidor.
   // Headless só sob demanda: VIRTUS_DELTA_CITY_COLLECTOR_HEADLESS=1

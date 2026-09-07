@@ -4390,7 +4390,12 @@ async function bootCluster() {
   try { rotateForensicLogs24h(); } catch {}
   const { createCluster } = require('./scripts/clusterMaster.js');
   logger.info('[BOOT] Construindo cluster multi-node (auto)...');
-  clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }
+  try {
+    clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }
+  } catch (e) {
+    logger.error('[BOOT] cluster abortado. Sem fallback ao Chrome unificado.', { error: (e && e.message) || String(e) }, e);
+    process.exit(1);
+  }
   logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes);
 }
 // ===================== FIM CLUSTER MULTI-NODE =====================

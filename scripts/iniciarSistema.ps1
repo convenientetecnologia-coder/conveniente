@@ -243,6 +243,20 @@ function Start-ConvenienteNode {
         return 1
     }
     [void](Stop-ConvenienteConsoleHosts)
+    Write-StartLog 'motores_begin'
+    & taskkill.exe /F /IM chrome.exe 1>$null 2>$null
+    Start-Sleep -Milliseconds 1200
+    $mot = Start-Process -FilePath $node -ArgumentList @('C:\conveniente\scripts\chromeMotores.js', '--boot') -WorkingDirectory 'C:\conveniente' -Wait -PassThru -NoNewWindow
+    if (-not $mot -or $mot.ExitCode -ne 0) {
+        Write-StartLog ('motores_fatal exit=' + $(if ($mot) { $mot.ExitCode } else { 'null' }))
+        try {
+            $hwnd2 = [Native.Win]::GetConsoleWindow()
+            if ($hwnd2 -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwnd2, 1) }
+        } catch {}
+        Write-Host 'MULTI_ENGINE_FATAL: falha ao clonar/validar motores. Sistema NAO iniciou. Sem fallback ao Chrome unico.'
+        return 1
+    }
+    Write-StartLog 'motores_ok'
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0

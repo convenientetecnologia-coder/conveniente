@@ -1,0 +1,58 @@
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const root = path.join(__dirname, "..");
+let failed = 0;
+function check(name, ok, extra) {
+  if (ok) console.log("OK  " + name);
+  else {
+    failed += 1;
+    console.log("FAIL " + name + (extra ? " :: " + extra : ""));
+  }
+}
+function read(rel) {
+  return fs.readFileSync(path.join(root, rel), "utf8");
+}
+
+const mot = read("scripts/chromeMotores.js");
+const browser = read("scripts/browser.js");
+const city = read("scripts/deltaCityCollector.js");
+const cluster = read("scripts/clusterMaster.js");
+const iniciar = read("scripts/iniciarSistema.ps1");
+const dash = read("scripts/dashboard.js");
+const gitignore = read(".gitignore");
+const indexJs = read("index.js");
+
+const launchBlock = (browser.split("GUARDA: Chrome Stable only")[1] || browser.split("Motor isolado do worker")[1] || "")
+  .slice(0, 400);
+const cityLaunch = city.split("createCollectorRuntime")[1] || "";
+
+check("modulo_existe", fs.existsSync(path.join(root, "scripts", "chromeMotores.js")));
+check("root_motores", /C:\\\\conveniente\\\\motores/.test(mot) || /C:\\conveniente\\motores/.test(mot));
+check("taskkill_modulo", /taskkill/.test(mot) && /chrome\.exe/.test(mot));
+check("sem_fallback_modulo", /Sem fallback/.test(mot) && /MULTI_ENGINE_FATAL/.test(mot));
+check("log_ok", /MULTI_ENGINE_OK/.test(mot));
+check("userdatadir_intacto_modulo", /User Data\\\\Conveniente/.test(mot) || /Conveniente\\<nome>/.test(mot));
+check("browser_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(browser));
+check("browser_launch_nao_usa_stable", !/const executablePath = findChromeStable\(\)/.test(browser));
+check("city_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(cityLaunch));
+check("city_sem_programfiles_fallback", !/PROGRAMFILES[\s\S]{0,80}chrome\.exe/.test(cityLaunch.slice(0, 2500)));
+check("cluster_ensure_boot", /ensureWorkers\(blocks\.length, \{ purge: true \}\)/.test(cluster));
+check("cluster_ensure_grow", /ensureWorkers\(desiredNodes, \{ purge: false \}\)/.test(cluster));
+check("cluster_env_motor", /CHROME_MOTOR_EXE/.test(cluster) && /CHROME_PATH = motorExe/.test(cluster));
+check("iniciar_taskkill", /taskkill\.exe \/F \/IM chrome\.exe/.test(iniciar));
+check("iniciar_boot_js", /chromeMotores\.js/.test(iniciar) && /--boot/.test(iniciar));
+check("iniciar_abort", /motores_fatal/.test(iniciar) && /NAO iniciou/.test(iniciar));
+check("index_exit_fatal", /process\.exit\(1\)/.test(indexJs) && /Sem fallback ao Chrome unificado/.test(indexJs));
+check("dash_allowlist", /multi_engine_last:/.test(dash));
+check("gitignore_motores", /motores\//.test(gitignore));
+check("gitignore_last", /multi_engine_last\.json/.test(gitignore));
+check("userdatadir_browser_intacto", /User Data\\Conveniente/.test(read("scripts/browser.js")) || /Conveniente', manifest\.nome/.test(browser));
+
+if (failed) {
+  console.log("FAILED " + failed);
+  process.exit(1);
+}
+console.log("ALL_OK");
