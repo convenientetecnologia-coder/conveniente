@@ -16,6 +16,17 @@ const logger = require('./logger.js');
 
 const MOTORES_ROOT = 'C:\\conveniente\\motores';
 const LAST_PATH = path.join(__dirname, '..', 'dados', 'multi_engine_last.json');
+const LOG_PATH = path.join(__dirname, '..', 'dados', 'logs', 'multi_engine.log');
+
+function say(line) {
+  const text = String(line || '');
+  try { console.log(text); } catch {}
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFileSync(LOG_PATH, ts + ' ' + text + '\n', 'utf8');
+  } catch {}
+}
 
 function fatal(msg, extra) {
   const text = 'MULTI_ENGINE_FATAL: ' + String(msg || 'falha');
@@ -268,9 +279,9 @@ function resolveLaunchExeOrFatal() {
   return resolveWorkerExeOrFatal();
 }
 
-function ensureWorkers(workerCount, { purge = false } = {}) {
-  const n = Math.max(1, Math.floor(Number(workerCount) || 0));
-  if (!n) fatal('quantidade de workers invalida');
+function ensureWorkers(capacity, { purge = false } = {}) {
+  const n = Math.max(1, Math.floor(Number(capacity) || 0));
+  if (!n) fatal('capacidade de motores invalida');
 
   let purgeInfo = null;
   if (purge) purgeInfo = hardPurgeChrome();
@@ -293,33 +304,37 @@ function ensureWorkers(workerCount, { purge = false } = {}) {
 
   const cloned = [];
   const reused = [];
+  say('[MULTI_ENGINE] capacidade=' + n + ' (teto RAM/divisor) mestre=' + masterVer.full + ' purge=' + !!purge);
   for (let i = 1; i <= n; i++) {
     const dest = motorDir(i);
     const exe = motorExe(i);
-    let need = true;
-    if (fs.existsSync(exe)) {
+    const exists = fs.existsSync(exe);
+    if (exists) {
       const local = readExeVersion(exe);
-      if (local && local.full === masterVer.full) {
-        need = false;
+      const same = !!(local && local.full === masterVer.full);
+      if (same || !purge) {
         reused.push(i);
+        say('[MULTI_ENGINE] w' + i + ' ok' + (same ? ' versao=' + local.full : ' (em uso, troca de versao so no proximo Iniciar)'));
+        continue;
       }
     }
-    if (need) {
-      cloneMasterTo(dest, masterDir, masterVer);
-      cloned.push(i);
-    }
+    if (!purge && exists) continue;
+    say('[MULTI_ENGINE] w' + i + ' criando clone do Chrome mestre...');
+    cloneMasterTo(dest, masterDir, masterVer);
+    cloned.push(i);
+    say('[MULTI_ENGINE] w' + i + ' pronto ' + dest);
   }
 
-  const deleted = deleteObsoleteMotors(n);
+  const deleted = purge ? deleteObsoleteMotors(n) : [];
   const engines = [];
   for (let i = 1; i <= n; i++) {
     const exe = motorExe(i);
     if (!fs.existsSync(exe)) fatal('motor faltando apos sync', { worker: i, exe });
     const ver = readExeVersion(exe);
-    if (!ver || ver.full !== masterVer.full) {
+    if (purge && (!ver || ver.full !== masterVer.full)) {
       fatal('motor com versao divergente apos sync', { worker: i, master: masterVer.full, clone: ver && ver.full || null });
     }
-    engines.push({ worker: i, exe, version: ver.full });
+    engines.push({ worker: i, exe, version: (ver && ver.full) || null });
   }
 
   const rec = {
@@ -329,6 +344,7 @@ function ensureWorkers(workerCount, { purge = false } = {}) {
     ts: Date.now(),
     iso: new Date().toISOString(),
     hostname: os.hostname(),
+    capacity: n,
     nodes: n,
     masterExe,
     masterVersion: masterVer.full,
@@ -344,21 +360,23 @@ function ensureWorkers(workerCount, { purge = false } = {}) {
   try {
     logger.info('[MULTI_ENGINE_OK]', {
       ts: rec.iso,
-      motores: n,
+      capacidade: n,
       versao: masterVer.full,
       clonados: cloned.join(',') || '0',
       reuso: reused.join(',') || '0'
     });
   } catch {}
-  try { console.log('[MULTI_ENGINE_OK] ' + rec.iso + ' motores=' + n + ' versao=' + masterVer.full); } catch {}
+  say('[MULTI_ENGINE_OK] ' + rec.iso + ' capacidade=' + n + ' versao=' + masterVer.full);
   return rec;
 }
 
 function bootFromCli() {
   try {
     const plan = planWorkerCount();
-    const rec = ensureWorkers(plan.nodes, { purge: true });
+    const capacity = Math.max(1, Number(plan.hardwareNodes) || Number(plan.nodes) || 1);
+    const rec = ensureWorkers(capacity, { purge: true });
     rec.plan = plan;
+    rec.liveWorkers = plan.nodes;
     writeLast(rec);
     process.exit(0);
   } catch (e) {

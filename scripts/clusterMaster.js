@@ -281,7 +281,8 @@ function createCluster() {
     return { proc, pending };
   }
 
-  chromeMotores.ensureWorkers(blocks.length, { purge: true });
+  const motorCapacity = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || blocks.length);
+  chromeMotores.ensureWorkers(motorCapacity, { purge: true });
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
@@ -405,7 +406,11 @@ function createCluster() {
     });
 
     if (growPlan.newWorkerIndexes && growPlan.newWorkerIndexes.length) {
-      chromeMotores.ensureWorkers(desiredNodes, { purge: false });
+      const motorCapacity = Math.max(
+        1,
+        Number(livePlan.serverConfig && livePlan.serverConfig.hardwareNodes) || desiredNodes
+      );
+      chromeMotores.ensureWorkers(motorCapacity, { purge: false });
     }
     for (const idx of growPlan.newWorkerIndexes) {
       const shardNames = growPlan.nextShards[idx] || [];
