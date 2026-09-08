@@ -4396,7 +4396,7 @@ async function bootCluster() {
     logger.error('[BOOT] cluster abortado. Sem fallback ao Chrome unificado.', { error: (e && e.message) || String(e) }, e);
     process.exit(1);
   }
-  logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes);
+  logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false));
 }
 // ===================== FIM CLUSTER MULTI-NODE =====================
 

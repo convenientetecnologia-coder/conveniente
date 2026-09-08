@@ -218,6 +218,11 @@ const DEFAULTS = Object.freeze({
       marketplace_disabled: true,
       id_virtus: true
     }
+  },
+  // Isolamento térmico do console (stdout/stderr). Forense em arquivo fica.
+  // silentConsole=true: logger não pinta o PowerShell. Override: CONVENIENTE_SILENT_CONSOLE=0.
+  logging: {
+    silentConsole: true
   }
 });
 
@@ -309,6 +314,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const termClean = (r.terminalAccountCleanup && typeof r.terminalAccountCleanup === "object")
     ? r.terminalAccountCleanup
     : {};
+  const logRaw = (r.logging && typeof r.logging === "object") ? r.logging : {};
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
@@ -563,7 +569,10 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
         )), 0, 59),
         deleteKinds
       };
-    })()
+    })(),
+    logging: {
+      silentConsole: logRaw.silentConsole !== false
+    }
   };
 
   normalized.capacity.maxAccountsEffective = calcMaxAccountsEffective({
@@ -586,7 +595,11 @@ function validateServerConfigPayload(payload) {
   const termClean = (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === "object")
     ? p.terminalAccountCleanup
     : null;
-  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean) {
+  if (p.logging !== undefined && (!p.logging || typeof p.logging !== "object")) {
+    return { ok: false, error: "validation_failed", details: ["logging_invalido"] };
+  }
+  const log = (p.logging && typeof p.logging === "object") ? p.logging : null;
+  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean && !log) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -782,6 +795,11 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (log) {
+    if (log.silentConsole !== undefined && typeof log.silentConsole !== "boolean") {
+      errors.push("logging.silentConsole_invalido");
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
@@ -801,6 +819,11 @@ function validateServerConfigPayload(payload) {
       ...DEFAULTS.terminalAccountCleanup,
       ...((readServerConfigRaw() || {}).terminalAccountCleanup || {}),
       ...(termClean || {})
+    },
+    logging: {
+      ...DEFAULTS.logging,
+      ...((readServerConfigRaw() || {}).logging || {}),
+      ...(log || {})
     }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
@@ -941,6 +964,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
           id_virtus: dk.id_virtus === true
         };
       })()
+    },
+    logging: {
+      silentConsole: v.normalized.logging.silentConsole !== false
     }
   };
   try {

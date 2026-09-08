@@ -13,6 +13,24 @@ const chromeMotores = require('./chromeMotores.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
+function resolveClusterSilentConsole() {
+  try {
+    if (logger && typeof logger.isSilentConsole === 'function') return !!logger.isSilentConsole();
+  } catch {}
+  return true;
+}
+
+// 4 slots. String 'ignore' sozinha some com o fd ipc.
+function workerStdioSlots(silent) {
+  const stdio = silent
+    ? ['ignore', 'ignore', 'ignore', 'ipc']
+    : ['inherit', 'inherit', 'inherit', 'ipc'];
+  if (!Array.isArray(stdio) || stdio.length !== 4 || stdio[3] !== 'ipc') {
+    throw new Error('CLUSTER_STDIO_FATAL: ipc obrigatorio em array de 4; string ignore proibida');
+  }
+  return stdio;
+}
+
 // NOVO: Algoritmo determinístico, justo, distribui round-robin lexicográfico.
 // Balanceamento perfeito, diferença máxima 1 entre nodes.
 function splitRoundRobinFair(names, blocks) {
@@ -63,6 +81,22 @@ function createCluster() {
   let rebalanceTail = Promise.resolve();
   const bootHardwareNodes = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || 1);
   const bootDivisorGb = Math.max(4, Number(plan.serverConfig && plan.serverConfig.workerRamDivisorGb) || 16);
+  const silentConsole = resolveClusterSilentConsole();
+  const workerStdio = workerStdioSlots(silentConsole);
+  try {
+    logger.info('[CLUSTER][SILENT_CONSOLE]', {
+      silentConsole,
+      stdio: workerStdio.join(','),
+      ipcSlot: workerStdio[3]
+    });
+  } catch {}
+  try {
+    require('./indexLifecycle.js').append('silent_console_boot', {
+      silentConsole,
+      stdio: workerStdio,
+      ipcSlot: workerStdio[3]
+    });
+  } catch {}
 
   // Rebuild route from a block array (idx->name list)
   function routeRebuildFromBlocks(blocksArr) {
@@ -97,8 +131,13 @@ function createCluster() {
     }
     env.CHROME_PATH = motorExe;
     env.CHROME_MOTOR_EXE = motorExe;
+    if (silentConsole && String(env.CONVENIENTE_SILENT_CONSOLE || '').trim() !== '0') {
+      env.CONVENIENTE_SILENT_CONSOLE = '1';
+      if (!env.FB_LOG_LEVEL) env.FB_LOG_LEVEL = 'silent';
+    }
 
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
+    const stdio = workerStdioSlots(silentConsole);
 
     try {
       logger.info('[CLUSTER][SPAWN]', {
@@ -106,11 +145,14 @@ function createCluster() {
         shardSize: Array.isArray(shardNames) ? shardNames.length : 0,
         cityCollectorUserDataDir: env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR,
         chromeMotor: motorExe,
+        silentConsole,
+        stdio: stdio.join(','),
+        ipcSlot: stdio[3]
       });
     } catch {}
 
     const proc = fork(path.join(__dirname, 'worker.js'), [], {
-      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+      stdio,
       execPath,
       env
     });
@@ -855,7 +897,7 @@ function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, rebalance, reshuffleFairIfIdle };
+  return { plan, children, sendWorkerCommand, kill, rebalance, reshuffleFairIfIdle, silentConsole };
 }
 
-module.exports = { createCluster };
+module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };

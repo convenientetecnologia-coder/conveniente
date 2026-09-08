@@ -22,6 +22,26 @@ const COLOR = {
 const LOG_TO_FILE = !!process.env.LOG_TO_FILE; // Para logar também num arquivo (append)
 const LOG_FILE = path.join(__dirname, '..', 'dados', 'logger.log');
 const DEBUG_MODE = process.env.DEBUG || process.env.LOG_DEBUG || '1';
+const CONFIG_PATH = path.join(__dirname, '..', 'dados', 'server_runtime_config.json');
+
+// DEFAULTS.logging.silentConsole = true. Sem require(serverConfig) aqui:
+// serverConfig → utils → logger. Env ganha: CONVENIENTE_SILENT_CONSOLE=0/1.
+function resolveSilentConsole() {
+  const env = String(process.env.CONVENIENTE_SILENT_CONSOLE || '').trim();
+  if (env === '0') return false;
+  if (env === '1') return true;
+  try {
+    const j = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    if (j && j.logging && j.logging.silentConsole === false) return false;
+  } catch {}
+  return true;
+}
+
+function isSilentConsole() {
+  return resolveSilentConsole();
+}
+
+const SILENT_CONSOLE = resolveSilentConsole();
 
 function shouldLog(level) {
   // Exibe DEBUG somente se ativado
@@ -46,15 +66,17 @@ function log({ level = LEVELS.INFO, msg = '', ctx = {}, errorObj = null }) {
 
   const color = COLOR[level] || '';
   const line = `${COLOR.ts}[${ts}]${COLOR.reset} ${color}[${level.toUpperCase()}]${COLOR.reset} ${base}`;
-  // Terminal
-  if (level === LEVELS.ERROR) {
-    console.error(line);
-  } else if (level === LEVELS.WARN) {
-    console.warn(line);
-  } else {
-    console.log(line);
+  // Terminal — só se a trava estiver desligada
+  if (!isSilentConsole()) {
+    if (level === LEVELS.ERROR) {
+      console.error(line);
+    } else if (level === LEVELS.WARN) {
+      console.warn(line);
+    } else {
+      console.log(line);
+    }
   }
-  // Arquivo (opcional)
+  // Arquivo (opcional) — intocado
   if (LOG_TO_FILE) {
     try {
       fs.appendFileSync(LOG_FILE, `[${ts}] [${level.toUpperCase()}] ${base}\n`, { encoding: 'utf8' });
@@ -67,6 +89,8 @@ module.exports = {
   warn: (msg, ctx) => log({ level: LEVELS.WARN, msg, ctx }),
   error: (msg, ctx, errorObj) => log({ level: LEVELS.ERROR, msg, ctx, errorObj }),
   debug: (msg, ctx) => log({ level: LEVELS.DEBUG, msg, ctx }),
+  isSilentConsole,
+  SILENT_CONSOLE,
   LEVELS,
   log // acesso bruto
 };

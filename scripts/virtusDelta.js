@@ -338,7 +338,7 @@ function __deltaCityLabelIsClean(raw, source = null) {
   return true;
 }
 
-const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || "info").trim().toLowerCase();
+const LOG_LEVEL = String(process.env.FB_LOG_LEVEL || (process.env.CONVENIENTE_SILENT_CONSOLE === '0' ? 'info' : 'silent')).trim().toLowerCase();
 
 function logInfo(...args) {
   if (LOG_LEVEL === "silent") return;
