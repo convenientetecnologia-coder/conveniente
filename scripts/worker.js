@@ -6731,6 +6731,41 @@ async function governorTick() {
 }
 
 let _statusLock = Promise.resolve();
+const STATUS_JOURNAL_MIN_MS = Math.max(800, Math.min(15000, parseInt(process.env.STATUS_JOURNAL_MIN_MS || '2500', 10) || 2500));
+const STATUS_JOURNAL_IDLE_MS = Math.max(2000, Math.min(30000, parseInt(process.env.STATUS_JOURNAL_IDLE_MS || '8000', 10) || 8000));
+let __statusJournal = null;
+let __statusJournalAt = 0;
+
+function __statusJournalDebug() {
+  return {
+    pid: process && process.pid ? process.pid : null,
+    buildTag: (typeof WORKER_BUILD_TAG === 'string' ? WORKER_BUILD_TAG : null),
+    humanOverlayEnabled: (typeof HUMAN_OVERLAY_CFG === 'object' ? !!HUMAN_OVERLAY_CFG.enabled : null),
+    shardSize: SHARD_SET ? SHARD_SET.size : null,
+    controllersCount: controllers ? controllers.size : null,
+    ts: Date.now(),
+    journal: true,
+    journalAgeMs: __statusJournalAt ? (Date.now() - __statusJournalAt) : null
+  };
+}
+
+function __cloneStatusJournal() {
+  if (!__statusJournal || typeof __statusJournal !== 'object') return null;
+  const snap = __statusJournal;
+  return {
+    perfis: Array.isArray(snap.perfis) ? snap.perfis : [],
+    robes: (snap.robes && typeof snap.robes === 'object') ? snap.robes : {},
+    robeQueue: Array.isArray(snap.robeQueue) ? snap.robeQueue : [],
+    autoMode: snap.autoMode || null,
+    last_engine_event: snap.last_engine_event,
+    last_engine_event_at: snap.last_engine_event_at,
+    sys: snap.sys || null,
+    serverConfig: snap.serverConfig || null,
+    build: snap.build || null,
+    ts: snap.ts || __statusJournalAt || Date.now(),
+    _debug: __statusJournalDebug()
+  };
+}
 
 async function milLog(type, msg) {
   try { await reportAction('system', type || 'mil_action', String(msg || '')); } catch {}
@@ -15934,314 +15969,20 @@ const handlers = {
   },
 
   async ['get-status']() {
-    try {
-      for (const n of Object.keys(robeMeta)) {
-        const m = robeMeta[n];
-        if (!m) continue;
-        if (!Array.isArray(m.cpuHistory)) m.cpuHistory = [];
-        while (m.cpuHistory.length > 8) m.cpuHistory.shift();
-        if (!Array.isArray(m.ramHist)) m.ramHist = [];
-        while (m.ramHist.length > 8) m.ramHist.shift();
-        if (!Array.isArray(m.reloadAttemptsWindow)) m.reloadAttemptsWindow = [];
-        while (m.reloadAttemptsWindow.length > 8) m.reloadAttemptsWindow.shift();
-        if (!Array.isArray(m.blockDetectWindow)) m.blockDetectWindow = [];
-        while (m.blockDetectWindow.length > 8) m.blockDetectWindow.shift();
-      }
-    } catch {}
-
-    const perfisArr = loadPerfisJson();
-    const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
-    const perfis = [];
-    for (const p of perfisArr) {
-      const nome = p.nome;
-      let issuesCount = 0;
-      try {
-        if (issues && typeof issues.countErrors === 'function') {
-          const res = issues.countErrors(nome);
-          issuesCount = Number(res && res.count) || 0;
-        } else {
-          issuesCount = countErrorsLocal(nome);
-        }
-      } catch { issuesCount = 0; }
-      const fail = getFailureCounts(nome);
-      let manifestStatus = await computeManifestStatus(nome);
-      const man = await manifestStore.read(nome).catch(()=>null);
-      const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
-      const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
-      const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) || null) : (robeMeta[nome]?.loginSource || null);
-      const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
-      const loginRemediateFailedAt = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedAt) || null) : null;
-      const loginRemediateFailedReason = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedReason) || null) : (robeMeta[nome]?.loginRemediateFailedReason || null);
-      const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
-      const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
-      const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
-      const marketplaceDisabled = man ? !!(man.accountFlags && man.accountFlags.marketplaceDisabled === true) : !!robeMeta[nome]?.marketplaceDisabled;
-      const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledAt) || null) : null;
-      const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
-      const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
-      const captchaCheckpoint = man ? !!(man.accountFlags && man.accountFlags.captchaCheckpoint === true) : false;
-      const captchaCheckpointReason = man ? ((man.accountFlags && man.accountFlags.captchaCheckpointReason) || null) : null;
-      const idVirtus = man ? !!(man.accountFlags && man.accountFlags.idVirtus === true) : false;
-      const idVirtusReason = man ? ((man.accountFlags && man.accountFlags.idVirtusReason) || null) : null;
-      const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
-      const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
-      const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
-      const twoFactorText = man ? ((man.accountFlags && man.accountFlags.twoFactorText) || null) : null;
-      const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
-      const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
-      const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
-      const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDoneDay
-        ? String(man.accountFlags.robeIdDocDoneDay)
-        : null;
-      const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
-      const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
-        ? Number(man.accountFlags.renovadosAt) || null
-        : null;
-      const marketplaceRenewStatus = await (async () => {
-        try {
-          return await marketplaceRenewPlan.getStatusSnapshot(nome, { nowMs: Date.now(), manifestHint: man });
-        } catch {
-          return {
-            marketplaceRenewEnabled: false,
-            marketplaceRenewDueLabel: null,
-            marketplaceRenewDueMinute: null,
-            marketplaceRenewDueReached: false,
-            marketplaceRenewScrollDays: null,
-            marketplaceRenewPlanDate: null,
-            marketplaceRenewDoneDay: null,
-            marketplaceRenewDoneAt: null,
-            marketplaceRenewDoneToday: false,
-            marketplaceRenewLastCount: 0
-          };
-        }
-      })();
-      const effectiveRenovadosLastCount = marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday === true
-        ? Math.max(0, Number(marketplaceRenewStatus.marketplaceRenewLastCount || 0) || 0)
-        : 0;
-      const effectiveRenovadosAt = effectiveRenovadosLastCount > 0 ? renovadosAt : null;
-      const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
-      const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
-      const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
-      const appealLastCheckAt = man ? ((man.accountFlags && man.accountFlags.appealLastCheckAt) || null) : null;
-      const appealLastReason = man ? ((man.accountFlags && man.accountFlags.appealLastReason) || null) : null;
-      const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
-      const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
-      const problem = man
-        ? !!(
-          (man.accountFlags && man.accountFlags.loginRequired === true) ||
-          (man.accountFlags && man.accountFlags.banned === true) ||
-          (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
-          (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
-          (man.accountFlags && man.accountFlags.idVirtus === true) ||
-          (man.accountFlags && man.accountFlags.twoFactor === true) ||
-          (man.accountFlags && man.accountFlags.identityRequired === true) ||
-          (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
-          (man.accountFlags && man.accountFlags.messengerPin === true) ||
-          (man.accountFlags && man.accountFlags.appealSubmitted === true)
-        )
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
-      const man0 = await manifestStore.read(nome).catch(()=>null);
-      const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
-      const robeDailyPlanSummary = await (async () => {
-        try {
-          const plan = await getOrCreateRobeDailyPlan(nome, Date.now(), man0);
-          return _robeDailyPlanSummary(plan, Date.now());
-        } catch {
-          return { featureEnabled: false, date: _robeDailyDateYmd(Date.now()), enabled: false, dailyHours: 0, blocksCount: 0, blocks: [], inWindowNow: false, nextWindowStartMin: null, nextWindowLabel: null };
-        }
-      })();
-      const robeSessionSummary = await (async () => {
-        try {
-          const gate = await getOrCreateRobeSessionGate(nome, Date.now(), null, man0);
-          return gate && gate.summary ? gate.summary : { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
-        } catch {
-          return { featureEnabled: true, enabled: false, state: 'none', plannedPosts: 0, postedPosts: 0, remainingInAction: 0, pauseUntil: null, nextAtLabel: null };
-        }
-      })();
-
-      // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
-      const ctrl = controllers.get(nome);
-      const isActive = !!ctrl;
-      const virtusOnline = !!(ctrl && ctrl.virtus);
-      const sendLockObj = (ctrl && ctrl.browser && ctrl.browser._sendLock && typeof ctrl.browser._sendLock === 'object')
-        ? ctrl.browser._sendLock
-        : null;
-      const sendLockActive = !!(sendLockObj && sendLockObj.active);
-      const sendLockOwner = sendLockObj && sendLockObj.owner ? String(sendLockObj.owner).slice(0, 40) : null;
-      const sendLockChatId = sendLockObj && sendLockObj.chatId ? String(sendLockObj.chatId).slice(0, 80) : null;
-      const sendLockSince = (sendLockObj && typeof sendLockObj.since === 'number') ? sendLockObj.since : null;
-      const sendLockAgeMs = (sendLockSince && sendLockSince > 0) ? Math.max(0, Date.now() - sendLockSince) : null;
-      const robeEmExecucao = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
-
-      perfis.push({
-        nome,
-        label: p.label || null,
-        cidade: p.cidade,
-        uaPresetId: p.uaPresetId,
-        active: isActive,
-        trabalhando: !!(ctrl?.trabalhando),
-        virtusOnline,
-        sendLockActive,
-        sendLockOwner,
-        sendLockChatId,
-        sendLockSince,
-        sendLockAgeMs,
-        robeEmExecucao,
-        configurando: !!(ctrl?.configurando),
-        humanControl: !!(ctrl?.humanControl),
-        humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
-        issuesCount,
-        ramMB: (() => {
-          const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
-          return v;
-        })(),
-        cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-        // Evita pill "Abas: N" stale quando o perfil já não tem controller/browser ativo.
-        numPages: isActive
-          ? (typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null)
-          : 0,
-        robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-        frozenReason: robeMeta[nome]?.frozenReason || null,
-        frozenAt: robeMeta[nome]?.frozenAt || null,
-        frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-        internalFailCountWindow: fail.internal,
-        externalFailCountWindow: fail.external,
-        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
-        activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
-        killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
-        reopenAt: robeMeta[nome]?.reopenAt || null,
-        manifestStatus,
-        closingReason: robeMeta[nome]?.closingReason || null,
-        openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
-        lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
-        loginRequired,
-        loginReason,
-        loginSource,
-        loginRemediateFailed,
-        loginRemediateFailedAt,
-        loginRemediateFailedReason,
-        banned,
-        bannedAt,
-        bannedText,
-        marketplaceDisabled,
-        marketplaceDisabledAt,
-        marketplaceDisabledReason,
-        marketplaceDisabledText,
-        captchaCheckpoint,
-        captchaCheckpointReason,
-        idVirtus,
-        idVirtusReason,
-        twoFactor,
-        twoFactorAt,
-        twoFactorReason,
-        twoFactorText,
-        identityRequired,
-        identitySubmitted,
-        identityNextCheckAt,
-        robeIdDocDoneDay,
-        robeIdDocDoneToday,
-        renovadosLastCount: effectiveRenovadosLastCount,
-        renovadosAt: effectiveRenovadosAt,
-        marketplaceRenewEnabled: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewEnabled),
-        marketplaceRenewDueLabel: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueLabel : null,
-        marketplaceRenewDueMinute: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDueMinute : null,
-        marketplaceRenewDueReached: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDueReached),
-        marketplaceRenewScrollDays: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewScrollDays : null,
-        marketplaceRenewPlanDate: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewPlanDate : null,
-        marketplaceRenewDoneDay: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneDay : null,
-        marketplaceRenewDoneAt: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewDoneAt : null,
-        marketplaceRenewDoneToday: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday),
-        marketplaceRenewLastCount: marketplaceRenewStatus ? marketplaceRenewStatus.marketplaceRenewLastCount : 0,
-        appealSubmitted,
-        appealSubmittedAt,
-        appealNextCheckAt,
-        appealLastCheckAt,
-        appealLastReason,
-        messengerPin,
-        messengerPinReason,
-        problem,
-        robeMode,
-        robeDailyPlanSummary,
-        robeSessionSummary
-      });
-    }
-    const robes = {};
-    for (const p of perfisArr) {
-      const nome = p.nome;
-      const fail = getFailureCounts(nome);
-      robes[nome] = {
-        cooldownSec: await normalizeCooldown(nome),
-        estado: robeMeta[nome]?.estado || '',
-        proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
-        ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
-        emFila: !!robeMeta[nome]?.emFila,
-        emExecucao: !!robeMeta[nome]?.emExecucao,
-        ramMB: (() => {
-          const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
-          return v;
-        })(),
-        cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-        numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
-        robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-        frozenReason: robeMeta[nome]?.frozenReason || null,
-        frozenAt: robeMeta[nome]?.frozenAt || null,
-        frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-        internalFailCountWindow: fail.internal,
-        externalFailCountWindow: fail.external,
-        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
-        pauseReason: robeMeta[nome]?.pauseReason || null,
-        blockedBy: null,
-        lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
-      };
-      const pauseActive = await (async () => {
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now());
-        } catch { return false; }
-      })();
-      if (pauseActive) {
-        robes[nome].estado = 'paused_limit';
-      }
-      const man = await manifestStore.read(nome).catch(()=>null);
-      if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
-        robes[nome].pauseReason = 'limit_posting';
-        robes[nome].estado = 'paused_limit';
-        await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
-      }
-      robes[nome].blockedBy = _robeBlockedByFromMeta(robes[nome]);
-    }
-    const robeQueueList = robeQueue.queueList();
-    const sys = {
-      freeMB: Math.round(os.freemem()/(1024*1024)),
-      totalMB: Math.round(os.totalmem()/(1024*1024)),
-      cores: (os.cpus()||[]).length,
-      cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
-    };
-    return {
-      perfis,
-      robes,
-      robeQueue: robeQueueList,
-      autoMode,
-      sys,
-      serverConfig: (() => {
-        try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
-      })(),
-      // Diagnóstico enterprise: ajuda a provar quando o dashboard está “cego” porque não há controllers vivos.
-      _debug: {
-        pid: process && process.pid ? process.pid : null,
-        buildTag: (typeof WORKER_BUILD_TAG === 'string' ? WORKER_BUILD_TAG : null),
-        humanOverlayEnabled: (typeof HUMAN_OVERLAY_CFG === 'object' ? !!HUMAN_OVERLAY_CFG.enabled : null),
-        shardSize: SHARD_SET ? SHARD_SET.size : null,
-        controllersCount: controllers ? controllers.size : null,
-        ts: Date.now()
-      }
+    // Jornal: devolve o último snapshot. Não remonta manifesto/issue no meio do Robe.
+    const ready = __cloneStatusJournal();
+    if (ready && Array.isArray(ready.perfis)) return ready;
+    try { await snapshotStatusAndWrite(); } catch {}
+    return __cloneStatusJournal() || {
+      perfis: [],
+      robes: {},
+      robeQueue: [],
+      autoMode: null,
+      sys: null,
+      ts: Date.now(),
+      _debug: __statusJournalDebug()
     };
   },
-
   async unfreeze({ nome, setBy }) {
     return lockProfileAction(nome, async () => {
       if (!nome) return { ok: false, error: 'nome_obrigatorio' };
@@ -16585,8 +16326,14 @@ const handlers = {
 };
 
 async function snapshotStatusAndWrite() {
+if (__statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
+  return _statusLock;
+}
 _statusLock = _statusLock.then(async () => {
 try {
+if (__statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
+  return;
+}
 try {
   for (const n of Object.keys(robeMeta)) {
     const m = robeMeta[n];
@@ -16677,8 +16424,12 @@ const effectiveRenovadosLastCount = marketplaceRenewStatus && marketplaceRenewSt
   ? Math.max(0, Number(marketplaceRenewStatus.marketplaceRenewLastCount || 0) || 0)
   : 0;
 const effectiveRenovadosAt = effectiveRenovadosLastCount > 0 ? renovadosAt : null;
-const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
+const loginRemediateFailedAt = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedAt) || null) : null;
+const loginRemediateFailedReason = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedReason) || null) : (robeMeta[nome]?.loginRemediateFailedReason || null);
+const idVirtus = man ? !!(man.accountFlags && man.accountFlags.idVirtus === true) : false;
+const idVirtusReason = man ? ((man.accountFlags && man.accountFlags.idVirtusReason) || null) : null;
+const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
 const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
 const appealLastCheckAt = man ? ((man.accountFlags && man.accountFlags.appealLastCheckAt) || null) : null;
@@ -16691,6 +16442,7 @@ const problem = man
     (man.accountFlags && man.accountFlags.banned === true) ||
     (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
+    (man.accountFlags && man.accountFlags.idVirtus === true) ||
     (man.accountFlags && man.accountFlags.twoFactor === true) ||
     (man.accountFlags && man.accountFlags.identityRequired === true) ||
     (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
@@ -16748,15 +16500,49 @@ perfis.push({
   })(),
   // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
   virtusOnline: !!(controllers.get(nome)?.virtus),
-  sendLockActive: !!(controllers.get(nome)?.browser && controllers.get(nome).browser._sendLock && controllers.get(nome).browser._sendLock.active),
+  sendLockActive: (() => {
+    try {
+      const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
+      return !!(sl && sl.active);
+    } catch { return false; }
+  })(),
+  sendLockOwner: (() => {
+    try {
+      const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
+      return sl && sl.owner ? String(sl.owner).slice(0, 40) : null;
+    } catch { return null; }
+  })(),
+  sendLockChatId: (() => {
+    try {
+      const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
+      return sl && sl.chatId ? String(sl.chatId).slice(0, 80) : null;
+    } catch { return null; }
+  })(),
+  sendLockSince: (() => {
+    try {
+      const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
+      return (sl && typeof sl.since === 'number') ? sl.since : null;
+    } catch { return null; }
+  })(),
+  sendLockAgeMs: (() => {
+    try {
+      const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
+      const since = (sl && typeof sl.since === 'number') ? sl.since : null;
+      return (since && since > 0) ? Math.max(0, Date.now() - since) : null;
+    } catch { return null; }
+  })(),
   robeEmExecucao: !!(robeMeta[nome]?.emExecucao),
   configurando: !!(controllers.get(nome)?.configurando),
   humanControl: !!(controllers.get(nome)?.humanControl),
   humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
   issuesCount,
+  internalFailCountWindow: fail.internal,
+  externalFailCountWindow: fail.external,
   ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-  numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+  numPages: controllers.has(nome)
+    ? (typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null)
+    : 0,
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
   frozenReason: robeMeta[nome]?.frozenReason || null,
   frozenAt: robeMeta[nome]?.frozenAt || null,
@@ -16770,9 +16556,15 @@ perfis.push({
   closingReason: robeMeta[nome]?.closingReason || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
+  lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
+  swapCooldown: typeof robeMeta[nome]?.swapCooldown === 'number' ? robeMeta[nome].swapCooldown : null,
+  whyNotOpen: robeMeta[nome]?.whyNotOpen || null,
   loginRequired,
   loginReason,
   loginSource,
+  loginRemediateFailed,
+  loginRemediateFailedAt,
+  loginRemediateFailedReason,
   banned,
   bannedAt,
   bannedText,
@@ -16782,6 +16574,8 @@ perfis.push({
   marketplaceDisabledText,
   captchaCheckpoint,
   captchaCheckpointReason,
+  idVirtus,
+  idVirtusReason,
   twoFactor,
   twoFactorAt,
   twoFactorReason,
@@ -16808,7 +16602,6 @@ perfis.push({
   appealNextCheckAt,
   appealLastCheckAt,
   appealLastReason,
-  loginRemediateFailed,
   messengerPin,
   messengerPinReason,
   problem,
@@ -16988,6 +16781,8 @@ robes[nome] = {
   frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
+  internalFailCountWindow: fail.internal,
+  externalFailCountWindow: fail.external,
   pauseReason: robeMeta[nome]?.pauseReason || null,
   blockedBy: null,
   lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
@@ -17061,8 +16856,14 @@ const statusObj = {
     try { return serverConfig.readServerConfigEffective({ totalMemMB: sys.totalMB }); } catch { return null; }
   })(),
   build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null),
-  ts: Date.now()
+  ts: Date.now(),
+  _debug: __statusJournalDebug()
 };
+
+try {
+  __statusJournal = statusObj;
+  __statusJournalAt = Date.now();
+} catch {}
 
 // LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
 try {
@@ -17083,6 +16884,19 @@ try { logger.warn('[WORKER][statusWrite] erro', { error: e && e.message || e });
 try { supervisorClient.sendTelemetria({ type: 'hb', alive: controllers.size }); } catch {}
 return _statusLock;
 }
+
+try {
+  if (!global.__statusJournalIdleTimer) {
+    global.__statusJournalIdleTimer = setInterval(() => {
+      try {
+        if (!__statusJournal || (Date.now() - __statusJournalAt) >= STATUS_JOURNAL_IDLE_MS) {
+          snapshotStatusAndWrite().catch(() => {});
+        }
+      } catch {}
+    }, Math.min(4000, STATUS_JOURNAL_IDLE_MS));
+    try { global.__statusJournalIdleTimer.unref?.(); } catch {}
+  }
+} catch {}
 
 async function appendIssueNurseDebounced(nome, type, message, key) {
   if (!nome) return;

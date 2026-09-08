@@ -640,112 +640,92 @@ function createCluster() {
         });
       }
 
-      const results = await Promise.allSettled(
-        children.map((_, i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }))
-      );
-
-      // INÍCIO: Adicionado para agregação resiliente de autoMode e sys
       let autoModePick = null;
       let sysPick = null;
-      // FIM DECLARAÇÕES INICIAIS
+      let serverConfigPick = null;
+      let buildPick = null;
+      let lastEngineEvent = null;
+      let lastEngineEventAt = null;
       const nodesDebug = [];
-
       let combinedRobes = {};
       let combinedQueue = [];
-      let anyOverlay = false;
       const warningParts = [];
+      const missingIdx = [];
 
-      // Primeira passada: RPC ou arquivo fresco (<= MAX_FILE_AGE_MS)
-      for (let i = 0; i < results.length; i++) {
-        let payload = null;
-        let source = 'rpc';
-        const r = results[i];
-
-        if (r.status === 'fulfilled' && r.value && Array.isArray(r.value.perfis)) {
-          payload = r.value;
-          try {
-            nodesDebug.push({
-              node: i + 1,
-              source,
-              ok: true,
-              pid: payload && payload._debug ? payload._debug.pid : null,
-              buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
-              controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
-              shardSize: payload && payload._debug ? payload._debug.shardSize : null
-            });
-          } catch {}
-        } else {
-          const fb = readNodeStatusFile(i);
-          if (fb && fb.json && Array.isArray(fb.json.perfis) && fb.ageMs <= MAX_FILE_AGE_MS) {
-            payload = fb.json;
-            source = `file(${Math.round(fb.ageMs / 1000)}s)`;
-            warningParts.push(`node${i + 1}: rpc_fail -> file_ok(${Math.round(fb.ageMs / 1000)}s)`);
-            try {
-              nodesDebug.push({
-                node: i + 1,
-                source,
-                ok: true,
-                pid: payload && payload._debug ? payload._debug.pid : null,
-                buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
-                controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
-                shardSize: payload && payload._debug ? payload._debug.shardSize : null
-              });
-            } catch {}
-          } else {
-            warningParts.push(`node${i + 1}: no_reply`);
-            try { nodesDebug.push({ node: i + 1, source, ok: false }); } catch {}
-          }
-        }
-        if (!payload) continue;
-        anyOverlay = true;
-
-        // perfis
+      const applyPayload = (payload, source, i, ageMs) => {
+        if (!payload || !Array.isArray(payload.perfis)) return false;
+        try {
+          nodesDebug.push({
+            node: i + 1,
+            source,
+            ok: true,
+            journalAgeMs: (typeof ageMs === 'number') ? ageMs : null,
+            pid: payload && payload._debug ? payload._debug.pid : null,
+            buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
+            controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
+            shardSize: payload && payload._debug ? payload._debug.shardSize : null
+          });
+        } catch {}
         for (const p of payload.perfis || []) {
           const dst = baseMap.get(p.nome);
           if (dst) Object.assign(dst, p);
         }
-
-        // robes
         if (payload.robes && typeof payload.robes === 'object') {
           combinedRobes = Object.assign(combinedRobes, payload.robes);
         }
-        // robeQueue
         if (Array.isArray(payload.robeQueue)) {
           combinedQueue.push(...payload.robeQueue);
         }
-
-        // NOVO: Agregue autoMode e sys do primeiro node válido desta rodada
         if (!sysPick && payload.sys) sysPick = payload.sys;
         if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
+        if (!serverConfigPick && payload.serverConfig) serverConfigPick = payload.serverConfig;
+        if (!buildPick && payload.build) buildPick = payload.build;
+        if (lastEngineEvent == null && payload.last_engine_event != null) lastEngineEvent = payload.last_engine_event;
+        if (lastEngineEventAt == null && payload.last_engine_event_at != null) lastEngineEventAt = payload.last_engine_event_at;
+        return true;
+      };
+
+      for (let i = 0; i < children.length; i++) {
+        const fb = readNodeStatusFile(i);
+        if (fb && fb.json && Array.isArray(fb.json.perfis)) {
+          const ageSec = Math.round((fb.ageMs || 0) / 1000);
+          applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
+          if (fb.ageMs > MAX_FILE_AGE_MS) {
+            warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
+          }
+        } else {
+          missingIdx.push(i);
+          try { nodesDebug.push({ node: i + 1, source: 'none', ok: false }); } catch {}
+        }
       }
 
-      // Segunda passada: se não houve overlay nenhum, aceite arquivos mesmo “stale”
-      if (!anyOverlay) {
-        for (let i = 0; i < children.length; i++) {
-          const fb = readNodeStatusFile(i);
-          if (fb && fb.json && Array.isArray(fb.json.perfis)) {
-            const payload = fb.json;
-            // perfis
-            for (const p of payload.perfis || []) {
-              const dst = baseMap.get(p.nome);
-              if (dst) Object.assign(dst, p);
-            }
-            // robes/queue
-            if (payload.robes && typeof payload.robes === 'object') {
-              combinedRobes = Object.assign(combinedRobes, payload.robes);
-            }
-            if (Array.isArray(payload.robeQueue)) {
-              combinedQueue.push(...payload.robeQueue);
-            }
-            // NOVO: Agregue autoMode e sys do primeiro arquivo válido "stale"
-            if (!sysPick && payload.sys) sysPick = payload.sys;
-            if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
-            warningParts.push(`node${i + 1}: using_stale_file(${Math.round((fb.ageMs || 0) / 1000)}s)`);
+      // RPC só se o jornal daquele node ainda não existe (boot). Com jornal no disco, não cutuca o worker.
+      if (missingIdx.length) {
+        try {
+          logger.info('[CLUSTER][STATUS] jornal ausente, rpc só nesses nodes', {
+            nodes: missingIdx.map((i) => i + 1)
+          });
+        } catch {}
+        const rpcResults = await Promise.allSettled(
+          missingIdx.map((i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }).then((v) => ({ i, v })))
+        );
+        for (const r of rpcResults) {
+          if (r.status !== 'fulfilled' || !r.value) {
+            warningParts.push('rpc_boot_fail');
+            continue;
+          }
+          const i = r.value.i;
+          const payload = r.value.v;
+          if (payload && Array.isArray(payload.perfis)) {
+            const di = nodesDebug.findIndex((n) => n && n.node === (i + 1) && n.ok === false);
+            if (di >= 0) nodesDebug.splice(di, 1);
+            applyPayload(payload, 'rpc_boot', i, null);
+          } else {
+            warningParts.push(`node${i + 1}: no_journal`);
           }
         }
       }
 
-      // dedup e ordem para robeQueue
       if (combinedQueue.length) {
         const seen = new Set();
         combinedQueue = combinedQueue.filter(n => {
@@ -756,21 +736,22 @@ function createCluster() {
       }
 
       const perfis = Array.from(baseMap.values());
-      // TROQUE: autoMode: null → autoMode: autoModePick || null (sys já faz sysPick || null)
       const out = {
         perfis,
         robes: combinedRobes,
         robeQueue: combinedQueue,
         autoMode: autoModePick || null,
         sys: sysPick || null,
+        serverConfig: serverConfigPick || null,
+        build: buildPick || null,
+        last_engine_event: lastEngineEvent,
+        last_engine_event_at: lastEngineEventAt,
         ts: Date.now(),
-        _debug: { nodes: nodesDebug }
+        _debug: { nodes: nodesDebug, source: 'journal' }
       };
-      // Expor lock global no status agregado (painel/CT): evita “0 trabalhando” sem explicação.
       try { out.provisionLock = provisionLock.get(); } catch { out.provisionLock = null; }
       if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
-      
-      // ADICIONADO: grava agregado em dados/status.json antes do return out;
+
       try {
         const aggPath = path.join(__dirname, '..', 'dados', 'status.json');
         fileStore.writeJsonAtomic(aggPath, out);
