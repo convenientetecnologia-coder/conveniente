@@ -25,7 +25,11 @@ check("src_life_append_pulse", lifeSrc.includes("function appendPulse") && lifeS
 check("src_life_no_pulse_in_append_life", !/appendTo\(LIFE_PATH[\s\S]{0,80}handle_pulse/.test(lifeSrc));
 check("src_life_prev_path", lifeSrc.includes("index_lifecycle.prev.jsonl") && lifeSrc.includes("index_handle_pulse.jsonl"));
 check("src_life_archive", lifeSrc.includes("archiveBeforeOverwrite") && lifeSrc.includes("KEEP_ARCH"));
+check("src_life_host_exit_on_unexpected", lifeSrc.includes("hostExit") && lifeSrc.includes("index_host_exit.jsonl"));
 check("src_dash_allow_prev", dashSrc.includes("index_lifecycle_prev") && dashSrc.includes("index_handle_pulse"));
+check("src_dash_allow_host_exit", dashSrc.includes("index_host_exit:"));
+const hostSrc = fs.readFileSync(path.join(root, "scripts", "convenienteNodeHost.ps1"), "utf8");
+check("src_host_exit_file", hostSrc.includes("index_host_exit.jsonl") && hostSrc.includes("index_lifecycle.jsonl"));
 check("src_dash_timeout_45s", dashSrc.includes("INGEST_TIMEOUT_MS") && !/setTimeout\(\(\) => \{ try \{ controller\.abort\(\); \} catch \{\} \}, 8000\)/.test(dashSrc));
 check("src_dash_slice", dashSrc.includes("sliceLogFile") && dashSrc.includes("fromStart") && dashSrc.includes("byteOffset"));
 check("src_dash_packets", dashSrc.includes("buildIngestPackets") && dashSrc.includes("postLogsIngestOnce"));

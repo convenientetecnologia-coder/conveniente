@@ -198,13 +198,23 @@ function noteUnexpectedDead() {
   );
   if (hadExit) return;
   const prevTs = Number(prev.ts) || 0;
+  let hostExit = null;
+  try {
+    const hostPath = path.join(DADOS, "index_host_exit.jsonl");
+    const hostTail = String(fs.readFileSync(hostPath, "utf8") || "").trim().split(/\n/).filter(Boolean);
+    const last = hostTail.length ? JSON.parse(hostTail[hostTail.length - 1]) : null;
+    if (last && last.event === "index_host_exit") {
+      hostExit = { code: last.code, hex: last.hex, ts: last.ts || null };
+    }
+  } catch {}
   append("unexpected_dead", {
     prevPid,
     prevHbIso: prev.iso || null,
     prevUptimeSec: prev.uptimeSec != null ? Number(prev.uptimeSec) : null,
     gapSec: prevTs ? Math.round((Date.now() - prevTs) / 1000) : null,
     prevFleet: prev.fleet || null,
-    reason: "prev_index_sem_exit"
+    reason: "prev_index_sem_exit",
+    hostExit
   });
   try { require("./crashHammer.js").scheduleIndex("index_unexpected_dead"); } catch {}
 }
