@@ -22,6 +22,7 @@ const logPorter = require('./logPorter.js');
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
 const FULL_REPORT_INTERVAL_MS = parseInt(process.env.DASHBOARD_FULL_REPORT_INTERVAL_MS || '300000', 10); // 5 min padrão
+const POLL_LIVE_STATUS_MAX_AGE_MS = Math.max(5000, parseInt(process.env.DASHBOARD_POLL_STATUS_MAX_AGE_MS || '15000', 10) || 15000);
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const ACK_PENDING_PATH = path.join(__dirname, '..', 'dados', 'acks_pending.json');
@@ -196,6 +197,19 @@ async function readAggregatedStatus() {
   } catch (e) {
     return { perfis: [], robes: {}, robeQueue: [], ts: Date.now(), error: 'sem snapshot' };
   }
+}
+
+async function readStatusForPollLight() {
+  try {
+    const st = fsSync.statSync(STATUS_PATH);
+    const ageMs = Date.now() - Number(st && st.mtimeMs || 0);
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= POLL_LIVE_STATUS_MAX_AGE_MS) {
+      const raw = fsSync.readFileSync(STATUS_PATH, 'utf8');
+      const j = JSON.parse(raw);
+      if (j && typeof j === 'object') return j;
+    }
+  } catch {}
+  return await readAggregatedStatus();
 }
 
 function buildUtcMinus3DayWindow(dayDelta) {
@@ -4221,13 +4235,12 @@ async function tick(reason = 'interval') {
       const hostId = await getOrCreateHostId();
       hostIdCache = hostId;
       try { await flushPendingAcks({ limit: 40 }); } catch {}
-      // Pulso leve de RAM (lê só status.json local): o CT não recebe snapshot completo por horas,
-      // mas o scheduler de estoque precisa de freeMB atual para não travar em "no_headroom" fantasioso.
+      // Pulso leve: prefere status local recente; se estiver stale, refresca no /api/status
+      // para o CT enxergar a mesma contagem viva do dashboard do servidor.
       let pulseSys = null;
       let pollLight = null;
       try {
-        const raw = fsSync.readFileSync(STATUS_PATH, 'utf8');
-        const sj = JSON.parse(raw);
+        const sj = await readStatusForPollLight();
         const fm = Number(sj && sj.sys && sj.sys.freeMB);
         if (Number.isFinite(fm) && fm >= 0) {
           pulseSys = { freeMB: Math.round(fm) };
