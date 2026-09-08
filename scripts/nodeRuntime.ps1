@@ -2,6 +2,52 @@ Set-StrictMode -Version Latest
 
 $script:ConvenienteNodeRuntimeManifestCache = $null
 
+function Write-ConvenienteNodeRuntimeEvent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Event,
+        [hashtable]$Data
+    )
+
+    try {
+        $repoRoot = Get-ConvenienteRepoRoot
+        $dados = Join-Path $repoRoot 'dados'
+        $path = Join-Path $dados 'node_runtime_events.jsonl'
+        New-Item -ItemType Directory -Path $dados -Force | Out-Null
+        $body = [ordered]@{
+            ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            iso = (Get-Date).ToUniversalTime().ToString('o')
+            event = [string]$Event
+        }
+        if ($Data) {
+            foreach ($k in $Data.Keys) {
+                $body[$k] = $Data[$k]
+            }
+        }
+        Add-Content -LiteralPath $path -Value ($body | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    } catch {}
+}
+
+function Write-ConvenienteNodeRuntimeState {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State
+    )
+
+    try {
+        $repoRoot = Get-ConvenienteRepoRoot
+        $dados = Join-Path $repoRoot 'dados'
+        $path = Join-Path $dados 'node_runtime_last.json'
+        New-Item -ItemType Directory -Path $dados -Force | Out-Null
+        $body = [ordered]@{
+            ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            iso = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        foreach ($k in $State.Keys) {
+            $body[$k] = $State[$k]
+        }
+        $body | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+    } catch {}
+}
+
 function Get-ConvenienteRepoRoot {
     return (Split-Path -Parent $PSScriptRoot)
 }
@@ -112,18 +158,21 @@ function Ensure-ConvenienteNodeRuntime {
     try {
         $manifest = Get-ConvenienteNodeRuntimeManifest
         if (-not (Test-Path -LiteralPath $manifest.ZipPath)) {
-            return [ordered]@{
+            $out = [ordered]@{
                 Ok         = $false
                 Error      = 'node_zip_missing'
                 ZipPath    = $manifest.ZipPath
                 WantedTag  = $manifest.WantedTag
                 DownloadUrl = $manifest.DownloadUrl
             }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
+            return $out
         }
 
         $zipHash = ((Get-FileHash -LiteralPath $manifest.ZipPath -Algorithm SHA256).Hash).ToLowerInvariant()
         if ($zipHash -ne $manifest.ZipSha256) {
-            return [ordered]@{
+            $out = [ordered]@{
                 Ok          = $false
                 Error       = 'node_zip_sha256_mismatch'
                 ZipPath     = $manifest.ZipPath
@@ -131,11 +180,14 @@ function Ensure-ConvenienteNodeRuntime {
                 ExpectedSha = $manifest.ZipSha256
                 WantedTag   = $manifest.WantedTag
             }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
+            return $out
         }
 
         $existing = Test-ConvenienteNodeVersion -NodeExe $manifest.NodeExe -WantedTag $manifest.WantedTag
         if ($existing.ok -and ((-not $RequireNpm) -or (Test-Path -LiteralPath $manifest.NpmCmd))) {
-            return [ordered]@{
+            $out = [ordered]@{
                 Ok        = $true
                 Source    = 'existing'
                 WantedTag = $manifest.WantedTag
@@ -144,13 +196,16 @@ function Ensure-ConvenienteNodeRuntime {
                 DistDir   = $manifest.DistDir
                 ZipPath   = $manifest.ZipPath
             }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_ok' -Data $out
+            return $out
         }
 
         Expand-ConvenienteNodeRuntimeZip -Manifest $manifest
 
         $check = Test-ConvenienteNodeVersion -NodeExe $manifest.NodeExe -WantedTag $manifest.WantedTag
         if (-not $check.ok) {
-            return [ordered]@{
+            $out = [ordered]@{
                 Ok        = $false
                 Error     = 'node_extract_invalid'
                 Detail    = $check.error
@@ -158,19 +213,25 @@ function Ensure-ConvenienteNodeRuntime {
                 WantedTag = $manifest.WantedTag
                 NodeExe   = $manifest.NodeExe
             }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
+            return $out
         }
 
         if ($RequireNpm -and -not (Test-Path -LiteralPath $manifest.NpmCmd)) {
-            return [ordered]@{
+            $out = [ordered]@{
                 Ok        = $false
                 Error     = 'npm_cmd_missing'
                 WantedTag = $manifest.WantedTag
                 NodeExe   = $manifest.NodeExe
                 NpmCmd    = $manifest.NpmCmd
             }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
+            return $out
         }
 
-        return [ordered]@{
+        $out = [ordered]@{
             Ok        = $true
             Source    = 'extracted'
             WantedTag = $manifest.WantedTag
@@ -179,11 +240,80 @@ function Ensure-ConvenienteNodeRuntime {
             DistDir   = $manifest.DistDir
             ZipPath   = $manifest.ZipPath
         }
+        Write-ConvenienteNodeRuntimeState $out
+        Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_ok' -Data $out
+        return $out
     } catch {
-        return [ordered]@{
+        $out = [ordered]@{
             Ok    = $false
             Error = $_.Exception.Message
         }
+        Write-ConvenienteNodeRuntimeState $out
+        Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_exception' -Data $out
+        return $out
+    }
+}
+
+function Repair-ConvenienteNodeRuntimeZip {
+    param(
+        [switch]$Force
+    )
+
+    try {
+        $manifest = Get-ConvenienteNodeRuntimeManifest
+        $zipDir = Split-Path -Parent $manifest.ZipPath
+        New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+        if ((Test-Path -LiteralPath $manifest.ZipPath) -and (-not $Force)) {
+            $out = [ordered]@{
+                Ok       = $false
+                Error    = 'node_zip_already_present'
+                ZipPath  = $manifest.ZipPath
+                WantedTag = $manifest.WantedTag
+            }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_zip_repair_skip' -Data $out
+            return $out
+        }
+
+        $tmp = $manifest.ZipPath + '.tmp'
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Invoke-WebRequest -UseBasicParsing $manifest.DownloadUrl -OutFile $tmp
+        $hash = ((Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash).ToLowerInvariant()
+        if ($hash -ne $manifest.ZipSha256) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            $out = [ordered]@{
+                Ok          = $false
+                Error       = 'node_zip_repair_sha256_mismatch'
+                ZipPath     = $manifest.ZipPath
+                ZipSha256   = $hash
+                ExpectedSha = $manifest.ZipSha256
+                WantedTag   = $manifest.WantedTag
+                DownloadUrl = $manifest.DownloadUrl
+            }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_zip_repair_fail' -Data $out
+            return $out
+        }
+
+        Move-Item -LiteralPath $tmp -Destination $manifest.ZipPath -Force
+        $out = [ordered]@{
+            Ok         = $true
+            ZipPath    = $manifest.ZipPath
+            ZipSha256  = $hash
+            WantedTag  = $manifest.WantedTag
+            DownloadUrl = $manifest.DownloadUrl
+        }
+        Write-ConvenienteNodeRuntimeState $out
+        Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_zip_repaired' -Data $out
+        return $out
+    } catch {
+        $out = [ordered]@{
+            Ok    = $false
+            Error = $_.Exception.Message
+        }
+        Write-ConvenienteNodeRuntimeState $out
+        Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_zip_repair_exception' -Data $out
+        return $out
     }
 }
 

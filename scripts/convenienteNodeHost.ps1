@@ -23,10 +23,12 @@ try {
 $node = [string]$NodeExe
 if ([string]::IsNullOrWhiteSpace($node)) {
     if (-not (Get-Command Ensure-ConvenienteNodeRuntime -ErrorAction SilentlyContinue)) {
+        try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'node_runtime_helper_missing'; Helper = $nodeRuntimePs1 } } catch {}
         throw "node_runtime_helper_missing: $nodeRuntimePs1"
     }
     $rt = Ensure-ConvenienteNodeRuntime
     if (-not $rt -or -not $rt.Ok) {
+        try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = [string]$rt.Error; Helper = $nodeRuntimePs1 } } catch {}
         throw ("node_runtime_fail: " + [string]$rt.Error)
     }
     $node = [string]$rt.NodeExe
@@ -34,8 +36,14 @@ if ([string]::IsNullOrWhiteSpace($node)) {
 
 $idx = [string]$IndexPath
 $wd = [string]$WorkDir
-if (-not (Test-Path -LiteralPath $node)) { throw "node_missing: $node" }
-if (-not (Test-Path -LiteralPath $idx)) { throw "index_missing: $idx" }
+if (-not (Test-Path -LiteralPath $node)) {
+    try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'node_missing'; NodeExe = $node; IndexPath = $idx } } catch {}
+    throw "node_missing: $node"
+}
+if (-not (Test-Path -LiteralPath $idx)) {
+    try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'index_missing'; NodeExe = $node; IndexPath = $idx } } catch {}
+    throw "index_missing: $idx"
+}
 $ver = ''
 try {
     $ver = [string](@(& $node -v 2>$null)[0])
@@ -43,7 +51,13 @@ try {
 } catch {
     $ver = ''
 }
-if ($ver -ne 'v20.20.2') { throw "node_version_unexpected: $ver wanted=v20.20.2 path=$node" }
+if ($ver -ne 'v20.20.2') {
+    try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'node_version_unexpected'; NodeExe = $node; Version = $ver; WantedTag = 'v20.20.2'; IndexPath = $idx } } catch {}
+    throw "node_version_unexpected: $ver wanted=v20.20.2 path=$node"
+}
+try {
+    Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_launch' -Data @{ NodeExe = $node; Version = $ver; IndexPath = $idx; WorkDir = $wd }
+} catch {}
 Push-Location $wd
 try {
     & $node $idx

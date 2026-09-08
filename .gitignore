@@ -45,6 +45,8 @@ dados/process_sentinel_state.json
 dados/process_sentinel_last_incident.json
 dados/process_sentinel_install.json
 dados/bin/node/
+dados/node_runtime_last.json
+dados/node_runtime_events.jsonl
 dados/forensic_process/
 dados/forensic_dumps/
 dados/forensic_node_reports/

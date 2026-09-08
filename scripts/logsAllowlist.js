@@ -107,6 +107,8 @@ function logsAllowlist() {
     index_handle_pulse_prev: path.join(base, 'index_handle_pulse.prev.jsonl'),
     index_heartbeat: path.join(base, 'index_heartbeat.json'),
     index_boot_context: path.join(base, 'index_boot_context.json'),
+    node_runtime_last: path.join(base, 'node_runtime_last.json'),
+    node_runtime_events: path.join(base, 'node_runtime_events.jsonl'),
     windows_forensic_last: path.join(base, 'windows_forensic_last.json'),
     windows_forensic_deep_last: path.join(base, 'windows_forensic_deep_last.json'),
     windows_tuning: path.join(base, 'logs', 'windows_tuning.log'),
