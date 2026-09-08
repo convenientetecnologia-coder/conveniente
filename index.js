@@ -1054,6 +1054,7 @@ const terminalAccountCleanupScheduler = require('./scripts/terminalAccountCleanu
 
 // Dashboard monitor
 const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
+const logPorter = require('./scripts/logPorter.js');
 const { readCtConfig, writeCtConfig } = require('./scripts/ctConfig.js');
 
 // Inicialização
@@ -3535,6 +3536,26 @@ app.post('/api/infra/command-bus', async (req, res) => {
           }
         };
         if (typeof global.gc === 'function') global.gc();
+        continue;
+      }
+
+      // fetch_logs: ACK imediato. Leitura/ingest no porteiro (PID separado).
+      // O pai NÃO espera o filho — o CT já polla /api/logs/ingest por requestId.
+      if (t === 'fetch_logs' || t === 'fetch_logs_query') {
+        const accepted = logPorter.enqueueLogJob(t, cmd);
+        const cmdId = String(cmd && cmd.id ? cmd.id : '').trim() || null;
+        const requestId = String((cmd.payload && cmd.payload.requestId) || '').trim() || null;
+        results[i] = {
+          id: cmdId,
+          type: t,
+          ok: !!(accepted && accepted.ok),
+          accepted: !!(accepted && accepted.accepted),
+          queued: !!(accepted && accepted.queued),
+          status: (accepted && accepted.ok) ? 'queued_to_porter' : 'porter_reject',
+          requestId,
+          error: (accepted && accepted.ok) ? null : String((accepted && accepted.error) || 'porter_enqueue_failed'),
+          details: accepted || null
+        };
         continue;
       }
 

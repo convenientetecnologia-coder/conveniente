@@ -381,6 +381,9 @@ function createCluster() {
   }
 
   const STATUS_TIMEOUT_MS = parseInt(process.env.CLUSTER_STATUS_TIMEOUT_MS || '25000', 10);
+  const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '4500', 10) || 4500);
+  let statusAggCache = { at: 0, value: null };
+  let statusAggInflight = null;
 
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
@@ -610,6 +613,15 @@ function createCluster() {
       }
     }
     if (type === 'get-status' && !nome) {
+      const bypass = !!(opts && (opts.bypassStatusCache === true || opts.fresh === true));
+      const nowTs = Date.now();
+      if (!bypass && STATUS_CACHE_MS > 0 && statusAggCache.value && (nowTs - statusAggCache.at) < STATUS_CACHE_MS) {
+        return statusAggCache.value;
+      }
+      if (!bypass && STATUS_CACHE_MS > 0 && statusAggInflight) {
+        return statusAggInflight;
+      }
+      const runAgg = (async () => {
       const allPerfis = fileStore.loadPerfisJson() || [];
       const baseMap = new Map();
       for (const p of allPerfis) {
@@ -763,8 +775,14 @@ function createCluster() {
         const aggPath = path.join(__dirname, '..', 'dados', 'status.json');
         fileStore.writeJsonAtomic(aggPath, out);
       } catch {}
-      
+
+      statusAggCache = { at: Date.now(), value: out };
       return out;
+      })();
+      if (!bypass && STATUS_CACHE_MS > 0) {
+        statusAggInflight = runAgg.finally(() => { statusAggInflight = null; });
+      }
+      return runAgg;
     }
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
       const timeoutMs = type === 'robes-release-all'

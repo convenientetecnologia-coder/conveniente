@@ -69,6 +69,7 @@ dados/mensagens_pendentes.cursor.json
 dados/mensagens_pendentes.compact.lock
 dados/edge_delta_reply/
 dados/delta_delivery_confirm/
+dados/log_porter/
 
 # Resíduos e diretórios locais de operação (não versionar)
 _residuos_local_*/

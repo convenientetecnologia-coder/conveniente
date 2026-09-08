@@ -16,6 +16,8 @@ const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqC
 const gatewayProxy = require('./gatewayProxy');
 const { buildServerCardAggs } = require('./serverCardAgg');
 const logsFetchCore = require('./logsFetchCore');
+const { logsAllowlist } = require('./logsAllowlist.js');
+const logPorter = require('./logPorter.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const POLL_INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // poll leve de comandos
@@ -3111,210 +3113,9 @@ async function ackCommand(cmdId, ok, errorMsg, details, cmdType = '') {
 // ===== ALTERAÇÃO FIM ===============================================
 
 // ===== Logs sob demanda (fetch_logs) =====
-function logsSecret() {
-  try {
-    const { readCtConfig } = require('./ctConfig');
-    const cfg = readCtConfig();
-    const fromCfg = String(cfg && cfg.logIngestSecret || '').trim();
-    if (fromCfg) return fromCfg;
-  } catch {
-    // ignore
-  }
-  // Fallback: permite env var, mas ct_config tem prioridade (permite correção remota via set_ct_config)
-  const env = String(process.env.LOG_INGEST_SECRET || '').trim();
-  if (env) return env;
-  return '';
-}
-function logsAllowlist() {
-  const base = path.join(__dirname, '..', 'dados');
-  const repo = path.join(__dirname, '..');
-  const perfisDir = path.join(base, 'perfis');
-  function safeKey(v) {
-    return String(v || '')
-      .trim()
-      .replace(/[^\w.-]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .slice(0, 180);
-  }
-  function collectProfileNames() {
-    const set = new Set();
-    try {
-      const desiredPath = path.join(base, 'desired.json');
-      if (fsSync.existsSync(desiredPath)) {
-        const desired = JSON.parse(fsSync.readFileSync(desiredPath, 'utf8'));
-        const perfisObj = (desired && typeof desired === 'object' && desired.perfis && typeof desired.perfis === 'object')
-          ? desired.perfis
-          : null;
-        if (perfisObj) {
-          for (const nome of Object.keys(perfisObj)) {
-            const n = String(nome || '').trim();
-            if (n) set.add(n);
-          }
-        }
-      }
-    } catch {}
-    try {
-      if (fsSync.existsSync(perfisDir)) {
-        const ents = fsSync.readdirSync(perfisDir, { withFileTypes: true });
-        for (const ent of ents) {
-          if (!ent || !ent.isDirectory || !ent.isDirectory()) continue;
-          const n = String(ent.name || '').trim();
-          if (n) set.add(n);
-        }
-      }
-    } catch {}
-    return Array.from(set);
-  }
-  const allow = {
-    logger: path.join(base, 'logger.log'),
-    issues_fallback: path.join(base, 'issues_fallback.log'),
-    // Auditoria de estado (enterprise): permite verificar “sobras” de desired/perfis/status
-    desired: path.join(base, 'desired.json'),
-    perfis: path.join(base, 'perfis.json'),
-    status: path.join(base, 'status.json'),
-    provision_audit: path.join(base, 'provision_audit.jsonl'),
-    connect_lane_events: path.join(base, 'connect_lane_events.jsonl'),
-    connect_lane_fail: path.join(base, 'connect_lane_fail.json'),
-    server_runtime_config: path.join(base, 'server_runtime_config.json'),
-    ct_config: path.join(base, 'ct_config.json'),
-    // Fila durável Delta (diagnóstico de reenvio/queda CT sem perda).
-    delta_thread_state: path.join(base, 'delta_thread_state.json'),
-    delta_queue: path.join(base, 'mensagens_pendentes.jsonl'),
-    delta_queue_cursor: path.join(base, 'mensagens_pendentes.cursor.json'),
-    delta_deadletter: path.join(base, 'mensagens_pendentes.deadletter.jsonl'),
-    delta_deadletter_cursor: path.join(base, 'mensagens_pendentes.deadletter.cursor.json'),
-    // Forense de parsing/rede do Delta (sem depender de logger.log).
-    forensic_triagem: path.join(base, 'forensic_triagem.log'),
-    forensic_edge: path.join(base, 'forensic_edge.log'),
-    login_required_events: path.join(base, 'login_required_events.jsonl'),
-    login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
-    messenger_pin: path.join(base, 'messenger_pin.jsonl'),
-    // Governor RAM/light/full monitoring (1/min) — para análise 48h via CT fetch_logs
-    governor_snapshots: path.join(base, 'governor_snapshots.jsonl'),
-    // DiskClean /StandbyList — CT precisa puxar sozinho (não mandar operador abrir arquivo na MAE)
-    standby_sweep: path.join(base, 'logs', 'standby_sweep.jsonl'),
-    standby_sweep_last: path.join(base, 'standby_sweep_last.json'),
-    migrations: path.join(base, 'migrations.jsonl'),
-    updates: path.join(base, 'updates.jsonl'),
-    // Evidência de versão (para auditoria E2E): prova qual commit está no disco
-    git_head: path.join(repo, '.git', 'HEAD'),
-    git_main_ref: path.join(repo, '.git', 'refs', 'heads', 'main'),
-    // Auditoria enterprise: lock de provisão (para diagnosticar maintenance_provision/locks presos)
-    provision_lock: path.join(base, 'provision_lock.json'),
-    // útil para auditoria do canal de comandos
-    commands: path.join(base, 'commands.log'),
-    // estado real do gerador V2 (fila + falhas/backoff/meta)
-    robe_v2_queue: path.join(base, 'robe_v2_queue.json'),
-    // logs do serviço (quando NSSM estiver configurado)
-    service_stdout: path.join(base, 'service_stdout.log'),
-    service_stderr: path.join(base, 'service_stderr.log'),
-    // Caixa-preta do processo-pai (morte do CMD / exception).
-    // Pulso de handle NÃO mora aqui — arquivo próprio, senão o tail estoura.
-    index_lifecycle: path.join(base, 'index_lifecycle.jsonl'),
-    index_lifecycle_prev: path.join(base, 'index_lifecycle.prev.jsonl'),
-    index_handle_pulse: path.join(base, 'index_handle_pulse.jsonl'),
-    index_handle_pulse_prev: path.join(base, 'index_handle_pulse.prev.jsonl'),
-    index_heartbeat: path.join(base, 'index_heartbeat.json'),
-    index_boot_context: path.join(base, 'index_boot_context.json'),
-    windows_forensic_last: path.join(base, 'windows_forensic_last.json'),
-    windows_forensic_deep_last: path.join(base, 'windows_forensic_deep_last.json'),
-    windows_tuning: path.join(base, 'logs', 'windows_tuning.log'),
-    windows_tuning_prev: path.join(base, 'logs', 'windows_tuning.prev.log'),
-    windows_tuning_state: path.join(base, 'logs', 'windows_tuning.state.json'),
-    windows_tuning_forensic: path.join(base, 'logs', 'windows_tuning.forensic.jsonl'),
-    windows_tuning_forensic_prev: path.join(base, 'logs', 'windows_tuning.forensic.prev.jsonl'),
-    porteiro_log: 'C:\\auto_vigia\\logs\\porteiro.log',
-    porteiro_ensure_log: 'C:\\auto_vigia\\logs\\porteiro_ensure.log',
-    process_sentinel: path.join(base, 'process_sentinel.jsonl'),
-    process_sentinel_state: path.join(base, 'process_sentinel_state.json'),
-    process_sentinel_incident: path.join(base, 'process_sentinel_last_incident.json'),
-    process_sentinel_install: path.join(base, 'process_sentinel_install.json'),
-    crash_hammer: path.join(base, 'crash_hammer.jsonl'),
-    crash_hammer_last: path.join(base, 'crash_hammer_last.json'),
-    index_host_exit: path.join(base, 'index_host_exit.jsonl'),
-    multi_engine_last: path.join(base, 'multi_engine_last.json'),
-    multi_engine_log: path.join(base, 'logs', 'multi_engine.log')
-  };
-  // Virtus Messenger (por perfil): permite auditoria de chats respondidos por período.
-  // Chaves:
-  // - virtus_step_<perfil>: dados/perfis/<perfil>/virtus-step.log
-  // - chats_respondidos_<perfil>: dados/perfis/<perfil>/chats_respondidos.json
-  try {
-    const nomes = collectProfileNames();
-    for (const nome of nomes) {
-      const sk = safeKey(nome);
-      if (!sk) continue;
-      allow[`virtus_step_${sk}`] = path.join(perfisDir, nome, 'virtus-step.log');
-      allow[`chats_respondidos_${sk}`] = path.join(perfisDir, nome, 'chats_respondidos.json');
-    }
-  } catch {}
-  const statusNodeMax = Math.max(6, parseInt(process.env.STATUS_NODE_ALLOWLIST_MAX || '16', 10) || 16);
-  for (let i = 1; i <= statusNodeMax; i += 1) {
-    allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
-  }
-  addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_lifecycle', 'life_arch', 16);
-  addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_handle_pulse', 'pulse_arch', 16);
-  return allow;
-}
-function addArchivedLogKeys(allow, dir, filePrefix, keyPrefix, maxN) {
-  try {
-    if (!allow || !dir || !fsSync.existsSync(dir)) return;
-    const re = new RegExp(
-      '^' + String(filePrefix || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.\\d{8}-\\d{6}\\.jsonl$'
-    );
-    const cap = Math.max(1, Math.min(32, Number(maxN || 16) || 16));
-    const hits = fsSync.readdirSync(dir)
-      .filter((n) => re.test(String(n || '')))
-      .map((name) => {
-        const full = path.join(dir, name);
-        let mtimeMs = 0;
-        try { mtimeMs = Number(fsSync.statSync(full).mtimeMs || 0) || 0; } catch {}
-        return { name, full, mtimeMs };
-      })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, cap);
-    for (const row of hits) {
-      const stamp = String(row.name || '').replace(/^.*\.(\d{8}-\d{6})\.jsonl$/i, '$1');
-      const key = `${keyPrefix}_${stamp}`;
-      if (!allow[key]) allow[key] = row.full;
-    }
-  } catch {}
-}
+// Leitura/ingest: logPorter.js (PID separado). O pai só enfileira o job.
 function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
   return logsFetchCore.tailFileLines(filePath, maxLines, maxBytes);
-}
-
-function tailFileGrep(filePath, { patterns = [], maxBytes = 10_000_000, maxMatches = 600 } = {}) {
-  try {
-    if (!fsSync.existsSync(filePath)) return { ok:false, error:'not_found', filePath };
-    const st = fsSync.statSync(filePath);
-    const size = Number(st.size || 0) || 0;
-    const readBytes = Math.min(Math.max(0, Number(maxBytes || 0) || 0), size);
-    const start = Math.max(0, size - readBytes);
-    const buf = Buffer.alloc(readBytes);
-    const fd = fsSync.openSync(filePath, 'r');
-    try { fsSync.readSync(fd, buf, 0, readBytes, start); }
-    finally { try { fsSync.closeSync(fd); } catch {} }
-    const txt = buf.toString('utf8');
-    const lines = txt.split(/\r?\n/);
-    const pats = Array.isArray(patterns) ? patterns.map(x => String(x||'').trim()).filter(Boolean) : [];
-    if (!pats.length) return { ok:false, error:'missing_patterns', filePath };
-    const out = [];
-    for (const line of lines) {
-      if (!line) continue;
-      let hit = false;
-      for (const p of pats) {
-        if (line.includes(p)) { hit = true; break; }
-      }
-      if (!hit) continue;
-      out.push(line);
-      if (out.length >= maxMatches) break;
-    }
-    const truncated = (start > 0) || (out.length >= maxMatches);
-    return { ok:true, filePath, bytes: readBytes, lines: out.length, truncated, text: out.join('\n') };
-  } catch (e) {
-    return { ok:false, error: (e && e.message) || String(e), filePath };
-  }
 }
 
 function safeMkdirp(dir) {
@@ -3444,140 +3245,6 @@ function maybeAutoRotateCriticalJsonl() {
     return { ok:false, error: (e && e.message) || String(e) };
   }
 }
-async function postLogsIngestOnce(body, timeoutMs) {
-  const base = notifierBaseFromEndpoints();
-  if (!base) throw new Error('notifier_base_unavailable');
-  const sec = logsSecret();
-  const AbortCtrl = global.AbortController || require('node-abort-controller');
-  const controller = new AbortCtrl();
-  const t = setTimeout(() => { try { controller.abort(); } catch {} }, Math.max(8000, Number(timeoutMs || logsFetchCore.INGEST_TIMEOUT_MS) || logsFetchCore.INGEST_TIMEOUT_MS));
-  try {
-    const resp = await fetch(`${base}/api/logs/ingest`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(sec ? { 'X-Log-Secret': sec } : {})
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    if (!resp || !resp.ok) {
-      const status = resp ? Number(resp.status || 0) : 0;
-      throw new Error(`logs_ingest_http_${status || 'unknown'}`);
-    }
-  } finally {
-    clearTimeout(t);
-  }
-}
-async function postLogsToNotifier({ requestId, items }) {
-  let hostId = String(hostIdCache || '').trim();
-  if (!hostId) {
-    try {
-      hostId = String(await getOrCreateHostId() || '').trim();
-      if (hostId) hostIdCache = hostId;
-    } catch {}
-  }
-  if (!hostId) throw new Error('hostId_unavailable');
-  const packets = logsFetchCore.buildIngestPackets(items);
-  const errors = [];
-  for (let i = 0; i < packets.length; i += 1) {
-    let lastErr = null;
-    const body = {
-      hostId,
-      hostname: (os && os.hostname) ? os.hostname() : '',
-      requestId,
-      sentAt: Date.now(),
-      merge: packets.length > 1,
-      packetIndex: i,
-      packetTotal: packets.length,
-      items: packets[i]
-    };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        await postLogsIngestOnce(body, logsFetchCore.INGEST_TIMEOUT_MS);
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    if (lastErr) {
-      errors.push({ packet: i, keys: (packets[i] || []).map((x) => x && x.key).filter(Boolean), error: String((lastErr && lastErr.message) || lastErr) });
-    }
-  }
-  if (errors.length && errors.length === packets.length) {
-    throw new Error('logs_ingest_all_packets_failed:' + String(errors[0] && errors[0].error || 'unknown'));
-  }
-  return { ok: errors.length === 0, packets: packets.length, errors };
-}
-async function execFetchLogs(cmd) {
-  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
-  const requestId = String(payload.requestId || '').trim();
-  const keys = Array.isArray(payload.keys) ? payload.keys.map(x => String(x||'').trim()).filter(Boolean) : [];
-  const tailLines = Math.max(50, Math.min(8000, Number(payload.tailLines || 1200) || 1200));
-  const maxBytes = logsFetchCore.clampMaxBytes(payload.maxBytes || 1_200_000);
-  const fromStart = payload.fromStart === true || payload.fromEnd === false || String(payload.from || '').toLowerCase() === 'start';
-  const byteOffsetRaw = Number(payload.byteOffset);
-  const byteOffset = Number.isFinite(byteOffsetRaw) && byteOffsetRaw >= 0 ? Math.floor(byteOffsetRaw) : null;
-  if (!requestId) throw new Error('missing_requestId');
-  if (!keys.length) throw new Error('missing_keys');
-  const allow = logsAllowlist();
-  const items = [];
-  for (const key of keys.slice(0, logsFetchCore.FETCH_KEYS_MAX)) {
-    const fp = allow[key];
-    if (!fp) { items.push({ key, ok:false, error:'not_allowed' }); continue; }
-    const r = logsFetchCore.sliceLogFile(fp, { maxLines: tailLines, maxBytes, fromStart, byteOffset });
-    items.push({ key, ...r });
-  }
-  let ingest = null;
-  try {
-    ingest = await postLogsToNotifier({ requestId, items });
-  } catch (e) {
-    ingest = { ok: false, error: String((e && e.message) || e) };
-  }
-  return {
-    ok: !!(ingest && ingest.ok !== false),
-    requestId,
-    keys: items.map((x) => x && x.key).filter(Boolean),
-    ingest,
-    cursor: items.map((it) => ({
-      key: it && it.key,
-      ok: !!(it && it.ok),
-      fileBytes: it && it.fileBytes,
-      nextByte: it && it.nextByte,
-      eof: it && it.eof,
-      truncated: !!(it && it.truncated)
-    }))
-  };
-}
-
-async function execFetchLogsQuery(cmd) {
-  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
-  const requestId = String(payload.requestId || '').trim();
-  const key = String(payload.key || '').trim();
-  const patterns = Array.isArray(payload.patterns) ? payload.patterns : [];
-  const maxBytes = Math.max(500_000, Math.min(50_000_000, Number(payload.maxBytes || 10_000_000) || 10_000_000));
-  const maxMatches = Math.max(10, Math.min(5000, Number(payload.maxMatches || 600) || 600));
-  if (!requestId) throw new Error('missing_requestId');
-  if (!key) throw new Error('missing_key');
-  const allow = logsAllowlist();
-  const fp = allow[key];
-  if (!fp) throw new Error('not_allowed');
-  const r = tailFileGrep(fp, { patterns, maxBytes, maxMatches });
-  const items = [{
-    key: `query_${key}`,
-    ...r,
-    meta: { key, patterns: patterns.map(x => String(x||'').slice(0, 120)), maxBytes, maxMatches }
-  }];
-  let ingest = null;
-  try {
-    ingest = await postLogsToNotifier({ requestId, items });
-  } catch (e) {
-    ingest = { ok: false, error: String((e && e.message) || e) };
-  }
-  return { ok: !!(ingest && ingest.ok !== false), requestId, key, ingest, lines: Number(r && r.lines || 0) || 0 };
-}
-
 /**
  * Fallback cookies-only: coleta cidade a partir do item_link Marketplace.
  * Preferir o caminho vivo (IPC delta-force-city-collect-task) no command-bus:
@@ -4458,8 +4125,19 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_relink_orphans') { details = await execProfilesRelinkOrphans(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'repair_perfis_json') { details = await execRepairPerfisJson(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'profiles_backfill_labels') { details = await execProfilesBackfillLabels(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
-      else if (c.type === 'fetch_logs')       { details = await execFetchLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
-      else if (c.type === 'fetch_logs_query') { details = await execFetchLogsQuery(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'fetch_logs' || c.type === 'fetch_logs_query') {
+        details = logPorter.enqueueLogJob(c.type, c);
+        results.push({
+          id: cmdId || null,
+          type: cmdType,
+          ok: !!(details && details.ok !== false),
+          accepted: !!(details && details.accepted),
+          queued: !!(details && details.queued),
+          status: (details && details.ok) ? 'queued_to_porter' : 'porter_reject',
+          details: details || null,
+          error: (details && details.ok === false) ? String(details.error || 'porter_enqueue_failed') : null
+        });
+      }
       else if (c.type === 'delta_force_city_collect') {
         details = await execDeltaForceCityCollect(c);
         results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok === true), details: details || null, error: (details && details.ok) ? null : String((details && details.error) || 'city_collect_failed') });
@@ -4700,8 +4378,8 @@ const COMMAND_HANDLERS = Object.freeze({
   profiles_relink_orphans: execProfilesRelinkOrphans,
   repair_perfis_json: execRepairPerfisJson,
   profiles_backfill_labels: execProfilesBackfillLabels,
-  fetch_logs: execFetchLogs,
-  fetch_logs_query: execFetchLogsQuery,
+  fetch_logs: async (c) => logPorter.enqueueLogJob('fetch_logs', c),
+  fetch_logs_query: async (c) => logPorter.enqueueLogJob('fetch_logs_query', c),
   delta_force_city_collect: execDeltaForceCityCollect,
   logs_manifest: execLogsManifest,
   health_bundle: execHealthBundle,
