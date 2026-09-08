@@ -5,10 +5,7 @@ function Log($msg) {
     Write-Host ("[CONVENIENTE-INSTALADOR] " + $msg) -ForegroundColor Cyan
 }
 
-# 1. Instalar dependências via Winget (Node, Chrome, Chromium, Git)
-Log "Instalando Node.js LTS (Se necessário)..."
-winget install -e --id OpenJS.NodeJS.LTS -h
-
+# 1. Instalar dependências via Winget (Chrome, Chromium, Git)
 Log "Instalando Google Chrome (Se necessário)..."
 winget install -e --id Google.Chrome -h
 
@@ -29,10 +26,26 @@ if (Test-Path "C:\conveniente") {
 Log "Clonando o sistema do GitHub em C:\conveniente..."
 git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
 
-# 3. Instalar bibliotecas node (NPM)
+# 3. Instalar bibliotecas node (NPM) usando o runtime pinado do projeto
 Set-Location "C:\conveniente"
-Log "Instalando bibliotecas npm..."
-npm install
+$nodeRuntime = Join-Path $PWD "scripts\nodeRuntime.ps1"
+if (!(Test-Path -LiteralPath $nodeRuntime)) {
+    throw "Node runtime helper ausente: $nodeRuntime"
+}
+. $nodeRuntime
+$rt = Ensure-ConvenienteNodeRuntime -RequireNpm
+if (-not $rt -or -not $rt.Ok) {
+    throw "Falha ao preparar Node pinado: $($rt.Error)"
+}
+$npmCmd = [string]$rt.NpmCmd
+if (!(Test-Path -LiteralPath $npmCmd)) {
+    throw "npm.cmd pinado ausente: $npmCmd"
+}
+Log "Instalando bibliotecas npm com o Node pinado..."
+& $npmCmd install
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+    throw "npm install falhou com o Node pinado (codigo $LASTEXITCODE)"
+}
 
 # 4. Criar estrutura de dados mínima (caso não exista)
 if (!(Test-Path ".\dados")) {
@@ -79,4 +92,4 @@ if (Test-Path -LiteralPath $porteiro) {
 Log "INSTALAÇÃO FINALIZADA!"
 Log "Para rodar, basta clicar 2x no ícone 'Iniciar Conveniente' na sua Área de Trabalho!"
 Start-Sleep -Seconds 2
-[System.Windows.MessageBox]::Show("Conveniente + Porteiro instalados.`nClique no icone 'Iniciar Conveniente'.`nRAM: Conveniente. Reboot 04:00: Porteiro.", "Conveniente — Instalado", 0, 64)
+[System.Windows.MessageBox]::Show("Conveniente + Porteiro instalados.`nClique no icone 'Iniciar Conveniente'.`nRAM: Conveniente. Reboot 04:00: Porteiro.", "Conveniente - Instalado", 0, 64)

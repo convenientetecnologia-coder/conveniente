@@ -6,7 +6,7 @@
  * Escape: CONVENIENTE_ORPHAN_REAP=0
  */
 
-const { execFileSync } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -16,6 +16,13 @@ const logger = require("./logger.js");
 const provisionAudit = require("./provisionAudit.js");
 
 const DADOS = path.join(__dirname, "..", "dados");
+const ORPHAN_REAP_CLOUDFLARED_MIN_MS = Math.max(
+  10_000,
+  Math.min(10 * 60 * 1000, Number(process.env.CONVENIENTE_ORPHAN_REAP_CLOUDFLARED_MIN_MS || 60_000) || 60_000)
+);
+let __cloudflaredReapInFlight = null;
+let __cloudflaredReapLastAt = 0;
+let __cloudflaredReapLastResult = { listed: 0, ours: 0, killed: 0, skipped: true, reason: "never" };
 
 function clip(v, n) {
   const s = v == null ? "" : String(v);
@@ -176,30 +183,46 @@ function convenienteCloudflaredExeHints() {
   ].map((p) => normalizePathForCompare(p));
 }
 
-function listCloudflaredWin() {
-  if (process.platform !== "win32") return [];
-  try {
-    const ps = `
-      Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" |
-        Select-Object ProcessId, ParentProcessId, CommandLine |
-        ConvertTo-Json -Compress -Depth 3
-    `;
-    const out = execFileSync(
+function execPsJsonAsync(psScript, { timeoutMs = 10000, maxBuffer = 512 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    execFile(
       "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-      { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024, timeout: 10000 }
-    ).trim();
-    if (!out) return [];
-    const json = JSON.parse(out);
-    const arr = Array.isArray(json) ? json : (json ? [json] : []);
-    return arr.map((p) => ({
-      pid: Number(p.ProcessId),
-      ppid: Number(p.ParentProcessId) || 0,
-      cmd: String(p.CommandLine || "")
-    })).filter((p) => Number.isFinite(p.pid) && p.pid > 0);
-  } catch {
-    return [];
-  }
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", String(psScript || "")],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        maxBuffer: Math.max(64 * 1024, Number(maxBuffer || 0) || 0),
+        timeout: Math.max(1000, Number(timeoutMs || 0) || 0)
+      },
+      (error, stdout) => {
+        if (error) return resolve([]);
+        const out = String(stdout || "").trim();
+        if (!out) return resolve([]);
+        try {
+          const json = JSON.parse(out);
+          const arr = Array.isArray(json) ? json : (json ? [json] : []);
+          return resolve(arr);
+        } catch {
+          return resolve([]);
+        }
+      }
+    );
+  });
+}
+
+async function listCloudflaredWinAsync() {
+  if (process.platform !== "win32") return [];
+  const ps = [
+    "Get-CimInstance Win32_Process -Filter \"Name='cloudflared.exe'\" |",
+    "Select-Object ProcessId, ParentProcessId, CommandLine |",
+    "ConvertTo-Json -Compress -Depth 3"
+  ].join(" ");
+  const rows = await execPsJsonAsync(ps, { timeoutMs: 10000, maxBuffer: 512 * 1024 });
+  return rows.map((p) => ({
+    pid: Number(p.ProcessId),
+    ppid: Number(p.ParentProcessId) || 0,
+    cmd: String(p.CommandLine || "")
+  })).filter((p) => Number.isFinite(p.pid) && p.pid > 0);
 }
 
 function isOurCloudflaredCmd(cmd) {
@@ -216,36 +239,58 @@ function life(event, patch) {
   try { require("./indexLifecycle.js").append(event, patch); } catch {}
 }
 
-function reapCloudflaredOrphans({ keepPid = null, reason = "boot" } = {}) {
+async function reapCloudflaredOrphans({ keepPid = null, reason = "boot" } = {}) {
   if (!reapEnabled()) return { listed: 0, ours: 0, killed: 0, skipped: true };
-  const keep = Number(keepPid) || 0;
-  const listed = listCloudflaredWin();
-  const ours = listed.filter((p) => isOurCloudflaredCmd(p.cmd));
-  const victims = ours.filter((p) => p.pid !== keep && p.pid !== process.pid);
-  let killed = 0;
-  const pids = [];
-  for (const p of victims) {
-    if (taskkillPid(p.pid)) {
-      killed += 1;
-      pids.push(p.pid);
-    }
+  const reasonTag = clip(reason, 48);
+  const now = Date.now();
+  if (__cloudflaredReapInFlight) {
+    try { life("orphan_reap_cloudflared_skipped", { reason: reasonTag, skipReason: "in_flight" }); } catch {}
+    return __cloudflaredReapInFlight;
   }
+  if (__cloudflaredReapLastAt > 0 && (now - __cloudflaredReapLastAt) < ORPHAN_REAP_CLOUDFLARED_MIN_MS) {
+    const waitMs = Math.max(0, ORPHAN_REAP_CLOUDFLARED_MIN_MS - (now - __cloudflaredReapLastAt));
+    try { life("orphan_reap_cloudflared_skipped", { reason: reasonTag, skipReason: "rate_limit", waitMs }); } catch {}
+    return { ...(__cloudflaredReapLastResult || {}), skipped: true, rateLimited: true, waitMs };
+  }
+  const keep = Number(keepPid) || 0;
+  __cloudflaredReapLastAt = now;
+  const job = (async () => {
+    const listed = await listCloudflaredWinAsync();
+    const ours = listed.filter((p) => isOurCloudflaredCmd(p.cmd));
+    const victims = ours.filter((p) => p.pid !== keep && p.pid !== process.pid);
+    let killed = 0;
+    const pids = [];
+    for (const p of victims) {
+      if (taskkillPid(p.pid)) {
+        killed += 1;
+        pids.push(p.pid);
+      }
+    }
+    const result = { listed: listed.length, ours: ours.length, killed, keepPid: keep || null, pids: pids.slice(0, 16) };
+    __cloudflaredReapLastResult = { ...result, skipped: false, reason: reasonTag };
+    try {
+      provisionAudit.append({
+        event: "orphan_reap_cloudflared",
+        reason: reasonTag,
+        listed: listed.length,
+        ours: ours.length,
+        killed,
+        keepPid: keep || null,
+        pids: pids.slice(0, 16)
+      });
+    } catch {}
+    life("orphan_reap_cloudflared", { reason: reasonTag, killed, ours: ours.length, keepPid: keep || null });
+    try {
+      if (killed > 0) logger.warn("[ORPHAN] cloudflared zumbi removido", { reason, killed, keepPid: keep || null });
+    } catch {}
+    return result;
+  })();
+  __cloudflaredReapInFlight = job;
   try {
-    provisionAudit.append({
-      event: "orphan_reap_cloudflared",
-      reason: clip(reason, 48),
-      listed: listed.length,
-      ours: ours.length,
-      killed,
-      keepPid: keep || null,
-      pids: pids.slice(0, 16)
-    });
-  } catch {}
-  life("orphan_reap_cloudflared", { reason: clip(reason, 48), killed, ours: ours.length, keepPid: keep || null });
-  try {
-    if (killed > 0) logger.warn("[ORPHAN] cloudflared zumbi removido", { reason, killed, keepPid: keep || null });
-  } catch {}
-  return { listed: listed.length, ours: ours.length, killed };
+    return await job;
+  } finally {
+    if (__cloudflaredReapInFlight === job) __cloudflaredReapInFlight = null;
+  }
 }
 
 function collectDirsForNames(names) {

@@ -405,10 +405,12 @@ async function maybeBootstrapGateBToken() {
         }
       } catch {}
       try {
-        require('./scripts/orphanReaper.js').reapCloudflaredOrphans({
-          keepPid: keepCloudflaredPid,
-          reason: 'spawn_cloudflared'
-        });
+        Promise.resolve(
+          require('./scripts/orphanReaper.js').reapCloudflaredOrphans({
+            keepPid: keepCloudflaredPid,
+            reason: 'spawn_cloudflared'
+          })
+        ).catch(() => {});
       } catch {}
       try {
         if (__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null) return true;
@@ -1774,6 +1776,14 @@ const __EDGE_DEFERRED_OFFLINE_REFRESH_MS = 5 * 60_000;
 /** Log “conta offline” no máximo 1x por cmd neste intervalo (anti paranoia). */
 const __EDGE_OFFLINE_LOG_THROTTLE_MS = 60_000;
 const __edgeOfflineLogAtByCmd = new Map();
+const __EDGE_OFFLINE_LOG_THROTTLE_TTL_MS = Math.max(
+  __EDGE_OFFLINE_LOG_THROTTLE_MS,
+  Math.min(6 * 60 * 60 * 1000, Number(process.env.EDGE_OFFLINE_LOG_THROTTLE_TTL_MS || (15 * 60 * 1000)) || (15 * 60 * 1000))
+);
+const __EDGE_OFFLINE_LOG_THROTTLE_MAX = Math.max(
+  256,
+  Math.min(20_000, Number(process.env.EDGE_OFFLINE_LOG_THROTTLE_MAX || 4096) || 4096)
+);
 /** Quantos offline distintos refileirar por scan antes de pausar (backoff). */
 const __EDGE_OFFLINE_DEFER_PER_SCAN_CAP = Math.max(
   4,
@@ -1784,6 +1794,29 @@ function __edgeClearDeferredOfflineCtThrottle(cmdId) {
   const cid = String(cmdId || '').trim();
   if (!cid) return;
   try { __edgeDeferredOfflineCtByCmd.delete(cid); } catch {}
+}
+
+function __edgeClearOfflineLogThrottle(cmdId) {
+  const cid = String(cmdId || '').trim();
+  if (!cid) return;
+  try { __edgeOfflineLogAtByCmd.delete(cid); } catch {}
+}
+
+function __edgePruneOfflineLogThrottle(nowMs = Date.now()) {
+  try {
+    const now = Math.max(0, Number(nowMs || 0) || Date.now());
+    for (const [cid, ts] of __edgeOfflineLogAtByCmd.entries()) {
+      const at = Number(ts || 0) || 0;
+      if (!cid || !at || (now - at) >= __EDGE_OFFLINE_LOG_THROTTLE_TTL_MS) {
+        __edgeOfflineLogAtByCmd.delete(cid);
+      }
+    }
+    while (__edgeOfflineLogAtByCmd.size > __EDGE_OFFLINE_LOG_THROTTLE_MAX) {
+      const oldest = __edgeOfflineLogAtByCmd.keys().next().value;
+      if (oldest == null) break;
+      __edgeOfflineLogAtByCmd.delete(oldest);
+    }
+  } catch {}
 }
 
 function __edgeKickCtDeferredBrowserOffline({ rec } = {}) {
@@ -1876,6 +1909,7 @@ function __edgeKickCtReverseDeliveryStatusDeadLetter({ rec, error } = {}) {
     const cid = String(rec && (rec.client_message_id || rec.id) || '').trim();
     if (!cid) return;
     try { __edgeClearDeferredOfflineCtThrottle(cid); } catch {}
+    try { __edgeClearOfflineLogThrottle(cid); } catch {}
     const payload = {
       server_id: String(process.env.SERVER_ID || process.env.VIRTUS_SERVER_ID || '').trim() || null,
       account_login: String(rec && rec.nome || '').trim() || null,
@@ -2676,12 +2710,16 @@ async function __edgeRunDeltaReplyPump() {
 
         const cmdId = String(rec.id || '').trim() || __edgeComputeCmdIdFallback(rec);
         if (__edgeHasAckSync(cmdId)) {
+          try { __edgeClearDeferredOfflineCtThrottle(cmdId); } catch {}
+          try { __edgeClearOfflineLogThrottle(cmdId); } catch {}
           __edgeWriteDeltaReplyCursorSync(nextOffset);
           continue;
         }
 
         const junk = __edgeIsStaleDeltaReplyJunkSync(rec);
         if (junk && junk.junk) {
+          try { __edgeClearDeferredOfflineCtThrottle(cmdId); } catch {}
+          try { __edgeClearOfflineLogThrottle(cmdId); } catch {}
           __edgeWriteAckSync(cmdId, {
             ok: false,
             dead_letter: true,
@@ -2785,6 +2823,7 @@ async function __edgeRunDeltaReplyPump() {
           });
           try {
             const nowLog = Date.now();
+            __edgePruneOfflineLogThrottle(nowLog);
             const lastLog = Number(__edgeOfflineLogAtByCmd.get(cmdId) || 0) || 0;
             if (!lastLog || (nowLog - lastLog) >= __EDGE_OFFLINE_LOG_THROTTLE_MS) {
               __edgeOfflineLogAtByCmd.set(cmdId, nowLog);
@@ -2830,6 +2869,7 @@ async function __edgeRunDeltaReplyPump() {
           });
           try {
             const nowLog = Date.now();
+            __edgePruneOfflineLogThrottle(nowLog);
             const lastLog = Number(__edgeOfflineLogAtByCmd.get(cmdId) || 0) || 0;
             if (!lastLog || (nowLog - lastLog) >= __EDGE_OFFLINE_LOG_THROTTLE_MS) {
               __edgeOfflineLogAtByCmd.set(cmdId, nowLog);
@@ -2886,6 +2926,7 @@ async function __edgeRunDeltaReplyPump() {
         // Claim: avança cursor já; envio roda em paralelo sem travar as outras contas.
         // Runtime ready: libera throttle do soft-status (se voltar offline, CT é avisado de novo).
         try { __edgeClearDeferredOfflineCtThrottle(cmdId); } catch {}
+        try { __edgeClearOfflineLogThrottle(cmdId); } catch {}
         __edgeDeltaReplyAccountInFlight.set(accountNome || `__anon:${cmdId}`, {
           startedAt: Date.now(),
           cmdId,
@@ -4503,7 +4544,9 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   }
   // Túnel zumbi primeiro (rápido). Gate B sobe em seguida. Chrome órfão depois, antes do cluster.
   try {
-    require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' });
+    Promise.resolve(
+      require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' })
+    ).catch(() => {});
   } catch (e) {
     try { logger.warn('[BOOT] orphan reap cloudflared falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
   }

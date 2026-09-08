@@ -1,18 +1,55 @@
-# Host visivel do index. Resolve o node sozinho (Program Files tem espaco).
+# Host visivel do index. Usa apenas o Node pinado do projeto.
 # Se o node morrer e esta janela ficar, grava o codigo.
 # Se a janela sumir junto, nao grava — morte da arvore (X / sessao / taskkill).
+param(
+    [string]$NodeExe = '',
+    [string]$IndexPath = 'C:\conveniente\index.js',
+    [string]$WorkDir = 'C:\conveniente'
+)
+
 $ErrorActionPreference = 'Continue'
 try {
     $Host.UI.RawUI.WindowTitle = 'Conveniente_Node'
     [Console]::Title = 'Conveniente_Node'
 } catch {}
-$node = $null
-try { $node = (Get-Command node -ErrorAction SilentlyContinue).Source } catch {}
-if (-not $node) { $node = 'C:\Program Files\nodejs\node.exe' }
-$idx = 'C:\conveniente\index.js'
+
+$nodeRuntimePs1 = 'C:\conveniente\scripts\nodeRuntime.ps1'
+try {
+    if (Test-Path -LiteralPath $nodeRuntimePs1) {
+        . $nodeRuntimePs1
+    }
+} catch {}
+
+$node = [string]$NodeExe
+if ([string]::IsNullOrWhiteSpace($node)) {
+    if (-not (Get-Command Ensure-ConvenienteNodeRuntime -ErrorAction SilentlyContinue)) {
+        throw "node_runtime_helper_missing: $nodeRuntimePs1"
+    }
+    $rt = Ensure-ConvenienteNodeRuntime
+    if (-not $rt -or -not $rt.Ok) {
+        throw ("node_runtime_fail: " + [string]$rt.Error)
+    }
+    $node = [string]$rt.NodeExe
+}
+
+$idx = [string]$IndexPath
+$wd = [string]$WorkDir
 if (-not (Test-Path -LiteralPath $node)) { throw "node_missing: $node" }
 if (-not (Test-Path -LiteralPath $idx)) { throw "index_missing: $idx" }
-& $node $idx
+$ver = ''
+try {
+    $ver = [string](@(& $node -v 2>$null)[0])
+    $ver = $ver.Trim()
+} catch {
+    $ver = ''
+}
+if ($ver -ne 'v20.20.2') { throw "node_version_unexpected: $ver wanted=v20.20.2 path=$node" }
+Push-Location $wd
+try {
+    & $node $idx
+} finally {
+    Pop-Location
+}
 $ec = 0
 try { $ec = [int]$LASTEXITCODE } catch { $ec = -1 }
 $hex = 'na'

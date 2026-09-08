@@ -29,6 +29,13 @@ $pauseFlag = Join-Path $destDir 'PAUSED.flag'
 $logFile = Join-Path $destDir 'logs\porteiro_ensure.log'
 $indexJs = 'C:\conveniente\index.js'
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$nodeRuntimePs1 = 'C:\conveniente\scripts\nodeRuntime.ps1'
+
+try {
+    if (Test-Path -LiteralPath $nodeRuntimePs1) {
+        . $nodeRuntimePs1
+    }
+} catch {}
 
 function Write-StartLog([string]$Line) {
     try {
@@ -36,6 +43,24 @@ function Write-StartLog([string]$Line) {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         Add-Content -LiteralPath $logFile -Value "$ts INICIAR $Line" -Encoding ASCII
     } catch {}
+}
+
+function Resolve-ConvenienteNodeExe {
+    if (-not (Get-Command Ensure-ConvenienteNodeRuntime -ErrorAction SilentlyContinue)) {
+        Write-StartLog 'node_runtime_helper_missing'
+        return $null
+    }
+    try {
+        $rt = Ensure-ConvenienteNodeRuntime
+        if ($rt -and $rt.Ok -and $rt.NodeExe) {
+            Write-StartLog ('node_runtime_ok ' + [string]$rt.WantedTag + ' ' + [string]$rt.Source)
+            return [string]$rt.NodeExe
+        }
+        Write-StartLog ('node_runtime_fail ' + [string]$rt.Error)
+    } catch {
+        Write-StartLog ('node_runtime_exception ' + $_.Exception.Message)
+    }
+    return $null
 }
 
 function Test-ConvenienteUp {
@@ -207,8 +232,15 @@ function Start-ConvenienteNodeHost {
         [Parameter(Mandatory = $true)][string]$WorkDir
     )
     $hostPs1 = 'C:\conveniente\scripts\convenienteNodeHost.ps1'
-    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -File "' + $hostPs1 + '"'
-    return Start-Process -FilePath $ps -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
+    return Start-Process -FilePath $ps -ArgumentList @(
+        '-NoExit',
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $hostPs1,
+        '-NodeExe', $NodeExe,
+        '-IndexPath', $IndexPath,
+        '-WorkDir', $WorkDir
+    ) -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
 function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
@@ -236,8 +268,7 @@ function Start-ConvenienteNode {
         Write-StartLog 'index_missing'
         return 1
     }
-    $node = $null
-    try { $node = (Get-Command node -ErrorAction SilentlyContinue).Source } catch {}
+    $node = Resolve-ConvenienteNodeExe
     if (-not $node) {
         Write-StartLog 'node_missing'
         return 1

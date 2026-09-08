@@ -25,6 +25,13 @@ $LogFile     = Join-Path $Root 'logs\porteiro.log'
 $PidFile     = Join-Path $Root 'master.pid'
 $PanelPort   = 8088
 $Version     = 'v5.2.1-clean-cpu'
+$NodeRuntimePs1 = Join-Path $Conveniente 'scripts\nodeRuntime.ps1'
+
+try {
+    if (Test-Path -LiteralPath $NodeRuntimePs1) {
+        . $NodeRuntimePs1
+    }
+} catch {}
 
 # Reboot diario (1x/dia): limpeza TEMP+Lixeira e reinicia. Producao = 04:00.
 # So dispara DENTRO da janela (ex.: 04:00-04:20). Nunca "atrasado" ao instalar de tarde.
@@ -59,6 +66,24 @@ function Write-Log([string]$Line) {
             Move-Item $LogFile $bak -Force
         }
     } catch {}
+}
+
+function Resolve-ConvenienteNodeExe {
+    if (-not (Get-Command Ensure-ConvenienteNodeRuntime -ErrorAction SilentlyContinue)) {
+        Write-Log 'node_runtime_helper_missing'
+        return $null
+    }
+    try {
+        $rt = Ensure-ConvenienteNodeRuntime
+        if ($rt -and $rt.Ok -and $rt.NodeExe) {
+            Write-Log ("node_runtime_ok wanted=" + [string]$rt.WantedTag + " source=" + [string]$rt.Source)
+            return [string]$rt.NodeExe
+        }
+        Write-Log ("node_runtime_fail error=" + [string]$rt.Error)
+    } catch {
+        Write-Log ("node_runtime_exception error=" + $_.Exception.Message)
+    }
+    return $null
 }
 
 function Set-MaxPerf {
@@ -610,8 +635,15 @@ function Start-ConvenienteNodeHost {
     )
     $psExe = Get-ConvenientePsHost
     $hostPs1 = 'C:\conveniente\scripts\convenienteNodeHost.ps1'
-    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -File "' + $hostPs1 + '"'
-    return Start-Process -FilePath $psExe -ArgumentList $arg -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
+    return Start-Process -FilePath $psExe -ArgumentList @(
+        '-NoExit',
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $hostPs1,
+        '-NodeExe', $NodeExe,
+        '-IndexPath', $IndexPath,
+        '-WorkDir', $WorkDir
+    ) -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
 # ---------------- actions ----------------
@@ -672,8 +704,8 @@ function Do-Start {
 
     [void](Stop-ConvenienteConsoleHosts)
 
-    $node = (Get-Command node -ErrorAction SilentlyContinue).Source
-    if (-not $node) { Write-Host 'ERRO: node nao esta no PATH'; return }
+    $node = Resolve-ConvenienteNodeExe
+    if (-not $node) { Write-Host 'ERRO: runtime Node pinado indisponivel'; return }
 
     $p = Start-ConvenienteNodeHost -NodeExe $node -IndexPath $IndexJs -WorkDir $Conveniente
     if ($p) {

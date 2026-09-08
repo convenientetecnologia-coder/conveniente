@@ -1,0 +1,10 @@
+{
+  "version": "20.20.2",
+  "distName": "node-v20.20.2-win-x64",
+  "repoZipRel": "bin\\node\\node-v20.20.2-win-x64.zip",
+  "extractRootRel": "dados\\bin\\node",
+  "nodeExeRel": "node.exe",
+  "npmCmdRel": "npm.cmd",
+  "zipSha256": "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77",
+  "downloadUrl": "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip"
+}
