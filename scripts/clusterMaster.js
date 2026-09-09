@@ -380,6 +380,7 @@ async function createCluster() {
   async function spawnWorker(idx, shardNames) {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
+    env.UV_THREADPOOL_SIZE = '64';
     env.IS_WORKER_CHILD = '1';
     env.CONVENIENTE_CELL = '1';
     env.WORKER_SHARD_INDEX = String(idx);

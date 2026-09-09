@@ -234,6 +234,7 @@ function writeBootContext() {
       argv: (process.argv || []).map((x) => clip(x, 160)),
       title: clip(process.title, 80),
       execPath: clip(process.execPath, 200),
+      uvThreadpool: String(process.env.UV_THREADPOOL_SIZE || ''),
       fleet: readFleetSnap()
     };
     fs.writeFileSync(BOOT_CTX_PATH, JSON.stringify(ctx, null, 2), "utf8");

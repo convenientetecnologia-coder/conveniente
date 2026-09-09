@@ -24,6 +24,12 @@ const iniciar = read("scripts/iniciarSistema.ps1");
 const dash = read("scripts/dashboard.js");
 const gitignore = read(".gitignore");
 const indexJs = read("index.js");
+const cellEntry = read("scripts/cellEntry.js");
+const workerJs = read("scripts/worker.js");
+
+const indexBeforeRequire = indexJs.split("require(")[0] || "";
+const cellBeforeRequire = cellEntry.split("require(")[0] || "";
+const workerBeforeRequire = workerJs.split("require(")[0] || "";
 
 const launchBlock = (browser.split("GUARDA: Chrome Stable only")[1] || browser.split("Motor isolado do worker")[1] || "")
   .slice(0, 400);
@@ -53,6 +59,14 @@ check("dash_allowlist", /multi_engine_last:/.test(dash) && /multi_engine_log:/.t
 check("iniciar_mostra_copia", /motores do Chrome/.test(iniciar) && /ForegroundColor Red/.test(iniciar));
 check("gitignore_motores", /motores\//.test(gitignore));
 check("gitignore_last", /multi_engine_last\.json/.test(gitignore));
+check("tp_index_set_antes_require", /UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(indexBeforeRequire));
+check("tp_index_trava_exit", /process\.exit\(1\)/.test(indexBeforeRequire) && /UV_THREADPOOL_SIZE/.test(indexBeforeRequire));
+check("tp_cell_set_antes_require", /UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cellBeforeRequire));
+check("tp_cell_trava_exit", /process\.exit\(1\)/.test(cellBeforeRequire));
+check("tp_worker_trava_antes_require", /UV_THREADPOOL_SIZE/.test(workerBeforeRequire) && /process\.exit\(1\)/.test(workerBeforeRequire));
+check("tp_worker_nao_seta_se_modulo", /require\.main === module/.test(workerBeforeRequire));
+check("tp_spawn_env_64", /env\.UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cluster));
+check("tp_carimbo_ok", /THREADPOOL_TUNED_OK/.test(indexJs));
 check("userdatadir_browser_intacto", /User Data\\Conveniente/.test(read("scripts/browser.js")) || /Conveniente', manifest\.nome/.test(browser));
 
 if (failed) {

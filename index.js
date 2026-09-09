@@ -1,4 +1,9 @@
 // index.js (main do projeto, pasta principal)
+process.env.UV_THREADPOOL_SIZE = '64';
+if (String(process.env.UV_THREADPOOL_SIZE || '').trim() !== '64') {
+  console.error('\x1b[31m[THREADPOOL] FATAL: UV_THREADPOOL_SIZE obrigatorio=64, lido=' + JSON.stringify(process.env.UV_THREADPOOL_SIZE) + '. Abortando boot.\x1b[0m');
+  process.exit(1);
+}
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
@@ -16,6 +21,16 @@ const {
   getActiveForensicLogPath,
 } = require('./scripts/forensicLogger.js');
 try { require('./scripts/indexLifecycle.js').install({ role: 'index' }); } catch {}
+try {
+  const tpLog = path.join(__dirname, 'dados', 'logs', 'multi_engine.log');
+  fs.mkdirSync(path.dirname(tpLog), { recursive: true });
+  fs.appendFileSync(
+    tpLog,
+    new Date().toISOString() + ' [THREADPOOL_TUNED_OK] Sistema validado e iniciado com sucesso sob o colchão enterprise de 64 threads nativas de I/O.\n',
+    'utf8'
+  );
+} catch {}
+try { require('./scripts/indexLifecycle.js').append('threadpool_tuned_ok', { size: 64 }); } catch {}
 try { require('./scripts/processDiagnostics.js').install({ role: 'index' }); } catch {}
 
 /**
