@@ -75,6 +75,17 @@ async function createCluster() {
     try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch' }); } catch {}
     aliveAtBoot = [];
   }
+  if (aliveAtBoot.length > 0 && cellLifecycle.isTopologyStale()) {
+    try {
+      logger.warn('[CLUSTER] topologia nova (divisor/RAM): reciclando células para o número certo', {
+        alive: aliveAtBoot.length,
+        want: plan.nodes,
+        divisorGb: plan.serverConfig && plan.serverConfig.workerRamDivisorGb
+      });
+    } catch {}
+    try { cellLifecycle.stopAllCells({ reason: 'topology_mismatch' }); } catch {}
+    aliveAtBoot = [];
+  }
   const adopting = aliveAtBoot.length > 0;
   if (adopting) {
     const maxIdx = Math.max(
@@ -488,6 +499,13 @@ async function createCluster() {
     });
   }
   try { cellLifecycle.setStamp(bootStamp); } catch {}
+  try {
+    cellLifecycle.setTopology({
+      divisorGb: plan.serverConfig && plan.serverConfig.workerRamDivisorGb,
+      hardwareNodes: plan.serverConfig && plan.serverConfig.hardwareNodes,
+      nodes: children.length
+    });
+  } catch {}
 
   try {
     const watch = setInterval(() => {

@@ -42,6 +42,7 @@ module.exports = (app, workerClient, fileStore) => {
         maestroAlive: cellRegistry.pidAlive(reg.maestroPid),
         basePort: reg.basePort,
         codeStamp: reg.codeStamp || null,
+        topology: reg.topology || null,
         cells,
         alive: cells.filter((c) => c.alive).length,
         updatedAt: reg.updatedAt || null

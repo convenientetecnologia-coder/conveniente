@@ -1306,7 +1306,7 @@
           <div class="form-row">
             <label>Células — 1 processo worker a cada bloco de RAM física (GB)</label>
             <input type="number" id="srvMemWorkerDivisor" min="4" max="32" step="1" />
-            <div class="muted" style="margin-top:6px;">Fábrica: 16 GB. MAE 2 com 64 GB e divisor 16 = 4 células; divisor 8 = 8 células. Cada célula é 1 worker + 1 motor Chrome, independente do index. <b>Fechar Todos</b> só fecha Chrome (células ficam). <b>Parar células</b> mata os workers. <b>Ctrl+C</b> no index deixa as células vivas. Depois do git pull, <b>Iniciar Sistema</b> recicla código velho sozinho e nasce com navegador fechado.</div>
+            <div class="muted" style="margin-top:6px;">Fábrica: 16 GB. MAE 2 com 64 GB e divisor 16 = 4 células; divisor 8 = 8 células. Cada célula é 1 worker + 1 motor Chrome, independente do index. Mudou o divisor: <b>Ctrl+C no index e Iniciar Sistema</b> (ou só Iniciar se o index ainda estiver ligado). As células velhas são recicadas no número novo e as contas se repartem. <b>Parar células não é obrigatório.</b> Se os navegadores estavam abertos, fecham com as células velhas e as novas reabrem; se você fez Fechar Todos antes, nascem fechadas.</div>
           </div>
           <div class="form-row">
             <label>RAM — extra por Worker/bloco calculado (MB, × ceil(RAM GB ÷ divisor acima))</label>
@@ -1762,7 +1762,7 @@
         if (memProvSpikeEl) memProvSpikeEl.value = Number(mem.provisionSpikeMb != null ? mem.provisionSpikeMb : 1536);
         infoEl.className = 'pill info';
         infoEl.innerHTML = workerDivisorSupported
-          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Células (${Number(mem.workerRamDivisorGb || 16)} GB cada): conta nova já usa o valor salvo; redistribuição igual só no próximo reinício do index.js.`
+          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Células (${Number(mem.workerRamDivisorGb || 16)} GB cada): conta nova já usa o valor salvo; 4→8 ou 8→4 só no próximo reinício do index (Ctrl+C + Iniciar, ou só Iniciar). Parar células não é preciso.`
           : `<span class="dot"></span>Backend anterior detectado. Reinicie o index.js uma vez para habilitar a configuração do divisor de Workers; os demais campos continuam operacionais.`;
         renderGlobalCities();
       };
@@ -2135,7 +2135,7 @@
               ? ` Config salva, mas o replanejamento da renovação falhou: ${String(renewReplan.error || 'erro')}.`
               : '');
           const workerRestartMsg = r && r.workerRamDivisorChanged
-            ? ' O novo divisor já vale para a próxima conta nova (pode nascer Worker extra). Os Workers e navegadores atuais ficam como estão; no próximo reinício do index.js as contas se dividem iguais no plano novo.'
+            ? ' O novo divisor já vale para a próxima conta nova (pode nascer célula extra). Para repartir igual no número novo (4→8 ou 8→4): Ctrl+C no index e Iniciar Sistema, ou só Iniciar. As células velhas são recicadas sozinhas — não precisa Parar células. Navegador aberto fecha e as novas reabrem; se Fechar Todos antes, nascem fechadas.'
             : '';
           const partialFailureMsg = partialFailure
             ? ` Uma etapa secundária falhou depois da persistência (${String(r.error || 'erro desconhecido')}); a configuração acima não foi revertida.`

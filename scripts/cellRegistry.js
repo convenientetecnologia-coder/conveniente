@@ -17,6 +17,7 @@ function empty() {
     maestroPid: null,
     basePort: BASE_PORT,
     codeStamp: '',
+    topology: null,
     cells: []
   };
 }

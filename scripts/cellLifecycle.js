@@ -63,11 +63,43 @@ function isStampStale() {
   return saved !== disk;
 }
 
+function isTopologyStale() {
+  const alive = cellRegistry.listAlive();
+  if (!alive.length) return false;
+  try {
+    const fileStore = require('./fileStore.js');
+    const { planMemoryAndShards } = require('./memoryPlan.js');
+    const names = (fileStore.loadPerfisJson() || []).map((p) => p && p.nome).filter(Boolean);
+    const plan = planMemoryAndShards({ totalProfiles: names.length });
+    const want = Math.max(1, Number(plan.nodes) || 1);
+    if (alive.length !== want) return true;
+    const saved = cellRegistry.read().topology;
+    if (saved && saved.divisorGb) {
+      const wantDiv = Math.max(4, Number(plan.serverConfig && plan.serverConfig.workerRamDivisorGb) || 16);
+      if (Number(saved.divisorGb) !== wantDiv) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function setStamp(stamp) {
   const reg = cellRegistry.read();
   reg.codeStamp = String(stamp || currentStamp());
   cellRegistry.write(reg);
   return reg.codeStamp;
+}
+
+function setTopology({ divisorGb, hardwareNodes, nodes } = {}) {
+  const reg = cellRegistry.read();
+  reg.topology = {
+    divisorGb: Math.max(4, Number(divisorGb) || 16),
+    hardwareNodes: Math.max(1, Number(hardwareNodes) || 1),
+    nodes: Math.max(1, Number(nodes) || 1)
+  };
+  cellRegistry.write(reg);
+  return reg.topology;
 }
 
 function sleepMs(ms) {
@@ -132,12 +164,16 @@ if (require.main === module) {
     process.stdout.write(isStampStale() ? '1' : '0');
     process.exit(0);
   }
+  if (arg === 'topo-stale') {
+    process.stdout.write(isTopologyStale() ? '1' : '0');
+    process.exit(0);
+  }
   if (arg === 'stop') {
     const r = stopAllCells({ reason: String(process.argv[3] || 'cli') });
     process.stdout.write(JSON.stringify(r));
     process.exit(r.ok ? 0 : 1);
   }
-  process.stderr.write('usage: cellLifecycle.js stamp|stale|stop\n');
+  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|stop\n');
   process.exit(2);
 }
 
@@ -145,6 +181,8 @@ module.exports = {
   currentStamp,
   savedStamp,
   isStampStale,
+  isTopologyStale,
   setStamp,
+  setTopology,
   stopAllCells
 };

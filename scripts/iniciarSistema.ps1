@@ -92,8 +92,8 @@ function Invoke-ConvenienteCellCli([string]$Arg) {
     }
 }
 
-function Test-ConvenienteCellsStale {
-    $v = Invoke-ConvenienteCellCli 'stale'
+function Test-ConvenienteTopologyStale {
+    $v = Invoke-ConvenienteCellCli 'topo-stale'
     return ($v -eq '1')
 }
 
@@ -316,9 +316,11 @@ function Start-ConvenienteNode {
     try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
     $cellsStale = $false
     try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
+    $topoStale = $false
+    try { $topoStale = [bool](Test-ConvenienteTopologyStale) } catch { $topoStale = $false }
 
     if (Test-ConvenienteUp) {
-        if ($cellsAlive -and -not $cellsStale) {
+        if ($cellsAlive -and -not $cellsStale -and -not $topoStale) {
             Write-StartLog 'already_up'
             return 0
         }
@@ -328,10 +330,15 @@ function Start-ConvenienteNode {
             Write-Host 'Codigo novo no disco (git pull). Reciclando index e celulas. Navegadores nascem fechados.'
             Write-Host ''
             if ($cellsAlive) { Stop-ConvenienteCells 'iniciar_already_up_stale' }
-        } else {
+        } elseif (-not $cellsAlive) {
             Write-StartLog 'already_up_cells_dead restart_maestro'
             Write-Host ''
             Write-Host 'Index esta up, mas as celulas estao mortas (Parar celulas). Reiniciando o maestro para subir workers de novo, com navegador fechado.'
+            Write-Host ''
+        } elseif ($topoStale) {
+            Write-StartLog 'already_up_topology restart_maestro'
+            Write-Host ''
+            Write-Host 'Divisor/topologia nova. Reciclando o index; as celulas passam para o numero novo neste boot.'
             Write-Host ''
         }
         Stop-ConvenienteMaestro
