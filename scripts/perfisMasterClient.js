@@ -3,32 +3,13 @@
 // Objetivo: blindagem máxima — workers NUNCA escrevem perfis.json diretamente.
 
 const logger = require('./logger.js');
+const workerIpc = require('./workerIpc.js');
 
 const isChild = (process && process.env && process.env.IS_WORKER_CHILD === '1');
 
-function newMsgId(){ return Math.random().toString(36).slice(2); }
-
 function _sendIpc(type, payload, { timeoutMs = 12000 } = {}) {
   if (!isChild) return Promise.resolve({ ok: false, error: 'not_child' });
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type, msgId, payload: payload || {} }); } catch (e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok: false, error: 'ipc_send_failed' });
-      return;
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok: false, error: 'timeout' });
-    }, Math.max(2000, Number(timeoutMs || 0) || 12000));
-  });
+  return workerIpc.request({ type, payload: payload || {} }, timeoutMs);
 }
 
 async function remove(nome, { reason = 'worker_remove', caller = 'worker' } = {}) {

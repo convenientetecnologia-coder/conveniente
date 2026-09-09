@@ -8112,6 +8112,13 @@ async function activateOnce(nome, source = '', operator = '') {
 }
 
 function sendReply(msgId, data) {
+  try {
+    const bus = require('./cellCommandBus.js');
+    if (bus.isCellMode()) {
+      bus.reply(msgId, data);
+      return;
+    }
+  } catch {}
   if (process && process.send) {
     process.send({ replyTo: msgId, data });
   }
@@ -11833,14 +11840,18 @@ function maybeStandbySweepIdleHint() {
     const snap = collectStandbySweepBusy();
     if (snap.busy) return;
   } catch {}
-  if (typeof process.send !== 'function') return;
+  let canHint = false;
+  try { canHint = require('./cellCommandBus.js').isCellMode(); } catch {}
+  if (!canHint && typeof process.send !== 'function') return;
   if (standbySweepIdleHintTimer) return;
   standbySweepIdleHintTimer = setTimeout(() => {
     standbySweepIdleHintTimer = null;
     try {
       const again = collectStandbySweepBusy();
       if (again.busy) return;
-      process.send({ type: 'standby-sweep-idle-hint' });
+      const bus = require('./cellCommandBus.js');
+      if (bus.isCellMode()) bus.sendToMaestro({ type: 'standby-sweep-idle-hint' });
+      else if (typeof process.send === 'function') process.send({ type: 'standby-sweep-idle-hint' });
     } catch {}
   }, 50);
   try { if (standbySweepIdleHintTimer && typeof standbySweepIdleHintTimer.unref === 'function') standbySweepIdleHintTimer.unref(); } catch {}
@@ -29085,9 +29096,15 @@ async function gracefulShutdown(reason) {
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
-process.on('disconnect', () => gracefulShutdown('disconnect'));
+process.on('disconnect', () => {
+  if (String(process.env.CONVENIENTE_CELL || '').trim() === '1') {
+    try { logger.info('[WORKER] disconnect ignorado (célula independente)'); } catch {}
+    return;
+  }
+  gracefulShutdown('disconnect');
+});
 
-process.on('message', async (msg) => {
+async function handleWorkerCommand(msg) {
   if (!msg || !msg.type || !msg.msgId) return;
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
@@ -29102,7 +29119,13 @@ process.on('message', async (msg) => {
     logger.error('[WORKER][MESSAGE] handler error', { type: msg.type, error: e && e.message || e }, e);
     sendReply(msg.msgId, { ok: false, error: e && e.message || String(e) });
   }
-});
+}
+
+try {
+  require('./cellCommandBus.js').setCommandHandler((msg) => handleWorkerCommand(msg));
+} catch {}
+
+process.on('message', (msg) => { handleWorkerCommand(msg).catch(() => {}); });
 
 const CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS = Math.max(5000, parseInt(process.env.CONVENIENTE_CDP_FATAL_RECOVERY_SWEEP_COOLDOWN_MS || '15000', 10) || 15000);
 let _lastCdpFatalRecoverySweepAt = 0;

@@ -174,14 +174,26 @@ function hardPurgeChrome() {
 }
 
 function rmDirFatal(dir) {
-  try {
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  } catch (e) {
-    fatal('nao consegui limpar pasta do motor (permissao ou arquivo preso)', {
-      dir,
-      error: e && e.message || String(e)
-    });
+  const target = String(dir || '');
+  const deadline = Date.now() + 20000;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      if (!fs.existsSync(target)) return;
+      fs.rmSync(target, { recursive: true, force: true });
+      if (!fs.existsSync(target)) return;
+    } catch (e) {
+      lastErr = e;
+    }
+    try {
+      spawnSync('taskkill', ['/F', '/IM', 'chrome.exe'], { windowsHide: true, timeout: 20000 });
+    } catch {}
+    sleepMs(700);
   }
+  fatal('nao consegui limpar pasta do motor (permissao ou arquivo preso)', {
+    dir: target,
+    error: lastErr && lastErr.message ? String(lastErr.message) : String(lastErr || 'locked')
+  });
 }
 
 function cloneMasterTo(destDir, masterDir, masterVer) {

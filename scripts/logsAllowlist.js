@@ -109,6 +109,10 @@ function logsAllowlist() {
     index_boot_context: path.join(base, 'index_boot_context.json'),
     node_runtime_last: path.join(base, 'node_runtime_last.json'),
     node_runtime_events: path.join(base, 'node_runtime_events.jsonl'),
+    cell_registry: path.join(base, 'cells', 'registry.json'),
+    cell_events: path.join(base, 'cells', 'events.jsonl'),
+    cell_events_prev: path.join(base, 'cells', 'events.prev.jsonl'),
+    cell_last: path.join(base, 'cells', 'last.json'),
     windows_forensic_last: path.join(base, 'windows_forensic_last.json'),
     windows_forensic_deep_last: path.join(base, 'windows_forensic_deep_last.json'),
     windows_tuning: path.join(base, 'logs', 'windows_tuning.log'),
@@ -137,12 +141,13 @@ function logsAllowlist() {
       allow[`chats_respondidos_${sk}`] = path.join(perfisDir, nome, 'chats_respondidos.json');
     }
   } catch {}
-  const statusNodeMax = Math.max(6, parseInt(process.env.STATUS_NODE_ALLOWLIST_MAX || '16', 10) || 16);
+  const statusNodeMax = Math.max(8, parseInt(process.env.STATUS_NODE_ALLOWLIST_MAX || '24', 10) || 24);
   for (let i = 1; i <= statusNodeMax; i += 1) {
     allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
   }
   addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_lifecycle', 'life_arch', 16);
   addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_handle_pulse', 'pulse_arch', 16);
+  addArchivedLogKeys(allow, path.join(base, 'logs'), 'cell_events', 'cell_arch', 16);
   return allow;
 }
 

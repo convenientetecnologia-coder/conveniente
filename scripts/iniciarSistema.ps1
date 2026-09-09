@@ -63,6 +63,45 @@ function Resolve-ConvenienteNodeExe {
     return $null
 }
 
+function Test-ConvenienteCellsAlive {
+    $regPath = 'C:\conveniente\dados\cells\registry.json'
+    if (-not (Test-Path -LiteralPath $regPath)) { return $false }
+    try {
+        $reg = Get-Content -LiteralPath $regPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($c in @($reg.cells)) {
+            $id = 0
+            try { $id = [int]$c.pid } catch { $id = 0 }
+            if ($id -le 0) { continue }
+            $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($proc) { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+function Invoke-ConvenienteCellCli([string]$Arg) {
+    $node = Resolve-ConvenienteNodeExe
+    if (-not $node) { return $null }
+    $life = 'C:\conveniente\scripts\cellLifecycle.js'
+    if (-not (Test-Path -LiteralPath $life)) { return $null }
+    try {
+        $out = & $node $life $Arg
+        return [string]$out
+    } catch {
+        return $null
+    }
+}
+
+function Test-ConvenienteCellsStale {
+    $v = Invoke-ConvenienteCellCli 'stale'
+    return ($v -eq '1')
+}
+
+function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
+    Write-StartLog ('cells_stop ' + $Reason)
+    [void](Invoke-ConvenienteCellCli 'stop')
+}
+
 function Test-ConvenienteUp {
     try {
         $c = @(Get-NetTCPConnection -LocalPort 8088 -State Listen -ErrorAction SilentlyContinue)
@@ -256,10 +295,50 @@ function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
     return $false
 }
 
+function Stop-ConvenienteMaestro {
+    [void](Stop-ConvenienteConsoleHosts)
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
+        $cmd = [string]$p.CommandLine
+        if (-not $cmd) { continue }
+        if ($cmd -notmatch 'index\.js') { continue }
+        if ($cmd -match 'cellEntry\.js') { continue }
+        try { & taskkill.exe /F /PID $p.ProcessId 2>$null | Out-Null } catch {}
+    }
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-ConvenienteUp)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 function Start-ConvenienteNode {
+    $cellsAlive = $false
+    try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
+    $cellsStale = $false
+    try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
+
     if (Test-ConvenienteUp) {
-        Write-StartLog 'already_up'
-        return 0
+        if ($cellsAlive -and -not $cellsStale) {
+            Write-StartLog 'already_up'
+            return 0
+        }
+        if ($cellsStale) {
+            Write-StartLog 'already_up_stale restart_maestro'
+            Write-Host ''
+            Write-Host 'Codigo novo no disco (git pull). Reciclando index e celulas. Navegadores nascem fechados.'
+            Write-Host ''
+            if ($cellsAlive) { Stop-ConvenienteCells 'iniciar_already_up_stale' }
+        } else {
+            Write-StartLog 'already_up_cells_dead restart_maestro'
+            Write-Host ''
+            Write-Host 'Index esta up, mas as celulas estao mortas (Parar celulas). Reiniciando o maestro para subir workers de novo, com navegador fechado.'
+            Write-Host ''
+        }
+        Stop-ConvenienteMaestro
+        $cellsAlive = $false
+        try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
+        $cellsStale = $false
+        try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
     }
     try {
         if (Test-Path -LiteralPath $pauseFlag) { Remove-Item -LiteralPath $pauseFlag -Force -ErrorAction SilentlyContinue }
@@ -274,6 +353,25 @@ function Start-ConvenienteNode {
         return 1
     }
     [void](Stop-ConvenienteConsoleHosts)
+    $cellsAlive = $false
+    try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
+    $cellsStale = $false
+    try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
+    if ($cellsAlive -and $cellsStale) {
+        Write-StartLog 'cells_stale recycle'
+        Write-Host ''
+        Write-Host 'Codigo novo no disco (git pull). Encerrando celulas antigas para o worker novo valer.'
+        Write-Host ''
+        Stop-ConvenienteCells 'iniciar_stamp_stale'
+        $cellsAlive = $false
+        try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
+    }
+    if ($cellsAlive) {
+        Write-StartLog 'adopt_cells skip_chrome_kill skip_motor_boot'
+        Write-Host ''
+        Write-Host 'Células vivas detectadas. Subindo só o maestro (index). Chromes seguem.'
+        Write-Host ''
+    } else {
     Write-StartLog 'motores_begin'
     try {
         $hwndShow = [Native.Win]::GetConsoleWindow()
@@ -302,6 +400,7 @@ function Start-ConvenienteNode {
         $hwndHide = [Native.Win]::GetConsoleWindow()
         if ($hwndHide -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndHide, 0) }
     } catch {}
+    }
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0

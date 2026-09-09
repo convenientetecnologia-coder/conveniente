@@ -299,6 +299,7 @@
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
       <div class="metric"><span>IP atual</span><b id="mPublicIp">--</b></div>
       <div class="metric"><span>Próx. troca IP</span><b id="mNextSwap">--</b></div>
+      <div class="metric"><span>Células</span><b id="mCells">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
       <div class="metric clickable" id="metricMkt" style="display:none"><span>MKT Desativado</span><b id="mMktDisabled">0</b></div>
@@ -312,8 +313,9 @@
     <button class="add-btn" id="addPerfilBtn">+Nova Conta</button>
     <button class="btn" id="citiesCountBtn">Cidades</button>
     <button class="btn btn-cinza" id="serverConfigBtn">Config Servidor</button>
+    <button class="btn btn-vermelho" id="cellsStopBtn" title="Explode os workers: mata os processos das células e os Chromes vão junto. O painel (index) continua. NÃO é o Fechar Todos.">Parar células</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
-    <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
+    <button class="btn btn-vermelho" id="stopAllBtn" title="Fecha os navegadores com calma. As células/workers continuam vivos, só sem Chrome. Use isto antes de atualizar.">Fechar Todos</button>
     <button class="btn btn-cinza" id="autoOpenBtn">Tudo aberto: OFF</button>
     <button class="btn btn-amarelo" id="invokeAllBtn">Invocar Tudo</button>
     <button class="btn btn-verde" id="resumeAllBtn">Retomar Tudo</button>
@@ -353,7 +355,7 @@
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','robePostingsBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn','serverConfigBtn'];
+      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','robePostingsBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn','serverConfigBtn','cellsStopBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -1226,22 +1228,28 @@
       }
       return r;
     }
-    function showSystemMessageModal({ title = 'Aviso', message = '', tone = 'info', okText = 'OK' } = {}) {
+    function showSystemMessageModal({ title = 'Aviso', message = '', tone = 'info', okText = 'OK', cancelText = '' } = {}) {
       return new Promise((resolve) => {
         const overlay = document.createElement('div'); overlay.className = 'modal-ov';
         const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth = '560px';
+        const cancelBtn = cancelText
+          ? `<button class="btn" id="sysMsgCancel">${escapeHtml(cancelText)}</button>`
+          : '';
         box.innerHTML = `
           <h2>${escapeHtml(title)}</h2>
           <div class="pill ${tone}" style="margin-bottom:12px;"><span class="dot"></span>${escapeHtml(String(message || ''))}</div>
           <div class="modal-actions">
+            ${cancelBtn}
             <button class="btn primary" id="sysMsgOk">${escapeHtml(okText)}</button>
           </div>
         `;
         overlay.append(box);
         document.body.append(overlay);
-        const close = () => { try { overlay.remove(); } catch {} resolve(true); };
-        box.querySelector('#sysMsgOk').onclick = close;
-        overlay.onclick = (ev) => { if (ev.target === overlay) close(); };
+        const close = (val) => { try { overlay.remove(); } catch {} resolve(val); };
+        box.querySelector('#sysMsgOk').onclick = () => close(true);
+        const cancelEl = box.querySelector('#sysMsgCancel');
+        if (cancelEl) cancelEl.onclick = () => close(false);
+        overlay.onclick = (ev) => { if (ev.target === overlay) close(!!cancelText ? false : true); };
       });
     }
     function showServerConfigApplyChoiceModal() {
@@ -1296,9 +1304,9 @@
             <input type="number" id="srvMemHostBase" min="256" max="16384" step="128" />
           </div>
           <div class="form-row">
-            <label>Workers — 1 processo Worker a cada bloco de RAM física (GB)</label>
+            <label>Células — 1 processo worker a cada bloco de RAM física (GB)</label>
             <input type="number" id="srvMemWorkerDivisor" min="4" max="32" step="1" />
-            <div class="muted" style="margin-top:6px;">Fábrica: 16 GB. Faixa: 4–32. Salvar já vale para a próxima conta nova: se o teto novo couber, nasce Worker extra e essa conta fica nele; os Workers atuais não são mexidos. Reiniciar o <code>index.js</code> redistribui todas as contas iguais entre os Workers do plano novo.</div>
+            <div class="muted" style="margin-top:6px;">Fábrica: 16 GB. MAE 2 com 64 GB e divisor 16 = 4 células; divisor 8 = 8 células. Cada célula é 1 worker + 1 motor Chrome, independente do index. <b>Fechar Todos</b> só fecha Chrome (células ficam). <b>Parar células</b> mata os workers. <b>Ctrl+C</b> no index deixa as células vivas. Depois do git pull, <b>Iniciar Sistema</b> recicla código velho sozinho e nasce com navegador fechado.</div>
           </div>
           <div class="form-row">
             <label>RAM — extra por Worker/bloco calculado (MB, × ceil(RAM GB ÷ divisor acima))</label>
@@ -1747,14 +1755,14 @@
           memWorkerDivisorEl.value = Number(mem.workerRamDivisorGb != null ? mem.workerRamDivisorGb : 16);
           memWorkerDivisorEl.disabled = !workerDivisorSupported;
           memWorkerDivisorEl.title = workerDivisorSupported
-            ? 'Salva agora; aplica a topologia no próximo reinício do index.js.'
+            ? 'GB por célula (1 processo worker + 1 motor Chrome). Salva agora; aplica no próximo reinício do index.js.'
             : 'Reinicie o index.js uma vez para carregar o backend que suporta este campo.';
         }
         if (memPer8El) memPer8El.value = Number(mem.reservePer8GbMb != null ? mem.reservePer8GbMb : 768);
         if (memProvSpikeEl) memProvSpikeEl.value = Number(mem.provisionSpikeMb != null ? mem.provisionSpikeMb : 1536);
         infoEl.className = 'pill info';
         infoEl.innerHTML = workerDivisorSupported
-          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Divisor de Workers (${Number(mem.workerRamDivisorGb || 16)} GB): conta nova já usa o valor salvo; redistribuição igual só no próximo reinício do index.js.`
+          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Células (${Number(mem.workerRamDivisorGb || 16)} GB cada): conta nova já usa o valor salvo; redistribuição igual só no próximo reinício do index.js.`
           : `<span class="dot"></span>Backend anterior detectado. Reinicie o index.js uma vez para habilitar a configuração do divisor de Workers; os demais campos continuam operacionais.`;
         renderGlobalCities();
       };
@@ -3482,6 +3490,13 @@
           const el = document.getElementById('mFotos');
           if (el) el.textContent = String(f.count || 0);
         }
+        try {
+          const cells = await fetch('/api/cells').then((r) => r.json()).catch(() => null);
+          const el = document.getElementById('mCells');
+          if (el && cells && cells.ok) {
+            el.textContent = String(Number(cells.alive || 0)) + '/' + String(Array.isArray(cells.cells) ? cells.cells.length : 0);
+          }
+        } catch {}
       } catch (e) {
         // silencioso
       }
@@ -3549,6 +3564,38 @@
       btn.onclick = async () => {
         if (isMassActionRunning()) { alertMassActionRunning(); return; }
         showServerConfigModal();
+      };
+    })();
+
+    (function bindCellsStop() {
+      const btn = document.getElementById('cellsStopBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        const ok = await showSystemMessageModal({
+          title: 'Parar células',
+          message: 'Isso EXPLODE as células: mata os processos worker e os Chromes vão junto. O painel (index) continua, mas sem workers. Fechar Todos NÃO faz isso — Fechar Todos só fecha navegador com calma. Depois disto: git pull e Iniciar Sistema (ele reinicia o index e sobe células novas, navegador fechado). Ou Ctrl+C no terminal e Iniciar Sistema.',
+          tone: 'bad',
+          okText: 'Parar células',
+          cancelText: 'Cancelar'
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/cells/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true })
+          }).then((x) => x.json()).catch(() => null);
+          await showSystemMessageModal({
+            title: r && r.ok ? 'Células paradas' : 'Falha ao parar células',
+            message: r && r.ok
+              ? ('Encerradas: ' + String(r.requested || 0) + '. Painel ainda aberto, workers mortos. git pull se precisar, depois Iniciar Sistema (ele recicla o index e sobe células novas fechadas).')
+              : String((r && r.error) || 'erro desconhecido'),
+            tone: r && r.ok ? 'good' : 'bad'
+          });
+        } finally {
+          btn.disabled = false;
+        }
       };
     })();
 

@@ -21,4 +21,52 @@ module.exports = (app, workerClient, fileStore) => {
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
+
+  app.get('/api/cells', (req, res) => {
+    try {
+      const cellRegistry = require('./cellRegistry.js');
+      const reg = cellRegistry.read();
+      const cells = (reg.cells || []).map((c) => ({
+        id: c.id,
+        idx: c.idx,
+        pid: c.pid,
+        port: c.port,
+        shard: Array.isArray(c.shard) ? c.shard.length : 0,
+        alive: cellRegistry.pidAlive(c.pid),
+        statusFile: c.statusFile || null,
+        updatedAt: c.updatedAt || null
+      }));
+      res.json({
+        ok: true,
+        maestroPid: reg.maestroPid || null,
+        maestroAlive: cellRegistry.pidAlive(reg.maestroPid),
+        basePort: reg.basePort,
+        codeStamp: reg.codeStamp || null,
+        cells,
+        alive: cells.filter((c) => c.alive).length,
+        updatedAt: reg.updatedAt || null
+      });
+    } catch (e) {
+      res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  app.post('/api/cells/stop', async (req, res) => {
+    const body = (req && req.body && typeof req.body === 'object') ? req.body : {};
+    if (body.confirm !== true) {
+      return res.status(400).json({ ok: false, error: 'confirm_required' });
+    }
+    try {
+      if (workerClient && typeof workerClient.kill === 'function') {
+        await workerClient.kill();
+      }
+    } catch {}
+    try {
+      const cellLifecycle = require('./cellLifecycle.js');
+      const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
+      return res.json(Object.assign({ maestroStays: true }, r));
+    } catch (e) {
+      return res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
 };

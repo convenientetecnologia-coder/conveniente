@@ -4000,6 +4000,12 @@ function __buildServerEventTelemetry(status) {
 }
 
 async function __readLocalStatusForEventBridge() {
+  if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
+    try {
+      const json = await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+      if (json && typeof json === 'object') return json;
+    } catch {}
+  }
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), 8000);
   try {
@@ -4453,12 +4459,12 @@ async function bootCluster() {
   const { createCluster } = require('./scripts/clusterMaster.js');
   logger.info('[BOOT] Construindo cluster multi-node (auto)...');
   try {
-    clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }
+    clusterClient = await createCluster(); // { plan, children, sendWorkerCommand, kill, detach }
   } catch (e) {
     logger.error('[BOOT] cluster abortado. Sem fallback ao Chrome unificado.', { error: (e && e.message) || String(e) }, e);
     process.exit(1);
   }
-  logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false));
+  logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false) + ' adopting=' + String(!!clusterClient.adopting));
 }
 // ===================== FIM CLUSTER MULTI-NODE =====================
 
@@ -4476,6 +4482,12 @@ const apiClient = {
       return Promise.resolve({ ok: false, error: 'cluster_not_ready', reshuffled: false });
     }
     return clusterClient.reshuffleFairIfIdle(...args);
+  },
+  kill: (...args) => {
+    if (!clusterClient || typeof clusterClient.kill !== 'function') {
+      return Promise.resolve({ ok: false, error: 'cluster_not_ready' });
+    }
+    return clusterClient.kill(...args);
   }
 };
 require('./scripts/api_status.js')(app, apiClient, fileStore);
@@ -4530,12 +4542,33 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
   // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.
   let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
+  let adoptingLiveCells = false;
+  let codeStale = false;
+  try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
+  try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
+  // Atualização (git pull): mata células velhas ANTES do start-closed, senão o boot
+  // acha célula viva, pula o "começar fechado" e as células novas reabrem o Chrome.
+  if (adoptingLiveCells && codeStale) {
+    try {
+      logger.info('[BOOT] Código novo no disco: encerrando células antigas antes do start-closed.');
+      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
+    } catch (e) {
+      try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+    }
+    adoptingLiveCells = false;
+  }
+  if (adoptingLiveCells) {
+    startClosedOnBoot = false;
+    try { logger.info('[BOOT] Células vivas (mesmo código): skip start-closed e reap chrome (adota e reconecta).'); } catch {}
+  }
   try {
     if (startClosedOnBoot) {
       logger.info('[BOOT] Política start-closed ATIVA: resetando desired.active=false para todos (aguardando clique).');
       const r = await fileStore.resetDesiredAllOffOnBoot({ reason: 'triagem_inbox_policy_manual_start' });
       if (r && r.ok === true) logger.info('[BOOT] start-closed aplicado', { changed: r.changed });
       else logger.warn('[BOOT] start-closed falhou (best-effort)', { error: r && r.error ? r.error : 'unknown' });
+    } else if (adoptingLiveCells) {
+      logger.info('[BOOT] start-closed pulado: adotando células vivas.');
     } else {
       logger.warn('[BOOT] Política start-closed DESATIVADA (CONVENIENTE_START_CLOSED_ON_BOOT=0).');
     }
@@ -4666,14 +4699,14 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
 
 // Graceful shutdown — encerra worker e faz cleanup
 process.on('SIGINT', async () => {
-  logger.info('[STOP] SIGINT recebido. Encerrando...');
-  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
+  logger.info('[STOP] SIGINT recebido. Maestro sai; células seguem.');
+  try { await (clusterClient && clusterClient.detach && clusterClient.detach()); } catch(e){}
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  logger.info('[STOP] SIGTERM recebido. Encerrando...');
-  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
+  logger.info('[STOP] SIGTERM recebido. Maestro sai; células seguem.');
+  try { await (clusterClient && clusterClient.detach && clusterClient.detach()); } catch(e){}
   process.exit(0);
 });
 

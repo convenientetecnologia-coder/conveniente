@@ -1,6 +1,7 @@
 // scripts/clusterMaster.js
 
-const { fork } = require('child_process');
+const { spawn } = require('child_process');
+const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const { planMemoryAndShards, planStickyGrow, calcLiveDesiredWorkerNodes, planFairReshuffle } = require('./memoryPlan.js');
@@ -10,6 +11,10 @@ const supervisor = require('./supervisor.js');
 const provisionLock = require('./provisionLock.js');
 const chromeMemorySweep = require('./chromeMemorySweep.js');
 const chromeMotores = require('./chromeMotores.js');
+const cellRegistry = require('./cellRegistry.js');
+const cellForensic = require('./cellForensic.js');
+const cellLifecycle = require('./cellLifecycle.js');
+const { writeJsonLine, attachLineParser } = require('./cellNet.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -52,11 +57,57 @@ function readNodeStatusFile(idx) {
 
 const MAX_FILE_AGE_MS = parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10);
 
-function createCluster() {
+async function createCluster() {
   const allPerfis = fileStore.loadPerfisJson() || [];
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
-  const blocks = splitRoundRobinFair(names, plan.nodes);
+  let blocks = splitRoundRobinFair(names, plan.nodes);
+  let aliveAtBoot = cellRegistry.listAlive();
+  const bootStamp = cellLifecycle.currentStamp();
+  if (aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {
+    try {
+      logger.warn('[CLUSTER] código novo no disco: reciclando células antigas (git pull / atualização)', {
+        saved: cellLifecycle.savedStamp(),
+        disk: bootStamp,
+        alive: aliveAtBoot.length
+      });
+    } catch {}
+    try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch' }); } catch {}
+    aliveAtBoot = [];
+  }
+  const adopting = aliveAtBoot.length > 0;
+  if (adopting) {
+    const maxIdx = Math.max(
+      plan.nodes - 1,
+      ...aliveAtBoot.map((r) => Math.max(0, Number(r.idx) || 0))
+    );
+    const fromReg = Array.from({ length: Math.max(plan.nodes, maxIdx + 1) }, () => []);
+    for (const row of aliveAtBoot) {
+      const i = Math.max(0, Number(row.idx) || 0);
+      fromReg[i] = Array.isArray(row.shard) ? row.shard.slice() : [];
+    }
+    const used = new Set();
+    for (const shard of fromReg) {
+      for (const n of shard) used.add(n);
+    }
+    for (const n of names) {
+      if (used.has(n)) continue;
+      let best = 0;
+      for (let i = 1; i < fromReg.length; i++) {
+        if (fromReg[i].length < fromReg[best].length) best = i;
+      }
+      fromReg[best].push(n);
+      used.add(n);
+    }
+    blocks = fromReg;
+    try {
+      logger.info('[CLUSTER][ADOPT_PLAN]', {
+        alive: aliveAtBoot.length,
+        nodes: blocks.length,
+        sizes: blocks.map((s) => s.length)
+      });
+    } catch {}
+  }
 
   logger.info('[CLUSTER][PLAN]', {
     totalMB: plan.totalMB,
@@ -109,15 +160,221 @@ function createCluster() {
   let perfisWatcher = null;
   // ================= END PATCH: perfisWatcher handle ======================
 
-  function spawnWorker(idx, shardNames) {
+  function cellReply(child, msgId, data) {
+    if (!child || typeof child.netSend !== 'function') return;
+    try { child.netSend({ replyTo: msgId, data }); } catch {}
+  }
+
+  function handleCellInbound(child, idx, msg) {
+    if (msg && msg.replyTo && child.pending && child.pending.has(msg.replyTo)) {
+      const { resolve } = child.pending.get(msg.replyTo);
+      child.pending.delete(msg.replyTo);
+      return resolve(msg.data);
+    }
+    if (msg && msg.type === 'standby-sweep-idle-hint') {
+      try {
+        if (standbySweep && typeof standbySweep.idleHint === 'function') standbySweep.idleHint();
+      } catch {}
+      return;
+    }
+    if (msg && msg.type === 'perfis:remove') {
+      const nome = String((msg.payload && msg.payload.nome) || '').trim();
+      const reason = String((msg.payload && msg.payload.reason) || 'worker_remove').slice(0, 180);
+      const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+      const r = fileStore.withPerfisFileLockUpdate((arr) => {
+        return Array.isArray(arr) ? arr.filter(p => p && p.nome !== nome) : [];
+      }, { caller, reason });
+      return cellReply(child, msg.msgId, Object.assign({ ok: true, nome }, r));
+    }
+    if (msg && msg.type === 'perfis:upsert') {
+      const perfil = (msg.payload && typeof msg.payload.perfil === 'object') ? msg.payload.perfil : null;
+      const nome = String(perfil && perfil.nome || '').trim();
+      const reason = String((msg.payload && msg.payload.reason) || 'worker_upsert').slice(0, 180);
+      const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+      if (!perfil || !nome) return cellReply(child, msg.msgId, { ok: false, error: 'invalid_perfil' });
+      const r = fileStore.withPerfisFileLockUpdate((arr) => {
+        const next = Array.isArray(arr) ? arr.slice() : [];
+        const i = next.findIndex(p => p && p.nome === nome);
+        if (i >= 0) next[i] = Object.assign({}, next[i], perfil);
+        else next.push(Object.assign({}, perfil));
+        return next;
+      }, { caller, reason });
+      return cellReply(child, msg.msgId, Object.assign({ ok: true, nome }, r));
+    }
+    if (msg && msg.type === 'perfis:patch') {
+      const nome = String((msg.payload && msg.payload.nome) || '').trim();
+      const patch = (msg.payload && typeof msg.payload.patch === 'object') ? msg.payload.patch : null;
+      const reason = String((msg.payload && msg.payload.reason) || 'worker_patch').slice(0, 180);
+      const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+      if (!nome || !patch) return cellReply(child, msg.msgId, { ok: false, error: 'invalid_args' });
+      const r = fileStore.withPerfisFileLockUpdate((arr) => {
+        const next = Array.isArray(arr) ? arr.slice() : [];
+        const i = next.findIndex(p => p && p.nome === nome);
+        if (i >= 0) next[i] = Object.assign({}, next[i], patch);
+        return next;
+      }, { caller, reason });
+      return cellReply(child, msg.msgId, Object.assign({ ok: true, nome }, r));
+    }
+    if (msg && msg.type === 'sup:reqOpen') {
+      const { perfil } = msg;
+      const r = supervisor.requestOpen(perfil, (msg && msg.opts) || {});
+      return cellReply(child, msg.msgId, r);
+    }
+    if (msg && msg.type === 'sup:reqPermit') {
+      const kind = msg && msg.kind ? String(msg.kind) : '';
+      const perfil = msg && msg.perfil ? String(msg.perfil) : '';
+      const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
+      const r = supervisor.requestPermit({ kind, perfil, operator: opts.operator || '', ttlMs: opts.ttlMs });
+      return cellReply(child, msg.msgId, r);
+    }
+    if (msg && msg.type === 'sup:notifyOpened') {
+      const { perfil, result } = msg;
+      const r = supervisor.notifyOpened(perfil, result);
+      return cellReply(child, msg.msgId, r);
+    }
+    if (msg && msg.type === 'sup:releasePermit') {
+      const token = msg && msg.token ? String(msg.token) : '';
+      const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
+      const r = supervisor.releasePermit({ token, result: opts.result || null });
+      return cellReply(child, msg.msgId, r);
+    }
+    if (msg && msg.type === 'sup:getStatus') {
+      const r = supervisor.getStatus();
+      return cellReply(child, msg.msgId, r);
+    }
+  }
+
+  function bindCellSocket(child, idx, sock) {
+    try { if (child.socket && child.socket !== sock) child.socket.destroy(); } catch {}
+    child.socket = sock;
+    try { sock.setNoDelay(true); } catch {}
+    child.netSend = (obj) => writeJsonLine(sock, obj);
+    attachLineParser(sock, (msg) => handleCellInbound(child, idx, msg));
+    sock.on('close', () => {
+      if (child.socket === sock) child.socket = null;
+      if (isShuttingDown || child.deadHandled) return;
+      if (cellRegistry.pidAlive(child.pid)) {
+        setTimeout(() => { connectCellSocket(child, idx).catch(() => {}); }, 400);
+      }
+    });
+    sock.on('error', () => {});
+  }
+
+  function connectCellSocket(child, idx) {
+    return new Promise((resolve) => {
+      const port = Number(child.port);
+      const sock = net.connect({ host: '127.0.0.1', port });
+      const fail = () => {
+        try { sock.destroy(); } catch {}
+        resolve(false);
+      };
+      sock.once('connect', () => {
+        try { sock.setTimeout(0); } catch {}
+        bindCellSocket(child, idx, sock);
+        try {
+          cellForensic.append('cell_maestro_socket', { idx: idx + 1, port, pid: child.pid, adopted: !!child.adopted });
+        } catch {}
+        resolve(true);
+      });
+      sock.once('error', fail);
+      sock.setTimeout(4000, fail);
+    });
+  }
+
+  function onCellDeath(idx, { code, signal, pid } = {}) {
+    const child = children[idx];
+    if (!child || child.deadHandled) return;
+    if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
+    child.deadHandled = true;
+    logger.warn('[CLUSTER] worker dropado', { idx, code, signal, pid: pid || child.pid });
+    try {
+      require('./crashHammer.js').scheduleWorkerDrop({
+        idx: idx + 1,
+        code: code == null ? null : Number(code),
+        signal: signal == null ? null : String(signal),
+        workerPid: pid || (child && child.pid) || null,
+        shard: child && child.shard ? child.shard.size : (blocks[idx] || []).length
+      });
+    } catch {}
+    try { cellForensic.append('cell_drop', { idx: idx + 1, code, signal, pid: pid || child.pid }); } catch {}
+    for (const [msgId, { resolve }] of (child.pending || new Map()).entries()) {
+      try { resolve({ ok: false, error: 'worker_died' }); } catch {}
+    }
+    try { child.pending.clear(); } catch {}
+    if (isShuttingDown) return;
+    try {
+      const dyingShard = child && child.shard ? Array.from(child.shard) : (blocks[idx] || []);
+      const reap = require('./orphanReaper.js').reapShard({
+        names: dyingShard,
+        shardIdx: idx,
+        reason: 'worker_drop'
+      });
+      try {
+        require('./indexLifecycle.js').append('worker_drop_reap', {
+          idx: idx + 1,
+          code: code == null ? null : Number(code),
+          signal: signal == null ? null : String(signal),
+          shard: dyingShard.length,
+          killed: reap && reap.killed != null ? reap.killed : null
+        });
+      } catch {}
+    } catch (e) {
+      try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
+    }
+    setTimeout(() => {
+      if (isShuttingDown) return;
+      const target = children[idx];
+      const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
+      logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
+      spawnWorker(idx, shardNames).then((fresh) => {
+        if (!target) {
+          children.push(fresh);
+          return;
+        }
+        target.proc = fresh.proc;
+        target.pending = fresh.pending;
+        target.pid = fresh.pid;
+        target.port = fresh.port;
+        target.socket = fresh.socket;
+        target.netSend = fresh.netSend;
+        target.adopted = false;
+        target.deadHandled = false;
+        target.shard = fresh.shard;
+      }).catch((e) => {
+        logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
+      });
+    }, 2000);
+  }
+
+  function spawnDetachedCell(idx, shardNames, env) {
+    const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
+    const entry = path.join(__dirname, 'cellEntry.js');
+    const proc = spawn(execPath, [entry], {
+      cwd: path.join(__dirname, '..'),
+      env,
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    try { proc.unref(); } catch {}
+    proc.on('error', (err) => {
+      try { logger.error('[WORKER] erro no spawn da célula', { idx: idx + 1, error: err && err.message || err }, err); } catch {}
+    });
+    proc.on('exit', (code, signal) => {
+      onCellDeath(idx, { code, signal, pid: proc.pid });
+    });
+    return proc;
+  }
+
+  async function spawnWorker(idx, shardNames) {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
+    env.CONVENIENTE_CELL = '1';
     env.WORKER_SHARD_INDEX = String(idx);
     env.SHARD_PROFILES = JSON.stringify(shardNames);
     env.STATUS_FILE_NAME = `status_node_${idx + 1}.json`;
-    // Blindagem city collector: 1 Chrome de raspagem por worker (sem Code 21 cross-kill).
-    // Path dedicado — não compartilha userDataDir entre shards do mesmo host.
+    env.CELL_CMD_PORT = String(cellRegistry.portForIdx(idx));
     env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR = path.join(
       __dirname,
       '..',
@@ -136,8 +393,44 @@ function createCluster() {
       if (!env.FB_LOG_LEVEL) env.FB_LOG_LEVEL = 'silent';
     }
 
-    const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
-    const stdio = workerStdioSlots(silentConsole);
+    const pending = new Map();
+    const child = {
+      id: idx,
+      proc: null,
+      pending,
+      shard: new Set(shardNames),
+      pid: null,
+      port: cellRegistry.portForIdx(idx),
+      socket: null,
+      netSend: null,
+      adopted: false,
+      deadHandled: false
+    };
+
+    const aliveRow = (cellRegistry.listAlive() || []).find((r) => Number(r.idx) === idx);
+    if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
+      child.pid = Number(aliveRow.pid);
+      child.port = Number(aliveRow.port) || child.port;
+      child.adopted = true;
+      child.shard = new Set(Array.isArray(aliveRow.shard) && aliveRow.shard.length ? aliveRow.shard : shardNames);
+      child.shard.forEach((n) => { route[n] = idx; });
+      const connected = await (async () => {
+        const started = Date.now();
+        while ((Date.now() - started) < 8000) {
+          if (await connectCellSocket(child, idx)) return true;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return false;
+      })();
+      if (!connected) {
+        logger.warn('[CLUSTER] adopt sem socket', { idx: idx + 1, pid: child.pid, port: child.port });
+      }
+      try {
+        logger.info('[CLUSTER][ADOPT]', { worker: idx + 1, pid: child.pid, port: child.port, shardSize: child.shard.size });
+        cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, shard: child.shard.size });
+      } catch {}
+      return child;
+    }
 
     try {
       logger.info('[CLUSTER][SPAWN]', {
@@ -146,192 +439,69 @@ function createCluster() {
         cityCollectorUserDataDir: env.VIRTUS_DELTA_CITY_COLLECTOR_USER_DATA_DIR,
         chromeMotor: motorExe,
         silentConsole,
-        stdio: stdio.join(','),
-        ipcSlot: stdio[3]
+        cellPort: env.CELL_CMD_PORT,
+        detached: true
       });
     } catch {}
 
-    const proc = fork(path.join(__dirname, 'worker.js'), [], {
-      stdio,
-      execPath,
-      env
-    });
-
-    // ================== BEGIN PATCH: worker error+close handlers ================
-    proc.on('error', (err) => {
-      try { logger.error('[WORKER] erro no fork', { error: err && err.message || err }, err); } catch {}
-    });
-    proc.on('close', () => { /* noop para manter referência viva até exit resolver */ });
-    // ================== END PATCH: worker error+close handlers ==================
-
-    const pending = new Map();
-
-    proc.on('message', (msg) => {
-      if (msg && msg.replyTo && pending.has(msg.replyTo)) {
-        const { resolve } = pending.get(msg.replyTo);
-        pending.delete(msg.replyTo);
-        return resolve(msg.data);
+    const proc = spawnDetachedCell(idx, shardNames, env);
+    child.proc = proc;
+    child.pid = proc.pid || null;
+    const connected = await (async () => {
+      const started = Date.now();
+      while ((Date.now() - started) < 90000) {
+        if (await connectCellSocket(child, idx)) return true;
+        await new Promise((r) => setTimeout(r, 150));
       }
-      if (msg && msg.type === 'standby-sweep-idle-hint') {
-        try {
-          if (standbySweep && typeof standbySweep.idleHint === 'function') standbySweep.idleHint();
-        } catch {}
-        return;
-      }
-      // ===== perfis.json master-only writes (blindagem máxima) =====
-      // Workers NÃO escrevem perfis.json; pedem mutação ao master via IPC.
-      if (msg && msg.type === 'perfis:remove') {
-        const nome = String((msg.payload && msg.payload.nome) || '').trim();
-        const reason = String((msg.payload && msg.payload.reason) || 'worker_remove').slice(0, 180);
-        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
-        const r = fileStore.withPerfisFileLockUpdate((arr) => {
-          return Array.isArray(arr) ? arr.filter(p => p && p.nome !== nome) : [];
-        }, { caller, reason });
-        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
-      }
-      if (msg && msg.type === 'perfis:upsert') {
-        const perfil = (msg.payload && typeof msg.payload.perfil === 'object') ? msg.payload.perfil : null;
-        const nome = String(perfil && perfil.nome || '').trim();
-        const reason = String((msg.payload && msg.payload.reason) || 'worker_upsert').slice(0, 180);
-        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
-        if (!perfil || !nome) return proc.send({ replyTo: msg.msgId, data: { ok: false, error: 'invalid_perfil' } });
-        const r = fileStore.withPerfisFileLockUpdate((arr) => {
-          const next = Array.isArray(arr) ? arr.slice() : [];
-          const i = next.findIndex(p => p && p.nome === nome);
-          if (i >= 0) next[i] = Object.assign({}, next[i], perfil);
-          else next.push(Object.assign({}, perfil));
-          return next;
-        }, { caller, reason });
-        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
-      }
-      if (msg && msg.type === 'perfis:patch') {
-        const nome = String((msg.payload && msg.payload.nome) || '').trim();
-        const patch = (msg.payload && typeof msg.payload.patch === 'object') ? msg.payload.patch : null;
-        const reason = String((msg.payload && msg.payload.reason) || 'worker_patch').slice(0, 180);
-        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
-        if (!nome || !patch) return proc.send({ replyTo: msg.msgId, data: { ok: false, error: 'invalid_args' } });
-        const r = fileStore.withPerfisFileLockUpdate((arr) => {
-          const next = Array.isArray(arr) ? arr.slice() : [];
-          const i = next.findIndex(p => p && p.nome === nome);
-          if (i >= 0) next[i] = Object.assign({}, next[i], patch);
-          return next;
-        }, { caller, reason });
-        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
-      }
-      if (msg && msg.type === 'sup:reqOpen') {
-        const { perfil } = msg;
-        const r = supervisor.requestOpen(perfil, (msg && msg.opts) || {});
-        return proc.send({ replyTo: msg.msgId, data: r });
-      }
-      if (msg && msg.type === 'sup:reqPermit') {
-        const kind = msg && msg.kind ? String(msg.kind) : '';
-        const perfil = msg && msg.perfil ? String(msg.perfil) : '';
-        const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
-        const r = supervisor.requestPermit({ kind, perfil, operator: opts.operator || '', ttlMs: opts.ttlMs });
-        return proc.send({ replyTo: msg.msgId, data: r });
-      }
-      if (msg && msg.type === 'sup:notifyOpened') {
-        const { perfil, result } = msg;
-        const r = supervisor.notifyOpened(perfil, result);
-        return proc.send({ replyTo: msg.msgId, data: r });
-      }
-      if (msg && msg.type === 'sup:releasePermit') {
-        const token = msg && msg.token ? String(msg.token) : '';
-        const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
-        const r = supervisor.releasePermit({ token, result: opts.result || null });
-        return proc.send({ replyTo: msg.msgId, data: r });
-      }
-      if (msg && msg.type === 'sup:getStatus') {
-        const r = supervisor.getStatus();
-        return proc.send({ replyTo: msg.msgId, data: r });
-      }
-    });
-
-    proc.on('exit', (code, signal) => {
-      logger.warn('[CLUSTER] worker dropado', { idx, code, signal });
-      try {
-        require('./crashHammer.js').scheduleWorkerDrop({
-          idx: idx + 1,
-          code: code == null ? null : Number(code),
-          signal: signal == null ? null : String(signal),
-          workerPid: proc && proc.pid ? Number(proc.pid) : null,
-          shard: (() => {
-            try {
-              const child = children[idx];
-              if (child && child.shard) return child.shard.size;
-            } catch {}
-            return (blocks[idx] || []).length;
-          })()
-        });
-      } catch {}
-      // Resolver pendências do pending com erro
-      for (const [msgId, { resolve }] of pending.entries()) {
-        try { resolve({ ok: false, error: 'worker_died' }); } catch {}
-      }
-      pending.clear();
-      // Respawn após 2000ms se não estiver em shutdown
-      if (!isShuttingDown) {
-        // Chrome do shard morto fica órfão (hardClose não rodou). Limpa SÓ este shard
-        // antes do respawn, senão o worker novo abre em cima dos zumbis.
-        try {
-          const dyingShard = (() => {
-            try {
-              const child = children[idx];
-              if (child && child.shard) return Array.from(child.shard);
-            } catch {}
-            return blocks[idx] || [];
-          })();
-          const reap = require('./orphanReaper.js').reapShard({
-            names: dyingShard,
-            shardIdx: idx,
-            reason: 'worker_drop'
-          });
-          try {
-            require('./indexLifecycle.js').append('worker_drop_reap', {
-              idx: idx + 1,
-              code: code == null ? null : Number(code),
-              signal: signal == null ? null : String(signal),
-              shard: dyingShard.length,
-              killed: reap && reap.killed != null ? reap.killed : null
-            });
-          } catch {}
-        } catch (e) {
-          try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
-        }
-        setTimeout(() => {
-          if (isShuttingDown) return;
-          try {
-            logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
-            const child = children[idx];
-            if (child) {
-              const shardNames = Array.from(child.shard);
-              const newWorker = spawnWorker(idx, shardNames);
-              child.proc = newWorker.proc;
-              child.pending = newWorker.pending;
-            } else {
-              const shardNames = blocks[idx] || [];
-              const newWorker = spawnWorker(idx, shardNames);
-              children.push({ id: idx, proc: newWorker.proc, pending: newWorker.pending, shard: new Set(shardNames) });
-            }
-          } catch (e) {
-            logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
-          }
-        }, 2000);
-      }
-    });
-
-    return { proc, pending };
+      return false;
+    })();
+    if (!connected) {
+      throw new Error('CELL_LISTEN_TIMEOUT: w' + (idx + 1) + ' port ' + child.port);
+    }
+    try {
+      cellRegistry.upsertCell({
+        idx,
+        pid: child.pid,
+        port: child.port,
+        shard: shardNames,
+        statusFile: env.STATUS_FILE_NAME
+      });
+      cellForensic.append('cell_spawn', { idx: idx + 1, pid: child.pid, port: child.port, shard: shardNames.length });
+    } catch {}
+    return child;
   }
 
   const motorCapacity = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || blocks.length);
-  chromeMotores.ensureWorkers(motorCapacity, { purge: true });
+  chromeMotores.ensureWorkers(motorCapacity, { purge: !adopting });
+  try { cellRegistry.setMaestroPid(process.pid); } catch {}
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
-    const { proc, pending } = spawnWorker(idx, shardNames);
-    children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
-    logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
+    const child = await spawnWorker(idx, shardNames);
+    children.push(child);
+    logger.info('[CLUSTER] Worker iniciado', {
+      idx: idx + 1,
+      perfis: child.shard ? child.shard.size : shardNames.length,
+      pid: child.pid,
+      port: child.port,
+      adopted: !!child.adopted
+    });
   }
+  try { cellLifecycle.setStamp(bootStamp); } catch {}
+
+  try {
+    const watch = setInterval(() => {
+      if (isShuttingDown) return;
+      for (let i = 0; i < children.length; i++) {
+        const c = children[i];
+        if (!c || c.deadHandled) continue;
+        if (!cellRegistry.pidAlive(c.pid)) {
+          onCellDeath(i, { code: null, signal: 'pid_gone', pid: c.pid });
+        }
+      }
+    }, 2500);
+    if (watch && typeof watch.unref === 'function') watch.unref();
+  } catch {}
 
   logger.info('[CLUSTER][ROUTE]', {
     totalPerfis: names.length,
@@ -392,10 +562,14 @@ function createCluster() {
     const p = new Promise((resolve) => {
       child.pending.set(msgId, { resolve });
       try {
-        child.proc.send({ type, payload, msgId });
+        if (typeof child.netSend === 'function') {
+          if (!child.netSend({ type, payload, msgId })) throw new Error('send_failed');
+        } else {
+          throw new Error('cell_socket_missing');
+        }
       } catch (e) {
         child.pending.delete(msgId);
-        resolve({ ok: false, error: 'send_failed' });
+        resolve({ ok: false, error: e && e.message ? e.message : 'send_failed' });
       }
       setTimeout(() => {
         if (child.pending.has(msgId)) {
@@ -426,7 +600,18 @@ function createCluster() {
       const prevNames = Array.from((children[i] && children[i].shard) ? children[i].shard : []);
       children[i].shard = new Set(shardNames);
       if (shardKey(prevNames) === shardKey(shardNames)) continue;
-      tasks.push(sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }));
+      tasks.push(
+        sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }).then(() => {
+          try {
+            cellRegistry.upsertCell({
+              idx: i,
+              pid: children[i] && children[i].pid,
+              port: children[i] && children[i].port,
+              shard: shardNames
+            });
+          } catch {}
+        })
+      );
     }
     if (tasks.length) await Promise.all(tasks);
     for (const k of Object.keys(route)) delete route[k];
@@ -459,8 +644,8 @@ function createCluster() {
     }
     for (const idx of growPlan.newWorkerIndexes) {
       const shardNames = growPlan.nextShards[idx] || [];
-      const { proc, pending } = spawnWorker(idx, shardNames);
-      children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
+      const child = await spawnWorker(idx, shardNames);
+      children.push(child);
       logger.info('[CLUSTER] Worker nascido ao vivo', {
         reason: String(reason || ''),
         idx: idx + 1,
@@ -823,15 +1008,27 @@ function createCluster() {
     }
   }
 
+  async function detach() {
+    isShuttingDown = true;
+    try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
+    try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
+    for (const c of children) {
+      try { if (c.socket) c.socket.destroy(); } catch {}
+      c.socket = null;
+      c.netSend = null;
+    }
+    try { cellForensic.append('cell_maestro_detach', { cells: children.length, pids: children.map((c) => c.pid) }); } catch {}
+    try { logger.info('[CLUSTER] maestro detach: células seguem vivas', { cells: children.length }); } catch {}
+  }
+
   async function kill() {
     isShuttingDown = true;
     try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
-    // ============= BEGIN PATCH: close perfisWatcher before killing =============
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
-    // ============= END PATCH: close perfisWatcher before killing ===============
     for (const c of children) {
-      try { c.proc.kill('SIGTERM'); } catch {}
+      try { if (c.socket) c.socket.destroy(); } catch {}
     }
+    try { cellLifecycle.stopAllCells({ reason: 'maestro_kill' }); } catch {}
   }
 
   // Watcher: conta nova / conta apagada. Grow ao vivo; não reshuffle.
@@ -896,7 +1093,7 @@ function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, rebalance, reshuffleFairIfIdle, silentConsole };
+  return { plan, children, sendWorkerCommand, kill, detach, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
 }
 
 module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };

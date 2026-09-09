@@ -6,8 +6,8 @@
  */
 
 const logger = require('./logger.js'); // <- Adicionado conforme instrução
+const workerIpc = require('./workerIpc.js');
 
-// Worker child — usa IPC com master
 const isChild = (process && process.env && process.env.IS_WORKER_CHILD === '1');
 
 // Patch kill_guard_until: bloqueio proativo
@@ -31,8 +31,6 @@ function localKillGuardActive(perfil) {
 }
 // --- FIM PATCH local function
 
-function newMsgId(){ return Math.random().toString(36).slice(2); }
-
 // ===== Governança por tipo (permits) =====
 async function requestPermit(kind, perfil, opts = {}) {
   const k = String(kind || '').trim();
@@ -48,24 +46,7 @@ async function requestPermit(kind, perfil, opts = {}) {
       return { ok: false, error: e && e.message || e };
     }
   }
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:reqPermit', kind: k, perfil: p, opts: o, msgId }); } catch(e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'ipc_send_failed' });
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'timeout' });
-    }, 15000);
-  });
+  return workerIpc.request({ type: 'sup:reqPermit', kind: k, perfil: p, opts: o }, 15000);
 }
 
 async function releasePermit(token, opts = {}) {
@@ -81,24 +62,7 @@ async function releasePermit(token, opts = {}) {
       return { ok: false, error: e && e.message || e };
     }
   }
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:releasePermit', token: t, opts: o, msgId }); } catch(e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'ipc_send_failed' });
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'timeout' });
-    }, 15000);
-  });
+  return workerIpc.request({ type: 'sup:releasePermit', token: t, opts: o }, 15000);
 }
 
 async function requestOpen(perfil, url, opts = {}) {
@@ -114,25 +78,7 @@ async function requestOpen(perfil, url, opts = {}) {
       return { ok: false, error: e && e.message || e };
     }
   }
-  // child: IPC
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:reqOpen', perfil, msgId, opts }); } catch(e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'ipc_send_failed' });
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'timeout' });
-    }, 15000);
-  });
+  return workerIpc.request({ type: 'sup:reqOpen', perfil, opts }, 15000);
 }
 
 async function notifyOpened(perfil, resultado = "ok", url) {
@@ -145,24 +91,7 @@ async function notifyOpened(perfil, resultado = "ok", url) {
       return { ok: false, error: e && e.message || e };
     }
   }
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:notifyOpened', perfil, result: resultado, msgId }); } catch(e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'ipc_send_failed' });
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'timeout' });
-    }, 15000);
-  });
+  return workerIpc.request({ type: 'sup:notifyOpened', perfil, result: resultado }, 15000);
 }
 
 async function sendTelemetria(evt, url) {
@@ -185,24 +114,7 @@ async function getStatus(url) {
       return { ok: false, error: e && e.message || e };
     }
   }
-  return new Promise((resolve) => {
-    const msgId = newMsgId();
-    const onMsg = (m) => {
-      if (m && m.replyTo === msgId) {
-        try { process.off('message', onMsg); } catch {}
-        resolve(m.data);
-      }
-    };
-    try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:getStatus', msgId }); } catch(e) {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'ipc_send_failed' });
-    }
-    setTimeout(() => {
-      try { process.off('message', onMsg); } catch {}
-      resolve({ ok:false, error:'timeout' });
-    }, 8000);
-  });
+  return workerIpc.request({ type: 'sup:getStatus' }, 8000);
 }
 
 async function getRam(url) {

@@ -160,10 +160,9 @@ function Get-SystemState {
         }
     }
 
-    $up = ($masters.Count -gt 0) -or $port -or ($nodes -gt 0)
+    $up = ($masters.Count -gt 0) -or $port
     $why = if ($masters.Count -gt 0) { 'master' }
            elseif ($port) { 'port' }
-           elseif ($nodes -gt 0) { 'node' }
            else { 'down' }
 
     return [pscustomobject]@{
@@ -898,7 +897,7 @@ function Do-Loop {
             else {
                 # So sobe apos 2 ciclos seguidos "down" (~6 min) - evita falso negativo
                 $downStreak++
-                if ($downStreak -ge 2) {
+                if ($downStreak -ge 1) {
                     Do-Start -Reason 'AUTO' | Out-Null
                     $st = Get-SystemState
                     $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
