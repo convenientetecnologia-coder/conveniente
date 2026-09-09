@@ -31,7 +31,12 @@ function say(line) {
 function fatal(msg, extra) {
   const text = 'MULTI_ENGINE_FATAL: ' + String(msg || 'falha');
   try { logger.error(text, extra && typeof extra === 'object' ? extra : {}); } catch {}
-  try { console.error(text); } catch {}
+  try {
+    if (extra && typeof extra === 'object') console.error(text + ' ' + JSON.stringify(extra));
+    else console.error(text);
+  } catch {
+    try { console.error(text); } catch {}
+  }
   const err = new Error(text);
   err.multiEngine = true;
   throw err;
@@ -154,16 +159,139 @@ function chromeProcessCount() {
   }
 }
 
-function hardPurgeChrome() {
+function taskkillIm(image) {
   try {
-    spawnSync('taskkill', ['/F', '/IM', 'chrome.exe'], { windowsHide: true, timeout: 20000 });
-  } catch (e) {
-    fatal('taskkill chrome.exe falhou', { error: e && e.message || String(e) });
+    spawnSync('taskkill', ['/F', '/IM', String(image)], { windowsHide: true, timeout: 20000 });
+  } catch {}
+}
+
+function killChromeFamily() {
+  taskkillIm('chrome.exe');
+  taskkillIm('crashpad_handler.exe');
+  taskkillIm('GoogleCrashHandler.exe');
+  taskkillIm('GoogleCrashHandler64.exe');
+}
+
+function killProcessesTouching(dir) {
+  const target = String(dir || '').trim();
+  if (!target) return;
+  const needle = target.toLowerCase().replace(/'/g, "''");
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const cmd =
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('" +
+    needle +
+    "') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+  try {
+    spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd], {
+      windowsHide: true,
+      timeout: 25000
+    });
+  } catch {}
+}
+
+function clearReadOnlyTree(dir) {
+  const target = String(dir || '');
+  if (!target || !fs.existsSync(target)) return;
+  const attrib = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'attrib.exe');
+  try {
+    spawnSync(attrib, ['-R', path.join(target, '*'), '/S', '/D'], { windowsHide: true, timeout: 60000 });
+  } catch {}
+}
+
+function rmdirViaCmd(dir) {
+  const target = String(dir || '');
+  if (!target) return;
+  try {
+    spawnSync(process.env.ComSpec || 'cmd.exe', ['/c', 'rmdir', '/s', '/q', target], {
+      windowsHide: true,
+      timeout: 120000
+    });
+  } catch {}
+}
+
+function errText(e) {
+  if (!e) return 'locked';
+  const code = e.code ? String(e.code) : '';
+  const msg = e.message ? String(e.message) : String(e);
+  return (code ? code + ' ' : '') + msg;
+}
+
+function rmDirBestEffort(dir) {
+  const target = String(dir || '');
+  if (!target) return { ok: true, leftover: false };
+  if (!fs.existsSync(target)) return { ok: true, leftover: false };
+  let lastErr = null;
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    try {
+      clearReadOnlyTree(target);
+      killChromeFamily();
+      killProcessesTouching(target);
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
+      if (!fs.existsSync(target)) return { ok: true, leftover: false };
+    } catch (e) {
+      lastErr = e;
+    }
+    rmdirViaCmd(target);
+    if (!fs.existsSync(target)) return { ok: true, leftover: false };
+    sleepMs(800);
   }
+  return {
+    ok: false,
+    leftover: fs.existsSync(target),
+    error: errText(lastErr)
+  };
+}
+
+function renameAside(dir) {
+  const target = String(dir || '');
+  if (!target || !fs.existsSync(target)) return null;
+  const trash = target + '.__trash__' + Date.now();
+  try {
+    fs.renameSync(target, trash);
+    return trash;
+  } catch {
+    return null;
+  }
+}
+
+function sweepTrashMotors() {
+  try {
+    if (!fs.existsSync(MOTORES_ROOT)) return;
+    for (const name of fs.readdirSync(MOTORES_ROOT)) {
+      if (!/^w\d+\.__trash__/i.test(name) && !/^w\d+\.__new__/i.test(name)) continue;
+      const full = path.join(MOTORES_ROOT, name);
+      const r = rmDirBestEffort(full);
+      if (r && r.leftover) say('[MULTI_ENGINE] lixo residual ' + name + ' (best-effort)');
+    }
+  } catch {}
+}
+
+function pruneForeignVersionDirs(destDir, keepFull) {
+  const keep = String(keepFull || '');
+  let names = [];
+  try { names = fs.readdirSync(destDir); } catch { return; }
+  for (const name of names) {
+    const parsed = parseVersionToken(name);
+    if (!parsed || parsed.full === keep) continue;
+    const full = path.join(destDir, name);
+    let isDir = false;
+    try { isDir = fs.statSync(full).isDirectory(); } catch {}
+    if (!isDir) continue;
+    const r = rmDirBestEffort(full);
+    if (r && r.leftover) {
+      say('[MULTI_ENGINE] versao antiga ficou ' + name + ' (nao bloqueia) ' + (r.error || ''));
+    }
+  }
+}
+
+function hardPurgeChrome() {
+  killChromeFamily();
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     const n = chromeProcessCount();
     if (n === 0) return { ok: true, leftover: 0 };
+    killChromeFamily();
     sleepMs(400);
   }
   const leftover = chromeProcessCount();
@@ -173,27 +301,48 @@ function hardPurgeChrome() {
   return { ok: true, leftover: 0 };
 }
 
-function rmDirFatal(dir) {
-  const target = String(dir || '');
-  const deadline = Date.now() + 20000;
-  let lastErr = null;
-  while (Date.now() < deadline) {
-    try {
-      if (!fs.existsSync(target)) return;
-      fs.rmSync(target, { recursive: true, force: true });
-      if (!fs.existsSync(target)) return;
-    } catch (e) {
-      lastErr = e;
-    }
-    try {
-      spawnSync('taskkill', ['/F', '/IM', 'chrome.exe'], { windowsHide: true, timeout: 20000 });
-    } catch {}
-    sleepMs(700);
+function verifyMotorDir(destDir, masterVer) {
+  const exe = path.join(destDir, 'chrome.exe');
+  if (!fs.existsSync(exe)) return { ok: false, reason: 'sem chrome.exe' };
+  const ver = readExeVersion(exe);
+  if (!ver || !ver.full || ver.full !== masterVer.full) {
+    return { ok: false, reason: 'versao', clone: ver && ver.full || null };
   }
-  fatal('nao consegui limpar pasta do motor (permissao ou arquivo preso)', {
-    dir: target,
-    error: lastErr && lastErr.message ? String(lastErr.message) : String(lastErr || 'locked')
-  });
+  return { ok: true, ver };
+}
+
+function copyMasterOnto(destDir, masterDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  clearReadOnlyTree(destDir);
+  try {
+    fs.cpSync(masterDir, destDir, { recursive: true, force: true, errorOnExist: false });
+    return;
+  } catch (e) {
+    const r = spawnSync('robocopy', [
+      masterDir,
+      destDir,
+      '/E', '/IS', '/IT', '/R:4', '/W:2', '/NFL', '/NDL', '/NJH', '/NJS'
+    ], { windowsHide: true, timeout: 180000 });
+    const code = r && r.status != null ? Number(r.status) : 16;
+    if (code >= 0 && code < 8) return;
+    throw e;
+  }
+}
+
+function freeMotorSlot(destDir) {
+  const gone = rmDirBestEffort(destDir);
+  if (!fs.existsSync(destDir)) return { ok: true, how: 'rm' };
+  killChromeFamily();
+  killProcessesTouching(destDir);
+  sleepMs(500);
+  const trash = renameAside(destDir);
+  if (trash && !fs.existsSync(destDir)) return { ok: true, how: 'rename', trash };
+  return {
+    ok: false,
+    how: 'locked',
+    error: gone && gone.error ? gone.error : 'pasta presa (Explorer/AV/chrome)',
+    trash: trash || null
+  };
 }
 
 function cloneMasterTo(destDir, masterDir, masterVer) {
@@ -202,45 +351,58 @@ function cloneMasterTo(destDir, masterDir, masterVer) {
   } catch (e) {
     fatal('nao consegui criar C:\\conveniente\\motores', { error: e && e.message || String(e) });
   }
-  rmDirFatal(destDir);
-  try {
-    fs.mkdirSync(destDir, { recursive: true });
-  } catch (e) {
-    fatal('nao consegui criar pasta do motor', { dir: destDir, error: e && e.message || String(e) });
+
+  killChromeFamily();
+  killProcessesTouching(destDir);
+
+  let lastErr = null;
+  const overlayDeadline = Date.now() + 90000;
+  while (Date.now() < overlayDeadline) {
+    try {
+      copyMasterOnto(destDir, masterDir);
+      const checked = verifyMotorDir(destDir, masterVer);
+      if (checked.ok) {
+        pruneForeignVersionDirs(destDir, masterVer.full);
+        return checked.ver;
+      }
+      lastErr = new Error(checked.reason + (checked.clone ? ' clone=' + checked.clone : ''));
+    } catch (e) {
+      lastErr = e;
+    }
+    say('[MULTI_ENGINE] overlay falhou em ' + destDir + ' :: ' + errText(lastErr) + ' — tentando esvaziar a pasta');
+    const freed = freeMotorSlot(destDir);
+    if (!freed.ok) {
+      fatal('nao consegui limpar pasta do motor (permissao ou arquivo preso)', {
+        dir: destDir,
+        error: freed.error || errText(lastErr)
+      });
+    }
+    sleepMs(400);
   }
-  try {
-    fs.cpSync(masterDir, destDir, { recursive: true, force: true, errorOnExist: false });
-  } catch (e) {
-    fatal('copia do Chrome mestre falhou (permissao ou disco)', {
-      from: masterDir,
-      to: destDir,
-      error: e && e.message || String(e)
-    });
-  }
-  const exe = path.join(destDir, 'chrome.exe');
-  if (!fs.existsSync(exe)) {
-    fatal('clone sem chrome.exe apos a copia', { destDir });
-  }
-  const ver = readExeVersion(exe);
-  if (!ver || !ver.full || ver.full !== masterVer.full) {
-    fatal('clone nasceu com versao diferente do Chrome mestre', {
-      destDir,
-      master: masterVer.full,
-      clone: ver && ver.full || null
-    });
-  }
-  return ver;
+
+  fatal('copia do Chrome mestre falhou (permissao ou disco)', {
+    from: masterDir,
+    to: destDir,
+    error: errText(lastErr)
+  });
 }
 
 function deleteObsoleteMotors(keepN) {
   const n = Math.max(1, Number(keepN) || 1);
   const extras = [];
   for (const idx of listMotorIndexes()) {
-    if (idx > n) {
-      const dir = motorDir(idx);
-      rmDirFatal(dir);
-      extras.push(idx);
+    if (idx <= n) continue;
+    const dir = motorDir(idx);
+    const r = rmDirBestEffort(dir);
+    if (r && r.leftover) {
+      const trash = renameAside(dir);
+      if (fs.existsSync(dir)) {
+        say('[MULTI_ENGINE] nao apaguei motor extra w' + idx + ' (best-effort, nao aborta) ' + (r.error || ''));
+        continue;
+      }
+      if (trash) say('[MULTI_ENGINE] motor extra w' + idx + ' movido para lixo ' + path.basename(trash));
     }
+    extras.push(idx);
   }
   return extras;
 }
@@ -313,6 +475,7 @@ function ensureWorkers(capacity, { purge = false } = {}) {
   } catch (e) {
     fatal('nao consegui criar C:\\conveniente\\motores', { error: e && e.message || String(e) });
   }
+  sweepTrashMotors();
 
   const cloned = [];
   const reused = [];
@@ -331,7 +494,7 @@ function ensureWorkers(capacity, { purge = false } = {}) {
       }
     }
     if (!purge && exists) continue;
-    say('[MULTI_ENGINE] w' + i + ' criando clone do Chrome mestre...');
+    say('[MULTI_ENGINE] w' + i + ' criando clone do Chrome mestre (atualiza por cima, sem apagar a pasta inteira)...');
     cloneMasterTo(dest, masterDir, masterVer);
     cloned.push(i);
     say('[MULTI_ENGINE] w' + i + ' pronto ' + dest);

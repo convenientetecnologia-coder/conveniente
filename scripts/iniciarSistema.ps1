@@ -385,7 +385,8 @@ function Start-ConvenienteNode {
     Write-Host 'Se faltar 1 motor do teto, o index NAO sobe.'
     Write-Host ''
     & taskkill.exe /F /IM chrome.exe 1>$null 2>$null
-    Start-Sleep -Milliseconds 1200
+    & taskkill.exe /F /IM crashpad_handler.exe 1>$null 2>$null
+    Start-Sleep -Milliseconds 2500
     $mot = Start-Process -FilePath $node -ArgumentList @('C:\conveniente\scripts\chromeMotores.js', '--boot') -WorkingDirectory 'C:\conveniente' -Wait -PassThru -NoNewWindow
     if (-not $mot -or $mot.ExitCode -ne 0) {
         Write-StartLog ('motores_fatal exit=' + $(if ($mot) { $mot.ExitCode } else { 'null' }))
