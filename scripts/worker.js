@@ -75,6 +75,10 @@ function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_sta
     details: details
   });
 }
+// Caixa-preta por FRAME do Lightspeed: off por padrão.
+// Não alimenta o Delta (ouvir/parsear/responder). Só disco síncrono no pior caminho.
+// Ligar auditoria: DELTA_FORENSIC_FRAME=1 no processo do worker.
+const DELTA_FORENSIC_FRAME = String(process.env.DELTA_FORENSIC_FRAME || '0').trim() === '1';
 const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (circular)
 function __triagemCircularAppendSync(signature, details = null) {
   try {
@@ -26151,6 +26155,7 @@ function __deltaEmitFrameTelemetryIfDue({ force = false } = {}) {
   try { if (typeof forensicLog === 'function') forensicLog('DELTA', 'network_telemetry_1m', snapshot); } catch {}
 }
 function __deltaMaybeDumpNoLeadFrameSample(nome, { opcode, payloadData, decoded, inner } = {}) {
+  if (!DELTA_FORENSIC_FRAME) return;
   const n = String(nome || '').trim();
   const now = Date.now();
   if (n) {
@@ -27575,14 +27580,16 @@ async function __deltaAttachCdpEar(nome, page) {
         let texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
         // Sensor forense 3: triagem final ingest → forensic_triagem.log (teto 10MB)
         try {
-          __deltaTriagemEmit('ingest_processing_line', {
-            thread_key: threadKey || null,
-            op: op || null,
-            text_len: String(texto || '').length,
-            should_emit: !!__deltaShouldEmitLeadText(texto),
-            account_login: String(nome || '') || null,
-            transport: String(transport || '') || null
-          });
+          if (DELTA_FORENSIC_FRAME) {
+            __deltaTriagemEmit('ingest_processing_line', {
+              thread_key: threadKey || null,
+              op: op || null,
+              text_len: String(texto || '').length,
+              should_emit: !!__deltaShouldEmitLeadText(texto),
+              account_login: String(nome || '') || null,
+              transport: String(transport || '') || null
+            });
+          }
         } catch {}
         if (!threadKey) {
           // Mensagem válida sem identificador (causa: missing_identifiers).
@@ -28389,33 +28396,37 @@ async function __deltaAttachCdpEar(nome, page) {
         const payloadData = response.payloadData || '';
         // Sensor forense 1: entrada bruta CDP (Lightspeed) → forensic_triagem.log (teto 10MB)
         try {
-          const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
-          if (isLightspeed) {
-            __deltaTriagemEmit('raw_cdp_frame_intercepted', {
-              opcode,
-              payload_len: String(payloadData || '').length,
-              requestId,
-              account_login: String(nome || '') || null
-            });
+          if (DELTA_FORENSIC_FRAME) {
+            const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
+            if (isLightspeed) {
+              __deltaTriagemEmit('raw_cdp_frame_intercepted', {
+                opcode,
+                payload_len: String(payloadData || '').length,
+                requestId,
+                account_login: String(nome || '') || null
+              });
+            }
           }
         } catch {}
         const decoded = __deltaDecodeWebSocketPayload(payloadData, opcode);
         const payloadBytes = __deltaEstimateWsPayloadBytes(payloadData, opcode, decoded);
         // Sensor A: cdp_frame_received (Lightspeed / canal rico)
         try {
-          const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
-          if (isLightspeed) {
-            __forensicEdgeEmit({
-              account_login: String(nome || ''),
-              thread_key: null,
-              flow_stage: 'cdp_frame_received',
-              details: {
-                requestId: requestId || null,
-                payload_bytes: Number(payloadBytes || 0) || 0,
-                opcode: Number(opcode ?? -1),
-                hasLightspeed: !!(wsMeta && wsMeta.hasLightspeed)
-              }
-            });
+          if (DELTA_FORENSIC_FRAME) {
+            const isLightspeed = !!(wsMeta && wsMeta.hasLightspeed) || (requestId && requestId === String(wsState && wsState.selectedRichWsId || ''));
+            if (isLightspeed) {
+              __forensicEdgeEmit({
+                account_login: String(nome || ''),
+                thread_key: null,
+                flow_stage: 'cdp_frame_received',
+                details: {
+                  requestId: requestId || null,
+                  payload_bytes: Number(payloadBytes || 0) || 0,
+                  opcode: Number(opcode ?? -1),
+                  hasLightspeed: !!(wsMeta && wsMeta.hasLightspeed)
+                }
+              });
+            }
           }
         } catch {}
         __deltaIncFrameTelemetry('telemetry_frames_decoded', 1);
@@ -28445,7 +28456,7 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         // Sensor forense 2: saída do parser Universal (opcode 2) → forensic_triagem.log
         try {
-          if (opcode === 2) {
+          if (DELTA_FORENSIC_FRAME && opcode === 2) {
             __deltaTriagemEmit('parser_extraction_result', {
               opcode,
               extracted_events_count: Array.isArray(events) ? events.length : 0,
