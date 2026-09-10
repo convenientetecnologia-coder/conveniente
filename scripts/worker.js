@@ -1108,6 +1108,7 @@ try {
 try {
   fileStore.withDesiredFileLockUpdate((d) => {
     d = d || {};
+    if (d._openAll && d._openAll.active === true) return d;
     d._autoOpen = d._autoOpen || {};
     d._autoOpen.enabled = false;
     d._autoOpen.changedAt = Date.now();
@@ -10702,6 +10703,8 @@ function attachPageCrashIsolate(nome, page) {
             return;
           }
           if (action === 'annihilate') {
+            const young = (Date.now() - Number((robeMeta[nome] || {}).activatedAt || 0)) < 60_000;
+            if (browserConnected && (young || isOpenAllSessionActive())) return;
             await annihilateChromeSick(nome, 'page_crash_isolate', { error: msg });
           }
         } catch {}
@@ -19600,6 +19603,8 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `suspect_no_usable_page`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_usable_page');
 
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
+            const young = (Date.now() - Number(robeMeta[nome].activatedAt || 0)) < 60_000;
+            if (young || isOpenAllSessionActive()) continue;
             if (killGuardActive(nome)) {
               await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
               continue;
