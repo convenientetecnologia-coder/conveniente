@@ -133,7 +133,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
   for (const pid of pids) {
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 4000;
   while (Date.now() < deadline) {
     if (cellRegistry.listAlive().length === 0) break;
     sleepMs(400);
@@ -146,9 +146,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
     if (p) ports.add(p);
   }
   for (let i = 0; i < 8; i++) ports.add(cellRegistry.portForIdx(i));
-  for (const port of ports) {
-    try { cellRegistry.reapPort(port, { keepPids: [process.pid] }); } catch {}
-  }
+  try { cellRegistry.reapPorts(Array.from(ports), { keepPids: [process.pid] }); } catch {}
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);

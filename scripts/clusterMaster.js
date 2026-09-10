@@ -14,7 +14,7 @@ const chromeMotores = require('./chromeMotores.js');
 const cellRegistry = require('./cellRegistry.js');
 const cellForensic = require('./cellForensic.js');
 const cellLifecycle = require('./cellLifecycle.js');
-const { writeJsonLine, attachLineParser, waitPortFree } = require('./cellNet.js');
+const { writeJsonLine, attachLineParser } = require('./cellNet.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -519,53 +519,15 @@ async function createCluster() {
       });
     } catch {}
 
-    let portFree = await waitPortFree(child.port, { timeoutMs: 8000, intervalMs: 200 });
-    if (!portFree) {
-      let killed = [];
-      try { killed = cellRegistry.reapPort(child.port, { keepPids: [] }); } catch {}
-      try {
-        logger.warn('[CLUSTER] porta da célula ocupada, ceifando fantasma', { idx: idx + 1, port: child.port, killed });
-        require('./indexLifecycle.js').append('cell_port_ghost_reap', { idx: idx + 1, port: child.port, killed, phase: 'pre_spawn' });
-      } catch {}
-      portFree = await waitPortFree(child.port, { timeoutMs: 10000, intervalMs: 200 });
-    }
-    if (!portFree) {
-      try {
-        logger.warn('[CLUSTER] porta da célula ainda ocupada', { idx: idx + 1, port: child.port });
-        require('./indexLifecycle.js').append('cell_port_wait_busy', { idx: idx + 1, port: child.port });
-      } catch {}
-    }
-
     const proc = spawnDetachedCell(idx, shardNames, env);
     child.proc = proc;
     child.pid = proc.pid || null;
     const connected = await (async () => {
       const started = Date.now();
-      while ((Date.now() - started) < 90000) {
+      while ((Date.now() - started) < 20000) {
         if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
-        if (await connectCellSocket(child, idx)) {
-          const holders = cellRegistry.listPidsOnPort(child.port);
-          const mine = Number(child.pid) || 0;
-          if (mine && holders.length && holders.indexOf(mine) < 0) {
-            try { if (child.socket) child.socket.destroy(); } catch {}
-            child.socket = null;
-            let killed = [];
-            try { killed = cellRegistry.reapPort(child.port, { keepPids: [mine] }); } catch {}
-            try {
-              require('./indexLifecycle.js').append('cell_port_ghost_reap', {
-                idx: idx + 1,
-                port: child.port,
-                killed,
-                wantPid: mine,
-                holders,
-                phase: 'connect_mismatch'
-              });
-            } catch {}
-          } else {
-            return true;
-          }
-        }
-        await new Promise((r) => setTimeout(r, 150));
+        if (await connectCellSocket(child, idx)) return true;
+        await new Promise((r) => setTimeout(r, 120));
       }
       return false;
     })();
@@ -601,11 +563,67 @@ async function createCluster() {
   const motorCapacity = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || blocks.length);
   chromeMotores.ensureWorkers(motorCapacity, { purge: !adopting });
   try { cellRegistry.setMaestroPid(process.pid); } catch {}
+  try {
+    console.log('[CLUSTER] ' + (adopting ? 'adotando ' : 'subindo ') + blocks.length + ' celulas');
+  } catch {}
+
+  if (!adopting) {
+    const ports = [];
+    for (let i = 0; i < blocks.length; i++) ports.push(cellRegistry.portForIdx(i));
+    let killed = [];
+    try { killed = cellRegistry.reapPorts(ports, { keepPids: [process.pid] }); } catch {}
+    if (killed && killed.length) {
+      try {
+        require('./indexLifecycle.js').append('cell_port_ghost_reap', {
+          ports,
+          killed,
+          phase: 'pre_cluster'
+        });
+      } catch {}
+    }
+  }
+
+  function hollowChild(idx, shardNames) {
+    return {
+      id: idx,
+      proc: null,
+      pending: new Map(),
+      shard: new Set(shardNames || []),
+      pid: null,
+      port: cellRegistry.portForIdx(idx),
+      socket: null,
+      netSend: null,
+      adopted: false,
+      deadHandled: true,
+      heardAt: null
+    };
+  }
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
-    const child = await spawnWorker(idx, shardNames);
+    let child = null;
+    try {
+      child = await spawnWorker(idx, shardNames);
+    } catch (e) {
+      const msg = String((e && e.message) || e || '');
+      if (/CHROME_OFFICIAL_MISSING/.test(msg)) throw e;
+      try { logger.error('[CLUSTER] spawn falhou', { idx: idx + 1, error: msg }); } catch {}
+      try { cellRegistry.reapPort(cellRegistry.portForIdx(idx), { keepPids: [process.pid] }); } catch {}
+      try {
+        child = await spawnWorker(idx, shardNames);
+      } catch (e2) {
+        try { logger.error('[CLUSTER] spawn retry falhou', { idx: idx + 1, error: (e2 && e2.message) || e2 }); } catch {}
+        child = hollowChild(idx, shardNames);
+        children.push(child);
+        kickRespawn(idx, 3000);
+        try { console.log('[CLUSTER] w' + (idx + 1) + ' vai retentar'); } catch {}
+        continue;
+      }
+    }
     children.push(child);
+    try {
+      console.log('[CLUSTER] w' + (idx + 1) + ' pid=' + (child.pid || 'na') + (child.adopted ? ' adopt' : ''));
+    } catch {}
     logger.info('[CLUSTER] Worker iniciado', {
       idx: idx + 1,
       perfis: child.shard ? child.shard.size : shardNames.length,

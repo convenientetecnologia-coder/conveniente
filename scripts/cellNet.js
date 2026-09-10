@@ -52,26 +52,12 @@ function waitPortOpen(port, { timeoutMs = 60000, intervalMs = 120 } = {}) {
 }
 
 function waitPortFree(port, { timeoutMs = 15000, intervalMs = 250 } = {}) {
-  const net = require('net');
-  const started = Date.now();
-  const n = Number(port) || 0;
-  if (!Number.isFinite(n) || n <= 0) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const tryOnce = () => {
-      const srv = net.createServer();
-      srv.once('error', (err) => {
-        try { srv.close(); } catch {}
-        const busy = err && String(err.code || '') === 'EADDRINUSE';
-        if (!busy) return resolve(true);
-        if ((Date.now() - started) >= timeoutMs) return resolve(false);
-        setTimeout(tryOnce, intervalMs);
-      });
-      srv.listen({ port: n, host: '127.0.0.1', exclusive: true }, () => {
-        srv.close(() => resolve(true));
-      });
-    };
-    tryOnce();
-  });
+  // Nao faz bind nem connect. Bind deixa TIME_WAIT e o cellEntry perde o listen.
+  // Connect o ocupante trata como maestro e derruba o socket real.
+  void port;
+  void timeoutMs;
+  void intervalMs;
+  return Promise.resolve(true);
 }
 
 module.exports = { writeJsonLine, attachLineParser, waitPortOpen, waitPortFree };
