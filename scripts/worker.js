@@ -18267,6 +18267,9 @@ async function profileHasSettledOpenLanding(nome, ctrl) {
       if (facebookNavHosts.isLiveMessagesUrl(u)) {
         return { settled: true, reason: 'messages_live', url: u.slice(0, 180) };
       }
+      if (/(facebook|messenger)\.com/i.test(u)) {
+        return { settled: true, reason: 'facebook_up', url: u.slice(0, 180) };
+      }
     }
     return { settled: false, reason: 'waiting_messages_live' };
   } catch {

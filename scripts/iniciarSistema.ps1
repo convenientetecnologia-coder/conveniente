@@ -360,29 +360,7 @@ function Start-ConvenienteNode {
         return 1
     }
     [void](Stop-ConvenienteConsoleHosts)
-    $cellsAlive = $false
-    try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-    $cellsStale = $false
-    try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
-    if ($cellsAlive -and $cellsStale) {
-        Write-StartLog 'cells_stale recycle'
-        Write-Host ''
-        Write-Host 'Codigo novo no disco (git pull). Encerrando celulas antigas para o worker novo valer.'
-        Write-Host ''
-        Stop-ConvenienteCells 'iniciar_stamp_stale'
-        $cellsAlive = $false
-        try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-    } elseif (-not $cellsAlive) {
-        # Registry vazio nao e garantia: guerra de spawn deixa cellEntry fantasma
-        # fora da lista. Sem este sweep o Iniciar adota porta ocupada e reabre Chrome.
-        Stop-ConvenienteCells 'iniciar_ghost_sweep'
-    }
-    if ($cellsAlive) {
-        Write-StartLog 'adopt_cells skip_chrome_kill skip_motor_boot'
-        Write-Host ''
-        Write-Host 'Células vivas detectadas. Subindo só o maestro (index). Chromes seguem.'
-        Write-Host ''
-    } else {
+    Stop-ConvenienteCells 'iniciar_click_fresh'
     Write-StartLog 'motores_begin'
     try {
         $hwndShow = [Native.Win]::GetConsoleWindow()
@@ -411,7 +389,6 @@ function Start-ConvenienteNode {
         $hwndHide = [Native.Win]::GetConsoleWindow()
         if ($hwndHide -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndHide, 0) }
     } catch {}
-    }
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0
