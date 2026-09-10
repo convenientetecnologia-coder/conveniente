@@ -82,8 +82,7 @@ function onListenError(err) {
         error: (code || msg).slice(0, 80)
       });
     } catch {}
-    try { registry.reapPort(port, { keepPids: [process.pid] }); } catch {}
-    setTimeout(startListen, listenTries <= 2 ? 400 : 1200);
+    setTimeout(startListen, 400);
     return;
   }
   try {

@@ -574,6 +574,35 @@ async function createCluster() {
       });
     } catch {}
 
+    const occupants = (cellRegistry.listPidsOnPort(child.port) || []).filter((p) => p > 4 && p !== process.pid);
+    if (occupants.length) {
+      child.pid = occupants[0];
+      child.adopted = true;
+      const connectedBusy = await (async () => {
+        const started = Date.now();
+        while ((Date.now() - started) < 8000) {
+          if (await connectCellSocket(child, idx)) return true;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return false;
+      })();
+      if (connectedBusy) {
+        try {
+          logger.info('[CLUSTER][ADOPT] porta ocupada', { worker: idx + 1, pid: child.pid, port: child.port });
+          cellRegistry.upsertCell({
+            idx,
+            pid: child.pid,
+            port: child.port,
+            shard: shardNames,
+            statusFile: env.STATUS_FILE_NAME
+          });
+          cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, via: 'port_busy' });
+        } catch {}
+        return child;
+      }
+      throw new Error('CELL_PORT_BUSY: w' + (idx + 1) + ' port ' + child.port + ' pid ' + child.pid);
+    }
+
     const proc = spawnDetachedCell(idx, shardNames, env);
     child.proc = proc;
     child.pid = proc.pid || null;
