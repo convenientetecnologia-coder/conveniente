@@ -7867,7 +7867,7 @@ async function activateOnce(nome, source = '', operator = '') {
             connectLane.markArmed(true, 'proxy_resolved');
           }
         } catch {}
-        if (connectLane.isEnabled()) {
+        if (connectLane.isEnabled() && !isOpenAllSessionActive()) {
           heavyNav = await connectLane.acquire({ kind: 'chrome_boot', nome });
         }
         const browser = await browserHelper.openBrowser(manifest);
@@ -18288,22 +18288,6 @@ async function openAllShouldWaitBeforeActivate(nextNome) {
     const inflight = Object.keys(opening || {}).filter((n) => n && opening[n] && n !== skip);
     if (inflight.length) {
       return { wait: true, waitingFor: inflight[0], reason: 'opening' };
-    }
-    if (connectLane.isEnabled()) {
-      if (connectLane.isHeld()) {
-        return { wait: true, waitingFor: 'host', reason: 'connect_lane_held' };
-      }
-      try {
-        if (typeof connectLane.isCooling === 'function' && connectLane.isCooling()) {
-          return {
-            wait: true,
-            waitingFor: 'host',
-            reason: 'connect_lane_tunnel_cool',
-            ageMs: Number(connectLane.coolRemainingMs && connectLane.coolRemainingMs() || 0) || 0
-          };
-        }
-      } catch {}
-      return { wait: false };
     }
     let oaStartedAt = 0;
     try {

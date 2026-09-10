@@ -57,19 +57,25 @@ module.exports = (app, workerClient, fileStore) => {
     if (body.confirm !== true) {
       return res.status(400).json({ ok: false, error: 'confirm_required' });
     }
+    let r = { ok: true };
     try {
       if (workerClient && typeof workerClient.kill === 'function') {
-        await workerClient.kill();
+        r = (await workerClient.kill()) || r;
+      } else {
+        const cellLifecycle = require('./cellLifecycle.js');
+        r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
       }
-    } catch {}
-    try {
-      const cellLifecycle = require('./cellLifecycle.js');
-      const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
-      try { await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' }); } catch {}
-      try { require('./orphanReaper.js').reapAllConvenienteChrome('api_cells_stop'); } catch {}
-      return res.json(Object.assign({ maestroStays: true }, r));
     } catch (e) {
-      return res.json({ ok: false, error: e && e.message || String(e) });
+      try {
+        const cellLifecycle = require('./cellLifecycle.js');
+        r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
+      } catch (e2) {
+        return res.json({ ok: false, error: (e2 && e2.message) || (e && e.message) || String(e) });
+      }
     }
+    try { await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' }); } catch {}
+    try { require('./supervisor.js').resetSupervisor(); } catch {}
+    try { require('./orphanReaper.js').reapAllConvenienteChrome('api_cells_stop'); } catch {}
+    return res.json(Object.assign({ maestroStays: true }, r));
   });
 };

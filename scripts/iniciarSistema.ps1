@@ -107,10 +107,6 @@ function Test-ConvenienteUp {
         $c = @(Get-NetTCPConnection -LocalPort 8088 -State Listen -ErrorAction SilentlyContinue)
         if ($c.Count -gt 0) { return $true }
     } catch {}
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
-        $cmd = [string]$p.CommandLine
-        if ($cmd -and ($cmd -match 'index\.js')) { return $true }
-    }
     return $false
 }
 
@@ -297,17 +293,17 @@ function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
 
 function Stop-ConvenienteMaestro {
     [void](Stop-ConvenienteConsoleHosts)
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
-        $cmd = [string]$p.CommandLine
-        if (-not $cmd) { continue }
-        if ($cmd -notmatch 'index\.js') { continue }
-        if ($cmd -match 'cellEntry\.js') { continue }
-        try { & taskkill.exe /F /PID $p.ProcessId 2>$null | Out-Null } catch {}
-    }
-    $deadline = (Get-Date).AddSeconds(8)
+    try {
+        foreach ($x in @(Get-NetTCPConnection -LocalPort 8088 -State Listen -ErrorAction SilentlyContinue)) {
+            $id = 0
+            try { $id = [int]$x.OwningProcess } catch { $id = 0 }
+            if ($id -gt 4) { try { & taskkill.exe /F /PID $id 2>$null | Out-Null } catch {} }
+        }
+    } catch {}
+    $deadline = (Get-Date).AddSeconds(2)
     while ((Get-Date) -lt $deadline) {
         if (-not (Test-ConvenienteUp)) { return }
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 150
     }
 }
 
@@ -374,7 +370,7 @@ function Start-ConvenienteNode {
     Write-Host ''
     & taskkill.exe /F /IM chrome.exe 1>$null 2>$null
     & taskkill.exe /F /IM crashpad_handler.exe 1>$null 2>$null
-    Start-Sleep -Milliseconds 2500
+    Start-Sleep -Milliseconds 400
     $mot = Start-Process -FilePath $node -ArgumentList @('C:\conveniente\scripts\chromeMotores.js', '--boot') -WorkingDirectory 'C:\conveniente' -Wait -PassThru -NoNewWindow
     if (-not $mot -or $mot.ExitCode -ne 0) {
         Write-StartLog ('motores_fatal exit=' + $(if ($mot) { $mot.ExitCode } else { 'null' }))

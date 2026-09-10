@@ -587,52 +587,53 @@ async function createCluster() {
 
     const occupants = (cellRegistry.listPidsOnPort(child.port) || []).filter((p) => p > 4 && p !== process.pid);
     if (occupants.length) {
-      child.pid = occupants[0];
-      child.adopted = true;
-      const connectedBusy = await (async () => {
-        const started = Date.now();
-        while ((Date.now() - started) < 8000) {
-          if (await connectCellSocket(child, idx)) return true;
-          await new Promise((r) => setTimeout(r, 150));
-        }
-        return false;
-      })();
-      if (connectedBusy) {
-        try {
-          cellRegistry.upsertCell({
-            idx,
-            pid: child.pid,
-            port: child.port,
-            shard: shardNames,
-            statusFile: env.STATUS_FILE_NAME
-          });
-          cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, via: 'port_busy' });
-        } catch {}
-        return child;
-      }
       if (!replaceOccupant) {
+        child.pid = occupants[0];
+        child.adopted = true;
+        const connectedBusy = await (async () => {
+          const started = Date.now();
+          while ((Date.now() - started) < 8000) {
+            if (await connectCellSocket(child, idx)) return true;
+            await new Promise((r) => setTimeout(r, 150));
+          }
+          return false;
+        })();
+        if (connectedBusy) {
+          try {
+            cellRegistry.upsertCell({
+              idx,
+              pid: child.pid,
+              port: child.port,
+              shard: shardNames,
+              statusFile: env.STATUS_FILE_NAME
+            });
+            cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, via: 'port_busy' });
+          } catch {}
+          return child;
+        }
         throw new Error('CELL_PORT_BUSY: w' + (idx + 1) + ' port ' + child.port + ' pid ' + child.pid);
       }
       for (const p of occupants) {
         try { cellRegistry.killPid(p); } catch {}
       }
-      const quietUntil = Date.now() + 3000;
+      const quietUntil = Date.now() + 1200;
       while (Date.now() < quietUntil) {
         const left = (cellRegistry.listPidsOnPort(child.port) || []).filter((p) => p > 4 && p !== process.pid);
         if (!left.length) break;
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 80));
       }
     }
 
     const proc = spawnDetachedCell(idx, shardNames, env);
     child.proc = proc;
     child.pid = proc.pid || null;
+    const listenMs = replaceOccupant ? 8000 : 20000;
     const connected = await (async () => {
       const started = Date.now();
-      while ((Date.now() - started) < 20000) {
+      while ((Date.now() - started) < listenMs) {
         if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
         if (await connectCellSocket(child, idx)) return true;
-        await new Promise((r) => setTimeout(r, 120));
+        await new Promise((r) => setTimeout(r, 80));
       }
       return false;
     })();
@@ -679,19 +680,18 @@ async function createCluster() {
   } catch {}
 
   if (!adopting) {
-    try { cellLifecycle.stopAllCells({ reason: 'cluster_fresh_start' }); } catch {}
     const ports = [];
     for (let i = 0; i < blocks.length; i++) ports.push(cellRegistry.portForIdx(i));
-    const waitUntil = Date.now() + 8000;
+    try { cellRegistry.reapPorts(ports, { keepPids: [process.pid] }); } catch {}
+    const waitUntil = Date.now() + 2000;
     while (Date.now() < waitUntil) {
       let busy = 0;
       for (const p of ports) {
         busy += (cellRegistry.listPidsOnPort(p) || []).filter((id) => id > 4 && id !== process.pid).length;
       }
       if (!busy) break;
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 80));
     }
-    await new Promise((r) => setTimeout(r, 600));
   }
 
   function hollowChild(idx, shardNames) {
@@ -710,34 +710,34 @@ async function createCluster() {
     };
   }
 
-  for (let idx = 0; idx < blocks.length; idx++) {
-    const shardNames = blocks[idx] || [];
-    let child = null;
+  const started = await Promise.all(blocks.map(async (shardNames, idx) => {
+    const names = shardNames || [];
     try {
-      child = await spawnWorker(idx, shardNames, { replaceOccupant: true });
+      return await spawnWorker(idx, names, { replaceOccupant: true });
     } catch (e) {
       const msg = String((e && e.message) || e || '');
       if (/CHROME_OFFICIAL_MISSING/.test(msg)) throw e;
       try { logger.error('[CLUSTER] spawn falhou', { idx: idx + 1, error: msg }); } catch {}
       try { cellRegistry.reapPort(cellRegistry.portForIdx(idx), { keepPids: [process.pid] }); } catch {}
       try {
-        child = await spawnWorker(idx, shardNames, { replaceOccupant: true });
+        return await spawnWorker(idx, names, { replaceOccupant: true });
       } catch (e2) {
         try { logger.error('[CLUSTER] spawn retry falhou', { idx: idx + 1, error: (e2 && e2.message) || e2 }); } catch {}
-        child = hollowChild(idx, shardNames);
-        children.push(child);
-        kickRespawn(idx, 3000);
         try { console.log('[CLUSTER] w' + (idx + 1) + ' vai retentar'); } catch {}
-        continue;
+        kickRespawn(idx, 3000);
+        return hollowChild(idx, names);
       }
     }
-    children.push(child);
+  }));
+  for (let idx = 0; idx < started.length; idx++) {
+    const child = started[idx];
+    children[idx] = child;
     try {
       console.log('[CLUSTER] w' + (idx + 1) + ' pid=' + (child.pid || 'na') + (child.adopted ? ' adopt' : ''));
     } catch {}
     logger.info('[CLUSTER] Worker iniciado', {
       idx: idx + 1,
-      perfis: child.shard ? child.shard.size : shardNames.length,
+      perfis: child.shard ? child.shard.size : (blocks[idx] || []).length,
       pid: child.pid,
       port: child.port,
       adopted: !!child.adopted
@@ -1286,12 +1286,15 @@ async function createCluster() {
 
   async function kill() {
     isShuttingDown = true;
+    for (const c of children) {
+      try { c.deadHandled = true; } catch {}
+    }
     try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     for (const c of children) {
       try { if (c.socket) c.socket.destroy(); } catch {}
     }
-    try { cellLifecycle.stopAllCells({ reason: 'maestro_kill' }); } catch {}
+    try { return cellLifecycle.stopAllCells({ reason: 'maestro_kill' }); } catch { return { ok: false }; }
   }
 
   // Watcher: conta nova / conta apagada. Grow ao vivo; não reshuffle.
