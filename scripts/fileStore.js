@@ -1196,6 +1196,14 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
           desired._openAll = neutralizeOpenAllAfterBoot(desired._openAll, { nowMs: Date.now() });
         }
       } catch {}
+      // Abrir Tudo liga _autoOpen.enabled. Se o boot só zera active, a nurse
+      // reforce active=true e o Iniciar já abre Chrome. Desligar o autopilot aqui.
+      try {
+        desired._autoOpen = desired._autoOpen || {};
+        desired._autoOpen.enabled = false;
+        desired._autoOpen.changedAt = Date.now();
+        desired._autoOpen.changedBy = String(reason || 'boot_start_closed').slice(0, 120);
+      } catch {}
       desired._boot = { ...(desired._boot || {}), ts: Date.now(), reason: String(reason || '').slice(0, 120) };
       desired._bootStartClosed = true;
       desired._bootStartClosedAt = Date.now();

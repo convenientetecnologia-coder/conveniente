@@ -30,6 +30,26 @@ assert.ok(
   fileStoreSrc.includes("desired._openAll = neutralizeOpenAllAfterBoot"),
   "resetDesiredAllOffOnBoot precisa chamar neutralizeOpenAllAfterBoot"
 );
+assert.ok(
+  fileStoreSrc.includes("desired._autoOpen.enabled = false"),
+  "resetDesiredAllOffOnBoot precisa desligar _autoOpen (senao a nurse reabre no Iniciar)"
+);
+
+const apiSysSrc = fs.readFileSync(path.join(ROOT, "scripts", "api_sys.js"), "utf8");
+assert.ok(
+  apiSysSrc.includes("resetDesiredAllOffOnBoot"),
+  "Parar celulas precisa zerar desired/_autoOpen senao o proximo Iniciar reabre"
+);
+assert.ok(
+  apiSysSrc.includes("reapAllConvenienteChrome"),
+  "Parar celulas precisa recolher Chrome orfao num clique"
+);
+
+const lifeSrc = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");
+assert.ok(
+  lifeSrc.includes("cellEntry.js"),
+  "stopAllCells precisa matar cellEntry fora do registry (um clique fecha tudo)"
+);
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(

@@ -65,6 +65,8 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       const cellLifecycle = require('./cellLifecycle.js');
       const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
+      try { await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' }); } catch {}
+      try { require('./orphanReaper.js').reapAllConvenienteChrome('api_cells_stop'); } catch {}
       return res.json(Object.assign({ maestroStays: true }, r));
     } catch (e) {
       return res.json({ ok: false, error: e && e.message || String(e) });

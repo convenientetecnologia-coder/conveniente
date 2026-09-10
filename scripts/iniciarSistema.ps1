@@ -372,6 +372,10 @@ function Start-ConvenienteNode {
         Stop-ConvenienteCells 'iniciar_stamp_stale'
         $cellsAlive = $false
         try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
+    } elseif (-not $cellsAlive) {
+        # Registry vazio nao e garantia: guerra de spawn deixa cellEntry fantasma
+        # fora da lista. Sem este sweep o Iniciar adota porta ocupada e reabre Chrome.
+        Stop-ConvenienteCells 'iniciar_ghost_sweep'
     }
     if ($cellsAlive) {
         Write-StartLog 'adopt_cells skip_chrome_kill skip_motor_boot'

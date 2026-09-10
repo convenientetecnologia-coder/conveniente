@@ -124,6 +124,33 @@ function forceKillPid(pid) {
   } catch {}
 }
 
+function listCellEntryPids() {
+  if (process.platform !== 'win32') return [];
+  try {
+    const r = spawnSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -like '*cellEntry.js*') } | ForEach-Object { $_.ProcessId }"
+    ], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 20000,
+      maxBuffer: 1024 * 1024
+    });
+    const seen = new Set();
+    const out = [];
+    for (const tok of String((r && r.stdout) || '').split(/\s+/)) {
+      const n = Math.floor(Number(tok) || 0);
+      if (n > 4 && n !== process.pid && !seen.has(n)) {
+        seen.add(n);
+        out.push(n);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function stopAllCells({ reason = 'manual' } = {}) {
   const alive = cellRegistry.listAlive();
   const pids = alive.map((c) => Number(c.pid)).filter((n) => n > 0);
@@ -147,6 +174,11 @@ function stopAllCells({ reason = 'manual' } = {}) {
   }
   for (let i = 0; i < 8; i++) ports.add(cellRegistry.portForIdx(i));
   try { cellRegistry.reapPorts(Array.from(ports), { keepPids: [process.pid] }); } catch {}
+  const ghosts = listCellEntryPids();
+  for (const pid of ghosts) forceKillPid(pid);
+  if (ghosts.length) {
+    try { cellRegistry.reapPorts(Array.from(ports), { keepPids: [process.pid] }); } catch {}
+  }
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);
@@ -156,6 +188,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
     reason: String(reason || ''),
     requested: pids.length,
     forced: leftover.length,
+    ghosts: ghosts.length,
     alive: still.length,
     pids
   };
