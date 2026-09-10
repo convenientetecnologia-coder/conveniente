@@ -140,6 +140,15 @@ function stopAllCells({ reason = 'manual' } = {}) {
   }
   const leftover = cellRegistry.listAlive();
   for (const c of leftover) forceKillPid(c.pid);
+  const ports = new Set();
+  for (const c of alive.concat(leftover)) {
+    const p = Number(c && c.port) || cellRegistry.portForIdx(c && c.idx);
+    if (p) ports.add(p);
+  }
+  for (let i = 0; i < 8; i++) ports.add(cellRegistry.portForIdx(i));
+  for (const port of ports) {
+    try { cellRegistry.reapPort(port, { keepPids: [process.pid] }); } catch {}
+  }
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);

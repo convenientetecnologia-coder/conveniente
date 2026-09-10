@@ -265,7 +265,8 @@ async function createCluster() {
     child.netSend = (obj) => writeJsonLine(sock, obj);
     attachLineParser(sock, (msg) => handleCellInbound(child, idx, msg));
     sock.on('close', () => {
-      if (child.socket === sock) child.socket = null;
+      if (child.socket !== sock) return;
+      child.socket = null;
       if (isShuttingDown || child.deadHandled) return;
       if (cellRegistry.pidAlive(child.pid)) {
         setTimeout(() => { connectCellSocket(child, idx).catch(() => {}); }, 400);
@@ -518,7 +519,16 @@ async function createCluster() {
       });
     } catch {}
 
-    const portFree = await waitPortFree(child.port, { timeoutMs: 20000, intervalMs: 250 });
+    let portFree = await waitPortFree(child.port, { timeoutMs: 8000, intervalMs: 200 });
+    if (!portFree) {
+      let killed = [];
+      try { killed = cellRegistry.reapPort(child.port, { keepPids: [] }); } catch {}
+      try {
+        logger.warn('[CLUSTER] porta da célula ocupada, ceifando fantasma', { idx: idx + 1, port: child.port, killed });
+        require('./indexLifecycle.js').append('cell_port_ghost_reap', { idx: idx + 1, port: child.port, killed, phase: 'pre_spawn' });
+      } catch {}
+      portFree = await waitPortFree(child.port, { timeoutMs: 10000, intervalMs: 200 });
+    }
     if (!portFree) {
       try {
         logger.warn('[CLUSTER] porta da célula ainda ocupada', { idx: idx + 1, port: child.port });
@@ -533,7 +543,28 @@ async function createCluster() {
       const started = Date.now();
       while ((Date.now() - started) < 90000) {
         if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
-        if (await connectCellSocket(child, idx)) return true;
+        if (await connectCellSocket(child, idx)) {
+          const holders = cellRegistry.listPidsOnPort(child.port);
+          const mine = Number(child.pid) || 0;
+          if (mine && holders.length && holders.indexOf(mine) < 0) {
+            try { if (child.socket) child.socket.destroy(); } catch {}
+            child.socket = null;
+            let killed = [];
+            try { killed = cellRegistry.reapPort(child.port, { keepPids: [mine] }); } catch {}
+            try {
+              require('./indexLifecycle.js').append('cell_port_ghost_reap', {
+                idx: idx + 1,
+                port: child.port,
+                killed,
+                wantPid: mine,
+                holders,
+                phase: 'connect_mismatch'
+              });
+            } catch {}
+          } else {
+            return true;
+          }
+        }
         await new Promise((r) => setTimeout(r, 150));
       }
       return false;

@@ -58,21 +58,17 @@ function waitPortFree(port, { timeoutMs = 15000, intervalMs = 250 } = {}) {
   if (!Number.isFinite(n) || n <= 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     const tryOnce = () => {
-      const sock = net.connect({ host: '127.0.0.1', port: n });
-      const retry = () => {
-        try { sock.destroy(); } catch {}
+      const srv = net.createServer();
+      srv.once('error', (err) => {
+        try { srv.close(); } catch {}
+        const busy = err && String(err.code || '') === 'EADDRINUSE';
+        if (!busy) return resolve(true);
         if ((Date.now() - started) >= timeoutMs) return resolve(false);
         setTimeout(tryOnce, intervalMs);
-      };
-      sock.once('connect', () => {
-        try { sock.end(); } catch {}
-        retry();
       });
-      sock.once('error', () => {
-        try { sock.destroy(); } catch {}
-        resolve(true);
+      srv.listen({ port: n, host: '127.0.0.1', exclusive: true }, () => {
+        srv.close(() => resolve(true));
       });
-      sock.setTimeout(600, retry);
     };
     tryOnce();
   });

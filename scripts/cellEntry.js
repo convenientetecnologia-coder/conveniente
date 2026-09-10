@@ -33,7 +33,7 @@ const server = net.createServer((socket) => {
 
 let listenTries = 0;
 let booted = false;
-const MAX_LISTEN_TRIES = 12;
+const MAX_LISTEN_TRIES = 8;
 
 function onListening() {
   if (booted) return;
@@ -77,7 +77,7 @@ function onListenError(err) {
         error: (code || msg).slice(0, 80)
       });
     } catch {}
-    setTimeout(startListen, 500);
+    setTimeout(startListen, 400);
     return;
   }
   try {

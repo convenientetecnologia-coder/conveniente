@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const REG_DIR = path.join(__dirname, '..', 'dados', 'cells');
 const REG_PATH = path.join(REG_DIR, 'registry.json');
@@ -62,6 +63,54 @@ function pidAlive(pid) {
   }
 }
 
+function listPidsOnPort(port) {
+  const n = Math.floor(Number(port) || 0);
+  if (!Number.isFinite(n) || n <= 0) return [];
+  if (process.platform !== 'win32') return [];
+  let out = '';
+  try {
+    const r = spawnSync('netstat.exe', ['-ano', '-p', 'tcp'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 8000,
+      maxBuffer: 4 * 1024 * 1024
+    });
+    out = String((r && r.stdout) || '');
+  } catch {
+    return [];
+  }
+  const pids = new Set();
+  for (const line of out.split(/\r?\n/)) {
+    const parts = String(line || '').trim().split(/\s+/);
+    if (parts.length < 5) continue;
+    if (!/^TCP$/i.test(parts[0])) continue;
+    if (!/LISTENING/i.test(parts[3])) continue;
+    const local = String(parts[1] || '');
+    const localPort = Number(local.split(':').pop());
+    const pid = Math.floor(Number(parts[4]) || 0);
+    if (localPort === n && pid > 4) pids.add(pid);
+  }
+  return Array.from(pids);
+}
+
+function reapPort(port, { keepPids = [] } = {}) {
+  const keep = new Set(
+    [process.pid].concat(Array.isArray(keepPids) ? keepPids : [])
+      .map((x) => Math.floor(Number(x) || 0))
+      .filter((id) => id > 4)
+  );
+  const pids = listPidsOnPort(port).filter((pid) => !keep.has(pid));
+  for (const pid of pids) {
+    try {
+      spawnSync('taskkill.exe', ['/F', '/PID', String(pid), '/T'], {
+        windowsHide: true,
+        timeout: 8000
+      });
+    } catch {}
+  }
+  return pids;
+}
+
 function portForIdx(idx) {
   return BASE_PORT + Math.max(0, Math.floor(Number(idx) || 0));
 }
@@ -114,6 +163,8 @@ module.exports = {
   read,
   write,
   pidAlive,
+  listPidsOnPort,
+  reapPort,
   portForIdx,
   listAlive,
   hasAliveCells,
