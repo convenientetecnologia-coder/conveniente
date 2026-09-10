@@ -113,85 +113,14 @@ function sleepMs(ms) {
   }
 }
 
-function forceKillPids(pids) {
-  const ids = Array.from(new Set((pids || []).map((p) => Math.floor(Number(p) || 0)).filter((n) => n > 4)));
-  if (!ids.length) return;
-  const args = ['/F', '/T'];
-  for (const n of ids) {
-    args.push('/PID', String(n));
-  }
+function forceKillPid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!n) return;
   try {
-    spawnSync('taskkill.exe', args, { windowsHide: true, timeout: 8000 });
-  } catch {}
-}
-
-function decodeWmicStdout(buf) {
-  if (!buf) return '';
-  if (Buffer.isBuffer(buf) && buf.length >= 2 && buf[1] === 0) return buf.toString('utf16le');
-  return Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf);
-}
-
-function listCellEntryPids() {
-  if (process.platform !== 'win32') return [];
-  try {
-    const wmic = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wbem', 'WMIC.exe');
-    const r = spawnSync(wmic, [
-      'process', 'where', "name='node.exe'", 'get', 'ProcessId,CommandLine', '/format:list'
-    ], {
-      encoding: 'buffer',
+    spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
       windowsHide: true,
-      timeout: 6000,
-      maxBuffer: 4 * 1024 * 1024
+      timeout: 15000
     });
-    const seen = new Set();
-    const out = [];
-    let cmd = '';
-    let pid = 0;
-    const flush = () => {
-      if (pid > 4 && pid !== process.pid && /cellEntry\.js/i.test(cmd) && !seen.has(pid)) {
-        seen.add(pid);
-        out.push(pid);
-      }
-      cmd = '';
-      pid = 0;
-    };
-    for (const line of decodeWmicStdout(r && r.stdout).split(/\r?\n/)) {
-      const s = String(line || '').replace(/\u0000/g, '').trim();
-      if (!s) {
-        flush();
-        continue;
-      }
-      if (/^CommandLine=/i.test(s)) cmd = s.replace(/^CommandLine=/i, '');
-      else if (/^ProcessId=/i.test(s)) pid = Math.floor(Number(s.replace(/^ProcessId=/i, '')) || 0);
-    }
-    flush();
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function clearCellStatusFiles() {
-  const now = Date.now();
-  for (let i = 1; i <= 8; i++) {
-    const p = path.join(ROOT, 'dados', 'status_node_' + i + '.json');
-    try {
-      fs.writeFileSync(p, JSON.stringify({ ok: true, perfis: [], ts: now, cellsStopped: true }));
-    } catch {}
-  }
-  const stPath = path.join(ROOT, 'dados', 'status.json');
-  try {
-    const st = JSON.parse(fs.readFileSync(stPath, 'utf8'));
-    if (st && Array.isArray(st.perfis)) {
-      for (const p of st.perfis) {
-        if (!p) continue;
-        p.active = false;
-        p.trabalhando = false;
-        p.numPages = 0;
-      }
-      st.ts = now;
-      fs.writeFileSync(stPath, JSON.stringify(st));
-    }
   } catch {}
 }
 
@@ -201,30 +130,25 @@ function stopAllCells({ reason = 'manual' } = {}) {
   try {
     cellForensic.append('cell_stop_all', { reason: String(reason).slice(0, 80), count: pids.length, pids });
   } catch {}
-  forceKillPids(pids);
-  const ports = new Set();
-  for (const c of alive) {
-    const p = Number(c && c.port) || cellRegistry.portForIdx(c && c.idx);
-    if (p) ports.add(p);
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
   }
-  for (let i = 0; i < 8; i++) ports.add(cellRegistry.portForIdx(i));
-  try { cellRegistry.reapPorts(Array.from(ports), { keepPids: [process.pid] }); } catch {}
-  const ghosts = listCellEntryPids();
-  forceKillPids(ghosts);
-  if (ghosts.length) {
-    try { cellRegistry.reapPorts(Array.from(ports), { keepPids: [process.pid] }); } catch {}
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (cellRegistry.listAlive().length === 0) break;
+    sleepMs(400);
   }
+  const leftover = cellRegistry.listAlive();
+  for (const c of leftover) forceKillPid(c.pid);
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);
-  try { clearCellStatusFiles(); } catch {}
   const still = cellRegistry.listAlive();
   return {
     ok: still.length === 0,
     reason: String(reason || ''),
     requested: pids.length,
-    forced: pids.length,
-    ghosts: ghosts.length,
+    forced: leftover.length,
     alive: still.length,
     pids
   };

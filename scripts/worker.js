@@ -1108,7 +1108,6 @@ try {
 try {
   fileStore.withDesiredFileLockUpdate((d) => {
     d = d || {};
-    if (d._openAll && d._openAll.active === true) return d;
     d._autoOpen = d._autoOpen || {};
     d._autoOpen.enabled = false;
     d._autoOpen.changedAt = Date.now();
@@ -7867,7 +7866,7 @@ async function activateOnce(nome, source = '', operator = '') {
             connectLane.markArmed(true, 'proxy_resolved');
           }
         } catch {}
-        if (connectLane.isEnabled() && !isOpenAllSessionActive()) {
+        if (connectLane.isEnabled()) {
           heavyNav = await connectLane.acquire({ kind: 'chrome_boot', nome });
         }
         const browser = await browserHelper.openBrowser(manifest);
@@ -10703,9 +10702,6 @@ function attachPageCrashIsolate(nome, page) {
             return;
           }
           if (action === 'annihilate') {
-            if (isOpenAllSessionActive()) return;
-            const young = (Date.now() - Number((robeMeta[nome] || {}).activatedAt || 0)) < 60_000;
-            if (browserConnected && young) return;
             await annihilateChromeSick(nome, 'page_crash_isolate', { error: msg });
           }
         } catch {}
@@ -18268,9 +18264,6 @@ async function profileHasSettledOpenLanding(nome, ctrl) {
       if (facebookNavHosts.isLiveMessagesUrl(u)) {
         return { settled: true, reason: 'messages_live', url: u.slice(0, 180) };
       }
-      if (/(facebook|messenger)\.com/i.test(u)) {
-        return { settled: true, reason: 'facebook_up', url: u.slice(0, 180) };
-      }
     }
     return { settled: false, reason: 'waiting_messages_live' };
   } catch {
@@ -18288,6 +18281,22 @@ async function openAllShouldWaitBeforeActivate(nextNome) {
     const inflight = Object.keys(opening || {}).filter((n) => n && opening[n] && n !== skip);
     if (inflight.length) {
       return { wait: true, waitingFor: inflight[0], reason: 'opening' };
+    }
+    if (connectLane.isEnabled()) {
+      if (connectLane.isHeld()) {
+        return { wait: true, waitingFor: 'host', reason: 'connect_lane_held' };
+      }
+      try {
+        if (typeof connectLane.isCooling === 'function' && connectLane.isCooling()) {
+          return {
+            wait: true,
+            waitingFor: 'host',
+            reason: 'connect_lane_tunnel_cool',
+            ageMs: Number(connectLane.coolRemainingMs && connectLane.coolRemainingMs() || 0) || 0
+          };
+        }
+      } catch {}
+      return { wait: false };
     }
     let oaStartedAt = 0;
     try {
@@ -19591,8 +19600,6 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `suspect_no_usable_page`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_usable_page');
 
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
-            const young = (Date.now() - Number(robeMeta[nome].activatedAt || 0)) < 60_000;
-            if (young || isOpenAllSessionActive()) continue;
             if (killGuardActive(nome)) {
               await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
               continue;

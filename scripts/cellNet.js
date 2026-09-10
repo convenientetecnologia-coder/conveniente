@@ -51,13 +51,4 @@ function waitPortOpen(port, { timeoutMs = 60000, intervalMs = 120 } = {}) {
   });
 }
 
-function waitPortFree(port, { timeoutMs = 15000, intervalMs = 250 } = {}) {
-  // Nao faz bind nem connect. Bind deixa TIME_WAIT e o cellEntry perde o listen.
-  // Connect o ocupante trata como maestro e derruba o socket real.
-  void port;
-  void timeoutMs;
-  void intervalMs;
-  return Promise.resolve(true);
-}
-
-module.exports = { writeJsonLine, attachLineParser, waitPortOpen, waitPortFree };
+module.exports = { writeJsonLine, attachLineParser, waitPortOpen };

@@ -265,31 +265,10 @@ state.nextProbeAt = state.nextProbeAt || 0;
 function getFreeMB() {
   return getAvailableMB();
 }
-function floorSlots() {
-  const env = Number(process.env.SUPERVISOR_MIN_SLOTS);
-  if (Number.isFinite(env) && env > 0) return Math.max(1, Math.floor(env));
-  try {
-    const cellRegistry = require('./cellRegistry.js');
-    const alive = (cellRegistry.listAlive() || []).length;
-    const reg = cellRegistry.read() || {};
-    const topo = Number(reg.topology && reg.topology.nodes) || 0;
-    const n = Math.max(alive, topo);
-    if (n > 0) return n;
-  } catch {}
-  return 4;
-}
-
-function slotCap() {
-  const floor = floorSlots();
-  if (!state.maxSlots) return floor;
-  return Math.max(floor, Number(state.maxSlots) || floor);
-}
-
 function canProbe() {
   const now = Date.now();
   const minFree = getMinFreeRamMBFor({});
-  const cap = slotCap();
-  return cap && state.slotsAbertos >= cap &&
+  return state.maxSlots && state.slotsAbertos >= state.maxSlots &&
     getFreeMB() >= (minFree + 1024) &&
     now >= state.nextProbeAt;
 }
@@ -346,10 +325,10 @@ function podeAbrirNovoSlot(perfil, opts = {}) {
   // (ANTIGO global - pode remover ou restringir para edge-cases de hard fault, mas por now deixamos sem efeito)
   // if (state.openBlockedUntil > now) { ... }
 
-  const cap = slotCap();
-  if (cap && state.slotsAbertos >= cap) {
-    pushEvent({type:"denied", reason:"slots", maxSlots: cap, slotsAbertos: state.slotsAbertos, perfil});
-    return {ok: false, reason: "slots", maxSlots: cap};
+  // Limitador por slots (mantém igual)
+  if (state.maxSlots && state.slotsAbertos >= state.maxSlots) {
+    pushEvent({type:"denied", reason:"slots", maxSlots:state.maxSlots, slotsAbertos: state.slotsAbertos, perfil});
+    return {ok: false, reason: "slots", maxSlots: state.maxSlots};
   }
   return {ok: true, freeMB};
 }
@@ -397,16 +376,14 @@ function notifyOpened(perfil, resultado = "ok") {
   if (state.slotHistory.length > 600) state.slotHistory.shift();
 
   if (resultado === "ok") {
-    const floor = floorSlots();
-    state.maxSlots = Math.max(floor, Number(state.maxSlots) || 0, state.slotsAbertos + 1);
+    if (!state.maxSlots || state.slotsAbertos > state.maxSlots) state.maxSlots = state.slotsAbertos;
     if (state.maxSlots > state.maxEver) state.maxEver = state.maxSlots;
     cooldownPerAcc.delete(perfil); // Limpa cooldown ativo (robustez extra)
   } else {
     // NOVO: Reduzido de 15s para 5s (reabertura quase imediata, mas ainda controlada)
     const until = Date.now() + 5000;
     cooldownPerAcc.set(perfil, until); // SÓ aplica cooldown para este perfil
-    const floor = floorSlots();
-    state.maxSlots = Math.max(floor, (Number(state.maxSlots) || floor) - 1);
+    state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
     pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots, cooldownUntil:until});
   }
 
