@@ -1,11 +1,5 @@
 'use strict';
 
-process.env.UV_THREADPOOL_SIZE = '64';
-if (String(process.env.UV_THREADPOOL_SIZE || '').trim() !== '64') {
-  console.error('\x1b[31m[THREADPOOL] FATAL: UV_THREADPOOL_SIZE obrigatorio=64, lido=' + JSON.stringify(process.env.UV_THREADPOOL_SIZE) + '. Abortando boot.\x1b[0m');
-  process.exit(1);
-}
-
 // Entrada da célula: abre a porta de comando ANTES de carregar o worker.js.
 // O maestro reconecta aqui se o index cair. Chrome e contas seguem neste processo.
 
@@ -16,7 +10,6 @@ const net = require('net');
 const bus = require('./cellCommandBus.js');
 const registry = require('./cellRegistry.js');
 const forensic = require('./cellForensic.js');
-try { forensic.append('threadpool_tuned_ok', { size: 64, pid: process.pid }); } catch {}
 
 const idx = Math.max(0, parseInt(process.env.WORKER_SHARD_INDEX || '0', 10) || 0);
 const port = Math.max(

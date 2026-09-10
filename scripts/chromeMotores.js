@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * Isolamento de motores: 1 worker = 1 clone oficial do Chrome.
- * userDataDir das contas permanece no cofre original (User Data\\Conveniente\\<nome>).
- * Sem fallback para o chrome.exe unificado do Windows.
+ * Chrome unico: todos os workers usam o chrome.exe oficial do Windows.
+ * userDataDir das contas permanece no cofre (User Data\\Conveniente\\<nome>).
+ * Nao clona pasta em C:\\conveniente\\motores.
  */
 
 const fs = require('fs');
@@ -434,17 +434,11 @@ function shardIndex1FromEnv() {
 
 function resolveWorkerExeOrFatal() {
   if (String(process.env.IS_WORKER_CHILD || '') !== '1') {
-    fatal('launch de conta so no worker. Sem fallback ao Chrome unificado.');
+    fatal('launch de conta so no worker.');
   }
-  const n = shardIndex1FromEnv();
-  if (!n) fatal('WORKER_SHARD_INDEX ausente ou invalido no worker');
-  const exe = motorExe(n);
-  if (!fs.existsSync(exe)) {
-    fatal('motor ausente para este worker. Boot abortado.', { worker: n, exe });
-  }
-  const expected = String(process.env.CHROME_MOTOR_EXE || '').trim();
-  if (expected && path.normalize(expected).toLowerCase() !== path.normalize(exe).toLowerCase()) {
-    fatal('CHROME_MOTOR_EXE nao bate com o motor deste worker', { worker: n, exe, expected });
+  const exe = findMasterChromeExe();
+  if (!exe || !fs.existsSync(exe)) {
+    fatal('Chrome oficial do Windows nao encontrado em Program Files / LocalAppData');
   }
   return exe;
 }
@@ -454,94 +448,47 @@ function resolveLaunchExeOrFatal() {
 }
 
 function ensureWorkers(capacity, { purge = false } = {}) {
-  const n = Math.max(1, Math.floor(Number(capacity) || 0));
-  if (!n) fatal('capacidade de motores invalida');
-
   let purgeInfo = null;
   if (purge) purgeInfo = hardPurgeChrome();
 
   const masterExe = findMasterChromeExe();
   if (!masterExe) {
-    fatal('Chrome mestre do Windows nao encontrado em Program Files / LocalAppData');
+    fatal('Chrome oficial do Windows nao encontrado em Program Files / LocalAppData');
   }
   const masterVer = readExeVersion(masterExe);
   if (!masterVer || !masterVer.full) {
-    fatal('nao consegui ler a versao do Chrome mestre', { masterExe });
-  }
-  const masterDir = path.dirname(masterExe);
-
-  try {
-    fs.mkdirSync(MOTORES_ROOT, { recursive: true });
-  } catch (e) {
-    fatal('nao consegui criar C:\\conveniente\\motores', { error: e && e.message || String(e) });
-  }
-  sweepTrashMotors();
-
-  const cloned = [];
-  const reused = [];
-  say('[MULTI_ENGINE] capacidade=' + n + ' (teto RAM/divisor) mestre=' + masterVer.full + ' purge=' + !!purge);
-  for (let i = 1; i <= n; i++) {
-    const dest = motorDir(i);
-    const exe = motorExe(i);
-    const exists = fs.existsSync(exe);
-    if (exists) {
-      const local = readExeVersion(exe);
-      const same = !!(local && local.full === masterVer.full);
-      if (same || !purge) {
-        reused.push(i);
-        say('[MULTI_ENGINE] w' + i + ' ok' + (same ? ' versao=' + local.full : ' (em uso, troca de versao so no proximo Iniciar)'));
-        continue;
-      }
-    }
-    if (!purge && exists) continue;
-    say('[MULTI_ENGINE] w' + i + ' criando clone do Chrome mestre (atualiza por cima, sem apagar a pasta inteira)...');
-    cloneMasterTo(dest, masterDir, masterVer);
-    cloned.push(i);
-    say('[MULTI_ENGINE] w' + i + ' pronto ' + dest);
-  }
-
-  const deleted = purge ? deleteObsoleteMotors(n) : [];
-  const engines = [];
-  for (let i = 1; i <= n; i++) {
-    const exe = motorExe(i);
-    if (!fs.existsSync(exe)) fatal('motor faltando apos sync', { worker: i, exe });
-    const ver = readExeVersion(exe);
-    if (purge && (!ver || ver.full !== masterVer.full)) {
-      fatal('motor com versao divergente apos sync', { worker: i, master: masterVer.full, clone: ver && ver.full || null });
-    }
-    engines.push({ worker: i, exe, version: (ver && ver.full) || null });
+    fatal('nao consegui ler a versao do Chrome oficial', { masterExe });
   }
 
   const rec = {
     ok: true,
-    kind: 'multi_engine',
+    kind: 'single_engine',
     tag: 'MULTI_ENGINE_OK',
     ts: Date.now(),
     iso: new Date().toISOString(),
     hostname: os.hostname(),
-    capacity: n,
-    nodes: n,
+    capacity: 1,
+    nodes: Math.max(1, Math.floor(Number(capacity) || 1)),
     masterExe,
     masterVersion: masterVer.full,
-    cloned,
-    reused,
-    deletedObsolete: deleted,
+    cloned: [],
+    reused: [1],
+    deletedObsolete: [],
     purged: !!purge,
     purgeInfo,
-    engines,
+    engines: [{ worker: 1, exe: masterExe, version: masterVer.full }],
     userDataDirPolicy: 'User Data\\Conveniente\\<nome> intacto'
   };
   writeLast(rec);
   try {
     logger.info('[MULTI_ENGINE_OK]', {
       ts: rec.iso,
-      capacidade: n,
+      kind: 'single_engine',
       versao: masterVer.full,
-      clonados: cloned.join(',') || '0',
-      reuso: reused.join(',') || '0'
+      exe: masterExe
     });
   } catch {}
-  say('[MULTI_ENGINE_OK] ' + rec.iso + ' capacidade=' + n + ' versao=' + masterVer.full);
+  say('[MULTI_ENGINE_OK] chrome unico ' + rec.iso + ' versao=' + masterVer.full + ' exe=' + masterExe);
   return rec;
 }
 

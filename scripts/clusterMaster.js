@@ -380,7 +380,6 @@ async function createCluster() {
   async function spawnWorker(idx, shardNames) {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
-    env.UV_THREADPOOL_SIZE = '64';
     env.IS_WORKER_CHILD = '1';
     env.CONVENIENTE_CELL = '1';
     env.WORKER_SHARD_INDEX = String(idx);
@@ -394,9 +393,9 @@ async function createCluster() {
       'city-collector-shards',
       `w${idx + 1}`
     );
-    const motorExe = chromeMotores.motorExe(idx + 1);
-    if (!fs.existsSync(motorExe)) {
-      throw new Error('MULTI_ENGINE_FATAL: motor ausente no spawn w' + (idx + 1) + ' ' + motorExe);
+    const motorExe = chromeMotores.findMasterChromeExe();
+    if (!motorExe || !fs.existsSync(motorExe)) {
+      throw new Error('CHROME_OFFICIAL_MISSING: Chrome do Windows nao encontrado para o worker ' + (idx + 1));
     }
     env.CHROME_PATH = motorExe;
     env.CHROME_MOTOR_EXE = motorExe;

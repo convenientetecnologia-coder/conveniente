@@ -385,11 +385,10 @@ function Start-ConvenienteNode {
         if ($hwndShow -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndShow, 1) }
     } catch {}
     Write-Host ''
-    Write-Host 'CONVENIENTE — motores do Chrome'
-    Write-Host 'Fechando chrome.exe orfao e clonando o TETO do servidor (RAM / divisor).'
-    Write-Host '64 GB e 8 GB por worker = w1 ate w8, mesmo com 3 contas. Conta nova nao clona no meio do expediente.'
-    Write-Host 'Primeira vez (ou Chrome atualizou): copia o Chrome oficial para C:\conveniente\motores\'
-    Write-Host 'Se faltar 1 motor do teto, o index NAO sobe.'
+    Write-Host 'CONVENIENTE — Chrome unico'
+    Write-Host 'Fechando chrome.exe orfao e conferindo o Chrome oficial do Windows.'
+    Write-Host 'Um chrome.exe para todos os workers. Sem clone em C:\conveniente\motores.'
+    Write-Host 'Se o Chrome oficial nao existir, o index NAO sobe.'
     Write-Host ''
     & taskkill.exe /F /IM chrome.exe 1>$null 2>$null
     & taskkill.exe /F /IM crashpad_handler.exe 1>$null 2>$null
@@ -398,12 +397,12 @@ function Start-ConvenienteNode {
     if (-not $mot -or $mot.ExitCode -ne 0) {
         Write-StartLog ('motores_fatal exit=' + $(if ($mot) { $mot.ExitCode } else { 'null' }))
         Write-Host ''
-        Write-Host 'MULTI_ENGINE_FATAL: falha ao clonar/validar motores. Sistema NAO iniciou. Sem fallback ao Chrome unico.' -ForegroundColor Red
+        Write-Host 'CHROME_OFFICIAL_MISSING: Chrome do Windows ausente. Sistema NAO iniciou.' -ForegroundColor Red
         return 1
     }
     Write-StartLog 'motores_ok'
     Write-Host ''
-    Write-Host 'Motores ok. Subindo o Conveniente.'
+    Write-Host 'Chrome unico ok. Subindo o Conveniente.'
     try {
         $hwndHide = [Native.Win]::GetConsoleWindow()
         if ($hwndHide -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndHide, 0) }

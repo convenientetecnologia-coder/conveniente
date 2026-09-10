@@ -36,37 +36,29 @@ const launchBlock = (browser.split("GUARDA: Chrome Stable only")[1] || browser.s
 const cityLaunch = city.split("createCollectorRuntime")[1] || "";
 
 check("modulo_existe", fs.existsSync(path.join(root, "scripts", "chromeMotores.js")));
-check("root_motores", /C:\\\\conveniente\\\\motores/.test(mot) || /C:\\conveniente\\motores/.test(mot));
 check("taskkill_modulo", /taskkill/.test(mot) && /chrome\.exe/.test(mot));
-check("sem_fallback_modulo", /Sem fallback/.test(mot) && /MULTI_ENGINE_FATAL/.test(mot));
+check("chrome_unico", /single_engine/.test(mot) && /findMasterChromeExe/.test(mot));
 check("log_ok", /MULTI_ENGINE_OK/.test(mot) && /multi_engine\.log/.test(mot));
-check("progresso_clone", /criando clone/.test(mot));
+check("nao_clona_no_ensure", /kind: 'single_engine'/.test(mot) && !/criando clone do Chrome mestre/.test(mot.split("function ensureWorkers")[1] || ""));
 check("userdatadir_intacto_modulo", /User Data\\\\Conveniente/.test(mot) || /Conveniente\\<nome>/.test(mot));
 check("browser_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(browser));
-check("browser_launch_nao_usa_stable", !/const executablePath = findChromeStable\(\)/.test(browser));
 check("city_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(cityLaunch));
-check("city_sem_programfiles_fallback", !/PROGRAMFILES[\s\S]{0,80}chrome\.exe/.test(cityLaunch.slice(0, 2500)));
-check("cluster_ensure_boot", /hardwareNodes/.test(cluster) && /ensureWorkers\(motorCapacity, \{ purge: true \}\)/.test(cluster));
+check("cluster_ensure_boot", /hardwareNodes/.test(cluster) && /ensureWorkers\(motorCapacity/.test(cluster));
 check("cluster_ensure_grow", /purge: false/.test(cluster) && /hardwareNodes/.test(cluster));
-check("boot_cli_teto", /hardwareNodes/.test(mot) && /ensureWorkers\(capacity, \{ purge: true \}\)/.test(mot));
-check("grow_nao_apaga_em_uso", /if \(!purge && exists\)/.test(mot) || /em uso, troca de versao so no proximo Iniciar/.test(mot));
-check("cluster_env_motor", /CHROME_MOTOR_EXE/.test(cluster) && /CHROME_PATH = motorExe/.test(cluster));
+check("boot_cli_teto", /ensureWorkers\(capacity, \{ purge: true \}\)/.test(mot));
+check("cluster_env_chrome_oficial", /findMasterChromeExe/.test(cluster) && /CHROME_PATH = motorExe/.test(cluster));
 check("iniciar_taskkill", /taskkill\.exe \/F \/IM chrome\.exe/.test(iniciar));
 check("iniciar_boot_js", /chromeMotores\.js/.test(iniciar) && /--boot/.test(iniciar));
 check("iniciar_abort", /motores_fatal/.test(iniciar) && /NAO iniciou/.test(iniciar));
-check("index_exit_fatal", /process\.exit\(1\)/.test(indexJs) && /Sem fallback ao Chrome unificado/.test(indexJs));
 check("dash_allowlist", /multi_engine_last:/.test(dash) && /multi_engine_log:/.test(dash));
-check("iniciar_mostra_copia", /motores do Chrome/.test(iniciar) && /ForegroundColor Red/.test(iniciar));
+check("iniciar_chrome_unico", /Chrome unico/.test(iniciar) && /ForegroundColor Red/.test(iniciar));
 check("gitignore_motores", /motores\//.test(gitignore));
 check("gitignore_last", /multi_engine_last\.json/.test(gitignore));
-check("tp_index_set_antes_require", /UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(indexBeforeRequire));
-check("tp_index_trava_exit", /process\.exit\(1\)/.test(indexBeforeRequire) && /UV_THREADPOOL_SIZE/.test(indexBeforeRequire));
-check("tp_cell_set_antes_require", /UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cellBeforeRequire));
-check("tp_cell_trava_exit", /process\.exit\(1\)/.test(cellBeforeRequire));
-check("tp_worker_trava_antes_require", /UV_THREADPOOL_SIZE/.test(workerBeforeRequire) && /process\.exit\(1\)/.test(workerBeforeRequire));
-check("tp_worker_nao_seta_se_modulo", /require\.main === module/.test(workerBeforeRequire));
-check("tp_spawn_env_64", /env\.UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cluster));
-check("tp_carimbo_ok", /THREADPOOL_TUNED_OK/.test(indexJs));
+check("tp_index_sem_64", !/UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(indexBeforeRequire));
+check("tp_cell_sem_64", !/UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cellBeforeRequire));
+check("tp_worker_sem_trava", !/UV_THREADPOOL_SIZE/.test(workerBeforeRequire));
+check("tp_spawn_sem_64", !/env\.UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(cluster));
+check("tp_sem_carimbo_64", !/THREADPOOL_TUNED_OK/.test(indexJs));
 check("userdatadir_browser_intacto", /User Data\\Conveniente/.test(read("scripts/browser.js")) || /Conveniente', manifest\.nome/.test(browser));
 
 if (failed) {

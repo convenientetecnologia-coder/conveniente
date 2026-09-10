@@ -1,11 +1,4 @@
 // scripts/worker.js
-if (require.main === module) {
-  process.env.UV_THREADPOOL_SIZE = '64';
-}
-if (String(process.env.UV_THREADPOOL_SIZE || '').trim() !== '64') {
-  console.error('\x1b[31m[THREADPOOL] FATAL: UV_THREADPOOL_SIZE obrigatorio=64, lido=' + JSON.stringify(process.env.UV_THREADPOOL_SIZE) + '. Abortando boot.\x1b[0m');
-  process.exit(1);
-}
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1087,7 +1080,6 @@ try {
       shardIndex: Number(process.env.WORKER_SHARD_INDEX || 0) || 0
     }
   });
-  require('./indexLifecycle.js').append('threadpool_tuned_ok', { size: 64 });
 } catch {}
 try { require('./processDiagnostics.js').install({ role: 'worker' }); } catch {}
 try {

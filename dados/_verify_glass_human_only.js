@@ -48,8 +48,12 @@ check("blindar_no_glass", !/async function _blindarOnce[\s\S]{0,700}applyGlassVi
 check("bring_maximizes_window", /async function bringWindowToFront[\s\S]{0,700}maximizeWindow/.test(browserSrc));
 check("bring_no_apply_glass", !/async function bringWindowToFront[\s\S]{0,700}applyGlassViewer/.test(browserSrc));
 check("boot_start_maximized", browserSrc.includes("'--start-maximized'"));
+check("boot_no_window_size", !/--window-size=/.test(browserSrc));
+check("boot_no_window_position", !/--window-position=/.test(browserSrc));
 check("boot_cdp_maximized", /windowState: 'maximized'/.test(browserSrc));
+check("boot_no_cdp_sized_bounds", !/bounds:\s*\{[\s\S]{0,120}windowState:\s*'normal'[\s\S]{0,80}left:\s*windowBounds/.test(browserSrc));
 check("prefs_maximized", /maximized:\s*true/.test(browserSrc));
+check("prefs_no_preset_placement", !/right:\s*left \+ width/.test(browserSrc));
 check("invoke_uses_first_live", /async function invocarHumano[\s\S]{0,600}firstLivePage\(browser\)/.test(browserSrc));
 check("invoke_enables_glass", browserSrc.includes("glassViewer.enableGlassForHuman(page, { source: 'invocarHumano' })"));
 {

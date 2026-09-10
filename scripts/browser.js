@@ -1981,8 +1981,9 @@ function writeJsonAtomic(file, obj) {
  * - Força: profile.exit_type="Normal", profile.exited_cleanly=true
  * - Força: session.restore_on_startup=0 (Nova guia), startup_urls=[]
  * - Em "Local State": exited_cleanly=true
+ * - Janela: só maximized. Sem tamanho/posição do preset (dance da moldura).
  */
-function ensureChromeProfilePreferences(userDataDir, windowBounds) {
+function ensureChromeProfilePreferences(userDataDir) {
   try {
     if (!userDataDir) return;
 
@@ -1997,20 +1998,8 @@ function ensureChromeProfilePreferences(userDataDir, windowBounds) {
     prefs.session = prefs.session || {};
     prefs.session.restore_on_startup = 0; // 0: Nova guia
     prefs.session.startup_urls = [];
-    if (windowBounds && Number(windowBounds.width) >= 800 && Number(windowBounds.height) >= 600) {
-      const left = Math.floor(Number(windowBounds.left) || 0);
-      const top = Math.floor(Number(windowBounds.top) || 0);
-      const width = Math.floor(Number(windowBounds.width));
-      const height = Math.floor(Number(windowBounds.height));
-      prefs.browser = prefs.browser || {};
-      prefs.browser.window_placement = {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-        maximized: true
-      };
-    }
+    prefs.browser = prefs.browser || {};
+    prefs.browser.window_placement = { maximized: true };
     writeJsonAtomic(prefsPath, prefs);
 
     // Local State
@@ -2340,7 +2329,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     const accountNome = String((manifest && manifest.nome) || nome || '').trim();
     let launchAntiState = null;
     try { launchAntiState = await syncStealthFromManifest(accountNome, manifest); } catch {}
-    const windowBounds = resolveAccountWindowBounds(manifest);
 
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
       logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
@@ -2352,7 +2340,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
     try { clearChromeSessionRestore(userDataDir); } catch {}
-    ensureChromeProfilePreferences(userDataDir, windowBounds);
+    ensureChromeProfilePreferences(userDataDir);
 
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
@@ -2376,8 +2364,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
       '--disk-cache-size=104857600', // 100MB de cap em disco
       '--media-cache-size=0', // Zero cache de mídia
-      `--window-size=${windowBounds.width},${windowBounds.height}`,
-      `--window-position=${windowBounds.left},${windowBounds.top}`,
       '--start-maximized'
     ];
 
@@ -2516,21 +2502,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
     // Permaneça inativo aqui.
 
-    // 2) Janela maximizada no monitor. Restore-down fica no preset da conta.
+    // 2) Janela maximizada no monitor. Sem tamanho/posição do preset (Windows nativo).
     try {
       const first = (await browser.pages())[0];
       await chromeHeapFaxina.withEphemeralCdpSession(first, async (client) => {
         const { windowId } = await client.send('Browser.getWindowForTarget');
-        await client.send('Browser.setWindowBounds', {
-          windowId,
-          bounds: {
-            windowState: 'normal',
-            left: windowBounds.left,
-            top: windowBounds.top,
-            width: windowBounds.width,
-            height: windowBounds.height
-          }
-        });
         await client.send('Browser.setWindowBounds', {
           windowId,
           bounds: { windowState: 'maximized' }
