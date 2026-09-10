@@ -395,6 +395,9 @@ async function createCluster() {
       }
     } else {
       try {
+        cellRegistry.reapPort(child.port || cellRegistry.portForIdx(idx), { keepPids: [process.pid] });
+      } catch {}
+      try {
         require('./indexLifecycle.js').append('worker_drop_skip_reap', {
           idx: idx + 1,
           code: code == null ? null : Number(code),
@@ -526,12 +529,17 @@ async function createCluster() {
       const started = Date.now();
       while ((Date.now() - started) < 20000) {
         if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
-        if (await connectCellSocket(child, idx)) return true;
+        const heardPid = cellRegistry.pidForIdx(idx);
+        if (heardPid && Number(heardPid) === Number(child.pid)) {
+          if (await connectCellSocket(child, idx)) return true;
+        }
         await new Promise((r) => setTimeout(r, 120));
       }
       return false;
     })();
     if (!connected) {
+      try { cellRegistry.killPid(child.pid); } catch {}
+      try { cellRegistry.reapPort(child.port, { keepPids: [process.pid] }); } catch {}
       throw new Error('CELL_LISTEN_TIMEOUT: w' + (idx + 1) + ' port ' + child.port);
     }
     try {

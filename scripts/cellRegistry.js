@@ -174,6 +174,28 @@ function setMaestroPid(pid) {
   write(reg);
 }
 
+function pidForIdx(idx) {
+  const i = Math.max(0, Math.floor(Number(idx) || 0));
+  try {
+    const row = (read().cells || []).find((c) => Number(c && c.idx) === i);
+    const n = Math.floor(Number(row && row.pid) || 0);
+    return n > 4 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function killPid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (n <= 4) return;
+  try {
+    spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
+      windowsHide: true,
+      timeout: 8000
+    });
+  } catch {}
+}
+
 function clearDead() {
   const reg = read();
   reg.cells = (reg.cells || []).filter((c) => pidAlive(c && c.pid));
@@ -192,6 +214,8 @@ module.exports = {
   reapPort,
   reapPorts,
   portForIdx,
+  pidForIdx,
+  killPid,
   listAlive,
   hasAliveCells,
   upsertCell,
