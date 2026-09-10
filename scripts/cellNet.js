@@ -51,4 +51,31 @@ function waitPortOpen(port, { timeoutMs = 60000, intervalMs = 120 } = {}) {
   });
 }
 
-module.exports = { writeJsonLine, attachLineParser, waitPortOpen };
+function waitPortFree(port, { timeoutMs = 15000, intervalMs = 250 } = {}) {
+  const net = require('net');
+  const started = Date.now();
+  const n = Number(port) || 0;
+  if (!Number.isFinite(n) || n <= 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const tryOnce = () => {
+      const sock = net.connect({ host: '127.0.0.1', port: n });
+      const retry = () => {
+        try { sock.destroy(); } catch {}
+        if ((Date.now() - started) >= timeoutMs) return resolve(false);
+        setTimeout(tryOnce, intervalMs);
+      };
+      sock.once('connect', () => {
+        try { sock.end(); } catch {}
+        retry();
+      });
+      sock.once('error', () => {
+        try { sock.destroy(); } catch {}
+        resolve(true);
+      });
+      sock.setTimeout(600, retry);
+    };
+    tryOnce();
+  });
+}
+
+module.exports = { writeJsonLine, attachLineParser, waitPortOpen, waitPortFree };

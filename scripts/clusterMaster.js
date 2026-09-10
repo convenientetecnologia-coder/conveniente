@@ -14,7 +14,7 @@ const chromeMotores = require('./chromeMotores.js');
 const cellRegistry = require('./cellRegistry.js');
 const cellForensic = require('./cellForensic.js');
 const cellLifecycle = require('./cellLifecycle.js');
-const { writeJsonLine, attachLineParser } = require('./cellNet.js');
+const { writeJsonLine, attachLineParser, waitPortFree } = require('./cellNet.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -138,6 +138,8 @@ async function createCluster() {
 
   const children = [];
   const route = {};
+  const spawnInFlight = Object.create(null);
+  const CELL_HEARD_MIN_MS = 8000;
   let isShuttingDown = false;
   let standbySweep = null;
   let rebalanceTail = Promise.resolve();
@@ -258,6 +260,7 @@ async function createCluster() {
   function bindCellSocket(child, idx, sock) {
     try { if (child.socket && child.socket !== sock) child.socket.destroy(); } catch {}
     child.socket = sock;
+    child.heardAt = Date.now();
     try { sock.setNoDelay(true); } catch {}
     child.netSend = (obj) => writeJsonLine(sock, obj);
     attachLineParser(sock, (msg) => handleCellInbound(child, idx, msg));
@@ -292,69 +295,128 @@ async function createCluster() {
     });
   }
 
+  function kickRespawn(idx, delayMs) {
+    const wait = Math.max(2000, Number(delayMs) || 2000);
+    setTimeout(() => {
+      if (isShuttingDown) return;
+      if (spawnInFlight[idx]) return;
+      const target = children[idx];
+      const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
+      logger.info('[CLUSTER] respawnando worker', { idx: idx + 1, delayMs: wait });
+      spawnWorker(idx, shardNames).then((fresh) => {
+        applyFreshChild(idx, fresh);
+      }).catch((e) => {
+        logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
+        try {
+          require('./indexLifecycle.js').append('cell_respawn_fail', {
+            idx: idx + 1,
+            error: String((e && e.message) || e || '').slice(0, 180)
+          });
+        } catch {}
+        kickRespawn(idx, 8000);
+      });
+    }, wait);
+  }
+
+  function applyFreshChild(idx, fresh) {
+    const target = children[idx];
+    if (!target) {
+      children[idx] = fresh;
+      return fresh;
+    }
+    target.proc = fresh.proc;
+    target.pending = fresh.pending;
+    target.pid = fresh.pid;
+    target.port = fresh.port;
+    target.socket = fresh.socket;
+    target.netSend = fresh.netSend;
+    target.adopted = !!fresh.adopted;
+    target.deadHandled = false;
+    target.shard = fresh.shard;
+    target.heardAt = fresh.heardAt || null;
+    return target;
+  }
+
   function onCellDeath(idx, { code, signal, pid } = {}) {
     const child = children[idx];
     if (!child || child.deadHandled) return;
     if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
     child.deadHandled = true;
-    logger.warn('[CLUSTER] worker dropado', { idx, code, signal, pid: pid || child.pid });
-    try {
-      require('./crashHammer.js').scheduleWorkerDrop({
-        idx: idx + 1,
-        code: code == null ? null : Number(code),
-        signal: signal == null ? null : String(signal),
-        workerPid: pid || (child && child.pid) || null,
-        shard: child && child.shard ? child.shard.size : (blocks[idx] || []).length
-      });
-    } catch {}
-    try { cellForensic.append('cell_drop', { idx: idx + 1, code, signal, pid: pid || child.pid }); } catch {}
+    const heardAt = Number(child.heardAt) || 0;
+    const heardMs = heardAt ? Math.max(0, Date.now() - heardAt) : 0;
+    const neverStayed = !child.adopted && (!heardAt || heardMs < CELL_HEARD_MIN_MS);
+    const inflight = !!spawnInFlight[idx];
+    const skipReap = neverStayed || inflight;
+    logger.warn('[CLUSTER] worker dropado', {
+      idx,
+      code,
+      signal,
+      pid: pid || child.pid,
+      neverStayed,
+      heardMs,
+      inflight
+    });
+    try { cellForensic.append('cell_drop', { idx: idx + 1, code, signal, pid: pid || child.pid, neverStayed, heardMs }); } catch {}
     for (const [msgId, { resolve }] of (child.pending || new Map()).entries()) {
       try { resolve({ ok: false, error: 'worker_died' }); } catch {}
     }
     try { child.pending.clear(); } catch {}
     if (isShuttingDown) return;
-    try {
-      const dyingShard = child && child.shard ? Array.from(child.shard) : (blocks[idx] || []);
-      const reap = require('./orphanReaper.js').reapShard({
-        names: dyingShard,
-        shardIdx: idx,
-        reason: 'worker_drop'
-      });
+
+    if (!skipReap) {
       try {
-        require('./indexLifecycle.js').append('worker_drop_reap', {
+        require('./crashHammer.js').scheduleWorkerDrop({
           idx: idx + 1,
           code: code == null ? null : Number(code),
           signal: signal == null ? null : String(signal),
-          shard: dyingShard.length,
-          killed: reap && reap.killed != null ? reap.killed : null
+          workerPid: pid || (child && child.pid) || null,
+          shard: child && child.shard ? child.shard.size : (blocks[idx] || []).length
         });
       } catch {}
-    } catch (e) {
-      try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
+      try {
+        const dyingShard = child && child.shard ? Array.from(child.shard) : (blocks[idx] || []);
+        const reap = require('./orphanReaper.js').reapShard({
+          names: dyingShard,
+          shardIdx: idx,
+          reason: 'worker_drop'
+        });
+        try {
+          require('./indexLifecycle.js').append('worker_drop_reap', {
+            idx: idx + 1,
+            code: code == null ? null : Number(code),
+            signal: signal == null ? null : String(signal),
+            shard: dyingShard.length,
+            killed: reap && reap.killed != null ? reap.killed : null
+          });
+        } catch {}
+      } catch (e) {
+        try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
+      }
+    } else {
+      try {
+        require('./indexLifecycle.js').append('worker_drop_skip_reap', {
+          idx: idx + 1,
+          code: code == null ? null : Number(code),
+          signal: signal == null ? null : String(signal),
+          heardMs,
+          inflight,
+          reason: inflight ? 'spawn_in_flight' : 'never_stayed'
+        });
+      } catch {}
     }
-    setTimeout(() => {
-      if (isShuttingDown) return;
-      const target = children[idx];
-      const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
-      logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
-      spawnWorker(idx, shardNames).then((fresh) => {
-        if (!target) {
-          children.push(fresh);
-          return;
-        }
-        target.proc = fresh.proc;
-        target.pending = fresh.pending;
-        target.pid = fresh.pid;
-        target.port = fresh.port;
-        target.socket = fresh.socket;
-        target.netSend = fresh.netSend;
-        target.adopted = false;
-        target.deadHandled = false;
-        target.shard = fresh.shard;
-      }).catch((e) => {
-        logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
-      });
-    }, 2000);
+
+    if (inflight) {
+      try {
+        require('./indexLifecycle.js').append('cell_death_during_spawn', {
+          idx: idx + 1,
+          pid: pid || child.pid,
+          reason: 'spawn_in_flight'
+        });
+      } catch {}
+      return;
+    }
+
+    kickRespawn(idx, neverStayed ? 8000 : 2000);
   }
 
   function spawnDetachedCell(idx, shardNames, env) {
@@ -377,7 +439,7 @@ async function createCluster() {
     return proc;
   }
 
-  async function spawnWorker(idx, shardNames) {
+  async function spawnWorkerUnlocked(idx, shardNames) {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
@@ -415,7 +477,8 @@ async function createCluster() {
       socket: null,
       netSend: null,
       adopted: false,
-      deadHandled: false
+      deadHandled: false,
+      heardAt: null
     };
 
     const aliveRow = (cellRegistry.listAlive() || []).find((r) => Number(r.idx) === idx);
@@ -455,12 +518,21 @@ async function createCluster() {
       });
     } catch {}
 
+    const portFree = await waitPortFree(child.port, { timeoutMs: 20000, intervalMs: 250 });
+    if (!portFree) {
+      try {
+        logger.warn('[CLUSTER] porta da célula ainda ocupada', { idx: idx + 1, port: child.port });
+        require('./indexLifecycle.js').append('cell_port_wait_busy', { idx: idx + 1, port: child.port });
+      } catch {}
+    }
+
     const proc = spawnDetachedCell(idx, shardNames, env);
     child.proc = proc;
     child.pid = proc.pid || null;
     const connected = await (async () => {
       const started = Date.now();
       while ((Date.now() - started) < 90000) {
+        if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
         if (await connectCellSocket(child, idx)) return true;
         await new Promise((r) => setTimeout(r, 150));
       }
@@ -480,6 +552,19 @@ async function createCluster() {
       cellForensic.append('cell_spawn', { idx: idx + 1, pid: child.pid, port: child.port, shard: shardNames.length });
     } catch {}
     return child;
+  }
+
+  async function spawnWorker(idx, shardNames) {
+    if (spawnInFlight[idx]) return spawnInFlight[idx];
+    const job = (async () => {
+      try {
+        return await spawnWorkerUnlocked(idx, shardNames);
+      } finally {
+        if (spawnInFlight[idx] === job) delete spawnInFlight[idx];
+      }
+    })();
+    spawnInFlight[idx] = job;
+    return job;
   }
 
   const motorCapacity = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || blocks.length);

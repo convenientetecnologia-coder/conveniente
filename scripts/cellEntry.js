@@ -31,18 +31,13 @@ const server = net.createServer((socket) => {
   } catch {}
 });
 
-server.on('error', (err) => {
-  try {
-    forensic.append('cell_listen_fail', {
-      idx: idx + 1,
-      port,
-      error: err && err.message ? String(err.message).slice(0, 180) : String(err)
-    });
-  } catch {}
-  process.exit(1);
-});
+let listenTries = 0;
+let booted = false;
+const MAX_LISTEN_TRIES = 12;
 
-server.listen(port, '127.0.0.1', () => {
+function onListening() {
+  if (booted) return;
+  booted = true;
   try {
     registry.upsertCell({
       idx,
@@ -58,4 +53,42 @@ server.listen(port, '127.0.0.1', () => {
     forensic.append('cell_listen', { idx: idx + 1, port, pid: process.pid });
   } catch {}
   require('./worker.js');
-});
+}
+
+function startListen() {
+  try {
+    server.listen(port, '127.0.0.1', onListening);
+  } catch (err) {
+    onListenError(err);
+  }
+}
+
+function onListenError(err) {
+  listenTries += 1;
+  const code = String((err && err.code) || '');
+  const msg = String((err && err.message) || err || '');
+  const busy = code === 'EADDRINUSE' || /EADDRINUSE/i.test(msg);
+  if (busy && listenTries < MAX_LISTEN_TRIES) {
+    try {
+      forensic.append('cell_listen_retry', {
+        idx: idx + 1,
+        port,
+        try: listenTries,
+        error: (code || msg).slice(0, 80)
+      });
+    } catch {}
+    setTimeout(startListen, 500);
+    return;
+  }
+  try {
+    forensic.append('cell_listen_fail', {
+      idx: idx + 1,
+      port,
+      error: msg.slice(0, 180)
+    });
+  } catch {}
+  process.exit(1);
+}
+
+server.on('error', onListenError);
+startListen();
