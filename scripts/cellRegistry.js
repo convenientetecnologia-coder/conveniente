@@ -63,40 +63,75 @@ function pidAlive(pid) {
   }
 }
 
+function parseNetstatListening(out, want) {
+  const map = new Map();
+  for (const line of String(out || '').split(/\r?\n/)) {
+    const parts = String(line || '').trim().split(/\s+/);
+    if (parts.length < 4) continue;
+    if (!/^TCP$/i.test(parts[0])) continue;
+    const pid = Math.floor(Number(parts[parts.length - 1]) || 0);
+    const state = String(parts[parts.length - 2] || '');
+    if (!/LISTEN/i.test(state) || pid <= 4) continue;
+    const local = String(parts[1] || '');
+    const localPort = Number(String(local).split(':').pop());
+    if (!want.has(localPort)) continue;
+    const arr = map.get(localPort) || [];
+    if (arr.indexOf(pid) < 0) arr.push(pid);
+    map.set(localPort, arr);
+  }
+  return map;
+}
+
 function listListeningPidsByPort(ports) {
   const want = new Set(
     (Array.isArray(ports) ? ports : [ports])
       .map((p) => Math.floor(Number(p) || 0))
       .filter((p) => p > 0)
   );
-  const map = new Map();
-  if (!want.size || process.platform !== 'win32') return map;
-  let out = '';
+  const empty = new Map();
+  if (!want.size || process.platform !== 'win32') return empty;
+  const tryNetstat = (args) => {
+    try {
+      const r = spawnSync('netstat.exe', args, {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 12000,
+        maxBuffer: 8 * 1024 * 1024
+      });
+      return parseNetstatListening((r && r.stdout) || '', want);
+    } catch {
+      return empty;
+    }
+  };
+  let map = tryNetstat(['-ano']);
+  if (!map.size) map = tryNetstat(['-ano', '-p', 'tcp']);
+  if (map.size) return map;
   try {
-    const r = spawnSync('netstat.exe', ['-ano', '-p', 'tcp'], {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 12000,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    out = String((r && r.stdout) || '');
+    const list = Array.from(want);
+    const cmd =
+      'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |' +
+      ' Where-Object { @(' + list.join(',') + ') -contains $_.LocalPort } |' +
+      ' ForEach-Object { "{0} {1}" -f $_.LocalPort, $_.OwningProcess }';
+    const r = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 }
+    );
+    const map2 = new Map();
+    for (const line of String((r && r.stdout) || '').split(/\r?\n/)) {
+      const m = String(line || '').trim().match(/^(\d+)\s+(\d+)$/);
+      if (!m) continue;
+      const port = Math.floor(Number(m[1]) || 0);
+      const pid = Math.floor(Number(m[2]) || 0);
+      if (!want.has(port) || pid <= 4) continue;
+      const arr = map2.get(port) || [];
+      if (arr.indexOf(pid) < 0) arr.push(pid);
+      map2.set(port, arr);
+    }
+    return map2;
   } catch {
-    return map;
+    return empty;
   }
-  for (const line of out.split(/\r?\n/)) {
-    const parts = String(line || '').trim().split(/\s+/);
-    if (parts.length < 5) continue;
-    if (!/^TCP$/i.test(parts[0])) continue;
-    if (!/LISTENING/i.test(parts[3])) continue;
-    const local = String(parts[1] || '');
-    const localPort = Number(local.split(':').pop());
-    const pid = Math.floor(Number(parts[4]) || 0);
-    if (!want.has(localPort) || pid <= 4) continue;
-    const arr = map.get(localPort) || [];
-    if (arr.indexOf(pid) < 0) arr.push(pid);
-    map.set(localPort, arr);
-  }
-  return map;
 }
 
 function listPidsOnPort(port) {

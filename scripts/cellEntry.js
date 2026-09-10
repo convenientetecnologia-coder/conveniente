@@ -20,6 +20,9 @@ process.env.CELL_CMD_PORT = String(port);
 
 const server = net.createServer((socket) => {
   try { socket.setNoDelay(true); } catch {}
+  try {
+    socket.write(JSON.stringify({ type: 'cell_hello', idx, pid: process.pid, port }) + '\n');
+  } catch {}
   bus.attachMaestroSocket(socket);
   try {
     forensic.append('cell_maestro_connected', {
@@ -52,7 +55,9 @@ function onListening() {
   try {
     forensic.append('cell_listen', { idx: idx + 1, port, pid: process.pid });
   } catch {}
-  require('./worker.js');
+  setImmediate(() => {
+    require('./worker.js');
+  });
 }
 
 function startListen() {

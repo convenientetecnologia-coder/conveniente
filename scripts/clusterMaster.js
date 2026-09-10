@@ -179,6 +179,10 @@ async function createCluster() {
   }
 
   function handleCellInbound(child, idx, msg) {
+    if (msg && msg.type === 'cell_hello') {
+      child.helloPid = Math.floor(Number(msg.pid) || 0) || 0;
+      return;
+    }
     if (msg && msg.replyTo && child.pending && child.pending.has(msg.replyTo)) {
       const { resolve } = child.pending.get(msg.replyTo);
       child.pending.delete(msg.replyTo);
@@ -279,17 +283,65 @@ async function createCluster() {
     return new Promise((resolve) => {
       const port = Number(child.port);
       const sock = net.connect({ host: '127.0.0.1', port });
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        resolve(!!ok);
+      };
       const fail = () => {
         try { sock.destroy(); } catch {}
-        resolve(false);
+        done(false);
       };
       sock.once('connect', () => {
         try { sock.setTimeout(0); } catch {}
+        child.helloPid = 0;
         bindCellSocket(child, idx, sock);
-        try {
-          cellForensic.append('cell_maestro_socket', { idx: idx + 1, port, pid: child.pid, adopted: !!child.adopted });
-        } catch {}
-        resolve(true);
+        const t0 = Date.now();
+        const waitHello = () => {
+          if (settled) return;
+          const hp = Math.floor(Number(child.helloPid) || 0);
+          const mine = Math.floor(Number(child.pid) || 0);
+          if (hp && mine && hp !== mine) {
+            try { sock.destroy(); } catch {}
+            child.socket = null;
+            try { cellRegistry.killPid(hp); } catch {}
+            done(false);
+            return;
+          }
+          if (hp && (!mine || hp === mine)) {
+            try {
+              cellForensic.append('cell_maestro_socket', {
+                idx: idx + 1,
+                port,
+                pid: child.pid,
+                helloPid: hp,
+                adopted: !!child.adopted
+              });
+            } catch {}
+            done(true);
+            return;
+          }
+          if ((Date.now() - t0) >= 1200) {
+            if (mine && cellRegistry.pidAlive(mine)) {
+              try {
+                cellForensic.append('cell_maestro_socket', {
+                  idx: idx + 1,
+                  port,
+                  pid: child.pid,
+                  helloPid: 0,
+                  adopted: !!child.adopted
+                });
+              } catch {}
+              done(true);
+              return;
+            }
+            fail();
+            return;
+          }
+          setTimeout(waitHello, 40);
+        };
+        waitHello();
       });
       sock.once('error', fail);
       sock.setTimeout(4000, fail);
@@ -529,15 +581,16 @@ async function createCluster() {
       const started = Date.now();
       while ((Date.now() - started) < 20000) {
         if (child.pid && !cellRegistry.pidAlive(child.pid)) return false;
-        const heardPid = cellRegistry.pidForIdx(idx);
-        if (heardPid && Number(heardPid) === Number(child.pid)) {
-          if (await connectCellSocket(child, idx)) return true;
-        }
+        if (await connectCellSocket(child, idx)) return true;
         await new Promise((r) => setTimeout(r, 120));
       }
       return false;
     })();
     if (!connected) {
+      try { cellRegistry.reapPort(child.port, { keepPids: [process.pid, child.pid] }); } catch {}
+      if (child.pid && !cellRegistry.pidAlive(child.pid)) {
+        throw new Error('CELL_LISTEN_TIMEOUT: w' + (idx + 1) + ' port ' + child.port);
+      }
       try { cellRegistry.killPid(child.pid); } catch {}
       try { cellRegistry.reapPort(child.port, { keepPids: [process.pid] }); } catch {}
       throw new Error('CELL_LISTEN_TIMEOUT: w' + (idx + 1) + ' port ' + child.port);
