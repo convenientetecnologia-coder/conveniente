@@ -10703,8 +10703,9 @@ function attachPageCrashIsolate(nome, page) {
             return;
           }
           if (action === 'annihilate') {
+            if (isOpenAllSessionActive()) return;
             const young = (Date.now() - Number((robeMeta[nome] || {}).activatedAt || 0)) < 60_000;
-            if (browserConnected && (young || isOpenAllSessionActive())) return;
+            if (browserConnected && young) return;
             await annihilateChromeSick(nome, 'page_crash_isolate', { error: msg });
           }
         } catch {}

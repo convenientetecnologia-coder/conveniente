@@ -303,10 +303,18 @@ async function createCluster() {
           const hp = Math.floor(Number(child.helloPid) || 0);
           const mine = Math.floor(Number(child.pid) || 0);
           if (hp && mine && hp !== mine) {
-            try { sock.destroy(); } catch {}
-            child.socket = null;
-            try { cellRegistry.killPid(hp); } catch {}
-            done(false);
+            child.pid = hp;
+            child.adopted = true;
+            try {
+              cellForensic.append('cell_maestro_socket', {
+                idx: idx + 1,
+                port,
+                pid: hp,
+                helloPid: hp,
+                adopted: true
+              });
+            } catch {}
+            done(true);
             return;
           }
           if (hp && (!mine || hp === mine)) {
@@ -356,7 +364,7 @@ async function createCluster() {
       const target = children[idx];
       const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
       logger.info('[CLUSTER] respawnando worker', { idx: idx + 1, delayMs: wait });
-      spawnWorker(idx, shardNames).then((fresh) => {
+      spawnWorker(idx, shardNames, { replaceOccupant: false }).then((fresh) => {
         applyFreshChild(idx, fresh);
       }).catch((e) => {
         logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
@@ -495,7 +503,8 @@ async function createCluster() {
     return proc;
   }
 
-  async function spawnWorkerUnlocked(idx, shardNames) {
+  async function spawnWorkerUnlocked(idx, shardNames, opts) {
+    const replaceOccupant = !!(opts && opts.replaceOccupant);
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
@@ -576,6 +585,45 @@ async function createCluster() {
       });
     } catch {}
 
+    const occupants = (cellRegistry.listPidsOnPort(child.port) || []).filter((p) => p > 4 && p !== process.pid);
+    if (occupants.length) {
+      child.pid = occupants[0];
+      child.adopted = true;
+      const connectedBusy = await (async () => {
+        const started = Date.now();
+        while ((Date.now() - started) < 8000) {
+          if (await connectCellSocket(child, idx)) return true;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return false;
+      })();
+      if (connectedBusy) {
+        try {
+          cellRegistry.upsertCell({
+            idx,
+            pid: child.pid,
+            port: child.port,
+            shard: shardNames,
+            statusFile: env.STATUS_FILE_NAME
+          });
+          cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, via: 'port_busy' });
+        } catch {}
+        return child;
+      }
+      if (!replaceOccupant) {
+        throw new Error('CELL_PORT_BUSY: w' + (idx + 1) + ' port ' + child.port + ' pid ' + child.pid);
+      }
+      for (const p of occupants) {
+        try { cellRegistry.killPid(p); } catch {}
+      }
+      const quietUntil = Date.now() + 3000;
+      while (Date.now() < quietUntil) {
+        const left = (cellRegistry.listPidsOnPort(child.port) || []).filter((p) => p > 4 && p !== process.pid);
+        if (!left.length) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+
     const proc = spawnDetachedCell(idx, shardNames, env);
     child.proc = proc;
     child.pid = proc.pid || null;
@@ -610,11 +658,11 @@ async function createCluster() {
     return child;
   }
 
-  async function spawnWorker(idx, shardNames) {
+  async function spawnWorker(idx, shardNames, opts) {
     if (spawnInFlight[idx]) return spawnInFlight[idx];
     const job = (async () => {
       try {
-        return await spawnWorkerUnlocked(idx, shardNames);
+        return await spawnWorkerUnlocked(idx, shardNames, opts);
       } finally {
         if (spawnInFlight[idx] === job) delete spawnInFlight[idx];
       }
@@ -666,14 +714,14 @@ async function createCluster() {
     const shardNames = blocks[idx] || [];
     let child = null;
     try {
-      child = await spawnWorker(idx, shardNames);
+      child = await spawnWorker(idx, shardNames, { replaceOccupant: true });
     } catch (e) {
       const msg = String((e && e.message) || e || '');
       if (/CHROME_OFFICIAL_MISSING/.test(msg)) throw e;
       try { logger.error('[CLUSTER] spawn falhou', { idx: idx + 1, error: msg }); } catch {}
       try { cellRegistry.reapPort(cellRegistry.portForIdx(idx), { keepPids: [process.pid] }); } catch {}
       try {
-        child = await spawnWorker(idx, shardNames);
+        child = await spawnWorker(idx, shardNames, { replaceOccupant: true });
       } catch (e2) {
         try { logger.error('[CLUSTER] spawn retry falhou', { idx: idx + 1, error: (e2 && e2.message) || e2 }); } catch {}
         child = hollowChild(idx, shardNames);
