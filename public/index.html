@@ -313,7 +313,7 @@
     <button class="add-btn" id="addPerfilBtn">+Nova Conta</button>
     <button class="btn" id="citiesCountBtn">Cidades</button>
     <button class="btn btn-cinza" id="serverConfigBtn">Config Servidor</button>
-    <button class="btn btn-vermelho" id="cellsStopBtn" title="Mata os processos dos workers. Os Chromes daquele worker vão junto. O painel (index) continua. NÃO é o Fechar Todos (Fechar Todos só fecha navegador).">Encerrar workers</button>
+    <button class="btn btn-vermelho" id="cellsStopBtn" title="Mata as células e os Chromes. O painel (index) continua. Fechar Todos só fecha navegador e deixa a célula viva. Depois: Abrir Tudo ou abrir uma conta renasce a célula.">Encerrar workers</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn" title="Fecha os navegadores com calma. As células/workers continuam vivos, só sem Chrome. Use isto antes de atualizar.">Fechar Todos</button>
     <button class="btn btn-cinza" id="autoOpenBtn">Tudo aberto: OFF</button>
@@ -3573,7 +3573,7 @@
       btn.onclick = async () => {
         const ok = await showSystemMessageModal({
           title: 'Encerrar workers',
-          message: 'Isso mata os processos dos workers. Os Chromes daqueles workers vão junto. O painel (index) continua, sem workers. Fechar Todos NÃO faz isso — Fechar Todos só fecha navegador. Depois disto o porteiro NÃO clica em Abrir Tudo: você clica quando quiser. Ctrl+C sozinho (workers vivos) NÃO trava.',
+          message: 'Isso mata as células e os navegadores. O painel (index) continua. Fechar Todos NÃO faz isso — Fechar Todos só fecha navegador e deixa a célula ligada. Depois disto o porteiro NÃO clica em Abrir Tudo: você clica. Abrir Tudo ou abrir uma conta renasce a célula. Ctrl+C com navegador trabalhando NÃO mata célula.',
           tone: 'bad',
           okText: 'Encerrar workers',
           cancelText: 'Cancelar'
@@ -3589,7 +3589,7 @@
           await showSystemMessageModal({
             title: r && r.ok ? 'Workers encerrados' : 'Falha ao encerrar workers',
             message: r && r.ok
-              ? ('Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. git pull se precisar, depois Iniciar Sistema (sobe workers novos fechados).')
+              ? ('Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. Abrir Tudo ou abrir uma conta renasce a célula.')
               : String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')),
             tone: r && r.ok ? 'good' : 'bad'
           });

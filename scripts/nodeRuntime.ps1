@@ -170,21 +170,6 @@ function Ensure-ConvenienteNodeRuntime {
             return $out
         }
 
-        $zipHash = ((Get-FileHash -LiteralPath $manifest.ZipPath -Algorithm SHA256).Hash).ToLowerInvariant()
-        if ($zipHash -ne $manifest.ZipSha256) {
-            $out = [ordered]@{
-                Ok          = $false
-                Error       = 'node_zip_sha256_mismatch'
-                ZipPath     = $manifest.ZipPath
-                ZipSha256   = $zipHash
-                ExpectedSha = $manifest.ZipSha256
-                WantedTag   = $manifest.WantedTag
-            }
-            Write-ConvenienteNodeRuntimeState $out
-            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
-            return $out
-        }
-
         $existing = Test-ConvenienteNodeVersion -NodeExe $manifest.NodeExe -WantedTag $manifest.WantedTag
         if ($existing.ok -and ((-not $RequireNpm) -or (Test-Path -LiteralPath $manifest.NpmCmd))) {
             $out = [ordered]@{
@@ -198,6 +183,21 @@ function Ensure-ConvenienteNodeRuntime {
             }
             Write-ConvenienteNodeRuntimeState $out
             Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_ok' -Data $out
+            return $out
+        }
+
+        $zipHash = ((Get-FileHash -LiteralPath $manifest.ZipPath -Algorithm SHA256).Hash).ToLowerInvariant()
+        if ($zipHash -ne $manifest.ZipSha256) {
+            $out = [ordered]@{
+                Ok          = $false
+                Error       = 'node_zip_sha256_mismatch'
+                ZipPath     = $manifest.ZipPath
+                ZipSha256   = $zipHash
+                ExpectedSha = $manifest.ZipSha256
+                WantedTag   = $manifest.WantedTag
+            }
+            Write-ConvenienteNodeRuntimeState $out
+            Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_fail' -Data $out
             return $out
         }
 

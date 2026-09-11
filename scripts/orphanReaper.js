@@ -361,6 +361,28 @@ function reapShard({ names, shardIdx, reason }) {
   return reapChromeDirs(dirs, reason || "worker_drop");
 }
 
+function countConvenienteChrome() {
+  if (process.platform !== "win32") return 0;
+  try {
+    const out = execFileSync("wmic.exe", [
+      "process",
+      "where",
+      "name='chrome.exe'",
+      "get",
+      "CommandLine"
+    ], { encoding: "utf8", windowsHide: true, timeout: 2500, maxBuffer: 8 * 1024 * 1024 });
+    let n = 0;
+    for (const line of String(out || "").split(/\r?\n/)) {
+      const cmd = normalizePathForCompare(line);
+      if (!cmd) continue;
+      if (cmd.indexOf("user data/conveniente") >= 0 || cmd.indexOf("city-collector-shards") >= 0) n += 1;
+    }
+    return n;
+  } catch {
+    return -1;
+  }
+}
+
 function killChromeByConvenienteHint() {
   const procs = listChromeProcessesWin();
   const toKill = new Set();
@@ -405,5 +427,6 @@ module.exports = {
   reapOnIndexBoot,
   reapCloudflaredOrphans,
   reapAllConvenienteChrome,
+  countConvenienteChrome,
   resolveUserDataDir
 };

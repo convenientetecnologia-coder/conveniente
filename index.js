@@ -4438,6 +4438,7 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 
 // ===================== CLUSTER MULTI-NODE =====================
 let clusterClient = null;
+let httpServer = null;
 function __deltaProvisionDeliveryConfirmEnv() {
   try {
     // 1) URL canônica e rígida do confirm-delivery (balão azul)
@@ -4481,6 +4482,12 @@ async function bootCluster() {
 // API endpoints (militar por arquivo de rota, modular, fácil de achar)
 const apiClient = {
   sendWorkerCommand: (...args) => clusterClient.sendWorkerCommand(...args),
+  ensureCellsRunning: (...args) => {
+    if (!clusterClient || typeof clusterClient.ensureCellsRunning !== 'function') {
+      return Promise.resolve({ ok: false, error: 'cluster_not_ready' });
+    }
+    return clusterClient.ensureCellsRunning(...args);
+  },
   rebalance: (...args) => {
     if (!clusterClient || typeof clusterClient.rebalance !== 'function') {
       return Promise.resolve({ ok: false, error: 'cluster_not_ready' });
@@ -4560,6 +4567,11 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   // acha célula viva, pula o "começar fechado" e as células novas reabrem o Chrome.
   if (adoptingLiveCells && codeStale) {
     try {
+      if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
+        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
+      }
+    } catch {}
+    try {
       logger.info('[BOOT] Código novo no disco: encerrando células antigas antes do start-closed.');
       require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
     } catch (e) {
@@ -4597,80 +4609,107 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   maybeBootstrapGateBToken().catch((e) => {
     logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
   });
-  if (startClosedOnBoot) {
-    try {
-      require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
-    } catch (e) {
-      try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-    }
-  }
   // Delta: coordenar endpoints (confirm-delivery) e secrets ANTES de criar workers.
   try { __deltaProvisionDeliveryConfirmEnv(); } catch {}
-  await bootCluster();
+  if (!clusterClient) {
+    clusterClient = {
+      plan: { nodes: 0, perNode: { maxChromes: 0 } },
+      children: [],
+      silentConsole: true,
+      adopting: false,
+      sendWorkerCommand: async () => ({ ok: false, error: 'cluster_booting' }),
+      rebalance: async () => ({ ok: false, error: 'cluster_booting' }),
+      reshuffleFairIfIdle: async () => ({ ok: false, error: 'cluster_booting' }),
+      kill: async () => {},
+      detach: async () => {},
+      ensureCellsRunning: async () => ({ ok: false, error: 'cluster_booting' })
+    };
+  }
 
-  // Start server — faça o binding em 127.0.0.1
-  app.listen(PORT, '127.0.0.1', () => {
-    logger.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
-    logger.info('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
-    // Logging claro: status da proteção e do modo de abertura do painel
+  // Painel escuta já; as células sobem em paralelo logo em seguida.
+  httpServer = await new Promise((resolve, reject) => {
+    const srv = app.listen(PORT, '127.0.0.1', () => {
+      logger.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
+      logger.info('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
 
-    if (process.env.OPEN_CHROMIUM_ON_START == '1') {
-      logger.info('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
-    } else {
-      logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
-    }
-
-    // Monitor legacy (polling) foi extinto (Tacada 1). Infra agora é event-driven via /api/infra/command-bus.
-    startServerEventBridge();
-    networkRotation.startNetworkRotationScheduler({ port: PORT });
-    dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
-    terminalAccountCleanupScheduler.startTerminalAccountCleanupScheduler({ port: PORT });
-    if (!adoptingLiveCells) {
-      setTimeout(() => {
-        try {
-          require('./scripts/bootIntent.js').maybePorterOpenAllOnBoot({
-            allCellsDead: true,
-            port: PORT
-          }).catch(() => {});
-        } catch {}
-      }, 5000);
-    }
-
-    // Outbox gordo = esteira morta. Arquiva e zera; CT redispara o pendente das contas abertas.
-    try {
-      __edgeEnsureDeltaReplyOutboxDirsSync();
-      let bootOutboxSize = 0;
-      try {
-        if (fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) {
-          bootOutboxSize = Number(fs.statSync(EDGE_DELTA_REPLY_OUTBOX_PATH).size || 0) || 0;
-        }
-      } catch {}
-      const bootTruncateBytes = Math.max(
-        8 * 1024 * 1024,
-        Number(process.env.EDGE_DELTA_REPLY_BOOT_TRUNCATE_BYTES || (32 * 1024 * 1024)) || (32 * 1024 * 1024)
-      );
-      if (bootOutboxSize >= bootTruncateBytes) {
-        __edgeTruncateDeltaReplyOutboxSync({ reason: 'boot_auto_truncate_huge' });
-      } else if (bootOutboxSize > (8 * 1024 * 1024)) {
-        __edgeSeekDeltaReplyCursorToTailSync(bootOutboxSize, { keepBytes: 2 * 1024 * 1024 });
+      if (process.env.OPEN_CHROMIUM_ON_START == '1') {
+        logger.info('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
+      } else {
+        logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
       }
-      __edgeKickDeltaReplyPump();
-    } catch {}
-    // Retoma cadastros aceitos e ainda pendentes após restart.
-    try { __edgeKickStockProvisionPump(); } catch {}
 
-    // Porteiro e o vigia do Windows (tarefa ao logon). O index so corrige a versao.
-    // Nao mata Node. Se o loop ja e v5.2.1-clean-cpu e esta vivo, nao mexe.
-    try {
-      setImmediate(() => {
+      startServerEventBridge();
+      networkRotation.startNetworkRotationScheduler({ port: PORT });
+      dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
+      terminalAccountCleanupScheduler.startTerminalAccountCleanupScheduler({ port: PORT });
+
+      try {
+        __edgeEnsureDeltaReplyOutboxDirsSync();
+        let bootOutboxSize = 0;
         try {
-          require('./scripts/porteiroSync.js').sync({ reason: 'index_boot' });
-        } catch (e) {
-          try { logger.warn('[PORTEIRO-SYNC] falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+          if (fs.existsSync(EDGE_DELTA_REPLY_OUTBOX_PATH)) {
+            bootOutboxSize = Number(fs.statSync(EDGE_DELTA_REPLY_OUTBOX_PATH).size || 0) || 0;
+          }
+        } catch {}
+        const bootTruncateBytes = Math.max(
+          8 * 1024 * 1024,
+          Number(process.env.EDGE_DELTA_REPLY_BOOT_TRUNCATE_BYTES || (32 * 1024 * 1024)) || (32 * 1024 * 1024)
+        );
+        if (bootOutboxSize >= bootTruncateBytes) {
+          __edgeTruncateDeltaReplyOutboxSync({ reason: 'boot_auto_truncate_huge' });
+        } else if (bootOutboxSize > (8 * 1024 * 1024)) {
+          __edgeSeekDeltaReplyCursorToTailSync(bootOutboxSize, { keepBytes: 2 * 1024 * 1024 });
         }
-      });
-    } catch {}
+        __edgeKickDeltaReplyPump();
+      } catch {}
+      try { __edgeKickStockProvisionPump(); } catch {}
+
+      try {
+        setImmediate(() => {
+          try {
+            require('./scripts/porteiroSync.js').sync({ reason: 'index_boot' });
+          } catch (e) {
+            try { logger.warn('[PORTEIRO-SYNC] falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+          }
+        });
+      } catch {}
+      resolve(srv);
+    });
+    srv.on('error', reject);
   });
+
+  if (startClosedOnBoot) {
+    let chromeAlive = false;
+    try {
+      const { execFileSync } = require('child_process');
+      const listed = execFileSync('tasklist.exe', ['/FI', 'IMAGENAME eq chrome.exe', '/NH'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 4000
+      });
+      chromeAlive = /chrome\.exe/i.test(String(listed || ''));
+    } catch {
+      chromeAlive = true;
+    }
+    if (chromeAlive) {
+      try {
+        require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
+      } catch (e) {
+        try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+      }
+    }
+  }
+  await bootCluster();
+  if (!adoptingLiveCells) {
+    setTimeout(() => {
+      try {
+        require('./scripts/bootIntent.js').maybePorterOpenAllOnBoot({
+          allCellsDead: true,
+          port: PORT
+        }).catch(() => {});
+      } catch {}
+    }, 5000);
+  }
 })();
 
 // Tenta abrir sempre o painel no Chromium azul (agora OPT-IN)
@@ -4718,18 +4757,53 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
   }, 1200); // Delay de 1.2s para garantir o servidor up antes do browser abrir
 }
 
-// Graceful shutdown — encerra worker e faz cleanup
-process.on('SIGINT', async () => {
-  logger.info('[STOP] SIGINT recebido. Maestro sai; células seguem.');
-  try { await (clusterClient && clusterClient.detach && clusterClient.detach()); } catch(e){}
-  process.exit(0);
-});
+function __withTimeout(p, ms) {
+  return Promise.race([
+    Promise.resolve(p).catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, Math.max(200, Number(ms) || 0)))
+  ]);
+}
 
-process.on('SIGTERM', async () => {
-  logger.info('[STOP] SIGTERM recebido. Maestro sai; células seguem.');
-  try { await (clusterClient && clusterClient.detach && clusterClient.detach()); } catch(e){}
+let indexStopping = false;
+async function handleIndexConsoleStop(kind) {
+  if (indexStopping) return;
+  indexStopping = true;
+  setTimeout(() => { try { process.exit(0); } catch {} }, 7000);
+  // Solta a 8088 na hora. Célula viva NÃO é index. Porteiro tem que poder religar o painel.
+  try { if (httpServer && typeof httpServer.close === 'function') httpServer.close(); } catch {}
+  let work = { yes: false, chrome: 0, desired: 0 };
+  try { work = require('./scripts/cellLifecycle.js').browsersWorking(); } catch {}
+  try {
+    logger.info('[STOP] ' + String(kind || 'signal'), {
+      browsersWorking: !!work.yes,
+      chrome: work.chrome,
+      desired: work.desired
+    });
+  } catch {}
+  try {
+    require('./scripts/indexLifecycle.js').append('index_console_stop', {
+      kind: String(kind || ''),
+      browsersWorking: !!work.yes,
+      chrome: work.chrome,
+      desired: work.desired
+    });
+  } catch {}
+  if (work.yes) {
+    try { logger.info('[STOP] navegadores trabalhando — células ficam, só o index sai'); } catch {}
+    await __withTimeout(clusterClient && clusterClient.detach && clusterClient.detach(), 1500);
+  } else {
+    try { logger.info('[STOP] sem navegador aberto — index sai e leva as células'); } catch {}
+    if (clusterClient && typeof clusterClient.kill === 'function') {
+      await __withTimeout(clusterClient.kill(), 5000);
+    } else {
+      try { require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'index_ctrl_c_idle' }); } catch {}
+    }
+  }
   process.exit(0);
-});
+}
+
+process.on('SIGINT', () => { handleIndexConsoleStop('SIGINT'); });
+process.on('SIGTERM', () => { handleIndexConsoleStop('SIGTERM'); });
 
 // P1: política consistente de erros globais (master).
 // - Por padrão NÃO mata o processo (sem auto-restart neste ambiente).

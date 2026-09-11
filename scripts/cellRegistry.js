@@ -66,17 +66,29 @@ function pidAlive(pid) {
   }
 }
 
-// Dono do LISTEN em 127.0.0.1:port. TCP connect sozinho mente: outra célula
-// na mesma porta também aceita o socket.
-function tcpListenPid(port) {
-  const p = Math.floor(Number(port) || 0);
-  if (!(p > 0)) return 0;
+// Um netstat para todas as portas. Chamadas em loop (watch / spawn / Encerrar)
+// que faziam 4–8 netstat.exe viravam tempestade de 10–40s.
+const LISTEN_CACHE_MS = 250;
+let listenCacheAt = 0;
+let listenByPort = new Map();
+
+function invalidateListenCache() {
+  listenCacheAt = 0;
+  listenByPort = new Map();
+}
+
+function parseListenMap(force) {
+  const now = Date.now();
+  if (!force && listenByPort && (now - listenCacheAt) < LISTEN_CACHE_MS) {
+    return listenByPort;
+  }
+  const map = new Map();
   try {
     const { spawnSync } = require('child_process');
     const r = spawnSync('netstat.exe', ['-ano', '-p', 'TCP'], {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 10000
+      timeout: 4000
     });
     const text = String((r && r.stdout) || '');
     for (const line of text.split(/\r?\n/)) {
@@ -88,20 +100,31 @@ function tcpListenPid(port) {
       const colon = local.lastIndexOf(':');
       if (colon < 0) continue;
       const localPort = Math.floor(Number(String(local.slice(colon + 1)).replace(/\]/g, '')) || 0);
-      if (localPort !== p) continue;
+      if (!(localPort > 0)) continue;
       const pid = Math.floor(Number(parts[parts.length - 1]) || 0);
-      if (pid > 0) return pid;
+      if (pid > 0) map.set(localPort, pid);
     }
   } catch {}
-  return 0;
+  listenCacheAt = Date.now();
+  listenByPort = map;
+  return map;
+}
+
+// Dono do LISTEN em 127.0.0.1:port. TCP connect sozinho mente: outra célula
+// na mesma porta também aceita o socket.
+function tcpListenPid(port) {
+  const p = Math.floor(Number(port) || 0);
+  if (!(p > 0)) return 0;
+  return parseListenMap().get(p) || 0;
 }
 
 function collectListenPids(maxSlots) {
   const n = Math.max(1, Math.min(16, Math.floor(Number(maxSlots) || 8)));
+  const map = parseListenMap();
   const out = [];
   for (let i = 0; i < n; i++) {
     const port = portForIdx(i);
-    const pid = tcpListenPid(port);
+    const pid = map.get(port) || 0;
     if (pid > 0) out.push({ idx: i, port, pid });
   }
   return out;
@@ -159,6 +182,7 @@ module.exports = {
   read,
   write,
   pidAlive,
+  invalidateListenCache,
   tcpListenPid,
   collectListenPids,
   portForIdx,

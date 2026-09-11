@@ -496,7 +496,7 @@ function bootFromCli() {
   try {
     const plan = planWorkerCount();
     const capacity = Math.max(1, Number(plan.hardwareNodes) || Number(plan.nodes) || 1);
-    const rec = ensureWorkers(capacity, { purge: true });
+    const rec = ensureWorkers(capacity, { purge: false });
     rec.plan = plan;
     rec.liveWorkers = plan.nodes;
     writeLast(rec);

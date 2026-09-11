@@ -7,7 +7,7 @@
  * - Humano encerrou os workers (botão Encerrar workers, ou Iniciar reciclando célula velha no git pull)
  *
  * NÃO TRAVA:
- * - Ctrl+C no index
+ * - Ctrl+C no index (com navegador aberto as células ficam; sem navegador o index leva as células — sem trava)
  * - Fechar Todos
  * - Iniciar / porteiro depois de uma queda, sem o humano ter encerrado workers
  * - Queda real (crash)

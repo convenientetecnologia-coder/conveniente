@@ -92,13 +92,8 @@ function Invoke-ConvenienteCellCli([string]$Arg) {
     }
 }
 
-function Test-ConvenienteCellsStale {
-    $v = Invoke-ConvenienteCellCli 'stale'
-    return ($v -eq '1')
-}
-
-function Test-ConvenienteTopologyStale {
-    $v = Invoke-ConvenienteCellCli 'topo-stale'
+function Test-ConvenienteNeedRestart {
+    $v = Invoke-ConvenienteCellCli 'need-restart'
     return ($v -eq '1')
 }
 
@@ -108,16 +103,21 @@ function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
     [void](Invoke-ConvenienteCellCli 'stop')
 }
 
-function Test-ConvenienteUp {
+function Get-ListenPid([int]$Port) {
+    $portTok = ':' + [string]$Port + ' '
     try {
-        $c = @(Get-NetTCPConnection -LocalPort 8088 -State Listen -ErrorAction SilentlyContinue)
-        if ($c.Count -gt 0) { return $true }
+        foreach ($line in @(& netstat.exe -ano -p TCP 2>$null)) {
+            $t = [string]$line
+            if ($t -notmatch 'LISTENING|OUVINDO|ESCUTA') { continue }
+            if ($t.IndexOf($portTok) -lt 0) { continue }
+            if ($t -match '\s(\d+)\s*$') { return [int]$Matches[1] }
+        }
     } catch {}
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
-        $cmd = [string]$p.CommandLine
-        if ($cmd -and ($cmd -match 'index\.js')) { return $true }
-    }
-    return $false
+    return 0
+}
+
+function Test-ConvenienteUp {
+    return ((Get-ListenPid 8088) -gt 0)
 }
 
 function Test-NomemFile([string]$Path) {
@@ -140,23 +140,13 @@ function Test-NomemFile([string]$Path) {
 
 function Test-LoopAlive {
     $lock = Join-Path $destDir 'porteiro.lock'
-    if (Test-Path -LiteralPath $lock) {
-        try {
-            $id = [int]((Get-Content -LiteralPath $lock -Raw).Trim())
-            if ($id -gt 0) {
-                $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
-                if ($cim -and $cim.CommandLine -and ($cim.CommandLine -match 'manutencao\.ps1') -and ($cim.CommandLine -match '-Action loop')) {
-                    return $true
-                }
-            }
-        } catch {}
-    }
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)) {
-        $c = [string]$p.CommandLine
-        if ($c -and ($c -match 'manutencao\.ps1') -and ($c -match '-Action loop')) {
-            return $true
-        }
-    }
+    if (-not (Test-Path -LiteralPath $lock)) { return $false }
+    try {
+        $id = [int]((Get-Content -LiteralPath $lock -Raw).Trim())
+        if ($id -le 0) { return $false }
+        $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
+        return [bool]$proc
+    } catch {}
     return $false
 }
 
@@ -203,12 +193,6 @@ function Stop-LoopOnly {
         } catch {}
         Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
     }
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)) {
-        $c = [string]$p.CommandLine
-        if ($c -and ($c -match 'manutencao\.ps1') -and ($c -match '-Action loop')) {
-            try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
-        }
-    }
 }
 
 function Start-LoopSilent {
@@ -217,8 +201,8 @@ function Start-LoopSilent {
         return
     }
     & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 400
+    for ($i = 0; $i -lt 3; $i++) {
+        Start-Sleep -Milliseconds 200
         if (Test-LoopAlive) {
             Write-StartLog 'loop_via_schtasks'
             return
@@ -260,10 +244,12 @@ function Test-IsConvenienteNodeHost([string]$CommandLine) {
 
 function Stop-ConvenienteConsoleHosts {
     $killed = 0
-    foreach ($name in @('powershell.exe', 'cmd.exe')) {
-        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='$name'" -ErrorAction SilentlyContinue)) {
-            if (-not (Test-IsConvenienteNodeHost ([string]$p.CommandLine))) { continue }
-            try { & taskkill.exe /F /PID $p.ProcessId /T 2>$null | Out-Null } catch {}
+    foreach ($name in @('powershell', 'pwsh', 'cmd')) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $title = ''
+            try { $title = [string]$p.MainWindowTitle } catch { $title = '' }
+            if ($title -ne 'Conveniente_Node') { continue }
+            try { & taskkill.exe /F /PID $p.Id /T 2>$null | Out-Null } catch {}
             $killed++
         }
     }
@@ -308,14 +294,14 @@ function Start-ConvenienteNodeHost {
     ) -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
-function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
+function Wait-ConvenienteUp([int]$TimeoutSec = 1) {
     $deadline = (Get-Date).AddSeconds([math]::Max(1, $TimeoutSec))
     while ((Get-Date) -lt $deadline) {
         if (Test-ConvenienteUp) {
             Write-StartLog 'wait_up_ok'
             return $true
         }
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 150
     }
     Write-StartLog 'wait_up_timeout'
     return $false
@@ -323,55 +309,28 @@ function Wait-ConvenienteUp([int]$TimeoutSec = 4) {
 
 function Stop-ConvenienteMaestro {
     [void](Stop-ConvenienteConsoleHosts)
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
-        $cmd = [string]$p.CommandLine
-        if (-not $cmd) { continue }
-        if ($cmd -notmatch 'index\.js') { continue }
-        if ($cmd -match 'cellEntry\.js') { continue }
-        try { & taskkill.exe /F /PID $p.ProcessId 2>$null | Out-Null } catch {}
+    $listenPid = Get-ListenPid 8088
+    if ($listenPid -gt 0) {
+        try { & taskkill.exe /F /PID $listenPid 2>$null | Out-Null } catch {}
     }
-    $deadline = (Get-Date).AddSeconds(8)
+    $deadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $deadline) {
         if (-not (Test-ConvenienteUp)) { return }
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 150
     }
 }
 
 function Start-ConvenienteNode {
-    $cellsAlive = $false
-    try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-    $cellsStale = $false
-    try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
-    $topoStale = $false
-    try { $topoStale = [bool](Test-ConvenienteTopologyStale) } catch { $topoStale = $false }
-
     if (Test-ConvenienteUp) {
-        if ($cellsAlive -and -not $cellsStale -and -not $topoStale) {
+        $need = $true
+        try { $need = [bool](Test-ConvenienteNeedRestart) } catch { $need = $true }
+        if (-not $need) {
             Write-StartLog 'already_up'
             return 0
         }
-        if ($cellsStale) {
-            Write-StartLog 'already_up_stale restart_maestro'
-            Write-Host ''
-            Write-Host 'Codigo novo no disco (git pull). Reciclando index e celulas. Navegadores nascem fechados.'
-            Write-Host ''
-            if ($cellsAlive) { Stop-ConvenienteCells 'iniciar_already_up_stale' }
-        } elseif (-not $cellsAlive) {
-            Write-StartLog 'already_up_cells_dead restart_maestro'
-            Write-Host ''
-            Write-Host 'Index esta up, mas os workers estao mortos (Encerrar workers). Reiniciando o maestro para subir workers de novo, com navegador fechado.'
-            Write-Host ''
-        } elseif ($topoStale) {
-            Write-StartLog 'already_up_topology restart_maestro'
-            Write-Host ''
-            Write-Host 'Divisor/topologia nova. Reciclando o index; as celulas passam para o numero novo neste boot.'
-            Write-Host ''
-        }
+        Write-StartLog 'already_up_recycle restart_maestro'
+        Write-ConvenienteHumanHold 'iniciar_recycle'
         Stop-ConvenienteMaestro
-        $cellsAlive = $false
-        try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-        $cellsStale = $false
-        try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
     }
     try {
         if (Test-Path -LiteralPath $pauseFlag) { Remove-Item -LiteralPath $pauseFlag -Force -ErrorAction SilentlyContinue }
@@ -386,70 +345,23 @@ function Start-ConvenienteNode {
         return 1
     }
     [void](Stop-ConvenienteConsoleHosts)
-    $cellsAlive = $false
-    try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-    $cellsStale = $false
-    try { $cellsStale = [bool](Test-ConvenienteCellsStale) } catch { $cellsStale = $false }
-    if ($cellsAlive -and $cellsStale) {
-        Write-StartLog 'cells_stale recycle'
-        Write-Host ''
-        Write-Host 'Codigo novo no disco (git pull). Encerrando celulas antigas para o worker novo valer.'
-        Write-Host ''
-        Stop-ConvenienteCells 'iniciar_stamp_stale'
-        $cellsAlive = $false
-        try { $cellsAlive = [bool](Test-ConvenienteCellsAlive) } catch { $cellsAlive = $false }
-    }
-    if ($cellsAlive) {
-        Write-StartLog 'adopt_cells skip_chrome_kill skip_motor_boot'
-        Write-Host ''
-        Write-Host 'Células vivas detectadas. Subindo só o maestro (index). Chromes seguem.'
-        Write-Host ''
-    } else {
-    Write-StartLog 'motores_begin'
-    try {
-        $hwndShow = [Native.Win]::GetConsoleWindow()
-        if ($hwndShow -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndShow, 1) }
-    } catch {}
-    Write-Host ''
-    Write-Host 'CONVENIENTE — Chrome unico'
-    Write-Host 'Fechando chrome.exe orfao e conferindo o Chrome oficial do Windows.'
-    Write-Host 'Um chrome.exe para todos os workers. Sem clone em C:\conveniente\motores.'
-    Write-Host 'Se o Chrome oficial nao existir, o index NAO sobe.'
-    Write-Host ''
-    & taskkill.exe /F /IM chrome.exe 1>$null 2>$null
-    & taskkill.exe /F /IM crashpad_handler.exe 1>$null 2>$null
-    Start-Sleep -Milliseconds 2500
-    $mot = Start-Process -FilePath $node -ArgumentList @('C:\conveniente\scripts\chromeMotores.js', '--boot') -WorkingDirectory 'C:\conveniente' -Wait -PassThru -NoNewWindow
-    if (-not $mot -or $mot.ExitCode -ne 0) {
-        Write-StartLog ('motores_fatal exit=' + $(if ($mot) { $mot.ExitCode } else { 'null' }))
-        Write-Host ''
-        Write-Host 'CHROME_OFFICIAL_MISSING: Chrome do Windows ausente. Sistema NAO iniciou.' -ForegroundColor Red
-        return 1
-    }
-    Write-StartLog 'motores_ok'
-    Write-Host ''
-    Write-Host 'Chrome unico ok. Subindo o Conveniente.'
-    try {
-        $hwndHide = [Native.Win]::GetConsoleWindow()
-        if ($hwndHide -ne [IntPtr]::Zero) { [void][Native.Win]::ShowWindow($hwndHide, 0) }
-    } catch {}
-    }
+    Write-StartLog 'launch_host'
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0
 }
 
 Write-StartLog 'click'
+# Janela do Node primeiro. Kit/loop depois, sem esconder o clique.
+$code = Start-ConvenienteNode
 $copied = $false
 try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
 Ensure-LogonTaskSilent
-# Node primeiro. Se o porteiro reciclar agora, o AUTO_BOOT ve already_up e nao abre 2a janela.
-$code = Start-ConvenienteNode
-[void](Wait-ConvenienteUp 4)
+[void](Wait-ConvenienteUp 1)
 if ($copied) {
     Write-StartLog 'version_swap'
     Stop-LoopOnly
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 200
 }
 Start-LoopSilent
 exit $code

@@ -26,9 +26,7 @@ if (Test-Path (Join-Path $Dest 'porteiro.lock')) {
     } catch {}
     Remove-Item (Join-Path $Dest 'porteiro.lock') -Force -ErrorAction SilentlyContinue
 }
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -and ($_.CommandLine -match 'porteiro_loop\.ps1|manutencao\.ps1 -Action loop|manutencao\.ps1" -Action loop|manutencao\.ps1 -Action netboot|auto_vigia\\vigia\.bat')
-} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+# Sem WMI. Lock do loop e o PID dono.
 
 @(
     'vigia.bat','porteiro_loop.ps1','node_control.ps1','node_control_cli.ps1',

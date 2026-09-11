@@ -123,6 +123,12 @@ function forceKillPid(pid) {
       stdio: ['ignore', 'ignore', 'ignore']
     });
   } catch {}
+  try { cellRegistry.invalidateListenCache(); } catch {}
+}
+
+function needRestart() {
+  if (!cellRegistry.hasAliveCells()) return true;
+  return isStampStale() || isTopologyStale();
 }
 
 function killListenUntilFree(timeoutMs) {
@@ -136,6 +142,29 @@ function killListenUntilFree(timeoutMs) {
   }
   const left = cellRegistry.collectListenPids(8);
   return { ok: left.length === 0, left };
+}
+
+function countDesiredActive() {
+  try {
+    const fileStore = require('./fileStore.js');
+    const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+    const perf = (d && d.perfis && typeof d.perfis === 'object') ? d.perfis : {};
+    let n = 0;
+    for (const k of Object.keys(perf)) {
+      if (perf[k] && perf[k].active === true) n += 1;
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+function browsersWorking() {
+  let chrome = 0;
+  try { chrome = require('./orphanReaper.js').countConvenienteChrome(); } catch { chrome = -1; }
+  const desired = countDesiredActive();
+  const yes = (Number(chrome) > 0) || (desired > 0);
+  return { yes, chrome: Number(chrome) || 0, desired };
 }
 
 function stopAllCells({ reason = 'manual' } = {}) {
@@ -215,12 +244,16 @@ if (require.main === module) {
     process.stdout.write(isTopologyStale() ? '1' : '0');
     process.exit(0);
   }
+  if (arg === 'need-restart') {
+    process.stdout.write(needRestart() ? '1' : '0');
+    process.exit(0);
+  }
   if (arg === 'stop') {
     const r = stopAllCells({ reason: String(process.argv[3] || 'cli') });
     process.stdout.write(JSON.stringify(r));
     process.exit(r.ok ? 0 : 1);
   }
-  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|stop\n');
+  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|need-restart|stop\n');
   process.exit(2);
 }
 
@@ -229,9 +262,12 @@ module.exports = {
   savedStamp,
   isStampStale,
   isTopologyStale,
+  needRestart,
   setStamp,
   setTopology,
   forceKillPid,
   killListenUntilFree,
-  stopAllCells
+  stopAllCells,
+  countDesiredActive,
+  browsersWorking
 };

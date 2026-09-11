@@ -45,13 +45,13 @@ check("browser_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(browser
 check("city_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(cityLaunch));
 check("cluster_ensure_boot", /hardwareNodes/.test(cluster) && /ensureWorkers\(motorCapacity/.test(cluster));
 check("cluster_ensure_grow", /purge: false/.test(cluster) && /hardwareNodes/.test(cluster));
-check("boot_cli_teto", /ensureWorkers\(capacity, \{ purge: true \}\)/.test(mot));
+check("boot_cli_sem_purge", /ensureWorkers\(capacity, \{ purge: false \}\)/.test(mot));
 check("cluster_env_chrome_oficial", /findMasterChromeExe/.test(cluster) && /CHROME_PATH = motorExe/.test(cluster));
-check("iniciar_taskkill", /taskkill\.exe \/F \/IM chrome\.exe/.test(iniciar));
-check("iniciar_boot_js", /chromeMotores\.js/.test(iniciar) && /--boot/.test(iniciar));
-check("iniciar_abort", /motores_fatal/.test(iniciar) && /NAO iniciou/.test(iniciar));
+check("iniciar_sem_taskkill_chrome", !/taskkill\.exe \/F \/IM chrome\.exe/.test(iniciar));
+check("iniciar_sem_boot_wait", !/--boot/.test(iniciar) && !/chromeMotores\.js/.test(iniciar));
+check("iniciar_uma_janela", /Start-ConvenienteNodeHost/.test(iniciar) && /launch_host/.test(iniciar) && !/Chrome unico/.test(iniciar));
+check("cluster_spawn_paralelo", /Promise\.all/.test(cluster) && /BOOT_MS/.test(cluster));
 check("dash_allowlist", /multi_engine_last:/.test(dash) && /multi_engine_log:/.test(dash));
-check("iniciar_chrome_unico", /Chrome unico/.test(iniciar) && /ForegroundColor Red/.test(iniciar));
 check("gitignore_motores", /motores\//.test(gitignore));
 check("gitignore_last", /multi_engine_last\.json/.test(gitignore));
 check("tp_index_sem_64", !/UV_THREADPOOL_SIZE\s*=\s*['"]64['"]/.test(indexBeforeRequire));

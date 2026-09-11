@@ -47,6 +47,7 @@ check("kit_no_standbylist_arglist", !/ArgumentList\s+['"]\/StandbyList['"]/.test
 check("kit_no_mem_soft", !/\bmem_soft\b/.test(kitTxt));
 check("kit_no_get_cpu_avg", !/function Get-CpuAvg/.test(kitTxt) && !/\bGet-CpuAvg\b/.test(kitTxt));
 check("kit_no_win32_processor", !/Win32_Processor/.test(kitTxt));
+check("install_kit_no_wmi", !/Get-CimInstance/.test(instKitTxt) && !/Get-WmiObject/.test(instKitTxt));
 check("kit_cpu_static_zero", /\$cpu\s*=\s*0/.test(kitTxt));
 check("kit_no_cpu_gate", !/\$cpu\s*-le\s*(40|50)/.test(kitTxt) && !/disk_(daily|emergency)_wait_cpu/.test(kitTxt));
 check("kit_loop_no_taskkill", !/taskkill/i.test(loopBody));
@@ -122,9 +123,12 @@ const doStartBody = (kitTxt.split("function Do-Start")[1] || "").split("function
 const doStopBody = (kitTxt.split("function Do-Stop")[1] || "").split("function Do-Start")[0];
 check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTxt) && /-NoExit/.test(kitTxt) && /WindowStyle Normal/.test(kitTxt) && /Start-ConvenienteNodeHost/.test(doStartBody) && !/Start-Process cmd\.exe/.test(kitTxt) && !/cmd\.exe \/c/.test(kitTxt));
 check("kit_do_stop_powershell_host", /function Stop-ConvenienteConsoleHosts/.test(kitTxt) && /powershell\.exe/.test(kitTxt) && /Stop-ConvenienteConsoleHosts/.test(doStopBody) && /index\.js/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
-check("kit_do_stop_cmd_leftover", /cmd\.exe/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("kit_do_stop_cmd_leftover", /cmd/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("kit_index_is_8088_only", /index_8088/.test(kitTxt) && /index_down/.test(kitTxt) && /celula nao conta/.test(kitTxt) && /netstat\.exe/.test(kitTxt.split("function Get-ListenPid")[1] || ""));
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
-check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /Invoke-WinTuningSilent/.test(doStartBody) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
+check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
+check("kit_tuning_not_in_loop_or_start", !/Invoke-WinTuningSilent/.test(loopBody) && !/Invoke-WinTuningSilent/.test(doStartBody));
+check("kit_no_wmi", !/Get-CimInstance/.test(kitTxt) && !/Get-WmiObject/.test(kitTxt) && !/Get-NetTCPConnection/.test(kitTxt) && !/Get-NetAdapter/.test(kitTxt) && !/Win32_/.test(kitTxt));
 check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_excludes_hammer_host", /crashHammer\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_crash_dumps_fn", /function Ensure-NodeCrashDumps/.test(kitTxt) && /LocalDumps\\node\.exe/.test(kitTxt) && /DumpType/.test(kitTxt));

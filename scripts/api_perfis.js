@@ -1116,6 +1116,11 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro ao patchDesired para start_work', { nome, error: e && e.message }, e);
     }
+    try {
+      if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
+        await workerClient.ensureCellsRunning('start_work:' + String(nome || '').slice(0, 40));
+      }
+    } catch {}
     // Garante ativação do browser e início do Virtus imediatamente
     const r1 = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
       logger.error('Erro ao enviar activate p/ worker em start_work', { nome, error: e && e.message }, e);
@@ -1949,6 +1954,17 @@ module.exports = (app, workerClient, fileStore) => {
         }
       } catch (e) {
         return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
+      }
+
+      try {
+        if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
+          const woke = await workerClient.ensureCellsRunning('open_all_24h');
+          if (!woke || woke.ok !== true) {
+            try { logger.warn('[API][open-all] células não nasceram', { error: woke && woke.error }); } catch {}
+          }
+        }
+      } catch (eEnsure) {
+        try { logger.warn('[API][open-all] ensure cells falhou', { error: (eEnsure && eEnsure.message) || String(eEnsure) }); } catch {}
       }
 
       let clusterReshuffle = null;

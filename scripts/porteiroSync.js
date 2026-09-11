@@ -224,11 +224,7 @@ function stopOldVigia({ endMainLoop }) {
       "  Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue",
       "}"
     ].join(" ") : "",
-    "$re = 'porteiro_loop\\.ps1|limpeza_memoria\\.ps1|auto_vigia\\\\vigia\\.bat|node_control\\.ps1'",
-    endMain ? "$re = $re + '|manutencao\\.ps1 -Action loop|manutencao\\.ps1\" -Action loop|auto_vigia\\\\manutencao\\.ps1 -Action loop'" : "",
-    "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-    "  $_.CommandLine -and ($_.CommandLine -match $re) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install|ensure_diskclean)')",
-    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    endMain ? "" : ""
   ].filter(Boolean).join("; ");
 
   const r = spawnSync(PS_EXE, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {

@@ -105,12 +105,22 @@ function Set-PausedFlag([bool]$On) {
     else { Remove-Item $PauseFlag -Force -ErrorAction SilentlyContinue }
 }
 
-function Test-Port8088 {
+function Get-ListenPid([int]$Port) {
+    $portTok = ':' + [string]$Port + ' '
     try {
-        $c = @(Get-NetTCPConnection -LocalPort $PanelPort -State Listen -ErrorAction SilentlyContinue)
-        if ($c.Count -gt 0) { return $true }
+        foreach ($line in @(& netstat.exe -ano -p TCP 2>$null)) {
+            $t = [string]$line
+            if ($t -notmatch 'LISTENING|OUVINDO|ESCUTA') { continue }
+            if ($t.IndexOf($portTok) -lt 0) { continue }
+            if ($t -match '\s(\d+)\s*$') { return [int]$Matches[1] }
+        }
     } catch {}
-    return $false
+    return 0
+}
+
+function Test-Port8088 {
+    # Index vivo = só LISTEN na 8088. Sem WMI. Célula não conta.
+    return ((Get-ListenPid $PanelPort) -gt 0)
 }
 
 function Get-NodeCount { @(Get-Process -Name node -ErrorAction SilentlyContinue).Count }
@@ -119,58 +129,30 @@ function Get-ChromeCount {
     @(Get-Process -Name chrome -ErrorAction SilentlyContinue).Count
 }
 
-function Get-MasterIndexPids {
-    $pids = @()
-    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'")) {
-        $cmd = [string]$p.CommandLine
-        if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
-        $c = $cmd.ToLowerInvariant()
-        if ($c -match 'cellentry\.js') { continue }
-        if ($c -match 'index\.js') { $pids += [int]$p.ProcessId }
-    }
-    return $pids
-}
-
 function Get-SystemState {
-    # Qualquer sinal REAL = LIGADO (nao sobe de novo)
-    $masters = @(Get-MasterIndexPids)
-    $nodes   = Get-NodeCount
-    $port    = Test-Port8088
-
-    # pid file so conta se o processo ainda existe E ainda ha node OU porta
-    # (evita fantasma: pid reaproveitado / arquivo velho com Nodes=0)
-    $pidOk = $false
-    if (Test-Path $PidFile) {
-        try {
-            $id = [int]((Get-Content $PidFile -Raw).Trim())
-            $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-            if ($proc -and ($nodes -gt 0 -or $port -or $masters.Count -gt 0)) {
-                $pidOk = $true
-            } elseif (-not $proc -or ($nodes -eq 0 -and -not $port -and $masters.Count -eq 0)) {
-                Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-            }
-        } catch {
-            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-        }
+    # PRETO NO BRANCO: index ligado = 8088 em LISTEN. Ponto.
+    # Célula viva, chrome aberto, node.exe sobrando — não são o index.
+    $port = Test-Port8088
+    $nodes = Get-NodeCount
+    if ((Test-Path $PidFile) -and -not $port) {
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
-
-    $up = ($masters.Count -gt 0) -or $port
-    $why = if ($masters.Count -gt 0) { 'master' }
-           elseif ($port) { 'port' }
-           else { 'down' }
-
+    $up = [bool]$port
+    $why = if ($port) { 'index_8088' } else { 'index_down' }
     return [pscustomobject]@{
         Up = $up; Why = $why
-        Masters = $masters.Count; Nodes = $nodes
+        Masters = $(if ($port) { 1 } else { 0 }); Nodes = $nodes
         Port = $port; Chrome = (Get-ChromeCount)
         Paused = (Test-Paused)
     }
 }
 
 function Get-DiskFreeGB {
-    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-    if (-not $d) { return $null }
-    [math]::Round($d.FreeSpace / 1GB, 2)
+    try {
+        $d = New-Object -TypeName System.IO.DriveInfo -ArgumentList 'C'
+        if (-not $d -or -not $d.IsReady) { return $null }
+        return [math]::Round($d.AvailableFreeSpace / 1GB, 2)
+    } catch { return $null }
 }
 
 function Get-EstadoPath { Join-Path $Root 'estado.json' }
@@ -306,8 +288,9 @@ function Invoke-DiskEmergencyClean {
 # --- Reboot diario + checagem de rede (sutil; nao altera regras de node/disco) ---
 function Get-UptimeMinutes {
     try {
-        $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-        return [math]::Round(((Get-Date) - $boot).TotalMinutes, 1)
+        $ms = [System.Environment]::TickCount64
+        if ($ms -lt 0) { $ms = [System.Environment]::TickCount }
+        return [math]::Round($ms / 60000.0, 1)
     } catch { return 999 }
 }
 
@@ -329,18 +312,12 @@ function Test-HasInternet {
 }
 
 function Test-NicVisible {
-    # Placa sumiu de verdade? (aba Conexoes de Rede vazia = sem NIC util)
     try {
-        $n = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
-            $_.HardwareInterface -and $_.Status -ne 'Not Present'
-        })
-        if ($n.Count -gt 0) { return $true }
-    } catch {}
-    try {
-        $n = @(Get-CimInstance Win32_NetworkAdapter -ErrorAction SilentlyContinue | Where-Object {
-            $_.PhysicalAdapter -eq $true -and $_.NetConnectionStatus -in @(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12)
-        })
-        if ($n.Count -gt 0) { return $true }
+        $nics = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()
+        foreach ($n in @($nics)) {
+            if ($n.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
+            if ($n.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up) { return $true }
+        }
     } catch {}
     return $false
 }
@@ -360,9 +337,10 @@ function Test-InternetConfirmed {
 
 function Get-BootId {
     try {
-        return (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+        $sys = Get-Process -Id 4 -ErrorAction Stop
+        return $sys.StartTime.ToUniversalTime().ToString('o')
     } catch {
-        return (Get-Date).ToUniversalTime().ToString('o')
+        return ('tick:' + [string][System.Environment]::TickCount64)
     }
 }
 
@@ -610,10 +588,12 @@ function Test-IsConvenienteNodeHost([string]$CommandLine) {
 
 function Stop-ConvenienteConsoleHosts {
     $killed = 0
-    foreach ($name in @('powershell.exe', 'cmd.exe')) {
-        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='$name'")) {
-            if (-not (Test-IsConvenienteNodeHost ([string]$p.CommandLine))) { continue }
-            & taskkill.exe /F /PID $p.ProcessId /T 2>$null | Out-Null
+    foreach ($name in @('powershell', 'pwsh', 'cmd')) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $title = ''
+            try { $title = [string]$p.MainWindowTitle } catch { $title = '' }
+            if ($title -ne 'Conveniente_Node') { continue }
+            & taskkill.exe /F /PID $p.Id /T 2>$null | Out-Null
             $killed++
         }
     }
@@ -646,8 +626,9 @@ function Do-Stop {
     $killed = 0
     $killed += [int](Stop-ConvenienteConsoleHosts)
     Start-Sleep -Milliseconds 400
-    foreach ($id in @(Get-MasterIndexPids)) {
-        & taskkill.exe /F /PID $id /T 2>$null | Out-Null
+    $listenPid = Get-ListenPid $PanelPort
+    if ($listenPid -gt 0) {
+        & taskkill.exe /F /PID $listenPid /T 2>$null | Out-Null
         $killed++
     }
     foreach ($n in @(Get-Process -Name node -ErrorAction SilentlyContinue)) {
@@ -672,7 +653,6 @@ function Invoke-WinTuningSilent {
 
 function Do-Start {
     param([string]$Reason = 'MANUAL') # MANUAL | AUTO | AUTO_BOOT
-    Invoke-WinTuningSilent
     if (-not (Test-Path $IndexJs)) { Write-Host 'ERRO: C:\conveniente\index.js ausente'; return }
     Set-PausedFlag $false
     Set-MaxPerf
@@ -682,17 +662,16 @@ function Do-Start {
     $st3 = $null
     $st = Get-SystemState
     if ($st -and $st.Up) {
-        Write-Host "JA LIGADO why=$($st.Why) masters=$($st.Masters) nodes=$($st.Nodes) port=$($st.Port) — nao subi de novo"
-        Write-Log "$Reason start skipped already_up=$($st.Why)"
+        Write-Host "JA LIGADO why=$($st.Why) port8088=$($st.Port) — nao subi de novo (celula nao conta)"
+        Write-Log "$Reason start skipped already_up=$($st.Why) index_only"
         return
     }
 
-    # Confirmacao dupla (anti falso-negativo)
-    Start-Sleep -Seconds 2
+    Start-Sleep -Milliseconds 300
     $st2 = Get-SystemState
     if ($st2 -and $st2.Up) {
-        Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) — nao subi de novo"
-        Write-Log "$Reason start skipped already_up2=$($st2.Why)"
+        Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) — nao subi de novo (celula nao conta)"
+        Write-Log "$Reason start skipped already_up2=$($st2.Why) index_only"
         return
     }
 
@@ -801,18 +780,16 @@ function Ensure-DiskCleanTask {
 }
 
 function Stop-RivalVigia {
-    # Este loop e Highest. O index comum NAO consegue matar o velho.
-    # Qualquer outro vigia auto_vigia (loop, porteiro_loop, vigia.bat, limpeza_memoria) morre aqui.
+    # Sem WMI. O lock e o dono do loop. PID velho no arquivo morre aqui.
     $my = $PID
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessId -ne $my -and $_.CommandLine -and (
-            $_.CommandLine -match 'porteiro_loop\.ps1|limpeza_memoria\.ps1|auto_vigia\\vigia\.bat|manutencao\.ps1 -Action loop|manutencao\.ps1" -Action loop'
-        ) -and ($_.CommandLine -notmatch 'windowsForensicDeep|-Action (start|stop|status|netboot|install|ensure_diskclean)')
-    } | ForEach-Object {
-        $rid = [int]$_.ProcessId
-        Stop-Process -Id $rid -Force -ErrorAction SilentlyContinue
-        Write-Log "rival_kill pid=$rid"
-    }
+    if (-not (Test-Path -LiteralPath $LockFile)) { return }
+    try {
+        $old = [int]((Get-Content -LiteralPath $LockFile -Raw).Trim())
+        if ($old -gt 0 -and $old -ne $my) {
+            Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
+            Write-Log "rival_kill pid=$old"
+        }
+    } catch {}
 }
 
 function Do-Loop {
@@ -832,7 +809,6 @@ function Do-Loop {
     Stop-RivalVigia
 
     Set-MaxPerf
-    Invoke-WinTuningSilent
     try { [void](Ensure-NodeCrashDumps) } catch {}
     try { [void](Ensure-WerSvc) } catch {}
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
@@ -870,8 +846,8 @@ function Do-Loop {
     while ($true) {
         try {
             $cpu = 0
-            $disk = Get-DiskFreeGB
             $st = Get-SystemState
+            $disk = Get-DiskFreeGB
             $actions = @()
             $nodeMsg = ''
 

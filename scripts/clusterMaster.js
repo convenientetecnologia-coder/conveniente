@@ -409,6 +409,7 @@ async function createCluster() {
         stdio: ['ignore', 'ignore', 'ignore']
       });
     } catch {}
+    try { cellRegistry.invalidateListenCache(); } catch {}
   }
 
   function reapSlotChrome(idx, shardNames, reason) {
@@ -600,8 +601,7 @@ async function createCluster() {
       if (owner > 0) forceKillCellPid(owner);
       if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) forceKillCellPid(aliveRow.pid);
       reapSlotChrome(idx, shardNames, 'cell_stamp_replace');
-      try { cellRegistry.clearDead(); } catch {}
-      await waitMs(400);
+      await waitMs(200);
     }
 
     child.adopted = false;
@@ -709,29 +709,54 @@ async function createCluster() {
   }
 
   const motorCapacity = Math.max(1, Number(plan.serverConfig && plan.serverConfig.hardwareNodes) || blocks.length);
-  chromeMotores.ensureWorkers(motorCapacity, { purge: !adopting });
+  chromeMotores.ensureWorkers(motorCapacity, { purge: false });
   try { cellRegistry.setMaestroPid(process.pid); } catch {}
+  if (recycledThisBoot) {
+    try { cellRegistry.clearDead(); } catch {}
+  }
 
-  for (let idx = 0; idx < blocks.length; idx++) {
-    const shardNames = blocks[idx] || [];
+  const bootStarted = Date.now();
+  const spawned = await Promise.all(blocks.map(async (shardNames, idx) => {
+    const names = shardNames || [];
     try {
-      const child = await spawnWorker(idx, shardNames, { replace: recycledThisBoot });
-      children.push(child);
+      const child = await spawnWorker(idx, names, { replace: recycledThisBoot });
       logger.info('[CLUSTER] Worker iniciado', {
         idx: idx + 1,
-        perfis: child.shard ? child.shard.size : shardNames.length,
+        perfis: child.shard ? child.shard.size : names.length,
         pid: child.pid,
         port: child.port,
         adopted: !!child.adopted
       });
+      return child;
     } catch (e) {
       logger.error('[CLUSTER] worker não subiu; segue os outros', {
         idx: idx + 1,
         error: (e && e.message) || e
       });
       try { cellForensic.append('cell_spawn_fail', { idx: idx + 1, error: String((e && e.message) || e).slice(0, 180) }); } catch {}
+      return {
+        id: idx,
+        proc: null,
+        pending: new Map(),
+        shard: new Set(names),
+        pid: null,
+        port: cellRegistry.portForIdx(idx),
+        socket: null,
+        netSend: null,
+        adopted: false,
+        deadHandled: false
+      };
     }
-  }
+  }));
+  for (const child of spawned) children.push(child);
+  try {
+    logger.info('[CLUSTER][BOOT_MS]', {
+      ms: Date.now() - bootStarted,
+      nodes: children.length,
+      adopted: children.filter((c) => c && c.adopted).length,
+      recycled: recycledThisBoot
+    });
+  } catch {}
   try { cellLifecycle.setStamp(bootStamp); } catch {}
   try {
     cellLifecycle.setTopology({
@@ -1294,6 +1319,76 @@ async function createCluster() {
     try { require('./orphanReaper.js').reapAllConvenienteChrome('maestro_kill'); } catch {}
   }
 
+  async function ensureCellsRunning(reason = 'ensure') {
+    isShuttingDown = false;
+    const want = Math.max(1, blocks.length || children.length || 1);
+    while (children.length < want) {
+      const idx = children.length;
+      children.push({
+        id: idx,
+        proc: null,
+        pending: new Map(),
+        shard: new Set(blocks[idx] || []),
+        pid: null,
+        port: cellRegistry.portForIdx(idx),
+        socket: null,
+        netSend: null,
+        adopted: false,
+        deadHandled: true
+      });
+    }
+    const started = [];
+    await Promise.all(children.map(async (c, idx) => {
+      const port = c.port || cellRegistry.portForIdx(idx);
+      const owner = cellRegistry.tcpListenPid(port);
+      if (owner > 0) {
+        c.pid = owner;
+        c.deadHandled = false;
+        if (!c.socket) {
+          try { await connectCellSocket(c, idx); } catch {}
+        }
+        started.push(idx + 1);
+        return;
+      }
+      const shardNames = (c.shard && c.shard.size) ? Array.from(c.shard) : (blocks[idx] || []);
+      try {
+        const fresh = await spawnWorker(idx, shardNames, { replace: false });
+        c.proc = fresh.proc;
+        c.pending = fresh.pending;
+        c.pid = fresh.pid;
+        c.port = fresh.port;
+        c.socket = fresh.socket;
+        c.netSend = fresh.netSend;
+        c.adopted = !!fresh.adopted;
+        c.deadHandled = false;
+        c.shard = fresh.shard;
+        started.push(idx + 1);
+      } catch (e) {
+        logger.error('[CLUSTER] ensure cell falhou', { idx: idx + 1, error: (e && e.message) || e });
+      }
+    }));
+    try {
+      cellForensic.append('cell_ensure', {
+        reason: String(reason || 'ensure').slice(0, 80),
+        started: started.length,
+        want
+      });
+    } catch {}
+    try {
+      logger.info('[CLUSTER] ensure cells', {
+        reason: String(reason || 'ensure'),
+        started: started.length,
+        want
+      });
+    } catch {}
+    return {
+      ok: started.length > 0,
+      nodes: started.length,
+      want,
+      reason: String(reason || 'ensure')
+    };
+  }
+
   // Watcher: conta nova / conta apagada. Grow ao vivo; não reshuffle.
   // CLUSTER_AUTO_REBALANCE=0 desliga. Default ligado.
   (function watchPerfisJson(){
@@ -1356,7 +1451,7 @@ async function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, detach, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
+  return { plan, children, sendWorkerCommand, kill, detach, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
 }
 
 module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };
