@@ -6,16 +6,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-# Tuning do host: dispara e segue. Sem Wait. Sem RunAs. Nao atrasa o Node.
-try {
-    $tune = 'C:\conveniente\scripts\winTuningMaster.ps1'
-    if (Test-Path -LiteralPath $tune) {
-        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $tune, '-Boot'
-        ) | Out-Null
-    }
-} catch {}
-
 try {
     Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -ErrorAction SilentlyContinue
     $hwnd = [Native.Win]::GetConsoleWindow()
@@ -352,8 +342,16 @@ function Start-ConvenienteNode {
 }
 
 Write-StartLog 'click'
-# Janela do Node primeiro. Kit/loop depois, sem esconder o clique.
+# Janela do Node primeiro. Kit/loop/tuning depois, sem esconder o clique.
 $code = Start-ConvenienteNode
+try {
+    $tune = 'C:\conveniente\scripts\winTuningMaster.ps1'
+    if (Test-Path -LiteralPath $tune) {
+        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $tune, '-Boot'
+        ) | Out-Null
+    }
+} catch {}
 $copied = $false
 try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
 Ensure-LogonTaskSilent

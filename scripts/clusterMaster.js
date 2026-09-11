@@ -642,20 +642,20 @@ async function createCluster() {
     child.pid = proc.pid || null;
     const connected = await (async () => {
       const started = Date.now();
-      while ((Date.now() - started) < 90000) {
+      while ((Date.now() - started) < 8000) {
         if (proc.exitCode != null || proc.signalCode) return false;
         const owner = cellRegistry.tcpListenPid(child.port);
         if (owner > 0 && Number(owner) !== Number(proc.pid)) {
-          await waitMs(150);
+          if ((Date.now() - started) > 1500) {
+            if (!replace && await adoptIfListening(child, idx, 'spawn_other_owner')) return true;
+            return false;
+          }
+          await waitMs(80);
           continue;
         }
-        if (owner > 0 && Number(owner) === Number(proc.pid) && await connectCellSocket(child, idx)) {
-          return true;
-        }
-        if (!owner && (Date.now() - started) > 2000 && await connectCellSocket(child, idx)) {
-          return true;
-        }
-        await waitMs(150);
+        if (owner > 0 && await connectCellSocket(child, idx)) return true;
+        if (!owner && (Date.now() - started) > 400 && await connectCellSocket(child, idx)) return true;
+        await waitMs(80);
       }
       return false;
     })();

@@ -4552,65 +4552,9 @@ fileStore.ensurePerfisJson();
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// Boot sequencial: bootstrap de serviço -> cluster -> listen
+// Painel primeiro. Recycle/células depois — Iniciar não espera WMI nem bootstrap.
 (async () => {
-  await maybeBootstrapService();
-  // Política definida (triagem inbox): após restart, começar fechado.
-  // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
-  // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.
-  let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
-  let adoptingLiveCells = false;
-  let codeStale = false;
-  try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
-  try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
-  // Atualização (git pull): mata células velhas ANTES do start-closed, senão o boot
-  // acha célula viva, pula o "começar fechado" e as células novas reabrem o Chrome.
-  if (adoptingLiveCells && codeStale) {
-    try {
-      if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
-        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
-      }
-    } catch {}
-    try {
-      logger.info('[BOOT] Código novo no disco: encerrando células antigas antes do start-closed.');
-      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
-    } catch (e) {
-      try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-    }
-    adoptingLiveCells = false;
-  }
-  if (adoptingLiveCells) {
-    startClosedOnBoot = false;
-    try { require('./scripts/bootIntent.js').clearHumanHold({ by: 'adopt_live_cells' }); } catch {}
-    try { logger.info('[BOOT] Células vivas (mesmo código): skip start-closed e reap chrome (adota e reconecta).'); } catch {}
-  }
-  try {
-    if (startClosedOnBoot) {
-      logger.info('[BOOT] Política start-closed ATIVA: resetando desired.active=false para todos (aguardando clique).');
-      const r = await fileStore.resetDesiredAllOffOnBoot({ reason: 'triagem_inbox_policy_manual_start' });
-      if (r && r.ok === true) logger.info('[BOOT] start-closed aplicado', { changed: r.changed });
-      else logger.warn('[BOOT] start-closed falhou (best-effort)', { error: r && r.error ? r.error : 'unknown' });
-    } else if (adoptingLiveCells) {
-      logger.info('[BOOT] start-closed pulado: adotando células vivas.');
-    } else {
-      logger.warn('[BOOT] Política start-closed DESATIVADA (CONVENIENTE_START_CLOSED_ON_BOOT=0).');
-    }
-  } catch (e) {
-    logger.warn('[BOOT] start-closed exceção (best-effort)', { error: (e && e.message) || String(e) });
-  }
-  // Túnel zumbi primeiro (rápido). Gate B sobe em seguida. Chrome órfão depois, antes do cluster.
-  try {
-    Promise.resolve(
-      require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' })
-    ).catch(() => {});
-  } catch (e) {
-    try { logger.warn('[BOOT] orphan reap cloudflared falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-  }
-  maybeBootstrapGateBToken().catch((e) => {
-    logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
-  });
-  // Delta: coordenar endpoints (confirm-delivery) e secrets ANTES de criar workers.
-  try { __deltaProvisionDeliveryConfirmEnv(); } catch {}
+  const bootT0 = Date.now();
   if (!clusterClient) {
     clusterClient = {
       plan: { nodes: 0, perNode: { maxChromes: 0 } },
@@ -4625,8 +4569,17 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       ensureCellsRunning: async () => ({ ok: false, error: 'cluster_booting' })
     };
   }
+  try { __deltaProvisionDeliveryConfirmEnv(); } catch {}
+  maybeBootstrapService().catch(() => {});
+  maybeBootstrapGateBToken().catch((e) => {
+    logger.warn('[GATE_B][BOOTSTRAP] falha no disparo em background', { error: (e && e.message) || String(e) });
+  });
+  try {
+    Promise.resolve(
+      require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' })
+    ).catch(() => {});
+  } catch {}
 
-  // Painel escuta já; as células sobem em paralelo logo em seguida.
   httpServer = await new Promise((resolve, reject) => {
     const srv = app.listen(PORT, '127.0.0.1', () => {
       logger.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
@@ -4677,21 +4630,49 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     });
     srv.on('error', reject);
   });
+  try { logger.info('[BOOT] painel no ar', { ms: Date.now() - bootT0 }); } catch {}
+
+  let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
+  let adoptingLiveCells = false;
+  let codeStale = false;
+  try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
+  try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
+  if (adoptingLiveCells && codeStale) {
+    try {
+      if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
+        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
+      }
+    } catch {}
+    try {
+      logger.info('[BOOT] Código novo no disco: reciclando células depois do painel.');
+      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
+    } catch (e) {
+      try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+    }
+    adoptingLiveCells = false;
+  }
+  if (adoptingLiveCells) {
+    startClosedOnBoot = false;
+    try { require('./scripts/bootIntent.js').clearHumanHold({ by: 'adopt_live_cells' }); } catch {}
+    try { logger.info('[BOOT] Células vivas (mesmo código): adota, sem matar Chrome.'); } catch {}
+  }
+  try {
+    if (startClosedOnBoot) {
+      logger.info('[BOOT] start-closed: desired.active=false (aguardando clique).');
+      const r = await fileStore.resetDesiredAllOffOnBoot({ reason: 'triagem_inbox_policy_manual_start' });
+      if (r && r.ok === true) logger.info('[BOOT] start-closed aplicado', { changed: r.changed });
+      else logger.warn('[BOOT] start-closed falhou (best-effort)', { error: r && r.error ? r.error : 'unknown' });
+    } else if (adoptingLiveCells) {
+      logger.info('[BOOT] start-closed pulado: adotando células vivas.');
+    }
+  } catch (e) {
+    logger.warn('[BOOT] start-closed exceção (best-effort)', { error: (e && e.message) || String(e) });
+  }
 
   if (startClosedOnBoot) {
-    let chromeAlive = false;
-    try {
-      const { execFileSync } = require('child_process');
-      const listed = execFileSync('tasklist.exe', ['/FI', 'IMAGENAME eq chrome.exe', '/NH'], {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 4000
-      });
-      chromeAlive = /chrome\.exe/i.test(String(listed || ''));
-    } catch {
-      chromeAlive = true;
-    }
-    if (chromeAlive) {
+    let convenieteChrome = 0;
+    try { convenieteChrome = require('./scripts/orphanReaper.js').countConvenienteChrome(); } catch { convenieteChrome = -1; }
+    if (convenieteChrome > 0) {
       try {
         require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
       } catch (e) {
@@ -4700,6 +4681,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     }
   }
   await bootCluster();
+  try { logger.info('[BOOT] cluster pronto', { ms: Date.now() - bootT0 }); } catch {}
   if (!adoptingLiveCells) {
     setTimeout(() => {
       try {

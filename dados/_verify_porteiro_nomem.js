@@ -91,7 +91,7 @@ check("ensure_waits_uac", /Verb RunAs/.test(ensureTxt) && /-Wait/.test(ensureTxt
 check("ensure_installer_no_self_elevate", /NoSelfElevate/.test(ensureTxt));
 check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UAC/.test(instPTxt));
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
-check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("winTuningMaster.ps1") < iniciarTxt.indexOf("Write-StartLog 'click'"));
+check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("Start-ConvenienteNode") < iniciarTxt.indexOf("winTuningMaster.ps1"));
 check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
 check("host_node_in_window", /& \$node \$idx/.test(hostTxt) && /Conveniente_Node/.test(hostTxt) && !/WindowStyle Hidden/.test(hostTxt) && !/TreatControlCAsInput/.test(hostTxt));

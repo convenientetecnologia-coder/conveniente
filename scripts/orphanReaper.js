@@ -90,33 +90,42 @@ function resolveUserDataDir(nome) {
 
 function listChromeProcessesWin() {
   if (process.platform !== "win32") return [];
-  try {
-    const ps = `
-      $names = @('chrome.exe','chromium.exe');
-      $all = @();
-      foreach ($n in $names) {
-        try {
-          $all += Get-CimInstance Win32_Process -Filter ("Name='" + $n + "'") |
-            Select-Object ProcessId, Name, CommandLine;
-        } catch {}
+  const out = [];
+  for (const name of ["chrome.exe", "chromium.exe"]) {
+    try {
+      const raw = execFileSync("wmic.exe", [
+        "process",
+        "where",
+        "name='" + name + "'",
+        "get",
+        "ProcessId,CommandLine",
+        "/FORMAT:LIST"
+      ], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 3000,
+        maxBuffer: 8 * 1024 * 1024
+      });
+      let cmd = "";
+      for (const line of String(raw || "").split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) {
+          cmd = "";
+          continue;
+        }
+        if (/^CommandLine=/i.test(t)) {
+          cmd = t.slice(t.indexOf("=") + 1);
+          continue;
+        }
+        if (/^ProcessId=/i.test(t)) {
+          const pid = Math.floor(Number(t.slice(t.indexOf("=") + 1)) || 0);
+          if (pid > 0) out.push({ pid, cmd: cmd || "" });
+          cmd = "";
+        }
       }
-      $all | ConvertTo-Json -Compress -Depth 3
-    `;
-    const out = execFileSync(
-      "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-      { encoding: "utf8", windowsHide: true, maxBuffer: 20 * 1024 * 1024, timeout: 12000 }
-    ).trim();
-    if (!out) return [];
-    const json = JSON.parse(out);
-    const arr = Array.isArray(json) ? json : (json ? [json] : []);
-    return arr.map((p) => ({
-      pid: Number(p.ProcessId),
-      cmd: String(p.CommandLine || "")
-    })).filter((p) => Number.isFinite(p.pid) && p.pid > 0);
-  } catch {
-    return [];
+    } catch {}
   }
+  return out;
 }
 
 function taskkillPid(pid) {
@@ -362,18 +371,10 @@ function reapShard({ names, shardIdx, reason }) {
 }
 
 function countConvenienteChrome() {
-  if (process.platform !== "win32") return 0;
   try {
-    const out = execFileSync("wmic.exe", [
-      "process",
-      "where",
-      "name='chrome.exe'",
-      "get",
-      "CommandLine"
-    ], { encoding: "utf8", windowsHide: true, timeout: 2500, maxBuffer: 8 * 1024 * 1024 });
     let n = 0;
-    for (const line of String(out || "").split(/\r?\n/)) {
-      const cmd = normalizePathForCompare(line);
+    for (const pr of listChromeProcessesWin()) {
+      const cmd = normalizePathForCompare(pr.cmd);
       if (!cmd) continue;
       if (cmd.indexOf("user data/conveniente") >= 0 || cmd.indexOf("city-collector-shards") >= 0) n += 1;
     }

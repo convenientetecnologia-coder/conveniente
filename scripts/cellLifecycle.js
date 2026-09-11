@@ -168,6 +168,10 @@ function browsersWorking() {
 }
 
 function stopAllCells({ reason = 'manual' } = {}) {
+  const why = String(reason || 'manual');
+  const bootFast = /boot_|code_stamp|topology|index_ctrl_c|maestro_kill/.test(why) && !/api_cells_stop|stop_workers/.test(why);
+  const listen1 = bootFast ? 2000 : 10000;
+  const listen2 = bootFast ? 800 : 5000;
   const alive = cellRegistry.listAlive();
   const pids = [];
   const seen = new Set();
@@ -180,20 +184,20 @@ function stopAllCells({ reason = 'manual' } = {}) {
   for (const c of alive) addPid(c && c.pid);
   for (const row of cellRegistry.collectListenPids(8)) addPid(row && row.pid);
   try {
-    cellForensic.append('cell_stop_all', { reason: String(reason).slice(0, 80), count: pids.length, pids });
+    cellForensic.append('cell_stop_all', { reason: why.slice(0, 80), count: pids.length, pids, listen1 });
   } catch {}
   for (const pid of pids) forceKillPid(pid);
   let chrome = { killed: 0, matched: 0 };
   try {
-    chrome = require('./orphanReaper.js').reapAllConvenienteChrome(String(reason || 'stop_all_cells'));
+    chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
   } catch {}
-  let freed = killListenUntilFree(10000);
+  let freed = killListenUntilFree(listen1);
   if (!freed.ok) {
     try {
-      const again = require('./orphanReaper.js').reapAllConvenienteChrome(String(reason || 'stop_all_cells_retry'));
+      const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
       if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
     } catch {}
-    freed = killListenUntilFree(5000);
+    freed = killListenUntilFree(listen2);
   }
   const stillListen = freed.left || cellRegistry.collectListenPids(8);
   const still = cellRegistry.listAlive();
