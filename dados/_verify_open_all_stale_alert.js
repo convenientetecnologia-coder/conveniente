@@ -56,6 +56,8 @@ assert.ok(/if \(isShuttingDown\) \{\s*child\.deadHandled = true/.test(cluster), 
 assert.ok(/listCellEntryPids/.test(life) && /cellentry\.js/.test(life), "Encerrar mata pelo cellEntry.js, não só pela porta");
 assert.ok(/!recycledThisBoot && !cellLifecycle\.isStampStale\(\)/.test(cluster), "git pull nunca adota célula velha");
 assert.ok(/mustDie/.test(life) && /listCellEntryPids/.test(life), "atualização e Encerrar insistem até a célula morrer");
+assert.ok(/isSkippableListenPid/.test(life) && /terminateCellEntriesByCmd/.test(life), "Encerrar não trata porta do index como célula");
+assert.ok(/reg\.cells = \[\]/.test(life), "Encerrar zera o registry; não grava leftover fantasma como 4/4");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(

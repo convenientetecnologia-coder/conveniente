@@ -113,6 +113,11 @@ function sleepMs(ms) {
   }
 }
 
+let __cellEntryAt = 0;
+let __cellEntryPids = [];
+let __nodeCmdAt = 0;
+let __nodeCmds = [];
+
 function forceKillPid(pid) {
   const n = Math.floor(Number(pid) || 0);
   if (!n || n === process.pid || n <= 4) return;
@@ -125,6 +130,7 @@ function forceKillPid(pid) {
   } catch {}
   try { process.kill(n, 9); } catch {}
   __cellEntryAt = 0;
+  __nodeCmdAt = 0;
   try { cellRegistry.invalidateListenCache(); } catch {}
 }
 
@@ -142,22 +148,8 @@ function silentExec(file, args, timeoutMs) {
   }
 }
 
-let __cellEntryAt = 0;
-let __cellEntryPids = [];
-
-function listCellEntryPids() {
-  if (process.platform !== 'win32') return [];
-  const now = Date.now();
-  if (__cellEntryAt && (now - __cellEntryAt) < 600) return __cellEntryPids.slice();
-  const raw = silentExec('wmic.exe', [
-    'process',
-    'where',
-    "name='node.exe'",
-    'get',
-    'ProcessId,CommandLine',
-    '/FORMAT:LIST'
-  ], 3000);
-  const out = [];
+function parseWmicPidCmd(raw) {
+  const rows = [];
   let cmd = '';
   for (const line of String(raw || '').split(/\r?\n/)) {
     const t = line.trim();
@@ -171,14 +163,88 @@ function listCellEntryPids() {
     }
     if (/^ProcessId=/i.test(t)) {
       const pid = Math.floor(Number(t.slice(t.indexOf('=') + 1)) || 0);
-      const low = String(cmd || '').toLowerCase();
-      if (pid > 4 && pid !== process.pid && low.indexOf('cellentry.js') >= 0) out.push(pid);
+      if (pid > 0) rows.push({ pid, cmd: cmd || '' });
       cmd = '';
     }
+  }
+  return rows;
+}
+
+function listNodePidCmds() {
+  if (process.platform !== 'win32') return [];
+  const now = Date.now();
+  if (__nodeCmdAt && (now - __nodeCmdAt) < 600) return __nodeCmds.slice();
+  const rows = parseWmicPidCmd(silentExec('wmic.exe', [
+    'process',
+    'where',
+    "name='node.exe'",
+    'get',
+    'ProcessId,CommandLine',
+    '/FORMAT:LIST'
+  ], 3000));
+  __nodeCmdAt = Date.now();
+  __nodeCmds = rows;
+  return rows.slice();
+}
+
+function isCellEntryCmd(cmd) {
+  return String(cmd || '').toLowerCase().indexOf('cellentry.js') >= 0;
+}
+
+function isIndexCmd(cmd) {
+  const low = String(cmd || '').toLowerCase();
+  return low.indexOf('index.js') >= 0 && low.indexOf('cellentry.js') < 0;
+}
+
+function listCellEntryPids() {
+  const now = Date.now();
+  if (__cellEntryAt && (now - __cellEntryAt) < 600) return __cellEntryPids.slice();
+  const out = [];
+  for (const row of listNodePidCmds()) {
+    if (row.pid > 4 && row.pid !== process.pid && isCellEntryCmd(row.cmd)) out.push(row.pid);
   }
   __cellEntryAt = Date.now();
   __cellEntryPids = out;
   return out.slice();
+}
+
+function pidCommandLine(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 0)) return '';
+  for (const row of listNodePidCmds()) {
+    if (row.pid === n) return row.cmd || '';
+  }
+  return '';
+}
+
+function isSkippableListenPid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 0) || n === process.pid || n <= 4) return true;
+  const cmd = pidCommandLine(n);
+  if (cmd && isIndexCmd(cmd)) return true;
+  if (cmd && !isCellEntryCmd(cmd)) return true;
+  return false;
+}
+
+function terminateCellEntriesByCmd() {
+  if (process.platform !== 'win32') return;
+  silentExec('wmic.exe', [
+    'process',
+    'where',
+    "Name='node.exe' and CommandLine like '%cellEntry.js%'",
+    'call',
+    'terminate'
+  ], 5000);
+  __cellEntryAt = 0;
+  const left = listCellEntryPids();
+  if (!left.length) return;
+  silentExec(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*cellEntry.js*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+  ], 8000);
+  __cellEntryAt = 0;
 }
 
 function needRestart() {
@@ -186,22 +252,27 @@ function needRestart() {
   return isStampStale() || isTopologyStale();
 }
 
+function realCellListenRows() {
+  const rows = [];
+  for (const row of cellRegistry.collectListenPids(8, { force: true })) {
+    if (isSkippableListenPid(row.pid)) continue;
+    rows.push(row);
+  }
+  return rows;
+}
+
 function killListenUntilFree(timeoutMs) {
   const started = Date.now();
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
-    const rows = cellRegistry.collectListenPids(8, { force: true });
-    if (rows.length) {
-      for (const row of rows) forceKillPid(row.pid);
-      sleepMs(80);
-      continue;
-    }
+    const rows = realCellListenRows();
     const entry = listCellEntryPids();
-    if (!entry.length) return { ok: true, left: [] };
+    if (!rows.length && !entry.length) return { ok: true, left: [] };
+    for (const row of rows) forceKillPid(row.pid);
     for (const pid of entry) forceKillPid(pid);
     sleepMs(80);
   }
-  const left = cellRegistry.collectListenPids(8, { force: true });
+  const left = realCellListenRows();
   return { ok: left.length === 0 && listCellEntryPids().length === 0, left };
 }
 
@@ -241,76 +312,77 @@ function stopAllCells({ reason = 'manual' } = {}) {
   const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology/.test(why);
   const bootFast = !mustDie && /boot_|index_ctrl_c|maestro_kill/.test(why);
   if (mustDie || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
-  const listen1 = mustDie ? 20000 : (bootFast ? 2000 : 10000);
-  const listen2 = mustDie ? 8000 : (bootFast ? 800 : 5000);
+  const listen1 = mustDie ? 8000 : (bootFast ? 2000 : 8000);
+  const listen2 = mustDie ? 4000 : (bootFast ? 800 : 3000);
   const alive = cellRegistry.listAlive();
   const pids = [];
   const seen = new Set();
   function addPid(pid) {
     const n = Math.floor(Number(pid) || 0);
-    if (!(n > 0) || n === process.pid || seen.has(n)) return;
+    if (!(n > 0) || n === process.pid || n <= 4 || seen.has(n)) return;
+    if (isSkippableListenPid(n)) return;
     seen.add(n);
     pids.push(n);
   }
   for (const c of alive) addPid(c && c.pid);
-  for (const row of cellRegistry.collectListenPids(8, { force: true })) addPid(row && row.pid);
+  for (const row of realCellListenRows()) addPid(row && row.pid);
   for (const pid of listCellEntryPids()) addPid(pid);
+  const owners = [];
   try {
-    cellForensic.append('cell_stop_all', { reason: why.slice(0, 80), count: pids.length, pids, listen1 });
+    for (const row of cellRegistry.collectListenPids(8, { force: true })) {
+      owners.push({
+        port: row.port,
+        pid: row.pid,
+        skip: isSkippableListenPid(row.pid),
+        cmd: String(pidCommandLine(row.pid) || '').slice(0, 160)
+      });
+    }
+  } catch {}
+  try {
+    cellForensic.append('cell_stop_all', {
+      reason: why.slice(0, 80),
+      count: pids.length,
+      pids,
+      listen1,
+      owners
+    });
   } catch {}
   for (const pid of pids) forceKillPid(pid);
+  terminateCellEntriesByCmd();
   let chrome = { killed: 0, matched: 0 };
-  let chromeAlive = mustDie;
-  if (!chromeAlive) {
-    try { chromeAlive = require('./orphanReaper.js').anyChromeImage(); } catch { chromeAlive = true; }
-  }
-  if (chromeAlive) {
-    try {
-      chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
-    } catch {}
-  }
+  try {
+    chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
+  } catch {}
   let freed = killListenUntilFree(listen1);
   if (!freed.ok) {
-    if (chromeAlive) {
-      try {
-        const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
-        if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
-      } catch {}
-    }
+    terminateCellEntriesByCmd();
+    try {
+      const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
+      if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
+    } catch {}
     freed = killListenUntilFree(listen2);
   }
-  const stillListen = freed.left || cellRegistry.collectListenPids(8);
-  const still = cellRegistry.listAlive();
-  const ok = stillListen.length === 0 && still.length === 0;
+  const stillListen = Array.isArray(freed.left) ? freed.left : realCellListenRows();
+  const entryLeft = listCellEntryPids();
+  const ok = stillListen.length === 0 && entryLeft.length === 0;
   const reg = cellRegistry.read();
-  if (ok) {
-    reg.cells = [];
-    cellRegistry.write(reg);
-  } else {
-    for (const row of stillListen) {
-      try {
-        cellRegistry.upsertCell({
-          idx: row.idx,
-          pid: row.pid,
-          port: row.port
-        });
-      } catch {}
-    }
-  }
+  reg.cells = [];
+  cellRegistry.write(reg);
   return {
     ok,
     error: ok
       ? null
       : (stillListen.length
         ? ('celula_ainda_na_porta:' + stillListen.map((r) => r.port).join(','))
-        : 'celula_ainda_viva'),
+        : (entryLeft.length ? 'celula_ainda_viva' : 'nao_encerrou')),
     reason: String(reason || ''),
     requested: pids.length,
     forced: pids.length,
-    alive: still.length,
+    alive: 0,
     listenLeft: stillListen.length,
     chromeKilled: chrome && chrome.killed != null ? chrome.killed : 0,
-    pids
+    pids,
+    owners
   };
 }
 
