@@ -65,11 +65,9 @@ async function createCluster() {
   let aliveAtBoot = cellRegistry.listAlive();
   const bootStamp = cellLifecycle.currentStamp();
   let recycledThisBoot = false;
-  if (cellLifecycle.consumeBootRecycle()) {
+  if (cellLifecycle.consumeBootRecycle() || cellLifecycle.isStampStale()) {
     recycledThisBoot = true;
-    for (const row of cellRegistry.collectListenPids(8)) {
-      try { cellLifecycle.forceKillPid(row.pid); } catch {}
-    }
+    try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
     aliveAtBoot = [];
   }
   if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {
@@ -110,7 +108,7 @@ async function createCluster() {
   }
   try { cellRegistry.clearDead(); } catch {}
   if (aliveAtBoot.length > 0) aliveAtBoot = cellRegistry.listAlive();
-  const adopting = aliveAtBoot.length > 0;
+  const adopting = !recycledThisBoot && !cellLifecycle.isStampStale() && aliveAtBoot.length > 0;
   if (adopting) {
     const maxIdx = Math.max(
       plan.nodes - 1,
@@ -589,7 +587,7 @@ async function createCluster() {
       child.shard.forEach((n) => { route[n] = idx; });
     }
 
-    if (!replace) {
+    if (!replace && !recycledThisBoot && !cellLifecycle.isStampStale()) {
       if (await adoptIfListening(child, idx, 'port_live')) return child;
       if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
         logger.warn('[CLUSTER] célula surda: pid vivo sem porta — recicla o slot', {

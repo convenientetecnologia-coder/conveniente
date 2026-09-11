@@ -115,7 +115,7 @@ function sleepMs(ms) {
 
 function forceKillPid(pid) {
   const n = Math.floor(Number(pid) || 0);
-  if (!n) return;
+  if (!n || n === process.pid || n <= 4) return;
   try {
     spawnSync('taskkill.exe', ['/F', '/PID', String(n)], {
       windowsHide: true,
@@ -123,7 +123,54 @@ function forceKillPid(pid) {
       stdio: ['ignore', 'ignore', 'ignore']
     });
   } catch {}
+  try { process.kill(n, 9); } catch {}
   try { cellRegistry.invalidateListenCache(); } catch {}
+}
+
+function silentExec(file, args, timeoutMs) {
+  try {
+    return require('child_process').execFileSync(file, args, {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: Math.max(800, Number(timeoutMs) || 2500),
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (e) {
+    return String((e && e.stdout) || '');
+  }
+}
+
+function listCellEntryPids() {
+  if (process.platform !== 'win32') return [];
+  const raw = silentExec('wmic.exe', [
+    'process',
+    'where',
+    "name='node.exe'",
+    'get',
+    'ProcessId,CommandLine',
+    '/FORMAT:LIST'
+  ], 3000);
+  const out = [];
+  let cmd = '';
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) {
+      cmd = '';
+      continue;
+    }
+    if (/^CommandLine=/i.test(t)) {
+      cmd = t.slice(t.indexOf('=') + 1);
+      continue;
+    }
+    if (/^ProcessId=/i.test(t)) {
+      const pid = Math.floor(Number(t.slice(t.indexOf('=') + 1)) || 0);
+      const low = String(cmd || '').toLowerCase();
+      if (pid > 4 && pid !== process.pid && low.indexOf('cellentry.js') >= 0) out.push(pid);
+      cmd = '';
+    }
+  }
+  return out;
 }
 
 function needRestart() {
@@ -136,12 +183,14 @@ function killListenUntilFree(timeoutMs) {
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
     const rows = cellRegistry.collectListenPids(8, { force: true });
-    if (!rows.length) return { ok: true, left: [] };
+    const entry = listCellEntryPids();
+    if (!rows.length && !entry.length) return { ok: true, left: [] };
     for (const row of rows) forceKillPid(row.pid);
-    sleepMs(120);
+    for (const pid of entry) forceKillPid(pid);
+    sleepMs(80);
   }
   const left = cellRegistry.collectListenPids(8, { force: true });
-  return { ok: left.length === 0, left };
+  return { ok: left.length === 0 && listCellEntryPids().length === 0, left };
 }
 
 function countDesiredActive() {
@@ -177,28 +226,32 @@ function consumeBootRecycle() {
 
 function stopAllCells({ reason = 'manual' } = {}) {
   const why = String(reason || 'manual');
-  const bootFast = /boot_|code_stamp|topology|index_ctrl_c|maestro_kill/.test(why) && !/api_cells_stop|stop_workers/.test(why);
-  if (bootFast || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
-  const listen1 = bootFast ? 2000 : 10000;
-  const listen2 = bootFast ? 800 : 5000;
+  const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology/.test(why);
+  const bootFast = !mustDie && /boot_|index_ctrl_c|maestro_kill/.test(why);
+  if (mustDie || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
+  const listen1 = mustDie ? 20000 : (bootFast ? 2000 : 10000);
+  const listen2 = mustDie ? 8000 : (bootFast ? 800 : 5000);
   const alive = cellRegistry.listAlive();
   const pids = [];
   const seen = new Set();
   function addPid(pid) {
     const n = Math.floor(Number(pid) || 0);
-    if (!(n > 0) || seen.has(n)) return;
+    if (!(n > 0) || n === process.pid || seen.has(n)) return;
     seen.add(n);
     pids.push(n);
   }
   for (const c of alive) addPid(c && c.pid);
   for (const row of cellRegistry.collectListenPids(8, { force: true })) addPid(row && row.pid);
+  for (const pid of listCellEntryPids()) addPid(pid);
   try {
     cellForensic.append('cell_stop_all', { reason: why.slice(0, 80), count: pids.length, pids, listen1 });
   } catch {}
   for (const pid of pids) forceKillPid(pid);
   let chrome = { killed: 0, matched: 0 };
-  let chromeAlive = false;
-  try { chromeAlive = require('./orphanReaper.js').anyChromeImage(); } catch { chromeAlive = true; }
+  let chromeAlive = mustDie;
+  if (!chromeAlive) {
+    try { chromeAlive = require('./orphanReaper.js').anyChromeImage(); } catch { chromeAlive = true; }
+  }
   if (chromeAlive) {
     try {
       chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
@@ -288,6 +341,7 @@ module.exports = {
   killListenUntilFree,
   stopAllCells,
   consumeBootRecycle,
+  listCellEntryPids,
   countDesiredActive,
   browsersWorking
 };

@@ -53,6 +53,9 @@ const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), 
 const begin = cluster.split("function beginStop")[1] || "";
 assert.ok(/deadHandled = true/.test(begin.slice(0, 500)), "beginStop marca célula morta pra não readotar");
 assert.ok(/if \(isShuttingDown\) \{\s*child\.deadHandled = true/.test(cluster), "drop durante Encerrar não readota porta");
+assert.ok(/listCellEntryPids/.test(life) && /cellentry\.js/.test(life), "Encerrar mata pelo cellEntry.js, não só pela porta");
+assert.ok(/!recycledThisBoot && !cellLifecycle\.isStampStale\(\)/.test(cluster), "git pull nunca adota célula velha");
+assert.ok(/mustDie/.test(life) && /listCellEntryPids/.test(life), "atualização e Encerrar insistem até a célula morrer");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(

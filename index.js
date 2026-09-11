@@ -4652,6 +4652,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
     }
     adoptingLiveCells = false;
+    startClosedOnBoot = true;
   }
   let holdStopWorkers = false;
   try {
