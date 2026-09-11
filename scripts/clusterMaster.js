@@ -67,11 +67,7 @@ async function createCluster() {
   let recycledThisBoot = false;
   if (cellLifecycle.consumeBootRecycle() || cellLifecycle.isStampStale()) {
     recycledThisBoot = true;
-    let entry = [];
-    try { entry = cellLifecycle.listCellEntryPids(); } catch {}
-    if (entry.length || cellRegistry.hasAliveCells()) {
-      try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
-    }
+    try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
     aliveAtBoot = [];
   }
   if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {
@@ -673,20 +669,27 @@ async function createCluster() {
       await waitMs(300);
     }
     if (cellRegistry.tcpListenPid(child.port) > 0) {
-      const taken = children.map((c) => c && c.port).filter(Boolean);
-      taken.push(child.port);
-      const alt = cellRegistry.findFreePort({ exclude: taken, maxSlots: 32 });
-      if (alt > 0 && alt !== child.port) {
-        try {
-          cellForensic.append('cell_port_relocated', {
-            idx: idx + 1,
-            from: child.port,
-            to: alt,
-            blockedPid: occupant
-          });
-        } catch {}
-        child.port = alt;
-        env.CELL_CMD_PORT = String(alt);
+      const still = cellRegistry.tcpListenPid(child.port);
+      const leftoverCell = cellLifecycle.isProvenCellEntryPid(still) || cellLifecycle.isLikelyCellListenPid(still);
+      if (leftoverCell) {
+        forceKillCellPid(still);
+        await waitPortFree(child.port, 4000);
+      } else {
+        const taken = children.map((c) => c && c.port).filter(Boolean);
+        taken.push(child.port);
+        const alt = cellRegistry.findFreePort({ exclude: taken, maxSlots: 32 });
+        if (alt > 0 && alt !== child.port) {
+          try {
+            cellForensic.append('cell_port_relocated', {
+              idx: idx + 1,
+              from: child.port,
+              to: alt,
+              blockedPid: still
+            });
+          } catch {}
+          child.port = alt;
+          env.CELL_CMD_PORT = String(alt);
+        }
       }
     }
 
@@ -814,6 +817,17 @@ async function createCluster() {
     }
   }));
   for (const child of spawned) children.push(child);
+  try {
+    const keep = children.map((c) => c && c.pid).filter(Boolean);
+    const reap = cellLifecycle.reapForeignCellEntries(keep);
+    if (reap && reap.killed) {
+      logger.warn('[CLUSTER] células zumbi fora do plano removidas', {
+        killed: reap.killed,
+        keep: keep.length,
+        want: children.length
+      });
+    }
+  } catch {}
   try {
     logger.info('[CLUSTER][BOOT_MS]', {
       ms: Date.now() - bootStarted,
@@ -1449,6 +1463,10 @@ async function createCluster() {
         logger.error('[CLUSTER] ensure cell falhou', { idx: idx + 1, error: (e && e.message) || e });
       }
     }));
+    try {
+      const keep = children.map((c) => c && c.pid).filter(Boolean);
+      cellLifecycle.reapForeignCellEntries(keep);
+    } catch {}
     try {
       cellForensic.append('cell_ensure', {
         reason: String(reason || 'ensure').slice(0, 80),

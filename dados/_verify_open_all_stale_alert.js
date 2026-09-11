@@ -72,6 +72,8 @@ assert.ok(/neutralizeWorkerStatusJournals/.test(life), "Encerrar apaga journal a
 assert.ok(/human_hold_stop_workers/.test(cluster), "ensure não renasce célula depois do Encerrar");
 assert.ok(/isProvenCellEntryPid\(owner\)/.test(cluster), "não adota LISTEN que não é cellEntry");
 assert.ok(/cell_port_relocated/.test(cluster) && /findFreePort/.test(cluster), "porta bloqueada troca de porta, não mata o slot");
+assert.ok(/reapForeignCellEntries/.test(cluster) && /reapForeignCellEntries/.test(life), "boot mata cellEntry que não é do plano");
+assert.ok(/leftoverCell/.test(cluster), "não troca de porta se a ocupante ainda é célula");
 assert.ok(apiSys.includes("listLiveCellPids") && apiSys.includes("want"), "GET /api/cells manda alive e want");
 assert.ok(html.includes("cells.want") && html.includes("ownerLines"), "painel mostra vivo/plano e dono no Encerrar");
 

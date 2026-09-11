@@ -320,7 +320,7 @@ function isSkippableListenPid(pid) {
 function listListenOwners(maxSlots) {
   const owners = [];
   try {
-    for (const row of cellRegistry.collectListenPids(maxSlots || 8, { force: true })) {
+    for (const row of cellRegistry.collectListenPids(maxSlots || 32, { force: true })) {
       const cmd = pidCommandLine(row.pid);
       const node = listNodePidCmds().find((r) => r.pid === row.pid);
       owners.push({
@@ -396,11 +396,34 @@ function needRestart() {
 
 function realCellListenRows() {
   const rows = [];
-  for (const row of cellRegistry.collectListenPids(8, { force: true })) {
+  for (const row of cellRegistry.collectListenPids(32, { force: true })) {
     if (!isLikelyCellListenPid(row.pid)) continue;
     rows.push(row);
   }
   return rows;
+}
+
+function reapForeignCellEntries(keepPids) {
+  const keep = new Set();
+  for (const p of (Array.isArray(keepPids) ? keepPids : [])) {
+    const n = Math.floor(Number(p) || 0);
+    if (n > 4) keep.add(n);
+  }
+  const victims = [];
+  for (const pid of listLiveCellPids()) {
+    if (keep.has(pid)) continue;
+    victims.push(pid);
+    forceKillPid(pid);
+  }
+  if (victims.length) {
+    try {
+      cellForensic.append('cell_reap_foreign', {
+        keep: Array.from(keep),
+        killed: victims
+      });
+    } catch {}
+  }
+  return { killed: victims.length, pids: victims };
 }
 
 function killListenUntilFree(timeoutMs) {
@@ -467,7 +490,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
   for (const c of alive) addPid(c && c.pid, true);
   for (const row of realCellListenRows()) addPid(row && row.pid);
   for (const pid of listCellEntryPids()) addPid(pid, true);
-  const owners = listListenOwners(8);
+  const owners = listListenOwners(32);
   try {
     cellForensic.append('cell_stop_all', {
       reason: why.slice(0, 80),
@@ -495,7 +518,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
   const stillListen = Array.isArray(freed.left) ? freed.left : realCellListenRows();
   const entryLeft = listLiveCellPids();
   const ok = entryLeft.length === 0;
-  const ownersAfter = listListenOwners(8);
+  const ownersAfter = listListenOwners(32);
   try { neutralizeWorkerStatusJournals(why); } catch {}
   const reg = cellRegistry.read();
   reg.cells = [];
@@ -562,6 +585,7 @@ module.exports = {
   listCellEntryPids,
   listLiveCellPids,
   wantedCellCount,
+  reapForeignCellEntries,
   listListenOwners,
   isProvenCellEntryPid,
   isLikelyCellListenPid,

@@ -119,7 +119,7 @@ function tcpListenPid(port, opts) {
 }
 
 function collectListenPids(maxSlots, opts) {
-  const n = Math.max(1, Math.min(16, Math.floor(Number(maxSlots) || 8)));
+  const n = Math.max(1, Math.min(32, Math.floor(Number(maxSlots) || 8)));
   const map = parseListenMap(!!(opts && opts.force));
   const out = [];
   for (let i = 0; i < n; i++) {

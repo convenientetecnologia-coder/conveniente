@@ -4647,7 +4647,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   let codeStale = false;
   try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
   try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
-  if (adoptingLiveCells && codeStale) {
+  if (codeStale) {
     try {
       if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
         require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
@@ -4667,7 +4667,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     const hold = require('./scripts/bootIntent.js').readHumanHold();
     holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
   } catch {}
-  if (adoptingLiveCells && holdStopWorkers) {
+  if (holdStopWorkers) {
     try { logger.info('[BOOT] Encerrar workers ainda vale: leftover não se adota.'); } catch {}
     try { require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_hold_stop_workers' }); } catch (e) {
       try { logger.warn('[BOOT] leftover após Encerrar falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
