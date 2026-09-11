@@ -405,7 +405,8 @@ async function createCluster() {
     try {
       spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
         windowsHide: true,
-        timeout: 15000
+        timeout: 15000,
+        stdio: ['ignore', 'ignore', 'ignore']
       });
     } catch {}
   }
@@ -595,28 +596,13 @@ async function createCluster() {
         await waitPortFree(child.port, 4000);
       }
     } else {
-      const owner = cellRegistry.tcpListenPid(child.port);
-      if (owner > 0) {
-        forceKillCellPid(owner);
-        const waitDeadUntil = Date.now() + 4000;
-        while (Date.now() < waitDeadUntil && cellRegistry.pidAlive(owner)) {
-          await waitMs(150);
-        }
-      }
-      if (aliveRow && cellRegistry.pidAlive(aliveRow.pid) && Number(aliveRow.pid) !== owner) {
+      try { cellLifecycle.killListenUntilFree(12000); } catch {}
+      if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
         forceKillCellPid(aliveRow.pid);
       }
       reapSlotChrome(idx, shardNames, 'cell_stamp_replace');
       try { cellRegistry.clearDead(); } catch {}
-      await waitPortFree(child.port, 8000);
-      if (await adoptIfListening(child, idx, 'leftover_after_replace')) {
-        logger.warn('[CLUSTER] leftover na porta após recycle — adota pra não abrir/fechar em loop', {
-          idx: idx + 1,
-          pid: child.pid,
-          port: child.port
-        });
-        return child;
-      }
+      try { cellLifecycle.killListenUntilFree(8000); } catch {}
     }
 
     child.adopted = false;
@@ -625,13 +611,17 @@ async function createCluster() {
     child.port = cellRegistry.portForIdx(idx);
 
     if (cellRegistry.tcpListenPid(child.port) > 0) {
-      if (await adoptIfListening(child, idx, 'busy_before_spawn')) return child;
-      logger.warn('[CLUSTER] porta ocupada e adopt falhou — espera liberar e tenta nascer', {
-        idx: idx + 1,
-        port: child.port
-      });
-      await waitPortFree(child.port, 4000);
-      if (await adoptIfListening(child, idx, 'busy_after_wait')) return child;
+      if (!replace && await adoptIfListening(child, idx, 'busy_before_spawn')) return child;
+      if (replace) {
+        try { cellLifecycle.killListenUntilFree(8000); } catch {}
+      } else {
+        logger.warn('[CLUSTER] porta ocupada e adopt falhou — espera liberar e tenta nascer', {
+          idx: idx + 1,
+          port: child.port
+        });
+        await waitPortFree(child.port, 4000);
+        if (await adoptIfListening(child, idx, 'busy_after_wait')) return child;
+      }
     }
 
     try {
@@ -669,7 +659,7 @@ async function createCluster() {
       return false;
     })();
     if (!connected) {
-      if (await adoptIfListening(child, idx, 'spawn_died_port_live')) return child;
+      if (!replace && await adoptIfListening(child, idx, 'spawn_died_port_live')) return child;
       logger.error('[CLUSTER] célula não escutou; o index não morre por isso', {
         idx: idx + 1,
         port: child.port,

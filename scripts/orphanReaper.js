@@ -121,7 +121,11 @@ function listChromeProcessesWin() {
 
 function taskkillPid(pid) {
   try {
-    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, timeout: 8000 });
+    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      timeout: 8000,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
     return true;
   } catch {
     return false;

@@ -119,9 +119,23 @@ function forceKillPid(pid) {
   try {
     spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
       windowsHide: true,
-      timeout: 15000
+      timeout: 15000,
+      stdio: ['ignore', 'ignore', 'ignore']
     });
   } catch {}
+}
+
+function killListenUntilFree(timeoutMs) {
+  const started = Date.now();
+  const limit = Math.max(500, Number(timeoutMs) || 10000);
+  while ((Date.now() - started) < limit) {
+    const rows = cellRegistry.collectListenPids(8);
+    if (!rows.length) return { ok: true, left: [] };
+    for (const row of rows) forceKillPid(row.pid);
+    sleepMs(250);
+  }
+  const left = cellRegistry.collectListenPids(8);
+  return { ok: left.length === 0, left };
 }
 
 function stopAllCells({ reason = 'manual' } = {}) {
@@ -144,19 +158,32 @@ function stopAllCells({ reason = 'manual' } = {}) {
   try {
     chrome = require('./orphanReaper.js').reapAllConvenienteChrome(String(reason || 'stop_all_cells'));
   } catch {}
-  for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
-  const portWait = Date.now() + 2500;
-  while (Date.now() < portWait) {
-    if (cellRegistry.collectListenPids(8).length === 0) break;
-    for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
-    sleepMs(200);
+  let freed = killListenUntilFree(10000);
+  if (!freed.ok) {
+    try {
+      const again = require('./orphanReaper.js').reapAllConvenienteChrome(String(reason || 'stop_all_cells_retry'));
+      if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
+    } catch {}
+    freed = killListenUntilFree(5000);
   }
-  const reg = cellRegistry.read();
-  reg.cells = [];
-  cellRegistry.write(reg);
-  const stillListen = cellRegistry.collectListenPids(8);
+  const stillListen = freed.left || cellRegistry.collectListenPids(8);
   const still = cellRegistry.listAlive();
-  const ok = still.length === 0 && stillListen.length === 0;
+  const ok = stillListen.length === 0 && still.length === 0;
+  const reg = cellRegistry.read();
+  if (ok) {
+    reg.cells = [];
+    cellRegistry.write(reg);
+  } else {
+    for (const row of stillListen) {
+      try {
+        cellRegistry.upsertCell({
+          idx: row.idx,
+          pid: row.pid,
+          port: row.port
+        });
+      } catch {}
+    }
+  }
   return {
     ok,
     error: ok
@@ -204,5 +231,7 @@ module.exports = {
   isTopologyStale,
   setStamp,
   setTopology,
+  forceKillPid,
+  killListenUntilFree,
   stopAllCells
 };
