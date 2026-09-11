@@ -3579,22 +3579,38 @@
           cancelText: 'Cancelar'
         });
         if (!ok) return;
+        const prevLabel = btn.textContent;
         btn.disabled = true;
+        btn.textContent = 'Encerrando workers...';
+        startAllLock = false;
         try {
+          const startBtn = document.getElementById('startAllBtn');
+          if (startBtn) {
+            startBtn.disabled = true;
+            startBtn.textContent = 'Abrir Todos 24h';
+          }
+        } catch {}
+        try {
+          const ac = new AbortController();
+          const t = setTimeout(() => { try { ac.abort(); } catch {} }, 45000);
           const r = await fetch('/api/cells/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirm: true })
+            body: JSON.stringify({ confirm: true }),
+            signal: ac.signal
           }).then((x) => x.json()).catch(() => null);
+          try { clearTimeout(t); } catch {}
           await showSystemMessageModal({
             title: r && r.ok ? 'Workers encerrados' : 'Falha ao encerrar workers',
             message: r && r.ok
-              ? ('Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. Abrir Tudo ou abrir uma conta renasce a célula.')
+              ? ('Abrir Tudo cancelado. Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. Abrir Tudo ou abrir uma conta renasce a célula.')
               : String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')),
             tone: r && r.ok ? 'good' : 'bad'
           });
+          try { if (typeof reloadPerfis === 'function') reloadPerfis(); } catch {}
         } finally {
           btn.disabled = false;
+          btn.textContent = prevLabel || 'Encerrar workers';
         }
       };
     })();

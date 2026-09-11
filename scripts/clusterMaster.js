@@ -1302,7 +1302,7 @@ async function createCluster() {
     }
   }
 
-  async function detach() {
+  function beginStop() {
     isShuttingDown = true;
     try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
@@ -1311,17 +1311,16 @@ async function createCluster() {
       c.socket = null;
       c.netSend = null;
     }
+  }
+
+  async function detach() {
+    beginStop();
     try { cellForensic.append('cell_maestro_detach', { cells: children.length, pids: children.map((c) => c.pid) }); } catch {}
     try { logger.info('[CLUSTER] maestro detach: células seguem vivas', { cells: children.length }); } catch {}
   }
 
   async function kill() {
-    isShuttingDown = true;
-    try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
-    try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
-    for (const c of children) {
-      try { if (c.socket) c.socket.destroy(); } catch {}
-    }
+    beginStop();
     try { cellLifecycle.stopAllCells({ reason: 'maestro_kill' }); } catch {}
     try { require('./orphanReaper.js').reapAllConvenienteChrome('maestro_kill'); } catch {}
   }
@@ -1458,7 +1457,7 @@ async function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, detach, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
+  return { plan, children, sendWorkerCommand, kill, detach, beginStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
 }
 
 module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };

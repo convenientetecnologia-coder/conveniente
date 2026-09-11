@@ -58,20 +58,19 @@ module.exports = (app, workerClient, fileStore) => {
       return res.status(400).json({ ok: false, error: 'confirm_required' });
     }
     try {
-      if (workerClient && typeof workerClient.kill === 'function') {
-        await workerClient.kill();
-      }
-    } catch {}
-    try {
       try { require('./bootIntent.js').setHumanHold({ reason: 'stop_workers', by: 'api_cells_stop' }); } catch {}
-      const cellLifecycle = require('./cellLifecycle.js');
-      const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
       try {
         await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' });
       } catch {}
-      return res.json(Object.assign({ maestroStays: true }, r));
+      try { require('./provisionLock.js').release({ force: true }); } catch {}
+      try {
+        if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
+      } catch {}
+      const cellLifecycle = require('./cellLifecycle.js');
+      const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
+      return res.json(Object.assign({ maestroStays: true, cancelledOpenAll: true }, r));
     } catch (e) {
-      return res.json({ ok: false, error: e && e.message || String(e) });
+      return res.json({ ok: false, error: e && e.message || String(e), maestroStays: true });
     }
   });
 };

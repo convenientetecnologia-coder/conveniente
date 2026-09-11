@@ -4472,7 +4472,8 @@ async function bootCluster() {
       rebalance: async () => ({ ok: false, error: 'cluster_down' }),
       reshuffleFairIfIdle: async () => ({ ok: false, error: 'cluster_down' }),
       kill: async () => {},
-      detach: async () => {}
+      detach: async () => {},
+      beginStop: () => {}
     };
   }
   logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false) + ' adopting=' + String(!!clusterClient.adopting));
@@ -4566,6 +4567,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       reshuffleFairIfIdle: async () => ({ ok: false, error: 'cluster_booting' }),
       kill: async () => {},
       detach: async () => {},
+      beginStop: () => {},
       ensureCellsRunning: async () => ({ ok: false, error: 'cluster_booting' })
     };
   }
@@ -4650,6 +4652,19 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
     }
     adoptingLiveCells = false;
+  }
+  let holdStopWorkers = false;
+  try {
+    const hold = require('./scripts/bootIntent.js').readHumanHold();
+    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+  } catch {}
+  if (adoptingLiveCells && holdStopWorkers) {
+    try { logger.info('[BOOT] Encerrar workers ainda vale: leftover não se adota.'); } catch {}
+    try { require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_hold_stop_workers' }); } catch (e) {
+      try { logger.warn('[BOOT] leftover após Encerrar falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+    }
+    adoptingLiveCells = false;
+    startClosedOnBoot = true;
   }
   if (adoptingLiveCells) {
     startClosedOnBoot = false;
@@ -4773,11 +4788,16 @@ async function handleIndexConsoleStop(kind) {
       desired: work.desired
     });
   } catch {}
-  if (work.yes) {
+  let holdStopWorkers = false;
+  try {
+    const hold = require('./scripts/bootIntent.js').readHumanHold();
+    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+  } catch {}
+  if (work.yes && !holdStopWorkers) {
     try { logger.info('[STOP] navegadores trabalhando — células ficam, só o index sai'); } catch {}
     await __withTimeout(clusterClient && clusterClient.detach && clusterClient.detach(), 1500);
   } else {
-    try { logger.info('[STOP] sem navegador aberto — index sai e leva as células'); } catch {}
+    try { logger.info(holdStopWorkers ? '[STOP] Encerrar já pediu parar — index sai e leva as células' : '[STOP] sem navegador aberto — index sai e leva as células'); } catch {}
     if (clusterClient && typeof clusterClient.kill === 'function') {
       await __withTimeout(clusterClient.kill(), 5000);
     } else {

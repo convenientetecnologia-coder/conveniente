@@ -1196,6 +1196,13 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
           desired._openAll = neutralizeOpenAllAfterBoot(desired._openAll, { nowMs: Date.now() });
         }
       } catch {}
+      try {
+        desired._autoOpen = Object.assign({}, desired._autoOpen || {}, {
+          enabled: false,
+          changedAt: Date.now(),
+          changedBy: String(reason || 'boot').slice(0, 120)
+        });
+      } catch {}
       desired._boot = { ...(desired._boot || {}), ts: Date.now(), reason: String(reason || '').slice(0, 120) };
       desired._bootStartClosed = true;
       desired._bootStartClosedAt = Date.now();

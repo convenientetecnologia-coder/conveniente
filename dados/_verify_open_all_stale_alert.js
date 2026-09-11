@@ -30,6 +30,21 @@ assert.ok(
   fileStoreSrc.includes("desired._openAll = neutralizeOpenAllAfterBoot"),
   "resetDesiredAllOffOnBoot precisa chamar neutralizeOpenAllAfterBoot"
 );
+assert.ok(
+  fileStoreSrc.includes("desired._autoOpen") && fileStoreSrc.includes("enabled: false"),
+  "resetDesired precisa desligar Tudo aberto"
+);
+
+const apiSys = fs.readFileSync(path.join(ROOT, "scripts", "api_sys.js"), "utf8");
+const stopFn = apiSys.split("app.post('/api/cells/stop'")[1] || "";
+assert.ok(stopFn.indexOf("setHumanHold") >= 0 && stopFn.indexOf("setHumanHold") < stopFn.indexOf("stopAllCells"), "Encerrar trava antes de matar");
+assert.ok(stopFn.indexOf("resetDesiredAllOffOnBoot") >= 0 && stopFn.indexOf("resetDesiredAllOffOnBoot") < stopFn.indexOf("stopAllCells"), "Encerrar cancela Abrir Tudo antes de matar");
+assert.ok(!/await workerClient\.kill/.test(stopFn), "Encerrar não pode matar o index duas vezes via kill()+stopAll");
+assert.ok(html.includes("Encerrando workers..."), "botão Encerrar precisa mostrar Encerrando workers");
+
+const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
+assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
+assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de Encerrar mata célula, não solta");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(
