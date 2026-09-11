@@ -142,17 +142,21 @@ function stopAllCells({ reason = 'manual' } = {}) {
   for (const pid of pids) {
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 6000;
   while (Date.now() < deadline) {
-    if (cellRegistry.listAlive().length === 0 && cellRegistry.collectListenPids(8).length === 0) break;
-    sleepMs(400);
+    if (pids.every((pid) => !cellRegistry.pidAlive(pid))) break;
+    sleepMs(200);
   }
   const leftover = cellRegistry.listAlive();
   for (const c of leftover) forceKillPid(c.pid);
-  for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
-  const portWait = Date.now() + 8000;
+  for (const pid of pids) {
+    if (cellRegistry.pidAlive(pid)) forceKillPid(pid);
+  }
+  const listenLeft = cellRegistry.collectListenPids(8);
+  for (const row of listenLeft) forceKillPid(row.pid);
+  const portWait = Date.now() + 3000;
   while (Date.now() < portWait) {
-    if (cellRegistry.collectListenPids(8).length === 0) break;
+    if (pids.every((pid) => !cellRegistry.pidAlive(pid)) && cellRegistry.collectListenPids(8).length === 0) break;
     sleepMs(200);
   }
   const reg = cellRegistry.read();

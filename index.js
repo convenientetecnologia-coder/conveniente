@@ -4461,8 +4461,18 @@ async function bootCluster() {
   try {
     clusterClient = await createCluster(); // { plan, children, sendWorkerCommand, kill, detach }
   } catch (e) {
-    logger.error('[BOOT] cluster abortado. Sem fallback ao Chrome unificado.', { error: (e && e.message) || String(e) }, e);
-    process.exit(1);
+    logger.error('[BOOT] cluster falhou; o painel sobe do mesmo jeito', { error: (e && e.message) || String(e) }, e);
+    clusterClient = {
+      plan: { nodes: 0, perNode: { maxChromes: 0 } },
+      children: [],
+      silentConsole: true,
+      adopting: false,
+      sendWorkerCommand: async () => ({ ok: false, error: 'cluster_down' }),
+      rebalance: async () => ({ ok: false, error: 'cluster_down' }),
+      reshuffleFairIfIdle: async () => ({ ok: false, error: 'cluster_down' }),
+      kill: async () => {},
+      detach: async () => {}
+    };
   }
   logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false) + ' adopting=' + String(!!clusterClient.adopting));
 }

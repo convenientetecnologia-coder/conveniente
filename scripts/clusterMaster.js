@@ -451,12 +451,17 @@ async function createCluster() {
 
   async function adoptIfListening(child, idx, reason) {
     const owner = cellRegistry.tcpListenPid(child.port);
-    if (!(owner > 0) || !cellRegistry.pidAlive(owner)) return false;
+    if (!(owner > 0)) return false;
     child.pid = owner;
     child.proc = null;
     child.adopted = true;
     const connected = await connectRetry(child, idx, 8000);
-    if (!connected) return false;
+    if (!connected) {
+      child.adopted = false;
+      if (Number(child.pid) === Number(owner)) child.pid = null;
+      return false;
+    }
+    if (child.helloPid) child.pid = Number(child.helloPid) || child.pid;
     try {
       logger.info('[CLUSTER][ADOPT]', {
         worker: idx + 1,
@@ -621,7 +626,12 @@ async function createCluster() {
 
     if (cellRegistry.tcpListenPid(child.port) > 0) {
       if (await adoptIfListening(child, idx, 'busy_before_spawn')) return child;
-      throw new Error('CELL_PORT_BUSY: w' + (idx + 1) + ' port ' + child.port);
+      logger.warn('[CLUSTER] porta ocupada e adopt falhou — espera liberar e tenta nascer', {
+        idx: idx + 1,
+        port: child.port
+      });
+      await waitPortFree(child.port, 4000);
+      if (await adoptIfListening(child, idx, 'busy_after_wait')) return child;
     }
 
     try {
@@ -660,7 +670,38 @@ async function createCluster() {
     })();
     if (!connected) {
       if (await adoptIfListening(child, idx, 'spawn_died_port_live')) return child;
-      throw new Error('CELL_LISTEN_TIMEOUT: w' + (idx + 1) + ' port ' + child.port);
+      logger.error('[CLUSTER] célula não escutou; o index não morre por isso', {
+        idx: idx + 1,
+        port: child.port,
+        pid: proc && proc.pid
+      });
+      try { cellForensic.append('cell_listen_timeout', { idx: idx + 1, port: child.port, pid: proc && proc.pid }); } catch {}
+      child.proc = null;
+      child.pid = null;
+      child.adopted = false;
+      setTimeout(() => {
+        if (isShuttingDown) return;
+        const target = children[idx];
+        if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
+        spawnWorker(idx, shardNames).then((fresh) => {
+          if (!target) {
+            children[idx] = fresh;
+            return;
+          }
+          target.proc = fresh.proc;
+          target.pending = fresh.pending;
+          target.pid = fresh.pid;
+          target.port = fresh.port;
+          target.socket = fresh.socket;
+          target.netSend = fresh.netSend;
+          target.adopted = !!fresh.adopted;
+          target.deadHandled = false;
+          target.shard = fresh.shard;
+        }).catch((err) => {
+          logger.error('[CLUSTER] retry após listen timeout falhou', { idx: idx + 1, error: err && err.message || err });
+        });
+      }, 2000);
+      return child;
     }
     confirmSpawn(idx, proc.pid);
     try {
@@ -682,15 +723,23 @@ async function createCluster() {
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
-    const child = await spawnWorker(idx, shardNames, { replace: recycledThisBoot });
-    children.push(child);
-    logger.info('[CLUSTER] Worker iniciado', {
-      idx: idx + 1,
-      perfis: child.shard ? child.shard.size : shardNames.length,
-      pid: child.pid,
-      port: child.port,
-      adopted: !!child.adopted
-    });
+    try {
+      const child = await spawnWorker(idx, shardNames, { replace: recycledThisBoot });
+      children.push(child);
+      logger.info('[CLUSTER] Worker iniciado', {
+        idx: idx + 1,
+        perfis: child.shard ? child.shard.size : shardNames.length,
+        pid: child.pid,
+        port: child.port,
+        adopted: !!child.adopted
+      });
+    } catch (e) {
+      logger.error('[CLUSTER] worker não subiu; segue os outros', {
+        idx: idx + 1,
+        error: (e && e.message) || e
+      });
+      try { cellForensic.append('cell_spawn_fail', { idx: idx + 1, error: String((e && e.message) || e).slice(0, 180) }); } catch {}
+    }
   }
   try { cellLifecycle.setStamp(bootStamp); } catch {}
   try {
