@@ -323,6 +323,10 @@ async function createCluster() {
   function onCellDeath(idx, { code, signal, pid } = {}) {
     const child = children[idx];
     if (!child || child.deadHandled) return;
+    if (isShuttingDown) {
+      child.deadHandled = true;
+      return;
+    }
     if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
     const dying = Number(pid || child.pid) || 0;
     const owner = cellRegistry.tcpListenPid(child.port);
@@ -410,9 +414,9 @@ async function createCluster() {
     if (!(n > 0)) return;
     try { process.kill(n, 'SIGTERM'); } catch {}
     try {
-      spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
+      spawnSync('taskkill.exe', ['/F', '/PID', String(n)], {
         windowsHide: true,
-        timeout: 15000,
+        timeout: 4000,
         stdio: ['ignore', 'ignore', 'ignore']
       });
     } catch {}
@@ -1307,6 +1311,8 @@ async function createCluster() {
     try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     for (const c of children) {
+      if (!c) continue;
+      c.deadHandled = true;
       try { if (c.socket) c.socket.destroy(); } catch {}
       c.socket = null;
       c.netSend = null;

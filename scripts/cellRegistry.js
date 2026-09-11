@@ -79,7 +79,7 @@ function invalidateListenCache() {
 
 function parseListenMap(force) {
   const now = Date.now();
-  if (!force && listenByPort && (now - listenCacheAt) < LISTEN_CACHE_MS) {
+  if (!force && listenCacheAt && (now - listenCacheAt) < LISTEN_CACHE_MS) {
     return listenByPort;
   }
   const map = new Map();
@@ -112,15 +112,15 @@ function parseListenMap(force) {
 
 // Dono do LISTEN em 127.0.0.1:port. TCP connect sozinho mente: outra célula
 // na mesma porta também aceita o socket.
-function tcpListenPid(port) {
+function tcpListenPid(port, opts) {
   const p = Math.floor(Number(port) || 0);
   if (!(p > 0)) return 0;
-  return parseListenMap().get(p) || 0;
+  return parseListenMap(!!(opts && opts.force)).get(p) || 0;
 }
 
-function collectListenPids(maxSlots) {
+function collectListenPids(maxSlots, opts) {
   const n = Math.max(1, Math.min(16, Math.floor(Number(maxSlots) || 8)));
-  const map = parseListenMap();
+  const map = parseListenMap(!!(opts && opts.force));
   const out = [];
   for (let i = 0; i < n; i++) {
     const port = portForIdx(i);

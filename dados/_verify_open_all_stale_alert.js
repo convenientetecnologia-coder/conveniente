@@ -46,6 +46,14 @@ const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
 assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de Encerrar mata célula, não solta");
 
+const life = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");
+const killFn = life.split("function forceKillPid")[1] || "";
+assert.ok(/taskkill\.exe/.test(killFn) && /\/PID/.test(killFn) && !/\/T/.test(killFn.split("function")[0] || killFn), "Encerrar mata a célula sem /T (árvore do Chrome)");
+const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), "utf8");
+const begin = cluster.split("function beginStop")[1] || "";
+assert.ok(/deadHandled = true/.test(begin.slice(0, 500)), "beginStop marca célula morta pra não readotar");
+assert.ok(/if \(isShuttingDown\) \{\s*child\.deadHandled = true/.test(cluster), "drop durante Encerrar não readota porta");
+
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(
   { active: true, lastError: null, queue: ["a"] },

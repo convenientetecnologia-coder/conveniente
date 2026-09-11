@@ -117,9 +117,9 @@ function forceKillPid(pid) {
   const n = Math.floor(Number(pid) || 0);
   if (!n) return;
   try {
-    spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
+    spawnSync('taskkill.exe', ['/F', '/PID', String(n)], {
       windowsHide: true,
-      timeout: 15000,
+      timeout: 4000,
       stdio: ['ignore', 'ignore', 'ignore']
     });
   } catch {}
@@ -135,12 +135,12 @@ function killListenUntilFree(timeoutMs) {
   const started = Date.now();
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
-    const rows = cellRegistry.collectListenPids(8);
+    const rows = cellRegistry.collectListenPids(8, { force: true });
     if (!rows.length) return { ok: true, left: [] };
     for (const row of rows) forceKillPid(row.pid);
-    sleepMs(250);
+    sleepMs(120);
   }
-  const left = cellRegistry.collectListenPids(8);
+  const left = cellRegistry.collectListenPids(8, { force: true });
   return { ok: left.length === 0, left };
 }
 
@@ -191,7 +191,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
     pids.push(n);
   }
   for (const c of alive) addPid(c && c.pid);
-  for (const row of cellRegistry.collectListenPids(8)) addPid(row && row.pid);
+  for (const row of cellRegistry.collectListenPids(8, { force: true })) addPid(row && row.pid);
   try {
     cellForensic.append('cell_stop_all', { reason: why.slice(0, 80), count: pids.length, pids, listen1 });
   } catch {}
