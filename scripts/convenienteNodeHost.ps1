@@ -4,7 +4,8 @@
 param(
     [string]$NodeExe = '',
     [string]$IndexPath = 'C:\conveniente\index.js',
-    [string]$WorkDir = 'C:\conveniente'
+    [string]$WorkDir = 'C:\conveniente',
+    [string]$BootSource = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -58,6 +59,11 @@ if ($ver -ne 'v20.20.2') {
 try {
     Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_launch' -Data @{ NodeExe = $node; Version = $ver; IndexPath = $idx; WorkDir = $wd }
 } catch {}
+if ([string]::IsNullOrWhiteSpace($BootSource)) {
+    $env:CONVENIENTE_BOOT_SOURCE = 'porteiro'
+} else {
+    $env:CONVENIENTE_BOOT_SOURCE = [string]$BootSource
+}
 Push-Location $wd
 try {
     & $node $idx

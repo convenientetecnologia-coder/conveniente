@@ -63,6 +63,7 @@ module.exports = (app, workerClient, fileStore) => {
       }
     } catch {}
     try {
+      try { require('./bootIntent.js').setHumanHold({ reason: 'stop_workers', by: 'api_cells_stop' }); } catch {}
       const cellLifecycle = require('./cellLifecycle.js');
       const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
       return res.json(Object.assign({ maestroStays: true }, r));

@@ -1924,6 +1924,7 @@ module.exports = (app, workerClient, fileStore) => {
               const oaActive = !!(oa && oa.active === true);
               const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
               if (oaActive && oaOwner && oaOwner === curOwner) {
+                try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
                 return res.json({
                   ok: true,
                   alreadyRunning: true,
@@ -2047,6 +2048,7 @@ module.exports = (app, workerClient, fileStore) => {
             skippedTerminal: skippedTerminal.slice(0, 60)
           });
         } catch {}
+        try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
         return res.json({
           ok: true,
           total: 0,
@@ -2090,6 +2092,7 @@ module.exports = (app, workerClient, fileStore) => {
       // - NÃO iniciar activates em paralelo aqui.
       // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
       // garantindo: Messenger OK -> Robe OK/erro -> próximo.
+      try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
       return res.json({
         ok: true,
         total: eligibleNames.length,

@@ -1,6 +1,6 @@
 // scripts/clusterMaster.js
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -86,6 +86,8 @@ async function createCluster() {
     try { cellLifecycle.stopAllCells({ reason: 'topology_mismatch' }); } catch {}
     aliveAtBoot = [];
   }
+  try { cellRegistry.clearDead(); } catch {}
+  if (aliveAtBoot.length > 0) aliveAtBoot = cellRegistry.listAlive();
   const adopting = aliveAtBoot.length > 0;
   if (adopting) {
     const maxIdx = Math.max(
@@ -357,6 +359,31 @@ async function createCluster() {
     }, 2000);
   }
 
+  function forceKillCellPid(pid) {
+    const n = Math.floor(Number(pid) || 0);
+    if (!(n > 0)) return;
+    try { process.kill(n, 'SIGTERM'); } catch {}
+    try {
+      spawnSync('taskkill.exe', ['/F', '/PID', String(n), '/T'], {
+        windowsHide: true,
+        timeout: 15000
+      });
+    } catch {}
+  }
+
+  function reapSlotChrome(idx, shardNames, reason) {
+    try {
+      return require('./orphanReaper.js').reapShard({
+        names: Array.isArray(shardNames) ? shardNames : [],
+        shardIdx: idx,
+        reason: String(reason || 'cell_replace')
+      });
+    } catch (e) {
+      try { logger.warn('[CLUSTER] reap slot falhou (best-effort)', { idx: idx + 1, error: (e && e.message) || e }); } catch {}
+      return null;
+    }
+  }
+
   function spawnDetachedCell(idx, shardNames, env) {
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
     const entry = path.join(__dirname, 'cellEntry.js');
@@ -433,15 +460,40 @@ async function createCluster() {
         }
         return false;
       })();
-      if (!connected) {
-        logger.warn('[CLUSTER] adopt sem socket', { idx: idx + 1, pid: child.pid, port: child.port });
+      if (connected) {
+        try {
+          logger.info('[CLUSTER][ADOPT]', { worker: idx + 1, pid: child.pid, port: child.port, shardSize: child.shard.size });
+          cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, shard: child.shard.size });
+        } catch {}
+        return child;
       }
-      try {
-        logger.info('[CLUSTER][ADOPT]', { worker: idx + 1, pid: child.pid, port: child.port, shardSize: child.shard.size });
-        cellForensic.append('cell_adopt', { idx: idx + 1, pid: child.pid, port: child.port, shard: child.shard.size });
-      } catch {}
-      return child;
+      logger.warn('[CLUSTER] célula surda: pid vivo sem porta — recicla o slot', {
+        idx: idx + 1,
+        pid: child.pid,
+        port: child.port
+      });
+      try { cellForensic.append('cell_adopt_fail', { idx: idx + 1, pid: child.pid, port: child.port }); } catch {}
+      const deadPid = child.pid;
+      child.adopted = false;
+      child.pid = null;
+      child.socket = null;
+      child.netSend = null;
+      forceKillCellPid(deadPid);
+      const waitDeadUntil = Date.now() + 4000;
+      while (Date.now() < waitDeadUntil && cellRegistry.pidAlive(deadPid)) {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      reapSlotChrome(idx, shardNames, 'cell_adopt_fail');
+      try { cellRegistry.clearDead(); } catch {}
+      await new Promise((r) => setTimeout(r, 400));
+    } else {
+      reapSlotChrome(idx, shardNames, 'cell_spawn_replace');
     }
+
+    child.adopted = false;
+    child.shard = new Set(shardNames);
+    child.shard.forEach((n) => { route[n] = idx; });
+    child.port = cellRegistry.portForIdx(idx);
 
     try {
       logger.info('[CLUSTER][SPAWN]', {

@@ -92,6 +92,11 @@ function Invoke-ConvenienteCellCli([string]$Arg) {
     }
 }
 
+function Test-ConvenienteCellsStale {
+    $v = Invoke-ConvenienteCellCli 'stale'
+    return ($v -eq '1')
+}
+
 function Test-ConvenienteTopologyStale {
     $v = Invoke-ConvenienteCellCli 'topo-stale'
     return ($v -eq '1')
@@ -99,6 +104,7 @@ function Test-ConvenienteTopologyStale {
 
 function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
     Write-StartLog ('cells_stop ' + $Reason)
+    Write-ConvenienteHumanHold ('stop_workers:' + $Reason)
     [void](Invoke-ConvenienteCellCli 'stop')
 }
 
@@ -264,6 +270,25 @@ function Stop-ConvenienteConsoleHosts {
     return $killed
 }
 
+function Write-ConvenienteHumanHold([string]$Reason) {
+    $fp = 'C:\conveniente\dados\human_boot_hold.json'
+    try {
+        $dir = Split-Path -Parent $fp
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $obj = @{
+            version = 1
+            active  = $true
+            reason  = [string]$Reason
+            by      = 'iniciar_sistema'
+            at      = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        }
+        ($obj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $fp -Encoding UTF8
+        Write-StartLog ('human_hold ' + $Reason)
+    } catch {
+        Write-StartLog ('human_hold_fail ' + $_.Exception.Message)
+    }
+}
+
 function Start-ConvenienteNodeHost {
     param(
         [Parameter(Mandatory = $true)][string]$NodeExe,
@@ -278,7 +303,8 @@ function Start-ConvenienteNodeHost {
         '-File', $hostPs1,
         '-NodeExe', $NodeExe,
         '-IndexPath', $IndexPath,
-        '-WorkDir', $WorkDir
+        '-WorkDir', $WorkDir,
+        '-BootSource', 'iniciar'
     ) -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
@@ -333,7 +359,7 @@ function Start-ConvenienteNode {
         } elseif (-not $cellsAlive) {
             Write-StartLog 'already_up_cells_dead restart_maestro'
             Write-Host ''
-            Write-Host 'Index esta up, mas as celulas estao mortas (Parar celulas). Reiniciando o maestro para subir workers de novo, com navegador fechado.'
+            Write-Host 'Index esta up, mas os workers estao mortos (Encerrar workers). Reiniciando o maestro para subir workers de novo, com navegador fechado.'
             Write-Host ''
         } elseif ($topoStale) {
             Write-StartLog 'already_up_topology restart_maestro'

@@ -4559,6 +4559,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
   }
   if (adoptingLiveCells) {
     startClosedOnBoot = false;
+    try { require('./scripts/bootIntent.js').clearHumanHold({ by: 'adopt_live_cells' }); } catch {}
     try { logger.info('[BOOT] Células vivas (mesmo código): skip start-closed e reap chrome (adota e reconecta).'); } catch {}
   }
   try {
@@ -4614,6 +4615,16 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
     networkRotation.startNetworkRotationScheduler({ port: PORT });
     dailyWindowScheduler.startDailyWindowScheduler({ port: PORT });
     terminalAccountCleanupScheduler.startTerminalAccountCleanupScheduler({ port: PORT });
+    if (!adoptingLiveCells) {
+      setTimeout(() => {
+        try {
+          require('./scripts/bootIntent.js').maybePorterOpenAllOnBoot({
+            allCellsDead: true,
+            port: PORT
+          }).catch(() => {});
+        } catch {}
+      }, 5000);
+    }
 
     // Outbox gordo = esteira morta. Arquiva e zera; CT redispara o pendente das contas abertas.
     try {

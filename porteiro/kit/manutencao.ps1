@@ -132,6 +132,7 @@ function Get-MasterIndexPids {
         $cmd = [string]$p.CommandLine
         if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
         $c = $cmd.ToLowerInvariant()
+        if ($c -match 'cellentry\.js') { continue }
         if ($c -match 'index\.js') { $pids += [int]$p.ProcessId }
     }
     return $pids
@@ -641,7 +642,8 @@ function Start-ConvenienteNodeHost {
         '-File', $hostPs1,
         '-NodeExe', $NodeExe,
         '-IndexPath', $IndexPath,
-        '-WorkDir', $WorkDir
+        '-WorkDir', $WorkDir,
+        '-BootSource', 'porteiro'
     ) -WorkingDirectory $WorkDir -WindowStyle Normal -PassThru
 }
 
