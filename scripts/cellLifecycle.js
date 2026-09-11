@@ -167,9 +167,18 @@ function browsersWorking() {
   return { yes, chrome: Number(chrome) || 0, desired };
 }
 
+let bootRecycled = false;
+
+function consumeBootRecycle() {
+  const v = !!bootRecycled;
+  bootRecycled = false;
+  return v;
+}
+
 function stopAllCells({ reason = 'manual' } = {}) {
   const why = String(reason || 'manual');
   const bootFast = /boot_|code_stamp|topology|index_ctrl_c|maestro_kill/.test(why) && !/api_cells_stop|stop_workers/.test(why);
+  if (bootFast || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
   const listen1 = bootFast ? 2000 : 10000;
   const listen2 = bootFast ? 800 : 5000;
   const alive = cellRegistry.listAlive();
@@ -188,15 +197,21 @@ function stopAllCells({ reason = 'manual' } = {}) {
   } catch {}
   for (const pid of pids) forceKillPid(pid);
   let chrome = { killed: 0, matched: 0 };
-  try {
-    chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
-  } catch {}
+  let chromeAlive = false;
+  try { chromeAlive = require('./orphanReaper.js').anyChromeImage(); } catch { chromeAlive = true; }
+  if (chromeAlive) {
+    try {
+      chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
+    } catch {}
+  }
   let freed = killListenUntilFree(listen1);
   if (!freed.ok) {
-    try {
-      const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
-      if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
-    } catch {}
+    if (chromeAlive) {
+      try {
+        const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
+        if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
+      } catch {}
+    }
     freed = killListenUntilFree(listen2);
   }
   const stillListen = freed.left || cellRegistry.collectListenPids(8);
@@ -272,6 +287,7 @@ module.exports = {
   forceKillPid,
   killListenUntilFree,
   stopAllCells,
+  consumeBootRecycle,
   countDesiredActive,
   browsersWorking
 };

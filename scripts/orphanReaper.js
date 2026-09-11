@@ -88,47 +88,90 @@ function resolveUserDataDir(nome) {
   return root ? path.join(root, "Conveniente", n) : "";
 }
 
-function listChromeProcessesWin() {
-  if (process.platform !== "win32") return [];
+let __chromeCache = { at: 0, images: [], rows: [] };
+const CHROME_LIST_TTL_MS = 500;
+
+function silentExec(file, args, timeoutMs) {
+  try {
+    return execFileSync(file, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: Math.max(800, Number(timeoutMs) || 2500),
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (e) {
+    return String((e && e.stdout) || "");
+  }
+}
+
+function invalidateChromeListCache() {
+  __chromeCache = { at: 0, images: [], rows: [] };
+}
+
+function parseWmicProcessList(raw) {
   const out = [];
-  for (const name of ["chrome.exe", "chromium.exe"]) {
-    try {
-      const raw = execFileSync("wmic.exe", [
-        "process",
-        "where",
-        "name='" + name + "'",
-        "get",
-        "ProcessId,CommandLine",
-        "/FORMAT:LIST"
-      ], {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: 3000,
-        maxBuffer: 8 * 1024 * 1024
-      });
-      let cmd = "";
-      for (const line of String(raw || "").split(/\r?\n/)) {
-        const t = line.trim();
-        if (!t) {
-          cmd = "";
-          continue;
-        }
-        if (/^CommandLine=/i.test(t)) {
-          cmd = t.slice(t.indexOf("=") + 1);
-          continue;
-        }
-        if (/^ProcessId=/i.test(t)) {
-          const pid = Math.floor(Number(t.slice(t.indexOf("=") + 1)) || 0);
-          if (pid > 0) out.push({ pid, cmd: cmd || "" });
-          cmd = "";
-        }
-      }
-    } catch {}
+  let cmd = "";
+  for (const line of String(raw || "").split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) {
+      cmd = "";
+      continue;
+    }
+    if (/^CommandLine=/i.test(t)) {
+      cmd = t.slice(t.indexOf("=") + 1);
+      continue;
+    }
+    if (/^ProcessId=/i.test(t)) {
+      const pid = Math.floor(Number(t.slice(t.indexOf("=") + 1)) || 0);
+      if (pid > 0) out.push({ pid, cmd: cmd || "" });
+      cmd = "";
+    }
   }
   return out;
 }
 
+function fillChromeCache() {
+  if (process.platform !== "win32") {
+    __chromeCache = { at: Date.now(), images: [], rows: [] };
+    return __chromeCache;
+  }
+  const now = Date.now();
+  if (__chromeCache.at && (now - __chromeCache.at) < CHROME_LIST_TTL_MS) return __chromeCache;
+  const images = [];
+  for (const name of ["chrome.exe", "chromium.exe"]) {
+    const listed = silentExec("tasklist.exe", ["/FI", "IMAGENAME eq " + name, "/NH"], 2500);
+    if (new RegExp(name.replace(".", "\\."), "i").test(String(listed || ""))) images.push(name);
+  }
+  const rows = [];
+  for (const name of images) {
+    rows.push.apply(rows, parseWmicProcessList(silentExec("wmic.exe", [
+      "process",
+      "where",
+      "name='" + name + "'",
+      "get",
+      "ProcessId,CommandLine",
+      "/FORMAT:LIST"
+    ], 3000)));
+  }
+  __chromeCache = { at: Date.now(), images, rows };
+  return __chromeCache;
+}
+
+function chromeImagesRunning() {
+  return fillChromeCache().images.slice();
+}
+
+function anyChromeImage() {
+  return fillChromeCache().images.length > 0;
+}
+
+function listChromeProcessesWin() {
+  return fillChromeCache().rows.slice();
+}
+
 function taskkillPid(pid) {
+  invalidateChromeListCache();
   try {
     execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
       windowsHide: true,
@@ -429,5 +472,6 @@ module.exports = {
   reapCloudflaredOrphans,
   reapAllConvenienteChrome,
   countConvenienteChrome,
+  anyChromeImage,
   resolveUserDataDir
 };

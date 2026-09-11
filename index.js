@@ -4671,7 +4671,10 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
   if (startClosedOnBoot) {
     let convenieteChrome = 0;
-    try { convenieteChrome = require('./scripts/orphanReaper.js').countConvenienteChrome(); } catch { convenieteChrome = -1; }
+    try {
+      const reaper = require('./scripts/orphanReaper.js');
+      convenieteChrome = reaper.anyChromeImage() ? reaper.countConvenienteChrome() : 0;
+    } catch { convenieteChrome = -1; }
     if (convenieteChrome > 0) {
       try {
         require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');

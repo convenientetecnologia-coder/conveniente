@@ -51,6 +51,10 @@ check("iniciar_sem_taskkill_chrome", !/taskkill\.exe \/F \/IM chrome\.exe/.test(
 check("iniciar_sem_boot_wait", !/--boot/.test(iniciar) && !/chromeMotores\.js/.test(iniciar));
 check("iniciar_uma_janela", /Start-ConvenienteNodeHost/.test(iniciar) && /launch_host/.test(iniciar) && !/Chrome unico/.test(iniciar));
 check("cluster_spawn_paralelo", /Promise\.all/.test(cluster) && /BOOT_MS/.test(cluster));
+const orphan = read("scripts/orphanReaper.js");
+const life = read("scripts/cellLifecycle.js");
+check("chrome_list_silencioso", /stdio:\s*\[\s*["']ignore["']/.test(orphan) && /tasklist\.exe/.test(orphan) && /anyChromeImage/.test(orphan));
+check("cluster_nao_recicla_duas_vezes", /consumeBootRecycle/.test(cluster) && /consumeBootRecycle/.test(life));
 check("dash_allowlist", /multi_engine_last:/.test(dash) && /multi_engine_log:/.test(dash));
 check("gitignore_motores", /motores\//.test(gitignore));
 check("gitignore_last", /multi_engine_last\.json/.test(gitignore));

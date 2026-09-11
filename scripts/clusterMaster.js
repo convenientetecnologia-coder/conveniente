@@ -65,7 +65,14 @@ async function createCluster() {
   let aliveAtBoot = cellRegistry.listAlive();
   const bootStamp = cellLifecycle.currentStamp();
   let recycledThisBoot = false;
-  if (aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {
+  if (cellLifecycle.consumeBootRecycle()) {
+    recycledThisBoot = true;
+    for (const row of cellRegistry.collectListenPids(8)) {
+      try { cellLifecycle.forceKillPid(row.pid); } catch {}
+    }
+    aliveAtBoot = [];
+  }
+  if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {
     try {
       logger.warn('[CLUSTER] código novo no disco: reciclando células antigas (git pull / atualização)', {
         saved: cellLifecycle.savedStamp(),
@@ -77,7 +84,7 @@ async function createCluster() {
     recycledThisBoot = true;
     aliveAtBoot = [];
   }
-  if (aliveAtBoot.length > 0 && cellLifecycle.isTopologyStale()) {
+  if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isTopologyStale()) {
     try {
       logger.warn('[CLUSTER] topologia nova (divisor/RAM): reciclando células para o número certo', {
         alive: aliveAtBoot.length,
@@ -600,8 +607,8 @@ async function createCluster() {
       const owner = cellRegistry.tcpListenPid(child.port);
       if (owner > 0) forceKillCellPid(owner);
       if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) forceKillCellPid(aliveRow.pid);
-      reapSlotChrome(idx, shardNames, 'cell_stamp_replace');
-      await waitMs(200);
+      if (!recycledThisBoot) reapSlotChrome(idx, shardNames, 'cell_stamp_replace');
+      if (!recycledThisBoot) await waitMs(200);
     }
 
     child.adopted = false;
