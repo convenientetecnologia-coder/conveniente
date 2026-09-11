@@ -319,7 +319,7 @@ async function createCluster() {
     if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
     const dying = Number(pid || child.pid) || 0;
     const owner = cellRegistry.tcpListenPid(child.port);
-    if (owner > 0 && owner !== dying && cellRegistry.pidAlive(owner)) {
+    if (owner > 0) {
       try {
         cellForensic.append('cell_drop_ignored_listener_alive', {
           idx: idx + 1,
@@ -755,15 +755,18 @@ async function createCluster() {
       if (isShuttingDown) return;
       for (let i = 0; i < children.length; i++) {
         const c = children[i];
-        if (!c || c.deadHandled || !c.pid) continue;
-        if (!cellRegistry.pidAlive(c.pid)) {
-          const owner = cellRegistry.tcpListenPid(c.port);
-          if (owner > 0 && owner !== Number(c.pid) && cellRegistry.pidAlive(owner)) {
+        if (!c || c.deadHandled) continue;
+        const owner = cellRegistry.tcpListenPid(c.port);
+        if (owner > 0) {
+          if (Number(c.pid) !== owner) {
             c.pid = owner;
             c.adopted = true;
             c.proc = null;
-            continue;
           }
+          if (!c.socket) connectCellSocket(c, i).catch(() => {});
+          continue;
+        }
+        if (c.pid && !cellRegistry.pidAlive(c.pid)) {
           onCellDeath(i, { code: null, signal: 'pid_gone', pid: c.pid });
         }
       }
@@ -1297,6 +1300,7 @@ async function createCluster() {
       try { if (c.socket) c.socket.destroy(); } catch {}
     }
     try { cellLifecycle.stopAllCells({ reason: 'maestro_kill' }); } catch {}
+    try { require('./orphanReaper.js').reapAllConvenienteChrome('maestro_kill'); } catch {}
   }
 
   // Watcher: conta nova / conta apagada. Grow ao vivo; não reshuffle.

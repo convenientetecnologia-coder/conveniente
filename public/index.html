@@ -3589,8 +3589,8 @@
           await showSystemMessageModal({
             title: r && r.ok ? 'Workers encerrados' : 'Falha ao encerrar workers',
             message: r && r.ok
-              ? ('Encerrados: ' + String(r.requested || 0) + '. Painel ainda aberto, workers mortos. git pull se precisar, depois Iniciar Sistema (sobe workers novos fechados).')
-              : String((r && r.error) || 'erro desconhecido'),
+              ? ('Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. git pull se precisar, depois Iniciar Sistema (sobe workers novos fechados).')
+              : String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')),
             tone: r && r.ok ? 'good' : 'bad'
           });
         } finally {

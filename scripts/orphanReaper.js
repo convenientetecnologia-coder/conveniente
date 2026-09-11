@@ -357,8 +357,35 @@ function reapShard({ names, shardIdx, reason }) {
   return reapChromeDirs(dirs, reason || "worker_drop");
 }
 
+function killChromeByConvenienteHint() {
+  const procs = listChromeProcessesWin();
+  const toKill = new Set();
+  for (const pr of procs) {
+    const cmd = normalizePathForCompare(pr.cmd);
+    if (!cmd) continue;
+    if (
+      cmd.indexOf("user data/conveniente") >= 0 ||
+      cmd.indexOf("city-collector-shards") >= 0
+    ) {
+      toKill.add(pr.pid);
+    }
+  }
+  let killed = 0;
+  for (const pid of toKill) {
+    if (taskkillPid(pid)) killed += 1;
+  }
+  return { matched: toKill.size, killed, listed: procs.length };
+}
+
 function reapAllConvenienteChrome(reason) {
-  return reapChromeDirs(collectAllProfileDirs(), reason || "index_boot_start_closed");
+  const byDirs = reapChromeDirs(collectAllProfileDirs(), reason || "index_boot_start_closed");
+  const loose = killChromeByConvenienteHint();
+  return {
+    matched: (byDirs.matched || 0) + (loose.matched || 0),
+    killed: (byDirs.killed || 0) + (loose.killed || 0),
+    listed: Math.max(byDirs.listed || 0, loose.listed || 0),
+    skipped: !!byDirs.skipped
+  };
 }
 
 function reapOnIndexBoot({ startClosed = true } = {}) {

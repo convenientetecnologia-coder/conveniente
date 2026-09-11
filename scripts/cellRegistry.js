@@ -57,7 +57,11 @@ function pidAlive(pid) {
   try {
     process.kill(n, 0);
     return true;
-  } catch {
+  } catch (e) {
+    // Windows: processo existe mas o signal 0 vem EPERM/EACCES. Tratar como morto
+    // faz o watchdog reap Chrome e readotar a mesma célula a cada 2.5s.
+    const code = e && e.code ? String(e.code) : '';
+    if (code === 'EPERM' || code === 'EACCES') return true;
     return false;
   }
 }

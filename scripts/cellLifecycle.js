@@ -139,24 +139,16 @@ function stopAllCells({ reason = 'manual' } = {}) {
   try {
     cellForensic.append('cell_stop_all', { reason: String(reason).slice(0, 80), count: pids.length, pids });
   } catch {}
-  for (const pid of pids) {
-    try { process.kill(pid, 'SIGTERM'); } catch {}
-  }
-  const deadline = Date.now() + 6000;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !cellRegistry.pidAlive(pid))) break;
-    sleepMs(200);
-  }
-  const leftover = cellRegistry.listAlive();
-  for (const c of leftover) forceKillPid(c.pid);
-  for (const pid of pids) {
-    if (cellRegistry.pidAlive(pid)) forceKillPid(pid);
-  }
-  const listenLeft = cellRegistry.collectListenPids(8);
-  for (const row of listenLeft) forceKillPid(row.pid);
-  const portWait = Date.now() + 3000;
+  for (const pid of pids) forceKillPid(pid);
+  let chrome = { killed: 0, matched: 0 };
+  try {
+    chrome = require('./orphanReaper.js').reapAllConvenienteChrome(String(reason || 'stop_all_cells'));
+  } catch {}
+  for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
+  const portWait = Date.now() + 2500;
   while (Date.now() < portWait) {
-    if (pids.every((pid) => !cellRegistry.pidAlive(pid)) && cellRegistry.collectListenPids(8).length === 0) break;
+    if (cellRegistry.collectListenPids(8).length === 0) break;
+    for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
     sleepMs(200);
   }
   const reg = cellRegistry.read();
@@ -164,13 +156,20 @@ function stopAllCells({ reason = 'manual' } = {}) {
   cellRegistry.write(reg);
   const stillListen = cellRegistry.collectListenPids(8);
   const still = cellRegistry.listAlive();
+  const ok = still.length === 0 && stillListen.length === 0;
   return {
-    ok: still.length === 0 && stillListen.length === 0,
+    ok,
+    error: ok
+      ? null
+      : (stillListen.length
+        ? ('celula_ainda_na_porta:' + stillListen.map((r) => r.port).join(','))
+        : 'celula_ainda_viva'),
     reason: String(reason || ''),
     requested: pids.length,
-    forced: leftover.length,
+    forced: pids.length,
     alive: still.length,
     listenLeft: stillListen.length,
+    chromeKilled: chrome && chrome.killed != null ? chrome.killed : 0,
     pids
   };
 }
