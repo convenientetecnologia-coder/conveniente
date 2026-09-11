@@ -25,17 +25,33 @@ module.exports = (app, workerClient, fileStore) => {
   app.get('/api/cells', (req, res) => {
     try {
       const cellRegistry = require('./cellRegistry.js');
+      const cellLifecycle = require('./cellLifecycle.js');
+      const livePids = cellLifecycle.listCellEntryPids();
+      const liveSet = new Set(livePids.map((n) => Number(n)));
       const reg = cellRegistry.read();
-      const cells = (reg.cells || []).map((c) => ({
+      const cells = (reg.cells || []).filter((c) => liveSet.has(Number(c && c.pid))).map((c) => ({
         id: c.id,
         idx: c.idx,
         pid: c.pid,
         port: c.port,
         shard: Array.isArray(c.shard) ? c.shard.length : 0,
-        alive: cellRegistry.pidAlive(c.pid),
+        alive: true,
         statusFile: c.statusFile || null,
         updatedAt: c.updatedAt || null
       }));
+      for (const pid of livePids) {
+        if (cells.some((c) => Number(c.pid) === Number(pid))) continue;
+        cells.push({
+          id: cells.length + 1,
+          idx: cells.length,
+          pid,
+          port: null,
+          shard: 0,
+          alive: true,
+          statusFile: null,
+          updatedAt: null
+        });
+      }
       res.json({
         ok: true,
         maestroPid: reg.maestroPid || null,
@@ -44,7 +60,7 @@ module.exports = (app, workerClient, fileStore) => {
         codeStamp: reg.codeStamp || null,
         topology: reg.topology || null,
         cells,
-        alive: cells.filter((c) => c.alive).length,
+        alive: livePids.length,
         updatedAt: reg.updatedAt || null
       });
     } catch (e) {

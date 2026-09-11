@@ -67,10 +67,9 @@ async function createCluster() {
   let recycledThisBoot = false;
   if (cellLifecycle.consumeBootRecycle() || cellLifecycle.isStampStale()) {
     recycledThisBoot = true;
-    const left = cellRegistry.collectListenPids(8, { force: true });
     let entry = [];
     try { entry = cellLifecycle.listCellEntryPids(); } catch {}
-    if (left.length || entry.length || cellRegistry.hasAliveCells()) {
+    if (entry.length || cellRegistry.hasAliveCells()) {
       try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
     }
     aliveAtBoot = [];
@@ -99,7 +98,7 @@ async function createCluster() {
     recycledThisBoot = true;
     aliveAtBoot = [];
   }
-  if (!recycledThisBoot && cellLifecycle.isStampStale() && cellRegistry.collectListenPids(8).length > 0) {
+  if (!recycledThisBoot && cellLifecycle.isStampStale() && cellLifecycle.listCellEntryPids().length > 0) {
     try {
       logger.warn('[CLUSTER] código novo e porta de célula ainda ocupada: mata o listener, não spawna em cima', {
         saved: cellLifecycle.savedStamp(),
@@ -333,7 +332,7 @@ async function createCluster() {
     if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
     const dying = Number(pid || child.pid) || 0;
     const owner = cellRegistry.tcpListenPid(child.port);
-    if (owner > 0) {
+    if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
       try {
         cellForensic.append('cell_drop_ignored_listener_alive', {
           idx: idx + 1,
@@ -349,6 +348,22 @@ async function createCluster() {
       child.adopted = true;
       child.deadHandled = false;
       connectCellSocket(child, idx).catch(() => {});
+      return;
+    }
+    if (owner > 0 && !cellLifecycle.isProvenCellEntryPid(owner)) {
+      try {
+        cellForensic.append('cell_port_blocked_not_cell', {
+          idx: idx + 1,
+          dying,
+          owner,
+          port: child.port,
+          code,
+          signal
+        });
+      } catch {}
+      child.deadHandled = true;
+      child.pid = null;
+      child.proc = null;
       return;
     }
     child.deadHandled = true;
@@ -468,6 +483,7 @@ async function createCluster() {
   async function adoptIfListening(child, idx, reason) {
     const owner = cellRegistry.tcpListenPid(child.port);
     if (!(owner > 0)) return false;
+    if (!cellLifecycle.isProvenCellEntryPid(owner)) return false;
     child.pid = owner;
     child.proc = null;
     child.adopted = true;
@@ -636,6 +652,18 @@ async function createCluster() {
         });
         await waitPortFree(child.port, 4000);
         if (await adoptIfListening(child, idx, 'busy_after_wait')) return child;
+        const still = cellRegistry.tcpListenPid(child.port);
+        if (still > 0 && !cellLifecycle.isProvenCellEntryPid(still)) {
+          try {
+            cellForensic.append('cell_port_blocked_not_cell', {
+              idx: idx + 1,
+              port: child.port,
+              pid: still,
+              reason: 'before_spawn'
+            });
+          } catch {}
+          return child;
+        }
       }
     }
 
@@ -686,6 +714,8 @@ async function createCluster() {
       child.adopted = false;
       setTimeout(() => {
         if (isShuttingDown) return;
+        const blocked = cellRegistry.tcpListenPid(child.port);
+        if (blocked > 0 && !cellLifecycle.isProvenCellEntryPid(blocked)) return;
         const target = children[idx];
         if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
         spawnWorker(idx, shardNames).then((fresh) => {
@@ -787,7 +817,7 @@ async function createCluster() {
         const c = children[i];
         if (!c || c.deadHandled) continue;
         const owner = cellRegistry.tcpListenPid(c.port);
-        if (owner > 0) {
+        if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
           if (Number(c.pid) !== owner) {
             c.pid = owner;
             c.adopted = true;
@@ -1172,6 +1202,9 @@ async function createCluster() {
       };
 
       for (let i = 0; i < children.length; i++) {
+        const slot = children[i];
+        const owner = slot ? cellRegistry.tcpListenPid(slot.port) : 0;
+        if (!(owner > 0) || !cellLifecycle.isProvenCellEntryPid(owner)) continue;
         const fb = readNodeStatusFile(i);
         if (fb && fb.json && Array.isArray(fb.json.perfis)) {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
@@ -1311,6 +1344,7 @@ async function createCluster() {
 
   function beginStop() {
     isShuttingDown = true;
+    try { statusAggCache = { at: 0, value: null }; } catch {}
     try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     for (const c of children) {
@@ -1335,6 +1369,18 @@ async function createCluster() {
   }
 
   async function ensureCellsRunning(reason = 'ensure') {
+    const why = String(reason || 'ensure');
+    const userWantsCells = /open_all|start_work|abrir/.test(why);
+    try {
+      const hold = require('./bootIntent.js').readHumanHold();
+      const stopHold = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+      if (stopHold && !userWantsCells) {
+        return { ok: false, error: 'human_hold_stop_workers', nodes: 0, want: 0, reason: why };
+      }
+      if (stopHold && userWantsCells) {
+        require('./bootIntent.js').clearHumanHold({ by: 'ensure:' + why.slice(0, 40) });
+      }
+    } catch {}
     isShuttingDown = false;
     const want = Math.max(1, blocks.length || children.length || 1);
     while (children.length < want) {
@@ -1356,7 +1402,7 @@ async function createCluster() {
     await Promise.all(children.map(async (c, idx) => {
       const port = c.port || cellRegistry.portForIdx(idx);
       const owner = cellRegistry.tcpListenPid(port);
-      if (owner > 0) {
+      if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
         c.pid = owner;
         c.deadHandled = false;
         if (!c.socket) {

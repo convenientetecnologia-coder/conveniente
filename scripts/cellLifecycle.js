@@ -150,38 +150,78 @@ function silentExec(file, args, timeoutMs) {
 
 function parseWmicPidCmd(raw) {
   const rows = [];
-  let cmd = '';
+  let rec = { pid: 0, cmd: '', name: '' };
+  function flush() {
+    if (rec.pid > 0) rows.push({ pid: rec.pid, cmd: rec.cmd || '', name: rec.name || '' });
+    rec = { pid: 0, cmd: '', name: '' };
+  }
   for (const line of String(raw || '').split(/\r?\n/)) {
     const t = line.trim();
     if (!t) {
-      cmd = '';
+      flush();
       continue;
     }
-    if (/^CommandLine=/i.test(t)) {
-      cmd = t.slice(t.indexOf('=') + 1);
-      continue;
-    }
-    if (/^ProcessId=/i.test(t)) {
-      const pid = Math.floor(Number(t.slice(t.indexOf('=') + 1)) || 0);
-      if (pid > 0) rows.push({ pid, cmd: cmd || '' });
-      cmd = '';
-    }
+    const eq = t.indexOf('=');
+    if (eq < 0) continue;
+    const key = t.slice(0, eq);
+    const val = t.slice(eq + 1);
+    if (/^CommandLine$/i.test(key)) rec.cmd = val;
+    else if (/^ProcessId$/i.test(key)) rec.pid = Math.floor(Number(val) || 0);
+    else if (/^Name$/i.test(key)) rec.name = val;
   }
+  flush();
   return rows;
+}
+
+function parseCimJson(raw) {
+  const out = String(raw || '').trim();
+  if (!out) return [];
+  try {
+    const json = JSON.parse(out);
+    const arr = Array.isArray(json) ? json : (json ? [json] : []);
+    return arr.map((p) => ({
+      pid: Math.floor(Number(p && (p.ProcessId || p.pid)) || 0),
+      cmd: String((p && (p.CommandLine || p.cmd)) || ''),
+      name: String((p && (p.Name || p.name)) || '')
+    })).filter((p) => p.pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+function listCimPidCmds(imageName) {
+  if (process.platform !== 'win32') return [];
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const name = String(imageName || '').replace(/'/g, '');
+  const cmd = name
+    ? `Get-CimInstance Win32_Process -Filter "Name='${name}'" -ErrorAction SilentlyContinue | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress`
+    : 'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress';
+  const raw = silentExec(ps, [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    cmd
+  ], 8000);
+  return parseCimJson(raw);
 }
 
 function listNodePidCmds() {
   if (process.platform !== 'win32') return [];
   const now = Date.now();
   if (__nodeCmdAt && (now - __nodeCmdAt) < 600) return __nodeCmds.slice();
-  const rows = parseWmicPidCmd(silentExec('wmic.exe', [
+  let rows = parseWmicPidCmd(silentExec('wmic.exe', [
     'process',
     'where',
     "name='node.exe'",
     'get',
-    'ProcessId,CommandLine',
+    'ProcessId,Name,CommandLine',
     '/FORMAT:LIST'
   ], 3000));
+  const missingCmd = !rows.length || rows.every((r) => !r.cmd);
+  if (missingCmd) {
+    const cim = listCimPidCmds('node.exe');
+    if (cim.length) rows = cim;
+  }
   __nodeCmdAt = Date.now();
   __nodeCmds = rows;
   return rows.slice();
@@ -217,13 +257,83 @@ function pidCommandLine(pid) {
   return '';
 }
 
+function isProvenCellEntryPid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 4) || n === process.pid) return false;
+  return isCellEntryCmd(pidCommandLine(n));
+}
+
+function isNodePid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 4)) return false;
+  return listNodePidCmds().some((row) => row.pid === n);
+}
+
+function isLikelyCellListenPid(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 4) || n === process.pid) return false;
+  if (isProvenCellEntryPid(n)) return true;
+  const cmd = pidCommandLine(n);
+  if (cmd && isIndexCmd(cmd)) return false;
+  if (cmd && !isCellEntryCmd(cmd)) return false;
+  return !cmd && isNodePid(n);
+}
+
 function isSkippableListenPid(pid) {
   const n = Math.floor(Number(pid) || 0);
   if (!(n > 0) || n === process.pid || n <= 4) return true;
-  const cmd = pidCommandLine(n);
-  if (cmd && isIndexCmd(cmd)) return true;
-  if (cmd && !isCellEntryCmd(cmd)) return true;
-  return false;
+  return !isLikelyCellListenPid(n);
+}
+
+function listListenOwners(maxSlots) {
+  const owners = [];
+  try {
+    for (const row of cellRegistry.collectListenPids(maxSlots || 8, { force: true })) {
+      const cmd = pidCommandLine(row.pid);
+      const node = listNodePidCmds().find((r) => r.pid === row.pid);
+      owners.push({
+        port: row.port,
+        pid: row.pid,
+        name: node && node.name ? String(node.name) : (isNodePid(row.pid) ? 'node.exe' : ''),
+        cmd: String(cmd || '').slice(0, 200),
+        cell: isProvenCellEntryPid(row.pid),
+        likely: isLikelyCellListenPid(row.pid),
+        skip: isSkippableListenPid(row.pid)
+      });
+    }
+  } catch {}
+  return owners;
+}
+
+function neutralizeWorkerStatusJournals(reason) {
+  const dir = path.join(ROOT, 'dados');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => /^status_node_\d+\.json$/i.test(n));
+  } catch {}
+  names.push('status.json');
+  const why = String(reason || 'encerrar').slice(0, 80);
+  const ts = Date.now();
+  for (const name of names) {
+    const fp = path.join(dir, name);
+    try {
+      if (!fs.existsSync(fp)) continue;
+      const j = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (!j || typeof j !== 'object' || !Array.isArray(j.perfis)) continue;
+      for (const p of j.perfis) {
+        if (!p || typeof p !== 'object') continue;
+        p.active = false;
+        p.trabalhando = false;
+        p.configurando = false;
+      }
+      j.ts = ts;
+      j.encerradoAt = ts;
+      j.encerradoReason = why;
+      const tmp = fp + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(j));
+      fs.renameSync(tmp, fp);
+    } catch {}
+  }
 }
 
 function terminateCellEntriesByCmd() {
@@ -255,7 +365,7 @@ function needRestart() {
 function realCellListenRows() {
   const rows = [];
   for (const row of cellRegistry.collectListenPids(8, { force: true })) {
-    if (isSkippableListenPid(row.pid)) continue;
+    if (!isLikelyCellListenPid(row.pid)) continue;
     rows.push(row);
   }
   return rows;
@@ -265,15 +375,15 @@ function killListenUntilFree(timeoutMs) {
   const started = Date.now();
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
-    const rows = realCellListenRows();
     const entry = listCellEntryPids();
-    if (!rows.length && !entry.length) return { ok: true, left: [] };
+    const rows = realCellListenRows();
+    if (!entry.length) return { ok: true, left: [] };
     for (const row of rows) forceKillPid(row.pid);
     for (const pid of entry) forceKillPid(pid);
     sleepMs(80);
   }
-  const left = realCellListenRows();
-  return { ok: left.length === 0 && listCellEntryPids().length === 0, left };
+  const entryLeft = listCellEntryPids();
+  return { ok: entryLeft.length === 0, left: entryLeft.length ? realCellListenRows() : [] };
 }
 
 function countDesiredActive() {
@@ -317,27 +427,17 @@ function stopAllCells({ reason = 'manual' } = {}) {
   const alive = cellRegistry.listAlive();
   const pids = [];
   const seen = new Set();
-  function addPid(pid) {
+  function addPid(pid, force) {
     const n = Math.floor(Number(pid) || 0);
     if (!(n > 0) || n === process.pid || n <= 4 || seen.has(n)) return;
-    if (isSkippableListenPid(n)) return;
+    if (!force && isSkippableListenPid(n)) return;
     seen.add(n);
     pids.push(n);
   }
-  for (const c of alive) addPid(c && c.pid);
+  for (const c of alive) addPid(c && c.pid, true);
   for (const row of realCellListenRows()) addPid(row && row.pid);
-  for (const pid of listCellEntryPids()) addPid(pid);
-  const owners = [];
-  try {
-    for (const row of cellRegistry.collectListenPids(8, { force: true })) {
-      owners.push({
-        port: row.port,
-        pid: row.pid,
-        skip: isSkippableListenPid(row.pid),
-        cmd: String(pidCommandLine(row.pid) || '').slice(0, 160)
-      });
-    }
-  } catch {}
+  for (const pid of listCellEntryPids()) addPid(pid, true);
+  const owners = listListenOwners(8);
   try {
     cellForensic.append('cell_stop_all', {
       reason: why.slice(0, 80),
@@ -364,7 +464,9 @@ function stopAllCells({ reason = 'manual' } = {}) {
   }
   const stillListen = Array.isArray(freed.left) ? freed.left : realCellListenRows();
   const entryLeft = listCellEntryPids();
-  const ok = stillListen.length === 0 && entryLeft.length === 0;
+  const ok = entryLeft.length === 0;
+  const ownersAfter = listListenOwners(8);
+  try { neutralizeWorkerStatusJournals(why); } catch {}
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);
@@ -372,17 +474,19 @@ function stopAllCells({ reason = 'manual' } = {}) {
     ok,
     error: ok
       ? null
-      : (stillListen.length
-        ? ('celula_ainda_na_porta:' + stillListen.map((r) => r.port).join(','))
-        : (entryLeft.length ? 'celula_ainda_viva' : 'nao_encerrou')),
+      : (entryLeft.length
+        ? ('celula_ainda_viva:' + entryLeft.join(','))
+        : (stillListen.length
+          ? ('celula_ainda_na_porta:' + stillListen.map((r) => r.port).join(','))
+          : 'nao_encerrou')),
     reason: String(reason || ''),
     requested: pids.length,
     forced: pids.length,
-    alive: 0,
+    alive: entryLeft.length,
     listenLeft: stillListen.length,
     chromeKilled: chrome && chrome.killed != null ? chrome.killed : 0,
     pids,
-    owners
+    owners: ownersAfter.length ? ownersAfter : owners
   };
 }
 
@@ -426,6 +530,11 @@ module.exports = {
   stopAllCells,
   consumeBootRecycle,
   listCellEntryPids,
+  listListenOwners,
+  isProvenCellEntryPid,
+  isLikelyCellListenPid,
+  isSkippableListenPid,
+  neutralizeWorkerStatusJournals,
   countDesiredActive,
   browsersWorking
 };

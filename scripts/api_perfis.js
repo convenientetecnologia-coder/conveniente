@@ -1117,6 +1117,7 @@ module.exports = (app, workerClient, fileStore) => {
       logger.error('Erro ao patchDesired para start_work', { nome, error: e && e.message }, e);
     }
     try {
+      try { require('./bootIntent.js').clearHumanHold({ by: 'start_work:' + String(nome || '').slice(0, 40) }); } catch {}
       if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
         await workerClient.ensureCellsRunning('start_work:' + String(nome || '').slice(0, 40));
       }
@@ -1956,6 +1957,7 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
       }
 
+      try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
       try {
         if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
           const woke = await workerClient.ensureCellsRunning('open_all_24h');

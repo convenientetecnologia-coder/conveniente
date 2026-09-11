@@ -1237,7 +1237,7 @@
           : '';
         box.innerHTML = `
           <h2>${escapeHtml(title)}</h2>
-          <div class="pill ${tone}" style="margin-bottom:12px;"><span class="dot"></span>${escapeHtml(String(message || ''))}</div>
+          <div class="pill ${tone}" style="margin-bottom:12px;white-space:pre-wrap;"><span class="dot"></span>${escapeHtml(String(message || ''))}</div>
           <div class="modal-actions">
             ${cancelBtn}
             <button class="btn primary" id="sysMsgOk">${escapeHtml(okText)}</button>
@@ -3600,11 +3600,18 @@
             signal: ac.signal
           }).then((x) => x.json()).catch(() => null);
           try { clearTimeout(t); } catch {}
+          const ownerLines = (r && Array.isArray(r.owners) && r.owners.length)
+            ? r.owners.map((o) => {
+                const tag = o && o.cell ? 'celula' : (o && o.likely ? 'node' : 'nao-celula');
+                const cmd = String((o && (o.cmd || o.name)) || '').slice(0, 90);
+                return String((o && o.port) || '?') + ' pid=' + String((o && o.pid) || '?') + ' ' + tag + (cmd ? (' ' + cmd) : '');
+              }).join('\n')
+            : '';
           await showSystemMessageModal({
             title: r && r.ok ? 'Workers encerrados' : 'Falha ao encerrar workers',
             message: r && r.ok
               ? ('Abrir Tudo cancelado. Encerrados: ' + String(r.requested || 0) + ' worker(s), Chrome morto: ' + String(r.chromeKilled || 0) + '. Painel ainda aberto. Abrir Tudo ou abrir uma conta renasce a célula.')
-              : String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')),
+              : (String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')) + (ownerLines ? ('\n' + ownerLines) : '')),
             tone: r && r.ok ? 'good' : 'bad'
           });
           try { if (typeof reloadPerfis === 'function') reloadPerfis(); } catch {}

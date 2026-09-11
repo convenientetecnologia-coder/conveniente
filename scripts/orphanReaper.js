@@ -143,7 +143,7 @@ function fillChromeCache() {
     const listed = silentExec("tasklist.exe", ["/FI", "IMAGENAME eq " + name, "/NH"], 2500);
     if (new RegExp(name.replace(".", "\\."), "i").test(String(listed || ""))) images.push(name);
   }
-  const rows = [];
+  let rows = [];
   for (const name of images) {
     rows.push.apply(rows, parseWmicProcessList(silentExec("wmic.exe", [
       "process",
@@ -153,6 +153,27 @@ function fillChromeCache() {
       "ProcessId,CommandLine",
       "/FORMAT:LIST"
     ], 3000)));
+  }
+  const missingCmd = !rows.length || rows.every((r) => !r.cmd);
+  if (missingCmd && process.platform === "win32" && images.length) {
+    const ps = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const filter = images.map((n) => "Name='" + String(n).replace(/'/g, "") + "'").join(" or ");
+    const raw = silentExec(ps, [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Get-CimInstance Win32_Process -Filter \"" + filter + "\" -ErrorAction SilentlyContinue | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    ], 8000);
+    const parsed = [];
+    try {
+      const json = JSON.parse(String(raw || "").trim() || "[]");
+      const arr = Array.isArray(json) ? json : (json ? [json] : []);
+      for (const p of arr) {
+        const pid = Math.floor(Number(p && p.ProcessId) || 0);
+        if (pid > 0) parsed.push({ pid, cmd: String((p && p.CommandLine) || "") });
+      }
+    } catch {}
+    if (parsed.length) rows = parsed;
   }
   __chromeCache = { at: Date.now(), images, rows };
   return __chromeCache;

@@ -36,6 +36,13 @@ assert.ok(
 );
 
 const apiSys = fs.readFileSync(path.join(ROOT, "scripts", "api_sys.js"), "utf8");
+const apiPerfis = fs.readFileSync(path.join(ROOT, "scripts", "api_perfis.js"), "utf8");
+const openAllFn = apiPerfis.split("app.post('/api/perfis/open-all-24h'")[1] || "";
+assert.ok(
+  openAllFn.indexOf("clearHumanHold") >= 0 &&
+    openAllFn.indexOf("clearHumanHold") < openAllFn.indexOf("ensureCellsRunning('open_all_24h')"),
+  "Abrir Tudo destrava Encerrar antes de renascer célula"
+);
 const stopFn = apiSys.split("app.post('/api/cells/stop'")[1] || "";
 assert.ok(stopFn.indexOf("setHumanHold") >= 0 && stopFn.indexOf("setHumanHold") < stopFn.indexOf("stopAllCells"), "Encerrar trava antes de matar");
 assert.ok(stopFn.indexOf("resetDesiredAllOffOnBoot") >= 0 && stopFn.indexOf("resetDesiredAllOffOnBoot") < stopFn.indexOf("stopAllCells"), "Encerrar cancela Abrir Tudo antes de matar");
@@ -58,6 +65,14 @@ assert.ok(/!recycledThisBoot && !cellLifecycle\.isStampStale\(\)/.test(cluster),
 assert.ok(/mustDie/.test(life) && /listCellEntryPids/.test(life), "atualização e Encerrar insistem até a célula morrer");
 assert.ok(/isSkippableListenPid/.test(life) && /terminateCellEntriesByCmd/.test(life), "Encerrar não trata porta do index como célula");
 assert.ok(/reg\.cells = \[\]/.test(life), "Encerrar zera o registry; não grava leftover fantasma como 4/4");
+assert.ok(/isProvenCellEntryPid/.test(life) && /listListenOwners/.test(life), "Encerrar identifica célula por cellEntry.js, não por LISTEN solto");
+assert.ok(/const ok = entryLeft\.length === 0/.test(life), "Encerrar ok se não sobrou cellEntry, mesmo com porta fantasma");
+assert.ok(/neutralizeWorkerStatusJournals/.test(life), "Encerrar apaga journal ativo para o painel não mentir");
+assert.ok(/human_hold_stop_workers/.test(cluster), "ensure não renasce célula depois do Encerrar");
+assert.ok(/isProvenCellEntryPid\(owner\)/.test(cluster), "não adota LISTEN que não é cellEntry");
+assert.ok(/cell_port_blocked_not_cell/.test(cluster), "porta ocupada por não-célula não entra em loop de respawn");
+assert.ok(apiSys.includes("listCellEntryPids") && apiSys.includes("alive: livePids.length"), "GET /api/cells conta cellEntry vivo, não registry fantasma");
+assert.ok(html.includes("nao-celula") && html.includes("ownerLines"), "modal do Encerrar mostra dono da porta");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(
