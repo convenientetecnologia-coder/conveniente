@@ -1117,6 +1117,14 @@ app.use((req, res, next) => {
 // ===================== Body Parsers =====================
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use((err, req, res, next) => {
+  const msg = String((err && err.message) || '');
+  if (err && (err.type === 'request.aborted' || /request aborted/i.test(msg))) {
+    try { if (!res.headersSent) res.status(400).end(); } catch {}
+    return;
+  }
+  return next(err);
+});
 // ===================== Fim Body Parsers =====================
 
 // ===================== Forensic Logs (Caixa-preta Universal) =====================
@@ -4699,6 +4707,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       }
     }
   }
+  try { logger.info('[BOOT] subindo células'); } catch {}
   await bootCluster();
   try { logger.info('[BOOT] cluster pronto', { ms: Date.now() - bootT0 }); } catch {}
   if (!adoptingLiveCells) {
@@ -4815,6 +4824,8 @@ process.on('SIGTERM', () => { handleIndexConsoleStop('SIGTERM'); });
 // - Por padrão NÃO mata o processo (sem auto-restart neste ambiente).
 // - Se o operador habilitar CONVENIENTE_FATAL_EXIT=1, sai com code=1 para evitar estado corrompido.
 function fatalMaster(kind, e) {
+  const msg = String((e && e.message) || e || '');
+  if (/request aborted/i.test(msg) || (e && e.type === 'request.aborted')) return;
   try { logger.error(`[FATAL][MASTER] ${kind}`, { error: (e && e.message) ? e.message : e }, e); } catch {}
   try {
     if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {

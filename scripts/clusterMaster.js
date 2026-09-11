@@ -67,7 +67,12 @@ async function createCluster() {
   let recycledThisBoot = false;
   if (cellLifecycle.consumeBootRecycle() || cellLifecycle.isStampStale()) {
     recycledThisBoot = true;
-    try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
+    const left = cellRegistry.collectListenPids(8, { force: true });
+    let entry = [];
+    try { entry = cellLifecycle.listCellEntryPids(); } catch {}
+    if (left.length || entry.length || cellRegistry.hasAliveCells()) {
+      try { cellLifecycle.stopAllCells({ reason: 'code_stamp_mismatch_listen' }); } catch {}
+    }
     aliveAtBoot = [];
   }
   if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isStampStale()) {

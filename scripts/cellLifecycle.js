@@ -124,6 +124,7 @@ function forceKillPid(pid) {
     });
   } catch {}
   try { process.kill(n, 9); } catch {}
+  __cellEntryAt = 0;
   try { cellRegistry.invalidateListenCache(); } catch {}
 }
 
@@ -141,8 +142,13 @@ function silentExec(file, args, timeoutMs) {
   }
 }
 
+let __cellEntryAt = 0;
+let __cellEntryPids = [];
+
 function listCellEntryPids() {
   if (process.platform !== 'win32') return [];
+  const now = Date.now();
+  if (__cellEntryAt && (now - __cellEntryAt) < 600) return __cellEntryPids.slice();
   const raw = silentExec('wmic.exe', [
     'process',
     'where',
@@ -170,7 +176,9 @@ function listCellEntryPids() {
       cmd = '';
     }
   }
-  return out;
+  __cellEntryAt = Date.now();
+  __cellEntryPids = out;
+  return out.slice();
 }
 
 function needRestart() {
@@ -183,9 +191,13 @@ function killListenUntilFree(timeoutMs) {
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
     const rows = cellRegistry.collectListenPids(8, { force: true });
+    if (rows.length) {
+      for (const row of rows) forceKillPid(row.pid);
+      sleepMs(80);
+      continue;
+    }
     const entry = listCellEntryPids();
-    if (!rows.length && !entry.length) return { ok: true, left: [] };
-    for (const row of rows) forceKillPid(row.pid);
+    if (!entry.length) return { ok: true, left: [] };
     for (const pid of entry) forceKillPid(pid);
     sleepMs(80);
   }
