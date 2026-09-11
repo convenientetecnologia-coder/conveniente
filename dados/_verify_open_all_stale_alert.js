@@ -66,13 +66,14 @@ assert.ok(/mustDie/.test(life) && /listCellEntryPids/.test(life), "atualização
 assert.ok(/isSkippableListenPid/.test(life) && /terminateCellEntriesByCmd/.test(life), "Encerrar não trata porta do index como célula");
 assert.ok(/reg\.cells = \[\]/.test(life), "Encerrar zera o registry; não grava leftover fantasma como 4/4");
 assert.ok(/isProvenCellEntryPid/.test(life) && /listListenOwners/.test(life), "Encerrar identifica célula por cellEntry.js, não por LISTEN solto");
-assert.ok(/const ok = entryLeft\.length === 0/.test(life), "Encerrar ok se não sobrou cellEntry, mesmo com porta fantasma");
+assert.ok(/const ok = entryLeft\.length === 0/.test(life), "Encerrar ok se não sobrou célula viva");
+assert.ok(/listLiveCellPids/.test(life) && /wantedCellCount/.test(life), "conta célula viva e o plano 4, não 1/1");
 assert.ok(/neutralizeWorkerStatusJournals/.test(life), "Encerrar apaga journal ativo para o painel não mentir");
 assert.ok(/human_hold_stop_workers/.test(cluster), "ensure não renasce célula depois do Encerrar");
 assert.ok(/isProvenCellEntryPid\(owner\)/.test(cluster), "não adota LISTEN que não é cellEntry");
-assert.ok(/cell_port_blocked_not_cell/.test(cluster), "porta ocupada por não-célula não entra em loop de respawn");
-assert.ok(apiSys.includes("listCellEntryPids") && apiSys.includes("alive: livePids.length"), "GET /api/cells conta cellEntry vivo, não registry fantasma");
-assert.ok(html.includes("nao-celula") && html.includes("ownerLines"), "modal do Encerrar mostra dono da porta");
+assert.ok(/cell_port_relocated/.test(cluster) && /findFreePort/.test(cluster), "porta bloqueada troca de porta, não mata o slot");
+assert.ok(apiSys.includes("listLiveCellPids") && apiSys.includes("want"), "GET /api/cells manda alive e want");
+assert.ok(html.includes("cells.want") && html.includes("ownerLines"), "painel mostra vivo/plano e dono no Encerrar");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(

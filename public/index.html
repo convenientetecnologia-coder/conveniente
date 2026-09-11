@@ -3494,7 +3494,9 @@
           const cells = await fetch('/api/cells').then((r) => r.json()).catch(() => null);
           const el = document.getElementById('mCells');
           if (el && cells && cells.ok) {
-            el.textContent = String(Number(cells.alive || 0)) + '/' + String(Array.isArray(cells.cells) ? cells.cells.length : 0);
+            const want = Number(cells.want || (cells.topology && cells.topology.nodes) || 0) || 0;
+            const denom = want > 0 ? want : (Array.isArray(cells.cells) ? cells.cells.length : 0);
+            el.textContent = String(Number(cells.alive || 0)) + '/' + String(denom);
           }
         } catch {}
       } catch (e) {

@@ -134,6 +134,22 @@ function portForIdx(idx) {
   return BASE_PORT + Math.max(0, Math.floor(Number(idx) || 0));
 }
 
+function findFreePort({ exclude, maxSlots } = {}) {
+  const skip = new Set();
+  for (const p of (Array.isArray(exclude) ? exclude : [])) {
+    const n = Math.floor(Number(p) || 0);
+    if (n > 0) skip.add(n);
+  }
+  const n = Math.max(8, Math.min(32, Math.floor(Number(maxSlots) || 16)));
+  const map = parseListenMap(true);
+  for (let i = 0; i < n; i++) {
+    const port = portForIdx(i);
+    if (skip.has(port)) continue;
+    if (!(map.get(port) > 0)) return port;
+  }
+  return 0;
+}
+
 function listAlive() {
   const reg = read();
   return (reg.cells || []).filter((c) => c && pidAlive(c.pid));
@@ -186,6 +202,7 @@ module.exports = {
   tcpListenPid,
   collectListenPids,
   portForIdx,
+  findFreePort,
   listAlive,
   hasAliveCells,
   upsertCell,

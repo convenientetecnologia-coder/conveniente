@@ -332,7 +332,7 @@ async function createCluster() {
     if (pid && child.pid && Number(pid) !== Number(child.pid)) return;
     const dying = Number(pid || child.pid) || 0;
     const owner = cellRegistry.tcpListenPid(child.port);
-    if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
+    if (owner > 0 && (cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) {
       try {
         cellForensic.append('cell_drop_ignored_listener_alive', {
           idx: idx + 1,
@@ -482,8 +482,8 @@ async function createCluster() {
 
   async function adoptIfListening(child, idx, reason) {
     const owner = cellRegistry.tcpListenPid(child.port);
-    if (!(owner > 0)) return false;
-    if (!cellLifecycle.isProvenCellEntryPid(owner)) return false;
+    if (!(owner > 4) || owner === process.pid) return false;
+    if (!cellLifecycle.isProvenCellEntryPid(owner) && !cellLifecycle.isLikelyCellListenPid(owner)) return false;
     child.pid = owner;
     child.proc = null;
     child.adopted = true;
@@ -492,6 +492,18 @@ async function createCluster() {
       child.adopted = false;
       if (Number(child.pid) === Number(owner)) child.pid = null;
       return false;
+    }
+    if (!cellLifecycle.isProvenCellEntryPid(owner)) {
+      const helloUntil = Date.now() + 1500;
+      while (Date.now() < helloUntil && !child.helloPid) await waitMs(50);
+      if (!child.helloPid) {
+        try { if (child.socket) child.socket.destroy(); } catch {}
+        child.socket = null;
+        child.netSend = null;
+        child.adopted = false;
+        child.pid = null;
+        return false;
+      }
     }
     if (child.helloPid) child.pid = Number(child.helloPid) || child.pid;
     try {
@@ -652,18 +664,29 @@ async function createCluster() {
         });
         await waitPortFree(child.port, 4000);
         if (await adoptIfListening(child, idx, 'busy_after_wait')) return child;
-        const still = cellRegistry.tcpListenPid(child.port);
-        if (still > 0 && !cellLifecycle.isProvenCellEntryPid(still)) {
-          try {
-            cellForensic.append('cell_port_blocked_not_cell', {
-              idx: idx + 1,
-              port: child.port,
-              pid: still,
-              reason: 'before_spawn'
-            });
-          } catch {}
-          return child;
-        }
+      }
+    }
+
+    const occupant = cellRegistry.tcpListenPid(child.port);
+    if (occupant > 4 && occupant !== process.pid) {
+      forceKillCellPid(occupant);
+      await waitMs(300);
+    }
+    if (cellRegistry.tcpListenPid(child.port) > 0) {
+      const taken = children.map((c) => c && c.port).filter(Boolean);
+      taken.push(child.port);
+      const alt = cellRegistry.findFreePort({ exclude: taken, maxSlots: 32 });
+      if (alt > 0 && alt !== child.port) {
+        try {
+          cellForensic.append('cell_port_relocated', {
+            idx: idx + 1,
+            from: child.port,
+            to: alt,
+            blockedPid: occupant
+          });
+        } catch {}
+        child.port = alt;
+        env.CELL_CMD_PORT = String(alt);
       }
     }
 
@@ -714,8 +737,6 @@ async function createCluster() {
       child.adopted = false;
       setTimeout(() => {
         if (isShuttingDown) return;
-        const blocked = cellRegistry.tcpListenPid(child.port);
-        if (blocked > 0 && !cellLifecycle.isProvenCellEntryPid(blocked)) return;
         const target = children[idx];
         if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
         spawnWorker(idx, shardNames).then((fresh) => {
@@ -817,7 +838,7 @@ async function createCluster() {
         const c = children[i];
         if (!c || c.deadHandled) continue;
         const owner = cellRegistry.tcpListenPid(c.port);
-        if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
+        if (owner > 0 && (cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) {
           if (Number(c.pid) !== owner) {
             c.pid = owner;
             c.adopted = true;
@@ -1204,7 +1225,7 @@ async function createCluster() {
       for (let i = 0; i < children.length; i++) {
         const slot = children[i];
         const owner = slot ? cellRegistry.tcpListenPid(slot.port) : 0;
-        if (!(owner > 0) || !cellLifecycle.isProvenCellEntryPid(owner)) continue;
+        if (!(owner > 0) || !(cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) continue;
         const fb = readNodeStatusFile(i);
         if (fb && fb.json && Array.isArray(fb.json.perfis)) {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
@@ -1402,7 +1423,7 @@ async function createCluster() {
     await Promise.all(children.map(async (c, idx) => {
       const port = c.port || cellRegistry.portForIdx(idx);
       const owner = cellRegistry.tcpListenPid(port);
-      if (owner > 0 && cellLifecycle.isProvenCellEntryPid(owner)) {
+      if (owner > 0 && (cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) {
         c.pid = owner;
         c.deadHandled = false;
         if (!c.socket) {

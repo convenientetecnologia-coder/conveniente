@@ -26,8 +26,9 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       const cellRegistry = require('./cellRegistry.js');
       const cellLifecycle = require('./cellLifecycle.js');
-      const livePids = cellLifecycle.listCellEntryPids();
+      const livePids = cellLifecycle.listLiveCellPids();
       const liveSet = new Set(livePids.map((n) => Number(n)));
+      const want = cellLifecycle.wantedCellCount();
       const reg = cellRegistry.read();
       const cells = (reg.cells || []).filter((c) => liveSet.has(Number(c && c.pid))).map((c) => ({
         id: c.id,
@@ -61,6 +62,7 @@ module.exports = (app, workerClient, fileStore) => {
         topology: reg.topology || null,
         cells,
         alive: livePids.length,
+        want,
         updatedAt: reg.updatedAt || null
       });
     } catch (e) {

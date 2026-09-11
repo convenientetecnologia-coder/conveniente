@@ -248,6 +248,38 @@ function listCellEntryPids() {
   return out.slice();
 }
 
+function listLiveCellPids() {
+  const seen = new Set();
+  const out = [];
+  function add(pid) {
+    const n = Math.floor(Number(pid) || 0);
+    if (!(n > 4) || n === process.pid || seen.has(n)) return;
+    if (isIndexCmd(pidCommandLine(n))) return;
+    seen.add(n);
+    out.push(n);
+  }
+  for (const pid of listCellEntryPids()) add(pid);
+  for (const row of realCellListenRows()) add(row.pid);
+  return out;
+}
+
+function wantedCellCount() {
+  try {
+    const reg = cellRegistry.read();
+    const n = Math.floor(Number(reg && reg.topology && reg.topology.nodes) || 0);
+    if (n > 0) return Math.max(1, Math.min(16, n));
+  } catch {}
+  try {
+    const fileStore = require('./fileStore.js');
+    const { planMemoryAndShards } = require('./memoryPlan.js');
+    const names = (fileStore.loadPerfisJson() || []).map((p) => p && p.nome).filter(Boolean);
+    const plan = planMemoryAndShards({ totalProfiles: names.length });
+    return Math.max(1, Math.min(16, Number(plan.nodes) || 1));
+  } catch {
+    return 1;
+  }
+}
+
 function pidCommandLine(pid) {
   const n = Math.floor(Number(pid) || 0);
   if (!(n > 0)) return '';
@@ -375,15 +407,13 @@ function killListenUntilFree(timeoutMs) {
   const started = Date.now();
   const limit = Math.max(500, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
-    const entry = listCellEntryPids();
-    const rows = realCellListenRows();
-    if (!entry.length) return { ok: true, left: [] };
-    for (const row of rows) forceKillPid(row.pid);
-    for (const pid of entry) forceKillPid(pid);
+    const left = listLiveCellPids();
+    if (!left.length) return { ok: true, left: [] };
+    for (const pid of left) forceKillPid(pid);
     sleepMs(80);
   }
-  const entryLeft = listCellEntryPids();
-  return { ok: entryLeft.length === 0, left: entryLeft.length ? realCellListenRows() : [] };
+  const left = listLiveCellPids();
+  return { ok: left.length === 0, left };
 }
 
 function countDesiredActive() {
@@ -463,7 +493,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
     freed = killListenUntilFree(listen2);
   }
   const stillListen = Array.isArray(freed.left) ? freed.left : realCellListenRows();
-  const entryLeft = listCellEntryPids();
+  const entryLeft = listLiveCellPids();
   const ok = entryLeft.length === 0;
   const ownersAfter = listListenOwners(8);
   try { neutralizeWorkerStatusJournals(why); } catch {}
@@ -530,6 +560,8 @@ module.exports = {
   stopAllCells,
   consumeBootRecycle,
   listCellEntryPids,
+  listLiveCellPids,
+  wantedCellCount,
   listListenOwners,
   isProvenCellEntryPid,
   isLikelyCellListenPid,
