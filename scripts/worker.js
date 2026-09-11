@@ -12,8 +12,6 @@ const { createEnsureWorkingTick } = require('./ensureWorking.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 // ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
-// Regra rígida: console + arquivo físico, JSON string única:
-// console.log(JSON.stringify({ timestamp, account_login, thread_key, flow_stage, details }))
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_edge.log');
 const LEADS_BRUTOS_JSONL_PATH = path.join(__dirname, '..', 'dados', 'leads_brutos.jsonl');
 const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_triagem.log');
@@ -880,6 +878,7 @@ async function __deltaReloadStaleMessages(nome, page) {
 }
 
 async function __deltaWsLivenessTick() {
+  if (!__deltaIsHostBootReady()) return;
   if (__deltaWsLivenessTickRunning) return;
   __deltaWsLivenessTickRunning = true;
   try {
@@ -1233,6 +1232,8 @@ function _touchGovSnapshotLeader() {
  * Revalidação multi-shard (4–8 workers):
  * - PID morto = stale (failover)
  * - phase running → done (followers recarregam estado do disco)
+ * Crachá (wx + PID/TTL + done) permanece sagrado. A espera do follower
+ * NÃO congela o Event Loop; o ouvido CDP só liga depois do caderno pronto.
  */
 function __deltaWriteHostBootLeaderLockSync(extra = {}) {
   try {
@@ -1312,33 +1313,103 @@ function __deltaMarkHostBootLeaderDoneSync() {
   try { __deltaWriteHostBootLeaderLockSync({ phase: 'done', doneAt: Date.now() }); } catch {}
 }
 
-function __deltaSleepSyncMs(ms) {
-  const wait = Math.max(0, Number(ms || 0) || 0);
-  if (!(wait > 0)) return;
-  try {
-    const sab = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(sab, 0, 0, wait);
-    return;
-  } catch {}
-  // Fallback sem spin CPU: Node filho dorme (Windows/Linux).
-  try {
-    require('child_process').spawnSync(
-      process.execPath,
-      ['-e', `setTimeout(()=>{},${wait})`],
-      { timeout: wait + 1500, windowsHide: true }
-    );
-    return;
-  } catch {}
-  const end = Date.now() + wait;
-  while (Date.now() < end) { /* last-resort spin */ }
+function __deltaHeartbeatHostBootLeaderLockSync() {
+  if (!DELTA_HOST_BOOT_SINGLE_OWNER) return;
+  try { __deltaWriteHostBootLeaderLockSync({ phase: 'running' }); } catch {}
 }
 
-function __deltaWaitHostBootLeaderDoneSync({ timeoutMs = null } = {}) {
+function __deltaHostBootWaitLimitMs(timeoutMs = null) {
   const defaultMs = Math.max(
     30_000,
     Math.min(Number(DELTA_HOST_BOOT_LEADER_TTL_MS || 0) || (10 * 60 * 1000), 8 * 60 * 1000)
   );
-  const limit = Math.max(1_000, Number(timeoutMs == null ? defaultMs : timeoutMs) || defaultMs);
+  return Math.max(1_000, Number(timeoutMs == null ? defaultMs : timeoutMs) || defaultMs);
+}
+
+let __deltaHostBootReady = false;
+let __deltaHostBootReadyResolve = null;
+const __deltaHostBootReadyPromise = new Promise((resolve) => {
+  __deltaHostBootReadyResolve = resolve;
+});
+let __deltaHostBootLeader = false;
+let __deltaLegacyAssimilationSummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  scannedProfiles: 0,
+  importedThreads: 0,
+  updatedExisting: 0,
+  skippedExisting: 0,
+  parseErrors: 0,
+  filesMissing: 0,
+  error: ''
+};
+let __deltaBootReplaySummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  scanned: 0,
+  enqueued: 0,
+  enqueue_failed: 0,
+  skipped_old: 0,
+  skipped_status: 0,
+  skipped_empty: 0,
+  skipped_invalid: 0,
+  hit_max: false,
+  error: ''
+};
+let __deltaForensicBootReplaySummary = {
+  ok: true,
+  skipped: true,
+  reason: 'not_host_boot_leader',
+  queue_lag_bytes: 0,
+  candidates: 0,
+  enqueued: 0,
+  enqueue_failed: 0,
+  files_scanned: 0,
+  lines_scanned: 0,
+  parsed_records: 0,
+  matched_records: 0,
+  missing_keys: 0,
+  skipped_old: 0,
+  skipped_op: 0,
+  read_errors: 0,
+  hit_max: false,
+  error: ''
+};
+
+function __deltaIsHostBootReady() {
+  return __deltaHostBootReady === true;
+}
+
+function __deltaOpenHostBootGate() {
+  if (__deltaHostBootReady) return;
+  __deltaHostBootReady = true;
+  try {
+    if (typeof __deltaHostBootReadyResolve === 'function') __deltaHostBootReadyResolve();
+  } catch {}
+}
+
+async function __deltaAwaitHostBootReady(timeoutMs = null) {
+  if (__deltaHostBootReady) return { ok: true, ready: true };
+  const p = __deltaHostBootReadyPromise;
+  if (!p) return { ok: false, ready: false, error: 'host_boot_not_started' };
+  const limit = __deltaHostBootWaitLimitMs(timeoutMs) + 120_000;
+  let to = null;
+  const raced = await Promise.race([
+    Promise.resolve(p).then(() => ({ ok: true, ready: true })),
+    new Promise((resolve) => {
+      to = setTimeout(() => resolve({ ok: false, ready: false, error: 'host_boot_timeout' }), limit);
+      try { if (to && typeof to.unref === 'function') to.unref(); } catch {}
+    })
+  ]);
+  try { if (to) clearTimeout(to); } catch {}
+  if (__deltaHostBootReady) return { ok: true, ready: true };
+  return raced;
+}
+
+async function __deltaWaitHostBootLeaderDoneAsync({ timeoutMs = null } = {}) {
+  const limit = __deltaHostBootWaitLimitMs(timeoutMs);
   const started = Date.now();
   while ((Date.now() - started) < limit) {
     try {
@@ -1350,9 +1421,161 @@ function __deltaWaitHostBootLeaderDoneSync({ timeoutMs = null } = {}) {
         return { ok: false, reason: 'leader_dead_or_stale' };
       }
     } catch {}
-    __deltaSleepSyncMs(120);
+    await sleep(120);
   }
   return { ok: false, reason: 'timeout' };
+}
+
+function __deltaApplyHostBootWork(work) {
+  if (!work || typeof work !== 'object') return;
+  if (work.assimilation) __deltaLegacyAssimilationSummary = work.assimilation;
+  if (work.bootReplay) __deltaBootReplaySummary = work.bootReplay;
+  if (work.forensicReplay) __deltaForensicBootReplaySummary = work.forensicReplay;
+}
+
+async function __deltaRunHostBootWork() {
+  const assimilation = await __deltaAssimilateLegacyRespondedHistorySync();
+  try { __deltaHeartbeatHostBootLeaderLockSync(); } catch {}
+  const bootReplay = __deltaReplayRecentThreadsToCtOnBoot();
+  try { __deltaHeartbeatHostBootLeaderLockSync(); } catch {}
+  const forensicReplay = __deltaReplayForensicLeadsToCtOnBoot({
+    bootReplaySummary: bootReplay
+  });
+  return { assimilation, bootReplay, forensicReplay };
+}
+
+function __deltaLogHostBootSummaries() {
+  try {
+    logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
+      ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
+      skipped: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skipped),
+      host_boot_leader: !!__deltaHostBootLeader,
+      scannedProfiles: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.scannedProfiles || 0) || 0,
+      importedThreads: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.importedThreads || 0) || 0,
+      updatedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.updatedExisting || 0) || 0,
+      skippedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skippedExisting || 0) || 0,
+      parseErrors: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.parseErrors || 0) || 0,
+      filesMissing: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.filesMissing || 0) || 0,
+      reason: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.reason || ''),
+      error: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.error || '')
+    });
+  } catch {}
+  try {
+    logger.info('[DELTA][BOOT_REPLAY] replay de threads recentes para CT', {
+      ok: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.ok),
+      scanned: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.scanned || 0) || 0,
+      enqueued: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueued || 0) || 0,
+      enqueue_failed: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueue_failed || 0) || 0,
+      skipped_old: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_old || 0) || 0,
+      skipped_status: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_status || 0) || 0,
+      skipped_empty: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_empty || 0) || 0,
+      skipped_invalid: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_invalid || 0) || 0,
+      hit_max: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.hit_max),
+      lookback_hours: DELTA_BOOT_REPLAY_LOOKBACK_HOURS,
+      max_threads: DELTA_BOOT_REPLAY_MAX_THREADS,
+      error: String(__deltaBootReplaySummary && __deltaBootReplaySummary.error || '')
+    });
+  } catch {}
+  try {
+    logger.info('[DELTA][BOOT_FORENSIC_REPLAY] replay forense de leads para CT', {
+      ok: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.ok),
+      skipped: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped),
+      reason: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.reason || ''),
+      queue_lag_bytes: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.queue_lag_bytes || 0) || 0,
+      candidates: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.candidates || 0) || 0,
+      enqueued: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueued || 0) || 0,
+      enqueue_failed: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueue_failed || 0) || 0,
+      files_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.files_scanned || 0) || 0,
+      lines_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.lines_scanned || 0) || 0,
+      parsed_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.parsed_records || 0) || 0,
+      matched_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.matched_records || 0) || 0,
+      missing_keys: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.missing_keys || 0) || 0,
+      skipped_old: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_old || 0) || 0,
+      skipped_op: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_op || 0) || 0,
+      read_errors: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.read_errors || 0) || 0,
+      hit_max: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.hit_max),
+      lookback_hours: DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS,
+      max_threads: DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS,
+      require_empty_queue: !!DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE,
+      error: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.error || '')
+    });
+  } catch {}
+}
+
+async function __deltaRunHostBootCoordinatorAsync() {
+  try {
+    __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
+    await sleep(0);
+    if (__deltaHostBootLeader) {
+      try {
+        const work = await __deltaRunHostBootWork();
+        __deltaApplyHostBootWork(work);
+      } catch (e) {
+        try {
+          logger.warn('[DELTA][ASSIMILACAO_BOOT] leader work error', {
+            pid: process.pid,
+            error: String((e && e.message) || e || '').slice(0, 220)
+          });
+        } catch {}
+      } finally {
+        __deltaMarkHostBootLeaderDoneSync();
+      }
+    } else {
+      try {
+        logger.info('[DELTA][ASSIMILACAO_BOOT] skip follower (host boot leader unico)', {
+          pid: process.pid,
+          shard: String(process.env.WORKER_SHARD_INDEX || ''),
+          lock: path.basename(DELTA_HOST_BOOT_LEADER_LOCK)
+        });
+      } catch {}
+      const wait = await __deltaWaitHostBootLeaderDoneAsync();
+      if (!wait.ok && String(wait.reason || '') === 'leader_dead_or_stale') {
+        __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
+        if (__deltaHostBootLeader) {
+          try {
+            const work = await __deltaRunHostBootWork();
+            __deltaApplyHostBootWork(work);
+          } catch (e) {
+            try {
+              logger.warn('[DELTA][ASSIMILACAO_BOOT] failover leader work error', {
+                pid: process.pid,
+                error: String((e && e.message) || e || '').slice(0, 220)
+              });
+            } catch {}
+          } finally {
+            __deltaMarkHostBootLeaderDoneSync();
+          }
+        }
+      }
+      if (!wait.ok) {
+        try {
+          logger.warn('[DELTA][ASSIMILACAO_BOOT] follower sync incomplete', {
+            pid: process.pid,
+            shard: String(process.env.WORKER_SHARD_INDEX || ''),
+            reason: String(wait.reason || '')
+          });
+        } catch {}
+      }
+    }
+  } catch (e) {
+    try {
+      logger.warn('[DELTA][ASSIMILACAO_BOOT] coordinator error', {
+        pid: process.pid,
+        error: String((e && e.message) || e || '').slice(0, 220)
+      });
+    } catch {}
+  } finally {
+    try { __deltaLoadThreadStateSync(); } catch {}
+    try { __deltaLogHostBootSummaries(); } catch {}
+    __deltaOpenHostBootGate();
+    try {
+      if (typeof isDeltaMotorEnabledRuntime === 'function' && isDeltaMotorEnabledRuntime()) {
+        __deltaStartIngestLoopOnce();
+      }
+    } catch {}
+    try { nurseTick().catch(() => {}); } catch {}
+    try { __deltaBootstrapNewLeadsTimerPumps().catch(() => {}); } catch {}
+  }
 }
 
 function writeStockProvisionEndMarker({ owner = null, kind = null, untilMs = 0 } = {}) {
@@ -1621,45 +1844,16 @@ async function lockProfileAction(nome, fn) {
     if (st && st.nome === nome) return await fn();
   } catch {}
 
-  const hadPrev = _profileOpLocks.has(nome);
   const prev = _profileOpLocks.get(nome) || Promise.resolve();
   let resolveNext;
   const next = new Promise(res => resolveNext = res);
   _profileOpLocks.set(nome, prev.then(() => next));
-  // #region agent log
-  __agentLog(
-    'H6',
-    'worker.js:lockProfileAction',
-    'profile_lock_enqueued',
-    {
-      nome: String(nome || ''),
-      lockMapSize: _profileOpLocks.size,
-      hadPrev
-    },
-    `profileLock.enqueue.${String(nome || '')}`,
-    15000
-  );
-  // #endregion
   try {
     await prev;
     return await _profileLockAls.run({ nome }, fn);
   } finally {
     resolveNext();
     if (_profileOpLocks.get(nome) === next) _profileOpLocks.delete(nome);
-    // #region agent log
-    __agentLog(
-      'H6',
-      'worker.js:lockProfileAction',
-      'profile_lock_release',
-      {
-        nome: String(nome || ''),
-        lockMapSize: _profileOpLocks.size,
-        lockStillPresent: _profileOpLocks.has(nome)
-      },
-      `profileLock.release.${String(nome || '')}`,
-      15000
-    );
-    // #endregion
   }
 }
 
@@ -6642,7 +6836,7 @@ const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '400', 10);
 const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '200', 10);
 const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '2000', 10);
 const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '900', 10);
-const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10);
+const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '5000', 10);
 
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
@@ -7215,109 +7409,17 @@ const controllers = new Map();
 
 const robeMeta = {};
 
-const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
-const __agentDebugState = { lastByKey: Object.create(null) };
-// Fase 5a: debug agent OFF por default (evita fetch/heartbeat em frota). Rollback: AGENT_DEBUG=1
-const AGENT_DEBUG = String(process.env.AGENT_DEBUG || '0').trim() === '1';
-function __agentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
-  if (!AGENT_DEBUG) return;
-  try {
-    const now = Date.now();
-    const k = String(key || `${hypothesisId}:${location}:${message}`);
-    const last = Number(__agentDebugState.lastByKey[k] || 0) || 0;
-    if (minIntervalMs > 0 && (now - last) < minIntervalMs) return;
-    __agentDebugState.lastByKey[k] = now;
-    // #region agent log
-    fetch(__AGENT_DEBUG_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'stage2-pre-fix', hypothesisId, location, message, data, timestamp: now }) }).catch(() => {});
-    // #endregion
-    try {
-      if (typeof provisionAudit !== 'undefined' && provisionAudit && typeof provisionAudit.append === 'function') {
-        provisionAudit.append({
-          ts: now,
-          event: 'dbg_agent_runtime',
-          runId: 'stage2-pre-fix',
-          hypothesisId: String(hypothesisId || ''),
-          location: String(location || ''),
-          message: String(message || ''),
-          data: data && typeof data === 'object' ? data : {}
-        });
-      }
-    } catch {}
-  } catch {}
-}
-
 function memorySweep() {
   try {
     const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
-    const _dbgBefore = {
-      healthStateSize: healthState.size,
-      profileFailuresSize: profileFailures.size,
-      robeMetaKeys: Object.keys(robeMeta).length,
-      activationLocksSize: activationLocks.size,
-      prunersSize: _pruners.size,
-      profileOpLocksSize: _profileOpLocks.size,
-      openingKeys: Object.keys(opening || {}).length,
-      controllersSize: controllers.size,
-      nomesValidosSize: nomesValidos.size
-    };
     for (const [n] of healthState) if (!nomesValidos.has(n) && !controllers.has(n)) healthState.delete(n);
     for (const [n] of profileFailures) if (!nomesValidos.has(n) && !controllers.has(n)) profileFailures.delete(n);
     for (const n of Object.keys(robeMeta)) {
       if (!nomesValidos.has(n) && !controllers.has(n)) delete robeMeta[n];
     }
-    const _dbgAfter = {
-      healthStateSize: healthState.size,
-      profileFailuresSize: profileFailures.size,
-      robeMetaKeys: Object.keys(robeMeta).length,
-      activationLocksSize: activationLocks.size,
-      prunersSize: _pruners.size,
-      profileOpLocksSize: _profileOpLocks.size,
-      openingKeys: Object.keys(opening || {}).length,
-      controllersSize: controllers.size
-    };
-    // #region agent log
-    __agentLog('H1', 'worker.js:memorySweep', 'sweep_sizes', { before: _dbgBefore, after: _dbgAfter }, 'memorySweep.sizes', 60000);
-    // #endregion
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
-if (AGENT_DEBUG) {
-  setInterval(() => {
-    try {
-      __agentLog(
-        'H1',
-        'worker.js:runtimeHeartbeat',
-        'runtime_structure_sizes',
-        {
-          controllersSize: controllers.size,
-          prunersSize: _pruners.size,
-          activationLocksSize: activationLocks.size,
-          profileOpLocksSize: _profileOpLocks.size,
-          openingKeys: Object.keys(opening || {}).length,
-          robeMetaKeys: Object.keys(robeMeta || {}).length,
-          healthStateSize: healthState.size,
-          profileFailuresSize: profileFailures.size
-        },
-        'runtime.heartbeat.structures',
-        55000
-      );
-    } catch {}
-  }, 60 * 1000);
-  // #region agent log
-  __agentLog(
-    'H5',
-    'worker.js:boot',
-    'debug_instrumentation_loaded',
-    {
-      pid: process.pid,
-      platform: process.platform,
-      hostId: (typeof readHostIdSync === 'function' ? (readHostIdSync() || null) : null)
-    },
-    `debug.boot.${String(process.pid)}`,
-    0
-  );
-  // #endregion
-}
 // Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
 setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
 
@@ -7628,6 +7730,19 @@ function isFrozenNow(nome) {
 const activationLocks = new Map();
 
 async function activateOnce(nome, source = '', operator = '') {
+  const boot = await __deltaAwaitHostBootReady();
+  if (!boot.ready) {
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'activate_skip_host_boot_not_ready',
+        nome: String(nome || ''),
+        source: String(source || ''),
+        reason: String(boot.error || 'host_boot_not_ready')
+      });
+    } catch {}
+    return { ok: false, error: 'host_boot_not_ready' };
+  }
   if (opening[nome]) return { ok: false, error: 'already_opening' };
   if (robeMeta[nome]?.banCloseInFlight === true) {
     try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_ban_close_inflight', nome: String(nome||''), source: String(source||'') }); } catch {}
@@ -9745,20 +9860,13 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
     }
   }, 2 * 60 * 1000);
   _pruners.set(nome, interval);
-  // #region agent log
-  __agentLog('H2', 'worker.js:maybeStartPruneLoop', 'pruner_started', { nome: String(nome || ''), prunersSize: _pruners.size, controllersSize: controllers.size }, `pruner.start.${String(nome || '')}`, 20000);
-  // #endregion
 }
 
 function stopPruneLoop(nome) {
-  const had = _pruners.has(nome);
   if (_pruners.has(nome)) {
     clearInterval(_pruners.get(nome));
     _pruners.delete(nome);
   }
-  // #region agent log
-  __agentLog('H2', 'worker.js:stopPruneLoop', 'pruner_stopped', { nome: String(nome || ''), had, prunersSize: _pruners.size, controllersSize: controllers.size }, `pruner.stop.${String(nome || '')}`, 20000);
-  // #endregion
 }
 
 function cleanupProfileTransientLocks(nome, source) {
@@ -9772,26 +9880,6 @@ function cleanupProfileTransientLocks(nome, source) {
     if (hadProfileLock) _profileOpLocks.delete(nome);
     if (hadActivationLock) activationLocks.delete(nome);
     if (hadOpening) delete opening[nome];
-    // #region agent log
-    __agentLog(
-      'H3',
-      'worker.js:cleanupProfileTransientLocks',
-      'cleanup_transient_locks',
-      {
-        nome: String(nome || ''),
-        source: String(source || ''),
-        hasControllerAfter: controllers.has(nome),
-        hadProfileLock,
-        hadActivationLock,
-        hadOpening,
-        profileOpLocksSize: _profileOpLocks.size,
-        activationLocksSize: activationLocks.size,
-        openingKeys: Object.keys(opening || {}).length
-      },
-      `cleanup.transient.${String(source || 'unknown')}.${String(nome || '')}`,
-      5000
-    );
-    // #endregion
   } catch {}
 }
 
@@ -10294,33 +10382,6 @@ async function ramCpuMonitorTick() {
         consecutiveFailures: Number(_cdpHeavyBudget.consecutiveFailures || 0)
       }
     };
-    if (_ramDiagLast && (_ramDiagLast.tickMs >= 12000 || Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0) > 0)) {
-      // #region agent log
-      __agentLog(
-        'H4',
-        'worker.js:ramCpuMonitorTick',
-        'ram_tick_diag',
-        {
-          tickMs: _ramDiagLast.tickMs,
-          controllers: _ramDiagLast.controllers,
-          refreshBudget: _ramDiagLast.refreshBudget,
-          forcedRefreshCount: _ramDiagLast.forcedRefreshCount,
-          forcedRefreshMsTotal: _ramDiagLast.forcedRefreshMsTotal,
-          heavyBudgetSkips: Number(_ramDiagLast.counters && _ramDiagLast.counters.heavyBudgetSkips || 0),
-          heavyTraceTimeouts: Number(_ramDiagLast.counters && _ramDiagLast.counters.heavyTraceTimeouts || 0),
-          staleHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0),
-          cacheHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.cacheHits || 0),
-          refreshes: Number(_ramDiagLast.counters && _ramDiagLast.counters.refreshes || 0),
-          refreshErrors: Number(_ramDiagLast.counters && _ramDiagLast.counters.refreshErrors || 0),
-          prunersSize: _pruners.size,
-          activationLocksSize: activationLocks.size,
-          profileOpLocksSize: _profileOpLocks.size
-        },
-        'ram.tick.diag',
-        30000
-      );
-      // #endregion
-    }
     await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
@@ -10336,13 +10397,6 @@ function extractUserDataDir(cmd) {
   if (!cmd) return null;
   const m = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i.exec(cmd);
   return m ? (m[1] || m[2] || m[3]) : null;
-}
-
-// Função para obter Private Working Set no Windows (evita duplicação de memória compartilhada)
-// 110% sem WMI/PowerShell — não coleta nada (pidusage e ps-list usam WMI internamente)
-async function getPidPrivateWSBytes(pids) {
-  // 110% sem WMI/PowerShell — não coleta nada
-  return {};
 }
 
 setTimeout(ramCpuMonitorTick, 5000);
@@ -11361,25 +11415,6 @@ try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado
 
 stopPruneLoop(nome);
 cleanupProfileTransientLocks(nome, 'disconnected');
-// #region agent log
-__agentLog(
-  'H3',
-  'worker.js:attachBrowserLifecycle.disconnected',
-  'cleanup_after_disconnected',
-  {
-    nome: String(nome || ''),
-    hasController: controllers.has(nome),
-    hasRobeMeta: !!robeMeta[nome],
-    hasActivationLock: activationLocks.has(nome),
-    hasPruner: _pruners.has(nome),
-    hasProfileOpLock: _profileOpLocks.has(nome),
-    hasOpening: !!(opening && opening[nome]),
-    rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
-  },
-  `cleanup.disconnected.${String(nome || '')}`,
-  15000
-);
-// #endregion
 
 try { registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
@@ -11456,6 +11491,8 @@ function automationAllowed(ctrl, { operator, ignoreTrabalhando } = {}) {
 }
 
 async function start_work({ nome, operator }) {
+  const boot = await __deltaAwaitHostBootReady();
+  if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
   return lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
@@ -11957,6 +11994,8 @@ const handlers = {
   },
 
   async activate({ nome, operator }) {
+    const boot = await __deltaAwaitHostBootReady();
+    if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] activate chamada', { nome });
       const r = await activateOnce(nome, 'message', operator);
@@ -12314,26 +12353,6 @@ const handlers = {
 
   stopPruneLoop(nome);
   cleanupProfileTransientLocks(nome, 'deactivate');
-  // #region agent log
-  __agentLog(
-    'H3',
-    'worker.js:deactivate.cleanup',
-    'cleanup_after_deactivate',
-    {
-      nome: String(nome || ''),
-      preserve: !!preserve,
-      hasController: controllers.has(nome),
-      hasRobeMeta: !!robeMeta[nome],
-      hasActivationLock: activationLocks.has(nome),
-      hasPruner: _pruners.has(nome),
-      hasProfileOpLock: _profileOpLocks.has(nome),
-      hasOpening: !!(opening && opening[nome]),
-      rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
-    },
-    `cleanup.deactivate.${String(nome || '')}`,
-    15000
-  );
-  // #endregion
   if (!preserve) {
     try {
       await fileStore.withDesiredFileLockUpdate((d) => {
@@ -12375,6 +12394,8 @@ const handlers = {
 },
 
   async configure({ nome, operator } = {}) {
+    const boot = await __deltaAwaitHostBootReady();
+    if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
@@ -13285,6 +13306,8 @@ const handlers = {
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
   async login_remediate({ nome, operator, options } = {}) {
+    const boot = await __deltaAwaitHostBootReady();
+    if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     return lockProfileAction(nome, async () => {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
@@ -14424,6 +14447,8 @@ const handlers = {
   // FUSÃO OPERACIONAL (FASE 2/3):
   // Recebe resposta do Maestro :8088 via IPC e executa pelas MÃOS (virtusDelta) com fila serial.
   async ['delta-reply-task']({ nome, thread_key, texto_resposta, client_message_id, thread_key_candidates }) {
+    const boot = await __deltaAwaitHostBootReady();
+    if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     return lockProfileAction(nome, async () => {
       const n = String(nome || '').trim();
       const tk = String(thread_key || '').trim();
@@ -14629,6 +14654,8 @@ const handlers = {
     attempts,
     link_attempts,
   }) {
+    const boot = await __deltaAwaitHostBootReady();
+    if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     return lockProfileAction(nome, async () => {
       const n = String(nome || '').trim();
       const tk = String(thread_key || '').trim();
@@ -16880,16 +16907,6 @@ try {
   __statusJournalAt = Date.now();
 } catch {}
 
-// LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
-try {
-  // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
-  // for (const ent of perfis) {
-  //   if (!(typeof ent.ramMB === 'number')) {
-  //     logger.warn('[STATUS-WRITE] ramMB é null/undefined', { nome: ent.nome, ramMB: ent.ramMB, hasRobeMeta: !!robeMeta[ent.nome] });
-  //   }
-  // }
-} catch {}
-
 const ok = writeJsonAtomic(statusPath, statusObj);
 if (!ok) { try { await issues.append('system','persist_failed', 'status_write'); } catch {} }
 } catch (e) {
@@ -17774,6 +17791,7 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
 }
 
 async function autoLoginRemediateTick() {
+  if (!__deltaIsHostBootReady()) return;
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
   // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
@@ -17996,7 +18014,7 @@ let _nurseTickRunning = false;
 let __nurseWakeSuppressDepth = 0;
 const NURSE_WAKE_POLL_MS = Math.max(
   250,
-  Math.min(2000, Number(process.env.NURSE_WAKE_POLL_MS || 750) || 750)
+  Math.min(10_000, Number(process.env.NURSE_WAKE_POLL_MS || 3000) || 3000)
 );
 const NURSE_WAKE_DEBOUNCE_MS = Math.max(
   250,
@@ -18057,6 +18075,7 @@ function __nurseConsumeWakeSignal() {
 }
 
 async function nurseWakePollTick() {
+  if (!__deltaIsHostBootReady()) return;
   if (__nurseWakePollRunning) return;
   __nurseWakePollRunning = true;
   let runNurse = false;
@@ -18535,6 +18554,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
 }
 
 async function nurseTick() {
+  if (!__deltaIsHostBootReady()) return;
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
   __nurseWakeSuppressDepth++;
@@ -20654,6 +20674,7 @@ function stockProvisionLockWatchTick() {
 }
 
 async function stockProvisionResumeTick() {
+  if (!__deltaIsHostBootReady()) return;
   try {
     if (provisionLock && provisionLock.isActive && provisionLock.isActive()) return;
   } catch {}
@@ -20786,18 +20807,29 @@ setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Fase 2a: poller leve do kick open-intent (multi-shard; não apaga kick no consume).
 setInterval(() => { nurseWakePollTick().catch(()=>{}); }, NURSE_WAKE_POLL_MS);
-setTimeout(() => { nurseWakePollTick().catch(()=>{}); }, Math.min(1200, NURSE_WAKE_POLL_MS + 200));
-// Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
-setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
-setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
-setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
-setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
+setTimeout(() => { nurseWakePollTick().catch(()=>{}); }, NURSE_WAKE_POLL_MS);
+// Watch do provision_lock e auto-resume pós stock_provision (P0 gaps).
+// Intervalos longos no steady-state; 1ª leitura pós-boot fica curta para pegar
+// transição que aconteceu durante restart. Pause/bloqueio de provision NÃO
+// passa por estes ticks — nurseTick / handlers leem o lock ao vivo.
+const STOCK_PROVISION_LOCK_WATCH_MS = Math.max(
+  5_000,
+  Math.min(120_000, Number(process.env.STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS || 60_000) || 60_000)
+);
+const STOCK_PROVISION_RESUME_MS = Math.max(
+  5_000,
+  Math.min(120_000, Number(process.env.STOCK_PROVISION_RESUME_INTERVAL_MS || 60_000) || 60_000)
+);
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, STOCK_PROVISION_LOCK_WATCH_MS);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, STOCK_PROVISION_RESUME_MS);
+setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, Math.min(5_000, STOCK_PROVISION_LOCK_WATCH_MS));
+setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, Math.min(8_000, STOCK_PROVISION_RESUME_MS));
 const ENSURE_WORKING_TICK_MS = Math.max(
   8_000,
   Math.min(60_000, Number(process.env.ENSURE_WORKING_TICK_MS || 12_000) || 12_000)
 );
-setInterval(() => { __ensureWorking.tick().catch(()=>{}); }, ENSURE_WORKING_TICK_MS);
-setTimeout(() => { __ensureWorking.tick().catch(()=>{}); }, Math.min(4000, ENSURE_WORKING_TICK_MS));
+setInterval(() => { if (!__deltaIsHostBootReady()) return; __ensureWorking.tick().catch(()=>{}); }, ENSURE_WORKING_TICK_MS);
+setTimeout(() => { if (!__deltaIsHostBootReady()) return; __ensureWorking.tick().catch(()=>{}); }, Math.min(4000, ENSURE_WORKING_TICK_MS));
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
@@ -21440,6 +21472,7 @@ function __deltaQueueActiveChatDebouncedDispatch({ nome, threadKey, payload } = 
   return !!queued;
 }
 async function __deltaBootstrapNewLeadsTimerPumps() {
+  if (!__deltaIsHostBootReady()) return;
   try {
     ensureDirSync(DELTA_NEW_LEADS_TIMER_QUEUE_DIR);
     const entries = fs.readdirSync(DELTA_NEW_LEADS_TIMER_QUEUE_DIR, { withFileTypes: true });
@@ -21478,6 +21511,7 @@ async function __deltaBootstrapNewLeadsTimerPumps() {
 setTimeout(() => { __deltaBootstrapNewLeadsTimerPumps().catch(() => {}); }, 8000).unref?.();
 setInterval(() => { __deltaBootstrapNewLeadsTimerPumps().catch(() => {}); }, 90_000).unref?.();
 async function __deltaRunNewLeadsTimerPump(nome) {
+  if (!__deltaIsHostBootReady()) return;
   const n = String(nome || '').trim();
   if (!n) return;
   if (__deltaNewLeadsTimerInFlight.has(n)) return; // 1 timer por vez POR CONTA
@@ -21597,6 +21631,14 @@ const __deltaAccountHistoryBootstrapByAccount = new Map(); // nome -> metadados 
 // Micro-buffer temporário (RAM fria): thread_key -> { items: [], seen: Set, timer, startedAt }
 const __deltaActiveUpsertBuffer = new Map();
 let __deltaThreadStatePersistTimer = null;
+let __deltaThreadStateDiskCache = {
+  exists: false,
+  mtimeMs: -1,
+  size: -1,
+  parsed: { updatedAt: 0, threads: [] }
+};
+const __deltaMetaIdLru = new Map();
+const DELTA_META_ID_LRU_MAX = 4000;
 const __deltaIngestAuthState = {
   lastBootstrapAt: 0,
   lastBootstrapError: '',
@@ -21770,10 +21812,28 @@ function __deltaExtractMetaTimestampMs(ev, fallbackNowMs) {
   }
 }
 
+function __deltaRememberMetaIdSeenOnDisk(id) {
+  const k = String(id || '').trim();
+  if (!k) return;
+  if (__deltaMetaIdLru.has(k)) __deltaMetaIdLru.delete(k);
+  __deltaMetaIdLru.set(k, 1);
+  while (__deltaMetaIdLru.size > DELTA_META_ID_LRU_MAX) {
+    const oldest = __deltaMetaIdLru.keys().next().value;
+    if (oldest == null) break;
+    __deltaMetaIdLru.delete(oldest);
+  }
+}
+function __deltaRememberQueueRecordMetaIds(record) {
+  if (!record || typeof record !== 'object') return;
+  __deltaRememberMetaIdSeenOnDisk(record.dedup_meta_id);
+  __deltaRememberMetaIdSeenOnDisk(record.meta_message_id);
+  __deltaRememberMetaIdSeenOnDisk(record.meta_offline_threading_id);
+}
 function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
   try {
     const id = String(dedupId || '').trim();
     if (!id) return false;
+    if (__deltaMetaIdLru.has(id)) return true;
     if (!fs.existsSync(DELTA_QUEUE_PATH)) return false;
     const st = fs.statSync(DELTA_QUEUE_PATH);
     const size = Number(st && st.size || 0) || 0;
@@ -21792,10 +21852,13 @@ function __deltaIsMetaIdAlreadyOnDisk(dedupId) {
     const hay = buf.toString('utf8');
     const q = JSON.stringify(id); // inclui aspas e escapes
     // Procurar por campos explicitamente gravados no JSONL (evita falsos positivos).
-    if (hay.includes(`\"meta_message_id\":${q}`)) return true;
-    if (hay.includes(`\"meta_offline_threading_id\":${q}`)) return true;
-    if (hay.includes(`\"dedup_meta_id\":${q}`)) return true;
-    return false;
+    const hit = (
+      hay.includes(`\"meta_message_id\":${q}`) ||
+      hay.includes(`\"meta_offline_threading_id\":${q}`) ||
+      hay.includes(`\"dedup_meta_id\":${q}`)
+    );
+    if (hit) __deltaRememberMetaIdSeenOnDisk(id);
+    return hit;
   } catch {
     return false;
   }
@@ -21815,13 +21878,75 @@ function __deltaIsKnownProcessedStatus(status) {
 }
 function __deltaReadThreadStateFileSync() {
   try {
-    if (!fs.existsSync(DELTA_THREAD_STATE_PATH)) return { updatedAt: 0, threads: [] };
+    if (!fs.existsSync(DELTA_THREAD_STATE_PATH)) {
+      __deltaThreadStateDiskCache = {
+        exists: false,
+        mtimeMs: -1,
+        size: -1,
+        parsed: { updatedAt: 0, threads: [] }
+      };
+      return __deltaThreadStateDiskCache.parsed;
+    }
+    const st = fs.statSync(DELTA_THREAD_STATE_PATH);
+    const mtimeMs = Number(st && st.mtimeMs || 0) || 0;
+    const size = Number(st && st.size || 0) || 0;
+    if (
+      __deltaThreadStateDiskCache.exists &&
+      __deltaThreadStateDiskCache.mtimeMs === mtimeMs &&
+      __deltaThreadStateDiskCache.size === size
+    ) {
+      return __deltaThreadStateDiskCache.parsed;
+    }
     const raw = String(fs.readFileSync(DELTA_THREAD_STATE_PATH, 'utf8') || '').trim();
     const parsed = __deltaSafeJsonParse(raw) || {};
     const arr = Array.isArray(parsed.threads) ? parsed.threads : [];
-    return { updatedAt: Number(parsed.updatedAt || 0) || 0, threads: arr };
+    const next = { updatedAt: Number(parsed.updatedAt || 0) || 0, threads: arr };
+    __deltaThreadStateDiskCache = {
+      exists: true,
+      mtimeMs,
+      size,
+      parsed: next
+    };
+    return next;
   } catch {
     return { updatedAt: 0, threads: [] };
+  }
+}
+function __deltaThreadStateWorkingCopy() {
+  const parsed = __deltaReadThreadStateFileSync();
+  return {
+    updatedAt: Number(parsed && parsed.updatedAt || 0) || 0,
+    threads: Array.isArray(parsed && parsed.threads) ? parsed.threads.slice() : []
+  };
+}
+function __deltaWriteThreadStateFileSync(threads, updatedAt) {
+  const now = Number(updatedAt || Date.now()) || Date.now();
+  const payload = {
+    updatedAt: now,
+    threads: Array.isArray(threads) ? threads : []
+  };
+  try {
+    const body = JSON.stringify(payload);
+    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
+    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
+    fs.writeFileSync(tmp, body, 'utf8');
+    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    let mtimeMs = now;
+    let size = Buffer.byteLength(body, 'utf8');
+    try {
+      const st = fs.statSync(DELTA_THREAD_STATE_PATH);
+      mtimeMs = Number(st && st.mtimeMs || mtimeMs) || mtimeMs;
+      size = Number(st && st.size || size) || size;
+    } catch {}
+    __deltaThreadStateDiskCache = {
+      exists: true,
+      mtimeMs,
+      size,
+      parsed: payload
+    };
+    return true;
+  } catch {
+    return false;
   }
 }
 function __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey) {
@@ -22001,8 +22126,8 @@ function __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTs) {
     const ts = Number(metaTs || 0) || 0;
     if (!n || !tk || ts <= 0) return false;
 
-    const parsed = __deltaReadThreadStateFileSync();
-    const arr = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    const snap = __deltaThreadStateWorkingCopy();
+    const arr = snap.threads;
     let found = -1;
     for (let i = arr.length - 1; i >= 0; i--) {
       const row = arr[i];
@@ -22035,12 +22160,7 @@ function __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTs) {
       });
     }
 
-    const body = JSON.stringify({ updatedAt: now, threads: arr }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
-    return true;
+    return __deltaWriteThreadStateFileSync(arr, now);
   } catch {
     return false;
   }
@@ -22053,8 +22173,8 @@ function __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, { highW
     if (!n || !tk) return false;
 
     const ts = Number(highWatermark || 0) || 0;
-    const parsed = __deltaReadThreadStateFileSync();
-    const arr = Array.isArray(parsed && parsed.threads) ? parsed.threads : [];
+    const snap = __deltaThreadStateWorkingCopy();
+    const arr = snap.threads;
     let found = -1;
     for (let i = arr.length - 1; i >= 0; i--) {
       const row = arr[i];
@@ -22099,12 +22219,7 @@ function __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, { highW
       });
     }
 
-    const body = JSON.stringify({ updatedAt: now, threads: arr }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
-    return true;
+    return __deltaWriteThreadStateFileSync(arr, now);
   } catch {
     return false;
   }
@@ -22207,12 +22322,7 @@ function __deltaMarkThreadActiveOnDiskSync(nome, threadKey, opts = {}) {
       messages: [],
     });
     const rows = Array.from(rowsByKey.values());
-    const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
-    return true;
+    return __deltaWriteThreadStateFileSync(rows, now);
   } catch {
     return false;
   }
@@ -22249,12 +22359,7 @@ function __deltaDemoteActiveWithoutHandsOnDiskSync(nome, threadKey) {
       handsFailures: Number(base.handsFailures || 0) || 0,
     });
     const rows = Array.from(rowsByKey.values());
-    const body = JSON.stringify({ updatedAt: now, threads: rows }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
-    return true;
+    return __deltaWriteThreadStateFileSync(rows, now);
   } catch {
     return false;
   }
@@ -22338,11 +22443,7 @@ function __deltaPersistThreadStateSync() {
       rowsByKey.set(__deltaThreadStateKey(one.nome, one.thread_key), one);
     }
     const rows = Array.from(rowsByKey.values());
-    const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
-    const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-    try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+    __deltaWriteThreadStateFileSync(rows, Date.now());
   } catch {}
 }
 function __deltaSchedulePersistThreadState() {
@@ -22406,7 +22507,7 @@ function __deltaLoadThreadStateSync() {
     }
   } catch {}
 }
-function __deltaAssimilateLegacyRespondedHistorySync() {
+async function __deltaAssimilateLegacyRespondedHistorySync() {
   const baseDir = path.join(__dirname, '..', 'dados', 'perfis');
   const out = {
     ok: true,
@@ -22443,7 +22544,9 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
       if (!rn || !rt) continue;
       rowsByKey.set(__deltaThreadStateKey(rn, rt), row);
     }
-    for (const nome of profileDirs) {
+    try { __deltaHeartbeatHostBootLeaderLockSync(); } catch {}
+    for (let i = 0; i < profileDirs.length; i++) {
+      const nome = profileDirs[i];
       out.scannedProfiles += 1;
       const fp = path.join(baseDir, nome, 'chats_respondidos.json');
       if (!fs.existsSync(fp)) {
@@ -22514,14 +22617,14 @@ function __deltaAssimilateLegacyRespondedHistorySync() {
         });
         out.importedThreads += 1;
       }
+      if ((i % 8) === 7) {
+        try { __deltaHeartbeatHostBootLeaderLockSync(); } catch {}
+        await sleep(0);
+      }
     }
     if (out.importedThreads > 0 || out.updatedExisting > 0) {
       const rows = Array.from(rowsByKey.values());
-      const body = JSON.stringify({ updatedAt: Date.now(), threads: rows }, null, 2);
-      const tmp = `${DELTA_THREAD_STATE_PATH}.tmp`;
-      try { fs.mkdirSync(path.dirname(DELTA_THREAD_STATE_PATH), { recursive: true }); } catch {}
-      fs.writeFileSync(tmp, body, 'utf8');
-      fs.renameSync(tmp, DELTA_THREAD_STATE_PATH);
+      __deltaWriteThreadStateFileSync(rows, Date.now());
     }
     return out;
   } catch (e) {
@@ -23997,175 +24100,24 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
   try { __deltaThreadStateMap.delete(__deltaThreadStateKey(n, tk)); } catch {}
 }
 __deltaLoadThreadStateSync();
-const __deltaRunHostBootWorkSync = () => {
-  const assimilation = __deltaAssimilateLegacyRespondedHistorySync();
-  const bootReplay = __deltaReplayRecentThreadsToCtOnBoot();
-  const forensicReplay = __deltaReplayForensicLeadsToCtOnBoot({
-    bootReplaySummary: bootReplay
-  });
-  return { assimilation, bootReplay, forensicReplay };
-};
-let __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
-let __deltaLegacyAssimilationSummary = {
-  ok: true,
-  skipped: true,
-  reason: 'not_host_boot_leader',
-  scannedProfiles: 0,
-  importedThreads: 0,
-  updatedExisting: 0,
-  skippedExisting: 0,
-  parseErrors: 0,
-  filesMissing: 0,
-  error: ''
-};
-let __deltaBootReplaySummary = {
-  ok: true,
-  skipped: true,
-  reason: 'not_host_boot_leader',
-  scanned: 0,
-  enqueued: 0,
-  enqueue_failed: 0,
-  skipped_old: 0,
-  skipped_status: 0,
-  skipped_empty: 0,
-  skipped_invalid: 0,
-  hit_max: false,
-  error: ''
-};
-let __deltaForensicBootReplaySummary = {
-  ok: true,
-  skipped: true,
-  reason: 'not_host_boot_leader',
-  queue_lag_bytes: 0,
-  candidates: 0,
-  enqueued: 0,
-  enqueue_failed: 0,
-  files_scanned: 0,
-  lines_scanned: 0,
-  parsed_records: 0,
-  matched_records: 0,
-  missing_keys: 0,
-  skipped_old: 0,
-  skipped_op: 0,
-  read_errors: 0,
-  hit_max: false,
-  error: ''
-};
-if (__deltaHostBootLeader) {
+// Crachá wx já existe; daqui o require NÃO congela. Follower espera com Event Loop
+// vivo. Portão do ouvido/ingest/nurse só abre quando o caderno estiver pronto
+// (phase=done, failover por PID morto, ou o mesmo timeout de 8 min de antes).
+__deltaRunHostBootCoordinatorAsync().catch((e) => {
   try {
-    const work = __deltaRunHostBootWorkSync();
-    __deltaLegacyAssimilationSummary = work.assimilation;
-    __deltaBootReplaySummary = work.bootReplay;
-    __deltaForensicBootReplaySummary = work.forensicReplay;
-  } catch (e) {
-    try {
-      logger.warn('[DELTA][ASSIMILACAO_BOOT] leader work error', {
-        pid: process.pid,
-        error: String((e && e.message) || e || '').slice(0, 220)
-      });
-    } catch {}
-  } finally {
-    // Sempre libera followers (mesmo com erro) — evita lock eterno em phase=running.
-    __deltaMarkHostBootLeaderDoneSync();
-  }
-  try { __deltaLoadThreadStateSync(); } catch {}
-} else {
-  try {
-    logger.info('[DELTA][ASSIMILACAO_BOOT] skip follower (host boot leader unico)', {
+    logger.warn('[DELTA][ASSIMILACAO_BOOT] coordinator launch error', {
       pid: process.pid,
-      shard: String(process.env.WORKER_SHARD_INDEX || ''),
-      lock: path.basename(DELTA_HOST_BOOT_LEADER_LOCK)
+      error: String((e && e.message) || e || '').slice(0, 220)
     });
   } catch {}
-  const wait = __deltaWaitHostBootLeaderDoneSync();
-  if (!wait.ok && String(wait.reason || '') === 'leader_dead_or_stale') {
-    // Failover: líder morreu no meio — este follower tenta virar líder e concluir.
-    __deltaHostBootLeader = __deltaTryBecomeHostBootLeaderSync();
-    if (__deltaHostBootLeader) {
-      try {
-        const work = __deltaRunHostBootWorkSync();
-        __deltaLegacyAssimilationSummary = work.assimilation;
-        __deltaBootReplaySummary = work.bootReplay;
-        __deltaForensicBootReplaySummary = work.forensicReplay;
-      } catch (e) {
-        try {
-          logger.warn('[DELTA][ASSIMILACAO_BOOT] failover leader work error', {
-            pid: process.pid,
-            error: String((e && e.message) || e || '').slice(0, 220)
-          });
-        } catch {}
-      } finally {
-        __deltaMarkHostBootLeaderDoneSync();
-      }
-    }
-  }
-  // Sempre recarrega estado soberano do disco após o líder terminar (ou timeout).
   try { __deltaLoadThreadStateSync(); } catch {}
-  if (!wait.ok) {
-    try {
-      logger.warn('[DELTA][ASSIMILACAO_BOOT] follower sync incomplete', {
-        pid: process.pid,
-        shard: String(process.env.WORKER_SHARD_INDEX || ''),
-        reason: String(wait.reason || '')
-      });
-    } catch {}
-  }
-}
-try {
-  logger.info('[DELTA][ASSIMILACAO_BOOT] legado->delta finalizado', {
-    ok: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.ok),
-    skipped: !!(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skipped),
-    host_boot_leader: !!__deltaHostBootLeader,
-    scannedProfiles: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.scannedProfiles || 0) || 0,
-    importedThreads: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.importedThreads || 0) || 0,
-    updatedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.updatedExisting || 0) || 0,
-    skippedExisting: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.skippedExisting || 0) || 0,
-    parseErrors: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.parseErrors || 0) || 0,
-    filesMissing: Number(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.filesMissing || 0) || 0,
-    reason: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.reason || ''),
-    error: String(__deltaLegacyAssimilationSummary && __deltaLegacyAssimilationSummary.error || '')
-  });
-} catch {}
-try {
-  logger.info('[DELTA][BOOT_REPLAY] replay de threads recentes para CT', {
-    ok: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.ok),
-    scanned: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.scanned || 0) || 0,
-    enqueued: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueued || 0) || 0,
-    enqueue_failed: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.enqueue_failed || 0) || 0,
-    skipped_old: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_old || 0) || 0,
-    skipped_status: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_status || 0) || 0,
-    skipped_empty: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_empty || 0) || 0,
-    skipped_invalid: Number(__deltaBootReplaySummary && __deltaBootReplaySummary.skipped_invalid || 0) || 0,
-    hit_max: !!(__deltaBootReplaySummary && __deltaBootReplaySummary.hit_max),
-    lookback_hours: DELTA_BOOT_REPLAY_LOOKBACK_HOURS,
-    max_threads: DELTA_BOOT_REPLAY_MAX_THREADS,
-    error: String(__deltaBootReplaySummary && __deltaBootReplaySummary.error || '')
-  });
-} catch {}
-try {
-  logger.info('[DELTA][BOOT_FORENSIC_REPLAY] replay forense de leads para CT', {
-    ok: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.ok),
-    skipped: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped),
-    reason: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.reason || ''),
-    queue_lag_bytes: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.queue_lag_bytes || 0) || 0,
-    candidates: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.candidates || 0) || 0,
-    enqueued: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueued || 0) || 0,
-    enqueue_failed: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.enqueue_failed || 0) || 0,
-    files_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.files_scanned || 0) || 0,
-    lines_scanned: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.lines_scanned || 0) || 0,
-    parsed_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.parsed_records || 0) || 0,
-    matched_records: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.matched_records || 0) || 0,
-    missing_keys: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.missing_keys || 0) || 0,
-    skipped_old: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_old || 0) || 0,
-    skipped_op: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.skipped_op || 0) || 0,
-    read_errors: Number(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.read_errors || 0) || 0,
-    hit_max: !!(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.hit_max),
-    lookback_hours: DELTA_FORENSIC_BOOT_REPLAY_LOOKBACK_HOURS,
-    max_threads: DELTA_FORENSIC_BOOT_REPLAY_MAX_THREADS,
-    require_empty_queue: !!DELTA_FORENSIC_BOOT_REPLAY_REQUIRE_EMPTY_QUEUE,
-    error: String(__deltaForensicBootReplaySummary && __deltaForensicBootReplaySummary.error || '')
-  });
-} catch {}
+  try { __deltaOpenHostBootGate(); } catch {}
+  try {
+    if (typeof isDeltaMotorEnabledRuntime === 'function' && isDeltaMotorEnabledRuntime()) {
+      __deltaStartIngestLoopOnce();
+    }
+  } catch {}
+});
 
 function __deltaSafeJsonParse(str) {
   try { return JSON.parse(String(str || '')); } catch { return null; }
@@ -24477,6 +24429,9 @@ function __deltaAppendPendingJsonlSync(payload) {
   } catch {}
   try {
     fs.appendFileSync(dispatchToCt ? DELTA_QUEUE_PATH : DELTA_FORENSIC_QUEUE_PATH, line + '\n', 'utf8');
+    if (dispatchToCt) {
+      try { __deltaRememberQueueRecordMetaIds(record); } catch {}
+    }
   } catch (e) {
     try {
       __deltaAppendIngestDeadLetterSync({
@@ -26036,6 +25991,7 @@ function __deltaConsumeIngestKickSync({ asLeader = false } = {}) {
 }
 
 function __deltaStartIngestLoopOnce() {
+  if (!__deltaIsHostBootReady()) return;
   if (__deltaStartIngestLoopOnce._started) return;
   __deltaStartIngestLoopOnce._started = true;
   try { __deltaEnsureHostIdSync(); } catch {}
@@ -27310,6 +27266,7 @@ async function __deltaDetachCdpSession(
 }
 
 async function __deltaAttachCdpEar(nome, page) {
+  if (!__deltaIsHostBootReady()) return;
   if (!page || !page.target || typeof page.target !== 'function') return;
   const earAttachTs = Date.now();
   try {

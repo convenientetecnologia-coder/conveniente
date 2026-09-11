@@ -5241,40 +5241,6 @@ async function invocarHumano(browser, nome, opts = {}) {
 }
 
 /**
- * Observadores de página para sinais de vida (health monitor).
- * Para ser chamado no worker, via wirePageObservers!
- * (Só inclui; worker faz uso.)
- */
-async function attachHealthProbes(page, nome, onPing) {
-  try {
-    await page.exposeFunction('__healthReport', (payload) => {
-      try { onPing && onPing({ nome, ts: Date.now(), ...payload }); } catch {}
-    });
-  } catch {}
-  try {
-    await page.evaluateOnNewDocument(() => {
-      (function(){
-        const safeCall = (ev) => { try { window.__healthReport && window.__healthReport(ev); } catch {} };
-        // Timer
-        setInterval(() => safeCall({ type:'timer', href: location.href, vis: document.visibilityState }), 10000);
-        // DOM observer
-        try {
-          const obs = new MutationObserver(() => { safeCall({ type:'dom', href: location.href }); });
-          obs.observe(document.documentElement, { childList:true, subtree:true, attributes:false });
-        } catch {}
-        // Input/visibilidade
-        ['visibilitychange','focus','blur','mousemove','keydown','wheel','touchstart'].forEach(evt => {
-          window.addEventListener(evt, () => safeCall({ type: 'evt:'+evt }), { passive:true, capture:false });
-        });
-        // Erros JS
-        window.addEventListener('error', (e) => safeCall({ type:'js_error', msg: (e && e.message) || '' }));
-        window.addEventListener('unhandledrejection', (e) => safeCall({ type:'js_unhandledrejection', msg: (e) && ((e.reason && e.reason.message) || e.reason) || '' }));
-      })();
-    });
-  } catch {}
-}
-
-/**
  * Limpeza HARD de caches e magreza de perfil preservando cookies/login.
  * - Localiza userDataDir a partir do perfis.json/manifest do perfil.
  * - Encerra quaisquer processos do Chrome que estejam usando esse userDataDir.
@@ -8046,7 +8012,6 @@ module.exports = {
       else if (typeof browser.forceCloseExtras === 'function') await browser.forceCloseExtras();
     } catch {}
   },
-  attachHealthProbes, // NOVO!
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
   detectLimitOverlayDeep,      // <----- NOVO
