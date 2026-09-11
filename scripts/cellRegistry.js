@@ -62,6 +62,47 @@ function pidAlive(pid) {
   }
 }
 
+// Dono do LISTEN em 127.0.0.1:port. TCP connect sozinho mente: outra célula
+// na mesma porta também aceita o socket.
+function tcpListenPid(port) {
+  const p = Math.floor(Number(port) || 0);
+  if (!(p > 0)) return 0;
+  try {
+    const { spawnSync } = require('child_process');
+    const r = spawnSync('netstat.exe', ['-ano', '-p', 'TCP'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10000
+    });
+    const text = String((r && r.stdout) || '');
+    for (const line of text.split(/\r?\n/)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 5) continue;
+      const state = String(parts[3] || '');
+      if (!/^(LISTENING|OUVINDO|ESCUTA)$/i.test(state)) continue;
+      const local = String(parts[1] || '');
+      const colon = local.lastIndexOf(':');
+      if (colon < 0) continue;
+      const localPort = Math.floor(Number(String(local.slice(colon + 1)).replace(/\]/g, '')) || 0);
+      if (localPort !== p) continue;
+      const pid = Math.floor(Number(parts[parts.length - 1]) || 0);
+      if (pid > 0) return pid;
+    }
+  } catch {}
+  return 0;
+}
+
+function collectListenPids(maxSlots) {
+  const n = Math.max(1, Math.min(16, Math.floor(Number(maxSlots) || 8)));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const port = portForIdx(i);
+    const pid = tcpListenPid(port);
+    if (pid > 0) out.push({ idx: i, port, pid });
+  }
+  return out;
+}
+
 function portForIdx(idx) {
   return BASE_PORT + Math.max(0, Math.floor(Number(idx) || 0));
 }
@@ -114,6 +155,8 @@ module.exports = {
   read,
   write,
   pidAlive,
+  tcpListenPid,
+  collectListenPids,
   portForIdx,
   listAlive,
   hasAliveCells,

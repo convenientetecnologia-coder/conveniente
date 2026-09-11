@@ -126,7 +126,16 @@ function forceKillPid(pid) {
 
 function stopAllCells({ reason = 'manual' } = {}) {
   const alive = cellRegistry.listAlive();
-  const pids = alive.map((c) => Number(c.pid)).filter((n) => n > 0);
+  const pids = [];
+  const seen = new Set();
+  function addPid(pid) {
+    const n = Math.floor(Number(pid) || 0);
+    if (!(n > 0) || seen.has(n)) return;
+    seen.add(n);
+    pids.push(n);
+  }
+  for (const c of alive) addPid(c && c.pid);
+  for (const row of cellRegistry.collectListenPids(8)) addPid(row && row.pid);
   try {
     cellForensic.append('cell_stop_all', { reason: String(reason).slice(0, 80), count: pids.length, pids });
   } catch {}
@@ -135,21 +144,29 @@ function stopAllCells({ reason = 'manual' } = {}) {
   }
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
-    if (cellRegistry.listAlive().length === 0) break;
+    if (cellRegistry.listAlive().length === 0 && cellRegistry.collectListenPids(8).length === 0) break;
     sleepMs(400);
   }
   const leftover = cellRegistry.listAlive();
   for (const c of leftover) forceKillPid(c.pid);
+  for (const row of cellRegistry.collectListenPids(8)) forceKillPid(row.pid);
+  const portWait = Date.now() + 8000;
+  while (Date.now() < portWait) {
+    if (cellRegistry.collectListenPids(8).length === 0) break;
+    sleepMs(200);
+  }
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);
+  const stillListen = cellRegistry.collectListenPids(8);
   const still = cellRegistry.listAlive();
   return {
-    ok: still.length === 0,
+    ok: still.length === 0 && stillListen.length === 0,
     reason: String(reason || ''),
     requested: pids.length,
     forced: leftover.length,
     alive: still.length,
+    listenLeft: stillListen.length,
     pids
   };
 }

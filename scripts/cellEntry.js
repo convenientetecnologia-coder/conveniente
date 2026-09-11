@@ -21,6 +21,9 @@ process.env.CELL_CMD_PORT = String(port);
 const server = net.createServer((socket) => {
   try { socket.setNoDelay(true); } catch {}
   bus.attachMaestroSocket(socket);
+  setImmediate(() => {
+    try { bus.sendToMaestro({ type: 'cell_hello', pid: process.pid, idx, port }); } catch {}
+  });
   try {
     forensic.append('cell_maestro_connected', {
       idx: idx + 1,
