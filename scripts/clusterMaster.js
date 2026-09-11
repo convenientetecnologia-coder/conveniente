@@ -596,13 +596,12 @@ async function createCluster() {
         await waitPortFree(child.port, 4000);
       }
     } else {
-      try { cellLifecycle.killListenUntilFree(12000); } catch {}
-      if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
-        forceKillCellPid(aliveRow.pid);
-      }
+      const owner = cellRegistry.tcpListenPid(child.port);
+      if (owner > 0) forceKillCellPid(owner);
+      if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) forceKillCellPid(aliveRow.pid);
       reapSlotChrome(idx, shardNames, 'cell_stamp_replace');
       try { cellRegistry.clearDead(); } catch {}
-      try { cellLifecycle.killListenUntilFree(8000); } catch {}
+      await waitMs(400);
     }
 
     child.adopted = false;
@@ -613,7 +612,9 @@ async function createCluster() {
     if (cellRegistry.tcpListenPid(child.port) > 0) {
       if (!replace && await adoptIfListening(child, idx, 'busy_before_spawn')) return child;
       if (replace) {
-        try { cellLifecycle.killListenUntilFree(8000); } catch {}
+        const busy = cellRegistry.tcpListenPid(child.port);
+        if (busy > 0) forceKillCellPid(busy);
+        await waitMs(400);
       } else {
         logger.warn('[CLUSTER] porta ocupada e adopt falhou — espera liberar e tenta nascer', {
           idx: idx + 1,

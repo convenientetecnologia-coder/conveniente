@@ -110,13 +110,6 @@ function Test-Port8088 {
         $c = @(Get-NetTCPConnection -LocalPort $PanelPort -State Listen -ErrorAction SilentlyContinue)
         if ($c.Count -gt 0) { return $true }
     } catch {}
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect('127.0.0.1', $PanelPort, $null, $null)
-        $ok = $ar.AsyncWaitHandle.WaitOne(250, $false)
-        if ($ok -and $tcp.Connected) { $tcp.Close(); return $true }
-        $tcp.Close()
-    } catch {}
     return $false
 }
 
@@ -897,16 +890,11 @@ function Do-Loop {
                 $downStreak = 0
             }
             else {
-                # So sobe apos 2 ciclos seguidos "down" (~6 min) - evita falso negativo
                 $downStreak++
-                if ($downStreak -ge 1) {
-                    Do-Start -Reason 'AUTO' | Out-Null
-                    $st = Get-SystemState
-                    $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
-                    $downStreak = 0
-                } else {
-                    $nodeMsg = "down_wait:$downStreak"
-                }
+                Do-Start -Reason 'AUTO' | Out-Null
+                $st = Get-SystemState
+                $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
+                $downStreak = 0
             }
 
             # Rede: se NETBOOT ainda nao rodou / estava cedo demais
@@ -942,7 +930,7 @@ function Do-Loop {
         } catch {
             Write-Log "ERROR $($_.Exception.Message)"
         }
-        Start-Sleep -Seconds 180
+        Start-Sleep -Seconds 30
     }
 }
 

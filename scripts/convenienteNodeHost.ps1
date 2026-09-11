@@ -64,6 +64,9 @@ if ([string]::IsNullOrWhiteSpace($BootSource)) {
 } else {
     $env:CONVENIENTE_BOOT_SOURCE = [string]$BootSource
 }
+Write-Host ''
+Write-Host 'Painel: http://localhost:8088/index.html'
+Write-Host ''
 Push-Location $wd
 try {
     & $node $idx

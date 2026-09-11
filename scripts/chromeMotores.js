@@ -488,7 +488,7 @@ function ensureWorkers(capacity, { purge = false } = {}) {
       exe: masterExe
     });
   } catch {}
-  say('[MULTI_ENGINE_OK] chrome unico ' + rec.iso + ' versao=' + masterVer.full + ' exe=' + masterExe);
+  say('[CHROME] oficial ' + rec.iso + ' versao=' + masterVer.full + ' exe=' + masterExe);
   return rec;
 }
 
