@@ -4481,7 +4481,9 @@ async function bootCluster() {
       reshuffleFairIfIdle: async () => ({ ok: false, error: 'cluster_down' }),
       kill: async () => {},
       detach: async () => {},
-      beginStop: () => {}
+      beginStop: () => {},
+      haltRespawn: () => {},
+      resumeAfterStop: () => {}
     };
   }
   logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes + ' silentConsole=' + String(clusterClient.silentConsole !== false) + ' adopting=' + String(!!clusterClient.adopting));
@@ -4514,6 +4516,18 @@ const apiClient = {
       return Promise.resolve({ ok: false, error: 'cluster_not_ready' });
     }
     return clusterClient.kill(...args);
+  },
+  beginStop: (...args) => {
+    if (!clusterClient || typeof clusterClient.beginStop !== 'function') return;
+    return clusterClient.beginStop(...args);
+  },
+  haltRespawn: (...args) => {
+    if (clusterClient && typeof clusterClient.haltRespawn === 'function') return clusterClient.haltRespawn(...args);
+    if (clusterClient && typeof clusterClient.beginStop === 'function') return clusterClient.beginStop(...args);
+  },
+  resumeAfterStop: (...args) => {
+    if (!clusterClient || typeof clusterClient.resumeAfterStop !== 'function') return;
+    return clusterClient.resumeAfterStop(...args);
   }
 };
 require('./scripts/api_status.js')(app, apiClient, fileStore);
@@ -4576,6 +4590,8 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
       kill: async () => {},
       detach: async () => {},
       beginStop: () => {},
+      haltRespawn: () => {},
+      resumeAfterStop: () => {},
       ensureCellsRunning: async () => ({ ok: false, error: 'cluster_booting' })
     };
   }

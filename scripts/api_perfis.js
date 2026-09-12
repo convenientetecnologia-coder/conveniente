@@ -15,6 +15,33 @@ function assertPerfilExists(fileStore, nome) {
   if (!perfis.find(p => p && p.nome === nome)) throw new Error('perfil inexistente');
 }
 
+function isAutomaticOpenAllOperator(op) {
+  return /porteiro|daily_window/i.test(String(op || ''));
+}
+
+function readEncerrarGen(fileStore) {
+  try {
+    if (typeof fileStore.readEncerrarGen === 'function') return fileStore.readEncerrarGen();
+    const d = fileStore.readJsonSafe(fileStore.desiredPath, {}) || {};
+    return Number(d && d._encerrarGen) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function resumeCellsForHuman(workerClient, reason) {
+  const why = String(reason || 'human').slice(0, 80);
+  try { require('./cellLifecycle.js').setCellsStopped(false); } catch {}
+  try { require('./bootIntent.js').clearHumanHold({ by: why }); } catch {}
+  try {
+    if (workerClient && typeof workerClient.resumeAfterStop === 'function') workerClient.resumeAfterStop();
+  } catch {}
+  if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
+    return workerClient.ensureCellsRunning(why);
+  }
+  return { ok: false, error: 'cluster_not_ready' };
+}
+
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -761,13 +788,15 @@ module.exports = (app, workerClient, fileStore) => {
 
     try { 
       await fileStore.withDesiredFileLockUpdate(desired => {
+        desired._cellsStopped = false;
         desired.perfis = desired.perfis || {};
         desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: true };
         return desired;
-      });
+      }, { resumeCells: true });
     } catch (e) {
       logger.error('Erro ao patchDesired para ativação', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
     }
+    try { await resumeCellsForHuman(workerClient, 'activate:' + String(nome || '').slice(0, 40)); } catch {}
     const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
     const isTransientActivateError = (msg) => {
       const m = String(msg || '').toLowerCase();
@@ -1109,18 +1138,16 @@ module.exports = (app, workerClient, fileStore) => {
 
     try {
       await fileStore.withDesiredFileLockUpdate(desired => {
+        desired._cellsStopped = false;
         desired.perfis = desired.perfis || {};
         desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'on', active: true };
         return desired;
-      });
+      }, { resumeCells: true });
     } catch (e) {
       logger.error('Erro ao patchDesired para start_work', { nome, error: e && e.message }, e);
     }
     try {
-      try { require('./bootIntent.js').clearHumanHold({ by: 'start_work:' + String(nome || '').slice(0, 40) }); } catch {}
-      if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
-        await workerClient.ensureCellsRunning('start_work:' + String(nome || '').slice(0, 40));
-      }
+      await resumeCellsForHuman(workerClient, 'start_work:' + String(nome || '').slice(0, 40));
     } catch {}
     // Garante ativação do browser e início do Virtus imediatamente
     const r1 = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
@@ -1930,6 +1957,11 @@ module.exports = (app, workerClient, fileStore) => {
               const oaActive = !!(oa && oa.active === true);
               const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
               if (oaActive && oaOwner && oaOwner === curOwner) {
+                try {
+                  if (require('./cellLifecycle.js').isCellsStopped()) {
+                    return res.json({ ok: false, error: 'cells_stopped', alreadyRunning: false });
+                  }
+                } catch {}
                 try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
                 return res.json({
                   ok: true,
@@ -1957,26 +1989,19 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
       }
 
-      try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
-      try {
-        if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
-          const woke = await workerClient.ensureCellsRunning('open_all_24h');
-          if (!woke || woke.ok !== true) {
-            try { logger.warn('[API][open-all] células não nasceram', { error: woke && woke.error }); } catch {}
-          }
+      const startedGen = readEncerrarGen(fileStore);
+      if (isAutomaticOpenAllOperator(op)) {
+        let holdStop = false;
+        try {
+          const hold = require('./bootIntent.js').readHumanHold();
+          holdStop = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+        } catch {}
+        let latch = false;
+        try { latch = require('./cellLifecycle.js').isCellsStopped(); } catch {}
+        if (holdStop || latch) {
+          try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+          return res.json({ ok: false, error: 'human_hold_stop_workers' });
         }
-      } catch (eEnsure) {
-        try { logger.warn('[API][open-all] ensure cells falhou', { error: (eEnsure && eEnsure.message) || String(eEnsure) }); } catch {}
-      }
-
-      let clusterReshuffle = null;
-      try {
-        if (workerClient && typeof workerClient.reshuffleFairIfIdle === 'function') {
-          clusterReshuffle = await workerClient.reshuffleFairIfIdle('open_all_24h');
-        }
-      } catch (eReshuffle) {
-        clusterReshuffle = { ok: false, reshuffled: false, error: (eReshuffle && eReshuffle.message) || String(eReshuffle) };
-        try { logger.warn('[API][open-all] fair reshuffle falhou; abre no mapa atual', { error: clusterReshuffle.error }); } catch {}
       }
 
       const perfisArr = fileStore.loadPerfisJson() || [];
@@ -2002,7 +2027,15 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       // 1) PASSO ATÔMICO: desired.active=true só para elegíveis (não suspensas/2FA).
+      // Se Encerrar ganhou a corrida (_encerrarGen mudou), este write aborta — não religa fila.
+      try {
       await fileStore.withDesiredFileLockUpdate(desired => {
+        if (Number(desired._encerrarGen || 0) !== startedGen) {
+          const err = new Error('cancelled_by_encerrar');
+          err.code = 'cancelled_by_encerrar';
+          throw err;
+        }
+        desired._cellsStopped = false;
         desired.perfis = desired.perfis || {};
         // Sequencer global de abertura (ordem do dashboard/perfis.json):
         // - um único perfil "inFlight" por vez, para o usuário acompanhar.
@@ -2053,7 +2086,54 @@ module.exports = (app, workerClient, fileStore) => {
           }
         }
         return desired;
-      });
+      }, { resumeCells: true });
+      } catch (eWrite) {
+        if (/cancelled_by_encerrar/.test(String((eWrite && eWrite.code) || (eWrite && eWrite.message) || ''))) {
+          try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+          return res.json({ ok: false, error: 'cancelled_by_encerrar' });
+        }
+        throw eWrite;
+      }
+
+      if (readEncerrarGen(fileStore) !== startedGen) {
+        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+        return res.json({ ok: false, error: 'cancelled_by_encerrar' });
+      }
+
+      try { require('./cellLifecycle.js').setCellsStopped(false); } catch {}
+      try { require('./bootIntent.js').clearHumanHold({ by: op }); } catch {}
+      try {
+        if (workerClient && typeof workerClient.resumeAfterStop === 'function') workerClient.resumeAfterStop();
+      } catch {}
+      try {
+        if (workerClient && typeof workerClient.ensureCellsRunning === 'function') {
+          const woke = await workerClient.ensureCellsRunning('open_all_24h');
+          if (!woke || woke.ok !== true) {
+            try { logger.warn('[API][open-all] células não nasceram', { error: woke && woke.error }); } catch {}
+          }
+        }
+      } catch (eEnsure) {
+        try { logger.warn('[API][open-all] ensure cells falhou', { error: (eEnsure && eEnsure.message) || String(eEnsure) }); } catch {}
+      }
+      if (readEncerrarGen(fileStore) !== startedGen) {
+        try { require('./cellLifecycle.js').setCellsStopped(true); } catch {}
+        try {
+          if (workerClient && typeof workerClient.haltRespawn === 'function') workerClient.haltRespawn();
+          else if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
+        } catch {}
+        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+        return res.json({ ok: false, error: 'cancelled_by_encerrar' });
+      }
+
+      let clusterReshuffle = null;
+      try {
+        if (workerClient && typeof workerClient.reshuffleFairIfIdle === 'function') {
+          clusterReshuffle = await workerClient.reshuffleFairIfIdle('open_all_24h');
+        }
+      } catch (eReshuffle) {
+        clusterReshuffle = { ok: false, reshuffled: false, error: (eReshuffle && eReshuffle.message) || String(eReshuffle) };
+        try { logger.warn('[API][open-all] fair reshuffle falhou; abre no mapa atual', { error: clusterReshuffle.error }); } catch {}
+      }
 
       // Se não há ninguém elegível, libera o lock imediatamente (missão concluída: nada a abrir).
       if (eligibleNames.length === 0) {

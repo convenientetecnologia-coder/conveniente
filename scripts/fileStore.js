@@ -637,6 +637,24 @@ async function withDesiredFileLockUpdate(mutator, opts = null) {
     // Snapshot ANTES do mutator (mutator costuma mutar in-place).
     const beforeIntent = snapshotDesiredOpenIntent(desired);
     const next = await Promise.resolve(mutator(desired)) || desired;
+    if (!(opts && opts.resumeCells === true) && next && next._cellsStopped === true) {
+      const perf = (next.perfis && typeof next.perfis === 'object') ? next.perfis : {};
+      for (const nome of Object.keys(perf)) {
+        const cur = perf[nome] && typeof perf[nome] === 'object' ? perf[nome] : {};
+        perf[nome] = Object.assign({}, cur, { active: false, virtus: 'off' });
+      }
+      next.perfis = perf;
+      try {
+        if (next._openAll) next._openAll = neutralizeOpenAllAfterBoot(next._openAll, { nowMs: Date.now() });
+      } catch {}
+      try {
+        next._autoOpen = Object.assign({}, next._autoOpen || {}, {
+          enabled: false,
+          changedAt: Date.now(),
+          changedBy: 'cells_stopped'
+        });
+      } catch {}
+    }
     const okWrite = writeJsonAtomic(desiredPath, next);
     if (!okWrite) throw new Error('desired_write_failed');
     try {
@@ -1164,6 +1182,15 @@ function neutralizeOpenAllAfterBoot(openAll, { nowMs } = {}) {
   return openAll;
 }
 
+function readEncerrarGen() {
+  try {
+    const d = readJsonSafe(desiredPath, {}) || {};
+    return Number(d && d._encerrarGen) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
   // Importante: precisa ser awaited no boot para não haver corrida com workers lendo desired.json.
   // Também não deve estourar unhandled rejection (lock timeout) => try/catch.
@@ -1207,6 +1234,12 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
       desired._bootStartClosed = true;
       desired._bootStartClosedAt = Date.now();
       desired._bootStartClosedReason = String(reason || '').slice(0, 160);
+      if (/api_cells_stop|stop_workers/.test(String(reason || ''))) {
+        desired._cellsStopped = true;
+        desired._encerrarGen = Date.now();
+      } else {
+        desired._cellsStopped = false;
+      }
       return Object.assign(desired, { _bootStartClosedChanged: changed });
     });
     return { ok: true, changed: Number(r && r._bootStartClosedChanged || 0) || 0 };
@@ -1319,7 +1352,7 @@ module.exports = {
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
   findChromeStablePath, readInstalledChromeVersion, alignUaToInstalledChrome, extractChromeMajorFromUa,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
-  resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, getSysMetricsSnapshot, existsFile, existsDir,
+  resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, readEncerrarGen, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,

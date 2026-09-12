@@ -76,17 +76,43 @@ module.exports = (app, workerClient, fileStore) => {
       return res.status(400).json({ ok: false, error: 'confirm_required' });
     }
     try {
+      const cellLifecycle = require('./cellLifecycle.js');
       try { require('./bootIntent.js').setHumanHold({ reason: 'stop_workers', by: 'api_cells_stop' }); } catch {}
+      try { cellLifecycle.setCellsStopped(true); } catch {}
       try {
         await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' });
       } catch {}
       try { require('./provisionLock.js').release({ force: true }); } catch {}
       try {
-        if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
+        if (workerClient && typeof workerClient.haltRespawn === 'function') workerClient.haltRespawn();
+        else if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
       } catch {}
-      const cellLifecycle = require('./cellLifecycle.js');
-      const r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
-      return res.json(Object.assign({ maestroStays: true, cancelledOpenAll: true }, r));
+      let r = cellLifecycle.stopAllCells({ reason: 'api_cells_stop' });
+      try {
+        await fileStore.resetDesiredAllOffOnBoot({ reason: 'api_cells_stop' });
+      } catch {}
+      try { cellLifecycle.setCellsStopped(true); } catch {}
+      try {
+        if (workerClient && typeof workerClient.haltRespawn === 'function') workerClient.haltRespawn();
+        else if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
+      } catch {}
+      const r2 = cellLifecycle.stopAllCells({ reason: 'api_cells_stop_reap' });
+      const chromeKilled = (Number(r && r.chromeKilled) || 0) + (Number(r2 && r2.chromeKilled) || 0);
+      try {
+        require('./cellForensic.js').append('cell_encerrar_done', {
+          firstOk: !!(r && r.ok),
+          ok: !!(r2 && r2.ok),
+          alive: r2 && r2.alive,
+          want: r2 && r2.want,
+          chromeKilled
+        });
+      } catch {}
+      return res.json(Object.assign({ maestroStays: true, cancelledOpenAll: true }, r2 || r || {}, {
+        requested: Math.max(Number(r && r.requested) || 0, Number(r2 && r2.requested) || 0),
+        chromeKilled,
+        firstPassOk: !!(r && r.ok),
+        ok: !!(r2 && r2.ok)
+      }));
     } catch (e) {
       return res.json({ ok: false, error: e && e.message || String(e), maestroStays: true });
     }

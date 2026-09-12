@@ -505,6 +505,18 @@ function browsersWorking() {
 }
 
 let bootRecycled = false;
+let cellsStopped = false;
+
+function setCellsStopped(v) {
+  cellsStopped = v === true;
+  return cellsStopped;
+}
+
+// Só memória deste index. Hold de Encerrar NÃO entra aqui:
+// Iniciar precisa nascer 4/4 fechadas mesmo com hold (hold só barra porteiro/agenda).
+function isCellsStopped() {
+  return cellsStopped === true;
+}
 
 function consumeBootRecycle() {
   const v = !!bootRecycled;
@@ -626,6 +638,8 @@ module.exports = {
   killListenUntilFree,
   stopAllCells,
   consumeBootRecycle,
+  setCellsStopped,
+  isCellsStopped,
   listCellEntryPids,
   listLiveCellPids,
   wantedCellCount,

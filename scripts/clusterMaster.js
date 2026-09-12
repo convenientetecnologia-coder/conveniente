@@ -58,6 +58,7 @@ function readNodeStatusFile(idx) {
 const MAX_FILE_AGE_MS = parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10);
 
 async function createCluster() {
+  try { cellLifecycle.setCellsStopped(false); } catch {}
   const allPerfis = fileStore.loadPerfisJson() || [];
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
@@ -321,7 +322,7 @@ async function createCluster() {
   function onCellDeath(idx, { code, signal, pid } = {}) {
     const child = children[idx];
     if (!child || child.deadHandled) return;
-    if (isShuttingDown) {
+    if (isShuttingDown || cellLifecycle.isCellsStopped()) {
       child.deadHandled = true;
       return;
     }
@@ -378,7 +379,7 @@ async function createCluster() {
       try { resolve({ ok: false, error: 'worker_died' }); } catch {}
     }
     try { child.pending.clear(); } catch {}
-    if (isShuttingDown) return;
+    if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
     try {
       const dyingShard = child && child.shard ? Array.from(child.shard) : (blocks[idx] || []);
       const reap = require('./orphanReaper.js').reapShard({
@@ -399,7 +400,7 @@ async function createCluster() {
       try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
     }
     setTimeout(() => {
-      if (isShuttingDown) return;
+      if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
       const target = children[idx];
       const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
       logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
@@ -569,6 +570,20 @@ async function createCluster() {
   }
 
   async function spawnWorker(idx, shardNames, opts) {
+    if (cellLifecycle.isCellsStopped() && !(opts && opts.resume === true)) {
+      return {
+        id: idx,
+        proc: null,
+        pending: new Map(),
+        shard: new Set(Array.isArray(shardNames) ? shardNames : []),
+        pid: null,
+        port: cellRegistry.portForIdx(idx),
+        socket: null,
+        netSend: null,
+        adopted: false,
+        deadHandled: true
+      };
+    }
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
@@ -739,7 +754,7 @@ async function createCluster() {
       child.pid = null;
       child.adopted = false;
       setTimeout(() => {
-        if (isShuttingDown) return;
+        if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
         const target = children[idx];
         if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
         spawnWorker(idx, shardNames).then((fresh) => {
@@ -760,6 +775,16 @@ async function createCluster() {
           logger.error('[CLUSTER] retry após listen timeout falhou', { idx: idx + 1, error: err && err.message || err });
         });
       }, 2000);
+      return child;
+    }
+    if (cellLifecycle.isCellsStopped() && !(opts && opts.resume === true)) {
+      try { cellLifecycle.forceKillPid(child.pid || (proc && proc.pid)); } catch {}
+      try { cellForensic.append('cell_spawn_aborted_stopped', { idx: idx + 1, pid: child.pid, port: child.port }); } catch {}
+      child.proc = null;
+      child.pid = null;
+      child.socket = null;
+      child.netSend = null;
+      child.deadHandled = true;
       return child;
     }
     confirmSpawn(idx, proc.pid);
@@ -847,7 +872,7 @@ async function createCluster() {
 
   try {
     const watch = setInterval(() => {
-      if (isShuttingDown) return;
+      if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
       for (let i = 0; i < children.length; i++) {
         const c = children[i];
         if (!c || c.deadHandled) continue;
@@ -985,7 +1010,7 @@ async function createCluster() {
   }
 
   async function rebalanceOnce(reason = 'watcher') {
-    if (isShuttingDown) return { ok: false, error: 'shutting_down' };
+    if (isShuttingDown || cellLifecycle.isCellsStopped()) return { ok: false, error: 'shutting_down' };
     const perfis = fileStore.loadPerfisJson() || [];
     const namesNow = perfis.map((p) => p && p.nome).filter(Boolean);
     const livePlan = planMemoryAndShards({ totalProfiles: namesNow.length });
@@ -1377,11 +1402,14 @@ async function createCluster() {
     }
   }
 
-  function beginStop() {
+  function resumeAfterStop() {
+    try { cellLifecycle.setCellsStopped(false); } catch {}
+    isShuttingDown = false;
+  }
+
+  function haltRespawn() {
     isShuttingDown = true;
-    try { statusAggCache = { at: 0, value: null }; } catch {}
-    try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
-    try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
+    try { cellLifecycle.setCellsStopped(true); } catch {}
     for (const c of children) {
       if (!c) continue;
       c.deadHandled = true;
@@ -1389,6 +1417,13 @@ async function createCluster() {
       c.socket = null;
       c.netSend = null;
     }
+  }
+
+  function beginStop() {
+    haltRespawn();
+    try { statusAggCache = { at: 0, value: null }; } catch {}
+    try { if (standbySweep && typeof standbySweep.stop === 'function') standbySweep.stop(); } catch {}
+    try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
   }
 
   async function detach() {
@@ -1405,17 +1440,9 @@ async function createCluster() {
 
   async function ensureCellsRunning(reason = 'ensure') {
     const why = String(reason || 'ensure');
-    const userWantsCells = /open_all|start_work|abrir/.test(why);
-    try {
-      const hold = require('./bootIntent.js').readHumanHold();
-      const stopHold = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
-      if (stopHold && !userWantsCells) {
-        return { ok: false, error: 'human_hold_stop_workers', nodes: 0, want: 0, reason: why };
-      }
-      if (stopHold && userWantsCells) {
-        require('./bootIntent.js').clearHumanHold({ by: 'ensure:' + why.slice(0, 40) });
-      }
-    } catch {}
+    if (cellLifecycle.isCellsStopped()) {
+      return { ok: false, error: 'cells_stopped', nodes: 0, want: 0, reason: why };
+    }
     isShuttingDown = false;
     const want = Math.max(1, blocks.length || children.length || 1);
     while (children.length < want) {
@@ -1435,6 +1462,7 @@ async function createCluster() {
     }
     const started = [];
     await Promise.all(children.map(async (c, idx) => {
+      if (cellLifecycle.isCellsStopped()) return;
       const port = c.port || cellRegistry.portForIdx(idx);
       const owner = cellRegistry.tcpListenPid(port);
       if (owner > 0 && (cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) {
@@ -1449,6 +1477,14 @@ async function createCluster() {
       const shardNames = (c.shard && c.shard.size) ? Array.from(c.shard) : (blocks[idx] || []);
       try {
         const fresh = await spawnWorker(idx, shardNames, { replace: false });
+        if (!fresh || !fresh.pid) {
+          c.proc = null;
+          c.pid = null;
+          c.socket = null;
+          c.netSend = null;
+          c.deadHandled = true;
+          return;
+        }
         c.proc = fresh.proc;
         c.pending = fresh.pending;
         c.pid = fresh.pid;
@@ -1512,7 +1548,7 @@ async function createCluster() {
   })();
 
   async function reshuffleFairIfIdle(reason = 'open_all') {
-    if (isShuttingDown) return { ok: false, error: 'shutting_down', reshuffled: false };
+    if (isShuttingDown || cellLifecycle.isCellsStopped()) return { ok: false, error: 'shutting_down', reshuffled: false };
     const checks = await Promise.all(
       children.map((_, i) => sendTo(i, 'shard-busy-count', {}, { timeoutMs: 8000 }))
     );
@@ -1551,7 +1587,7 @@ async function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, detach, beginStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
+  return { plan, children, sendWorkerCommand, kill, detach, beginStop, haltRespawn, resumeAfterStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
 }
 
 module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };
