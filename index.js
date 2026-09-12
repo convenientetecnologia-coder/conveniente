@@ -4743,16 +4743,19 @@ function wipeStaleCellsBeforeListen() {
   try { logger.info('[BOOT] subindo células'); } catch {}
   await bootCluster();
   try { logger.info('[BOOT] cluster pronto', { ms: Date.now() - bootT0 }); } catch {}
-  if (!adoptingLiveCells) {
-    setTimeout(() => {
-      try {
-        require('./scripts/bootIntent.js').maybePorterOpenAllOnBoot({
-          allCellsDead: true,
-          port: PORT
-        }).catch(() => {});
-      } catch {}
-    }, 5000);
-  }
+  try {
+    const bootSrc = String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase();
+    if (bootSrc === 'porteiro' || !adoptingLiveCells) {
+      setTimeout(() => {
+        try {
+          require('./scripts/bootIntent.js').maybePorterOpenAllOnBoot({
+            allCellsDead: adoptingLiveCells !== true,
+            port: PORT
+          }).catch(() => {});
+        } catch {}
+      }, 5000);
+    }
+  } catch {}
 })();
 
 // Tenta abrir sempre o painel no Chromium azul (agora OPT-IN)

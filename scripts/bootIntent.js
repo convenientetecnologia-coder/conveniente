@@ -114,15 +114,16 @@ function decideAutoOpenAll({
   bootSource,
   allCellsDead,
   humanHoldActive,
+  holdReason,
   workCycle
 } = {}) {
-  if (allCellsDead !== true) return { yes: false, reason: 'cells_alive_adopt' };
   if (String(bootSource || '') !== 'porteiro') return { yes: false, reason: 'boot_source_not_porteiro' };
-  if (humanHoldActive === true) return { yes: false, reason: 'human_hold' };
+  const encerrar = humanHoldActive === true && String(holdReason || '') === 'stop_workers';
+  if (encerrar) return { yes: false, reason: 'human_hold' };
   if (!workCycle || workCycle.inWorkCycle !== true) {
     return { yes: false, reason: (workCycle && workCycle.reason) ? String(workCycle.reason) : 'not_work_cycle' };
   }
-  return { yes: true, reason: 'porteiro_all_dead_work_cycle' };
+  return { yes: true, reason: allCellsDead === true ? 'porteiro_all_dead_work_cycle' : 'porteiro_work_cycle' };
 }
 
 function audit(event, patch) {
@@ -171,6 +172,7 @@ async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
     bootSource,
     allCellsDead: allCellsDead === true,
     humanHoldActive: !!(hold && hold.active),
+    holdReason: hold && hold.reason ? String(hold.reason) : null,
     workCycle: work
   });
   const snap = {

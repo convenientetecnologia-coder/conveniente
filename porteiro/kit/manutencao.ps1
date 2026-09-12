@@ -27,6 +27,7 @@ $KitSrc      = Join-Path $Conveniente 'porteiro\kit\manutencao.ps1'
 $PidFile     = Join-Path $Root 'master.pid'
 $PanelPort   = 8088
 $Version     = 'v5.2.1-clean-cpu'
+$IndexStartGraceSec = 180
 $NodeRuntimePs1 = Join-Path $Conveniente 'scripts\nodeRuntime.ps1'
 
 try {
@@ -290,8 +291,8 @@ function Invoke-DiskEmergencyClean {
 # --- Reboot diario + checagem de rede (sutil; nao altera regras de node/disco) ---
 function Get-UptimeMinutes {
     try {
-        $ms = [System.Environment]::TickCount64
-        if ($ms -lt 0) { $ms = [System.Environment]::TickCount }
+        $ms = [int64][Environment]::TickCount
+        if ($ms -lt 0) { $ms = $ms + 4294967296 }
         return [math]::Round($ms / 60000.0, 1)
     } catch { return 999 }
 }
@@ -342,7 +343,7 @@ function Get-BootId {
         $sys = Get-Process -Id 4 -ErrorAction Stop
         return $sys.StartTime.ToUniversalTime().ToString('o')
     } catch {
-        return ('tick:' + [string][System.Environment]::TickCount64)
+        return ('tick:' + [string][Environment]::TickCount)
     }
 }
 
@@ -939,19 +940,19 @@ function Do-Loop {
         Write-Log 'auto_unpause_on_boot'
     }
 
-    # Sobe Conveniente ANTES do NetGuard (nao ficar 4+ min parado sem sistema).
-    # Sem internet o NetGuard ainda pode pedir ate 3 reboot extra depois.
+    # Index caiu: espera 3 min (git pull). Nao sobe na hora.
+    $IndexDownSince = $null
     try {
         $stBoot = Get-SystemState
-        if (-not $stBoot.Up) {
-            Do-Start -Reason 'AUTO_BOOT' | Out-Null
-            $stAfter = Get-SystemState
-            Write-Log ("AUTO_BOOT up={0} why={1}" -f $stAfter.Up, $stAfter.Why)
-        } else {
+        if ($stBoot -and $stBoot.Up) {
             Write-Log "AUTO_BOOT skipped already_up=$($stBoot.Why)"
+        } else {
+            $IndexDownSince = Get-Date
+            Write-Log ("AUTO_BOOT wait_index {0}s" -f $IndexStartGraceSec)
         }
     } catch {
-        Write-Log "AUTO_BOOT ERROR $($_.Exception.Message)"
+        $IndexDownSince = Get-Date
+        Write-Log "AUTO_BOOT wait_index"
     }
 
     $downStreak = 0
@@ -975,17 +976,26 @@ function Do-Loop {
             if (Test-Paused) {
                 $nodeMsg = 'paused'
                 $downStreak = 0
+                $IndexDownSince = $null
             }
             elseif ($st.Up) {
                 $nodeMsg = "ok:$($st.Why):m=$($st.Masters):n=$($st.Nodes)"
                 $downStreak = 0
+                $IndexDownSince = $null
             }
             else {
                 $downStreak++
-                Do-Start -Reason 'AUTO' | Out-Null
-                $st = Get-SystemState
-                $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
-                $downStreak = 0
+                if (-not $IndexDownSince) { $IndexDownSince = Get-Date }
+                $downSec = [int]((Get-Date) - $IndexDownSince).TotalSeconds
+                if ($downSec -lt $IndexStartGraceSec) {
+                    $nodeMsg = "wait_index ${downSec}s/$IndexStartGraceSec"
+                } else {
+                    Do-Start -Reason 'AUTO' | Out-Null
+                    $st = Get-SystemState
+                    $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
+                    $downStreak = 0
+                    $IndexDownSince = $null
+                }
             }
 
             # Rede: se NETBOOT ainda nao rodou / estava cedo demais

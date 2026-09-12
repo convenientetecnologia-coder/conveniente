@@ -51,6 +51,38 @@ assert.ok(html.includes("Encerrando workers..."), "botão Encerrar precisa mostr
 
 const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
+assert.ok(indexJs.includes("bootSrc === 'porteiro'") && indexJs.includes("maybePorterOpenAllOnBoot"), "porteiro no ciclo pergunta Abrir Tudo mesmo adotando célula");
+const bootIntent = require(path.join(ROOT, "scripts", "bootIntent.js"));
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: false,
+    humanHoldActive: false,
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  true,
+  "porteiro no ciclo abre tudo mesmo com célula viva"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: true,
+    holdReason: "stop_workers",
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  false,
+  "Encerrar workers barra Abrir Tudo do porteiro"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "iniciar",
+    allCellsDead: true,
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  false,
+  "clique Iniciar não dispara Abrir Tudo"
+);
 assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de Encerrar mata célula, não solta");
 
 const life = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");

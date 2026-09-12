@@ -66,7 +66,8 @@ check("kit_net_no_nic_ok_bail", !/return 'net_fail_nic_ok'/.test(kitTxt) && !/pi
 check("kit_net_lock", /netguard\.lock/.test(kitTxt) && /net_guard_busy/.test(kitTxt) && /function Open-NetGuardLock/.test(kitTxt));
 check("kit_net_count_persists", /lastNetworkRetryCount/.test(kitTxt) && /function Get-NetRetryCountToday/.test(kitTxt));
 check("kit_lixeira_or_temp", /Lixeira|Recycle|TEMP/i.test(kitTxt));
-check("kit_auto_boot", /AUTO_BOOT/.test(kitTxt) && /Do-Start/.test(kitTxt));
+check("kit_auto_boot", /AUTO_BOOT/.test(kitTxt) && /Do-Start/.test(kitTxt) && /wait_index/.test(kitTxt) && /\$IndexStartGraceSec\s*=\s*180/.test(kitTxt));
+check("kit_no_tickcount64", !/TickCount64/.test(kitTxt) && /\[Environment\]::TickCount/.test(kitTxt));
 check("kit_do_stop_exists", /function Do-Stop/.test(kitTxt));
 check("kit_sourceIsNomem", sync.sourceIsNomem(kitTxt) === true);
 
