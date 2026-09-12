@@ -145,27 +145,18 @@ function Test-LoopAlive {
     return $false
 }
 
-function Get-PorteiroLogAgeSec {
-    $log = Join-Path $destDir 'logs\porteiro.log'
-    if (-not (Test-Path -LiteralPath $log)) { return [int]::MaxValue }
+function Get-PorteiroBeatAgeSec {
+    $beat = Join-Path $destDir 'porteiro.beat'
+    if (-not (Test-Path -LiteralPath $beat)) { return [int]::MaxValue }
     try {
-        $last = $null
-        foreach ($line in @(Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue)) {
-            $t = [string]$line
-            if ($t -notmatch '\bNODE=') { continue }
-            if ($t -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
-                try { $last = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch {}
-            }
-        }
-        if (-not $last) { return [int]::MaxValue }
-        return [int][math]::Round(((Get-Date) - $last).TotalSeconds)
+        return [int][math]::Round(((Get-Date) - (Get-Item -LiteralPath $beat).LastWriteTime).TotalSeconds)
     } catch {
         return [int]::MaxValue
     }
 }
 
 function Test-PorteiroLoopFresh {
-    return ((Get-PorteiroLogAgeSec) -le 180)
+    return ((Get-PorteiroBeatAgeSec) -le 90)
 }
 
 function Copy-KitSilent {
@@ -221,7 +212,7 @@ function Start-LoopSilent {
         return
     }
     if ($alive -and -not $fresh) {
-        Write-StartLog ('loop_stale_restart age=' + [string](Get-PorteiroLogAgeSec))
+        Write-StartLog ('loop_stale_restart age=' + [string](Get-PorteiroBeatAgeSec))
         Stop-LoopOnly
     }
     & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null

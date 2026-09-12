@@ -110,9 +110,9 @@ check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
 check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
-check("iniciar_loop_fresh", /function Test-PorteiroLoopFresh/.test(iniciarTxt) && /loop_stale_restart/.test(iniciarTxt) && /powershell\|pwsh/.test(iniciarTxt) && /NODE=/.test(iniciarTxt) && /-le 180/.test(iniciarTxt));
-check("sync_log_fresh", /function runningLoopIsFresh/.test(syncTxt) && /logFresh === false/.test(syncTxt) && /logDead/.test(syncTxt) && /isPorteiroHeartbeatLine/.test(syncTxt));
-check("kit_pulse", /function Do-Pulse/.test(kitTxt) && /pulse_stale_restart/.test(kitTxt) && /ConvenientePorteiroPulse/.test(instKitTxt));
+check("iniciar_loop_fresh", /function Test-PorteiroLoopFresh/.test(iniciarTxt) && /loop_stale_restart/.test(iniciarTxt) && /powershell\|pwsh/.test(iniciarTxt) && /porteiro\.beat/.test(iniciarTxt) && !/NODE=/.test(iniciarTxt.split("function Get-PorteiroBeatAgeSec")[1] || ""));
+check("sync_log_fresh", /function runningLoopIsFresh/.test(syncTxt) && /beatFresh !== true/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && /loopProcessAlive/.test(syncTxt));
+check("kit_pulse", /function Do-Pulse/.test(kitTxt) && /pulse_kit_swap/.test(kitTxt) && /porteiro\.beat/.test(kitTxt) && /ConvenientePorteiroPulse/.test(instKitTxt));
 check("kit_net_no_block_wait", /net_wait later/.test(kitTxt) && !/Start-Sleep -Seconds \$waitSec/.test(kitTxt));
 check("iniciar_pulse_task", /ConvenientePorteiroPulse/.test(iniciarTxt) && /function Ensure-PulseTaskSilent/.test(iniciarTxt));
 check("sync_pulse_task", /ConvenientePorteiroPulse/.test(syncTxt) && /ensurePulseTaskSilent/.test(syncTxt));
@@ -175,30 +175,28 @@ check("sync_sourceIsNomem_rejects_old_ver", sync.sourceIsNomem("MemClean=OFF Con
 check("destLooksLikeOld", sync.destLooksLikeOldMemClean("return 'mem_soft'") === true);
 check("destLooksLikeOld_kit_is_new", sync.destLooksLikeOldMemClean(kitTxt) === false);
 
-const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, taskRunning: false, tasksOk: false });
+const fresh = sync.planEnsure({ destExists: false, destOld: false, hashEqual: false, tasksOk: false });
 check("plan_fresh_copies", fresh.copy === true && fresh.restartLoop === true && fresh.installTasks === true);
 
-const maeOld = sync.planEnsure({ destExists: true, destOld: true, hashEqual: false, taskRunning: true, tasksOk: true });
+const maeOld = sync.planEnsure({ destExists: true, destOld: true, hashEqual: false, tasksOk: true, processAlive: true, beatFresh: true });
 check("plan_mae_old_no_uac", maeOld.copy === true && maeOld.restartLoop === true && maeOld.installTasks === false);
 
-const ok = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: true });
+const ok = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, tasksOk: true, processAlive: true, beatFresh: true });
 check("plan_already_ok_idle", ok.copy === false && ok.restartLoop === false && ok.installTasks === false);
 
-const staleMem = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: false });
+const staleMem = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, tasksOk: true, processAlive: true, beatFresh: false });
 check("plan_stale_inmemory_restarts", staleMem.copy === false && staleMem.restartLoop === true && staleMem.installTasks === false);
 
-const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: false, tasksOk: true, runningNomem: false });
+const dead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, tasksOk: true, processAlive: false, beatFresh: true });
 check("plan_loop_dead_restarts", dead.copy === false && dead.restartLoop === true && dead.installTasks === false);
 
-const unknownLog = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: null });
-check("plan_unknown_log_does_not_kill_alive", unknownLog.copy === false && unknownLog.restartLoop === false && unknownLog.installTasks === false);
+const unknownBeat = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, tasksOk: true, processAlive: true });
+check("plan_unknown_beat_restarts", unknownBeat.copy === false && unknownBeat.restartLoop === true && unknownBeat.installTasks === false);
 
-const logDead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: true, logFresh: false });
-check("plan_stale_log_restarts", logDead.copy === false && logDead.restartLoop === true && logDead.installTasks === false);
-const ageNow = new Date(2026, 8, 11, 21, 10, 0).getTime();
-check("age_local_ts", sync.porteiroLogAgeSec("2026-09-11 21:00:00 [X] NODE=ok\n", ageNow) === 600);
-check("age_ignores_crash_dumps", sync.porteiroLogAgeSec("2026-09-11 21:09:00 [X] crash_dumps armed\n", ageNow) === null);
-check("heartbeat_line", sync.isPorteiroHeartbeatLine("NODE=ok:index_8088") === true && sync.isPorteiroHeartbeatLine("crash_dumps armed") === false);
+const beatDead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, tasksOk: true, processAlive: true, beatFresh: false });
+check("plan_stale_beat_restarts", beatDead.copy === false && beatDead.restartLoop === true && beatDead.installTasks === false);
+check("kit_writes_beat", /function Write-LoopBeat/.test(kitTxt) && /Write-LoopBeat/.test(loopBody));
+check("sync_no_log_liveness", /beatFresh !== true/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && !/logFresh === false/.test(syncTxt) && !/isPorteiroHeartbeatLine/.test(syncTxt));
 
 check("sync_windows_owns_loop", /schtasks\.exe/.test(syncTxt) && /\/Run/.test(syncTxt));
 check("sync_ends_task_before_run", /\/End/.test(syncTxt) && /ConvenientePorteiro/.test(syncTxt));

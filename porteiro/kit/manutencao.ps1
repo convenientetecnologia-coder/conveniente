@@ -21,7 +21,9 @@ $IndexJs     = Join-Path $Conveniente 'index.js'
 $PauseFlag   = Join-Path $Root 'PAUSED.flag'
 $NoRebootFlag = Join-Path $Root 'NO_REBOOT.flag'
 $LockFile    = Join-Path $Root 'porteiro.lock'
+$BeatFile    = Join-Path $Root 'porteiro.beat'
 $LogFile     = Join-Path $Root 'logs\porteiro.log'
+$KitSrc      = Join-Path $Conveniente 'porteiro\kit\manutencao.ps1'
 $PidFile     = Join-Path $Root 'master.pid'
 $PanelPort   = 8088
 $Version     = 'v5.2.1-clean-cpu'
@@ -797,24 +799,52 @@ function Test-LoopLockAlive {
     return $false
 }
 
-function Get-LoopHeartbeatAgeSec {
-    if (-not (Test-Path -LiteralPath $LogFile)) { return [int]::MaxValue }
-    $last = $null
+function Write-LoopBeat {
     try {
-        foreach ($line in @(Get-Content -LiteralPath $LogFile -Tail 80 -ErrorAction SilentlyContinue)) {
-            $t = [string]$line
-            if ($t -notmatch '\bNODE=') { continue }
-            if ($t -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
-                try { $last = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch {}
-            }
-        }
+        [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() | Set-Content -LiteralPath $BeatFile -Encoding ASCII
     } catch {}
-    if (-not $last) { return [int]::MaxValue }
-    return [int][math]::Round(((Get-Date) - $last).TotalSeconds)
 }
 
-function Test-LoopHeartbeatFresh([int]$MaxAgeSec = 90) {
-    return ((Get-LoopHeartbeatAgeSec) -le $MaxAgeSec)
+function Get-LoopBeatAgeSec {
+    if (-not (Test-Path -LiteralPath $BeatFile)) { return [int]::MaxValue }
+    try {
+        return [int][math]::Round(((Get-Date) - (Get-Item -LiteralPath $BeatFile).LastWriteTime).TotalSeconds)
+    } catch {
+        return [int]::MaxValue
+    }
+}
+
+function Test-LoopBeatFresh([int]$MaxAgeSec = 90) {
+    return ((Get-LoopBeatAgeSec) -le $MaxAgeSec)
+}
+
+function Test-KitSrcNomem([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $t = ''
+    try { $t = [string](Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue) } catch { return $false }
+    if ($t.Contains(('Invoke-Soft' + 'MemClean'))) { return $false }
+    if ($t.Contains(('mem_' + 'soft'))) { return $false }
+    if ($t.Contains(('Get-Cpu' + 'Avg'))) { return $false }
+    if ($t -notmatch 'v5\.2\.1-clean-cpu') { return $false }
+    if ($t -notmatch 'MemClean=OFF') { return $false }
+    return $true
+}
+
+function Copy-KitIfChanged {
+    if (-not (Test-Path -LiteralPath $KitSrc)) { return $false }
+    if (-not (Test-KitSrcNomem $KitSrc)) { return $false }
+    $dest = Join-Path $Root 'manutencao.ps1'
+    $need = $true
+    if (Test-Path -LiteralPath $dest) {
+        try {
+            $a = (Get-FileHash -LiteralPath $KitSrc -Algorithm MD5).Hash
+            $b = (Get-FileHash -LiteralPath $dest -Algorithm MD5).Hash
+            if ($a -eq $b) { $need = $false }
+        } catch {}
+    }
+    if (-not $need) { return $false }
+    Copy-Item -LiteralPath $KitSrc -Destination $dest -Force
+    return $true
 }
 
 function Start-LoopArmSidecar {
@@ -856,16 +886,25 @@ function Start-LoopProcess {
 }
 
 function Do-Pulse {
-    # Olho de 2 min, sem o index. crash_dumps nao conta como vivo.
+    # Windows. Sem index. Sem ler porteiro.log.
+    # Kit mudou → copia, mata, nasce. Processo morto/preso → nasce.
     Ensure-Dirs
+    $swapped = $false
+    try { $swapped = [bool](Copy-KitIfChanged) } catch { $swapped = $false }
     $alive = [bool](Test-LoopLockAlive)
-    $fresh = [bool](Test-LoopHeartbeatFresh 90)
+    $fresh = [bool](Test-LoopBeatFresh 90)
+    if ($swapped) {
+        Write-Log 'pulse_kit_swap'
+        Stop-LoopLock
+        Start-LoopProcess
+        return
+    }
     if ($alive -and $fresh) { return }
-    if ($alive -and -not $fresh) {
-        Write-Log ('pulse_stale_restart age=' + [string](Get-LoopHeartbeatAgeSec))
+    if ($alive) {
+        Write-Log ('pulse_hung age=' + [string](Get-LoopBeatAgeSec))
         Stop-LoopLock
     } else {
-        Write-Log 'pulse_start loop_dead'
+        Write-Log 'pulse_dead'
     }
     Start-LoopProcess
 }
@@ -884,6 +923,7 @@ function Do-Loop {
         Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
     }
     $PID | Set-Content $LockFile -Encoding ASCII
+    Write-LoopBeat
     Stop-RivalVigia
 
     Set-MaxPerf
@@ -919,6 +959,7 @@ function Do-Loop {
 
     while ($true) {
         try {
+            Write-LoopBeat
             $cpu = 0
             $st = Get-SystemState
             $disk = Get-DiskFreeGB
@@ -979,6 +1020,7 @@ function Do-Loop {
             Write-Log "CPU=$cpu DISK=$disk`GB NODE=$nodeMsg ACTION=$($actions -join ',')"
         } catch {
             Write-Log "ERROR $($_.Exception.Message)"
+            Write-LoopBeat
         }
         Start-Sleep -Seconds 30
     }

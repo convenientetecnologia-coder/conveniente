@@ -27,6 +27,8 @@ const { spawnSync } = require("child_process");
 const AUTO_VIGIA = "C:\\auto_vigia";
 const DEST_PS1 = path.join(AUTO_VIGIA, "manutencao.ps1");
 const PORTEIRO_LOG = path.join(AUTO_VIGIA, "logs", "porteiro.log");
+const BEAT_FILE = path.join(AUTO_VIGIA, "porteiro.beat");
+const LOCK_FILE = path.join(AUTO_VIGIA, "porteiro.lock");
 const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -120,36 +122,38 @@ function parsePorteiroLogTs(stamp) {
   ).getTime();
 }
 
-function isPorteiroHeartbeatLine(line) {
-  return /\bNODE=/.test(String(line || ""));
+function loopProcessAlive() {
+  try {
+    if (!fs.existsSync(LOCK_FILE)) return false;
+    const pid = parseInt(String(fs.readFileSync(LOCK_FILE, "utf8") || "").trim(), 10);
+    if (!(pid > 0)) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function porteiroLogAgeSec(text, nowMs) {
-  let last = null;
-  String(text || "").split(/\r?\n/).forEach((line) => {
-    if (!isPorteiroHeartbeatLine(line)) return;
-    const m = String(line || "").match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-    if (!m) return;
-    const t = parsePorteiroLogTs(m[1]);
-    if (Number.isFinite(t)) last = t;
-  });
-  if (last == null) return null;
-  const now = Number(nowMs) > 0 ? Number(nowMs) : Date.now();
-  return Math.round((now - last) / 1000);
+function beatAgeSec(nowMs) {
+  try {
+    if (!fs.existsSync(BEAT_FILE)) return null;
+    const st = fs.statSync(BEAT_FILE);
+    const now = Number(nowMs) > 0 ? Number(nowMs) : Date.now();
+    return Math.round((now - Number(st.mtimeMs)) / 1000);
+  } catch {
+    return null;
+  }
 }
 
 function runningLoopIsFresh() {
-  if (!fs.existsSync(PORTEIRO_LOG)) return false;
-  const age = porteiroLogAgeSec(readTail(PORTEIRO_LOG, 120000), Date.now());
+  const age = beatAgeSec(Date.now());
   if (age == null) return false;
-  return age <= 600;
+  return age <= 90;
 }
 
-function planEnsure({ destExists, destOld, hashEqual, taskRunning, tasksOk, runningNomem, logFresh }) {
+function planEnsure({ destExists, destOld, hashEqual, tasksOk, processAlive, beatFresh } = {}) {
   const copy = !destExists || !!destOld || !hashEqual;
-  const staleInMemory = runningNomem === false;
-  const logDead = logFresh === false;
-  const restartLoop = copy || !taskRunning || staleInMemory || logDead;
+  const restartLoop = copy || processAlive === false || beatFresh !== true;
   const installTasks = !tasksOk;
   const scrubOldKit = true;
   return { copy, restartLoop, installTasks, scrubOldKit };
@@ -396,21 +400,20 @@ function sync(opts) {
 
   let taskRunning = false;
   let tasksPresent = false;
-  let runningNomem = false;
-  let logFresh = null;
+  let processAlive = false;
+  let beatFresh = false;
   try { taskRunning = taskIsRunning(TASK_LOOP); } catch {}
   try { tasksPresent = tasksOk(); } catch {}
-  try { runningNomem = runningLoopIsNomem(); } catch {}
-  try { logFresh = runningLoopIsFresh(); } catch {}
+  try { processAlive = loopProcessAlive(); } catch {}
+  try { beatFresh = runningLoopIsFresh(); } catch {}
 
   const plan = planEnsure({
     destExists,
     destOld,
     hashEqual,
-    taskRunning,
     tasksOk: tasksPresent,
-    runningNomem,
-    logFresh
+    processAlive,
+    beatFresh
   });
   result.plan = plan;
 
@@ -459,11 +462,10 @@ function sync(opts) {
 
   result.ok = true;
   result.hash = (fs.existsSync(DEST_PS1) ? md5File(DEST_PS1) : srcHash).slice(0, 8);
-  result.runningNomemBefore = runningNomem;
+  result.runningNomemBefore = null;
   if (!destExists && plan.copy) result.action = "installed_fresh";
   else if (destOld) result.action = "upgraded_nomem";
   else if (plan.copy) result.action = "updated";
-  else if (plan.restartLoop && !runningNomem) result.action = "loop_loaded_nomem";
   else if (plan.restartLoop) result.action = "loop_restarted";
   else result.action = "already_nomem";
   if (plan.installTasks) result.action += "+logon_task";
@@ -475,8 +477,8 @@ function sync(opts) {
     plan,
     tasksPresent,
     taskRunningBefore: taskRunning,
-    runningNomemBefore: runningNomem,
-    logFreshBefore: logFresh,
+    processAliveBefore: processAlive,
+    beatFreshBefore: beatFresh,
     start: result.start || null
   });
   return result;
@@ -488,10 +490,12 @@ module.exports = {
   sourceIsNomem,
   destLooksLikeOldMemClean,
   lastBootLineIsNomem,
-  isPorteiroHeartbeatLine,
-  porteiroLogAgeSec,
+  loopProcessAlive,
+  beatAgeSec,
   runningLoopIsFresh,
   planEnsure,
+  BEAT_FILE,
+  LOCK_FILE,
   SRC_PS1,
   DEST_PS1,
   TASK_LOOP,
