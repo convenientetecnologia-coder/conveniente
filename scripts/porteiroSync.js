@@ -197,12 +197,70 @@ function taskExists(name) {
   }
 }
 
+function readTaskInfo(name) {
+  const info = { exists: false, enabled: false, execute: "", arguments: "" };
+  if (process.platform !== "win32") return info;
+  const tn = String(name || "").replace(/'/g, "''");
+  try {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$t = Get-ScheduledTask -TaskName '" + tn + "' -ErrorAction Stop",
+      "$a = @($t.Actions)[0]",
+      "[pscustomobject]@{ exists = $true; enabled = [bool]$t.Settings.Enabled; execute = [string]$(if ($a) { $a.Execute } else { '' }); arguments = [string]$(if ($a) { $a.Arguments } else { '' }) } | ConvertTo-Json -Compress"
+    ].join("; ");
+    const r = spawnSync(PS_EXE, ["-NoProfile", "-Command", script], {
+      windowsHide: true,
+      timeout: 15000,
+      encoding: "utf8"
+    });
+    if (r.status === 0) {
+      const raw = String((r && r.stdout) || "").trim();
+      if (raw) {
+        const j = JSON.parse(raw);
+        info.exists = !!(j && j.exists);
+        info.enabled = !!(j && j.enabled);
+        info.execute = String((j && j.execute) || "");
+        info.arguments = String((j && j.arguments) || "");
+      }
+    }
+  } catch {}
+  if (!info.exists) {
+    try {
+      if (taskExists(name)) {
+        info.exists = true;
+        info.enabled = true;
+      }
+    } catch {}
+  }
+  return info;
+}
+
+function taskLooksValid(name, patterns) {
+  const info = readTaskInfo(name);
+  if (!info.exists || !info.enabled) return false;
+  const cmd = (String(info.execute || "") + " " + String(info.arguments || "")).trim();
+  if (!cmd) return false;
+  for (const re of patterns || []) {
+    if (!(re && re.test(cmd))) return false;
+  }
+  return true;
+}
+
+function loopTaskOk() {
+  return taskLooksValid(TASK_LOOP, [/manutencao\.ps1/i, /-Action\s+loop/i]);
+}
+
+function pulseTaskOk() {
+  return taskLooksValid(TASK_PULSE, [/manutencao\.ps1/i, /-Action\s+pulse/i]);
+}
+
 function tasksOk() {
-  return taskExists(TASK_LOOP);
+  return loopTaskOk() && pulseTaskOk();
 }
 
 function ensureLogonTaskSilent() {
-  if (taskExists(TASK_LOOP)) return { ok: true, existed: true };
+  const existed = taskExists(TASK_LOOP);
+  if (loopTaskOk()) return { ok: true, existed, repaired: false };
   const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action loop";
   try {
     const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_LOOP, "/tr", tr, "/sc", "onlogon", "/f"], {
@@ -210,9 +268,9 @@ function ensureLogonTaskSilent() {
       timeout: 15000,
       encoding: "utf8"
     });
-    return { ok: r.status === 0, existed: false, status: r.status };
+    return { ok: r.status === 0 && loopTaskOk(), existed, repaired: existed, status: r.status };
   } catch (e) {
-    return { ok: false, existed: false, error: (e && e.message) || String(e) };
+    return { ok: false, existed, repaired: existed, error: (e && e.message) || String(e) };
   }
 }
 
@@ -226,7 +284,8 @@ function destHasPulseAction() {
 
 function ensurePulseTaskSilent() {
   if (!destHasPulseAction()) return { ok: false, existed: false, skipped: "dest_no_pulse" };
-  if (taskExists(TASK_PULSE)) return { ok: true, existed: true };
+  const existed = taskExists(TASK_PULSE);
+  if (pulseTaskOk()) return { ok: true, existed, repaired: false };
   const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action pulse";
   try {
     const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_PULSE, "/tr", tr, "/sc", "minute", "/mo", "2", "/f"], {
@@ -234,9 +293,9 @@ function ensurePulseTaskSilent() {
       timeout: 15000,
       encoding: "utf8"
     });
-    return { ok: r.status === 0, existed: false, status: r.status };
+    return { ok: r.status === 0 && pulseTaskOk(), existed, repaired: existed, status: r.status };
   } catch (e) {
-    return { ok: false, existed: false, error: (e && e.message) || String(e) };
+    return { ok: false, existed, repaired: existed, error: (e && e.message) || String(e) };
   }
 }
 
@@ -330,17 +389,22 @@ function startLoopSpawn() {
 }
 
 function startLoopOwnedByWindows() {
-  if (taskExists(TASK_LOOP)) {
+  if (loopTaskOk()) {
     try {
       const r = spawnSync("schtasks.exe", ["/Run", "/TN", TASK_LOOP], {
         windowsHide: true,
         timeout: 20000,
         encoding: "utf8"
       });
-      if (r.status === 0) return { via: "schtasks", ok: true };
+      if (r.status === 0 && waitLoopHealthy(10000)) return { via: "schtasks", ok: true };
     } catch {}
   }
-  return startLoopSpawn();
+  const fallback = startLoopSpawn();
+  if (!fallback.ok) return fallback;
+  if (waitLoopHealthy(10000)) {
+    return Object.assign({}, fallback, { via: "start_process_fallback", ok: true });
+  }
+  return Object.assign({}, fallback, { via: "start_process_fallback", ok: false, error: "loop_not_healthy_after_start" });
 }
 
 function ensureDirs() {
@@ -354,6 +418,15 @@ function sleepMs(ms) {
     windowsHide: true,
     timeout: n + 4000
   });
+}
+
+function waitLoopHealthy(timeoutMs = 10000) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+  while (Date.now() < deadline) {
+    if (loopProcessAlive() && runningLoopIsFresh()) return true;
+    sleepMs(500);
+  }
+  return loopProcessAlive() && runningLoopIsFresh();
 }
 
 function sync(opts) {
@@ -447,6 +520,13 @@ function sync(opts) {
     try {
       const start = startLoopOwnedByWindows();
       result.start = start;
+      if (!start || start.ok !== true) {
+        result.action = plan.copy ? "copied_start_failed" : "loop_start_failed";
+        result.hash = md5File(DEST_PS1).slice(0, 8);
+        result.error = (start && start.error) ? String(start.error) : "loop_not_healthy_after_start";
+        persistLog(result);
+        return result;
+      }
     } catch (e) {
       result.action = "copied_start_failed";
       result.hash = md5File(DEST_PS1).slice(0, 8);
@@ -500,5 +580,6 @@ module.exports = {
   SRC_PS1,
   DEST_PS1,
   TASK_LOOP,
+  TASK_PULSE,
   TASK_NET
 };

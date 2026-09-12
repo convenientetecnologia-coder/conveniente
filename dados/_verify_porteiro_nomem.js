@@ -104,8 +104,8 @@ check("iniciar_silent_copy", /Copy-KitSilent/.test(iniciarTxt) && /Copy-Item/.te
 check("iniciar_loop_silent", /Start-LoopSilent/.test(iniciarTxt) && /WindowStyle Hidden/.test(iniciarTxt));
 check("ensure_uac_same_process", /param\(\[switch\]\$ReturnOnly\)/.test(ensureTxt) && /function Invoke-PorteiroEnsureMain/.test(ensureTxt));
 check("ensure_inprocess_if_admin", /Test-IsAdmin/.test(ensureTxt) && /inprocess_admin/.test(ensureTxt));
-check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
-check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
+check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenientePorteiroPulse/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-LoopFresh/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
+check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /Test-TaskPulseOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /-Action pulse/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
 check("ensure_arms_loop_without_uac", /Test-FilesAndTasksOk/.test(ensureTxt) && /Start-PorteiroLoopNow/.test(ensureTxt) && /schtasks\.exe \/Run/.test(ensureTxt) && /loop_armed_no_uac/.test(ensureTxt));
 check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/return 10/g) || []).length >= 2);
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
@@ -115,7 +115,7 @@ check("iniciar_loop_fresh", /function Test-PorteiroLoopFresh/.test(iniciarTxt) &
 check("sync_log_fresh", /function runningLoopIsFresh/.test(syncTxt) && /loopHealthy/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && /loopProcessAlive/.test(syncTxt));
 check("kit_pulse", /function Do-Pulse/.test(kitTxt) && /pulse_kit_swap/.test(kitTxt) && /porteiro\.beat/.test(kitTxt) && /ConvenientePorteiroPulse/.test(instKitTxt));
 check("kit_net_no_block_wait", /net_wait later/.test(kitTxt) && !/Start-Sleep -Seconds \$waitSec/.test(kitTxt));
-check("iniciar_pulse_task", /ConvenientePorteiroPulse/.test(iniciarTxt) && /function Ensure-PulseTaskSilent/.test(iniciarTxt));
+check("iniciar_pulse_task", /ConvenientePorteiroPulse/.test(iniciarTxt) && /function Ensure-PulseTaskSilent/.test(iniciarTxt) && /function Test-TaskPulseOk/.test(iniciarTxt));
 check("sync_pulse_task", /ConvenientePorteiroPulse/.test(syncTxt) && /ensurePulseTaskSilent/.test(syncTxt));
 check("iniciar_swaps_version", /version_swap/.test(iniciarTxt) && /Stop-LoopOnly/.test(iniciarTxt));
 const iniciarTail = iniciarTxt.split("Write-StartLog 'click'")[1] || "";
@@ -140,7 +140,7 @@ check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("fun
 check("kit_excludes_hammer_host", /crashHammer\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_crash_dumps_fn", /function Ensure-NodeCrashDumps/.test(kitTxt) && /LocalDumps\\node\.exe/.test(kitTxt) && /DumpType/.test(kitTxt));
 check("kit_wersvc_fn", /function Ensure-WerSvc/.test(kitTxt) && /Start-Service -Name WerSvc/.test(kitTxt) && !/Stop-Service -Name WerSvc/.test(kitTxt) && /sem_admin/.test(kitTxt));
-check("iniciar_loop_prefers_schtasks", /loop_wait_schtasks/.test(iniciarTxt) && /loop_via_schtasks/.test(iniciarTxt));
+check("iniciar_loop_prefers_schtasks", /loop_via_schtasks/.test(iniciarTxt) && /loop_schtasks_no_show/.test(iniciarTxt) && /loop_via_start_process/.test(iniciarTxt));
 check("kit_loop_wersvc", /Start-LoopArmSidecar/.test(loopBody) && /function Ensure-WerSvc/.test(kitTxt) && !/Ensure-WerSvc/.test(loopBody.split("function Start-LoopArmSidecar")[0] || loopBody));
 check("kit_crash_hammer_fn", /function Invoke-CrashHammer/.test(kitTxt) && /crashHammer\.ps1/.test(kitTxt));
 check("kit_loop_hammer_on_down", /Invoke-CrashHammer/.test(loopBody) && /porteiro_down/.test(loopBody) && /\$IndexStartGraceSec/.test(loopBody) && /host_zombie/.test(loopBody));
@@ -159,7 +159,7 @@ check("sync_refuses_dirty_src", /src_has_memclean_refused/.test(syncTxt));
 check("sync_installs_when_absent", /installed_fresh/.test(syncTxt) && /ensureDirs/.test(syncTxt));
 check("sync_no_skip_dest_absent", !/skipped dest_absent/.test(syncTxt));
 check("sync_no_runas", !/Verb RunAs/.test(syncTxt) && !/requestTaskInstall/.test(syncTxt));
-check("sync_logon_task_silent", /ensureLogonTaskSilent/.test(syncTxt) && /onlogon/.test(syncTxt));
+check("sync_logon_task_silent", /ensureLogonTaskSilent/.test(syncTxt) && /onlogon/.test(syncTxt) && /loopTaskOk/.test(syncTxt));
 check("index_wires_sync", /porteiroSync\.js/.test(indexTxt));
 const leiaTxt = fs.readFileSync(path.join(root, "porteiro", "LEIA-ME.txt"), "utf8");
 const contratoTxt = fs.readFileSync(path.join(root, "porteiro", "CONTRATO.txt"), "utf8");
@@ -205,6 +205,8 @@ check("kit_writes_beat", /function Write-LoopBeat/.test(kitTxt) && /Write-LoopBe
 check("sync_no_log_liveness", /loopHealthy/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && !/logFresh === false/.test(syncTxt) && !/isPorteiroHeartbeatLine/.test(syncTxt));
 
 check("sync_windows_owns_loop", /schtasks\.exe/.test(syncTxt) && /\/Run/.test(syncTxt));
+check("sync_validates_pulse_task", /pulseTaskOk/.test(syncTxt) && /readTaskInfo/.test(syncTxt));
+check("sync_waits_loop_healthy", /waitLoopHealthy/.test(syncTxt) && /loop_not_healthy_after_start/.test(syncTxt));
 check("sync_ends_task_before_run", /\/End/.test(syncTxt) && /ConvenientePorteiro/.test(syncTxt));
 check("sync_deletes_old_limpeza_task", /LimpezaAutomaticaConveniente/.test(syncTxt));
 check("sync_kills_old_kit", /porteiro_loop/.test(syncTxt) && /limpeza_memoria/.test(syncTxt) && /vigia\.bat/.test(syncTxt));

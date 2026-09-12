@@ -20,6 +20,7 @@ $Installer = 'C:\conveniente\instalar_porteiro.ps1'
 $LogFile = 'C:\auto_vigia\logs\porteiro_ensure.log'
 $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $TaskLoop = 'ConvenientePorteiro'
+$TaskPulse = 'ConvenientePorteiroPulse'
 $TaskNet = 'ConvenienteNetBoot'
 
 function Write-EnsureLog([string]$Line) {
@@ -108,6 +109,15 @@ function Test-TaskNetOk {
     return $true
 }
 
+function Test-TaskPulseOk {
+    $i = Get-TaskRunInfo $TaskPulse
+    if (-not $i.Exists) { return $false }
+    if (-not $i.Enabled) { return $false }
+    if ($i.Arguments -notmatch 'manutencao\.ps1') { return $false }
+    if ($i.Arguments -notmatch '-Action pulse') { return $false }
+    return $true
+}
+
 function Test-LoopAlive {
     $lock = 'C:\auto_vigia\porteiro.lock'
     if (Test-Path -LiteralPath $lock) {
@@ -130,6 +140,20 @@ function Test-LoopAlive {
     return $false
 }
 
+function Get-PorteiroBeatAgeSec {
+    $beat = 'C:\auto_vigia\porteiro.beat'
+    if (-not (Test-Path -LiteralPath $beat)) { return [int]::MaxValue }
+    try {
+        return [int][math]::Round(((Get-Date) - (Get-Item -LiteralPath $beat).LastWriteTime).TotalSeconds)
+    } catch {
+        return [int]::MaxValue
+    }
+}
+
+function Test-LoopFresh {
+    return ((Get-PorteiroBeatAgeSec) -le 90)
+}
+
 function Get-PorteiroSnapshot {
     return [pscustomobject]@{
         kitExists     = [bool](Test-Path -LiteralPath $KitSrc)
@@ -137,24 +161,26 @@ function Get-PorteiroSnapshot {
         destNomem     = [bool](Test-NomemFile $DestPs1)
         hashMatch     = [bool](Test-HashMatch)
         taskPorteiro  = [bool](Test-TaskLoopOk)
+        taskPulse     = [bool](Test-TaskPulseOk)
         taskNetBoot   = [bool](Test-TaskNetOk)
         loopAlive     = [bool](Test-LoopAlive)
+        loopFresh     = [bool](Test-LoopFresh)
     }
 }
 
 function Test-FilesAndTasksOk {
     $s = Get-PorteiroSnapshot
-    return ($s.kitExists -and $s.destExists -and $s.destNomem -and $s.hashMatch -and $s.taskPorteiro -and $s.taskNetBoot)
+    return ($s.kitExists -and $s.destExists -and $s.destNomem -and $s.hashMatch -and $s.taskPorteiro -and $s.taskPulse -and $s.taskNetBoot)
 }
 
 function Test-PorteiroReady {
     $s = Get-PorteiroSnapshot
-    return ($s.kitExists -and $s.destExists -and $s.destNomem -and $s.hashMatch -and $s.taskPorteiro -and $s.taskNetBoot -and $s.loopAlive)
+    return ($s.kitExists -and $s.destExists -and $s.destNomem -and $s.hashMatch -and $s.taskPorteiro -and $s.taskPulse -and $s.taskNetBoot -and $s.loopAlive -and $s.loopFresh)
 }
 
 function Write-Snapshot([string]$Prefix, $s) {
-    $line = ("{0} kit={1} dest={2} nomem={3} hash={4} task={5} net={6} loop={7}" -f `
-        $Prefix, $s.kitExists, $s.destExists, $s.destNomem, $s.hashMatch, $s.taskPorteiro, $s.taskNetBoot, $s.loopAlive)
+    $line = ("{0} kit={1} dest={2} nomem={3} hash={4} task={5} pulse={6} net={7} loop={8} fresh={9}" -f `
+        $Prefix, $s.kitExists, $s.destExists, $s.destNomem, $s.hashMatch, $s.taskPorteiro, $s.taskPulse, $s.taskNetBoot, $s.loopAlive, $s.loopFresh)
     Write-Host $line
     Write-EnsureLog $line
 }
@@ -213,7 +239,7 @@ function Invoke-PorteiroEnsureMain {
     Write-Snapshot 'ANTES' $before
 
     if (Test-PorteiroReady) {
-        Write-Host 'Porteiro 100%: kit certo, tarefas Windows certas, loop vivo. Nao mexe. Sobe o Conveniente.'
+        Write-Host 'Porteiro 100%: kit certo, tarefas Windows certas, loop vivo com beat fresco. Nao mexe. Sobe o Conveniente.'
         Write-EnsureLog 'READY skip_install'
         return 0
     }

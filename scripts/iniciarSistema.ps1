@@ -159,6 +159,66 @@ function Test-PorteiroLoopFresh {
     return ((Get-PorteiroBeatAgeSec) -le 90)
 }
 
+function Test-PorteiroLoopHealthy {
+    return ((Test-LoopAlive) -and (Test-PorteiroLoopFresh))
+}
+
+function Wait-PorteiroLoopHealthy([int]$Tries = 20, [int]$SleepMs = 400) {
+    for ($i = 0; $i -lt $Tries; $i++) {
+        if (Test-PorteiroLoopHealthy) { return $true }
+        Start-Sleep -Milliseconds $SleepMs
+    }
+    return [bool](Test-PorteiroLoopHealthy)
+}
+
+function Get-TaskRunInfo([string]$Name) {
+    $info = [pscustomobject]@{ Exists = $false; Enabled = $false; Arguments = '' }
+    try {
+        $t = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+        $info.Exists = $true
+        $info.Enabled = [bool]$t.Settings.Enabled
+        $exec = ''
+        $args = ''
+        try {
+            $a = @($t.Actions)[0]
+            if ($a) {
+                $exec = [string]$a.Execute
+                $args = [string]$a.Arguments
+            }
+        } catch {}
+        $info.Arguments = (($exec + ' ' + $args).Trim())
+        return $info
+    } catch {}
+    & schtasks.exe /Query /TN $Name 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { return $info }
+    $info.Exists = $true
+    $info.Enabled = $true
+    try {
+        $raw = (& schtasks.exe /Query /TN $Name /FO LIST /V 2>$null | Out-String)
+        if ($raw -match '(?im)^\s*Scheduled Task State\s*:\s*Disabled\s*$') { $info.Enabled = $false }
+        if ($raw -match '(?im)^\s*Task To Run\s*:\s*(.+)$') { $info.Arguments = $Matches[1].Trim() }
+    } catch {}
+    return $info
+}
+
+function Test-TaskLoopOk {
+    $i = Get-TaskRunInfo 'ConvenientePorteiro'
+    if (-not $i.Exists) { return $false }
+    if (-not $i.Enabled) { return $false }
+    if ($i.Arguments -notmatch 'manutencao\.ps1') { return $false }
+    if ($i.Arguments -notmatch '-Action loop') { return $false }
+    return $true
+}
+
+function Test-TaskPulseOk {
+    $i = Get-TaskRunInfo 'ConvenientePorteiroPulse'
+    if (-not $i.Exists) { return $false }
+    if (-not $i.Enabled) { return $false }
+    if ($i.Arguments -notmatch 'manutencao\.ps1') { return $false }
+    if ($i.Arguments -notmatch '-Action pulse') { return $false }
+    return $true
+}
+
 function Copy-KitSilent {
     if (-not (Test-Path -LiteralPath $kitSrc)) {
         Write-StartLog 'kit_missing'
@@ -215,18 +275,15 @@ function Start-LoopSilent {
         Write-StartLog ('loop_stale_restart age=' + [string](Get-PorteiroBeatAgeSec))
         Stop-LoopOnly
     }
-    & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
-    for ($i = 0; $i -lt 3; $i++) {
-        Start-Sleep -Milliseconds 200
-        if (Test-LoopAlive) {
+    if (Test-TaskLoopOk) {
+        & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
+        if (Wait-PorteiroLoopHealthy 20 400) {
             Write-StartLog 'loop_via_schtasks'
             return
         }
-    }
-    & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-StartLog 'loop_wait_schtasks'
-        return
+        Write-StartLog 'loop_schtasks_no_show'
+    } else {
+        Write-StartLog 'loop_task_invalid'
     }
     if (-not (Test-Path -LiteralPath $destPs1)) {
         Write-StartLog 'loop_no_dest'
@@ -235,18 +292,19 @@ function Start-LoopSilent {
     Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $destPs1, '-Action', 'loop'
     ) | Out-Null
-    Start-Sleep -Milliseconds 800
-    if (Test-LoopAlive) { Write-StartLog 'loop_via_start_process' } else { Write-StartLog 'loop_start_attempted' }
+    if (Wait-PorteiroLoopHealthy 20 400) { Write-StartLog 'loop_via_start_process' } else { Write-StartLog 'loop_start_failed' }
 }
 
 function Ensure-LogonTaskSilent {
-    & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-StartLog 'task_loop_exists'
+    $info = Get-TaskRunInfo 'ConvenientePorteiro'
+    if (Test-TaskLoopOk) {
+        Write-StartLog 'task_loop_ok'
     } else {
         $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
         & schtasks.exe /create /tn ConvenientePorteiro /tr $tr /sc onlogon /f 1>$null 2>$null
-        if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_loop_created' } else { Write-StartLog 'task_loop_create_skip' }
+        if ($LASTEXITCODE -eq 0) {
+            if ($info.Exists) { Write-StartLog 'task_loop_repaired' } else { Write-StartLog 'task_loop_created' }
+        } else { Write-StartLog 'task_loop_create_skip' }
     }
     if (Test-Path -LiteralPath $destPs1) {
         $destTxt = ''
@@ -256,14 +314,16 @@ function Ensure-LogonTaskSilent {
 }
 
 function Ensure-PulseTaskSilent {
-    & schtasks.exe /Query /TN 'ConvenientePorteiroPulse' 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-StartLog 'task_pulse_exists'
+    $info = Get-TaskRunInfo 'ConvenientePorteiroPulse'
+    if (Test-TaskPulseOk) {
+        Write-StartLog 'task_pulse_ok'
         return
     }
     $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
     & schtasks.exe /create /tn ConvenientePorteiroPulse /tr $tr /sc minute /mo 2 /f 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_pulse_created' } else { Write-StartLog 'task_pulse_create_skip' }
+    if ($LASTEXITCODE -eq 0) {
+        if ($info.Exists) { Write-StartLog 'task_pulse_repaired' } else { Write-StartLog 'task_pulse_created' }
+    } else { Write-StartLog 'task_pulse_create_skip' }
 }
 
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
