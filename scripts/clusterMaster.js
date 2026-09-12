@@ -481,6 +481,7 @@ async function createCluster() {
     const owner = cellRegistry.tcpListenPid(child.port);
     if (!(owner > 4) || owner === process.pid) return false;
     if (!cellLifecycle.isProvenCellEntryPid(owner) && !cellLifecycle.isLikelyCellListenPid(owner)) return false;
+    child.helloPid = null;
     child.pid = owner;
     child.proc = null;
     child.adopted = true;
@@ -494,12 +495,21 @@ async function createCluster() {
       const helloUntil = Date.now() + 1500;
       while (Date.now() < helloUntil && !child.helloPid) await waitMs(50);
       if (!child.helloPid) {
-        try { if (child.socket) child.socket.destroy(); } catch {}
-        child.socket = null;
-        child.netSend = null;
-        child.adopted = false;
-        child.pid = null;
-        return false;
+        child.helloPid = owner;
+        try {
+          logger.warn('[CLUSTER][ADOPT] socket conectou sem hello; aceitando owner vivo do port', {
+            idx: idx + 1,
+            pid: owner,
+            port: child.port,
+            reason: String(reason || 'port_live')
+          });
+          cellForensic.append('cell_adopt_no_hello', {
+            idx: idx + 1,
+            pid: owner,
+            port: child.port,
+            reason: String(reason || 'port_live')
+          });
+        } catch {}
       }
     }
     if (child.helloPid) child.pid = Number(child.helloPid) || child.pid;
@@ -634,6 +644,34 @@ async function createCluster() {
     if (!replace && !recycledThisBoot && !cellLifecycle.isStampStale()) {
       if (await adoptIfListening(child, idx, 'port_live')) return child;
       if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
+        const liveOwner = cellRegistry.tcpListenPid(child.port);
+        const livePortCell = liveOwner > 0 && (
+          cellLifecycle.isProvenCellEntryPid(liveOwner) ||
+          cellLifecycle.isLikelyCellListenPid(liveOwner)
+        );
+        if (livePortCell) {
+          child.pid = liveOwner;
+          child.proc = null;
+          child.adopted = false;
+          child.deadHandled = false;
+          try {
+            logger.warn('[CLUSTER] adopt inconclusivo, mas a porta da célula segue viva; preservando Chrome', {
+              idx: idx + 1,
+              pid: liveOwner,
+              port: child.port
+            });
+            cellForensic.append('cell_adopt_pending_port_live', {
+              idx: idx + 1,
+              pid: liveOwner,
+              port: child.port
+            });
+          } catch {}
+          setTimeout(() => {
+            if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
+            connectCellSocket(child, idx).catch(() => {});
+          }, 400);
+          return child;
+        }
         logger.warn('[CLUSTER] célula surda: pid vivo sem porta — recicla o slot', {
           idx: idx + 1,
           pid: aliveRow.pid,

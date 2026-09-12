@@ -126,6 +126,14 @@ const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), 
 const halt = cluster.split("function haltRespawn")[1] || cluster.split("function beginStop")[1] || "";
 assert.ok(/deadHandled = true/.test(halt.slice(0, 500)), "haltRespawn marca célula morta pra não readotar");
 assert.ok(/if \(isShuttingDown \|\| cellLifecycle\.isCellsStopped\(\)\) \{\s*child\.deadHandled = true/.test(cluster), "drop durante Encerrar não readota porta");
+assert.ok(cluster.includes("cell_adopt_no_hello") && cluster.includes("socket conectou sem hello"), "readopt não pode matar célula viva só porque o hello atrasou");
+assert.ok(cluster.includes("cell_adopt_pending_port_live") && cluster.includes("preservando Chrome"), "porta viva da célula deve preservar Chrome e tentar reconectar");
+const spawnFnCluster = cluster.split("async function spawnWorker")[1] || "";
+assert.ok(
+  spawnFnCluster.indexOf("cell_adopt_pending_port_live") >= 0 &&
+    spawnFnCluster.indexOf("cell_adopt_pending_port_live") < spawnFnCluster.indexOf("cell_adopt_fail"),
+  "porta viva precisa ser preservada antes do recycle cell_adopt_fail"
+);
 assert.ok(/listCellEntryPids/.test(life) && /cellentry\.js/.test(life), "Encerrar mata pelo cellEntry.js, não só pela porta");
 assert.ok(/!recycledThisBoot && !cellLifecycle\.isStampStale\(\)/.test(cluster), "git pull nunca adota célula velha");
 assert.ok(/mustDie/.test(life) && /listCellEntryPids/.test(life), "atualização e Encerrar insistem até a célula morrer");
