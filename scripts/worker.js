@@ -7728,6 +7728,113 @@ function isFrozenNow(nome) {
 }
 
 const activationLocks = new Map();
+const DETACHED_OPEN_SLOT_LOCK = path.join(__dirname, '..', 'dados', 'detached_open_slot.lock.json');
+const DETACHED_OPEN_SLOT_TTL_MS = Math.max(
+  30_000,
+  Number(process.env.DETACHED_OPEN_SLOT_TTL_MS || (3 * 60 * 1000)) || (3 * 60 * 1000)
+);
+
+function isOpenAllOperator(source = '', operator = '') {
+  const srcTrim = String(source || '').trim();
+  const opTrim = String(operator || '').trim();
+  return /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(srcTrim) ||
+    /^open_all_map:/i.test(opTrim) ||
+    /^open_all_keepalive/i.test(opTrim);
+}
+
+function isDetachedCellWithoutMaestro() {
+  try {
+    const bus = require('./cellCommandBus.js');
+    return !!(bus && typeof bus.isCellMode === 'function' && bus.isCellMode() && typeof bus.hasMaestro === 'function' && !bus.hasMaestro());
+  } catch {
+    return false;
+  }
+}
+
+function readDetachedOpenSlot() {
+  try {
+    return JSON.parse(fs.readFileSync(DETACHED_OPEN_SLOT_LOCK, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function detachedOpenSlotIsStale(lock, now = Date.now()) {
+  if (!lock || typeof lock !== 'object') return true;
+  const ts = Number(lock.ts || 0) || 0;
+  const pid = Number(lock.pid || 0) || 0;
+  if (!ts || (now - ts) > DETACHED_OPEN_SLOT_TTL_MS) return true;
+  if (pid > 0 && !isPidAlive(pid)) return true;
+  return false;
+}
+
+function tryAcquireDetachedOpenSlot({ nome = '', source = '', operator = '' } = {}) {
+  const now = Date.now();
+  try { ensureDirSync(path.dirname(DETACHED_OPEN_SLOT_LOCK)); } catch {}
+  try {
+    if (fs.existsSync(DETACHED_OPEN_SLOT_LOCK)) {
+      const cur = readDetachedOpenSlot();
+      if (!detachedOpenSlotIsStale(cur, now)) {
+        return { ok: false, error: 'detached_slot_busy', holderPid: Number(cur && cur.pid || 0) || null };
+      }
+      try { fs.unlinkSync(DETACHED_OPEN_SLOT_LOCK); } catch {}
+    }
+  } catch {}
+  try {
+    const token = `detached_open:${process.pid}:${now}`;
+    const payload = {
+      token,
+      pid: process.pid,
+      ts: now,
+      nome: String(nome || '').slice(0, 120),
+      source: String(source || '').slice(0, 80),
+      operator: String(operator || '').slice(0, 180)
+    };
+    const fd = fs.openSync(DETACHED_OPEN_SLOT_LOCK, 'wx');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(payload, null, 2), 'utf8');
+      try { fs.fsyncSync(fd); } catch {}
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'detached_open_slot_acquired',
+        nome: payload.nome,
+        source: payload.source,
+        operator: payload.operator,
+        pid: process.pid
+      });
+    } catch {}
+    return { ok: true, detached: true, token };
+  } catch {
+    const cur = readDetachedOpenSlot();
+    return { ok: false, error: 'detached_slot_busy', holderPid: Number(cur && cur.pid || 0) || null };
+  }
+}
+
+function releaseDetachedOpenSlot(token, { nome = '', result = 'ok' } = {}) {
+  const tok = String(token || '').trim();
+  if (!tok) return false;
+  try {
+    const cur = readDetachedOpenSlot();
+    if (!cur || String(cur.token || '') !== tok) return false;
+    try { fs.unlinkSync(DETACHED_OPEN_SLOT_LOCK); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'detached_open_slot_released',
+        nome: String(nome || '').slice(0, 120),
+        result: String(result || 'ok').slice(0, 40),
+        pid: process.pid
+      });
+    } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function activateOnce(nome, source = '', operator = '') {
   const boot = await __deltaAwaitHostBootReady();
@@ -7791,6 +7898,18 @@ async function activateOnce(nome, source = '', operator = '') {
 
   opening[nome] = true;
   let _supervisorSlotGranted = false;
+  let _detachedOpenToken = '';
+  async function _releaseOpenGrant(result = 'ok') {
+    if (_supervisorSlotGranted) {
+      try { await supervisorClient.notifyOpened(nome, result); } catch {}
+      _supervisorSlotGranted = false;
+      return;
+    }
+    if (_detachedOpenToken) {
+      try { releaseDetachedOpenSlot(_detachedOpenToken, { nome, result }); } catch {}
+      _detachedOpenToken = '';
+    }
+  }
   // Enterprise rule (2026-01): humanHold órfão é só cache.
   // Exceção do contrato atual: abertura manual com flag persistida reabre direto em humano.
   let _humanHoldAtStart = false;
@@ -7899,8 +8018,30 @@ async function activateOnce(nome, source = '', operator = '') {
       }
     } catch {}
 
-    const slotResp = await supervisorClient.requestOpen(nome, null, { operator: String(operator || '').trim() })
+    let slotResp = await supervisorClient.requestOpen(nome, null, { operator: String(operator || '').trim() })
       .catch(()=>({ok:false, error:'supervisor_unreachable'}));
+    if ((!slotResp || !slotResp.ok) && _isBulkOpen && isDetachedCellWithoutMaestro()) {
+      const detachedErr = String((slotResp && slotResp.error) || '').trim().toLowerCase();
+      if (!detachedErr || detachedErr === 'timeout' || detachedErr === 'ipc_send_failed' || detachedErr === 'supervisor_unreachable') {
+        const localSlot = tryAcquireDetachedOpenSlot({ nome, source, operator });
+        if (localSlot && localSlot.ok) {
+          _detachedOpenToken = String(localSlot.token || '');
+          slotResp = { ok: true, detached: true, token: _detachedOpenToken };
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'activate_detached_open_fallback',
+              nome: String(nome || ''),
+              source: String(source || ''),
+              operator: String(operator || '').slice(0, 180),
+              error: String(detachedErr || 'no_maestro')
+            });
+          } catch {}
+        } else {
+          slotResp = localSlot || { ok: false, error: 'detached_slot_busy' };
+        }
+      }
+    }
     if (!slotResp || !slotResp.ok) {
       robeMeta[nome] = robeMeta[nome] || {};
       const denyReason = String((slotResp && slotResp.reason) || 'unknown').toLowerCase();
@@ -7909,16 +8050,16 @@ async function activateOnce(nome, source = '', operator = '') {
       await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'} holdMs=${holdMs}`);
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
     }
-    _supervisorSlotGranted = true;
+    _supervisorSlotGranted = !slotResp.detached;
 
     if (!nome) {
-      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+      await _releaseOpenGrant('err');
       return { ok: false, error: 'Nome ausente' };
     }
 
     if (isFrozenNow(nome)) {
       await reportAction(nome, 'mil_action', 'block_activate_frozen');
-      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+      await _releaseOpenGrant('err');
       return { ok: false, error: 'account_is_frozen' };
     }
 
@@ -7931,7 +8072,7 @@ async function activateOnce(nome, source = '', operator = '') {
         if (!manifest) {
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
           await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
-          if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+          await _releaseOpenGrant('err');
           return { ok:false, error: 'manifest_incomplete' };
         }
         try {
@@ -7953,14 +8094,14 @@ async function activateOnce(nome, source = '', operator = '') {
             }
           } else {
             await reportAction(nome, 'robe_error', 'ua preset morto ou gordo; abertura bloqueada ate realinhar');
-            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            await _releaseOpenGrant('err');
             return { ok: false, error: 'ua_preset_realign_failed' };
           }
         } catch (e) {
           const still = uaPresetAlign.stillNeedsRealign(manifest);
           if (still && still.yes) {
             await reportAction(nome, 'robe_error', 'ua preset morto ou gordo; realign falhou; abertura bloqueada');
-            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            await _releaseOpenGrant('err');
             return { ok: false, error: 'ua_preset_realign_failed' };
           }
         }
@@ -8188,7 +8329,7 @@ async function activateOnce(nome, source = '', operator = '') {
         robeMeta[nome].closingReason = null;
         logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         logger.info('[WORKER][activateOnce] concluído', { nome, source });
-        if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
+        await _releaseOpenGrant('ok');
 
         return { ok: true };
       } catch (e) {
@@ -8214,7 +8355,7 @@ async function activateOnce(nome, source = '', operator = '') {
           try { await reportAction(nome, 'mil_action', `activation_hold_due_ram ${Math.round(ACTIVATE_RAM_HOLD_MS / 1000)}s (activateOnce)`); } catch {}
         }
         logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message || e }, e);
-        if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+        await _releaseOpenGrant('err');
         return { ok: false, error: e && e.message || String(e) };
       } finally {
         try { await connectLane.release(heavyNav); } catch {}

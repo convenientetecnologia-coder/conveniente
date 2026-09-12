@@ -158,6 +158,10 @@ assert.ok(/reapForeignCellEntries/.test(cluster) && /reapForeignCellEntries/.tes
 assert.ok(/leftoverCell/.test(cluster), "não troca de porta se a ocupante ainda é célula");
 assert.ok(apiSys.includes("listLiveCellPids") && apiSys.includes("want"), "GET /api/cells manda alive e want");
 assert.ok(html.includes("cells.want") && html.includes("ownerLines"), "painel mostra vivo/plano e dono no Encerrar");
+const worker = fs.readFileSync(path.join(ROOT, "scripts", "worker.js"), "utf8");
+assert.ok(worker.includes("detached_open_slot.lock.json") && worker.includes("activate_detached_open_fallback"), "open-all sem maestro precisa fallback conservador no worker");
+assert.ok(worker.includes("isDetachedCellWithoutMaestro") && worker.includes("_releaseOpenGrant") && worker.includes("slotResp = { ok: true, detached: true"), "worker precisa continuar abrindo sem maestro e liberar o slot depois");
+assert.ok(worker.includes("_isBulkOpen && isDetachedCellWithoutMaestro()"), "fallback detached deve valer só para open-all");
 
 const now = 1_700_000_000_000;
 const active = fileStore.neutralizeOpenAllAfterBoot(
