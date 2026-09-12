@@ -135,9 +135,33 @@ function Test-LoopAlive {
         $id = [int]((Get-Content -LiteralPath $lock -Raw).Trim())
         if ($id -le 0) { return $false }
         $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-        return [bool]$proc
+        if (-not $proc) { return $false }
+        $name = [string]$proc.ProcessName
+        if ($name -notmatch '^(powershell|pwsh)$') { return $false }
+        return $true
     } catch {}
     return $false
+}
+
+function Get-PorteiroLogAgeSec {
+    $log = Join-Path $destDir 'logs\porteiro.log'
+    if (-not (Test-Path -LiteralPath $log)) { return [int]::MaxValue }
+    try {
+        $last = $null
+        foreach ($line in @(Get-Content -LiteralPath $log -Tail 40 -ErrorAction SilentlyContinue)) {
+            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+                try { $last = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch {}
+            }
+        }
+        if (-not $last) { $last = (Get-Item -LiteralPath $log).LastWriteTime }
+        return [int][math]::Round(((Get-Date) - $last).TotalSeconds)
+    } catch {
+        return [int]::MaxValue
+    }
+}
+
+function Test-PorteiroLoopFresh {
+    return ((Get-PorteiroLogAgeSec) -le 600)
 }
 
 function Copy-KitSilent {
@@ -186,9 +210,15 @@ function Stop-LoopOnly {
 }
 
 function Start-LoopSilent {
-    if (Test-LoopAlive) {
+    $alive = [bool](Test-LoopAlive)
+    $fresh = [bool](Test-PorteiroLoopFresh)
+    if ($alive -and $fresh) {
         Write-StartLog 'loop_alive'
         return
+    }
+    if ($alive -and -not $fresh) {
+        Write-StartLog ('loop_stale_restart age=' + [string](Get-PorteiroLogAgeSec))
+        Stop-LoopOnly
     }
     & schtasks.exe /Run /TN 'ConvenientePorteiro' 1>$null 2>$null
     for ($i = 0; $i -lt 3; $i++) {

@@ -110,6 +110,8 @@ check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
 check("iniciar_script_exists", fs.existsSync(iniciarPs1));
 check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-ConvenienteUp/.test(iniciarTxt));
+check("iniciar_loop_fresh", /function Test-PorteiroLoopFresh/.test(iniciarTxt) && /loop_stale_restart/.test(iniciarTxt) && /powershell\|pwsh/.test(iniciarTxt));
+check("sync_log_fresh", /function runningLoopIsFresh/.test(syncTxt) && /logFresh === false/.test(syncTxt) && /logDead/.test(syncTxt));
 check("iniciar_swaps_version", /version_swap/.test(iniciarTxt) && /Stop-LoopOnly/.test(iniciarTxt));
 const iniciarTail = iniciarTxt.split("Write-StartLog 'click'")[1] || "";
 check("iniciar_node_before_loop", /Start-ConvenienteNode/.test(iniciarTail) && /Wait-ConvenienteUp/.test(iniciarTail) && iniciarTail.indexOf("Start-ConvenienteNode") < iniciarTail.indexOf("Start-LoopSilent") && iniciarTail.indexOf("Start-ConvenienteNode") < iniciarTail.indexOf("version_swap"));
@@ -186,6 +188,11 @@ check("plan_loop_dead_restarts", dead.copy === false && dead.restartLoop === tru
 
 const unknownLog = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: null });
 check("plan_unknown_log_does_not_kill_alive", unknownLog.copy === false && unknownLog.restartLoop === false && unknownLog.installTasks === false);
+
+const logDead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: true, taskRunning: true, tasksOk: true, runningNomem: true, logFresh: false });
+check("plan_stale_log_restarts", logDead.copy === false && logDead.restartLoop === true && logDead.installTasks === false);
+const ageNow = new Date(2026, 8, 11, 21, 10, 0).getTime();
+check("age_local_ts", sync.porteiroLogAgeSec("2026-09-11 21:00:00 [X] NODE=ok\n", ageNow) === 600);
 
 check("sync_windows_owns_loop", /schtasks\.exe/.test(syncTxt) && /\/Run/.test(syncTxt));
 check("sync_ends_task_before_run", /\/End/.test(syncTxt) && /ConvenientePorteiro/.test(syncTxt));

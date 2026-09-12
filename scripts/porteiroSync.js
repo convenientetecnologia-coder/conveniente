@@ -106,10 +106,44 @@ function runningLoopIsNomem() {
   return lastBootLineIsNomem(readTail(PORTEIRO_LOG, 120000));
 }
 
-function planEnsure({ destExists, destOld, hashEqual, taskRunning, tasksOk, runningNomem }) {
+function parsePorteiroLogTs(stamp) {
+  const m = String(stamp || "").match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return NaN;
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6])
+  ).getTime();
+}
+
+function porteiroLogAgeSec(text, nowMs) {
+  let last = null;
+  String(text || "").split(/\r?\n/).forEach((line) => {
+    const m = String(line || "").match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+    if (!m) return;
+    const t = parsePorteiroLogTs(m[1]);
+    if (Number.isFinite(t)) last = t;
+  });
+  if (last == null) return null;
+  const now = Number(nowMs) > 0 ? Number(nowMs) : Date.now();
+  return Math.round((now - last) / 1000);
+}
+
+function runningLoopIsFresh() {
+  if (!fs.existsSync(PORTEIRO_LOG)) return false;
+  const age = porteiroLogAgeSec(readTail(PORTEIRO_LOG, 120000), Date.now());
+  if (age == null) return false;
+  return age <= 600;
+}
+
+function planEnsure({ destExists, destOld, hashEqual, taskRunning, tasksOk, runningNomem, logFresh }) {
   const copy = !destExists || !!destOld || !hashEqual;
   const staleInMemory = runningNomem === false;
-  const restartLoop = copy || !taskRunning || staleInMemory;
+  const logDead = logFresh === false;
+  const restartLoop = copy || !taskRunning || staleInMemory || logDead;
   const installTasks = !tasksOk;
   const scrubOldKit = true;
   return { copy, restartLoop, installTasks, scrubOldKit };
@@ -333,9 +367,11 @@ function sync(opts) {
   let taskRunning = false;
   let tasksPresent = false;
   let runningNomem = false;
+  let logFresh = null;
   try { taskRunning = taskIsRunning(TASK_LOOP); } catch {}
   try { tasksPresent = tasksOk(); } catch {}
   try { runningNomem = runningLoopIsNomem(); } catch {}
+  try { logFresh = runningLoopIsFresh(); } catch {}
 
   const plan = planEnsure({
     destExists,
@@ -343,7 +379,8 @@ function sync(opts) {
     hashEqual,
     taskRunning,
     tasksOk: tasksPresent,
-    runningNomem
+    runningNomem,
+    logFresh
   });
   result.plan = plan;
 
@@ -408,6 +445,7 @@ function sync(opts) {
     tasksPresent,
     taskRunningBefore: taskRunning,
     runningNomemBefore: runningNomem,
+    logFreshBefore: logFresh,
     start: result.start || null
   });
   return result;
@@ -419,6 +457,8 @@ module.exports = {
   sourceIsNomem,
   destLooksLikeOldMemClean,
   lastBootLineIsNomem,
+  porteiroLogAgeSec,
+  runningLoopIsFresh,
   planEnsure,
   SRC_PS1,
   DEST_PS1,
