@@ -622,13 +622,37 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let warningINST = undefined;
   let erroMsgINST = undefined;
 
-  // 2) Tente overlay do workerClient (cluster), mas nunca trunque a lista do baseline!
-  // NOVO: Timeout aumentado para 15s (multi-node precisa de mais tempo)
+  // 2) Overlay: journal fresco no disco primeiro. get-status de 15s no F5 deixava o
+  // dashboard pintado em zero (HTML default) enquanto o index estava vivo.
   let overlayINST = null;
+  let staleSnapINST = null;
   try {
-    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000 });
-  } catch (e) {
-    warningINST = 'status temporarily unavailable';
+    const snap = fileStore.getStatusSnapshot();
+    let ageMs = Number.POSITIVE_INFINITY;
+    try {
+      const stFile = fs.statSync(fileStore.statusPath);
+      ageMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
+    } catch {}
+    if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
+      if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 20000) {
+        overlayINST = snap;
+      } else {
+        staleSnapINST = snap;
+        warningINST = 'status_journal_stale';
+      }
+    }
+  } catch {}
+  if (!overlayINST) {
+    try {
+      overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+    } catch (e) {
+      if (staleSnapINST && Array.isArray(staleSnapINST.perfis) && staleSnapINST.perfis.length > 0) {
+        overlayINST = staleSnapINST;
+        warningINST = 'status_journal_stale';
+      } else {
+        warningINST = 'status temporarily unavailable';
+      }
+    }
   }
   if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     // Overlay de status/metrics apenas nos que existem no baseline

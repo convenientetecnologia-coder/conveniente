@@ -52,6 +52,7 @@ assert.ok(html.includes("Encerrando workers..."), "botão Encerrar precisa mostr
 const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
 assert.ok(indexJs.includes("bootSrc === 'porteiro'") && indexJs.includes("maybePorterOpenAllOnBoot"), "porteiro no ciclo pergunta Abrir Tudo mesmo adotando célula");
+assert.ok(indexJs.includes("reason: 'human_iniciar'") && indexJs.includes("isStopWorkersHold"), "index no clique Iniciar reforça a trava e reconhece Encerrar");
 const bootIntent = require(path.join(ROOT, "scripts", "bootIntent.js"));
 assert.strictEqual(
   bootIntent.decideAutoOpenAll({
@@ -102,6 +103,55 @@ assert.strictEqual(
   false,
   "clique Iniciar não dispara Abrir Tudo nem com célula viva"
 );
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: true,
+    holdReason: "human_iniciar",
+    holdAt: Date.now(),
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  false,
+  "clique Iniciar barra Abrir Tudo do porteiro na corrida"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: true,
+    holdReason: "stop_workers:iniciar",
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  false,
+  "trava stop_workers: prefixo também barra o porteiro"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: true,
+    holdReason: "human_iniciar",
+    holdAt: Date.now() - (bootIntent.HUMAN_INICIAR_HOLD_MS + 1000),
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  true,
+  "trava de Iniciar expira e o porteiro volta a abrir no ciclo"
+);
+assert.strictEqual(
+  bootIntent.isHumanHoldBlockingOpenAll({
+    active: true,
+    reason: "human_iniciar",
+    at: Date.now()
+  }),
+  true,
+  "human_iniciar fresco barra"
+);
+assert.strictEqual(
+  bootIntent.isStopWorkersHold("stop_workers:iniciar"),
+  true,
+  "prefixo stop_workers conta como Encerrar"
+);
 assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de Encerrar mata célula, não solta");
 
 const life = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");
@@ -118,6 +168,8 @@ assert.ok(life.includes("function taskkillPids") && /\/T/.test(life.split("funct
 assert.ok(indexJs.includes("wipeStaleCellsBeforeListen") && indexJs.indexOf("function wipeStaleCellsBeforeListen") < indexJs.indexOf("app.listen"), "código novo mata célula antes do painel");
 assert.ok(!indexJs.includes("reciclando células depois do painel"), "Iniciar não espera o painel para matar célula velha");
 const iniciarPs1 = fs.readFileSync(path.join(ROOT, "scripts", "iniciarSistema.ps1"), "utf8");
+assert.ok(iniciarPs1.includes("Write-StartLog 'click'") && iniciarPs1.includes("Write-ConvenienteHumanHold 'human_iniciar'"), "clique Iniciar grava trava humana antes de subir o index");
+assert.ok(iniciarPs1.includes("human_hold_keep"), "Iniciar não apaga Encerrar workers");
 assert.ok(iniciarPs1.includes("cells_hard_stop before_launch") && iniciarPs1.includes("Stop-ConvenienteCells 'iniciar_stamp'"), "Iniciar com stamp mata célula antes de lançar o index");
 assert.ok(iniciarPs1.includes("Invoke-ConvenienteCellCli 'stop' $Reason"), "CLI de stop recebe o motivo (iniciar_stamp)");
 const reaper = fs.readFileSync(path.join(ROOT, "scripts", "orphanReaper.js"), "utf8");

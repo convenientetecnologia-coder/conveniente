@@ -89,7 +89,9 @@ function Test-ConvenienteNeedRestart {
 
 function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
     Write-StartLog ('cells_stop ' + $Reason)
-    if ($Reason -notmatch 'iniciar_stamp') {
+    if ($Reason -match 'iniciar_stamp') {
+        Write-ConvenienteHumanHold 'human_iniciar'
+    } else {
         Write-ConvenienteHumanHold ('stop_workers:' + $Reason)
     }
     [void](Invoke-ConvenienteCellCli 'stop' $Reason)
@@ -214,9 +216,37 @@ function Test-TaskPulseOk {
     $i = Get-TaskRunInfo 'ConvenientePorteiroPulse'
     if (-not $i.Exists) { return $false }
     if (-not $i.Enabled) { return $false }
-    if ($i.Arguments -notmatch 'manutencao\.ps1') { return $false }
-    if ($i.Arguments -notmatch '-Action pulse') { return $false }
-    return $true
+    if ($i.Arguments -match 'pulse_hidden\.vbs') { return $true }
+    if ($i.Arguments -match 'manutencao\.ps1' -and $i.Arguments -match '-Action pulse') { return $false }
+    return $false
+}
+
+function Copy-PulseHiddenSilent {
+    $src = 'C:\conveniente\porteiro\kit\pulse_hidden.vbs'
+    $dst = Join-Path $destDir 'pulse_hidden.vbs'
+    if (-not (Test-Path -LiteralPath $src)) {
+        Write-StartLog 'pulse_vbs_missing'
+        return $false
+    }
+    try {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        $need = $true
+        if (Test-Path -LiteralPath $dst) {
+            try {
+                $a = (Get-FileHash -LiteralPath $src -Algorithm MD5).Hash
+                $b = (Get-FileHash -LiteralPath $dst -Algorithm MD5).Hash
+                if ($a -eq $b) { $need = $false }
+            } catch {}
+        }
+        if ($need) {
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+            Write-StartLog 'pulse_vbs_copied'
+        }
+        return $true
+    } catch {
+        Write-StartLog ('pulse_vbs_copy_fail ' + $_.Exception.Message)
+        return $false
+    }
 }
 
 function Copy-KitSilent {
@@ -242,9 +272,11 @@ function Copy-KitSilent {
         if ($need) {
             Copy-Item -LiteralPath $kitSrc -Destination $destPs1 -Force
             Write-StartLog 'copied_dest'
+            [void](Copy-PulseHiddenSilent)
             return $true
         }
         Write-StartLog 'dest_already_kit'
+        [void](Copy-PulseHiddenSilent)
         return $false
     } catch {
         Write-StartLog ('copy_fail ' + $_.Exception.Message)
@@ -315,11 +347,16 @@ function Ensure-LogonTaskSilent {
 
 function Ensure-PulseTaskSilent {
     $info = Get-TaskRunInfo 'ConvenientePorteiroPulse'
+    if (-not (Copy-PulseHiddenSilent)) {
+        Write-StartLog 'task_pulse_no_vbs'
+        return
+    }
     if (Test-TaskPulseOk) {
         Write-StartLog 'task_pulse_ok'
         return
     }
-    $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $tr = "`"$wscript`" //B //Nologo C:\auto_vigia\pulse_hidden.vbs"
     & schtasks.exe /create /tn ConvenientePorteiroPulse /tr $tr /sc minute /mo 2 /f 1>$null 2>$null
     if ($LASTEXITCODE -eq 0) {
         if ($info.Exists) { Write-StartLog 'task_pulse_repaired' } else { Write-StartLog 'task_pulse_created' }
@@ -352,6 +389,17 @@ function Write-ConvenienteHumanHold([string]$Reason) {
     try {
         $dir = Split-Path -Parent $fp
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $prevReason = ''
+        if (Test-Path -LiteralPath $fp) {
+            try {
+                $prev = Get-Content -LiteralPath $fp -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($prev -and $prev.active -eq $true) { $prevReason = [string]$prev.reason }
+            } catch { $prevReason = '' }
+        }
+        if ($prevReason -eq 'stop_workers' -or $prevReason.StartsWith('stop_workers:')) {
+            Write-StartLog ('human_hold_keep ' + $prevReason)
+            return
+        }
         $obj = @{
             version = 1
             active  = $true
@@ -451,6 +499,7 @@ function Start-ConvenienteNode {
 }
 
 Write-StartLog 'click'
+Write-ConvenienteHumanHold 'human_iniciar'
 # Janela do Node primeiro. Kit/loop/tuning depois, sem esconder o clique.
 $code = Start-ConvenienteNode
 try {

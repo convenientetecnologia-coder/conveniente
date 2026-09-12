@@ -57,6 +57,13 @@ function readNodeStatusFile(idx) {
 
 const MAX_FILE_AGE_MS = parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10);
 
+function shouldApplyNodeStatusJournal({ liveChild = false, ageMs = Number.POSITIVE_INFINITY } = {}) {
+  const age = Number(ageMs);
+  const fresh = Number.isFinite(age) && age >= 0 && age <= MAX_FILE_AGE_MS;
+  if (fresh) return true;
+  return liveChild === true;
+}
+
 async function createCluster() {
   try { cellLifecycle.setCellsStopped(false); } catch {}
   const allPerfis = fileStore.loadPerfisJson() || [];
@@ -1266,10 +1273,10 @@ async function createCluster() {
       const warningParts = [];
       const missingIdx = [];
 
-      const applyPayload = (payload, source, i, ageMs) => {
+      const pushNodeDebug = (payload, source, i, ageMs, extra = null) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
         try {
-          nodesDebug.push({
+          nodesDebug.push(Object.assign({
             node: i + 1,
             source,
             ok: true,
@@ -1278,8 +1285,14 @@ async function createCluster() {
             buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
             controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
             shardSize: payload && payload._debug ? payload._debug.shardSize : null
-          });
+          }, extra || {}));
         } catch {}
+        return true;
+      };
+
+      const applyPayload = (payload, source, i, ageMs) => {
+        if (!payload || !Array.isArray(payload.perfis)) return false;
+        pushNodeDebug(payload, source, i, ageMs);
         for (const p of payload.perfis || []) {
           const dst = baseMap.get(p.nome);
           if (dst) Object.assign(dst, p);
@@ -1320,10 +1333,16 @@ async function createCluster() {
         const fb = readNodeStatusFile(i);
         if (fb && fb.json && Array.isArray(fb.json.perfis)) {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
-          applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
+          if (shouldApplyNodeStatusJournal({ liveChild, ageMs: fb.ageMs })) {
+            applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
+          } else {
+            pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: false });
+          }
           if (fb.ageMs > MAX_FILE_AGE_MS) {
-            warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
-            if (liveChild) missingIdx.push(i);
+            if (liveChild) {
+              warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
+              missingIdx.push(i);
+            }
           }
         } else if (liveChild) {
           missingIdx.push(i);
@@ -1643,4 +1662,4 @@ async function createCluster() {
   return { plan, children, sendWorkerCommand, kill, detach, beginStop, haltRespawn, resumeAfterStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
 }
 
-module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole };
+module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole, shouldApplyNodeStatusJournal };

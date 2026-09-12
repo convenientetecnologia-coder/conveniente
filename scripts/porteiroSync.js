@@ -31,7 +31,10 @@ const BEAT_FILE = path.join(AUTO_VIGIA, "porteiro.beat");
 const LOCK_FILE = path.join(AUTO_VIGIA, "porteiro.lock");
 const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
+const SRC_VBS = path.join(__dirname, "..", "porteiro", "kit", "pulse_hidden.vbs");
+const DEST_VBS = path.join(AUTO_VIGIA, "pulse_hidden.vbs");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+const WSCRIPT_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
 const TASK_LOOP = "ConvenientePorteiro";
 const TASK_PULSE = "ConvenientePorteiroPulse";
 const TASK_NET = "ConvenienteNetBoot";
@@ -263,7 +266,14 @@ function loopTaskOk() {
 }
 
 function pulseTaskOk() {
-  return taskLooksValid(TASK_PULSE, [/manutencao\.ps1/i, /-Action\s+pulse/i]);
+  return taskLooksValid(TASK_PULSE, [/pulse_hidden\.vbs/i]);
+}
+
+function copyPulseHidden() {
+  if (!fs.existsSync(SRC_VBS)) return false;
+  fs.mkdirSync(AUTO_VIGIA, { recursive: true });
+  fs.copyFileSync(SRC_VBS, DEST_VBS);
+  return true;
 }
 
 function tasksOk() {
@@ -296,9 +306,10 @@ function destHasPulseAction() {
 
 function ensurePulseTaskSilent() {
   if (!destHasPulseAction()) return { ok: false, existed: false, skipped: "dest_no_pulse" };
+  try { copyPulseHidden(); } catch {}
   const existed = taskExists(TASK_PULSE);
   if (pulseTaskOk()) return { ok: true, existed, repaired: false };
-  const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action pulse";
+  const tr = "\"" + WSCRIPT_EXE + "\" //B //Nologo C:\\auto_vigia\\pulse_hidden.vbs";
   try {
     const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_PULSE, "/tr", tr, "/sc", "minute", "/mo", "2", "/f"], {
       windowsHide: true,
@@ -515,6 +526,7 @@ function sync(opts) {
   if (plan.copy) {
     try {
       fs.copyFileSync(SRC_PS1, DEST_PS1);
+      try { copyPulseHidden(); } catch {}
     } catch (e) {
       result.action = "copy_failed";
       result.error = (e && e.message) || String(e);

@@ -47,6 +47,12 @@ check(
     clusterJs.includes("liveChild")
 );
 check(
+  "cluster_ignores_stale_orphan_journals",
+  clusterJs.includes("shouldApplyNodeStatusJournal") &&
+    clusterJs.includes("stale_ignored(") &&
+    /if \(fb\.ageMs > MAX_FILE_AGE_MS\) \{\s*if \(liveChild\)/.test(clusterJs)
+);
+check(
   "allowlist_has_server_event_bridge",
   allowJs.includes("server_event_bridge:")
 );

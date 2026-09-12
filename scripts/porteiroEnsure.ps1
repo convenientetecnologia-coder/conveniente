@@ -113,9 +113,9 @@ function Test-TaskPulseOk {
     $i = Get-TaskRunInfo $TaskPulse
     if (-not $i.Exists) { return $false }
     if (-not $i.Enabled) { return $false }
-    if ($i.Arguments -notmatch 'manutencao\.ps1') { return $false }
-    if ($i.Arguments -notmatch '-Action pulse') { return $false }
-    return $true
+    # Pulse certo = wscript pulse_hidden.vbs. powershell -Action pulse ainda pisca console.
+    if ($i.Arguments -match 'pulse_hidden\.vbs') { return $true }
+    return $false
 }
 
 function Test-LoopAlive {

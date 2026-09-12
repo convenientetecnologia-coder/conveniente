@@ -40,6 +40,7 @@ if (Test-Path (Join-Path $Dest 'porteiro.lock')) {
 
 Write-Host '[2] Instalando C:\auto_vigia\manutencao.ps1 ...'
 Copy-Item (Join-Path $Kit 'manutencao.ps1') (Join-Path $Dest 'manutencao.ps1') -Force
+Copy-Item (Join-Path $Kit 'pulse_hidden.vbs') (Join-Path $Dest 'pulse_hidden.vbs') -Force
 $hash = (Get-FileHash (Join-Path $Dest 'manutencao.ps1') -Algorithm MD5).Hash.Substring(0,8)
 Write-Host "  OK hash=$hash"
 
@@ -136,22 +137,23 @@ try {
 }
 
 $okPulse = $false
+$Wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 try {
-    $argPulse = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
-    $actionPulse = New-ScheduledTaskAction -Execute $PsExe -Argument $argPulse
+    $argPulse = '//B //Nologo C:\auto_vigia\pulse_hidden.vbs'
+    $actionPulse = New-ScheduledTaskAction -Execute $Wscript -Argument $argPulse
     $triggerPulse = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration ([TimeSpan]::FromDays(3650))
     $principalPulse = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
     $settingsPulse = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -StartWhenAvailable -DontStopOnIdleEnd
     Unregister-ScheduledTask -TaskName $TaskPulse -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     Register-ScheduledTask -TaskName $TaskPulse -Action $actionPulse -Trigger $triggerPulse -Principal $principalPulse -Settings $settingsPulse -Force -ErrorAction Stop | Out-Null
     $okPulse = $true
-    Write-Host "  OK $TaskPulse (a cada 2 min)"
+    Write-Host "  OK $TaskPulse (a cada 2 min, wscript)"
 } catch {
-    $trPulse = "$PsExe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
+    $trPulse = "`"$Wscript`" //B //Nologo C:\auto_vigia\pulse_hidden.vbs"
     & schtasks.exe /create /tn $TaskPulse /tr $trPulse /sc minute /mo 2 /f 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         $okPulse = $true
-        Write-Host "  OK $TaskPulse (schtasks)"
+        Write-Host "  OK $TaskPulse (schtasks wscript)"
     } else {
         Write-Host '  [!] Pulse 2 min: o clique Iniciar cria em silencio'
     }

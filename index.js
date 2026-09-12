@@ -4619,13 +4619,18 @@ function wipeStaleCellsBeforeListen() {
   let holdStopWorkers = false;
   try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
   try {
+    if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
+      require('./scripts/bootIntent.js').setHumanHold({ reason: 'human_iniciar', by: 'index_boot' });
+    }
+  } catch {}
+  try {
     const hold = require('./scripts/bootIntent.js').readHumanHold();
-    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+    holdStopWorkers = !!(hold && hold.active && require('./scripts/bootIntent.js').isStopWorkersHold(hold.reason));
   } catch {}
   if (codeStale) {
     try {
       if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
-        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
+        require('./scripts/bootIntent.js').setHumanHold({ reason: 'human_iniciar', by: 'index_boot' });
       }
     } catch {}
     try {
@@ -4744,7 +4749,7 @@ function wipeStaleCellsBeforeListen() {
     try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
     try {
       const hold = require('./scripts/bootIntent.js').readHumanHold();
-      holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+      holdStopWorkers = !!(hold && hold.active && require('./scripts/bootIntent.js').isStopWorkersHold(hold.reason));
     } catch {}
   }
   if (adoptingLiveCells) {
@@ -4876,7 +4881,7 @@ async function handleIndexConsoleStop(kind) {
   let holdStopWorkers = false;
   try {
     const hold = require('./scripts/bootIntent.js').readHumanHold();
-    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+    holdStopWorkers = !!(hold && hold.active && require('./scripts/bootIntent.js').isStopWorkersHold(hold.reason));
   } catch {}
   if (work.yes && !holdStopWorkers) {
     try { logger.info('[STOP] navegadores trabalhando — células ficam, só o index sai'); } catch {}

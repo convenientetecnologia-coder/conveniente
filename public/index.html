@@ -1206,16 +1206,16 @@
       return out.join('');
     }
     async function getServerConfig() {
-      const r = await fetch('/api/server-config').then(x => x.json()).catch(() => null);
+      const r = await fetchJsonTimeout('/api/server-config', 8000);
       if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_get_failed');
       return r;
     }
     async function saveServerConfig(payload, { applyNow = false } = {}) {
-      const r = await fetch('/api/server-config', {
+      const r = await fetchJsonTimeout('/api/server-config', 12000, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_server_config' },
         body: JSON.stringify({ ...(payload || {}), applyNow: !!applyNow })
-      }).then(x => x.json()).catch(() => null);
+      });
       if (!r || r.ok !== true || !r.config) {
         // A configuração pode ter sido persistida antes de uma etapa secundária
         // (ex.: desired/apply-now) falhar. Não reporte falso rollback ao operador.
@@ -2439,22 +2439,41 @@
       window.electronAPI.listPerfis = () => fetch('/api/perfis').then(r => r.json()).catch(() => null);
     }
 
+    let __reloadInflight = false;
+    let __lastStatusPaint = null;
+    let __lastPerfisPaint = null;
+    function fetchJsonTimeout(url, ms, init) {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), Math.max(1000, Number(ms) || 8000));
+      const opts = Object.assign({}, init || {}, { signal: ac.signal });
+      return fetch(url, opts)
+        .then((r) => r.json())
+        .catch(() => null)
+        .finally(() => { try { clearTimeout(t); } catch {} });
+    }
     async function safeGetStatus() {
       try {
         if (window.electronAPI && typeof window.electronAPI.getStatus === 'function') {
-          return await window.electronAPI.getStatus().catch(() => null);
+          const raced = await Promise.race([
+            window.electronAPI.getStatus().catch(() => null),
+            new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+          ]);
+          if (raced) return raced;
         }
       } catch {}
-      // fallback mínimo para browser
-      return await fetch('/api/status').then(r => r.json()).catch(() => null);
+      return await fetchJsonTimeout('/api/status', 8000);
     }
     async function safeListPerfis() {
       try {
         if (window.electronAPI && typeof window.electronAPI.listPerfis === 'function') {
-          return await window.electronAPI.listPerfis().catch(() => null);
+          const raced = await Promise.race([
+            window.electronAPI.listPerfis().catch(() => null),
+            new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+          ]);
+          if (raced) return raced;
         }
       } catch {}
-      return await fetch('/api/perfis').then(r => r.json()).catch(() => null);
+      return await fetchJsonTimeout('/api/perfis', 8000);
     }
     let __networkRotationState = null;
     function fmtNextRotation(ts, countdownSec) {
@@ -2515,11 +2534,23 @@
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
-      const [st, perfisResp, netRotate] = await Promise.all([
+      if (__reloadInflight) return;
+      __reloadInflight = true;
+      const [stFresh, perfisRespFresh, netRotate] = await Promise.all([
         safeGetStatus(),
         safeListPerfis(),
         fetch('/api/network-rotation/state').then(x => x.json()).catch(() => null)
       ]);
+      const st = (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length)
+        ? stFresh
+        : __lastStatusPaint;
+      const perfisResp = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
+        ? perfisRespFresh
+        : __lastPerfisPaint;
+      if (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length) __lastStatusPaint = stFresh;
+      if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
+      if (!st && !perfisResp) { __reloadInflight = false; return; }
+      try {
       if (netRotate && netRotate.ok === true && netRotate.state) {
         __networkRotationState = netRotate.state;
       }
@@ -3204,6 +3235,9 @@
         frag.appendChild(card);
       });
       lista.appendChild(frag);
+      } finally {
+        __reloadInflight = false;
+      }
     }
 
     // Nova Conta (chama o modal; o modal faz a criação com loading)
@@ -3564,7 +3598,6 @@
       const btn = document.getElementById('serverConfigBtn');
       if (!btn) return;
       btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
         showServerConfigModal();
       };
     })();

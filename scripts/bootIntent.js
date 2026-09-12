@@ -3,19 +3,23 @@
 /**
  * Trava humana (human_boot_hold.json) — só impede Abrir Tudo automático do porteiro.
  *
- * TRAVA (só este caso):
- * - Humano encerrou os workers (botão Encerrar workers, ou Iniciar reciclando célula velha no git pull)
+ * TRAVA:
+ * - Encerrar workers (reason=stop_workers) — vale até Abrir Tudo / adotar célula viva
+ * - Clique Iniciar Sistema (human_iniciar / iniciar_*) — vale 15 min
+ *   (cobre wait_index 180s + boot + corrida com AUTO_BOOT do porteiro)
  *
  * NÃO TRAVA:
- * - Ctrl+C no index (com navegador aberto as células ficam; sem navegador o index leva as células — sem trava)
+ * - Ctrl+C no index (células vivas ficam; sem navegador o index leva as células)
  * - Fechar Todos
- * - Iniciar / porteiro depois de uma queda, sem o humano ter encerrado workers
- * - Queda real (crash)
+ * - Queda real depois que a trava de Iniciar já expirou
  *
  * DESTRAVA:
- * - Abrir Tudo (clique, agenda 5-7h, ou porteiro no ciclo de trabalho)
+ * - Abrir Tudo (clique ou agenda 5-7h)
  * - Index adotou workers vivos (sistema já está aberto; trava velha morre)
+ * - human_iniciar: TTL 15 min (crash tarde ainda religa no ciclo)
  */
+
+const HUMAN_INICIAR_HOLD_MS = 15 * 60 * 1000;
 
 const fs = require('fs');
 const path = require('path');
@@ -54,11 +58,38 @@ function readHumanHold() {
   }
 }
 
+function isStopWorkersHold(reason) {
+  const r = String(reason || '');
+  return r === 'stop_workers' || r.startsWith('stop_workers:') || r === 'hold_unreadable';
+}
+
+function isHumanIniciarHold(reason) {
+  const r = String(reason || '');
+  return r === 'human_iniciar' || r === 'iniciar_recycle' || r === 'iniciar_stamp_stale' || /^iniciar_/.test(r);
+}
+
+function isHumanHoldBlockingOpenAll({ active, reason, at, nowTs: ts } = {}) {
+  if (active !== true) return false;
+  if (isStopWorkersHold(reason)) return true;
+  if (isHumanIniciarHold(reason)) {
+    const now = Number(ts) || Date.now();
+    const when = Number(at || 0) || 0;
+    if (!when) return true;
+    return (now - when) <= HUMAN_INICIAR_HOLD_MS;
+  }
+  return false;
+}
+
 function setHumanHold({ reason = 'human', by = 'unknown' } = {}) {
+  const prev = readHumanHold();
+  const nextReason = String(reason || 'human').slice(0, 80);
+  if (prev && prev.active === true && isStopWorkersHold(prev.reason) && !isStopWorkersHold(nextReason)) {
+    return prev;
+  }
   const row = {
     version: 1,
     active: true,
-    reason: String(reason || 'human').slice(0, 80),
+    reason: nextReason,
     by: String(by || 'unknown').slice(0, 120),
     at: nowTs()
   };
@@ -115,11 +146,19 @@ function decideAutoOpenAll({
   allCellsDead,
   humanHoldActive,
   holdReason,
+  holdAt,
+  nowTs: ts,
   workCycle
 } = {}) {
   if (String(bootSource || '') !== 'porteiro') return { yes: false, reason: 'boot_source_not_porteiro' };
-  const encerrar = humanHoldActive === true && String(holdReason || '') === 'stop_workers';
-  if (encerrar) return { yes: false, reason: 'human_hold' };
+  if (isHumanHoldBlockingOpenAll({
+    active: humanHoldActive === true,
+    reason: holdReason,
+    at: holdAt,
+    nowTs: ts
+  })) {
+    return { yes: false, reason: 'human_hold' };
+  }
   if (!workCycle || workCycle.inWorkCycle !== true) {
     return { yes: false, reason: (workCycle && workCycle.reason) ? String(workCycle.reason) : 'not_work_cycle' };
   }
@@ -173,6 +212,8 @@ async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
     allCellsDead: allCellsDead === true,
     humanHoldActive: !!(hold && hold.active),
     holdReason: hold && hold.reason ? String(hold.reason) : null,
+    holdAt: hold && hold.at ? hold.at : 0,
+    nowTs: nowTs(),
     workCycle: work
   });
   const snap = {
@@ -233,8 +274,12 @@ async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
 
 module.exports = {
   HOLD_PATH,
+  HUMAN_INICIAR_HOLD_MS,
   getBootSource,
   readHumanHold,
+  isStopWorkersHold,
+  isHumanIniciarHold,
+  isHumanHoldBlockingOpenAll,
   setHumanHold,
   clearHumanHold,
   isScheduledDailyWindowActor,

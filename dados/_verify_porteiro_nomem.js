@@ -105,7 +105,7 @@ check("iniciar_loop_silent", /Start-LoopSilent/.test(iniciarTxt) && /WindowStyle
 check("ensure_uac_same_process", /param\(\[switch\]\$ReturnOnly\)/.test(ensureTxt) && /function Invoke-PorteiroEnsureMain/.test(ensureTxt));
 check("ensure_inprocess_if_admin", /Test-IsAdmin/.test(ensureTxt) && /inprocess_admin/.test(ensureTxt));
 check("ensure_ready_needs_tasks_and_loop", /ConvenientePorteiro/.test(ensureTxt) && /ConvenientePorteiroPulse/.test(ensureTxt) && /ConvenienteNetBoot/.test(ensureTxt) && /Test-LoopAlive/.test(ensureTxt) && /Test-LoopFresh/.test(ensureTxt) && /Test-HashMatch/.test(ensureTxt));
-check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /Test-TaskPulseOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /-Action pulse/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
+check("ensure_task_checks_action", /Test-TaskLoopOk/.test(ensureTxt) && /Test-TaskPulseOk/.test(ensureTxt) && /-Action loop/.test(ensureTxt) && /pulse_hidden\.vbs/.test(ensureTxt) && /-Action netboot/.test(ensureTxt) && /Settings\.Enabled/.test(ensureTxt));
 check("ensure_arms_loop_without_uac", /Test-FilesAndTasksOk/.test(ensureTxt) && /Start-PorteiroLoopNow/.test(ensureTxt) && /schtasks\.exe \/Run/.test(ensureTxt) && /loop_armed_no_uac/.test(ensureTxt));
 check("ensure_install_exit_10", /OK installed_ready/.test(ensureTxt) && /OK loop_armed_no_uac/.test(ensureTxt) && (ensureTxt.match(/return 10/g) || []).length >= 2);
 check("ensure_does_not_kill_node", !/taskkill/i.test(ensureTxt) && !/-Action stop/.test(ensureTxt));
@@ -114,6 +114,15 @@ check("iniciar_already_up_skips", /already_up/.test(iniciarTxt) && /Test-Conveni
 check("iniciar_loop_fresh", /function Test-PorteiroLoopFresh/.test(iniciarTxt) && /loop_stale_restart/.test(iniciarTxt) && /powershell\|pwsh/.test(iniciarTxt) && /porteiro\.beat/.test(iniciarTxt) && !/NODE=/.test(iniciarTxt.split("function Get-PorteiroBeatAgeSec")[1] || ""));
 check("sync_log_fresh", /function runningLoopIsFresh/.test(syncTxt) && /loopHealthy/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && /loopProcessAlive/.test(syncTxt));
 check("kit_pulse", /function Do-Pulse/.test(kitTxt) && /pulse_kit_swap/.test(kitTxt) && /porteiro\.beat/.test(kitTxt) && /ConvenientePorteiroPulse/.test(instKitTxt));
+const pulseVbs = path.join(root, "porteiro", "kit", "pulse_hidden.vbs");
+const pulseVbsTxt = fs.existsSync(pulseVbs) ? fs.readFileSync(pulseVbs, "utf8") : "";
+check("pulse_hidden_vbs_exists", fs.existsSync(pulseVbs));
+check("pulse_hidden_vbs_run0", /WScript\.Shell/.test(pulseVbsTxt) && /\.Run /.test(pulseVbsTxt) && /, 0, True/.test(pulseVbsTxt) && /-Action pulse/.test(pulseVbsTxt));
+check("kit_pulse_copies_vbs", /function Copy-PulseHiddenIfChanged/.test(kitTxt) && /pulse_hidden\.vbs/.test(kitTxt) && /Copy-PulseHiddenIfChanged/.test(kitTxt.split("function Do-Pulse")[1] || ""));
+check("kit_pulse_repairs_task", /function Repair-PulseTaskHidden/.test(kitTxt) && /Repair-PulseTaskHidden/.test(kitTxt.split("function Do-Pulse")[1] || "") && /schtasks\.exe \/create/.test(kitTxt.split("function Repair-PulseTaskHidden")[1] || ""));
+check("install_pulse_uses_vbs", /pulse_hidden\.vbs/.test(instKitTxt) && /wscript\.exe/.test(instKitTxt));
+check("iniciar_pulse_uses_vbs", /pulse_hidden\.vbs/.test(iniciarTxt) && /function Copy-PulseHiddenSilent/.test(iniciarTxt) && /wscript\.exe/.test(iniciarTxt));
+check("sync_pulse_uses_vbs", /pulse_hidden\.vbs/.test(syncTxt) && /copyPulseHidden/.test(syncTxt) && /WSCRIPT_EXE/.test(syncTxt));
 check("kit_net_no_block_wait", /net_wait later/.test(kitTxt) && !/Start-Sleep -Seconds \$waitSec/.test(kitTxt));
 check("iniciar_pulse_task", /ConvenientePorteiroPulse/.test(iniciarTxt) && /function Ensure-PulseTaskSilent/.test(iniciarTxt) && /function Test-TaskPulseOk/.test(iniciarTxt));
 check("sync_pulse_task", /ConvenientePorteiroPulse/.test(syncTxt) && /ensurePulseTaskSilent/.test(syncTxt));

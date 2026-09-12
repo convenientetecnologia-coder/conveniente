@@ -903,6 +903,35 @@ function Copy-KitIfChanged {
     return $true
 }
 
+function Repair-PulseTaskHidden {
+    $vbs = Join-Path $Root 'pulse_hidden.vbs'
+    if (-not (Test-Path -LiteralPath $vbs)) { return $false }
+    $raw = ''
+    try { $raw = [string]((& schtasks.exe /Query /TN ConvenientePorteiroPulse /FO LIST /V 2>$null | Out-String)) } catch { $raw = '' }
+    if ($raw -match 'pulse_hidden\.vbs') { return $false }
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $tr = "`"$wscript`" //B //Nologo C:\auto_vigia\pulse_hidden.vbs"
+    & schtasks.exe /create /tn ConvenientePorteiroPulse /tr $tr /sc minute /mo 2 /f 1>$null 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Copy-PulseHiddenIfChanged {
+    $src = Join-Path $Conveniente 'porteiro\kit\pulse_hidden.vbs'
+    $dst = Join-Path $Root 'pulse_hidden.vbs'
+    if (-not (Test-Path -LiteralPath $src)) { return $false }
+    $need = $true
+    if (Test-Path -LiteralPath $dst) {
+        try {
+            $a = (Get-FileHash -LiteralPath $src -Algorithm MD5).Hash
+            $b = (Get-FileHash -LiteralPath $dst -Algorithm MD5).Hash
+            if ($a -eq $b) { $need = $false }
+        } catch {}
+    }
+    if (-not $need) { return $false }
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    return $true
+}
+
 function Start-LoopArmSidecar {
     # Dump/WerSvc fora do olho. Se travar, o loop ainda liga o index.
     try {
@@ -945,6 +974,8 @@ function Do-Pulse {
     # Windows. Sem index. Sem ler porteiro.log.
     # Kit mudou -> copia, mata, nasce. Processo morto/preso -> nasce.
     Ensure-Dirs
+    try { [void](Copy-PulseHiddenIfChanged) } catch {}
+    try { [void](Repair-PulseTaskHidden) } catch {}
     $swapped = $false
     try { $swapped = [bool](Copy-KitIfChanged) } catch { $swapped = $false }
     $alive = [bool](Test-LoopLockAlive)

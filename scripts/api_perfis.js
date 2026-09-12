@@ -288,25 +288,7 @@ module.exports = (app, workerClient, fileStore) => {
         try {
           const nextRenew = (wr.saved && wr.saved.marketplaceRenew) ? wr.saved.marketplaceRenew : null;
           if (nextRenew && marketplaceRenewConfigChanged(previousRenew, nextRenew)) {
-            if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
-              try {
-                renewReplanResult = await workerClient.sendWorkerCommand('renew-replan-all', {
-                  reason: 'ui_server_config_save',
-                  operator
-                }, { timeoutMs: 180000 });
-              } catch (eReplan) {
-                renewReplanResult = {
-                  ok: false,
-                  error: 'renew_replan_all_failed',
-                  details: (eReplan && eReplan.message) ? eReplan.message : String(eReplan)
-                };
-              }
-            } else {
-              renewReplanResult = {
-                ok: false,
-                error: 'worker_client_unavailable'
-              };
-            }
+            renewReplanResult = { ok: true, queued: true, reason: 'ui_server_config_save' };
             try {
               provisionAudit.append({
                 ts: Date.now(),
@@ -439,50 +421,57 @@ module.exports = (app, workerClient, fileStore) => {
       };
 
       const finish = async (result) => {
-        const robeV2WarmupResult = await tryWarmupV2();
-        const engineRolloverResult = await tryEngineRollover();
-        // Snapshot de config → CT (event-driven; não depende só do save ter mudado hash).
-        try {
-          const ctPush = require('./serverConfigCtPush.js');
-          if (ctPush && typeof ctPush.requestPush === 'function') {
-            ctPush.requestPush('ui_server_config_save');
-          }
-        } catch {}
-        try {
-          if (typeof global.__serverEventBridgeTick === 'function') {
-            setImmediate(() => {
-              try { global.__serverEventBridgeTick('config_save').catch(() => {}); } catch {}
-            });
-          }
-        } catch {}
-        return res.json({
+        res.json({
           ok: true,
           ...postWriteMeta,
           config: effectiveWithVirtusEngine,
-          applyNowResult: result || null,
+          applyNowResult: result || (applyNow ? { ok: true, queued: true } : null),
           renewReplanResult: renewReplanResult || null,
-          robeV2WarmupResult: robeV2WarmupResult || null,
-          engineRolloverResult: engineRolloverResult || null
+          robeV2WarmupResult: { queued: true },
+          engineRolloverResult: shouldEngineRollover ? { queued: true } : null,
+          sidecarQueued: true
+        });
+        setImmediate(() => {
+          Promise.resolve()
+            .then(async () => {
+              if (renewReplanResult && renewReplanResult.queued === true) {
+                try {
+                  if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
+                    await workerClient.sendWorkerCommand('renew-replan-all', {
+                      reason: 'ui_server_config_save',
+                      operator
+                    }, { timeoutMs: 180000 });
+                  }
+                } catch {}
+              }
+              try { await tryWarmupV2(); } catch {}
+              try { await tryEngineRollover(); } catch {}
+              if (applyNow) {
+                try {
+                  if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
+                    await workerClient.sendWorkerCommand('robe-replan-all', {
+                      reason: 'server_config_apply_now',
+                      operator
+                    }, { timeoutMs: 180000 });
+                  }
+                } catch {}
+              }
+              try {
+                const ctPush = require('./serverConfigCtPush.js');
+                if (ctPush && typeof ctPush.requestPush === 'function') {
+                  ctPush.requestPush('ui_server_config_save');
+                }
+              } catch {}
+              try {
+                if (typeof global.__serverEventBridgeTick === 'function') {
+                  global.__serverEventBridgeTick('config_save').catch(() => {});
+                }
+              } catch {}
+            })
+            .catch(() => {});
         });
       };
-      if (!applyNow) return finish(null);
-      if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') {
-        return res.json({ ok: false, error: 'worker_client_unavailable', ...postWriteMeta });
-      }
-      try {
-        const r = await workerClient.sendWorkerCommand('robe-replan-all', {
-          reason: 'server_config_apply_now',
-          operator
-        }, { timeoutMs: 180000 });
-        return finish(r || { ok: false, error: 'empty_replan_response' });
-      } catch (e) {
-        return res.json({
-          ok: false,
-          error: 'apply_now_failed',
-          details: (e && e.message) || String(e),
-          ...postWriteMeta
-        });
-      }
+      return finish(null);
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e), ...postWriteMeta });
     }
