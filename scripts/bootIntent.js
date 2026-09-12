@@ -45,7 +45,8 @@ function writeJsonAtomic(fp, obj) {
 function readHumanHold() {
   if (!fs.existsSync(HOLD_PATH)) return { active: false, missing: true };
   try {
-    const j = JSON.parse(String(fs.readFileSync(HOLD_PATH, 'utf8') || ''));
+    const raw = String(fs.readFileSync(HOLD_PATH, 'utf8') || '').replace(/^\uFEFF/, '');
+    const j = JSON.parse(raw);
     if (!j || typeof j !== 'object') return { active: true, reason: 'hold_unreadable' };
     return {
       active: j.active === true,

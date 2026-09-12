@@ -50,9 +50,11 @@ assert.ok(!/await workerClient\.kill/.test(stopFn), "Encerrar não pode matar o 
 assert.ok(html.includes("Encerrando workers..."), "botão Encerrar precisa mostrar Encerrando workers");
 
 const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
+const bootIntentSrc = fs.readFileSync(path.join(ROOT, "scripts", "bootIntent.js"), "utf8");
 assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
 assert.ok(indexJs.includes("bootSrc === 'porteiro'") && indexJs.includes("maybePorterOpenAllOnBoot"), "porteiro no ciclo pergunta Abrir Tudo mesmo adotando célula");
 assert.ok(indexJs.includes("reason: 'human_iniciar'") && indexJs.includes("isStopWorkersHold"), "index no clique Iniciar reforça a trava e reconhece Encerrar");
+assert.ok(bootIntentSrc.includes(".replace(/^\\uFEFF/, '')"), "bootIntent precisa aceitar BOM no human_boot_hold.json");
 const bootIntent = require(path.join(ROOT, "scripts", "bootIntent.js"));
 assert.strictEqual(
   bootIntent.decideAutoOpenAll({
@@ -169,6 +171,7 @@ assert.ok(indexJs.includes("wipeStaleCellsBeforeListen") && indexJs.indexOf("fun
 assert.ok(!indexJs.includes("reciclando células depois do painel"), "Iniciar não espera o painel para matar célula velha");
 const iniciarPs1 = fs.readFileSync(path.join(ROOT, "scripts", "iniciarSistema.ps1"), "utf8");
 assert.ok(iniciarPs1.includes("Write-StartLog 'click'") && iniciarPs1.includes("Write-ConvenienteHumanHold 'human_iniciar'"), "clique Iniciar grava trava humana antes de subir o index");
+assert.ok(/Set-Content -LiteralPath \$fp -Encoding ASCII/.test(iniciarPs1), "hold do Iniciar precisa ser ASCII sem BOM");
 assert.ok(iniciarPs1.includes("human_hold_keep"), "Iniciar não apaga Encerrar workers");
 assert.ok(iniciarPs1.includes("cells_hard_stop before_launch") && iniciarPs1.includes("Stop-ConvenienteCells 'iniciar_stamp'"), "Iniciar com stamp mata célula antes de lançar o index");
 assert.ok(iniciarPs1.includes("Invoke-ConvenienteCellCli 'stop' $Reason"), "CLI de stop recebe o motivo (iniciar_stamp)");

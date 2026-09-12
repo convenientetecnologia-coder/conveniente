@@ -2524,7 +2524,7 @@
     }
     async function reloadNetworkRotationState() {
       try {
-        const r = await fetch('/api/network-rotation/state').then(x => x.json()).catch(() => null);
+        const r = await fetchJsonTimeout('/api/network-rotation/state', 8000);
         if (r && r.ok === true && r.state) {
           __networkRotationState = r.state;
           paintNetworkRotationMetrics();
@@ -2539,7 +2539,7 @@
       const [stFresh, perfisRespFresh, netRotate] = await Promise.all([
         safeGetStatus(),
         safeListPerfis(),
-        fetch('/api/network-rotation/state').then(x => x.json()).catch(() => null)
+        fetchJsonTimeout('/api/network-rotation/state', 8000)
       ]);
       const st = (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length)
         ? stFresh

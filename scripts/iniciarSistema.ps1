@@ -407,7 +407,7 @@ function Write-ConvenienteHumanHold([string]$Reason) {
             by      = 'iniciar_sistema'
             at      = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         }
-        ($obj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $fp -Encoding UTF8
+        ($obj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $fp -Encoding ASCII
         Write-StartLog ('human_hold ' + $Reason)
     } catch {
         Write-StartLog ('human_hold_fail ' + $_.Exception.Message)
