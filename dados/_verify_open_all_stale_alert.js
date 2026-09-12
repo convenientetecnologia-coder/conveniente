@@ -55,7 +55,8 @@ assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de En
 
 const life = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");
 const killFn = life.split("function forceKillPid")[1] || "";
-assert.ok(/taskkill\.exe/.test(killFn) && /\/PID/.test(killFn) && !/\/T/.test(killFn.split("function")[0] || killFn), "Encerrar mata a célula sem /T (árvore do Chrome)");
+assert.ok(/taskkill\.exe/.test(killFn) && /\/PID/.test(killFn) && /pidExistsOnSystem/.test(life), "Encerrar só conta PID que o tasklist ainda vê");
+assert.ok(/reapAllConvenienteChrome/.test(life.split("function stopAllCells")[1] || "") && /for \(const pid of pids\) forceKillPid/.test(life), "Encerrar fecha Chrome antes de matar a célula");
 const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), "utf8");
 const begin = cluster.split("function beginStop")[1] || "";
 assert.ok(/deadHandled = true/.test(begin.slice(0, 500)), "beginStop marca célula morta pra não readotar");

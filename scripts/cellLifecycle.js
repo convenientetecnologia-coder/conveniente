@@ -118,9 +118,25 @@ let __cellEntryPids = [];
 let __nodeCmdAt = 0;
 let __nodeCmds = [];
 
+function pidExistsOnSystem(pid) {
+  const n = Math.floor(Number(pid) || 0);
+  if (!(n > 4)) return false;
+  const listed = silentExec('tasklist.exe', ['/FI', 'PID eq ' + n, '/FO', 'CSV', '/NH'], 2500);
+  const t = String(listed || '').trim();
+  if (!t) return false;
+  if (/nenhuma tarefa|no tasks are running/i.test(t)) return false;
+  return t.indexOf('"' + n + '"') >= 0;
+}
+
+function invalidatePidCaches() {
+  __cellEntryAt = 0;
+  __nodeCmdAt = 0;
+  try { cellRegistry.invalidateListenCache(); } catch {}
+}
+
 function forceKillPid(pid) {
   const n = Math.floor(Number(pid) || 0);
-  if (!n || n === process.pid || n <= 4) return;
+  if (!n || n === process.pid || n <= 4) return false;
   try {
     spawnSync('taskkill.exe', ['/F', '/PID', String(n)], {
       windowsHide: true,
@@ -128,10 +144,36 @@ function forceKillPid(pid) {
       stdio: ['ignore', 'ignore', 'ignore']
     });
   } catch {}
+  if (!pidExistsOnSystem(n)) {
+    invalidatePidCaches();
+    return true;
+  }
+  silentExec('wmic.exe', ['process', 'where', 'ProcessId=' + n, 'call', 'terminate'], 4000);
+  if (!pidExistsOnSystem(n)) {
+    invalidatePidCaches();
+    return true;
+  }
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  silentExec(ps, [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    "Stop-Process -Id " + n + " -Force -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process -Filter \"ProcessId=" + n + "\" -ErrorAction SilentlyContinue | Invoke-CimMethod -Name Terminate -ErrorAction SilentlyContinue | Out-Null"
+  ], 6000);
+  if (!pidExistsOnSystem(n)) {
+    invalidatePidCaches();
+    return true;
+  }
+  try {
+    spawnSync('taskkill.exe', ['/F', '/T', '/PID', String(n)], {
+      windowsHide: true,
+      timeout: 6000,
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+  } catch {}
   try { process.kill(n, 9); } catch {}
-  __cellEntryAt = 0;
-  __nodeCmdAt = 0;
-  try { cellRegistry.invalidateListenCache(); } catch {}
+  invalidatePidCaches();
+  return !pidExistsOnSystem(n);
 }
 
 function silentExec(file, args, timeoutMs) {
@@ -260,7 +302,7 @@ function listLiveCellPids() {
   }
   for (const pid of listCellEntryPids()) add(pid);
   for (const row of realCellListenRows()) add(row.pid);
-  return out;
+  return out.filter((pid) => pidExistsOnSystem(pid));
 }
 
 function wantedCellCount() {
@@ -433,7 +475,7 @@ function killListenUntilFree(timeoutMs) {
     const left = listLiveCellPids();
     if (!left.length) return { ok: true, left: [] };
     for (const pid of left) forceKillPid(pid);
-    sleepMs(80);
+    sleepMs(150);
   }
   const left = listLiveCellPids();
   return { ok: left.length === 0, left };
@@ -500,12 +542,12 @@ function stopAllCells({ reason = 'manual' } = {}) {
       owners
     });
   } catch {}
-  for (const pid of pids) forceKillPid(pid);
-  terminateCellEntriesByCmd();
   let chrome = { killed: 0, matched: 0 };
   try {
     chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
   } catch {}
+  for (const pid of pids) forceKillPid(pid);
+  terminateCellEntriesByCmd();
   let freed = killListenUntilFree(listen1);
   if (!freed.ok) {
     terminateCellEntriesByCmd();
@@ -518,11 +560,12 @@ function stopAllCells({ reason = 'manual' } = {}) {
   const stillListen = Array.isArray(freed.left) ? freed.left : realCellListenRows();
   const entryLeft = listLiveCellPids();
   const ok = entryLeft.length === 0;
-  const ownersAfter = listListenOwners(32);
+  const ownersAfter = listListenOwners(32).filter((o) => o && pidExistsOnSystem(o.pid));
   try { neutralizeWorkerStatusJournals(why); } catch {}
   const reg = cellRegistry.read();
   reg.cells = [];
   cellRegistry.write(reg);
+  const want = wantedCellCount();
   return {
     ok,
     error: ok
@@ -536,6 +579,7 @@ function stopAllCells({ reason = 'manual' } = {}) {
     requested: pids.length,
     forced: pids.length,
     alive: entryLeft.length,
+    want,
     listenLeft: stillListen.length,
     chromeKilled: chrome && chrome.killed != null ? chrome.killed : 0,
     pids,

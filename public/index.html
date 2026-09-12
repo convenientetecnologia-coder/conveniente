@@ -3616,6 +3616,15 @@
               : (String((r && r.error) || (r ? 'nao_encerrou_tudo' : 'sem_resposta_do_index')) + (ownerLines ? ('\n' + ownerLines) : '')),
             tone: r && r.ok ? 'good' : 'bad'
           });
+          try {
+            const el = document.getElementById('mCells');
+            if (el && r && r.ok !== undefined) {
+              const want = Number(r.want || 0);
+              const alive = Number(r.alive || 0);
+              if (want > 0) el.textContent = String(alive) + '/' + String(want);
+            }
+          } catch {}
+          try { if (typeof updateSysMetrics === 'function') updateSysMetrics(); } catch {}
           try { if (typeof reloadPerfis === 'function') reloadPerfis(); } catch {}
         } finally {
           btn.disabled = false;
