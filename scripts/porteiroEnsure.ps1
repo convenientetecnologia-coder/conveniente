@@ -258,7 +258,7 @@ function Invoke-PorteiroEnsureMain {
     }
 
     if (-not (Test-Path -LiteralPath $Installer)) {
-        Write-Host '[ERRO] C:\conveniente\instalar_porteiro.ps1 ausente. Dê git pull no Conveniente.'
+        Write-Host '[ERRO] C:\conveniente\instalar_porteiro.ps1 ausente. De git pull no Conveniente.'
         Write-EnsureLog 'FAIL installer_missing'
         return 1
     }

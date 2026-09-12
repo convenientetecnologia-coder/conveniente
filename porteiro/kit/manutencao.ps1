@@ -124,7 +124,7 @@ function Get-ListenPid([int]$Port) {
 }
 
 function Test-Port8088 {
-    # Index vivo = só LISTEN na 8088. Sem WMI. Célula não conta.
+    # Index vivo = so LISTEN na 8088. Sem WMI. Celula nao conta.
     return ((Get-ListenPid $PanelPort) -gt 0)
 }
 
@@ -137,7 +137,7 @@ function Get-ChromeCount {
 function Get-SystemState {
     param([switch]$Lite)
     # PRETO NO BRANCO: index ligado = 8088 em LISTEN. Ponto.
-    # Célula viva, chrome aberto, node.exe sobrando — não são o index.
+    # Celula viva, chrome aberto, node.exe sobrando - nao sao o index.
     # Lite: sem contar chrome (loop a cada 30s; 90+ chrome trava a VM).
     $port = Test-Port8088
     $nodes = Get-NodeCount
@@ -696,14 +696,14 @@ function Do-Start {
     $st = Get-SystemState -Lite
     if ($st -and $st.Up) {
         Clear-IndexStartLock
-        Write-Host "JA LIGADO why=$($st.Why) port8088=$($st.Port) — nao subi de novo (celula nao conta)"
+        Write-Host "JA LIGADO why=$($st.Why) port8088=$($st.Port) - nao subi de novo (celula nao conta)"
         Write-Log "$Reason start skipped already_up=$($st.Why) index_only"
         return
     }
 
     $hosts = [int](Count-ConvenienteNodeHosts)
     if ($hosts -gt 0) {
-        Write-Host "JA TEM JANELA Conveniente_Node n=$hosts — nao mato, nao subi de novo"
+        Write-Host "JA TEM JANELA Conveniente_Node n=$hosts - nao mato, nao subi de novo"
         Write-Log "$Reason start skipped host_alive n=$hosts"
         return
     }
@@ -716,7 +716,7 @@ function Do-Start {
     $st2 = Get-SystemState -Lite
     if ($st2 -and $st2.Up) {
         Clear-IndexStartLock
-        Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) — nao subi de novo (celula nao conta)"
+        Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) - nao subi de novo (celula nao conta)"
         Write-Log "$Reason start skipped already_up2=$($st2.Why) index_only"
         return
     }
@@ -943,7 +943,7 @@ function Start-LoopProcess {
 
 function Do-Pulse {
     # Windows. Sem index. Sem ler porteiro.log.
-    # Kit mudou → copia, mata, nasce. Processo morto/preso → nasce.
+    # Kit mudou -> copia, mata, nasce. Processo morto/preso -> nasce.
     Ensure-Dirs
     $swapped = $false
     try { $swapped = [bool](Copy-KitIfChanged) } catch { $swapped = $false }
