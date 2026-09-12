@@ -2532,6 +2532,19 @@
       } catch {}
     }
 
+    function paintTopSummary(perfisLike, robeQueueLike) {
+      const perfis = Array.isArray(perfisLike) ? perfisLike : [];
+      const robeQueue = Array.isArray(robeQueueLike) ? robeQueueLike : [];
+      const totalEl = document.getElementById('mTotal');
+      const ativosEl = document.getElementById('mAtivos');
+      const trabEl = document.getElementById('mTrabalhando');
+      const filaEl = document.getElementById('mFila');
+      if (totalEl) totalEl.textContent = String(perfis.length);
+      if (ativosEl) ativosEl.textContent = String(perfis.filter(p => p && p.active).length);
+      if (trabEl) trabEl.textContent = String(perfis.filter(p => p && p.trabalhando).length);
+      if (filaEl) filaEl.textContent = String(robeQueue.length);
+    }
+
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
       if (__reloadInflight) return;
@@ -2550,6 +2563,10 @@
       if (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length) __lastStatusPaint = stFresh;
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
       if (!st && !perfisResp) { __reloadInflight = false; return; }
+      const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
+      const earlyPerfis = (Array.isArray(st?.perfis) && st.perfis.length) ? st.perfis : basePerfis;
+      const earlyRobeQueue = Array.isArray(st?.robeQueue) ? st.robeQueue : [];
+      try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
       try {
       if (netRotate && netRotate.ok === true && netRotate.state) {
         __networkRotationState = netRotate.state;
@@ -2644,7 +2661,6 @@
           setGlobalActionButtonsDisabled(false);
         }
       } catch {}
-      const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
       const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
         active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
         ramMB: null, cpuPercent: null, numPages: null,
@@ -2732,10 +2748,7 @@
       }
 
       // Metrics
-      document.getElementById('mTotal').textContent = String(perfis.length);
-      document.getElementById('mAtivos').textContent = String(perfis.filter(p => p.active).length);
-      document.getElementById('mTrabalhando').textContent = String(perfis.filter(p => p.trabalhando).length);
-      document.getElementById('mFila').textContent = String(robeQueue.length);
+      paintTopSummary(perfis, robeQueue);
 
       // Contagens agregadas
       // Login requerido (AGREGADO): soma de subtipos do guarda-chuva loginRequired (captcha/login/session/2fa/identity/consent/unknown)
@@ -3235,6 +3248,9 @@
         frag.appendChild(card);
       });
       lista.appendChild(frag);
+      } catch (e) {
+        try { console.error('[reloadPerfis] fail', e && e.stack || e); } catch {}
+        try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
       } finally {
         __reloadInflight = false;
       }

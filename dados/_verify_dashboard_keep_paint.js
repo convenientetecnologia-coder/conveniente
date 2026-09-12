@@ -22,6 +22,7 @@ check("html_network_rotation_timeout", (html.match(/fetchJsonTimeout\('\/api\/ne
 check("html_keep_last_paint", /__lastStatusPaint/.test(html) && /__lastPerfisPaint/.test(html) && /__reloadInflight/.test(html));
 check("html_inflight_finally", /finally \{\s*__reloadInflight = false;/.test(html));
 check("html_no_zero_without_cache", /if \(!st && !perfisResp\) \{ __reloadInflight = false; return; \}/.test(html));
+check("html_top_summary_early_paint", /function paintTopSummary/.test(html) && /paintTopSummary\(earlyPerfis, earlyRobeQueue\)/.test(html) && /console\.error\('\[reloadPerfis\] fail'/.test(html));
 check("api_journal_before_rpc", /getStatusSnapshot\(\)/.test(api) && /status_journal_stale/.test(api) && /dashboard pintado em zero/.test(api));
 check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
 check("api_stale_journal_fallback_only_after_rpc", /let staleSnapINST = null;/.test(api) && /overlayINST = await workerClient\.sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000 \}\);/.test(api) && /overlayINST = staleSnapINST;/.test(api));
