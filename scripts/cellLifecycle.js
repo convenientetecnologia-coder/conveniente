@@ -653,7 +653,12 @@ if (require.main === module) {
     process.stdout.write(JSON.stringify(r));
     process.exit(r.ok ? 0 : 1);
   }
-  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|need-restart|stop\n');
+  if (arg === 'reap-chrome') {
+    const r = require('./orphanReaper.js').reapAllConvenienteChrome(String(process.argv[3] || 'cli'));
+    process.stdout.write(JSON.stringify(r));
+    process.exit(0);
+  }
+  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|need-restart|stop|reap-chrome\n');
   process.exit(2);
 }
 

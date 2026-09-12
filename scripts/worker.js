@@ -29147,6 +29147,17 @@ async function gracefulShutdown(reason) {
       });
     } catch {}
     try { robeQueue.clear(); } catch {}
+    try {
+      if (global.__deltaCityCollectorRuntimePromise) {
+        const cityMod = require('./deltaCityCollector.js');
+        if (typeof cityMod.shutdownDeltaCityCollector === 'function') {
+          await Promise.race([
+            cityMod.shutdownDeltaCityCollector(),
+            new Promise((resolve) => setTimeout(resolve, 8000))
+          ]);
+        }
+      }
+    } catch {}
     const shutdownEntries = Array.from(controllers.entries());
     for (const [, ctrl] of shutdownEntries) {
       try { if (ctrl) ctrl.deltaCdpClosing = true; } catch {}

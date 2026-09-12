@@ -16,6 +16,8 @@ const logger = require("./logger.js");
 const provisionAudit = require("./provisionAudit.js");
 
 const DADOS = path.join(__dirname, "..", "dados");
+const CITY_COLLECTOR_CHROME_FLAG = "--conveniente-city-collector";
+const CITY_COLLECTOR_PID_BASENAME = "conveniente-collector.pid";
 const ORPHAN_REAP_CLOUDFLARED_MIN_MS = Math.max(
   10_000,
   Math.min(10 * 60 * 1000, Number(process.env.CONVENIENTE_ORPHAN_REAP_CLOUDFLARED_MIN_MS || 60_000) || 60_000)
@@ -155,7 +157,8 @@ function fillChromeCache() {
     ], 3000)));
   }
   const missingCmd = !rows.length || rows.every((r) => !r.cmd);
-  if (missingCmd && process.platform === "win32" && images.length) {
+  const someMissingCmd = rows.some((r) => !r.cmd);
+  if ((missingCmd || someMissingCmd) && process.platform === "win32" && images.length) {
     const ps = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const filter = images.map((n) => "Name='" + String(n).replace(/'/g, "") + "'").join(" or ");
     const raw = silentExec(ps, [
@@ -173,7 +176,19 @@ function fillChromeCache() {
         if (pid > 0) parsed.push({ pid, cmd: String((p && p.CommandLine) || "") });
       }
     } catch {}
-    if (parsed.length) rows = parsed;
+    if (parsed.length) {
+      if (missingCmd) {
+        rows = parsed;
+      } else {
+        const byPid = new Map();
+        for (const r of rows) byPid.set(r.pid, r);
+        for (const r of parsed) {
+          const prev = byPid.get(r.pid);
+          if (!prev || (r.cmd && (!prev.cmd || r.cmd.length > prev.cmd.length))) byPid.set(r.pid, r);
+        }
+        rows = Array.from(byPid.values());
+      }
+    }
   }
   __chromeCache = { at: Date.now(), images, rows };
   return __chromeCache;
@@ -398,6 +413,97 @@ function collectCityCollectorDir(shardIdx) {
   return path.join(DADOS, "city-collector-shards", "w" + String(i + 1));
 }
 
+function isCityCollectorCmd(cmd) {
+  const n = normalizePathForCompare(cmd);
+  if (!n) return false;
+  return n.indexOf("city-collector-shards") >= 0
+    || n.indexOf("conveniente-city-collector") >= 0;
+}
+
+function isConvenienteChromeCmd(cmd) {
+  const n = normalizePathForCompare(cmd);
+  if (!n) return false;
+  return n.indexOf("user data/conveniente") >= 0 || isCityCollectorCmd(n);
+}
+
+function cityCollectorPidPath(userDataDir) {
+  const dir = String(userDataDir || "").trim();
+  if (!dir) return "";
+  return path.join(dir, CITY_COLLECTOR_PID_BASENAME);
+}
+
+function writeCityCollectorPid(userDataDir, pid) {
+  const fp = cityCollectorPidPath(userDataDir);
+  const n = Math.floor(Number(pid) || 0);
+  if (!fp || !(n > 4)) return false;
+  try {
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    fs.writeFileSync(fp, String(n), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readCityCollectorPid(userDataDir) {
+  const fp = cityCollectorPidPath(userDataDir);
+  if (!fp) return 0;
+  try {
+    const n = Math.floor(Number(String(fs.readFileSync(fp, "utf8") || "").replace(/^\uFEFF/, "").trim()) || 0);
+    return n > 4 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function clearCityCollectorPid(userDataDir) {
+  const fp = cityCollectorPidPath(userDataDir);
+  if (!fp) return false;
+  try {
+    if (fs.existsSync(fp)) fs.unlinkSync(fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function listCityCollectorDirs() {
+  const dirs = [];
+  const seen = new Set();
+  function add(dir) {
+    const d = String(dir || "").trim();
+    if (!d) return;
+    const key = normalizePathForCompare(d).replace(/\/+$/g, "");
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    dirs.push(d);
+  }
+  add(path.join(DADOS, "city-collector-shards", "master"));
+  for (let i = 0; i < 16; i += 1) add(collectCityCollectorDir(i));
+  try {
+    const shards = path.join(DADOS, "city-collector-shards");
+    if (fs.existsSync(shards)) {
+      for (const ent of fs.readdirSync(shards, { withFileTypes: true })) {
+        if (ent && ent.isDirectory()) add(path.join(shards, ent.name));
+      }
+    }
+  } catch {}
+  return dirs;
+}
+
+function collectCityCollectorJournalPids() {
+  const pids = [];
+  const seen = new Set();
+  for (const dir of listCityCollectorDirs()) {
+    const n = readCityCollectorPid(dir);
+    if (n > 4 && !seen.has(n)) {
+      seen.add(n);
+      pids.push(n);
+    }
+  }
+  return pids;
+}
+
 function collectAllProfileDirs() {
   const dirs = collectDirsForNames((fileStore.loadPerfisJson() || []).map((p) => p && p.nome).filter(Boolean));
   try {
@@ -443,7 +549,12 @@ function reapShard({ names, shardIdx, reason }) {
   if (!reapEnabled()) return { matched: 0, killed: 0, skipped: true };
   const dirs = collectDirsForNames(names);
   const city = collectCityCollectorDir(shardIdx);
-  if (city) dirs.push(city);
+  if (city) {
+    dirs.push(city);
+    const journalPid = readCityCollectorPid(city);
+    if (journalPid > 4) taskkillPids([journalPid]);
+    try { clearCityCollectorPid(city); } catch {}
+  }
   return reapChromeDirs(dirs, reason || "worker_drop");
 }
 
@@ -451,9 +562,7 @@ function countConvenienteChrome() {
   try {
     let n = 0;
     for (const pr of listChromeProcessesWin()) {
-      const cmd = normalizePathForCompare(pr.cmd);
-      if (!cmd) continue;
-      if (cmd.indexOf("user data/conveniente") >= 0 || cmd.indexOf("city-collector-shards") >= 0) n += 1;
+      if (isConvenienteChromeCmd(pr.cmd)) n += 1;
     }
     return n;
   } catch {
@@ -465,37 +574,74 @@ function killChromeByConvenienteHint() {
   const procs = listChromeProcessesWin();
   const toKill = new Set();
   for (const pr of procs) {
-    const cmd = normalizePathForCompare(pr.cmd);
-    if (!cmd) continue;
-    if (
-      cmd.indexOf("user data/conveniente") >= 0 ||
-      cmd.indexOf("city-collector-shards") >= 0
-    ) {
-      toKill.add(pr.pid);
-    }
+    if (isConvenienteChromeCmd(pr.cmd)) toKill.add(pr.pid);
   }
   const pidList = Array.from(toKill);
   const ok = taskkillPids(pidList);
   return { matched: toKill.size, killed: ok ? toKill.size : 0, listed: procs.length };
 }
 
+function reapCityCollectorChrome(reason) {
+  if (!reapEnabled()) return { matched: 0, killed: 0, listed: 0, skipped: true };
+  const journalPids = collectCityCollectorJournalPids();
+  if (journalPids.length) taskkillPids(journalPids);
+  const dirs = listCityCollectorDirs();
+  const byDir = killChromeMatchingDirs(dirs);
+  invalidateChromeListCache();
+  const hintPids = [];
+  for (const pr of listChromeProcessesWin()) {
+    if (isCityCollectorCmd(pr.cmd)) hintPids.push(pr.pid);
+  }
+  if (hintPids.length) taskkillPids(hintPids);
+  for (const dir of dirs) {
+    try { clearCityCollectorPid(dir); } catch {}
+  }
+  const matched = (journalPids.length || 0) + (byDir.matched || 0) + hintPids.length;
+  const killed = (journalPids.length || 0) + (byDir.killed || 0) + hintPids.length;
+  try {
+    provisionAudit.append({
+      event: "orphan_reap_city_collector",
+      reason: clip(reason, 48),
+      dirs: dirs.length,
+      journal: journalPids.length,
+      matched,
+      killed
+    });
+  } catch {}
+  life("orphan_reap_city_collector", { reason: clip(reason, 48), killed, matched, journal: journalPids.length });
+  try {
+    if (killed > 0) logger.warn("[ORPHAN] Chrome de coleta de cidade removido", { reason, killed, matched, journal: journalPids.length });
+  } catch {}
+  return { matched, killed, listed: byDir.listed || 0, journal: journalPids.length, skipped: false };
+}
+
 function reapAllConvenienteChrome(reason) {
+  const why = clip(reason || "index_boot_start_closed", 48);
+  const city = reapCityCollectorChrome(why);
+  const dirs = collectAllProfileDirs();
+  const byDir = reapEnabled() ? killChromeMatchingDirs(dirs) : { matched: 0, killed: 0, listed: 0, skipped: true };
+  invalidateChromeListCache();
   const loose = killChromeByConvenienteHint();
-  life("orphan_reap_chrome", { reason: clip(reason || "index_boot_start_closed", 48), killed: loose.killed, matched: loose.matched });
+  const matched = (city.matched || 0) + (byDir.matched || 0) + (loose.matched || 0);
+  const killed = (city.killed || 0) + (byDir.killed || 0) + (loose.killed || 0);
+  const listed = Math.max(city.listed || 0, byDir.listed || 0, loose.listed || 0);
+  life("orphan_reap_chrome", { reason: why, killed, matched, city: city.killed || 0 });
   try {
     provisionAudit.append({
       event: "orphan_reap_chrome",
-      reason: clip(reason || "index_boot_start_closed", 48),
-      dirs: 0,
-      matched: loose.matched,
-      killed: loose.killed,
-      listed: loose.listed
+      reason: why,
+      dirs: Array.isArray(dirs) ? dirs.length : 0,
+      matched,
+      killed,
+      listed,
+      cityKilled: city.killed || 0
     });
   } catch {}
   return {
-    matched: loose.matched || 0,
-    killed: loose.killed || 0,
-    listed: loose.listed || 0,
+    matched,
+    killed,
+    listed,
+    cityKilled: city.killed || 0,
     skipped: false
   };
 }
@@ -509,11 +655,32 @@ function reapOnIndexBoot({ startClosed = true } = {}) {
 }
 
 module.exports = {
+  CITY_COLLECTOR_CHROME_FLAG,
+  CITY_COLLECTOR_PID_BASENAME,
   reapShard,
   reapOnIndexBoot,
   reapCloudflaredOrphans,
   reapAllConvenienteChrome,
+  reapCityCollectorChrome,
   countConvenienteChrome,
   anyChromeImage,
-  resolveUserDataDir
+  resolveUserDataDir,
+  isCityCollectorCmd,
+  isConvenienteChromeCmd,
+  writeCityCollectorPid,
+  readCityCollectorPid,
+  clearCityCollectorPid,
+  listCityCollectorDirs,
+  collectCityCollectorJournalPids
 };
+
+if (require.main === module) {
+  const arg = String(process.argv[2] || "").trim();
+  if (arg === "reap-all" || arg === "reap-chrome") {
+    const r = reapAllConvenienteChrome(String(process.argv[3] || "cli"));
+    process.stdout.write(JSON.stringify(r));
+    process.exit(0);
+  }
+  process.stderr.write("usage: orphanReaper.js reap-all [reason]\n");
+  process.exit(2);
+}

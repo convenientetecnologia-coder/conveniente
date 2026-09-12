@@ -1609,6 +1609,7 @@ async function createCollectorRuntime() {
     page = null;
     browserPid = null;
     tabGuardAttached = false;
+    try { require("./orphanReaper.js").clearCityCollectorPid(userDataDir); } catch (_) {}
     launchGeneration += 1;
     log(`collector browser invalidado reason=${why} gen=${launchGeneration}`);
     if (reclaim) {
@@ -1637,6 +1638,7 @@ async function createCollectorRuntime() {
           executablePath,
           userDataDir,
           args: [
+            "--conveniente-city-collector",
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
@@ -1674,6 +1676,9 @@ async function createCollectorRuntime() {
     } catch {
       browserPid = null;
     }
+    try {
+      if (browserPid) require("./orphanReaper.js").writeCityCollectorPid(userDataDir, browserPid);
+    } catch (_) {}
     const pages = await browser.pages().catch(() => []);
     page = pages[0] || (await browser.newPage());
     await page.setDefaultTimeout(
@@ -2116,8 +2121,37 @@ async function getDeltaCityCollector() {
   return global.__deltaCityCollectorRuntimePromise;
 }
 
+async function shutdownDeltaCityCollector() {
+  const pending = global.__deltaCityCollectorRuntimePromise;
+  if (!pending) {
+    try {
+      const dir = resolveCityCollectorUserDataDir();
+      killZombieChromeForUserDataDir(dir);
+      try { require("./orphanReaper.js").clearCityCollectorPid(dir); } catch (_) {}
+    } catch (_) {}
+    return { ok: true, skippedRuntime: true };
+  }
+  try {
+    const rt = await pending;
+    if (rt && typeof rt.shutdown === "function") {
+      await rt.shutdown();
+    }
+    return { ok: true };
+  } catch (e) {
+    try {
+      const dir = resolveCityCollectorUserDataDir();
+      killZombieChromeForUserDataDir(dir);
+      try { require("./orphanReaper.js").clearCityCollectorPid(dir); } catch (_) {}
+    } catch (_) {}
+    return { ok: false, error: String((e && e.message) || e).slice(0, 180) };
+  } finally {
+    global.__deltaCityCollectorRuntimePromise = null;
+  }
+}
+
 module.exports = {
   getDeltaCityCollector,
+  shutdownDeltaCityCollector,
   resolveCityCollectorUserDataDir,
   extractCityFromLocationAnchorText,
   normalizeCityUfLabel,

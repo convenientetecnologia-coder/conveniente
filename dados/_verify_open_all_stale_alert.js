@@ -175,6 +175,9 @@ assert.ok(/Set-Content -LiteralPath \$fp -Encoding ASCII/.test(iniciarPs1), "hol
 assert.ok(iniciarPs1.includes("human_hold_keep"), "Iniciar não apaga Encerrar workers");
 assert.ok(iniciarPs1.includes("cells_hard_stop before_launch") && iniciarPs1.includes("Stop-ConvenienteCells 'iniciar_stamp'"), "Iniciar com stamp mata célula antes de lançar o index");
 assert.ok(iniciarPs1.includes("Invoke-ConvenienteCellCli 'stop' $Reason"), "CLI de stop recebe o motivo (iniciar_stamp)");
+assert.ok(iniciarPs1.includes("Stop-ConvenienteCityCollectorChrome") && iniciarPs1.includes("orphan_chrome before_launch"), "Iniciar fecha Chrome de coleta de cidade mesmo com célula já morta");
+assert.ok(iniciarPs1.includes("Invoke-ConvenienteCellCli 'reap-chrome'"), "Iniciar tem CLI para reap de Chrome órfão");
+assert.ok(life.includes("reap-chrome") && life.includes("reapAllConvenienteChrome"), "CLI da célula reapha Chrome leftover");
 const reaper = fs.readFileSync(path.join(ROOT, "scripts", "orphanReaper.js"), "utf8");
 assert.ok(reaper.includes("function taskkillPids") && /for \(const pid of toKill\)/.test(reaper) === false, "Chrome leftover morre em um taskkill, não um a um");
 const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), "utf8");

@@ -87,6 +87,35 @@ function Test-ConvenienteNeedRestart {
     return ($v -eq '1')
 }
 
+function Stop-ConvenienteCityCollectorChrome {
+    Write-StartLog 'city_collector_chrome_reap'
+    $killed = 0
+    try {
+        $filter = "Name='chrome.exe' OR Name='chromium.exe'"
+        $procs = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue)
+        foreach ($p in $procs) {
+            $cmd = [string]$p.CommandLine
+            if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+            if ($cmd -notmatch 'city-collector-shards' -and $cmd -notmatch 'conveniente-city-collector') { continue }
+            $id = 0
+            try { $id = [int]$p.ProcessId } catch { $id = 0 }
+            if ($id -le 4) { continue }
+            try { & taskkill.exe /F /PID $id /T 2>$null | Out-Null } catch {}
+            $killed++
+        }
+    } catch {
+        Write-StartLog ('city_collector_chrome_fail ' + $_.Exception.Message)
+    }
+    Write-StartLog ('city_collector_chrome_killed ' + $killed)
+    return $killed
+}
+
+function Stop-ConvenienteOrphanChrome([string]$Reason = 'iniciar_orphans') {
+    Write-StartLog ('orphan_chrome ' + $Reason)
+    [void](Invoke-ConvenienteCellCli 'reap-chrome' $Reason)
+    [void](Stop-ConvenienteCityCollectorChrome)
+}
+
 function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
     Write-StartLog ('cells_stop ' + $Reason)
     if ($Reason -match 'iniciar_stamp') {
@@ -95,6 +124,7 @@ function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
         Write-ConvenienteHumanHold ('stop_workers:' + $Reason)
     }
     [void](Invoke-ConvenienteCellCli 'stop' $Reason)
+    [void](Stop-ConvenienteCityCollectorChrome)
 }
 
 function Get-ListenPid([int]$Port) {
@@ -490,6 +520,9 @@ function Start-ConvenienteNode {
         if ($needCells -and (Test-ConvenienteCellsAlive)) {
             Write-StartLog 'cells_hard_stop before_launch'
             Stop-ConvenienteCells 'iniciar_stamp'
+        } elseif (-not (Test-ConvenienteCellsAlive)) {
+            Write-StartLog 'orphan_chrome before_launch'
+            Stop-ConvenienteOrphanChrome 'iniciar_orphans'
         }
     } catch {}
     Write-StartLog 'launch_host'

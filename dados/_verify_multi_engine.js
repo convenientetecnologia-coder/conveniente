@@ -43,6 +43,9 @@ check("nao_clona_no_ensure", /kind: 'single_engine'/.test(mot) && !/criando clon
 check("userdatadir_intacto_modulo", /User Data\\\\Conveniente/.test(mot) || /Conveniente\\<nome>/.test(mot));
 check("browser_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(browser));
 check("city_usa_motor", /chromeMotores\.resolveLaunchExeOrFatal/.test(cityLaunch));
+check("city_flag_cmdline", /--conveniente-city-collector/.test(cityLaunch));
+check("city_pid_journal", /writeCityCollectorPid/.test(cityLaunch) && /clearCityCollectorPid/.test(city));
+check("city_shutdown_export", /shutdownDeltaCityCollector/.test(city));
 check("cluster_ensure_boot", /hardwareNodes/.test(cluster) && /ensureWorkers\(motorCapacity/.test(cluster));
 check("cluster_ensure_grow", /purge: false/.test(cluster) && /hardwareNodes/.test(cluster));
 check("boot_cli_sem_purge", /ensureWorkers\(capacity, \{ purge: false \}\)/.test(mot));

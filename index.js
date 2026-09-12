@@ -4771,17 +4771,10 @@ function wipeStaleCellsBeforeListen() {
   }
 
   if (startClosedOnBoot) {
-    let convenieteChrome = 0;
     try {
-      const reaper = require('./scripts/orphanReaper.js');
-      convenieteChrome = reaper.anyChromeImage() ? reaper.countConvenienteChrome() : 0;
-    } catch { convenieteChrome = -1; }
-    if (convenieteChrome > 0) {
-      try {
-        require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
-      } catch (e) {
-        try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-      }
+      require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_start_closed');
+    } catch (e) {
+      try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
     }
   }
   try { logger.info('[BOOT] subindo células'); } catch {}
