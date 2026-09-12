@@ -1,7 +1,8 @@
 # C:\auto_vigia\manutencao.ps1  (fonte: kit\manutencao.ps1)
 # TUDO-EM-UM: porteiro + start/stop/status
 # Nao altera C:\conveniente
-# Regra: se JA estiver ligado, NUNCA sobe de novo.
+# Regra: se 8088 ou janela Conveniente_Node, NUNCA mata e NUNCA sobe de novo.
+# Host sem 8088 por 3 min = zumbi: ai sim mata e sobe um.
 # RAM (StandbyList) NAO vive neste loop (v5.2.1-clean-cpu).
 # Este script so GARANTE a tarefa SYSTEM ConvenienteDiskClean (on-demand).
 # Quem cronometra 15 min e pede o Run e o Conveniente (chromeMemorySweep.js).
@@ -22,6 +23,7 @@ $PauseFlag   = Join-Path $Root 'PAUSED.flag'
 $NoRebootFlag = Join-Path $Root 'NO_REBOOT.flag'
 $LockFile    = Join-Path $Root 'porteiro.lock'
 $BeatFile    = Join-Path $Root 'porteiro.beat'
+$IndexStartLock = Join-Path $Root 'index_start.lock'
 $LogFile     = Join-Path $Root 'logs\porteiro.log'
 $KitSrc      = Join-Path $Conveniente 'porteiro\kit\manutencao.ps1'
 $PidFile     = Join-Path $Root 'master.pid'
@@ -133,8 +135,10 @@ function Get-ChromeCount {
 }
 
 function Get-SystemState {
+    param([switch]$Lite)
     # PRETO NO BRANCO: index ligado = 8088 em LISTEN. Ponto.
     # Célula viva, chrome aberto, node.exe sobrando — não são o index.
+    # Lite: sem contar chrome (loop a cada 30s; 90+ chrome trava a VM).
     $port = Test-Port8088
     $nodes = Get-NodeCount
     if ((Test-Path $PidFile) -and -not $port) {
@@ -142,10 +146,12 @@ function Get-SystemState {
     }
     $up = [bool]$port
     $why = if ($port) { 'index_8088' } else { 'index_down' }
+    $chrome = 0
+    if (-not $Lite) { $chrome = Get-ChromeCount }
     return [pscustomobject]@{
         Up = $up; Why = $why
         Masters = $(if ($port) { 1 } else { 0 }); Nodes = $nodes
-        Port = $port; Chrome = (Get-ChromeCount)
+        Port = $port; Chrome = $chrome
         Paused = (Test-Paused)
     }
 }
@@ -581,6 +587,38 @@ function Test-IsConvenienteNodeHost([string]$CommandLine) {
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
+function Count-ConvenienteNodeHosts {
+    $n = 0
+    foreach ($name in @('powershell', 'pwsh')) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $title = ''
+            try { $title = [string]$p.MainWindowTitle } catch { $title = '' }
+            if ($title -eq 'Conveniente_Node') { $n++ }
+        }
+    }
+    return $n
+}
+
+function Test-IndexStartInflight {
+    if (-not (Test-Path -LiteralPath $IndexStartLock)) { return $false }
+    try {
+        $age = [int][math]::Round(((Get-Date) - (Get-Item -LiteralPath $IndexStartLock).LastWriteTime).TotalSeconds)
+        return ($age -ge 0 -and $age -le $IndexStartGraceSec)
+    } catch {
+        return $false
+    }
+}
+
+function Write-IndexStartLock {
+    try {
+        [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() | Set-Content -LiteralPath $IndexStartLock -Encoding ASCII
+    } catch {}
+}
+
+function Clear-IndexStartLock {
+    Remove-Item -LiteralPath $IndexStartLock -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-ConvenienteConsoleHosts {
     $killed = 0
     foreach ($name in @('powershell', 'pwsh', 'cmd')) {
@@ -655,22 +693,39 @@ function Do-Start {
     $st = $null
     $st2 = $null
     $st3 = $null
-    $st = Get-SystemState
+    $st = Get-SystemState -Lite
     if ($st -and $st.Up) {
+        Clear-IndexStartLock
         Write-Host "JA LIGADO why=$($st.Why) port8088=$($st.Port) — nao subi de novo (celula nao conta)"
         Write-Log "$Reason start skipped already_up=$($st.Why) index_only"
         return
     }
 
+    $hosts = [int](Count-ConvenienteNodeHosts)
+    if ($hosts -gt 0) {
+        Write-Host "JA TEM JANELA Conveniente_Node n=$hosts — nao mato, nao subi de novo"
+        Write-Log "$Reason start skipped host_alive n=$hosts"
+        return
+    }
+    if (Test-IndexStartInflight) {
+        Write-Log "$Reason start skipped start_inflight"
+        return
+    }
+
     Start-Sleep -Milliseconds 300
-    $st2 = Get-SystemState
+    $st2 = Get-SystemState -Lite
     if ($st2 -and $st2.Up) {
+        Clear-IndexStartLock
         Write-Host "JA LIGADO (2a checagem) why=$($st2.Why) — nao subi de novo (celula nao conta)"
         Write-Log "$Reason start skipped already_up2=$($st2.Why) index_only"
         return
     }
+    if ((Count-ConvenienteNodeHosts) -gt 0) {
+        Write-Log "$Reason start skipped host_alive2"
+        return
+    }
 
-    [void](Stop-ConvenienteConsoleHosts)
+    Write-IndexStartLock
 
     $node = Resolve-ConvenienteNodeExe
     if (-not $node) { Write-Host 'ERRO: runtime Node pinado indisponivel'; return }
@@ -681,7 +736,7 @@ function Do-Start {
         "$($p.Id)" | Set-Content $PidFile -Encoding ASCII
     }
     Start-Sleep -Seconds 3
-    $st3 = Get-SystemState
+    $st3 = Get-SystemState -Lite
     $up3 = $false
     $why3 = 'down'
     $masters3 = 0
@@ -943,7 +998,7 @@ function Do-Loop {
     # Index caiu: espera 3 min (git pull). Nao sobe na hora.
     $IndexDownSince = $null
     try {
-        $stBoot = Get-SystemState
+        $stBoot = Get-SystemState -Lite
         if ($stBoot -and $stBoot.Up) {
             Write-Log "AUTO_BOOT skipped already_up=$($stBoot.Why)"
         } else {
@@ -956,32 +1011,55 @@ function Do-Loop {
     }
 
     $downStreak = 0
-    $wasUp = $false
+    $hammeredThisDown = $false
 
     while ($true) {
         try {
             Write-LoopBeat
             $cpu = 0
-            $st = Get-SystemState
+            $st = Get-SystemState -Lite
+            $hosts = [int](Count-ConvenienteNodeHosts)
             $disk = Get-DiskFreeGB
             $actions = @()
             $nodeMsg = ''
 
-            if ($wasUp -and $st -and (-not $st.Up)) {
-                Invoke-CrashHammer -Reason 'porteiro_down'
-                $actions += 'crash_hammer'
-            }
-            if ($st) { $wasUp = [bool]$st.Up }
+            if ($st -and $st.Up) { Clear-IndexStartLock }
 
             if (Test-Paused) {
                 $nodeMsg = 'paused'
                 $downStreak = 0
                 $IndexDownSince = $null
+                $hammeredThisDown = $false
             }
             elseif ($st.Up) {
                 $nodeMsg = "ok:$($st.Why):m=$($st.Masters):n=$($st.Nodes)"
                 $downStreak = 0
                 $IndexDownSince = $null
+                $hammeredThisDown = $false
+            }
+            elseif ($hosts -gt 0) {
+                if (-not $IndexDownSince) { $IndexDownSince = Get-Date }
+                $downSec = [int]((Get-Date) - $IndexDownSince).TotalSeconds
+                if ($downSec -lt $IndexStartGraceSec) {
+                    $nodeMsg = "wait_host n=$hosts ${downSec}s/$IndexStartGraceSec"
+                } else {
+                    Write-Log "host_zombie n=$hosts down=${downSec}s"
+                    [void](Stop-ConvenienteConsoleHosts)
+                    Clear-IndexStartLock
+                    $IndexDownSince = $null
+                    if (-not $hammeredThisDown) {
+                        Invoke-CrashHammer -Reason 'porteiro_down'
+                        $actions += 'crash_hammer'
+                        $hammeredThisDown = $true
+                    }
+                    Do-Start -Reason 'AUTO' | Out-Null
+                    $st = Get-SystemState -Lite
+                    $nodeMsg = "start_attempt zombie up=$($st.Up) why=$($st.Why)"
+                    $downStreak = 0
+                }
+            }
+            elseif (Test-IndexStartInflight) {
+                $nodeMsg = 'wait_host inflight'
             }
             else {
                 $downStreak++
@@ -990,8 +1068,13 @@ function Do-Loop {
                 if ($downSec -lt $IndexStartGraceSec) {
                     $nodeMsg = "wait_index ${downSec}s/$IndexStartGraceSec"
                 } else {
+                    if (-not $hammeredThisDown) {
+                        Invoke-CrashHammer -Reason 'porteiro_down'
+                        $actions += 'crash_hammer'
+                        $hammeredThisDown = $true
+                    }
                     Do-Start -Reason 'AUTO' | Out-Null
-                    $st = Get-SystemState
+                    $st = Get-SystemState -Lite
                     $nodeMsg = "start_attempt up=$($st.Up) why=$($st.Why)"
                     $downStreak = 0
                     $IndexDownSince = $null

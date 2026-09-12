@@ -9,8 +9,8 @@
  *   - loop morto → dispara a tarefa Windows (não fica filho do Node)
  *   - loop vivo ainda no BOOT v5.1.13 → schtasks /End + o loop novo (Highest)
  *     mata qualquer rival (porteiro_loop, vigia.bat, limpeza_memoria, outro loop)
- *   - ja nomem, tarefa Running, ultimo BOOT nomem → NAO recicla o loop.
- *     Ainda apaga kit velho (LimpezaAutomaticaConveniente, vigia.bat, …).
+ *   - loop vivo + beat fresco → copia kit se mudou, NAO recicla o loop.
+ *     Pulse (2 min) e quem carrega kit novo. Index boot nao mata o vigia.
  *   - garante ConvenienteDiskClean (SYSTEM). O loop NAO dispara o exe.
  *
  * Tarefa ao logon ausente: cria em silencio (schtasks onlogon). Sem UAC.
@@ -153,7 +153,8 @@ function runningLoopIsFresh() {
 
 function planEnsure({ destExists, destOld, hashEqual, tasksOk, processAlive, beatFresh } = {}) {
   const copy = !destExists || !!destOld || !hashEqual;
-  const restartLoop = copy || processAlive === false || beatFresh !== true;
+  const loopHealthy = processAlive === true && beatFresh === true;
+  const restartLoop = !loopHealthy;
   const installTasks = !tasksOk;
   const scrubOldKit = true;
   return { copy, restartLoop, installTasks, scrubOldKit };

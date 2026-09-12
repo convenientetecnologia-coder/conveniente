@@ -406,9 +406,17 @@ try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
 Ensure-LogonTaskSilent
 [void](Wait-ConvenienteUp 1)
 if ($copied) {
-    Write-StartLog 'version_swap'
-    Stop-LoopOnly
-    Start-Sleep -Milliseconds 200
+    $alive = $false
+    $fresh = $false
+    try { $alive = [bool](Test-LoopAlive) } catch {}
+    try { $fresh = [bool](Test-PorteiroLoopFresh) } catch {}
+    if ($alive -and $fresh) {
+        Write-StartLog 'kit_copied_loop_kept'
+    } else {
+        Write-StartLog 'version_swap'
+        Stop-LoopOnly
+        Start-Sleep -Milliseconds 200
+    }
 }
 Start-LoopSilent
 exit $code
