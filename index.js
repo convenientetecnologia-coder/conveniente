@@ -3880,8 +3880,11 @@ let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
 let __serverEventLastSentAt = 0;
 let __serverEventLastDeltaSentAt = 0;
+let __serverEventLastQuick = null;
 let __serverEventPendingHash = '';
 let __serverEventPendingTicks = 0;
+let __serverEventBridgeStartedAt = 0;
+const SERVER_EVENT_TICK_MAX_MS = Math.max(8000, Number(process.env.SERVER_EVENT_TICK_MAX_MS || 12000) || 12000);
 
 function __serverEventHostIdPath() {
   return path.join(__dirname, 'dados', '.telemetry_hostid');
@@ -3952,6 +3955,8 @@ function __buildServerEventTelemetry(status) {
     perfisCount: perfis.length,
     activeCount: perfis.filter((p) => p && p.active).length,
     workingCount: perfis.filter((p) => p && p.trabalhando).length,
+    sourceTs: Number(status && status.ts) || Date.now(),
+    source: 'api_status',
     fotosCount,
     fotos: {
       dir: String(fotosInv && fotosInv.dir || ''),
@@ -4007,13 +4012,26 @@ function __buildServerEventTelemetry(status) {
   return { accountsAgg, flagsAgg, quick, stateHash };
 }
 
-async function __readLocalStatusForEventBridge() {
-  if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
-    try {
-      const json = await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
-      if (json && typeof json === 'object') return json;
-    } catch {}
+function __readFreshStatusJson(maxAgeMs) {
+  try {
+    const p = path.join(__dirname, 'dados', 'status.json');
+    const st = fs.statSync(p);
+    const age = Date.now() - Number(st.mtimeMs || 0);
+    if (!(Number.isFinite(age) && age >= 0 && age <= Math.max(1000, Number(maxAgeMs || 8000) || 8000))) return null;
+    const json = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!json || typeof json !== 'object') return null;
+    if (!Array.isArray(json.perfis) || !json.perfis.length) return null;
+    return json;
+  } catch {
+    return null;
   }
+}
+
+async function __readLocalStatusForEventBridge() {
+  // Mesma fonte do dashboard da MAE: status.json fresco ou GET /api/status.
+  // Nao usa get-status cru do cluster (jornal parcial / children incompleto).
+  const fresh = __readFreshStatusJson(8000);
+  if (fresh) return fresh;
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), 8000);
   try {
@@ -4206,8 +4224,21 @@ async function __postServerEventToCt(payload) {
 }
 
 async function __serverEventBridgeTick(reason) {
-  if (__serverEventBridgeInFlight) return { ok: false, skipped: true, error: 'bridge_in_flight' };
+  const now0 = Date.now();
+  if (__serverEventBridgeInFlight) {
+    const hungMs = __serverEventBridgeStartedAt ? (now0 - __serverEventBridgeStartedAt) : 0;
+    if (hungMs > SERVER_EVENT_TICK_MAX_MS) {
+      __appendServerEventBridgeLog('bridge_tick_watchdog_release', {
+        hungMs,
+        reason: String(reason || '')
+      });
+      __serverEventBridgeInFlight = false;
+    } else {
+      return { ok: false, skipped: true, error: 'bridge_in_flight' };
+    }
+  }
   __serverEventBridgeInFlight = true;
+  __serverEventBridgeStartedAt = now0;
   try {
     const status = await __readLocalStatusForEventBridge();
     const hostId = __readOrCreateServerEventHostId();
@@ -4231,9 +4262,15 @@ async function __serverEventBridgeTick(reason) {
       reason === 'gate_b_ready' ||
       reason === 'ct_config_applied' ||
       reason === 'force_full_report';
-    const deltaConfirmed = changed && (forceStatusEvent || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
+    const prevQuick = (__serverEventLastQuick && typeof __serverEventLastQuick === 'object') ? __serverEventLastQuick : null;
+    const countsChanged = !!(prevQuick && telemetry.quick && (
+      Number(prevQuick.activeCount || 0) !== Number(telemetry.quick.activeCount || 0) ||
+      Number(prevQuick.workingCount || 0) !== Number(telemetry.quick.workingCount || 0) ||
+      Number(prevQuick.perfisCount || 0) !== Number(telemetry.quick.perfisCount || 0)
+    ));
+    const deltaConfirmed = changed && (forceStatusEvent || countsChanged || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
-    const shouldSendDelta = forceStatusEvent || (deltaConfirmed && deltaRateOk);
+    const shouldSendDelta = forceStatusEvent || countsChanged || (deltaConfirmed && deltaRateOk);
 
     // Config Servidor → CT: boot/1ª vez no processo/save/hash mudou (sem spam).
     const configPush = (() => {
@@ -4316,6 +4353,7 @@ async function __serverEventBridgeTick(reason) {
         __serverEventPendingTicks = 0;
       }
       __serverEventLastSentAt = now;
+      __serverEventLastQuick = telemetry.quick || null;
       if (out.ctConfigApplied) {
         // Confirma ao CT, em seguida, que a configuração já está persistida e
         // publica um snapshot completo pós-configuração.
@@ -4401,6 +4439,7 @@ async function __serverEventBridgeTick(reason) {
     return { ok: false, error: (e && e.message) || String(e) };
   } finally {
     __serverEventBridgeInFlight = false;
+    __serverEventBridgeStartedAt = 0;
   }
 }
 

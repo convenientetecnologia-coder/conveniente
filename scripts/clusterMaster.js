@@ -1299,18 +1299,33 @@ async function createCluster() {
         return true;
       };
 
-      for (let i = 0; i < children.length; i++) {
+      const considerIdx = [];
+      for (let i = 0; i < children.length; i++) considerIdx.push(i);
+      try {
+        const dadosDir = path.join(__dirname, '..', 'dados');
+        const names = fs.readdirSync(dadosDir);
+        for (const name of names) {
+          const m = /^status_node_(\d+)\.json$/i.exec(String(name || ''));
+          if (!m) continue;
+          const i = Number(m[1]) - 1;
+          if (Number.isFinite(i) && i >= 0 && i < 64) considerIdx.push(i);
+        }
+      } catch {}
+      const uniqIdx = Array.from(new Set(considerIdx)).sort((a, b) => a - b);
+
+      for (const i of uniqIdx) {
         const slot = children[i];
         const owner = slot ? cellRegistry.tcpListenPid(slot.port) : 0;
-        if (!(owner > 0) || !(cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner))) continue;
+        const liveChild = !!(owner > 0 && (cellLifecycle.isProvenCellEntryPid(owner) || cellLifecycle.isLikelyCellListenPid(owner)));
         const fb = readNodeStatusFile(i);
         if (fb && fb.json && Array.isArray(fb.json.perfis)) {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
           applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
           if (fb.ageMs > MAX_FILE_AGE_MS) {
             warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
+            if (liveChild) missingIdx.push(i);
           }
-        } else {
+        } else if (liveChild) {
           missingIdx.push(i);
           try { nodesDebug.push({ node: i + 1, source: 'none', ok: false }); } catch {}
         }

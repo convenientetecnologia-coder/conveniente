@@ -130,7 +130,8 @@ function logsAllowlist() {
     crash_hammer_last: path.join(base, 'crash_hammer_last.json'),
     index_host_exit: path.join(base, 'index_host_exit.jsonl'),
     multi_engine_last: path.join(base, 'multi_engine_last.json'),
-    multi_engine_log: path.join(base, 'logs', 'multi_engine.log')
+    multi_engine_log: path.join(base, 'logs', 'multi_engine.log'),
+    server_event_bridge: path.join(base, 'server_event_bridge.log')
   };
   try {
     const nomes = collectProfileNames();
