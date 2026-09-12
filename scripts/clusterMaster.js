@@ -326,6 +326,44 @@ async function createCluster() {
     });
   }
 
+  function applyFreshCellTarget(target, fresh, idx) {
+    if (!fresh) return;
+    if (!target) {
+      children[idx] = fresh;
+      return;
+    }
+    target.proc = fresh.proc;
+    target.pending = fresh.pending;
+    target.pid = fresh.pid;
+    target.port = fresh.port;
+    target.socket = fresh.socket;
+    target.netSend = fresh.netSend;
+    target.adopted = !!fresh.adopted;
+    target.deadHandled = false;
+    target.shard = fresh.shard;
+  }
+
+  function scheduleRespawn(idx, reason, delayMs) {
+    const why = String(reason || 'worker_drop');
+    const waitMs = Math.max(0, Number(delayMs) || 2000);
+    setTimeout(() => {
+      if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
+      const target = children[idx];
+      if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
+      const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
+      logger.info('[CLUSTER] respawnando worker', { idx: idx + 1, reason: why });
+      spawnWorker(idx, shardNames).then((fresh) => {
+        applyFreshCellTarget(target, fresh, idx);
+      }).catch((e) => {
+        logger.error('[CLUSTER] erro ao respawnar worker', {
+          idx,
+          reason: why,
+          error: e && e.message || e
+        }, e);
+      });
+    }, waitMs);
+  }
+
   function onCellDeath(idx, { code, signal, pid } = {}) {
     const child = children[idx];
     if (!child || child.deadHandled) return;
@@ -354,7 +392,10 @@ async function createCluster() {
       connectCellSocket(child, idx).catch(() => {});
       return;
     }
-    if (owner > 0 && !cellLifecycle.isProvenCellEntryPid(owner)) {
+    const ownerLooksBlockedNotCell = owner > 0 &&
+      !cellLifecycle.isProvenCellEntryPid(owner) &&
+      !cellLifecycle.isLikelyCellListenPid(owner);
+    if (ownerLooksBlockedNotCell) {
       try {
         cellForensic.append('cell_port_blocked_not_cell', {
           idx: idx + 1,
@@ -365,13 +406,20 @@ async function createCluster() {
           signal
         });
       } catch {}
-      child.deadHandled = true;
       child.pid = null;
       child.proc = null;
-      return;
+      try { if (child.socket) child.socket.destroy(); } catch {}
+      child.socket = null;
+      child.netSend = null;
     }
     child.deadHandled = true;
-    logger.warn('[CLUSTER] worker dropado', { idx, code, signal, pid: pid || child.pid });
+    logger.warn('[CLUSTER] worker dropado', {
+      idx,
+      code,
+      signal,
+      pid: pid || child.pid,
+      blockedOwner: ownerLooksBlockedNotCell ? owner : null
+    });
     try {
       require('./crashHammer.js').scheduleWorkerDrop({
         idx: idx + 1,
@@ -392,7 +440,7 @@ async function createCluster() {
       const reap = require('./orphanReaper.js').reapShard({
         names: dyingShard,
         shardIdx: idx,
-        reason: 'worker_drop'
+        reason: ownerLooksBlockedNotCell ? 'worker_drop_port_blocked' : 'worker_drop'
       });
       try {
         require('./indexLifecycle.js').append('worker_drop_reap', {
@@ -400,35 +448,14 @@ async function createCluster() {
           code: code == null ? null : Number(code),
           signal: signal == null ? null : String(signal),
           shard: dyingShard.length,
-          killed: reap && reap.killed != null ? reap.killed : null
+          killed: reap && reap.killed != null ? reap.killed : null,
+          blockedOwner: ownerLooksBlockedNotCell ? owner : null
         });
       } catch {}
     } catch (e) {
       try { logger.warn('[CLUSTER] orphan reap falhou (best-effort)', { idx, error: e && e.message || e }); } catch {}
     }
-    setTimeout(() => {
-      if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
-      const target = children[idx];
-      const shardNames = target && target.shard ? Array.from(target.shard) : (blocks[idx] || []);
-      logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
-      spawnWorker(idx, shardNames).then((fresh) => {
-        if (!target) {
-          children.push(fresh);
-          return;
-        }
-        target.proc = fresh.proc;
-        target.pending = fresh.pending;
-        target.pid = fresh.pid;
-        target.port = fresh.port;
-        target.socket = fresh.socket;
-        target.netSend = fresh.netSend;
-        target.adopted = !!fresh.adopted;
-        target.deadHandled = false;
-        target.shard = fresh.shard;
-      }).catch((e) => {
-        logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
-      });
-    }, 2000);
+    scheduleRespawn(idx, ownerLooksBlockedNotCell ? 'port_blocked_not_cell' : 'worker_drop', 2000);
   }
 
   function forceKillCellPid(pid) {
@@ -798,28 +825,7 @@ async function createCluster() {
       child.proc = null;
       child.pid = null;
       child.adopted = false;
-      setTimeout(() => {
-        if (isShuttingDown || cellLifecycle.isCellsStopped()) return;
-        const target = children[idx];
-        if (target && target.pid && cellRegistry.pidAlive(target.pid)) return;
-        spawnWorker(idx, shardNames).then((fresh) => {
-          if (!target) {
-            children[idx] = fresh;
-            return;
-          }
-          target.proc = fresh.proc;
-          target.pending = fresh.pending;
-          target.pid = fresh.pid;
-          target.port = fresh.port;
-          target.socket = fresh.socket;
-          target.netSend = fresh.netSend;
-          target.adopted = !!fresh.adopted;
-          target.deadHandled = false;
-          target.shard = fresh.shard;
-        }).catch((err) => {
-          logger.error('[CLUSTER] retry após listen timeout falhou', { idx: idx + 1, error: err && err.message || err });
-        });
-      }, 2000);
+      scheduleRespawn(idx, 'listen_timeout_retry', 2000);
       return child;
     }
     if (cellLifecycle.isCellsStopped() && !(opts && opts.resume === true)) {

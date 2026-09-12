@@ -33,5 +33,18 @@ assert(
   "warning partial deve ficar só para child vivo stale"
 );
 
+const blockedPos = src.indexOf("if (ownerLooksBlockedNotCell) {");
+const blockedEnd = blockedPos >= 0 ? src.indexOf("child.deadHandled = true;", blockedPos) : -1;
+assert(blockedPos >= 0 && blockedEnd > blockedPos, "ramo de porta bloqueada por não-célula precisa existir");
+if (blockedPos >= 0 && blockedEnd > blockedPos) {
+  const blockedBranch = src.slice(blockedPos, blockedEnd);
+  assert(blockedBranch.includes("cell_port_blocked_not_cell"), "forense do bloqueio de porta precisa ser persistido");
+  assert(blockedBranch.indexOf("return;") === -1, "porta bloqueada por não-célula não pode abortar antes do respawn");
+}
+assert(
+  src.includes("scheduleRespawn(idx, ownerLooksBlockedNotCell ? 'port_blocked_not_cell' : 'worker_drop', 2000);"),
+  "drop com porta bloqueada por processo estranho precisa reentrar no respawn"
+);
+
 console.log("ALL_OK");
 process.exit(0);
