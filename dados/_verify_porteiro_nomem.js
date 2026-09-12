@@ -204,6 +204,7 @@ const beatDead = sync.planEnsure({ destExists: true, destOld: false, hashEqual: 
 check("plan_stale_beat_restarts", beatDead.copy === false && beatDead.restartLoop === true && beatDead.installTasks === false);
 check("kit_writes_beat", /function Write-LoopBeat/.test(kitTxt) && /Write-LoopBeat/.test(loopBody));
 check("sync_no_log_liveness", /loopHealthy/.test(syncTxt) && /porteiro\.beat/.test(syncTxt) && !/logFresh === false/.test(syncTxt) && !/isPorteiroHeartbeatLine/.test(syncTxt));
+check("sync_loop_process_alive_via_powershell", /Get-Process -Id/.test(syncTxt) && !/process\.kill\(pid,\s*0\)/.test(syncTxt));
 
 check("sync_windows_owns_loop", /schtasks\.exe/.test(syncTxt) && /\/Run/.test(syncTxt));
 check("sync_validates_pulse_task", /pulseTaskOk/.test(syncTxt) && /readTaskInfo/.test(syncTxt));

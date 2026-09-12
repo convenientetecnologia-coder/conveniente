@@ -123,12 +123,24 @@ function parsePorteiroLogTs(stamp) {
 }
 
 function loopProcessAlive() {
+  if (process.platform !== "win32") return false;
   try {
     if (!fs.existsSync(LOCK_FILE)) return false;
     const pid = parseInt(String(fs.readFileSync(LOCK_FILE, "utf8") || "").trim(), 10);
     if (!(pid > 0)) return false;
-    process.kill(pid, 0);
-    return true;
+    const script = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      "$p = Get-Process -Id " + String(pid) + " -ErrorAction SilentlyContinue",
+      "if (-not $p) { '0'; exit 0 }",
+      "$name = [string]$p.ProcessName",
+      "if ($name -match '^(powershell|pwsh)$') { '1' } else { '0' }"
+    ].join("; ");
+    const r = spawnSync(PS_EXE, ["-NoProfile", "-Command", script], {
+      windowsHide: true,
+      timeout: 8000,
+      encoding: "utf8"
+    });
+    return String((r && r.stdout) || "").trim() === "1";
   } catch {
     return false;
   }
