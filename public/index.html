@@ -2564,7 +2564,8 @@
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
-      const earlyPerfis = (Array.isArray(st?.perfis) && st.perfis.length) ? st.perfis : basePerfis;
+      const overlayPerfis = Array.isArray(st?.perfis) ? st.perfis.filter(p => p && p.nome) : [];
+      const earlyPerfis = overlayPerfis.length ? overlayPerfis : basePerfis;
       const earlyRobeQueue = Array.isArray(st?.robeQueue) ? st.robeQueue : [];
       try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
       try {
@@ -2661,17 +2662,39 @@
           setGlobalActionButtonsDisabled(false);
         }
       } catch {}
-      const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
+      const makePerfilEntry = (p = {}) => Object.assign({
         active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
         ramMB: null, cpuPercent: null, numPages: null,
         robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
         activationHeldUntil: null, reopenAt: null, openBackoffMs: null, lastSwapAt: null, swapCooldown: null, whyNotOpen: null,
         manifestStatus: null, closingReason: null
-      }, p)]));
+      }, p);
+      const perfisSeed = basePerfis.length
+        ? basePerfis
+        : overlayPerfis.map((p) => ({
+            nome: p.nome,
+            label: p.label || null,
+            cidade: p.cidade,
+            uaPresetId: p.uaPresetId
+          }));
+      const perfisMap = new Map(
+        perfisSeed
+          .filter((p) => p && p.nome)
+          .map((p) => [p.nome, makePerfilEntry(p)])
+      );
       // Overlay de /api/status (st)
-      if (Array.isArray(st?.perfis)) {
-        st.perfis.forEach(o => {
-          const dst = perfisMap.get(o.nome);
+      if (overlayPerfis.length) {
+        overlayPerfis.forEach(o => {
+          let dst = perfisMap.get(o.nome);
+          if (!dst) {
+            dst = makePerfilEntry({
+              nome: o.nome,
+              label: o.label || null,
+              cidade: o.cidade,
+              uaPresetId: o.uaPresetId
+            });
+            perfisMap.set(o.nome, dst);
+          }
           if (dst) Object.assign(dst, o);
         });
       }
@@ -2784,6 +2807,12 @@
       lastRobeQueueCache = robeQueue;
       lastSearchIndexCache = buildSearchIndex(lastPerfisCache, lastRobesCache);
       buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+      } catch (e) {
+        try { console.error('[reloadPerfis] fail', e && e.stack || e); } catch {}
+        try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
+      } finally {
+        __reloadInflight = false;
+      }
     }
 
     function buildList(perfisInput, robes, robeQueue) {
@@ -3248,12 +3277,6 @@
         frag.appendChild(card);
       });
       lista.appendChild(frag);
-      } catch (e) {
-        try { console.error('[reloadPerfis] fail', e && e.stack || e); } catch {}
-        try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
-      } finally {
-        __reloadInflight = false;
-      }
     }
 
     // Nova Conta (chama o modal; o modal faz a criação com loading)

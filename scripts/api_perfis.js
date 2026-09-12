@@ -178,8 +178,28 @@ module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
     try {
-      const arr = fileStore.loadPerfisJson();
-      res.json({ ok: true, perfis: arr });
+      const loadedPerfis = fileStore.loadPerfisJson();
+      const arr = Array.isArray(loadedPerfis) ? loadedPerfis : [];
+      if (arr.length > 0) {
+        return res.json({ ok: true, perfis: arr });
+      }
+      const snap = (() => {
+        try {
+          if (fileStore && typeof fileStore.getStatusSnapshot === 'function') return fileStore.getStatusSnapshot();
+        } catch {}
+        try {
+          if (fileStore && typeof fileStore.getFullStatusSnapshot === 'function') return fileStore.getFullStatusSnapshot();
+        } catch {}
+        return null;
+      })();
+      const fallback = Array.isArray(snap && snap.perfis)
+        ? snap.perfis.filter((p) => p && p.nome).map((p) => ({ ...p }))
+        : [];
+      return res.json({
+        ok: true,
+        perfis: fallback,
+        fallback: fallback.length > 0 ? 'status_snapshot' : 'empty'
+      });
     } catch (e) {
       logger.error('Erro fatal na rota listagem de perfis', { rota: '/api/perfis', error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

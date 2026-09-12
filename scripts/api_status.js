@@ -574,7 +574,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       _lastBaselineAt = Date.now();
     }
   }
-  const baseMap = new Map(perfisArr.map(p => [p.nome, {
+  const buildBasePerfil = (p) => ({
     nome: p.nome,
     label: p.label || null,
     cidade: p.cidade,
@@ -618,7 +618,12 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     robeDailyPlanSummary: null,
     robeSessionSummary: null
     // outros campos militares do shape retrocompatível
-  }]));
+  });
+  const baseMap = new Map(
+    perfisArr
+      .filter((p) => p && p.nome)
+      .map((p) => [p.nome, buildBasePerfil(p)])
+  );
   let warningINST = undefined;
   let erroMsgINST = undefined;
 
@@ -652,6 +657,31 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       } else {
         warningINST = 'status temporarily unavailable';
       }
+    }
+  }
+  if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
+    const derivedBaseline = [];
+    for (const o of overlayINST.perfis) {
+      const nome = String(o && o.nome || '').trim();
+      if (!nome || baseMap.has(nome)) continue;
+      const seeded = buildBasePerfil({
+        nome,
+        label: o && o.label ? o.label : null,
+        cidade: o && o.cidade ? o.cidade : null,
+        uaPresetId: o && o.uaPresetId ? o.uaPresetId : null
+      });
+      baseMap.set(nome, seeded);
+      derivedBaseline.push({
+        nome: seeded.nome,
+        label: seeded.label,
+        cidade: seeded.cidade,
+        uaPresetId: seeded.uaPresetId
+      });
+    }
+    if (derivedBaseline.length > 0) {
+      warningINST = warningINST ? warningINST + '; baseline_seeded_from_status' : 'baseline_seeded_from_status';
+      _lastBaselinePerfis = derivedBaseline;
+      _lastBaselineAt = Date.now();
     }
   }
   if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
