@@ -56,6 +56,16 @@ const bootIntent = require(path.join(ROOT, "scripts", "bootIntent.js"));
 assert.strictEqual(
   bootIntent.decideAutoOpenAll({
     bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: false,
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  true,
+  "porteiro no ciclo abre tudo quando caiu tudo"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
     allCellsDead: false,
     humanHoldActive: false,
     workCycle: { inWorkCycle: true }
@@ -82,6 +92,15 @@ assert.strictEqual(
   }).yes,
   false,
   "clique Iniciar não dispara Abrir Tudo"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "iniciar",
+    allCellsDead: false,
+    workCycle: { inWorkCycle: true }
+  }).yes,
+  false,
+  "clique Iniciar não dispara Abrir Tudo nem com célula viva"
 );
 assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de Encerrar mata célula, não solta");
 

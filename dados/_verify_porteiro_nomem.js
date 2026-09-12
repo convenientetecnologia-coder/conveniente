@@ -132,6 +132,7 @@ check("kit_do_start_powershell", /function Start-ConvenienteNodeHost/.test(kitTx
 check("kit_do_stop_powershell_host", /function Stop-ConvenienteConsoleHosts/.test(kitTxt) && /powershell\.exe/.test(kitTxt) && /Stop-ConvenienteConsoleHosts/.test(doStopBody) && /index\.js/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_do_stop_cmd_leftover", /cmd/.test(kitTxt.split("function Stop-ConvenienteConsoleHosts")[1] || "") && /Conveniente_Node/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_index_is_8088_only", /index_8088/.test(kitTxt) && /index_down/.test(kitTxt) && /celula nao conta/.test(kitTxt) && /netstat\.exe/.test(kitTxt.split("function Get-ListenPid")[1] || ""));
+check("kit_state_up_depends_only_on_port", /function Get-SystemState/.test(kitTxt) && /\$port = Test-Port8088/.test(kitTxt) && /\$up = \[bool\]\$port/.test(kitTxt) && /Why = \$why/.test(kitTxt) && /Nodes = \$nodes/.test(kitTxt));
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
 check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
 check("kit_tuning_not_in_loop_or_start", !/Invoke-WinTuningSilent/.test(loopBody) && !/Invoke-WinTuningSilent/.test(doStartBody));
