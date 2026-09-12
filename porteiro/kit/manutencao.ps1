@@ -8,7 +8,7 @@
 # CPU: o Conveniente opera em 90-100%. Este script NAO mede carga de hardware.
 
 param(
-    [ValidateSet('loop','start','stop','status','install','netboot','ensure_diskclean')]
+    [ValidateSet('loop','start','stop','status','install','netboot','ensure_diskclean','arm','pulse')]
     [string]$Action = 'status'
 )
 
@@ -420,16 +420,8 @@ function Invoke-StartupNetworkGuard {
 
         $uptime = Get-UptimeMinutes
         if ($uptime -lt $NetCheckWaitMin) {
-            $waitSec = [int][math]::Ceiling(($NetCheckWaitMin - $uptime) * 60)
-            $maxWait = [int]($NetCheckWaitMin * 60) + 30
-            if ($waitSec -gt 0 -and $waitSec -le $maxWait) {
-                Write-Log "net_wait ${waitSec}s uptime=${uptime}m need=${NetCheckWaitMin}m"
-                Start-Sleep -Seconds $waitSec
-                $st = Get-Estado
-                if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
-            } else {
-                return 'net_wait'
-            }
+            Write-Log "net_wait later uptime=${uptime}m need=${NetCheckWaitMin}m"
+            return 'net_wait'
         }
 
         $todayKey = (Get-Date).ToString('yyyy-MM-dd')
@@ -792,6 +784,92 @@ function Stop-RivalVigia {
     } catch {}
 }
 
+function Test-LoopLockAlive {
+    if (-not (Test-Path -LiteralPath $LockFile)) { return $false }
+    try {
+        $id = [int]((Get-Content -LiteralPath $LockFile -Raw).Trim())
+        if ($id -le 0) { return $false }
+        $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if (-not $proc) { return $false }
+        $name = [string]$proc.ProcessName
+        return ($name -match '^(powershell|pwsh)$')
+    } catch {}
+    return $false
+}
+
+function Get-LoopHeartbeatAgeSec {
+    if (-not (Test-Path -LiteralPath $LogFile)) { return [int]::MaxValue }
+    $last = $null
+    try {
+        foreach ($line in @(Get-Content -LiteralPath $LogFile -Tail 80 -ErrorAction SilentlyContinue)) {
+            $t = [string]$line
+            if ($t -notmatch '\bNODE=') { continue }
+            if ($t -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+                try { $last = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch {}
+            }
+        }
+    } catch {}
+    if (-not $last) { return [int]::MaxValue }
+    return [int][math]::Round(((Get-Date) - $last).TotalSeconds)
+}
+
+function Test-LoopHeartbeatFresh([int]$MaxAgeSec = 90) {
+    return ((Get-LoopHeartbeatAgeSec) -le $MaxAgeSec)
+}
+
+function Start-LoopArmSidecar {
+    # Dump/WerSvc fora do olho. Se travar, o loop ainda liga o index.
+    try {
+        $psExe = Get-ConvenientePsHost
+        $self = Join-Path $Root 'manutencao.ps1'
+        if (-not (Test-Path -LiteralPath $self)) { $self = $PSCommandPath }
+        Start-Process -FilePath $psExe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+            '-File', $self, '-Action', 'arm'
+        ) | Out-Null
+    } catch {}
+}
+
+function Do-Arm {
+    Ensure-Dirs
+    try { [void](Ensure-NodeCrashDumps) } catch {}
+    try { [void](Ensure-WerSvc) } catch {}
+}
+
+function Stop-LoopLock {
+    if (-not (Test-Path -LiteralPath $LockFile)) { return }
+    try {
+        $id = [int]((Get-Content -LiteralPath $LockFile -Raw).Trim())
+        if ($id -gt 0 -and $id -ne $PID) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    } catch {}
+    Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
+}
+
+function Start-LoopProcess {
+    $psExe = Get-ConvenientePsHost
+    $self = Join-Path $Root 'manutencao.ps1'
+    if (-not (Test-Path -LiteralPath $self)) { $self = $PSCommandPath }
+    Start-Process -FilePath $psExe -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+        '-File', $self, '-Action', 'loop'
+    ) | Out-Null
+}
+
+function Do-Pulse {
+    # Olho de 2 min, sem o index. crash_dumps nao conta como vivo.
+    Ensure-Dirs
+    $alive = [bool](Test-LoopLockAlive)
+    $fresh = [bool](Test-LoopHeartbeatFresh 90)
+    if ($alive -and $fresh) { return }
+    if ($alive -and -not $fresh) {
+        Write-Log ('pulse_stale_restart age=' + [string](Get-LoopHeartbeatAgeSec))
+        Stop-LoopLock
+    } else {
+        Write-Log 'pulse_start loop_dead'
+    }
+    Start-LoopProcess
+}
+
 function Do-Loop {
     Ensure-Dirs
     Stop-RivalVigia
@@ -809,8 +887,7 @@ function Do-Loop {
     Stop-RivalVigia
 
     Set-MaxPerf
-    try { [void](Ensure-NodeCrashDumps) } catch {}
-    try { [void](Ensure-WerSvc) } catch {}
+    Start-LoopArmSidecar
     if (Test-NoReboot) { Write-Log "BOOT $Version reboot=DESLIGADO" }
     else { Write-Log (("BOOT $Version reboot={0:D2}:{1:D2}" -f $RebootHour, $RebootMinute)) }
     try { [void](Ensure-DiskCleanTask) } catch {}
@@ -836,9 +913,6 @@ function Do-Loop {
     } catch {
         Write-Log "AUTO_BOOT ERROR $($_.Exception.Message)"
     }
-
-    # Em todo boot: espera NetCheckWaitMin e valida rede (max 3 retry/dia)
-    try { Invoke-StartupNetworkGuard | Out-Null } catch {}
 
     $downStreak = 0
     $wasUp = $false
@@ -917,6 +991,8 @@ switch ($Action) {
     'start'   { Do-Start }
     'status'  { Do-Status }
     'loop'    { Do-Loop }
+    'arm'     { Do-Arm }
+    'pulse'   { Do-Pulse }
     'netboot' { Do-NetBoot }
     'ensure_diskclean' {
         $r = Ensure-DiskCleanTask

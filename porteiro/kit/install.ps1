@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Continue'
 $Kit = $PSScriptRoot
 $Dest = 'C:\auto_vigia'
 $Task = 'ConvenientePorteiro'
+$TaskPulse = 'ConvenientePorteiroPulse'
 $TaskNet = 'ConvenienteNetBoot'
 $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
@@ -131,6 +132,28 @@ try {
         Write-Host "  OK $TaskNet (schtasks)"
     } else {
         Write-Host '  [!] Nao criou ConvenienteNetBoot - rode Setup como ADMIN'
+    }
+}
+
+$okPulse = $false
+try {
+    $argPulse = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
+    $actionPulse = New-ScheduledTaskAction -Execute $PsExe -Argument $argPulse
+    $triggerPulse = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration ([TimeSpan]::FromDays(3650))
+    $principalPulse = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+    $settingsPulse = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -StartWhenAvailable -DontStopOnIdleEnd
+    Unregister-ScheduledTask -TaskName $TaskPulse -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    Register-ScheduledTask -TaskName $TaskPulse -Action $actionPulse -Trigger $triggerPulse -Principal $principalPulse -Settings $settingsPulse -Force -ErrorAction Stop | Out-Null
+    $okPulse = $true
+    Write-Host "  OK $TaskPulse (a cada 2 min)"
+} catch {
+    $trPulse = "$PsExe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
+    & schtasks.exe /create /tn $TaskPulse /tr $trPulse /sc minute /mo 2 /f 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $okPulse = $true
+        Write-Host "  OK $TaskPulse (schtasks)"
+    } else {
+        Write-Host '  [!] Pulse 2 min: o clique Iniciar cria em silencio'
     }
 }
 

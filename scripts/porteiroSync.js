@@ -31,6 +31,7 @@ const LOG_FILE = path.join(AUTO_VIGIA, "logs", "porteiro_ensure.log");
 const SRC_PS1 = path.join(__dirname, "..", "porteiro", "kit", "manutencao.ps1");
 const PS_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const TASK_LOOP = "ConvenientePorteiro";
+const TASK_PULSE = "ConvenientePorteiroPulse";
 const TASK_NET = "ConvenienteNetBoot";
 const WANT_BOOT = "BOOT v5.2.1-clean-cpu";
 
@@ -119,9 +120,14 @@ function parsePorteiroLogTs(stamp) {
   ).getTime();
 }
 
+function isPorteiroHeartbeatLine(line) {
+  return /\bNODE=/.test(String(line || ""));
+}
+
 function porteiroLogAgeSec(text, nowMs) {
   let last = null;
   String(text || "").split(/\r?\n/).forEach((line) => {
+    if (!isPorteiroHeartbeatLine(line)) return;
     const m = String(line || "").match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
     if (!m) return;
     const t = parsePorteiroLogTs(m[1]);
@@ -195,6 +201,30 @@ function ensureLogonTaskSilent() {
   const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action loop";
   try {
     const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_LOOP, "/tr", tr, "/sc", "onlogon", "/f"], {
+      windowsHide: true,
+      timeout: 15000,
+      encoding: "utf8"
+    });
+    return { ok: r.status === 0, existed: false, status: r.status };
+  } catch (e) {
+    return { ok: false, existed: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function destHasPulseAction() {
+  try {
+    return /function Do-Pulse/.test(fs.readFileSync(DEST_PS1, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+function ensurePulseTaskSilent() {
+  if (!destHasPulseAction()) return { ok: false, existed: false, skipped: "dest_no_pulse" };
+  if (taskExists(TASK_PULSE)) return { ok: true, existed: true };
+  const tr = PS_EXE + " -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\auto_vigia\\manutencao.ps1 -Action pulse";
+  try {
+    const r = spawnSync("schtasks.exe", ["/create", "/tn", TASK_PULSE, "/tr", tr, "/sc", "minute", "/mo", "2", "/f"], {
       windowsHide: true,
       timeout: 15000,
       encoding: "utf8"
@@ -425,6 +455,7 @@ function sync(opts) {
   if (plan.installTasks) {
     result.logonTask = ensureLogonTaskSilent();
   }
+  try { result.pulseTask = ensurePulseTaskSilent(); } catch {}
 
   result.ok = true;
   result.hash = (fs.existsSync(DEST_PS1) ? md5File(DEST_PS1) : srcHash).slice(0, 8);
@@ -457,6 +488,7 @@ module.exports = {
   sourceIsNomem,
   destLooksLikeOldMemClean,
   lastBootLineIsNomem,
+  isPorteiroHeartbeatLine,
   porteiroLogAgeSec,
   runningLoopIsFresh,
   planEnsure,

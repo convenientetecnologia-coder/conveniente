@@ -150,12 +150,14 @@ function Get-PorteiroLogAgeSec {
     if (-not (Test-Path -LiteralPath $log)) { return [int]::MaxValue }
     try {
         $last = $null
-        foreach ($line in @(Get-Content -LiteralPath $log -Tail 40 -ErrorAction SilentlyContinue)) {
-            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+        foreach ($line in @(Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue)) {
+            $t = [string]$line
+            if ($t -notmatch '\bNODE=') { continue }
+            if ($t -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
                 try { $last = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) } catch {}
             }
         }
-        if (-not $last) { $last = (Get-Item -LiteralPath $log).LastWriteTime }
+        if (-not $last) { return [int]::MaxValue }
         return [int][math]::Round(((Get-Date) - $last).TotalSeconds)
     } catch {
         return [int]::MaxValue
@@ -163,7 +165,7 @@ function Get-PorteiroLogAgeSec {
 }
 
 function Test-PorteiroLoopFresh {
-    return ((Get-PorteiroLogAgeSec) -le 600)
+    return ((Get-PorteiroLogAgeSec) -le 180)
 }
 
 function Copy-KitSilent {
@@ -250,11 +252,27 @@ function Ensure-LogonTaskSilent {
     & schtasks.exe /Query /TN 'ConvenientePorteiro' 1>$null 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-StartLog 'task_loop_exists'
+    } else {
+        $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
+        & schtasks.exe /create /tn ConvenientePorteiro /tr $tr /sc onlogon /f 1>$null 2>$null
+        if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_loop_created' } else { Write-StartLog 'task_loop_create_skip' }
+    }
+    if (Test-Path -LiteralPath $destPs1) {
+        $destTxt = ''
+        try { $destTxt = [string](Get-Content -LiteralPath $destPs1 -Raw -ErrorAction SilentlyContinue) } catch {}
+        if ($destTxt -match 'function Do-Pulse') { Ensure-PulseTaskSilent }
+    }
+}
+
+function Ensure-PulseTaskSilent {
+    & schtasks.exe /Query /TN 'ConvenientePorteiroPulse' 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-StartLog 'task_pulse_exists'
         return
     }
-    $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action loop"
-    & schtasks.exe /create /tn ConvenientePorteiro /tr $tr /sc onlogon /f 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_loop_created' } else { Write-StartLog 'task_loop_create_skip' }
+    $tr = "$ps -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\auto_vigia\manutencao.ps1 -Action pulse"
+    & schtasks.exe /create /tn ConvenientePorteiroPulse /tr $tr /sc minute /mo 2 /f 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) { Write-StartLog 'task_pulse_created' } else { Write-StartLog 'task_pulse_create_skip' }
 }
 
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
