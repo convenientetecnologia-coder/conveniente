@@ -134,9 +134,37 @@ function invalidatePidCaches() {
   try { cellRegistry.invalidateListenCache(); } catch {}
 }
 
+function taskkillPids(pids, { tree = true, timeoutMs = 8000 } = {}) {
+  const list = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(pids) ? pids : [pids])) {
+    const n = Math.floor(Number(raw) || 0);
+    if (!(n > 4) || n === process.pid || seen.has(n)) continue;
+    seen.add(n);
+    list.push(n);
+  }
+  if (!list.length) return true;
+  const args = ['/F'];
+  if (tree) args.push('/T');
+  for (const n of list) {
+    args.push('/PID', String(n));
+  }
+  try {
+    spawnSync('taskkill.exe', args, {
+      windowsHide: true,
+      timeout: Math.max(2000, Number(timeoutMs) || 8000),
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+  } catch {}
+  invalidatePidCaches();
+  return list.every((n) => !pidExistsOnSystem(n));
+}
+
 function forceKillPid(pid) {
   const n = Math.floor(Number(pid) || 0);
   if (!n || n === process.pid || n <= 4) return false;
+  taskkillPids([n], { tree: true, timeoutMs: 5000 });
+  if (!pidExistsOnSystem(n)) return true;
   try {
     spawnSync('taskkill.exe', ['/F', '/PID', String(n)], {
       windowsHide: true,
@@ -470,12 +498,12 @@ function reapForeignCellEntries(keepPids) {
 
 function killListenUntilFree(timeoutMs) {
   const started = Date.now();
-  const limit = Math.max(500, Number(timeoutMs) || 10000);
+  const limit = Math.max(400, Number(timeoutMs) || 10000);
   while ((Date.now() - started) < limit) {
     const left = listLiveCellPids();
     if (!left.length) return { ok: true, left: [] };
-    for (const pid of left) forceKillPid(pid);
-    sleepMs(150);
+    taskkillPids(left, { tree: true, timeoutMs: 4000 });
+    sleepMs(80);
   }
   const left = listLiveCellPids();
   return { ok: left.length === 0, left };
@@ -526,11 +554,12 @@ function consumeBootRecycle() {
 
 function stopAllCells({ reason = 'manual' } = {}) {
   const why = String(reason || 'manual');
-  const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology/.test(why);
+  const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology|iniciar_stamp/.test(why);
   const bootFast = !mustDie && /boot_|index_ctrl_c|maestro_kill/.test(why);
   if (mustDie || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
-  const listen1 = mustDie ? 8000 : (bootFast ? 2000 : 8000);
-  const listen2 = mustDie ? 4000 : (bootFast ? 800 : 3000);
+  const listen1 = mustDie ? 1500 : (bootFast ? 800 : 2000);
+  const listen2 = mustDie ? 800 : (bootFast ? 400 : 800);
+  const t0 = Date.now();
   const alive = cellRegistry.listAlive();
   const pids = [];
   const seen = new Set();
@@ -542,8 +571,8 @@ function stopAllCells({ reason = 'manual' } = {}) {
     pids.push(n);
   }
   for (const c of alive) addPid(c && c.pid, true);
-  for (const row of realCellListenRows()) addPid(row && row.pid);
   for (const pid of listCellEntryPids()) addPid(pid, true);
+  for (const row of realCellListenRows()) addPid(row && row.pid);
   const owners = listListenOwners(32);
   try {
     cellForensic.append('cell_stop_all', {
@@ -554,15 +583,16 @@ function stopAllCells({ reason = 'manual' } = {}) {
       owners
     });
   } catch {}
+  taskkillPids(pids, { tree: true, timeoutMs: 8000 });
+  terminateCellEntriesByCmd();
   let chrome = { killed: 0, matched: 0 };
   try {
     chrome = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells');
   } catch {}
-  for (const pid of pids) forceKillPid(pid);
-  terminateCellEntriesByCmd();
   let freed = killListenUntilFree(listen1);
   if (!freed.ok) {
     terminateCellEntriesByCmd();
+    taskkillPids(listLiveCellPids(), { tree: true, timeoutMs: 5000 });
     try {
       const again = require('./orphanReaper.js').reapAllConvenienteChrome(why || 'stop_all_cells_retry');
       if (again && again.killed != null) chrome.killed = (chrome.killed || 0) + again.killed;
@@ -595,7 +625,8 @@ function stopAllCells({ reason = 'manual' } = {}) {
     listenLeft: stillListen.length,
     chromeKilled: chrome && chrome.killed != null ? chrome.killed : 0,
     pids,
-    owners: ownersAfter.length ? ownersAfter : owners
+    owners: ownersAfter.length ? ownersAfter : owners,
+    ms: Date.now() - t0
   };
 }
 
@@ -635,6 +666,7 @@ module.exports = {
   setStamp,
   setTopology,
   forceKillPid,
+  taskkillPids,
   killListenUntilFree,
   stopAllCells,
   consumeBootRecycle,

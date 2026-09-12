@@ -69,13 +69,13 @@ function Test-ConvenienteCellsAlive {
     return $false
 }
 
-function Invoke-ConvenienteCellCli([string]$Arg) {
+function Invoke-ConvenienteCellCli([string]$Arg, [string]$Extra = '') {
     $node = Resolve-ConvenienteNodeExe
     if (-not $node) { return $null }
     $life = 'C:\conveniente\scripts\cellLifecycle.js'
     if (-not (Test-Path -LiteralPath $life)) { return $null }
     try {
-        $out = & $node $life $Arg
+        $out = if ($Extra) { & $node $life $Arg $Extra } else { & $node $life $Arg }
         return [string]$out
     } catch {
         return $null
@@ -89,8 +89,10 @@ function Test-ConvenienteNeedRestart {
 
 function Stop-ConvenienteCells([string]$Reason = 'iniciar') {
     Write-StartLog ('cells_stop ' + $Reason)
-    Write-ConvenienteHumanHold ('stop_workers:' + $Reason)
-    [void](Invoke-ConvenienteCellCli 'stop')
+    if ($Reason -notmatch 'iniciar_stamp') {
+        Write-ConvenienteHumanHold ('stop_workers:' + $Reason)
+    }
+    [void](Invoke-ConvenienteCellCli 'stop' $Reason)
 }
 
 function Get-ListenPid([int]$Port) {
@@ -365,6 +367,14 @@ function Start-ConvenienteNode {
         return 1
     }
     [void](Stop-ConvenienteConsoleHosts)
+    try {
+        $needCells = $false
+        try { $needCells = [bool](Test-ConvenienteNeedRestart) } catch { $needCells = $false }
+        if ($needCells -and (Test-ConvenienteCellsAlive)) {
+            Write-StartLog 'cells_hard_stop before_launch'
+            Stop-ConvenienteCells 'iniciar_stamp'
+        }
+    } catch {}
     Write-StartLog 'launch_host'
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'

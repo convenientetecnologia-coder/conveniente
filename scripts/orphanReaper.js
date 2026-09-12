@@ -192,17 +192,32 @@ function listChromeProcessesWin() {
 }
 
 function taskkillPid(pid) {
+  return taskkillPids([pid]);
+}
+
+function taskkillPids(pids) {
+  const list = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(pids) ? pids : [pids])) {
+    const n = Math.floor(Number(raw) || 0);
+    if (!(n > 4) || n === process.pid || seen.has(n)) continue;
+    seen.add(n);
+    list.push(n);
+  }
+  if (!list.length) return false;
   invalidateChromeListCache();
+  const args = ["/F", "/T"];
+  for (const n of list) {
+    args.push("/PID", String(n));
+  }
   try {
-    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    execFileSync("taskkill", args, {
       windowsHide: true,
       timeout: 8000,
       stdio: ["ignore", "ignore", "ignore"]
     });
-    return true;
-  } catch {
-    return false;
-  }
+  } catch {}
+  return true;
 }
 
 function killChromeMatchingDirs(userDataDirs) {
@@ -245,11 +260,9 @@ function killChromeMatchingDirs(userDataDirs) {
     }
     if (hit) toKill.add(pr.pid);
   }
-  let killed = 0;
-  for (const pid of toKill) {
-    if (taskkillPid(pid)) killed += 1;
-  }
-  return { matched: toKill.size, killed, listed: procs.length };
+  const pidList = Array.from(toKill);
+  const ok = taskkillPids(pidList);
+  return { matched: toKill.size, killed: ok ? toKill.size : 0, listed: procs.length };
 }
 
 function convenienteCloudflaredExeHints() {
@@ -461,21 +474,29 @@ function killChromeByConvenienteHint() {
       toKill.add(pr.pid);
     }
   }
-  let killed = 0;
-  for (const pid of toKill) {
-    if (taskkillPid(pid)) killed += 1;
-  }
-  return { matched: toKill.size, killed, listed: procs.length };
+  const pidList = Array.from(toKill);
+  const ok = taskkillPids(pidList);
+  return { matched: toKill.size, killed: ok ? toKill.size : 0, listed: procs.length };
 }
 
 function reapAllConvenienteChrome(reason) {
-  const byDirs = reapChromeDirs(collectAllProfileDirs(), reason || "index_boot_start_closed");
   const loose = killChromeByConvenienteHint();
+  life("orphan_reap_chrome", { reason: clip(reason || "index_boot_start_closed", 48), killed: loose.killed, matched: loose.matched });
+  try {
+    provisionAudit.append({
+      event: "orphan_reap_chrome",
+      reason: clip(reason || "index_boot_start_closed", 48),
+      dirs: 0,
+      matched: loose.matched,
+      killed: loose.killed,
+      listed: loose.listed
+    });
+  } catch {}
   return {
-    matched: (byDirs.matched || 0) + (loose.matched || 0),
-    killed: (byDirs.killed || 0) + (loose.killed || 0),
-    listed: Math.max(byDirs.listed || 0, loose.listed || 0),
-    skipped: !!byDirs.skipped
+    matched: loose.matched || 0,
+    killed: loose.killed || 0,
+    listed: loose.listed || 0,
+    skipped: false
   };
 }
 

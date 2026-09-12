@@ -4575,9 +4575,44 @@ fileStore.ensurePerfisJson();
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// Painel primeiro. Recycle/células depois — Iniciar não espera WMI nem bootstrap.
+function wipeStaleCellsBeforeListen() {
+  let codeStale = false;
+  let holdStopWorkers = false;
+  try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
+  try {
+    const hold = require('./scripts/bootIntent.js').readHumanHold();
+    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
+  } catch {}
+  if (codeStale) {
+    try {
+      if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
+        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
+      }
+    } catch {}
+    try {
+      logger.info('[BOOT] Código novo: mata células antes do painel.');
+      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
+    } catch (e) {
+      try { logger.warn('[BOOT] recycle antes do painel falhou', { error: (e && e.message) || String(e) }); } catch {}
+    }
+    return { wiped: true, codeStale: true, holdStopWorkers };
+  }
+  if (holdStopWorkers) {
+    try {
+      logger.info('[BOOT] Encerrar ainda vale: mata leftover antes do painel.');
+      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_hold_stop_workers' });
+    } catch (e) {
+      try { logger.warn('[BOOT] leftover antes do painel falhou', { error: (e && e.message) || String(e) }); } catch {}
+    }
+    return { wiped: true, codeStale: false, holdStopWorkers: true };
+  }
+  return { wiped: false, codeStale: false, holdStopWorkers: false };
+}
+
+// Código novo / Encerrar: mata a árvore da célula ANTES do painel. Sem git pull, adota.
 (async () => {
   const bootT0 = Date.now();
+  const preWipe = wipeStaleCellsBeforeListen();
   if (!clusterClient) {
     clusterClient = {
       plan: { nodes: 0, perNode: { maxChromes: 0 } },
@@ -4660,36 +4695,18 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
   let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
   let adoptingLiveCells = false;
-  let codeStale = false;
-  try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
-  try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
-  if (codeStale) {
+  let codeStale = !!(preWipe && preWipe.codeStale);
+  let holdStopWorkers = !!(preWipe && preWipe.holdStopWorkers);
+  if (preWipe && preWipe.wiped) {
+    adoptingLiveCells = false;
+    startClosedOnBoot = true;
+  } else {
+    try { adoptingLiveCells = require('./scripts/cellRegistry.js').hasAliveCells(); } catch {}
+    try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
     try {
-      if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
-        require('./scripts/bootIntent.js').setHumanHold({ reason: 'iniciar_stamp_stale', by: 'index_boot' });
-      }
+      const hold = require('./scripts/bootIntent.js').readHumanHold();
+      holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
     } catch {}
-    try {
-      logger.info('[BOOT] Código novo no disco: reciclando células depois do painel.');
-      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
-    } catch (e) {
-      try { logger.warn('[BOOT] recycle de células falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-    }
-    adoptingLiveCells = false;
-    startClosedOnBoot = true;
-  }
-  let holdStopWorkers = false;
-  try {
-    const hold = require('./scripts/bootIntent.js').readHumanHold();
-    holdStopWorkers = !!(hold && hold.active && String(hold.reason || '') === 'stop_workers');
-  } catch {}
-  if (holdStopWorkers) {
-    try { logger.info('[BOOT] Encerrar workers ainda vale: leftover não se adota.'); } catch {}
-    try { require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_hold_stop_workers' }); } catch (e) {
-      try { logger.warn('[BOOT] leftover após Encerrar falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
-    }
-    adoptingLiveCells = false;
-    startClosedOnBoot = true;
   }
   if (adoptingLiveCells) {
     startClosedOnBoot = false;

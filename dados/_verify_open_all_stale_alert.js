@@ -56,7 +56,21 @@ assert.ok(indexJs.includes("work.yes && !holdStopWorkers"), "Ctrl+C depois de En
 const life = fs.readFileSync(path.join(ROOT, "scripts", "cellLifecycle.js"), "utf8");
 const killFn = life.split("function forceKillPid")[1] || "";
 assert.ok(/taskkill\.exe/.test(killFn) && /\/PID/.test(killFn) && /pidExistsOnSystem/.test(life), "Encerrar só conta PID que o tasklist ainda vê");
-assert.ok(/reapAllConvenienteChrome/.test(life.split("function stopAllCells")[1] || "") && /for \(const pid of pids\) forceKillPid/.test(life), "Encerrar fecha Chrome antes de matar a célula");
+const stopFnLife = life.split("function stopAllCells")[1] || "";
+assert.ok(
+  stopFnLife.indexOf("taskkillPids(pids") >= 0 &&
+    stopFnLife.indexOf("taskkillPids(pids") < stopFnLife.indexOf("reapAllConvenienteChrome"),
+  "Encerrar/stamp mata a árvore da célula em lote ANTES do Chrome leftover"
+);
+assert.ok(!/for \(const pid of pids\) forceKillPid/.test(life), "Encerrar não mata PID um a um");
+assert.ok(life.includes("function taskkillPids") && /\/T/.test(life.split("function taskkillPids")[1] || ""), "taskkill em lote com árvore /T");
+assert.ok(indexJs.includes("wipeStaleCellsBeforeListen") && indexJs.indexOf("function wipeStaleCellsBeforeListen") < indexJs.indexOf("app.listen"), "código novo mata célula antes do painel");
+assert.ok(!indexJs.includes("reciclando células depois do painel"), "Iniciar não espera o painel para matar célula velha");
+const iniciarPs1 = fs.readFileSync(path.join(ROOT, "scripts", "iniciarSistema.ps1"), "utf8");
+assert.ok(iniciarPs1.includes("cells_hard_stop before_launch") && iniciarPs1.includes("Stop-ConvenienteCells 'iniciar_stamp'"), "Iniciar com stamp mata célula antes de lançar o index");
+assert.ok(iniciarPs1.includes("Invoke-ConvenienteCellCli 'stop' $Reason"), "CLI de stop recebe o motivo (iniciar_stamp)");
+const reaper = fs.readFileSync(path.join(ROOT, "scripts", "orphanReaper.js"), "utf8");
+assert.ok(reaper.includes("function taskkillPids") && /for \(const pid of toKill\)/.test(reaper) === false, "Chrome leftover morre em um taskkill, não um a um");
 const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), "utf8");
 const halt = cluster.split("function haltRespawn")[1] || cluster.split("function beginStop")[1] || "";
 assert.ok(/deadHandled = true/.test(halt.slice(0, 500)), "haltRespawn marca célula morta pra não readotar");
