@@ -5,6 +5,7 @@ const path = require("path");
 const serverConfig = require("./serverConfig.js");
 const logger = require("./logger.js");
 const provisionAudit = require("./provisionAudit.js");
+const workHours = require("./workHours.js");
 const LOOP_MS = 30000;
 const STATE_PATH = path.join(__dirname, "..", "dados", "daily_window_scheduler_state.json");
 const OPEN_VERIFY_ENABLED = !/^(0|false|no|off)$/i.test(String(process.env.DAILY_WINDOW_OPEN_VERIFY_ENABLED || "1").trim());
@@ -17,6 +18,7 @@ let timer = null;
 let inFlight = false;
 let localPort = Number(process.env.PORT || 8088) || 8088;
 let state = null;
+let lastWorkHoursRecoverAt = 0;
 
 function now() { return Date.now(); }
 
@@ -659,6 +661,7 @@ async function tick() {
             nextOpenAt
           });
         } catch {}
+        await maybeRecoverOpenAllIfDesiredOff();
         return;
       }
 
@@ -680,6 +683,7 @@ async function tick() {
               nextOpenAt
             });
           } catch {}
+          await maybeRecoverOpenAllIfDesiredOff();
           return;
         }
       }
@@ -730,12 +734,64 @@ async function tick() {
         });
       } catch {}
       if (!rr.ok) logger.warn("[DAILY-WINDOW] open falhou", rr || {});
+      return;
     }
+    await maybeRecoverOpenAllIfDesiredOff();
   } catch (e) {
     try { saveState({ inProgress: false, inProgressKind: null, lastError: (e && e.message) ? String(e.message) : String(e) }); } catch {}
   } finally {
     inFlight = false;
   }
+}
+
+async function maybeRecoverOpenAllIfDesiredOff() {
+  const hours = workHours.getWorkHoursDecision();
+  if (!hours.inWorkHours || hours.waitScheduledOpen) return { skipped: hours.reason };
+  try {
+    const bootIntent = require("./bootIntent.js");
+    const hold = bootIntent.readHumanHold();
+    if (bootIntent.isHumanHoldBlockingOpenAll(hold)) return { skipped: "human_hold" };
+  } catch {}
+  try {
+    if (require("./cellLifecycle.js").isCellsStopped()) return { skipped: "cells_stopped" };
+  } catch {}
+  let desired = { perfis: {} };
+  try {
+    const fileStore = require("./fileStore.js");
+    desired = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || { perfis: {} };
+  } catch {}
+  if (workHours.countDesiredActive(desired) > 0) return { skipped: "desired_already_open" };
+  const oa = desired && desired._openAll && typeof desired._openAll === "object" ? desired._openAll : null;
+  if (oa && oa.active === true) return { skipped: "open_all_active" };
+  const nowTs = now();
+  if (lastWorkHoursRecoverAt && (nowTs - lastWorkHoursRecoverAt) < workHours.RECOVER_DEBOUNCE_MS) {
+    return { skipped: "recover_debounce" };
+  }
+  lastWorkHoursRecoverAt = nowTs;
+  try {
+    provisionAudit.append({
+      ts: nowTs,
+      event: "work_hours_desired_off_recover",
+      reason: hours.reason,
+      lastOpenDay: hours.lastOpenDay || null
+    });
+  } catch {}
+  const r = await httpJson(`http://127.0.0.1:${localPort}/api/perfis/open-all-24h`, {}, 5 * 60 * 1000);
+  const ok = !!(r && r.ok === true);
+  if (ok) {
+    try { saveState({ lastOpenAt: now(), lastError: null }); } catch {}
+  }
+  try {
+    provisionAudit.append({
+      ts: now(),
+      event: "work_hours_desired_off_recover_result",
+      ok,
+      alreadyRunning: !!(r && r.alreadyRunning),
+      error: r && r.error ? String(r.error).slice(0, 160) : null
+    });
+  } catch {}
+  if (!ok) logger.warn("[DAILY-WINDOW] recover Abrir Tudo no expediente falhou", r || {});
+  return { ok, result: r };
 }
 
 function startDailyWindowScheduler({ port } = {}) {

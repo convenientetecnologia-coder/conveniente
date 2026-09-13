@@ -71,6 +71,11 @@ const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 const bootIntentSrc = fs.readFileSync(path.join(ROOT, "scripts", "bootIntent.js"), "utf8");
 assert.ok(indexJs.includes("holdStopWorkers") && indexJs.includes("boot_hold_stop_workers"), "Iniciar com hold de Encerrar não adota leftover");
 assert.ok(indexJs.includes("bootSrc === 'porteiro'") && indexJs.includes("maybePorterOpenAllOnBoot"), "porteiro no ciclo pergunta Abrir Tudo mesmo adotando célula");
+assert.ok(indexJs.includes("shouldSkipStartClosedOnPorterBoot"), "boot do porteiro no expediente não zera o pedido");
+assert.ok(indexJs.includes("index_boot_work_hours_orphan"), "expediente sem worker só reapha Chrome leftover, não o desired");
+const schedSrc = fs.readFileSync(path.join(ROOT, "scripts", "dailyWindowScheduler.js"), "utf8");
+assert.ok(schedSrc.includes("maybeRecoverOpenAllIfDesiredOff"), "agenda recupera Abrir Tudo se o disco zerou de dia");
+assert.ok(schedSrc.includes("work_hours_desired_off_recover"), "recover do expediente deixa rastro no audit");
 assert.ok(indexJs.includes("reason: 'human_iniciar'") && indexJs.includes("isStopWorkersHold"), "index no clique Iniciar reforça a trava e reconhece Encerrar");
 assert.ok(bootIntentSrc.includes(".replace(/^\\uFEFF/, '')"), "bootIntent precisa aceitar BOM no human_boot_hold.json");
 const bootIntent = require(path.join(ROOT, "scripts", "bootIntent.js"));
@@ -89,10 +94,33 @@ assert.strictEqual(
     bootSource: "porteiro",
     allCellsDead: false,
     humanHoldActive: false,
-    workCycle: { inWorkCycle: true }
+    workCycle: { inWorkCycle: true },
+    desiredAllOff: true
   }).yes,
   true,
-  "porteiro no ciclo abre tudo mesmo com célula viva"
+  "porteiro no expediente abre tudo se worker vivo e pedido zerado"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: false,
+    humanHoldActive: false,
+    workCycle: { inWorkCycle: true },
+    desiredAllOff: false
+  }).yes,
+  false,
+  "pedido já no disco: nurse abre o Chrome, não o botão Abrir Tudo"
+);
+assert.strictEqual(
+  bootIntent.decideAutoOpenAll({
+    bootSource: "porteiro",
+    allCellsDead: true,
+    humanHoldActive: false,
+    workCycle: { inWorkCycle: false, waitScheduledOpen: true, reason: "wait_scheduled_open" },
+    desiredAllOff: true
+  }).yes,
+  false,
+  "5h–7h espera a agenda, não rouba a abertura"
 );
 assert.strictEqual(
   bootIntent.decideAutoOpenAll({

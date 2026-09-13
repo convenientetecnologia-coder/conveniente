@@ -17,6 +17,9 @@
  * - Abrir Tudo (clique ou agenda 5-7h)
  * - Index adotou workers vivos (sistema já está aberto; trava velha morre)
  * - human_iniciar: TTL 15 min (crash tarde ainda religa no ciclo)
+ *
+ * Expediente (workHours.js): relógio 05:00–01:00. lastOpenAt NÃO manda.
+ * De dia o boot do porteiro não zera desired. Abrir Tudo só se o pedido estiver zerado.
  */
 
 const HUMAN_INICIAR_HOLD_MS = 15 * 60 * 1000;
@@ -123,23 +126,35 @@ function decideWorkCycle({
   mode,
   lastOpenAt,
   lastCloseAt,
-  nextCloseAt
+  nextCloseAt,
+  nowMin,
+  day,
+  closeStartMin,
+  openStartMin,
+  openEndMin,
+  lastOpenDay
 } = {}) {
+  const workHours = require('./workHours.js');
   const now = Number(ts) || Date.now();
-  const openAt = Number(lastOpenAt) || 0;
-  const closeAt = Number(lastCloseAt) || 0;
-  const nextClose = Number(nextCloseAt) || 0;
-  const m = String(mode || '').trim().toLowerCase();
-
-  if (enabled !== true) return { inWorkCycle: false, reason: 'daily_window_disabled' };
-  if (m === 'always_on_24h') return { inWorkCycle: true, reason: 'always_on_24h' };
-  if (m !== 'window_close_open') return { inWorkCycle: false, reason: 'daily_window_mode_off' };
-  if (!(openAt > 0)) return { inWorkCycle: false, reason: 'never_opened' };
-  if (closeAt > openAt) return { inWorkCycle: false, reason: 'closed_after_last_open' };
-  if (!(nextClose > 0)) return { inWorkCycle: false, reason: 'no_next_close' };
-  if (nextClose > openAt && now >= nextClose) return { inWorkCycle: false, reason: 'past_next_close' };
-  if (now < openAt) return { inWorkCycle: false, reason: 'before_last_open' };
-  return { inWorkCycle: true, reason: 'between_last_open_and_next_close' };
+  const hours = workHours.decideWorkHours({
+    nowMin: nowMin != null ? nowMin : workHours.saoPauloMinutesSinceMidnight(now),
+    day: day || workHours.todayKeySaoPaulo(now),
+    enabled,
+    mode,
+    closeStartMin: closeStartMin != null ? closeStartMin : 60,
+    openStartMin: openStartMin != null ? openStartMin : 300,
+    openEndMin: openEndMin != null ? openEndMin : 420,
+    lastOpenDay
+  });
+  return {
+    inWorkCycle: hours.inWorkHours === true && hours.waitScheduledOpen !== true,
+    waitScheduledOpen: hours.waitScheduledOpen === true,
+    inWorkHours: hours.inWorkHours === true,
+    reason: hours.reason,
+    lastOpenAt: Number(lastOpenAt) || 0,
+    lastCloseAt: Number(lastCloseAt) || 0,
+    nextCloseAt: Number(nextCloseAt) || 0
+  };
 }
 
 function decideAutoOpenAll({
@@ -149,8 +164,10 @@ function decideAutoOpenAll({
   holdReason,
   holdAt,
   nowTs: ts,
-  workCycle
+  workCycle,
+  desiredAllOff
 } = {}) {
+  const workHours = require('./workHours.js');
   if (String(bootSource || '') !== 'porteiro') return { yes: false, reason: 'boot_source_not_porteiro' };
   if (isHumanHoldBlockingOpenAll({
     active: humanHoldActive === true,
@@ -160,10 +177,25 @@ function decideAutoOpenAll({
   })) {
     return { yes: false, reason: 'human_hold' };
   }
-  if (!workCycle || workCycle.inWorkCycle !== true) {
-    return { yes: false, reason: (workCycle && workCycle.reason) ? String(workCycle.reason) : 'not_work_cycle' };
-  }
-  return { yes: true, reason: allCellsDead === true ? 'porteiro_all_dead_work_cycle' : 'porteiro_work_cycle' };
+  const hoursYes = !!(workCycle && (workCycle.inWorkCycle === true || (
+    workCycle.inWorkHours === true && workCycle.waitScheduledOpen !== true
+  )));
+  const decided = workHours.shouldAutoOpenAll({
+    bootSource,
+    humanHoldActive,
+    holdReason,
+    holdAt,
+    nowTs: ts,
+    inWorkHours: hoursYes,
+    waitScheduledOpen: !!(workCycle && workCycle.waitScheduledOpen === true),
+    desiredAllOff,
+    isHumanHoldBlockingOpenAll
+  });
+  if (decided.yes !== true) return decided;
+  return {
+    yes: true,
+    reason: allCellsDead === true ? 'porteiro_all_dead_work_hours' : 'porteiro_work_hours_desired_off'
+  };
 }
 
 function audit(event, patch) {
@@ -176,38 +208,33 @@ function audit(event, patch) {
 }
 
 function getWorkCycleDecision(ts = Date.now()) {
-  const serverConfig = require('./serverConfig.js');
-  const cfg = serverConfig.readServerConfigEffective({});
-  const dw = (cfg && cfg.dailyWindow) ? cfg.dailyWindow : {};
-  const statePath = path.join(__dirname, '..', 'dados', 'daily_window_scheduler_state.json');
-  let st = {};
-  try { st = JSON.parse(String(fs.readFileSync(statePath, 'utf8') || '')) || {}; } catch { st = {}; }
-  const lastOpenAt = Number(st.lastOpenAt || 0) || 0;
-  const lastCloseAt = Number(st.lastCloseAt || 0) || 0;
-  const nextCloseAt = Number(st.nextCloseAt || 0) || 0;
-  const nextOpenAt = Number(st.nextOpenAt || 0) || 0;
-  const core = decideWorkCycle({
-    nowTs: ts,
-    enabled: dw && dw.enabled === true,
-    mode: dw && dw.executionMode,
-    lastOpenAt,
-    lastCloseAt,
-    nextCloseAt
-  });
+  const workHours = require('./workHours.js');
+  const hours = workHours.getWorkHoursDecision(ts);
   return {
-    inWorkCycle: core.inWorkCycle === true,
-    reason: core.reason,
-    lastOpenAt,
-    lastCloseAt,
-    nextCloseAt,
-    nextOpenAt
+    inWorkCycle: hours.inWorkHours === true && hours.waitScheduledOpen !== true,
+    inWorkHours: hours.inWorkHours === true,
+    waitScheduledOpen: hours.waitScheduledOpen === true,
+    reason: hours.reason,
+    lastOpenAt: hours.lastOpenAt,
+    lastCloseAt: hours.lastCloseAt,
+    nextCloseAt: hours.nextCloseAt,
+    nextOpenAt: hours.nextOpenAt,
+    lastOpenDay: hours.lastOpenDay,
+    lastCloseDay: hours.lastCloseDay
   };
 }
 
 async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
+  const workHours = require('./workHours.js');
   const work = getWorkCycleDecision(nowTs());
   const hold = readHumanHold();
   const bootSource = getBootSource();
+  let desiredSnap = { perfis: {} };
+  try {
+    const fileStore = require('./fileStore.js');
+    desiredSnap = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || { perfis: {} };
+  } catch {}
+  const allOff = workHours.desiredAllOff(desiredSnap);
   const decision = decideAutoOpenAll({
     bootSource,
     allCellsDead: allCellsDead === true,
@@ -215,7 +242,8 @@ async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
     holdReason: hold && hold.reason ? String(hold.reason) : null,
     holdAt: hold && hold.at ? hold.at : 0,
     nowTs: nowTs(),
-    workCycle: work
+    workCycle: work,
+    desiredAllOff: allOff
   });
   const snap = {
     bootSource: bootSource || null,
@@ -223,6 +251,8 @@ async function maybePorterOpenAllOnBoot({ allCellsDead, port } = {}) {
     humanHold: !!(hold && hold.active),
     holdReason: hold && hold.reason ? hold.reason : null,
     workReason: work && work.reason ? work.reason : null,
+    waitScheduledOpen: !!(work && work.waitScheduledOpen),
+    desiredActive: workHours.countDesiredActive(desiredSnap),
     lastOpenAt: work && work.lastOpenAt ? work.lastOpenAt : 0,
     lastCloseAt: work && work.lastCloseAt ? work.lastCloseAt : 0,
     nextCloseAt: work && work.nextCloseAt ? work.nextCloseAt : 0,

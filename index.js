@@ -4755,6 +4755,20 @@ function wipeStaleCellsBeforeListen() {
     try { require('./scripts/bootIntent.js').clearHumanHold({ by: 'adopt_live_cells' }); } catch {}
     try { logger.info('[BOOT] Células vivas (mesmo código): adota, sem matar Chrome.'); } catch {}
   }
+  const bootSrc = String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase();
+  let workHoursSnap = null;
+  try { workHoursSnap = require('./scripts/workHours.js').getWorkHoursDecision(); } catch {}
+  try {
+    const skipClosed = require('./scripts/workHours.js').shouldSkipStartClosedOnPorterBoot({
+      bootSource: bootSrc,
+      inWorkHours: !!(workHoursSnap && workHoursSnap.inWorkHours),
+      holdStopWorkers
+    });
+    if (skipClosed) {
+      startClosedOnBoot = false;
+      try { logger.info('[BOOT] start-closed pulado: expediente, pedido no disco fica.', { reason: workHoursSnap && workHoursSnap.reason }); } catch {}
+    }
+  } catch {}
   try {
     if (startClosedOnBoot) {
       logger.info('[BOOT] start-closed: desired.active=false (aguardando clique).');
@@ -4774,12 +4788,17 @@ function wipeStaleCellsBeforeListen() {
     } catch (e) {
       try { logger.warn('[BOOT] orphan reap chrome falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
     }
+  } else if (!adoptingLiveCells && bootSrc === 'porteiro' && workHoursSnap && workHoursSnap.inWorkHours) {
+    try {
+      require('./scripts/orphanReaper.js').reapAllConvenienteChrome('index_boot_work_hours_orphan');
+    } catch (e) {
+      try { logger.warn('[BOOT] orphan reap chrome (expediente) falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+    }
   }
   try { logger.info('[BOOT] subindo células'); } catch {}
   await bootCluster();
   try { logger.info('[BOOT] cluster pronto', { ms: Date.now() - bootT0 }); } catch {}
   try {
-    const bootSrc = String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase();
     if (bootSrc === 'porteiro' || !adoptingLiveCells) {
       setTimeout(() => {
         try {
