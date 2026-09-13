@@ -840,7 +840,7 @@ async function __deltaWsLivenessBusyCheap(nome, ctrl) {
   if (ctrl.humanControl === true) return 'human';
   if (ctrl.configurando === true) return 'config';
   try {
-    if (opening && opening[nome]) return 'opening';
+    if (isProfileOpening(nome)) return 'opening';
   } catch {}
   try {
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) return 'robe';
@@ -6970,6 +6970,43 @@ async function milLog(type, msg) {
 }
 
 let opening = {};
+const OPENING_TTL_MS = Math.max(
+  30_000,
+  Math.min(5 * 60_000, Number(process.env.NURSE_OPENING_TTL_MS || 120000) || 120000)
+);
+
+function isProfileOpening(nome) {
+  try {
+    const t = opening && opening[nome];
+    if (t == null || t === false) return false;
+    const startedAt = t === true ? 0 : (Number(t) || 0);
+    if (t !== true && startedAt > 0 && (Date.now() - startedAt) > OPENING_TTL_MS) {
+      try { delete opening[nome]; } catch {}
+      try {
+        if (typeof provisionAudit !== 'undefined' && provisionAudit && provisionAudit.append) {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'opening_ttl_expired',
+            nome: String(nome || ''),
+            ttlMs: OPENING_TTL_MS
+          });
+        }
+      } catch {}
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function markProfileOpening(nome) {
+  opening[nome] = Date.now();
+}
+
+function clearProfileOpening(nome) {
+  try { delete opening[nome]; } catch {}
+}
 
 async function killPids(pids = []) {
   for (const pid of (pids || [])) {
@@ -7850,7 +7887,7 @@ async function activateOnce(nome, source = '', operator = '') {
     } catch {}
     return { ok: false, error: 'host_boot_not_ready' };
   }
-  if (opening[nome]) return { ok: false, error: 'already_opening' };
+  if (isProfileOpening(nome)) return { ok: false, error: 'already_opening' };
   if (robeMeta[nome]?.banCloseInFlight === true) {
     try { provisionAudit.append({ ts: Date.now(), event: 'activate_skip_ban_close_inflight', nome: String(nome||''), source: String(source||'') }); } catch {}
     return { ok: false, error: 'ban_close_inflight' };
@@ -7885,7 +7922,21 @@ async function activateOnce(nome, source = '', operator = '') {
   } catch {}
 
   if (controllers.has(nome)) {
-    return { ok: true, already: true };
+    const existing = controllers.get(nome);
+    if (isLiveBrowserCtrl(existing)) {
+      return { ok: true, already: true };
+    }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'activate_drop_stale_controller',
+        nome: String(nome || ''),
+        source: String(source || ''),
+        hasBrowser: !!(existing && existing.browser)
+      });
+    } catch {}
+    try { if (existing && existing.virtus) await stopVirtus(nome).catch(() => {}); } catch {}
+    try { controllers.delete(nome); } catch {}
   }
 
   const inflight = activationLocks.get(nome);
@@ -7896,7 +7947,7 @@ async function activateOnce(nome, source = '', operator = '') {
       : { ok: false, error: 'activation_in_progress' };
   }
 
-  opening[nome] = true;
+  markProfileOpening(nome);
   let _supervisorSlotGranted = false;
   let _detachedOpenToken = '';
   async function _releaseOpenGrant(result = 'ok') {
@@ -8367,7 +8418,7 @@ async function activateOnce(nome, source = '', operator = '') {
     activationLocks.set(nome, job);
     return await job;
   } finally {
-    delete opening[nome];
+    clearProfileOpening(nome);
   }
 }
 
@@ -10017,10 +10068,10 @@ function cleanupProfileTransientLocks(nome, source) {
     if (hasController) return;
     const hadProfileLock = _profileOpLocks.has(nome);
     const hadActivationLock = activationLocks.has(nome);
-    const hadOpening = !!(opening && opening[nome]);
+    const hadOpening = isProfileOpening(nome);
     if (hadProfileLock) _profileOpLocks.delete(nome);
     if (hadActivationLock) activationLocks.delete(nome);
-    if (hadOpening) delete opening[nome];
+    if (hadOpening) clearProfileOpening(nome);
   } catch {}
 }
 
@@ -19478,16 +19529,16 @@ async function nurseTick() {
 
       {
         const rm = robeMeta[nome] || {};
-        if (rm.emExecucao === true) {
+        if (rm.emExecucao === true && isLiveBrowserCtrl(ctrl)) {
           await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_robe_running', 'nurse_skip_robe_running');
           continue;
         }
       }
 
-      if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
+      if (ctrl && isLiveBrowserCtrl(ctrl) && (ctrl.humanControl === true || ctrl.configurando === true)) {
         continue;
       }
-      if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
+      if (ctrl && isLiveBrowserCtrl(ctrl) && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
         await appendIssueNurseDebounced(nome, 'mil_action', 'send_lock_skip', 'send_lock_skip');
         continue;
       }
@@ -19498,12 +19549,12 @@ async function nurseTick() {
       }
 
       const hs = getHealth && getHealth(nome);
-      if (hs && ['recover1','recover2','recover3'].includes(hs.stage)) {
+      if (hs && ['recover1','recover2','recover3'].includes(hs.stage) && isLiveBrowserCtrl(ctrl)) {
         await appendIssueNurseDebounced(nome, 'mil_action', 'health_recovery_in_progress_skip', 'health_recovery_in_progress_skip');
         continue;
       }
 
-      if (want.active === true && !ctrl) {
+      if (want.active === true && !isLiveBrowserCtrl(ctrl)) {
         if (isFrozenNow(nome)) continue;
 
         // Live recheck: desired0 do tick pode estar stale após deactivate (reopen fantasma).
@@ -19536,7 +19587,7 @@ async function nurseTick() {
           try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_ban_close_inflight', nome: String(nome||'') }); } catch {}
           continue;
         }
-        if (opening[nome]) {
+        if (isProfileOpening(nome)) {
           try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_skip_already_opening', nome: String(nome||'') }); } catch {}
           continue;
         }
@@ -19703,7 +19754,7 @@ async function nurseTick() {
         continue;
       }
 
-      if (opening[nome]) continue;
+      if (isProfileOpening(nome)) continue;
       const tabCtx = { browser: ctrl.browser, nome };
       if (!pages[0] || pagesLookAllJunk(pages, tabCtx)) {
         let retryFailed = true;
@@ -19775,7 +19826,6 @@ async function nurseTick() {
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
             if (shouldBypassNurseZombie(nome, 'nurse.no_pages')) {
               robeMeta[nome].noPagesStrikes = 0;
-              robeMeta[nome].lastNoPagesAt = 0;
               continue;
             }
             await registerFailure(nome, 'no_pages', 'external');
@@ -20537,6 +20587,9 @@ async function nurseTick() {
         } else {
           robeMeta[nome].zombieStrikes = robeMeta[nome].zombieStrikes || 0;
           robeMeta[nome].zombieStrikes += 1;
+          if (!robeMeta[nome].lastNoPagesAt) {
+            robeMeta[nome].lastNoPagesAt = Date.now();
+          }
           // Falha recente: invalida idle skip até novo ready real.
           try { delete robeMeta[nome].lastPageReadyAt; } catch { robeMeta[nome].lastPageReadyAt = 0; }
           await appendIssueNurseDebounced(nome, `suspect_page_zombie`, `strike=${robeMeta[nome].zombieStrikes}`, 'suspect_page_zombie');
@@ -20556,7 +20609,6 @@ async function nurseTick() {
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
             if (shouldBypassNurseZombie(nome, 'nurse.page_zombie')) {
-              robeMeta[nome].zombieStrikes = 0;
               continue;
             }
             try { registerFailure(nome, 'zombie', 'external'); } catch {}
@@ -20627,7 +20679,7 @@ async function nurseTick() {
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
-      if (want.virtus === 'on' && !isOxyFaxinaHold(nome) && !isRobeBusy(nome) && automationAllowed(ctrl)) {
+      if (want.virtus === 'on' && !isOxyFaxinaHold(nome) && !isRobeBusy(nome) && automationAllowed(ctrl, { ignoreTrabalhando: true })) {
         // Se o governor mudou de modo, reinicia o runner do Virtus para aplicar slowMode sem derrubar browser/sessão.
         try {
           const curMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
@@ -20640,44 +20692,46 @@ async function nurseTick() {
         // Gatilho Robe: open-all/finalize liga virtus=on SEM passar por start_work.
         // Com GLOBAL_TICK=0, esse é o momento em que Pronto precisa entrar na fila.
         const wasWorking = !!(ctrl.trabalhando === true && ctrl.virtus);
-        try {
-          ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
-          ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
-          ctrl.trabalhando = true;
+        if (!wasWorking) {
           try {
-            const now = Date.now();
-            if (!ctrl.virtus) {
-              robeMeta[nome] = robeMeta[nome] || {};
-              const last = Number(robeMeta[nome].dbgVirtusFalsyAt || 0) || 0;
-              if (!last || (now - last) > 5 * 60 * 1000) {
-                robeMeta[nome].dbgVirtusFalsyAt = now;
-                try { provisionAudit.append({ ts: now, event: 'dbg_virtus_start_return_falsy', nome: String(nome||''), pid: process.pid, mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null }); } catch {}
+            ctrl.virtus = startVirtusByEngine(ctrl.browser, nome, autoMode, { epoch: ctrl.virtusEpoch || 0 });
+            ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
+            ctrl.trabalhando = true;
+            try {
+              const now = Date.now();
+              if (!ctrl.virtus) {
+                robeMeta[nome] = robeMeta[nome] || {};
+                const last = Number(robeMeta[nome].dbgVirtusFalsyAt || 0) || 0;
+                if (!last || (now - last) > 5 * 60 * 1000) {
+                  robeMeta[nome].dbgVirtusFalsyAt = now;
+                  try { provisionAudit.append({ ts: now, event: 'dbg_virtus_start_return_falsy', nome: String(nome||''), pid: process.pid, mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null }); } catch {}
+                }
               }
+            } catch {}
+            if (ctrl.trabalhando === true) {
+              try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
             }
-          } catch {}
-          if (!wasWorking && ctrl.trabalhando === true) {
-            try { scheduleRobeEnqueueAfterStartWork(nome); } catch {}
+          } catch (e) {
+            try {
+              const now = Date.now();
+              robeMeta[nome] = robeMeta[nome] || {};
+              const last = Number(robeMeta[nome].dbgVirtusErrAt || 0) || 0;
+              if (!last || (now - last) > 2 * 60 * 1000) {
+                robeMeta[nome].dbgVirtusErrAt = now;
+                const msg = (e && e.message) ? String(e.message) : String(e);
+                try {
+                  provisionAudit.append({
+                    ts: now,
+                    event: 'dbg_virtus_start_error',
+                    nome: String(nome||''),
+                    pid: process.pid,
+                    mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null,
+                    error: msg.slice(0, 220)
+                  });
+                } catch {}
+              }
+            } catch {}
           }
-        } catch (e) {
-          try {
-            const now = Date.now();
-            robeMeta[nome] = robeMeta[nome] || {};
-            const last = Number(robeMeta[nome].dbgVirtusErrAt || 0) || 0;
-            if (!last || (now - last) > 2 * 60 * 1000) {
-              robeMeta[nome].dbgVirtusErrAt = now;
-              const msg = (e && e.message) ? String(e.message) : String(e);
-              try {
-                provisionAudit.append({
-                  ts: now,
-                  event: 'dbg_virtus_start_error',
-                  nome: String(nome||''),
-                  pid: process.pid,
-                  mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null,
-                  error: msg.slice(0, 220)
-                });
-              } catch {}
-            }
-          } catch {}
         }
       }
     }
