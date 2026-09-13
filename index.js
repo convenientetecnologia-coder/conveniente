@@ -3879,6 +3879,7 @@ let __serverEventBridgeTimer = null;
 let __serverEventBridgeInFlight = false;
 let __serverEventLastHash = '';
 let __serverEventLastSentAt = 0;
+let __serverEventLastFullStatusAt = 0;
 let __serverEventLastDeltaSentAt = 0;
 let __serverEventLastQuick = null;
 let __serverEventPendingHash = '';
@@ -4028,21 +4029,10 @@ function __readFreshStatusJson(maxAgeMs) {
 }
 
 async function __readLocalStatusForEventBridge() {
-  // Mesma fonte do dashboard da MAE: status.json fresco ou GET /api/status.
-  // Nao usa get-status cru do cluster (jornal parcial / children incompleto).
-  const fresh = __readFreshStatusJson(8000);
+  // Jornal do dashboard. Nunca GET /api/status — compete no event loop e aborta em 8s.
+  const fresh = __readFreshStatusJson(60000);
   if (fresh) return fresh;
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(`http://127.0.0.1:${PORT}/api/status`, { method: 'GET', signal: controller.signal });
-    if (!res.ok) throw new Error(`status_http_${res.status}`);
-    const json = await res.json();
-    if (!json || typeof json !== 'object') throw new Error('status_invalid_json');
-    return json;
-  } finally {
-    clearTimeout(to);
-  }
+  return __readFreshStatusJson(24 * 60 * 60 * 1000);
 }
 
 function __resolveCtServerEventConfig() {
@@ -4151,7 +4141,7 @@ async function __postServerEventToCt(payload) {
   for (const cand of candidates.slice(0, 5)) {
     attempt += 1;
     const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), 8000);
+    const to = setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch(cand.eventUrl, {
         method: 'POST',
@@ -4327,6 +4317,13 @@ async function __serverEventBridgeTick(reason) {
     const eventType = shouldSendDelta
       ? 'server_delta'
       : (needConfigPush && !heartbeatDue ? 'server_config' : 'heartbeat');
+    const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_HEARTBEAT_MS);
+    const includeFullStatus = !!(
+      (forceStatusEvent || fullStatusDue) &&
+      status &&
+      Array.isArray(status.perfis) &&
+      status.perfis.length
+    );
 
     const payload = {
       hostId,
@@ -4341,7 +4338,7 @@ async function __serverEventBridgeTick(reason) {
       // CT novo devolve ctBaseUrl na própria resposta; zero dependência do
       // tunnel reverso e zero push DNS prematuro.
       acceptCtConfigReply: true,
-      ...(shouldSendDelta ? { status } : {}),
+      ...(includeFullStatus ? { status } : {}),
       ...(serverConfigPayload ? { serverConfig: serverConfigPayload } : {})
     };
     const out = await __postServerEventToCt(payload);
@@ -4353,6 +4350,7 @@ async function __serverEventBridgeTick(reason) {
         __serverEventPendingTicks = 0;
       }
       __serverEventLastSentAt = now;
+      if (includeFullStatus) __serverEventLastFullStatusAt = now;
       __serverEventLastQuick = telemetry.quick || null;
       if (out.ctConfigApplied) {
         // Confirma ao CT, em seguida, que a configuração já está persistida e

@@ -58,6 +58,19 @@ function __readGateBStateSafe() {
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
 let _lastBaselineAt = 0;
 let __virtusMetricsCache = { at: 0, key: '', value: null };
+let __statusJournalRefreshInflight = false;
+
+function __scheduleStatusJournalRefresh(workerClient) {
+  if (__statusJournalRefreshInflight) return;
+  if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return;
+  __statusJournalRefreshInflight = true;
+  setImmediate(() => {
+    Promise.resolve()
+      .then(() => workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 }))
+      .catch(() => null)
+      .finally(() => { __statusJournalRefreshInflight = false; });
+  });
+}
 
 function __buildUtcMinus3DayWindow(dayDelta) {
   const nowMs = Date.now();
@@ -627,8 +640,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let warningINST = undefined;
   let erroMsgINST = undefined;
 
-  // 2) Overlay: journal fresco no disco primeiro. get-status de 15s no F5 deixava o
-  // dashboard pintado em zero (HTML default) enquanto o index estava vivo.
+  // 2) Overlay: jornal no disco primeiro (fresco ou stale). Esperar get-status de 8s
+  // no F5 deixava o dashboard no HTML zerado — o browser corta no mesmo 8s.
   let overlayINST = null;
   let staleSnapINST = null;
   try {
@@ -639,9 +652,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       ageMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
     } catch {}
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
-      if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 20000) {
-        overlayINST = snap;
-      } else {
+      overlayINST = snap;
+      if (!(Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 20000)) {
         staleSnapINST = snap;
         warningINST = 'status_journal_stale';
       }
@@ -658,6 +670,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
         warningINST = 'status temporarily unavailable';
       }
     }
+  } else if (warningINST === 'status_journal_stale') {
+    try { __scheduleStatusJournalRefresh(workerClient); } catch {}
   }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];

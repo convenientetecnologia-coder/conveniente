@@ -29,8 +29,19 @@ assert.strictEqual(
 assert(src.includes("stale_ignored("), "aggregate precisa marcar stale órfão como ignored");
 assert(src.includes("ignored: true"), "debug do aggregate precisa expor ignored");
 assert(
-  /if \(fb\.ageMs > MAX_FILE_AGE_MS\) \{\s*if \(liveChild\)/.test(src),
+  /if \(fb\.ageMs > MAX_FILE_AGE_MS\) \{\s*if \(liveChild\) \{\s*warningParts/.test(src),
   "warning partial deve ficar só para child vivo stale"
+);
+const staleAgePos = src.indexOf("if (fb.ageMs > MAX_FILE_AGE_MS)");
+assert(staleAgePos >= 0, "ramo de journal_stale precisa existir");
+const staleAgeSlice = src.slice(staleAgePos, staleAgePos + 220);
+assert(
+  staleAgeSlice.includes("warningParts") && !staleAgeSlice.includes("missingIdx.push"),
+  "jornal stale de child vivo não dispara RPC"
+);
+assert(
+  /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/.test(src),
+  "RPC só quando o jornal do node não existe"
 );
 
 const blockedPos = src.indexOf("if (ownerLooksBlockedNotCell) {");

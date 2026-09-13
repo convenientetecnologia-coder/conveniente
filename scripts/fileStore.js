@@ -1248,6 +1248,16 @@ async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
   }
 }
 
+function clearBootStartClosedOnOpen(desired, by) {
+  if (!desired || typeof desired !== 'object') return desired;
+  if (desired._bootStartClosed === true) {
+    desired._bootStartClosed = false;
+    desired._bootStartClosedClearedAt = Date.now();
+    desired._bootStartClosedClearedBy = String(by || 'open_all').slice(0, 120);
+  }
+  return desired;
+}
+
 //// MÉTRICAS DO SISTEMA (RAM, CPU%) ////
 // PATCH MILITAR: cpu.percent (global, para painel) é soma dos cpuPercent de todos perfis/Chrome do snapshot status.json dividido por cores.
 // No Windows, loadavg==0, por isso não use loadavg! 
@@ -1352,7 +1362,7 @@ module.exports = {
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
   findChromeStablePath, readInstalledChromeVersion, alignUaToInstalledChrome, extractChromeMajorFromUa,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
-  resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, readEncerrarGen, getSysMetricsSnapshot, existsFile, existsDir,
+  resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, clearBootStartClosedOnOpen, readEncerrarGen, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,

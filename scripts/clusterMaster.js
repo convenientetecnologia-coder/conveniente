@@ -1318,18 +1318,9 @@ async function createCluster() {
         return true;
       };
 
+      // Só a topologia viva. status_node_N leftover (ex.: 5–8 de 8 workers) não entra.
       const considerIdx = [];
       for (let i = 0; i < children.length; i++) considerIdx.push(i);
-      try {
-        const dadosDir = path.join(__dirname, '..', 'dados');
-        const names = fs.readdirSync(dadosDir);
-        for (const name of names) {
-          const m = /^status_node_(\d+)\.json$/i.exec(String(name || ''));
-          if (!m) continue;
-          const i = Number(m[1]) - 1;
-          if (Number.isFinite(i) && i >= 0 && i < 64) considerIdx.push(i);
-        }
-      } catch {}
       const uniqIdx = Array.from(new Set(considerIdx)).sort((a, b) => a - b);
 
       for (const i of uniqIdx) {
@@ -1347,7 +1338,6 @@ async function createCluster() {
           if (fb.ageMs > MAX_FILE_AGE_MS) {
             if (liveChild) {
               warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
-              missingIdx.push(i);
             }
           }
         } else if (liveChild) {

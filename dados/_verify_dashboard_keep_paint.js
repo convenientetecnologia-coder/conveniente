@@ -25,6 +25,8 @@ check("html_network_rotation_timeout", (html.match(/fetchJsonTimeout\('\/api\/ne
 check("html_keep_last_paint", /__lastStatusPaint/.test(html) && /__lastPerfisPaint/.test(html) && /__reloadInflight/.test(html));
 check("html_inflight_finally", /finally \{\s*__reloadInflight = false;/.test(html));
 check("html_no_zero_without_cache", /if \(!st && !perfisResp\) \{ __reloadInflight = false; return; \}/.test(html));
+check("html_catalog_paints_before_status", /const catalogNow =/.test(html) && /paintTopSummary\(lastOverlay/.test(html) && /await Promise\.all\(\[statusP, netP\]\)/.test(html));
+check("html_cells_timeout", /fetchJsonTimeout\('\/api\/cells', 4000\)/.test(html) && /updateSysMetrics\(\);/.test(html));
 check("html_top_summary_early_paint", /function paintTopSummary/.test(html) && /paintTopSummary\(earlyPerfis, earlyRobeQueue\)/.test(html) && /console\.error\('\[reloadPerfis\] fail'/.test(html));
 check("html_inline_script_parses", (() => {
   try {
@@ -35,9 +37,10 @@ check("html_inline_script_parses", (() => {
   }
 })());
 check("html_status_only_merge", /const overlayPerfis = Array\.isArray\(st\?\.perfis\)/.test(html) && /const perfisSeed = basePerfis\.length/.test(html) && /if \(!dst\) \{\s*dst = makePerfilEntry\(/.test(html));
-check("api_journal_before_rpc", /getStatusSnapshot\(\)/.test(api) && /status_journal_stale/.test(api) && /dashboard pintado em zero/.test(api));
+check("api_journal_before_rpc", /getStatusSnapshot\(\)/.test(api) && /status_journal_stale/.test(api) && /HTML zerado/.test(api));
 check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
-check("api_stale_journal_fallback_only_after_rpc", /let staleSnapINST = null;/.test(api) && /overlayINST = await workerClient\.sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000 \}\);/.test(api) && /overlayINST = staleSnapINST;/.test(api));
+check("api_stale_journal_paints_immediately", /overlayINST = snap;/.test(api) && /__scheduleStatusJournalRefresh/.test(api) && /warningINST === 'status_journal_stale'/.test(api));
+check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000 \}\)/.test(api));
 check("api_status_seed_from_status", /baseline_seeded_from_status/.test(api) && /if \(!baseMap\.size && overlayINST/.test(api));
 const apiPerfis = fs.readFileSync(path.join(root, "scripts", "api_perfis.js"), "utf8");
 const postCfg = apiPerfis.split("app.post('/api/server-config'")[1] || "";

@@ -2549,11 +2549,24 @@
     async function reloadPerfis() {
       if (__reloadInflight) return;
       __reloadInflight = true;
-      const [stFresh, perfisRespFresh, netRotate] = await Promise.all([
-        safeGetStatus(),
-        safeListPerfis(),
-        fetchJsonTimeout('/api/network-rotation/state', 8000)
-      ]);
+      const statusP = safeGetStatus();
+      const perfisP = safeListPerfis();
+      const netP = fetchJsonTimeout('/api/network-rotation/state', 8000);
+      let perfisRespFresh = null;
+      try { perfisRespFresh = await perfisP; } catch { perfisRespFresh = null; }
+      if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) {
+        __lastPerfisPaint = perfisRespFresh;
+      }
+      const catalogNow = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
+        ? perfisRespFresh.perfis
+        : ((__lastPerfisPaint && Array.isArray(__lastPerfisPaint.perfis)) ? __lastPerfisPaint.perfis : []);
+      const lastOverlay = (__lastStatusPaint && Array.isArray(__lastStatusPaint.perfis) && __lastStatusPaint.perfis.length)
+        ? __lastStatusPaint.perfis
+        : catalogNow;
+      if (lastOverlay.length) {
+        try { paintTopSummary(lastOverlay, (__lastStatusPaint && __lastStatusPaint.robeQueue) || []); } catch {}
+      }
+      const [stFresh, netRotate] = await Promise.all([statusP, netP]);
       const st = (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length)
         ? stFresh
         : __lastStatusPaint;
@@ -3564,7 +3577,7 @@
           if (el) el.textContent = String(f.count || 0);
         }
         try {
-          const cells = await fetch('/api/cells').then((r) => r.json()).catch(() => null);
+          const cells = await fetchJsonTimeout('/api/cells', 4000);
           const el = document.getElementById('mCells');
           if (el && cells && cells.ok) {
             const want = Number(cells.want || (cells.topology && cells.topology.nodes) || 0) || 0;

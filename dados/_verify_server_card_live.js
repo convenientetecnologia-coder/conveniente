@@ -20,10 +20,17 @@ function check(name, ok, extra) {
 }
 
 check(
-  "bridge_reads_api_status_not_cluster_get_status",
+  "bridge_reads_journal_not_http_api_status",
   indexJs.includes("__readFreshStatusJson") &&
-    indexJs.includes("http://127.0.0.1:${PORT}/api/status") &&
-    !/__readLocalStatusForEventBridge[\s\S]{0,400}sendWorkerCommand\('get-status'/.test(indexJs)
+    indexJs.includes("__readFreshStatusJson(60000)") &&
+    !indexJs.includes("http://127.0.0.1:${PORT}/api/status") &&
+    !/__readLocalStatusForEventBridge[\s\S]{0,800}sendWorkerCommand\('get-status'/.test(indexJs)
+);
+check(
+  "bridge_full_status_not_on_every_count_delta",
+  indexJs.includes("includeFullStatus") &&
+    indexJs.includes("__serverEventLastFullStatusAt") &&
+    /includeFullStatus \? \{ status \}/.test(indexJs)
 );
 check(
   "bridge_watchdog_releases_hung_tick",
@@ -41,10 +48,11 @@ check(
     indexJs.includes("source: 'api_status'")
 );
 check(
-  "cluster_merges_all_status_node_journals",
-  clusterJs.includes("status_node_(\\d+)\\.json") &&
+  "cluster_aggregates_live_topology_only",
+  clusterJs.includes("for (let i = 0; i < children.length; i++) considerIdx.push(i)") &&
     clusterJs.includes("uniqIdx") &&
-    clusterJs.includes("liveChild")
+    clusterJs.includes("liveChild") &&
+    !/readdirSync\(dadosDir\)/.test(clusterJs)
 );
 check(
   "cluster_ignores_stale_orphan_journals",

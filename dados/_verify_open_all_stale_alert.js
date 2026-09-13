@@ -34,9 +34,27 @@ assert.ok(
   fileStoreSrc.includes("desired._autoOpen") && fileStoreSrc.includes("enabled: false"),
   "resetDesired precisa desligar Tudo aberto"
 );
+assert.ok(
+  fileStoreSrc.includes("function clearBootStartClosedOnOpen") &&
+    typeof fileStore.clearBootStartClosedOnOpen === "function",
+  "Abrir Tudo precisa limpar _bootStartClosed"
+);
+const closedFlag = { _bootStartClosed: true, _bootStartClosedAt: 1 };
+fileStore.clearBootStartClosedOnOpen(closedFlag, "ui_open_all");
+assert.strictEqual(closedFlag._bootStartClosed, false);
+assert.strictEqual(closedFlag._bootStartClosedClearedBy, "ui_open_all");
+assert.ok(Number(closedFlag._bootStartClosedClearedAt) > 0);
+const alreadyOpen = { _bootStartClosed: false };
+fileStore.clearBootStartClosedOnOpen(alreadyOpen, "ui_open_all");
+assert.strictEqual(alreadyOpen._bootStartClosed, false);
+assert.strictEqual(alreadyOpen._bootStartClosedClearedAt, undefined);
 
 const apiSys = fs.readFileSync(path.join(ROOT, "scripts", "api_sys.js"), "utf8");
 const apiPerfis = fs.readFileSync(path.join(ROOT, "scripts", "api_perfis.js"), "utf8");
+assert.ok(
+  apiPerfis.includes("clearBootStartClosedOnOpen(desired, op)"),
+  "open-all e activate chamam clearBootStartClosedOnOpen"
+);
 const openAllFn = apiPerfis.split("app.post('/api/perfis/open-all-24h'")[1] || "";
 assert.ok(
   openAllFn.indexOf("clearHumanHold") >= 0 &&

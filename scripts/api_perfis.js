@@ -798,6 +798,7 @@ module.exports = (app, workerClient, fileStore) => {
     try { 
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired._cellsStopped = false;
+        try { fileStore.clearBootStartClosedOnOpen(desired, op); } catch {}
         desired.perfis = desired.perfis || {};
         desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: true };
         return desired;
@@ -1148,6 +1149,7 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired._cellsStopped = false;
+        try { fileStore.clearBootStartClosedOnOpen(desired, op); } catch {}
         desired.perfis = desired.perfis || {};
         desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'on', active: true };
         return desired;
@@ -2045,6 +2047,7 @@ module.exports = (app, workerClient, fileStore) => {
           throw err;
         }
         desired._cellsStopped = false;
+        try { fileStore.clearBootStartClosedOnOpen(desired, op); } catch {}
         desired.perfis = desired.perfis || {};
         // Sequencer global de abertura (ordem do dashboard/perfis.json):
         // - um único perfil "inFlight" por vez, para o usuário acompanhar.
