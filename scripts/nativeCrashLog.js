@@ -130,6 +130,53 @@ function tailFileBytes(filePath, maxBytes) {
   }
 }
 
+function headFileBytes(filePath, maxBytes) {
+  const cap = Math.max(256, Math.min(128 * 1024, Number(maxBytes || 64 * 1024) || 64 * 1024));
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return "";
+    const st = fs.statSync(filePath);
+    const size = Number(st && st.size || 0) || 0;
+    if (!size) return "";
+    const toRead = Math.min(cap, size);
+    const buf = Buffer.allocUnsafe(toRead);
+    const fd = fs.openSync(filePath, "r");
+    try { fs.readSync(fd, buf, 0, toRead, 0); }
+    finally { try { fs.closeSync(fd); } catch {} }
+    return buf.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function summarizeReport(full) {
+  const raw = headFileBytes(full, 64 * 1024);
+  const pick = (re) => {
+    const m = raw.match(re);
+    return m && m[1] ? clip(m[1], 240) : null;
+  };
+  const num = (re) => {
+    const m = raw.match(re);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return Number.isFinite(n) ? n : null;
+  };
+  const used = num(/"usedHeapSize"\s*:\s*(\d+)/);
+  const total = num(/"totalHeapSize"\s*:\s*(\d+)/);
+  const limit = num(/"heapSizeLimit"\s*:\s*(\d+)/);
+  return {
+    trigger: pick(/"trigger"\s*:\s*"([^"]+)"/),
+    event: pick(/"event"\s*:\s*"([^"]+)"/),
+    heap: (used != null || total != null || limit != null)
+      ? {
+        usedMB: used != null ? Math.round(used / 1048576) : null,
+        totalMB: total != null ? Math.round(total / 1048576) : null,
+        limitMB: limit != null ? Math.round(limit / 1048576) : null
+      }
+      : null,
+    head: clip(raw.replace(/\s+/g, " ").trim(), 900)
+  };
+}
+
 function openCellNativeFd(idx1) {
   ensureLogsDir();
   const fp = cellNativeLogPath(idx1);
@@ -173,12 +220,20 @@ function writeReportsIndex() {
   try {
     ensureLogsDir();
     try { fs.mkdirSync(REPORT_DIR, { recursive: true }); } catch {}
-    const items = listRecentReports(8).map((it) => ({
-      name: it.name,
-      bytes: it.bytes,
-      mtimeMs: it.mtimeMs,
-      pid: it.pid
-    }));
+    const items = listRecentReports(8).map((it) => {
+      let sum = null;
+      try { sum = summarizeReport(it.full); } catch {}
+      return {
+        name: it.name,
+        bytes: it.bytes,
+        mtimeMs: it.mtimeMs,
+        pid: it.pid,
+        trigger: sum && sum.trigger || null,
+        event: sum && sum.event || null,
+        heap: sum && sum.heap || null,
+        head: sum && sum.head || null
+      };
+    });
     fs.writeFileSync(INDEX_JSON, JSON.stringify({
       ts: Date.now(),
       iso: new Date().toISOString(),
@@ -193,39 +248,53 @@ function writeReportsIndex() {
 
 function findReportForPid(pid) {
   const want = Number(pid) || 0;
+  if (!(want > 0)) return null;
   const items = listRecentReports(20);
-  if (want > 0) {
-    const hit = items.find((it) => Number(it.pid) === want);
-    if (hit) return hit;
+  return items.find((it) => Number(it.pid) === want) || null;
+}
+
+function attachReportFields(report) {
+  if (!report) {
+    return {
+      reportName: null,
+      reportBytes: null,
+      reportPid: null,
+      reportTrigger: null,
+      reportEvent: null,
+      reportHeap: null
+    };
   }
-  return items[0] || null;
+  let sum = null;
+  try { sum = summarizeReport(report.full); } catch {}
+  return {
+    reportName: report.name || null,
+    reportBytes: report.bytes || null,
+    reportPid: report.pid || null,
+    reportTrigger: sum && sum.trigger || null,
+    reportEvent: sum && sum.event || null,
+    reportHeap: sum && sum.heap || null
+  };
 }
 
 function deathEvidence({ idx1, pid } = {}) {
-  const decoded = decodeExitCode(null);
   const n = Math.max(1, Number(idx1) || 1);
   const tail = tailFileBytes(cellNativeLogPath(n), TAIL_BYTES);
   const report = findReportForPid(pid);
   return {
-    hex: decoded.hex,
-    codeName: decoded.name,
     nativeLog: "cell_" + n + "_native",
     nativeTail: clip(tail, 3500),
-    reportName: report && report.name || null,
-    reportBytes: report && report.bytes || null,
-    reportPid: report && report.pid || null
+    ...attachReportFields(report)
   };
 }
 
-function indexDeathEvidence() {
+function indexDeathEvidence(pid) {
   const prev = tailFileBytes(indexNativePrevPath(), TAIL_BYTES);
   const cur = tailFileBytes(indexNativeLogPath(), TAIL_BYTES);
-  const report = findReportForPid(null);
+  const report = findReportForPid(pid);
   return {
     nativeTail: clip(prev || cur, 3500),
     nativeFrom: prev ? "crash_nativo_index.prev" : (cur ? "crash_nativo_index" : null),
-    reportName: report && report.name || null,
-    reportBytes: report && report.bytes || null
+    ...attachReportFields(report)
   };
 }
 
@@ -297,6 +366,8 @@ module.exports = {
   cellNativeLogPath,
   rotateIfHuge,
   tailFileBytes,
+  headFileBytes,
+  summarizeReport,
   openCellNativeFd,
   listRecentReports,
   writeReportsIndex,

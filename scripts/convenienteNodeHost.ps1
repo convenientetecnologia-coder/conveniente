@@ -111,8 +111,9 @@ try { Move-NativeLogAside $outLog $outPrev } catch {}
 
 Push-Location $wd
 try {
-    # stderr/stdout no disco (V8 Fatal/Zone/heap). Janela fica; a autópsia é o arquivo.
-    & $node $idx 1>> $outLog 2>> $errLog
+    # PS 5.1 2>> no nativo vira NativeCommandError. cmd /c grava o stderr cru (Zone/heap/stack).
+    # Janela do host continua visivel; a autopcia e o arquivo.
+    cmd.exe /c "`"$node`" `"$idx`" 1>> `"$outLog`" 2>> `"$errLog`""
 } finally {
     Pop-Location
 }

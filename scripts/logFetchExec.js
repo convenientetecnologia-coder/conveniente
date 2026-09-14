@@ -190,7 +190,13 @@ async function execFetchLogs(cmd) {
   for (const key of keys.slice(0, logsFetchCore.FETCH_KEYS_MAX)) {
     const fp = allow[key];
     if (!fp) { items.push({ key, ok: false, error: 'not_allowed' }); continue; }
-    const r = logsFetchCore.sliceLogFile(fp, { maxLines: tailLines, maxBytes, fromStart, byteOffset });
+    const reportHead = /^node_report_\d+$/.test(key);
+    const r = logsFetchCore.sliceLogFile(fp, {
+      maxLines: tailLines,
+      maxBytes,
+      fromStart: reportHead ? true : fromStart,
+      byteOffset
+    });
     items.push({ key, ...r });
   }
   let ingest = null;

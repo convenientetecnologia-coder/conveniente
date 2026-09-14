@@ -60,10 +60,24 @@ const listed = native.listRecentReports(5);
 check("reports_list_pid", listed.some((r) => r.name === reportName && Number(r.pid) === 47648));
 const found = native.findReportForPid(47648);
 check("reports_find_pid", found && found.name === reportName);
+check("reports_find_miss_null", native.findReportForPid(1) == null);
+
+fs.writeFileSync(path.join(reportDir, reportName), JSON.stringify({
+  header: { event: "Allocation failed - JavaScript heap out of memory", trigger: "FatalError" },
+  javascriptHeap: { usedHeapSize: 16 * 1048576, totalHeapSize: 18 * 1048576, heapSizeLimit: 32 * 1048576 }
+}) + "\n", "utf8");
+const sum = native.summarizeReport(path.join(reportDir, reportName));
+check("report_summary_trigger", sum && sum.trigger === "FatalError" && /heap out of memory/.test(String(sum.event || "")));
+check("report_summary_heap", sum && sum.heap && Number(sum.heap.usedMB) === 16);
+const idxw2 = native.writeReportsIndex();
+check("reports_index_refresh", idxw2 && idxw2.ok === true);
+const idxBody = JSON.parse(fs.readFileSync(native.INDEX_JSON, "utf8"));
+check("reports_index_has_trigger", idxBody && Array.isArray(idxBody.items) && idxBody.items.some((it) => it && it.trigger === "FatalError"));
 
 const host = fs.readFileSync(path.join(root, "scripts", "convenienteNodeHost.ps1"), "utf8");
-check("host_redirect", /& \$node \$idx/.test(host) && /2>> \$errLog/.test(host) && /1>> \$outLog/.test(host));
+check("host_redirect", /cmd\.exe \/c/.test(host) && /2>> `"\$errLog`"/.test(host) && /1>> `"\$outLog`"/.test(host));
 check("host_hex_fn", /function Format-ExitHex/.test(host) && /codeName/.test(host));
+check("host_no_ps_amp", !/& \$node \$idx 1>>/.test(host));
 
 const cluster = fs.readFileSync(path.join(root, "scripts", "clusterMaster.js"), "utf8");
 check("cluster_stderr_fd", /openCellNativeFd/.test(cluster) && /\['ignore', 'ignore', errFd\]/.test(cluster));
@@ -84,6 +98,12 @@ check("life_jsonl_sizes", /jsonlSizes/.test(life) && /indexDeathEvidence/.test(l
 
 const dash = fs.readFileSync(path.join(root, "scripts", "dashboard.js"), "utf8");
 check("dash_rotate_keep_3", /archiveHugeJsonl/.test(dash) && /keep: 3/.test(dash) && /skipped: 'small'/.test(dash));
+
+const fetchExec = fs.readFileSync(path.join(root, "scripts", "logFetchExec.js"), "utf8");
+check("fetch_report_from_start", /node_report_\\d\+/.test(fetchExec) && /reportHead/.test(fetchExec));
+
+const evMiss = native.deathEvidence({ idx1: 2, pid: 1 });
+check("death_no_wrong_report", evMiss && evMiss.reportName == null);
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 

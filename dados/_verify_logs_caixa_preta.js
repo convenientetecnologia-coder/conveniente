@@ -35,7 +35,7 @@ check("src_allow_crash_nativo", allowSrc.includes("crash_nativo_index") && allow
 check("src_allow_node_report", allowSrc.includes("node_report_") && allowSrc.includes("forensic_node_reports_index"));
 const hostSrc = fs.readFileSync(path.join(root, "scripts", "convenienteNodeHost.ps1"), "utf8");
 check("src_host_exit_file", hostSrc.includes("index_host_exit.jsonl") && hostSrc.includes("index_lifecycle.jsonl"));
-check("src_host_native_log", hostSrc.includes("crash_nativo_index.log") && hostSrc.includes("Format-ExitHex") && /& \$node \$idx/.test(hostSrc));
+check("src_host_native_log", hostSrc.includes("crash_nativo_index.log") && hostSrc.includes("Format-ExitHex") && hostSrc.includes("cmd.exe /c"));
 check("src_dash_timeout_45s", coreSrc.includes("INGEST_TIMEOUT_MS") && coreSrc.includes("45_000"));
 check("src_dash_slice", coreSrc.includes("sliceLogFile") && coreSrc.includes("fromStart") && coreSrc.includes("byteOffset"));
 check("src_dash_packets", coreSrc.includes("buildIngestPackets") && fetchExecSrc.includes("postLogsIngestOnce"));

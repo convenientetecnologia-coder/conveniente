@@ -448,9 +448,13 @@ async function createCluster() {
         nativeLog: ev && ev.nativeLog || null,
         nativeTail: ev && ev.nativeTail || null,
         reportName: ev && ev.reportName || null,
-        reportBytes: ev && ev.reportBytes || null
+        reportBytes: ev && ev.reportBytes || null,
+        reportTrigger: ev && ev.reportTrigger || null,
+        reportEvent: ev && ev.reportEvent || null,
+        reportHeap: ev && ev.reportHeap || null
       });
     } catch {}
+    try { require('./nativeCrashLog.js').writeReportsIndex(); } catch {}
     for (const [msgId, { resolve }] of (child.pending || new Map()).entries()) {
       try { resolve({ ok: false, error: 'worker_died' }); } catch {}
     }
@@ -625,11 +629,16 @@ async function createCluster() {
       const gate = spawnGate.get(idx);
       if (gate && Number(gate.pid) === Number(proc.pid) && !gate.confirmed) {
         try {
+          const decoded = (() => {
+            try { return require('./nativeCrashLog.js').decodeExitCode(code); } catch { return { hex: null, name: null }; }
+          })();
           cellForensic.append('cell_spawn_exit_unconfirmed', {
             idx: idx + 1,
             pid: proc.pid,
             code,
-            signal
+            signal,
+            hex: decoded.hex,
+            codeName: decoded.name
           });
         } catch {}
         return;
