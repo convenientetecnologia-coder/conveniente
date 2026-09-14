@@ -129,6 +129,10 @@ function logsAllowlist() {
     crash_hammer: path.join(base, 'crash_hammer.jsonl'),
     crash_hammer_last: path.join(base, 'crash_hammer_last.json'),
     index_host_exit: path.join(base, 'index_host_exit.jsonl'),
+    crash_nativo_index: path.join(base, 'logs', 'crash_nativo_index.log'),
+    crash_nativo_index_prev: path.join(base, 'logs', 'crash_nativo_index.prev.log'),
+    crash_nativo_index_out: path.join(base, 'logs', 'crash_nativo_index.out.log'),
+    forensic_node_reports_index: path.join(base, 'forensic_node_reports_index.json'),
     multi_engine_last: path.join(base, 'multi_engine_last.json'),
     multi_engine_log: path.join(base, 'logs', 'multi_engine.log'),
     server_event_bridge: path.join(base, 'server_event_bridge.log')
@@ -146,6 +150,17 @@ function logsAllowlist() {
   for (let i = 1; i <= statusNodeMax; i += 1) {
     allow[`status_node_${i}`] = path.join(base, `status_node_${i}.json`);
   }
+  const cellNativeMax = Math.max(8, parseInt(process.env.CELL_NATIVE_ALLOWLIST_MAX || '8', 10) || 8);
+  for (let i = 1; i <= cellNativeMax; i += 1) {
+    allow[`cell_${i}_native`] = path.join(base, 'logs', `cell_${i}_native.log`);
+  }
+  try {
+    const native = require('./nativeCrashLog.js');
+    const reports = native.listRecentReports(5);
+    for (let i = 0; i < reports.length; i += 1) {
+      allow['node_report_' + (i + 1)] = reports[i].full;
+    }
+  } catch {}
   addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_lifecycle', 'life_arch', 16);
   addArchivedLogKeys(allow, path.join(base, 'logs'), 'index_handle_pulse', 'pulse_arch', 16);
   addArchivedLogKeys(allow, path.join(base, 'logs'), 'cell_events', 'cell_arch', 16);

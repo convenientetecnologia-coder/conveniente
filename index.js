@@ -4734,6 +4734,12 @@ function wipeStaleCellsBeforeListen() {
     srv.on('error', reject);
   });
   try { logger.info('[BOOT] painel no ar', { ms: Date.now() - bootT0 }); } catch {}
+  try {
+    const huge = require('./scripts/nativeCrashLog.js').archiveHugeJsonl();
+    logger.info('[BOOT] jsonl_huge_archive', { results: huge });
+  } catch (e) {
+    try { logger.warn('[BOOT] jsonl_huge_archive falhou (best-effort)', { error: (e && e.message) || String(e) }); } catch {}
+  }
 
   let startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
   let adoptingLiveCells = false;

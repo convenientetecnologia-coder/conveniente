@@ -67,19 +67,69 @@ if ([string]::IsNullOrWhiteSpace($BootSource)) {
 Write-Host ''
 Write-Host 'Painel: http://localhost:8088/index.html'
 Write-Host ''
+
+$logDir = 'C:\conveniente\dados\logs'
+try { New-Item -ItemType Directory -Path $logDir -Force | Out-Null } catch {}
+$errLog = Join-Path $logDir 'crash_nativo_index.log'
+$outLog = Join-Path $logDir 'crash_nativo_index.out.log'
+$errPrev = Join-Path $logDir 'crash_nativo_index.prev.log'
+$outPrev = Join-Path $logDir 'crash_nativo_index.out.prev.log'
+
+function Move-NativeLogAside([string]$cur, [string]$prev) {
+    if (-not (Test-Path -LiteralPath $cur)) { return }
+    if (Test-Path -LiteralPath $prev) {
+        $arch = Join-Path $logDir ((Split-Path -Leaf $cur) + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        try { Move-Item -LiteralPath $prev -Destination $arch -Force } catch {}
+    }
+    try { Move-Item -LiteralPath $cur -Destination $prev -Force } catch {}
+}
+
+function Format-ExitHex([int]$code) {
+    try {
+        $bytes = [BitConverter]::GetBytes([int32]$code)
+        $u = [BitConverter]::ToUInt32($bytes, 0)
+        return ('0x' + $u.ToString('X8'))
+    } catch {
+        return 'na'
+    }
+}
+
+function Format-ExitName([int]$code) {
+    $h = Format-ExitHex $code
+    if ($h -eq '0xC0000409') { return 'FASTFAIL' }
+    if ($h -eq '0xC0000374') { return 'HEAP_CORRUPT' }
+    if ($h -eq '0xC000012D') { return 'COMMIT_LIMIT' }
+    if ($h -eq '0xC00000FD') { return 'STACK_OVERFLOW' }
+    if ($h -eq '0x80000003') { return 'WAIT_ABANDONED' }
+    if ($code -eq 134) { return 'ABORT' }
+    if ($code -eq 0) { return 'OK' }
+    return 'OTHER'
+}
+
+try { Move-NativeLogAside $errLog $errPrev } catch {}
+try { Move-NativeLogAside $outLog $outPrev } catch {}
+
 Push-Location $wd
 try {
-    & $node $idx
+    # stderr/stdout no disco (V8 Fatal/Zone/heap). Janela fica; a autópsia é o arquivo.
+    & $node $idx 1>> $outLog 2>> $errLog
 } finally {
     Pop-Location
 }
 $ec = 0
 try { $ec = [int]$LASTEXITCODE } catch { $ec = -1 }
-$hex = 'na'
-try { $hex = '0x' + ([uint32]($ec -band 0xffffffff)).ToString('X') } catch {}
+$hex = Format-ExitHex $ec
+$codeName = Format-ExitName $ec
+try {
+    Write-Host ''
+    Write-Host ('--- crash_nativo_index exit code=' + $ec + ' hex=' + $hex + ' name=' + $codeName + ' ---')
+    if (Test-Path -LiteralPath $errLog) {
+        Get-Content -LiteralPath $errLog -Tail 40 | ForEach-Object { Write-Host $_ }
+    }
+} catch {}
 $ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $iso = (Get-Date).ToUniversalTime().ToString('o')
-$line = '{"ts":' + $ts + ',"iso":"' + $iso + '","event":"index_host_exit","role":"index_host","code":' + $ec + ',"hex":"' + $hex + '"}'
+$line = '{"ts":' + $ts + ',"iso":"' + $iso + '","event":"index_host_exit","role":"index_host","code":' + $ec + ',"hex":"' + $hex + '","codeName":"' + $codeName + '"}'
 try {
     $dir = 'C:\conveniente\dados'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null

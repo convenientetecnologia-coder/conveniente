@@ -19956,12 +19956,17 @@ async function nurseTick() {
             lr = weakCreateProbeFailed.det;
             lrPage = weakCreateProbeFailed.pg;
           }
-          // Log leve: scan (para auditoria e ajuste fino)
+          // Log leve: só grava se o scan mudou. Scan "tá normal" a cada 5s inchava GB no disco.
           try {
-            const fs = require('fs');
-            const path = require('path');
-            const fp = path.join(__dirname, '..', 'dados', 'login_required_events.jsonl');
-            fs.appendFileSync(fp, JSON.stringify({ ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan }) + '\n');
+            const fpScan = scan.map((p) => [p && p.u || '', p && p.lr ? 1 : 0, p && p.reason || ''].join('|')).join(';');
+            robeMeta[nome] = robeMeta[nome] || {};
+            if (robeMeta[nome].lastLrScanFp !== fpScan) {
+              robeMeta[nome].lastLrScanFp = fpScan;
+              const fs = require('fs');
+              const path = require('path');
+              const fp = path.join(__dirname, '..', 'dados', 'login_required_events.jsonl');
+              fs.appendFileSync(fp, JSON.stringify({ ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan }) + '\n');
+            }
           } catch {}
 
           // === Enterprise hardening (P0): auto-desengessar "probe_failed" quando o scan prova LR=false ===
@@ -20291,10 +20296,14 @@ async function nurseTick() {
               if (detPin && detPin.present) anyPresent = true;
             }
             try {
-              const fsSync2 = require('fs');
-              const path2 = require('path');
-              const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-              fsSync2.appendFileSync(p, JSON.stringify({ ts: nowp, src:'worker.js', perfil:nome, event:'scan', pages: scan }) + '\n');
+              const fpScan = scan.map((p) => [p && p.u || '', p && p.p ? 1 : 0, p && p.k || ''].join('|')).join(';');
+              if (robeMeta[nome].lastPinScanFp !== fpScan) {
+                robeMeta[nome].lastPinScanFp = fpScan;
+                const fsSync2 = require('fs');
+                const path2 = require('path');
+                const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                fsSync2.appendFileSync(p, JSON.stringify({ ts: nowp, src:'worker.js', perfil:nome, event:'scan', pages: scan }) + '\n');
+              }
             } catch {}
 
             if (firstMatch) {

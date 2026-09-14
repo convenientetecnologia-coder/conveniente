@@ -364,7 +364,7 @@ async function createCluster() {
     }, waitMs);
   }
 
-  function onCellDeath(idx, { code, signal, pid } = {}) {
+  function onCellDeath(idx, { code, signal, pid, evidence } = {}) {
     const child = children[idx];
     if (!child || child.deadHandled) return;
     if (isShuttingDown || cellLifecycle.isCellsStopped()) {
@@ -429,7 +429,28 @@ async function createCluster() {
         shard: child && child.shard ? child.shard.size : (blocks[idx] || []).length
       });
     } catch {}
-    try { cellForensic.append('cell_drop', { idx: idx + 1, code, signal, pid: pid || child.pid }); } catch {}
+    try {
+      const dyingPid = pid || child.pid;
+      let ev = evidence && typeof evidence === 'object' ? evidence : null;
+      try {
+        if (!ev) ev = require('./nativeCrashLog.js').deathEvidence({ idx1: idx + 1, pid: dyingPid });
+      } catch {}
+      const decoded = (() => {
+        try { return require('./nativeCrashLog.js').decodeExitCode(code); } catch { return { hex: null, name: null }; }
+      })();
+      cellForensic.append('cell_drop', {
+        idx: idx + 1,
+        code,
+        signal,
+        pid: dyingPid,
+        hex: decoded.hex,
+        codeName: decoded.name,
+        nativeLog: ev && ev.nativeLog || null,
+        nativeTail: ev && ev.nativeTail || null,
+        reportName: ev && ev.reportName || null,
+        reportBytes: ev && ev.reportBytes || null
+      });
+    } catch {}
     for (const [msgId, { resolve }] of (child.pending || new Map()).entries()) {
       try { resolve({ ok: false, error: 'worker_died' }); } catch {}
     }
@@ -578,13 +599,23 @@ async function createCluster() {
   function spawnDetachedCell(idx, shardNames, env) {
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
     const entry = path.join(__dirname, 'cellEntry.js');
+    let errFd = null;
+    let stdio = 'ignore';
+    try {
+      const opened = require('./nativeCrashLog.js').openCellNativeFd(idx + 1);
+      errFd = opened && opened.fd != null ? opened.fd : null;
+      if (errFd != null) stdio = ['ignore', 'ignore', errFd];
+    } catch {}
     const proc = spawn(execPath, [entry], {
       cwd: path.join(__dirname, '..'),
       env,
       detached: true,
       windowsHide: true,
-      stdio: 'ignore'
+      stdio
     });
+    if (errFd != null) {
+      try { fs.closeSync(errFd); } catch {}
+    }
     try { proc.unref(); } catch {}
     spawnGate.set(idx, { pid: proc.pid, confirmed: false });
     proc.on('error', (err) => {
@@ -603,7 +634,9 @@ async function createCluster() {
         } catch {}
         return;
       }
-      onCellDeath(idx, { code, signal, pid: proc.pid });
+      let ev = null;
+      try { ev = require('./nativeCrashLog.js').deathEvidence({ idx1: idx + 1, pid: proc.pid }); } catch {}
+      onCellDeath(idx, { code, signal, pid: proc.pid, evidence: ev });
     });
     return proc;
   }
@@ -938,7 +971,15 @@ async function createCluster() {
           continue;
         }
         if (c.pid && !cellRegistry.pidAlive(c.pid)) {
-          onCellDeath(i, { code: null, signal: 'pid_gone', pid: c.pid });
+          if (c.proc) {
+            if (!c._goneAt) c._goneAt = Date.now();
+            if ((Date.now() - Number(c._goneAt || 0)) < 1500) continue;
+          }
+          let ev = null;
+          try { ev = require('./nativeCrashLog.js').deathEvidence({ idx1: i + 1, pid: c.pid }); } catch {}
+          onCellDeath(i, { code: null, signal: 'pid_gone', pid: c.pid, evidence: ev });
+        } else if (c._goneAt) {
+          c._goneAt = 0;
         }
       }
     }, 2500);

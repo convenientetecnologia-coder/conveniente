@@ -3244,15 +3244,24 @@ function maybeAutoRotateCriticalJsonl() {
     safeMkdirp(dir);
     const keys = ['provision_audit', 'login_required_events', 'messenger_pin'];
     const rotated = [];
+    try {
+      const huge = require('./nativeCrashLog.js').archiveHugeJsonl({ maxBytes: 64 * 1024 * 1024, keep: 2 });
+      if (Array.isArray(huge)) rotated.push({ key: 'huge_archive', ok: true, results: huge });
+    } catch {}
     for (const key of keys) {
       const fp = allow[key];
       if (!fp) continue;
+      let size = 0;
+      try { if (fsSync.existsSync(fp)) size = Number(fsSync.statSync(fp).size || 0) || 0; } catch {}
+      if (size < (16 * 1024 * 1024)) {
+        rotated.push({ key, ok: true, skipped: 'small', bytes: size });
+        continue;
+      }
       const rr = rotateFileBestEffort(fp, { destDir: dir, baseName: `${key}` });
-      // not_found/empty são esperados quando arquivo ainda não existe ou sem dados
       if (rr && rr.ok) rotated.push({ key, ok: true, bytes: Number(rr.bytes || 0) || 0 });
       else rotated.push({ key, ok: false, error: rr && rr.error ? String(rr.error) : 'rotate_failed' });
       try { pruneLogsByAgeHours(dir, { prefix: `${key}.`, maxAgeHours }); } catch {}
-      try { pruneOldLogs(dir, { prefix: `${key}.`, keep: 96 }); } catch {}
+      try { pruneOldLogs(dir, { prefix: `${key}.`, keep: 3 }); } catch {}
     }
     return { ok:true, intervalMin, maxAgeHours, rotated };
   } catch (e) {

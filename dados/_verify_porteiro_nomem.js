@@ -96,6 +96,7 @@ check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /
 check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
 check("host_node_in_window", /& \$node \$idx/.test(hostTxt) && /Conveniente_Node/.test(hostTxt) && !/WindowStyle Hidden/.test(hostTxt) && !/TreatControlCAsInput/.test(hostTxt));
+check("host_native_stderr_file", /crash_nativo_index\.log/.test(hostTxt) && /2>> \$errLog/.test(hostTxt) && /Format-ExitHex/.test(hostTxt) && /codeName/.test(hostTxt));
 const lifeTxt = fs.readFileSync(path.join(root, "scripts", "indexLifecycle.js"), "utf8");
 check("life_sighup_listeners", /SIGBREAK/.test(lifeTxt) && /SIGHUP/.test(lifeTxt) && /handleConsoleSessionSignal/.test(lifeTxt));
 check("life_sighup_no_exit", /function handleConsoleSessionSignal[\s\S]{0,700}return \{ keptAlive: true, exited: false/.test(lifeTxt) && !/function handleConsoleSessionSignal[\s\S]{0,700}process\.exit/.test(lifeTxt));

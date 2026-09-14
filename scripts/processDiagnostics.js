@@ -89,6 +89,7 @@ function install({ role = "process" } = {}) {
     // A API JS do Node 24 não expõe excludeEnv. O flag documentado é propagado
     // em NODE_OPTIONS para todos os filhos Node (workers/backup).
     const childReports = hardenChildNodeReports();
+    try { require("./nativeCrashLog.js").writeReportsIndex(); } catch {}
 
     return {
       ...result,

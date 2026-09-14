@@ -180,7 +180,10 @@ function writeHeartbeat() {
       rssMB: Math.round((mem.rss || 0) / 1048576),
       freeMB: Math.round(os.freemem() / 1048576),
       totalMB: Math.round(os.totalmem() / 1048576),
-      fleet: readFleetSnap()
+      fleet: readFleetSnap(),
+      jsonlSizes: (function () {
+        try { return require("./nativeCrashLog.js").statJsonlSizes(); } catch { return null; }
+      })()
     });
     fs.writeFileSync(HEART_PATH, body, "utf8");
   } catch {}
@@ -204,9 +207,18 @@ function noteUnexpectedDead() {
     const hostTail = String(fs.readFileSync(hostPath, "utf8") || "").trim().split(/\n/).filter(Boolean);
     const last = hostTail.length ? JSON.parse(hostTail[hostTail.length - 1]) : null;
     if (last && last.event === "index_host_exit") {
-      hostExit = { code: last.code, hex: last.hex, ts: last.ts || null };
+      let decoded = { hex: last.hex || null, name: last.codeName || null };
+      try { decoded = require("./nativeCrashLog.js").decodeExitCode(last.code); } catch {}
+      hostExit = {
+        code: last.code,
+        hex: decoded.hex || last.hex || null,
+        codeName: decoded.name || last.codeName || null,
+        ts: last.ts || null
+      };
     }
   } catch {}
+  let nativeEye = null;
+  try { nativeEye = require("./nativeCrashLog.js").indexDeathEvidence(); } catch {}
   append("unexpected_dead", {
     prevPid,
     prevHbIso: prev.iso || null,
@@ -214,7 +226,10 @@ function noteUnexpectedDead() {
     gapSec: prevTs ? Math.round((Date.now() - prevTs) / 1000) : null,
     prevFleet: prev.fleet || null,
     reason: "prev_index_sem_exit",
-    hostExit
+    hostExit,
+    nativeTail: nativeEye && nativeEye.nativeTail ? nativeEye.nativeTail : null,
+    nativeFrom: nativeEye && nativeEye.nativeFrom ? nativeEye.nativeFrom : null,
+    reportName: nativeEye && nativeEye.reportName ? nativeEye.reportName : null
   });
   try { require("./crashHammer.js").scheduleIndex("index_unexpected_dead"); } catch {}
 }
