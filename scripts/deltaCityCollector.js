@@ -19,46 +19,16 @@ function log(...args) {
 }
 
 const FORENSIC_TRIAGEM_LOG_PATH = path.join(__dirname, "..", "dados", "forensic_triagem.log");
-const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024;
+const triagemAppend = require("./triagemAppend.js");
+const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = triagemAppend.MAX_BYTES;
 
-/** Append circular em forensic_triagem.log (RAM constante). */
+/** Um writer: triagemAppend. Nao le o arquivo. Nao aloca 10 MB. */
 function appendForensicTriagemLine(obj) {
   try {
-    const fp = FORENSIC_TRIAGEM_LOG_PATH;
-    const line = JSON.stringify(obj && typeof obj === "object" ? obj : { ts: Date.now(), msg: "invalid" }) + "\n";
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
-
-    let currentSize = 0;
-    try {
-      if (fs.existsSync(fp)) currentSize = Number(fs.statSync(fp).size || 0) || 0;
-    } catch (_) {}
-
-    if ((currentSize + lineBytes) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES) {
-      const keepBytes = Math.max(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes);
-      let tail = "";
-      if (keepBytes > 0 && currentSize > 0) {
-        let fd = null;
-        try {
-          fd = fs.openSync(fp, "r");
-          const start = Math.max(0, currentSize - keepBytes);
-          const toRead = Math.max(0, currentSize - start);
-          if (toRead > 0) {
-            const buf = Buffer.allocUnsafe(toRead);
-            const got = fs.readSync(fd, buf, 0, toRead, start);
-            tail = buf.slice(0, Math.max(0, got)).toString("utf8");
-          }
-        } catch (_) {
-          tail = "";
-        } finally {
-          try { if (fd) fs.closeSync(fd); } catch (_) {}
-        }
-      }
-      fs.writeFileSync(fp, tail + line, "utf8");
-      return;
-    }
-    fs.appendFileSync(fp, line, "utf8");
-  } catch (_) {}
+    return triagemAppend.appendJson(obj);
+  } catch (_) {
+    return { ok: false };
+  }
 }
 
 function logTriagemDomCityCommunion(ctx = {}) {

@@ -69,54 +69,11 @@ function __forensicLeadsEmit({ account_login = null, thread_key = null, flow_sta
     details: details
   });
 }
-const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = 10 * 1024 * 1024; // 10MB hard ceiling (circular)
+const triagemAppend = require("./triagemAppend.js");
+const FORENSIC_TRIAGEM_ROTATE_MAX_BYTES = triagemAppend.MAX_BYTES;
 function __triagemCircularAppendSync(signature, details = null) {
   try {
-    const sig = String(signature || "").trim();
-    if (!sig) return false;
-    const fp = String(FORENSIC_TRIAGEM_LOG_PATH || "").trim();
-    if (!fp) return false;
-    const payload = (details && typeof details === "object")
-      ? { ...details }
-      : { message: String(details || "") };
-    const line = `[${sig}] ${JSON.stringify({ timestamp: Date.now(), ...payload })}\n`;
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    try { fsSync.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
-
-    let currentSize = 0;
-    try {
-      if (fsSync.existsSync(fp)) {
-        const st = fsSync.statSync(fp);
-        currentSize = Number(st && st.size || 0) || 0;
-      }
-    } catch (_) {}
-
-    if ((currentSize + lineBytes) > FORENSIC_TRIAGEM_ROTATE_MAX_BYTES) {
-      const keepBytes = Math.max(0, FORENSIC_TRIAGEM_ROTATE_MAX_BYTES - lineBytes);
-      let tail = "";
-      if (keepBytes > 0 && currentSize > 0) {
-        let fd = null;
-        try {
-          fd = fsSync.openSync(fp, "r");
-          const start = Math.max(0, currentSize - keepBytes);
-          const toRead = Math.max(0, currentSize - start);
-          if (toRead > 0) {
-            const buf = Buffer.allocUnsafe(toRead);
-            const got = fsSync.readSync(fd, buf, 0, toRead, start);
-            tail = buf.slice(0, Math.max(0, got)).toString("utf8");
-          }
-        } catch (_) {
-          tail = "";
-        } finally {
-          try { if (fd) fsSync.closeSync(fd); } catch (_) {}
-        }
-      }
-      fsSync.writeFileSync(fp, tail + line, "utf8");
-      return true;
-    }
-
-    fsSync.appendFileSync(fp, line, "utf8");
-    return true;
+    return triagemAppend.appendSigned(signature, details).ok === true;
   } catch (_) {
     return false;
   }

@@ -17,6 +17,7 @@ const STAMP_FILES = [
   'scripts/cellLifecycle.js',
   'scripts/clusterMaster.js',
   'scripts/worker.js',
+  'scripts/triagemAppend.js',
   'scripts/workerIpc.js',
   'scripts/browser.js',
   'scripts/chromeMotores.js'
