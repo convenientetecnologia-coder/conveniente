@@ -1162,15 +1162,10 @@ function __rotateForensicFileIfNeededSync(fp) {
 }
 function __forensicEmitSync(filePath, obj) {
   try {
-    const line = JSON.stringify(obj);
-    try {
-      const fp = String(filePath || '').trim();
-      if (fp) {
-        try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
-        try { __rotateForensicFileIfNeededSync(fp); } catch {}
-        fs.appendFileSync(fp, line + '\n', 'utf8');
-      }
-    } catch {}
+    const fp = String(filePath || '').trim();
+    if (!fp) return;
+    try { __rotateForensicFileIfNeededSync(fp); } catch {}
+    require('./scripts/auditAppend.js').appendLine(fp, obj);
   } catch {}
 }
 

@@ -44,15 +44,10 @@ function __rotateForensicFileIfNeededSync(fp) {
 }
 function __forensicEmitSync(filePath, obj) {
   try {
-    const line = JSON.stringify(obj);
-    try {
-      const fp = String(filePath || '').trim();
-      if (fp) {
-        try { fs.mkdirSync(path.dirname(fp), { recursive: true }); } catch {}
-        try { __rotateForensicFileIfNeededSync(fp); } catch {}
-        fs.appendFileSync(fp, line + '\n', 'utf8');
-      }
-    } catch {}
+    const fp = String(filePath || '').trim();
+    if (!fp) return;
+    try { __rotateForensicFileIfNeededSync(fp); } catch {}
+    require('./auditAppend.js').appendLine(fp, obj);
   } catch {}
 }
 function __forensicEdgeEmit({ account_login = null, thread_key = null, flow_stage = '', details = null } = {}) {
@@ -1155,8 +1150,7 @@ function safeFilePart(s) {
 
 function appendJsonl(fp, obj) {
   try {
-    ensureDirSync(path.dirname(fp));
-    fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
+    require('./auditAppend.js').appendLine(fp, obj);
   } catch {}
 }
 
@@ -19965,7 +19959,7 @@ async function nurseTick() {
               const fs = require('fs');
               const path = require('path');
               const fp = path.join(__dirname, '..', 'dados', 'login_required_events.jsonl');
-              fs.appendFileSync(fp, JSON.stringify({ ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan }) + '\n');
+              require('./auditAppend.js').appendLine(fp, { ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan });
             }
           } catch {}
 
@@ -20299,10 +20293,9 @@ async function nurseTick() {
               const fpScan = scan.map((p) => [p && p.u || '', p && p.p ? 1 : 0, p && p.k || ''].join('|')).join(';');
               if (robeMeta[nome].lastPinScanFp !== fpScan) {
                 robeMeta[nome].lastPinScanFp = fpScan;
-                const fsSync2 = require('fs');
                 const path2 = require('path');
                 const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                fsSync2.appendFileSync(p, JSON.stringify({ ts: nowp, src:'worker.js', perfil:nome, event:'scan', pages: scan }) + '\n');
+                require('./auditAppend.js').appendLine(p, { ts: nowp, src:'worker.js', perfil:nome, event:'scan', pages: scan });
               }
             } catch {}
 
@@ -20317,10 +20310,9 @@ async function nurseTick() {
                 robeMeta[nome].pinCooldownUntil = Date.now() + 30 * 60 * 1000;
                 await setMessengerPinFlag(nome, { reason: 'create_pin_unsafe_target', source: 'nurse' }).catch(()=>{});
                 try {
-                  const fsSync2 = require('fs');
                   const path2 = require('path');
                   const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                  fsSync2.appendFileSync(p, JSON.stringify({
+                  require('./auditAppend.js').appendLine(p, {
                     ts: Date.now(),
                     src: 'worker.js',
                     perfil: nome,
@@ -20328,7 +20320,7 @@ async function nurseTick() {
                     kind: (firstMatch.det && firstMatch.det.kind) || null,
                     url: String(firstMatch.urlNow || '').slice(0, 220),
                     streak: robeMeta[nome].pinFailStreak
-                  }) + '\n');
+                  });
                 } catch {}
               } else {
                 // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
@@ -20345,10 +20337,9 @@ async function nurseTick() {
                   }
                   await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
                   try {
-                    const fsSync2 = require('fs');
                     const path2 = require('path');
                     const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                    fsSync2.appendFileSync(p, JSON.stringify({
+                    require('./auditAppend.js').appendLine(p, {
                       ts: Date.now(),
                       src: 'worker.js',
                       perfil: nome,
@@ -20357,16 +20348,15 @@ async function nurseTick() {
                       url: String(firstMatch.urlNow || '').slice(0, 220),
                       streak,
                       dismissError: dismissErr || null
-                    }) + '\n');
+                    });
                   } catch {}
                 } else {
                   robeMeta[nome].pinFailStreak = 0;
                   await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
                   try {
-                    const fsSync2 = require('fs');
                     const path2 = require('path');
                     const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                    fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
+                    require('./auditAppend.js').appendLine(p, { ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: String(firstMatch.urlNow||'').slice(0, 220) });
                   } catch {}
                 }
               }

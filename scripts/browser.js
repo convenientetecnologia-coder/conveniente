@@ -3025,7 +3025,11 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const fs = require('fs');
   const path = require('path');
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-  const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
+  const pinLog = (obj) => {
+    try {
+      require('./auditAppend.js').appendLine(MSGPIN_LOG, Object.assign({ ts: Date.now(), src: 'browser.js' }, obj || {}));
+    } catch {}
+  };
 
   // PIN padrão do sistema (enterprise): configurável via env.
   // Default: 882584 (padrão operacional)

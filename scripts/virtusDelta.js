@@ -45,15 +45,10 @@ function __rotateForensicFileIfNeededSync(fp) {
 }
 function __forensicEmitSync(filePath, obj) {
   try {
-    const line = JSON.stringify(obj);
-    try {
-      const fp = String(filePath || "").trim();
-      if (fp) {
-        try { fsSync.mkdirSync(path.dirname(fp), { recursive: true }); } catch (_) {}
-        try { __rotateForensicFileIfNeededSync(fp); } catch (_) {}
-        fsSync.appendFileSync(fp, line + "\n", "utf8");
-      }
-    } catch (_) {}
+    const fp = String(filePath || "").trim();
+    if (!fp) return;
+    try { __rotateForensicFileIfNeededSync(fp); } catch (_) {}
+    require("./auditAppend.js").appendLine(fp, obj);
   } catch (_) {}
 }
 function __forensicEdgeEmit({ account_login = null, thread_key = null, flow_stage = "", details = null } = {}) {
