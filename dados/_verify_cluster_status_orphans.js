@@ -16,9 +16,14 @@ assert.strictEqual(
   "journal fresco sem child vivo ainda vale"
 );
 assert.strictEqual(
-  cluster.shouldApplyNodeStatusJournal({ liveChild: true, ageMs: 120000 }),
+  cluster.shouldApplyNodeStatusJournal({ liveChild: true, ageMs: 4000 }),
   true,
-  "journal stale de child vivo ainda vale como fallback"
+  "journal dentro do limiar de 5s pinta mesmo com child vivo"
+);
+assert.strictEqual(
+  cluster.shouldApplyNodeStatusJournal({ liveChild: true, ageMs: 120000 }),
+  false,
+  "journal de minutos NÃO pinta — cell viva vai a RPC"
 );
 assert.strictEqual(
   cluster.shouldApplyNodeStatusJournal({ liveChild: false, ageMs: 120000 }),
@@ -28,20 +33,12 @@ assert.strictEqual(
 
 assert(src.includes("stale_ignored("), "aggregate precisa marcar stale órfão como ignored");
 assert(src.includes("ignored: true"), "debug do aggregate precisa expor ignored");
-assert(
-  /if \(fb\.ageMs > MAX_FILE_AGE_MS\) \{\s*if \(liveChild\) \{\s*warningParts/.test(src),
-  "warning partial deve ficar só para child vivo stale"
-);
-const staleAgePos = src.indexOf("if (fb.ageMs > MAX_FILE_AGE_MS)");
-assert(staleAgePos >= 0, "ramo de journal_stale precisa existir");
-const staleAgeSlice = src.slice(staleAgePos, staleAgePos + 220);
-assert(
-  staleAgeSlice.includes("warningParts") && !staleAgeSlice.includes("missingIdx.push"),
-  "jornal stale de child vivo não dispara RPC"
-);
+assert(src.includes("CLUSTER_STATUS_FILE_MAX_AGE_MS || '5000'"), "limiar de pintura 5s");
+assert(src.includes("journal_stale_fallback"), "RPC falho de cell viva reusa jornal stale em vez de zerar HUD");
+assert(src.includes("CLUSTER_STATUS_RPC_STALE_MS"), "timeout curto no RPC de jornal stale");
 assert(
   /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/.test(src),
-  "RPC só quando o jornal do node não existe"
+  "RPC também quando o jornal do node não existe"
 );
 
 const blockedPos = src.indexOf("if (ownerLooksBlockedNotCell) {");

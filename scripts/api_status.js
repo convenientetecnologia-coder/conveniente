@@ -642,6 +642,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 
   // 2) Overlay: jornal no disco primeiro (fresco ou stale). Esperar get-status de 8s
   // no F5 deixava o dashboard no HTML zerado — o browser corta no mesmo 8s.
+  // Lote D1: aviso status_journal_stale em 5s (cadência do poll da UI).
   let overlayINST = null;
   let staleSnapINST = null;
   try {
@@ -653,7 +654,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     } catch {}
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
       overlayINST = snap;
-      if (!(Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 20000)) {
+      if (!(Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 5000)) {
         staleSnapINST = snap;
         warningINST = 'status_journal_stale';
       }

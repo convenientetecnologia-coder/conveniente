@@ -3966,6 +3966,11 @@ const SERVER_EVENT_HEARTBEAT_MS = Math.min(
 );
 const SERVER_EVENT_DELTA_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SERVER_EVENT_DELTA_MIN_INTERVAL_MS || 30000) || 30000);
 const SERVER_EVENT_CHANGE_CONFIRM_TICKS = Math.max(1, Number(process.env.SERVER_EVENT_CHANGE_CONFIRM_TICKS || 2) || 2);
+// Lote D2: status cheio (stockAccountId) no mesmo relógio do espelho de config (30s).
+const SERVER_EVENT_FULL_STATUS_MS = Math.max(
+  5000,
+  Number(process.env.SERVER_EVENT_FULL_STATUS_MS || 30000) || 30000
+);
 // Bridge de presença/evento:
 // - default ON para servidor novo ficar visível no CT sem ajuste manual.
 // - escape hatch: SERVER_EVENT_BRIDGE_ENABLED=0 para desligar explicitamente.
@@ -4332,6 +4337,18 @@ async function __serverEventBridgeTick(reason) {
   __serverEventBridgeInFlight = true;
   __serverEventBridgeStartedAt = now0;
   try {
+    // Lote D1/D2: a ponte lia status.json congelado (nada chamava get-status).
+    // Agrega status_node_N no disco; timeout curto para não estourar TICK_MAX.
+    try {
+      const aggPath = path.join(__dirname, 'dados', 'status.json');
+      let aggAge = Number.POSITIVE_INFINITY;
+      try { aggAge = Date.now() - Number(fs.statSync(aggPath).mtimeMs || 0); } catch {}
+      if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 5000)) {
+        if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
+          await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000 });
+        }
+      }
+    } catch {}
     const status = await __readLocalStatusForEventBridge();
     const hostId = __readOrCreateServerEventHostId();
     const telemetry = __buildServerEventTelemetry(status);
@@ -4364,7 +4381,7 @@ async function __serverEventBridgeTick(reason) {
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
     const shouldSendDelta = forceStatusEvent || countsChanged || (deltaConfirmed && deltaRateOk);
 
-    // Config Servidor → CT: boot/1ª vez no processo/save/hash mudou (sem spam).
+    // Config Servidor → CT: boot/save/hash/force na hora; cadência 30s (Lote D2).
     const configPush = (() => {
       try {
         if (!__serverConfigCtPush || typeof __serverConfigCtPush.shouldPushConfig !== 'function') {
@@ -4388,7 +4405,15 @@ async function __serverEventBridgeTick(reason) {
       needsConfig = true;
     }
 
-    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush && !needsConfig) {
+    const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_FULL_STATUS_MS);
+    const includeFullStatus = !!(
+      (forceStatusEvent || fullStatusDue || needConfigPush) &&
+      status &&
+      Array.isArray(status.perfis) &&
+      status.perfis.length
+    );
+
+    if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush && !needsConfig && !fullStatusDue) {
       __appendServerEventBridgeLog('bridge_skip_noop', {
         hostId,
         changed,
@@ -4419,13 +4444,6 @@ async function __serverEventBridgeTick(reason) {
     const eventType = shouldSendDelta
       ? 'server_delta'
       : (needConfigPush && !heartbeatDue ? 'server_config' : 'heartbeat');
-    const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_HEARTBEAT_MS);
-    const includeFullStatus = !!(
-      (forceStatusEvent || fullStatusDue) &&
-      status &&
-      Array.isArray(status.perfis) &&
-      status.perfis.length
-    );
 
     const payload = {
       hostId,
@@ -4556,6 +4574,19 @@ function startServerEventBridge() {
     }
     if (__serverEventBridgeTimer) return;
     try { global.__serverEventBridgeTick = __serverEventBridgeTick; } catch {}
+    try {
+      if (!global.__DASHBOARD_REALTIME_STAMPED) {
+        global.__DASHBOARD_REALTIME_STAMPED = true;
+        const dashLog = path.join(__dirname, 'dados', 'logs', 'multi_engine.log');
+        fs.mkdirSync(path.dirname(dashLog), { recursive: true });
+        const tsDash = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        fs.appendFileSync(
+          dashLog,
+          tsDash + ' [DASHBOARD_REALTIME_OK] Debounces do jornal reduzidos para 250ms e sincronização da ponte configurada em alta velocidade.\n',
+          'utf8'
+        );
+      }
+    } catch {}
     __serverEventBridgeTick('boot').catch(() => {});
     __serverEventBridgeTimer = setInterval(() => {
       __serverEventBridgeTick('interval').catch(() => {});

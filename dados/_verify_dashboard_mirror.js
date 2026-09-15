@@ -36,12 +36,11 @@ assert.strictEqual(flagged._bootStartClosed, false);
 assert.match(cluster, /for \(let i = 0; i < children\.length; i\+\+\) considerIdx\.push\(i\)/);
 assert.doesNotMatch(cluster, /readdirSync\(dadosDir\)/);
 assert.match(cluster, /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/);
-const staleAgePos = cluster.indexOf("if (fb.ageMs > MAX_FILE_AGE_MS)");
-assert.ok(staleAgePos >= 0, "ramo de journal_stale precisa existir");
-const staleAgeSlice = cluster.slice(staleAgePos, staleAgePos + 220);
-assert.ok(staleAgeSlice.includes("warningParts") && !staleAgeSlice.includes("missingIdx.push"), "jornal stale de child vivo não dispara RPC");
+assert.match(cluster, /CLUSTER_STATUS_FILE_MAX_AGE_MS \|\| '5000'/);
+assert.match(cluster, /journal_stale_fallback/);
+assert.ok(cluster.includes("missingIdx.push(i)"), "stale vivo ou jornal ausente dispara RPC");
 
-assert.match(indexJs, /__readFreshStatusJson\(60000\)/);
+assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000 \}\)/);
 assert.doesNotMatch(indexJs, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/api\/status/);
 assert.match(indexJs, /includeFullStatus/);
 assert.match(indexJs, /__serverEventLastFullStatusAt/);

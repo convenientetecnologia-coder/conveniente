@@ -6878,8 +6878,9 @@ async function governorTick() {
 }
 
 let _statusLock = Promise.resolve();
-const STATUS_JOURNAL_MIN_MS = Math.max(800, Math.min(15000, parseInt(process.env.STATUS_JOURNAL_MIN_MS || '2500', 10) || 2500));
-const STATUS_JOURNAL_IDLE_MS = Math.max(2000, Math.min(30000, parseInt(process.env.STATUS_JOURNAL_IDLE_MS || '8000', 10) || 8000));
+// Lote D1: jornal em alta frequência (RAM livre). Rollback: STATUS_JOURNAL_MIN_MS=2500 STATUS_JOURNAL_IDLE_MS=8000
+const STATUS_JOURNAL_MIN_MS = Math.max(250, Math.min(15000, parseInt(process.env.STATUS_JOURNAL_MIN_MS || '250', 10) || 250));
+const STATUS_JOURNAL_IDLE_MS = Math.max(STATUS_JOURNAL_MIN_MS, Math.min(30000, parseInt(process.env.STATUS_JOURNAL_IDLE_MS || '1000', 10) || 1000));
 let __statusJournal = null;
 let __statusJournalAt = 0;
 
@@ -29344,6 +29345,19 @@ try {
     fs.appendFileSync(
       lote2Log,
       ts2 + ' [LOTE_2AB_CDP_OK] Filtro de calmaria e gating de 60s ativados com sucesso no caminho ocioso das contas.\n',
+      'utf8'
+    );
+  }
+} catch {}
+try {
+  if (!global.__DASHBOARD_REALTIME_STAMPED) {
+    global.__DASHBOARD_REALTIME_STAMPED = true;
+    const dashLog = path.join(__dirname, '..', 'dados', 'logs', 'multi_engine.log');
+    fs.mkdirSync(path.dirname(dashLog), { recursive: true });
+    const tsDash = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFileSync(
+      dashLog,
+      tsDash + ' [DASHBOARD_REALTIME_OK] Debounces do jornal reduzidos para 250ms e sincronização da ponte configurada em alta velocidade.\n',
       'utf8'
     );
   }

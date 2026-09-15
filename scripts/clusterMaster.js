@@ -56,13 +56,16 @@ function readNodeStatusFile(idx) {
   } catch { return null; }
 }
 
-const MAX_FILE_AGE_MS = parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10);
+// Lote D1: limiar de pintura 5s. Jornal de minutos NÃO entra no aggregate (nem com cell viva).
+// Rollback: CLUSTER_STATUS_FILE_MAX_AGE_MS=60000
+const MAX_FILE_AGE_MS = Math.max(
+  1000,
+  parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '5000', 10) || 5000
+);
 
 function shouldApplyNodeStatusJournal({ liveChild = false, ageMs = Number.POSITIVE_INFINITY } = {}) {
   const age = Number(ageMs);
-  const fresh = Number.isFinite(age) && age >= 0 && age <= MAX_FILE_AGE_MS;
-  if (fresh) return true;
-  return liveChild === true;
+  return Number.isFinite(age) && age >= 0 && age <= MAX_FILE_AGE_MS;
 }
 
 async function createCluster() {
@@ -1044,7 +1047,10 @@ async function createCluster() {
   }
 
   const STATUS_TIMEOUT_MS = parseInt(process.env.CLUSTER_STATUS_TIMEOUT_MS || '25000', 10);
-  const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '4500', 10) || 4500);
+  // RPC de jornal stale: clone RAM. Não pode competir com o abort 8s do browser.
+  const STATUS_RPC_STALE_MS = Math.max(1000, parseInt(process.env.CLUSTER_STATUS_RPC_STALE_MS || '3000', 10) || 3000);
+  // Lote D1: agregado sem delay. Rollback: CLUSTER_STATUS_CACHE_MS=4500
+  const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '250', 10) || 250);
   let statusAggCache = { at: 0, value: null };
   let statusAggInflight = null;
 
@@ -1329,6 +1335,7 @@ async function createCluster() {
       let combinedQueue = [];
       const warningParts = [];
       const missingIdx = [];
+      const staleFallback = new Map();
 
       const pushNodeDebug = (payload, source, i, ageMs, extra = null) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
@@ -1384,11 +1391,11 @@ async function createCluster() {
           if (shouldApplyNodeStatusJournal({ liveChild, ageMs: fb.ageMs })) {
             applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
           } else {
-            pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: false });
-          }
-          if (fb.ageMs > MAX_FILE_AGE_MS) {
+            pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: !!liveChild });
             if (liveChild) {
               warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
+              missingIdx.push(i);
+              staleFallback.set(i, fb.json);
             }
           }
         } else if (liveChild) {
@@ -1397,29 +1404,38 @@ async function createCluster() {
         }
       }
 
-      // RPC só se o jornal daquele node ainda não existe (boot). Com jornal no disco, não cutuca o worker.
+      // RPC: jornal ausente (boot) OU jornal além do limiar de pintura (não fundir arquivo de minutos).
       if (missingIdx.length) {
         try {
-          logger.info('[CLUSTER][STATUS] jornal ausente, rpc só nesses nodes', {
+          logger.info('[CLUSTER][STATUS] jornal ausente/stale, rpc nesses nodes', {
             nodes: missingIdx.map((i) => i + 1)
           });
         } catch {}
         const rpcResults = await Promise.allSettled(
-          missingIdx.map((i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }).then((v) => ({ i, v })))
+          missingIdx.map((i) => {
+            const timeoutMs = staleFallback.has(i) ? STATUS_RPC_STALE_MS : STATUS_TIMEOUT_MS;
+            return sendTo(i, 'get-status', {}, { timeoutMs }).then((v) => ({ i, v }));
+          })
         );
         for (const r of rpcResults) {
-          if (r.status !== 'fulfilled' || !r.value) {
+          const i = (r.status === 'fulfilled' && r.value) ? r.value.i : null;
+          const payload = (r.status === 'fulfilled' && r.value) ? r.value.v : null;
+          if (i == null) {
             warningParts.push('rpc_boot_fail');
             continue;
           }
-          const i = r.value.i;
-          const payload = r.value.v;
           if (payload && Array.isArray(payload.perfis)) {
             const di = nodesDebug.findIndex((n) => n && n.node === (i + 1) && n.ok === false);
             if (di >= 0) nodesDebug.splice(di, 1);
-            applyPayload(payload, 'rpc_boot', i, null);
+            applyPayload(payload, staleFallback.has(i) ? 'rpc_refresh' : 'rpc_boot', i, null);
           } else {
-            warningParts.push(`node${i + 1}: no_journal`);
+            const fbJson = staleFallback.get(i);
+            if (fbJson && Array.isArray(fbJson.perfis)) {
+              applyPayload(fbJson, 'journal_stale_fallback', i, null);
+              warningParts.push(`node${i + 1}: rpc_fail_stale_fallback`);
+            } else {
+              warningParts.push(`node${i + 1}: no_journal`);
+            }
           }
         }
       }

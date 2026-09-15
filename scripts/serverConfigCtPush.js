@@ -2,9 +2,8 @@
 
 /**
  * Push event-driven do snapshot de Config Servidor para o CT.
- * - Boot / primeiro tick do processo: manda 1x (mesmo sem mudar config).
- * - Save / mudança de hash: manda de novo.
- * - Sem spam: depois do ack local, só remanda se hash mudar ou force.
+ * - Boot / primeiro tick do processo / save / hash / force: manda na hora.
+ * - Lote D2: remanda o espelho a cada 30s (SERVER_EVENT_CONFIG_MIRROR_MS) para a aba Config não abrir vazia.
  */
 
 const fs = require("fs");
@@ -18,6 +17,10 @@ const DESIRED_PATH = path.join(__dirname, "..", "dados", "desired.json");
 let __pushedThisProcess = false;
 let __forceReason = "";
 let __forceAt = 0;
+const CONFIG_MIRROR_INTERVAL_MS = Math.max(
+  5000,
+  Number(process.env.SERVER_EVENT_CONFIG_MIRROR_MS || 30000) || 30000
+);
 
 function __readJsonSafe(file, fallback) {
   try {
@@ -130,24 +133,30 @@ function consumeForceRequest() {
 
 /**
  * Decide se o próximo event bridge deve anexar serverConfig.
- * Boot / 1ª vez no processo / save / hash diferente → sim.
+ * Boot / 1ª vez / save / hash / force → na hora.
+ * Cadência contínua 30s (ou SERVER_EVENT_CONFIG_MIRROR_MS) → aba Config do CT não fica vazia.
  */
 function shouldPushConfig({ reason } = {}) {
   const force = consumeForceRequest();
-  if (force) return { need: true, reason: force, hash: hashConfigMirror(buildConfigMirror()) };
-
   const mirror = buildConfigMirror();
   const hash = hashConfigMirror(mirror);
+  if (force) return { need: true, reason: force, hash, mirror };
+
   if (!hash) return { need: false, reason: "no_config", hash: "" };
 
-  const r = String(reason || "").trim();
-  if (r === "boot" || r === "config_save") {
+  const r = String(reason || "").trim().toLowerCase();
+  if (r === "boot" || r === "config_save" || r === "force_full_report" || r === "force" || r === "gate_b_ready" || r === "ct_config_applied") {
     return { need: true, reason: r, hash, mirror };
   }
   if (!__pushedThisProcess) {
     return { need: true, reason: "process_first", hash, mirror };
   }
   const st = readPushState();
+  const lastAt = Number(st.lastPushedAt || 0) || 0;
+  const ageMs = lastAt > 0 ? (Date.now() - lastAt) : Number.POSITIVE_INFINITY;
+  if (!lastAt || ageMs >= CONFIG_MIRROR_INTERVAL_MS) {
+    return { need: true, reason: lastAt ? "interval_30s" : "never_acked", hash, mirror };
+  }
   if (!st.lastHash || st.lastHash !== hash) {
     return { need: true, reason: st.lastHash ? "hash_changed" : "never_acked", hash, mirror };
   }
