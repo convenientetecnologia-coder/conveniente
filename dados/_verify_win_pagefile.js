@@ -39,7 +39,9 @@ check("kit_quiet_only_start", /winPagefileCommit\.ps1/.test(kit.split("function 
 check("kit_no_wmi", !/Get-CimInstance/.test(kit) && !/Get-WmiObject/.test(kit) && !/Win32_/.test(kit));
 check("install_no_false_ok", /pagefile skip exit=/.test(install) && /LASTEXITCODE -eq 0/.test(install));
 check("install_skip_loop_on_reboot", /if \(\$pagefileReboot\)/.test(install));
-check("ram_sum_all_dimms", /function Get-PfRamPick/.test(pf) && /Win32_PhysicalMemory/.test(pf) && /Measure-Object -Property Capacity -Sum/.test(pf) && /\[Math\]::Floor/.test(pf) && /ram_sum_picks_64_not_32/.test(pf) && !/TotalVisibleMemorySize/.test(pf));
+check("ram_sum_all_dimms", /function Get-PfSumDimmBytes/.test(pf) && /function Get-PfCollectDimms/.test(pf) && /Win32_PhysicalMemory/.test(pf) && /ram_sum_picks_64_not_32/.test(pf));
+check("ram_max_cross_source", /GetPhysicallyInstalledSystemMemory/.test(pf) && /TotalVisibleMemorySize/.test(pf) && /GlobalMemoryStatusEx/.test(pf) && /ram_max_picks_64_not_32/.test(pf) && /ram_max_not_sum_sources/.test(pf));
+check("ram_wow64_sysnative", /Sysnative\\WindowsPowerShell/.test(pf) && /Is64BitProcess/.test(pf));
 check("iniciar_bounce_system", /Invoke-PfViaSystemTask/.test(pf) && /ConvenienteNetBoot/.test(pf) && /PAGEFILE_NOW/.test(pf) && /Test-PfSystem/.test(pf));
 check("kit_netboot_pagefile", /function Do-NetBoot/.test(kit) && /PAGEFILE_NOW/.test(kit) && /pagefile_only skip_net_guard/.test(kit));
 check("iniciar_no_runas", !/Verb RunAs/.test(iniciar));
