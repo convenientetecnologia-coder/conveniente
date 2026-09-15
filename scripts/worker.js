@@ -4078,6 +4078,7 @@ function isRetryableEntryNavError(msg) {
 async function reportWorkerProxyIssueByName(nome, reason, context = {}) {
   try {
     if (!nome) return;
+    try { invalidateLrCheapCache(nome, 'proxy'); } catch {}
     const manifest = await manifestStore.read(nome).catch(() => null);
     const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest });
     if (!resolved || resolved.enabled !== true) return;
@@ -17320,6 +17321,108 @@ function shouldSkipNurseBlockDetectDelta({ robeRunning = false, isCreateOrSeller
   return { skip: true, reason: 'delta_idle_non_messenger' };
 }
 
+// Lote 2A+2B: filtro de calmaria (URL estável) + teto 60s no evaluate pesado do nurse.
+// Não mexe em detectLoginRequired / detectMessengerPinModal / INTERVAL_MS / Delta.
+// Rollback: LR_CHEAP_IDLE_MS=0
+const LR_CHEAP_IDLE_MS = Math.max(
+  0,
+  Math.min(180_000, Number(process.env.LR_CHEAP_IDLE_MS == null ? 60_000 : process.env.LR_CHEAP_IDLE_MS) || 0)
+);
+
+function __ensureLrCheapCache(nome) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  if (!robeMeta[nome].lrCheapCache || typeof robeMeta[nome].lrCheapCache !== 'object') {
+    robeMeta[nome].lrCheapCache = {
+      lrTabs: Object.create(null),
+      pinTabs: Object.create(null),
+      flagsFp: '',
+      invalidated: false
+    };
+  }
+  const c = robeMeta[nome].lrCheapCache;
+  if (!c.lrTabs || typeof c.lrTabs !== 'object') c.lrTabs = Object.create(null);
+  if (!c.pinTabs || typeof c.pinTabs !== 'object') c.pinTabs = Object.create(null);
+  return c;
+}
+
+function invalidateLrCheapCache(nome, reason) {
+  try {
+    if (!nome) return;
+    robeMeta[nome] = robeMeta[nome] || {};
+    const c = __ensureLrCheapCache(nome);
+    c.invalidated = true;
+    c.lrTabs = Object.create(null);
+    c.pinTabs = Object.create(null);
+    c.flagsFp = '';
+    c.lastInvalidateReason = String(reason || '').slice(0, 80);
+    c.lastInvalidateAt = Date.now();
+  } catch {}
+}
+
+function cheapScanFlagsFp(flags) {
+  const f = flags && typeof flags === 'object' ? flags : {};
+  return [
+    f.loginRequired === true ? 1 : 0,
+    String(f.loginReason || f.reason || '').toLowerCase().slice(0, 80),
+    f.messengerPin === true ? 1 : 0,
+    f.twoFactor === true ? 1 : 0,
+    f.identityRequired === true ? 1 : 0,
+    f.identitySubmitted === true ? 1 : 0,
+    f.banned === true ? 1 : 0,
+    f.captchaCheckpoint === true ? 1 : 0,
+    f.loginRemediateFailed === true ? 1 : 0
+  ].join('|');
+}
+
+function cheapScanHasEmergencyFlags(flags) {
+  const f = flags && typeof flags === 'object' ? flags : {};
+  return !!(
+    f.loginRequired === true ||
+    f.messengerPin === true ||
+    f.twoFactor === true ||
+    f.identityRequired === true ||
+    f.identitySubmitted === true ||
+    f.banned === true ||
+    f.captchaCheckpoint === true ||
+    f.loginRemediateFailed === true
+  );
+}
+
+function isPinWorkUrl(u) {
+  const s = String(u || '');
+  return /messenger\.com/i.test(s) || /\/messages\b/i.test(s) || /\/marketplace\/t\//i.test(s);
+}
+
+function shouldReuseCheapTabScan({ tabs, url, now, robeRunning, emergency, invalidated, kind }) {
+  if (!(LR_CHEAP_IDLE_MS > 0)) return { skip: false, reason: 'flag_off' };
+  if (robeRunning) return { skip: false, reason: 'robe_running' };
+  if (emergency) return { skip: false, reason: 'emergency_flags' };
+  if (invalidated) return { skip: false, reason: 'invalidated' };
+  const u = String(url || '');
+  if (!u) return { skip: false, reason: 'no_url' };
+  const tab = tabs && tabs[u];
+  if (!tab) return { skip: false, reason: 'no_tab' };
+  if (String(tab.url || '') !== u) return { skip: false, reason: 'url_changed' };
+  if (kind === 'lr') {
+    if (tab.loginRequired !== false) return { skip: false, reason: 'last_not_clear' };
+    const rr = String(tab.reason || '').toLowerCase();
+    if (rr === 'probe_failed' || rr.startsWith('probe_failed')) return { skip: false, reason: 'probe_failed' };
+  } else if (tab.present !== false) {
+    return { skip: false, reason: 'last_not_clear' };
+  }
+  const last = Number(tab.lastHeavyAt || 0) || 0;
+  if (!last) return { skip: false, reason: 'no_last_heavy' };
+  if ((now - last) >= LR_CHEAP_IDLE_MS) return { skip: false, reason: 'ttl_60s' };
+  if (!tab.det || typeof tab.det !== 'object') return { skip: false, reason: 'no_det' };
+  return { skip: true, reason: 'idle_url_cache', det: tab.det };
+}
+
+function rememberCheapTabScan(tabs, url, now, patch) {
+  const u = String(url || '');
+  if (!u || !tabs) return;
+  tabs[u] = Object.assign({ url: u, lastHeavyAt: now }, patch || {});
+}
+
 const MAX_OPEN_CONCURRENCY = 1;
 const OPEN_ALL_SETTLE_MS = Math.max(15_000, Math.min(90_000, Number(process.env.OPEN_ALL_SETTLE_MS || 55000) || 55000));
 let slotsInUse = 0;
@@ -19856,12 +19959,54 @@ async function nurseTick() {
           let hasMessengerTab = false;
           let hasMessengerOk = false;
           let weakCreateProbeFailed = null;
+          robeMeta[nome] = robeMeta[nome] || {};
+          const cheapCache = __ensureLrCheapCache(nome);
+          let flagsCheap = null;
+          try { flagsCheap = await readAccountFlags(nome).catch(() => null); } catch { flagsCheap = null; }
+          const flagsFpNow = cheapScanFlagsFp(flagsCheap);
+          if (cheapCache.flagsFp && cheapCache.flagsFp !== flagsFpNow) {
+            invalidateLrCheapCache(nome, 'flags_changed');
+          }
+          const cheapCacheLive = __ensureLrCheapCache(nome);
+          cheapCacheLive.flagsFp = flagsFpNow;
+          const cheapEmergency = cheapScanHasEmergencyFlags(flagsCheap);
+          const cheapRobeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+          const cheapNow = Date.now();
+          let cheapBusted = false;
           for (const pg of (pages || []).slice(0, 8)) {
             let u = '';
             try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
             // só avalia FB/Messenger
             if (!/(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(String(u || ''))) continue;
-            const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+            let det = null;
+            const reuseLr = shouldReuseCheapTabScan({
+              tabs: cheapCacheLive.lrTabs,
+              url: u,
+              now: cheapNow,
+              robeRunning: cheapRobeRunning,
+              emergency: cheapEmergency,
+              invalidated: !!cheapCacheLive.invalidated,
+              kind: 'lr'
+            });
+            if (reuseLr && reuseLr.skip && reuseLr.det) {
+              det = reuseLr.det;
+            } else {
+              det = await browserHelper.detectLoginRequired(pg).catch(() => null);
+              const reasonHeavy = String((det && det.reason) || '').toLowerCase();
+              const urlNowHeavy = String(u || '');
+              const isCreateItemTabHeavy = /facebook\.com\/marketplace\/create\/(?:item|vehicle)\b/i.test(urlNowHeavy);
+              const isWeakCreateProbe = !!(isCreateItemTabHeavy && reasonHeavy === 'probe_failed');
+              if (!det || typeof det !== 'object' || (reasonHeavy === 'probe_failed' && !isWeakCreateProbe)) {
+                invalidateLrCheapCache(nome, 'probe_failed');
+                cheapBusted = true;
+              } else if (!isWeakCreateProbe) {
+                rememberCheapTabScan(cheapCacheLive.lrTabs, u, Date.now(), {
+                  loginRequired: !!det.loginRequired,
+                  reason: String(det.reason || ''),
+                  det
+                });
+              }
+            }
             if (det && typeof det === 'object') {
               const urlNow = String(u || '');
               const domainNow = String(det.domain || '').toLowerCase();
@@ -19887,6 +20032,9 @@ async function nurseTick() {
                 }
               }
             }
+          }
+          if (!cheapBusted) {
+            try { __ensureLrCheapCache(nome).invalidated = false; } catch {}
           }
           if (!lr && weakCreateProbeFailed && hasMessengerTab && hasMessengerOk) {
             try {
@@ -20235,10 +20383,50 @@ async function nurseTick() {
             let scan = [];
             let anyPresent = false;
             let firstMatch = null;
+            const pinCache = __ensureLrCheapCache(nome);
+            const pinNow = Date.now();
+            const pinRobeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+            let pinFlags = null;
+            try { pinFlags = await readAccountFlags(nome).catch(() => null); } catch { pinFlags = null; }
+            const pinFpNow = cheapScanFlagsFp(pinFlags);
+            if (pinCache.flagsFp && pinCache.flagsFp !== pinFpNow) {
+              invalidateLrCheapCache(nome, 'flags_changed');
+            }
+            const pinCacheLive = __ensureLrCheapCache(nome);
+            pinCacheLive.flagsFp = pinFpNow;
+            const pinEmergency = cheapScanHasEmergencyFlags(pinFlags);
             for (const pg of pagesAll.slice(0, 8)) {
               let urlNow = '';
               try { urlNow = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-              const detPin = await browserHelper.detectMessengerPinModal(pg).catch(()=>({ present:false }));
+              if (!isPinWorkUrl(urlNow)) {
+                scan.push({ u: String(urlNow || '').slice(0, 140), p: false, k: null });
+                continue;
+              }
+              let detPin = null;
+              const reusePin = shouldReuseCheapTabScan({
+                tabs: pinCacheLive.pinTabs,
+                url: urlNow,
+                now: pinNow,
+                robeRunning: pinRobeRunning,
+                emergency: pinEmergency,
+                invalidated: !!pinCacheLive.invalidated,
+                kind: 'pin'
+              });
+              if (reusePin && reusePin.skip && reusePin.det) {
+                detPin = reusePin.det;
+              } else {
+                detPin = await browserHelper.detectMessengerPinModal(pg).catch(() => null);
+                if (!detPin || typeof detPin !== 'object' || detPin.probeFailed === true) {
+                  invalidateLrCheapCache(nome, 'pin_probe_failed');
+                  detPin = { present: false };
+                } else {
+                  rememberCheapTabScan(pinCacheLive.pinTabs, urlNow, Date.now(), {
+                    present: !!detPin.present,
+                    kind: detPin.kind || null,
+                    det: detPin
+                  });
+                }
+              }
               scan.push({ u: String(urlNow || '').slice(0, 140), p: !!detPin.present, k: detPin.kind || null });
               if (detPin && detPin.present && !firstMatch) firstMatch = { pg, det: detPin, urlNow };
               if (detPin && detPin.present) anyPresent = true;
@@ -20280,6 +20468,17 @@ async function nurseTick() {
                 // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
                 robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
                 const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
+                try {
+                  if (still && still.probeFailed === true) {
+                    invalidateLrCheapCache(nome, 'pin_probe_failed');
+                  } else {
+                    rememberCheapTabScan(__ensureLrCheapCache(nome).pinTabs, firstMatch.urlNow, Date.now(), {
+                      present: !!(still && still.present),
+                      kind: (still && still.kind) || null,
+                      det: still
+                    });
+                  }
+                } catch {}
                 if (still && still.present) {
                   // Não chamar GPT. Marcar flag + circuit-breaker se falhar em sequência.
                   robeMeta[nome].pinFailStreak = (Number(robeMeta[nome].pinFailStreak || 0) || 0) + 1;
@@ -29121,6 +29320,32 @@ try {
     fs.appendFileSync(
       faxinaLog,
       ts + ' [FAXINA_LOTE_1_OK] Camada D desativada e duplicata _pruneWindow exterminada com sucesso.\n',
+      'utf8'
+    );
+  }
+} catch {}
+try {
+  if (!global.__LOTE_2AB_CDP_STAMPED) {
+    global.__LOTE_2AB_CDP_STAMPED = true;
+    const lote2Log = path.join(__dirname, '..', 'dados', 'logs', 'multi_engine.log');
+    fs.mkdirSync(path.dirname(lote2Log), { recursive: true });
+    const ts2 = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFileSync(
+      lote2Log,
+      ts2 + ' [LOTE_2AB_CDP_OK] Filtro de calmaria e gating de 60s ativados com sucesso no caminho ocioso das contas.\n',
+      'utf8'
+    );
+  }
+} catch {}
+try {
+  if (!global.__BLINDAGEM_TOTAL_CDP_STAMPED) {
+    global.__BLINDAGEM_TOTAL_CDP_STAMPED = true;
+    const lote2cLog = path.join(__dirname, '..', 'dados', 'logs', 'multi_engine.log');
+    fs.mkdirSync(path.dirname(lote2cLog), { recursive: true });
+    const ts2c = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFileSync(
+      lote2cLog,
+      ts2c + ' [BLINDAGEM_TOTAL_CDP_OK] Lote 2AB ativo e Lote 2C estruturado em Andares de Evaluate com Variante C protetiva.\n',
       'utf8'
     );
   }

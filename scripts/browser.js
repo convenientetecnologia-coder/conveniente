@@ -2730,6 +2730,9 @@ async function clickVoltarParaFacebook(page, { logPrefix='[fb][voltar]', timeout
   }
 }
 
+// Lote 2C: Andar 0 (seletores) / Andar 1 (canhão innerText). Rollback: LR_TWO_FLOOR=0
+const LR_TWO_FLOOR_OFF = String(process.env.LR_TWO_FLOOR == null ? '1' : process.env.LR_TWO_FLOOR).trim() === '0';
+
 async function detectMessengerPinModal(page) {
   try {
     // Contrato DOM real (forense MAE1/MAE2 2026-08-04):
@@ -2739,7 +2742,7 @@ async function detectMessengerPinModal(page) {
     //    scans MAE1/MAE2 mostravam p:false com modal visível quando exigíamos dialog).
     // 3) create_pin = frase de CRIAR + input oficial (anti-FP: feed CTA sozinho sem input = false).
     // 4) continue_without_restore = dialog "Continuar sem restaurar?" + botão habilitado.
-    return await page.evaluate(() => {
+    return await page.evaluate((twoFloorOff) => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const isVisible = (el) => {
         try {
@@ -2802,6 +2805,41 @@ async function detectMessengerPinModal(page) {
         }
         return norm(document.body ? (document.body.innerText || '') : '');
       };
+
+      // Andar 0 (Variante C): sem body.innerText no caminho feliz.
+      // Qualquer âncora oficial / dialog / CTA de PIN → Andar 1 (bloco original abaixo).
+      if (!twoFloorOff) {
+        try {
+          const pinAnchor = document.querySelector(
+            'input#mw-numeric-code-input-prevent-composer-focus-steal, input[aria-label="PIN"][maxlength="6"][autocomplete="one-time-code"], input[aria-label="PIN"][maxlength="6"], input[aria-label="Confirme seu PIN"][maxlength="6"], input[aria-label="Confirm your PIN"][maxlength="6"], input[maxlength="6"][autocomplete="one-time-code"], input[maxlength="6"][inputmode="numeric"]'
+          );
+          const pinDialog = document.querySelector('div[role="dialog"], [aria-modal="true"]');
+          const pinCriarAria = document.querySelector(
+            '[aria-label="Criar PIN"], [aria-label="criar pin"], [aria-label="Create PIN"], [aria-label="Create a PIN"], [aria-label="Continuar sem restaurar"], [aria-label="continuar sem restaurar"]'
+          );
+          if (!pinAnchor && !pinDialog && !pinCriarAria) {
+            return {
+              present: false,
+              kind: null,
+              hasPinInput: false,
+              hasOfficialPinInput: false,
+              hasSplitPinInputs: false,
+              hasCreateTypingSurface: false,
+              hasNaoRestaurarBtn: false,
+              hasCreateBtn: false,
+              createText: false,
+              pinText: false,
+              pinIncorrect: false,
+              isPinConfirmation: false,
+              officialPinAria: '',
+              feedCreateCtaOnly: false,
+              isCreatePinCta: false,
+              hasRestoreSyncOkBtn: false,
+              hasDialog: false
+            };
+          }
+        } catch {}
+      }
 
       const bodyTxt = norm(document.body ? (document.body.innerText || '') : '');
       const hasLocalPinContext = (el) => {
@@ -3015,9 +3053,9 @@ async function detectMessengerPinModal(page) {
         hasRestoreSyncOkBtn: !!restoreSyncOkBtn,
         hasDialog: !!dlgEl
       };
-    });
+    }, LR_TWO_FLOOR_OFF);
   } catch {
-    return { present: false };
+    return { present: false, probeFailed: true };
   }
 }
 
@@ -5966,7 +6004,7 @@ async function detectLoginRequired(page) {
     const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
     if (!isFbOrMsg) return { loginRequired: false };
 
-    const v = await page.evaluate(() => {
+    const v = await page.evaluate((twoFloorOff) => {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
       // 1) Formulários de login canônicos
       const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
@@ -5976,6 +6014,80 @@ async function detectLoginRequired(page) {
       const href0 = String(location && location.href ? location.href : '');
       const path0 = String(location && location.pathname ? location.pathname : '');
       const title0 = String(document && document.title ? document.title : '');
+      // Andar 0 (Variante C): path/title/ID estáveis. Corte só com superfície positiva + zero âncora + zero dialog no feed.
+      // Qualquer dúvida → Andar 1 (canhão original abaixo). Nunca "não achei texto, logo logado".
+      if (!twoFloorOff) {
+        try {
+          const titleNorm = norm(title0);
+          const hrefNorm = href0;
+          const pathNorm = String(path0 || '').toLowerCase();
+          const strongLoginPath = /\/(login|checkpoint|recover|two_step_verification|security)/i.test(path0);
+          const looksLikeLoginUrl =
+            /\/login\.php/i.test(hrefNorm) ||
+            /\/login\//i.test(hrefNorm) ||
+            /\/checkpoint\//i.test(hrefNorm) ||
+            /\/recover\//i.test(hrefNorm);
+          const looksLikeLoggedOutTitle =
+            titleNorm.includes('entre ou cadastre') ||
+            titleNorm.includes('entre ou cadastrar') ||
+            titleNorm.includes('entre no facebook') ||
+            titleNorm.includes('facebook – entre') ||
+            titleNorm.includes('facebook - entre') ||
+            titleNorm.includes('log in') ||
+            titleNorm.includes('sign up');
+          const titleLooksError =
+            titleNorm.includes('nao esta disponivel') ||
+            titleNorm.includes("isn't available") ||
+            titleNorm.includes('is not available') ||
+            titleNorm.includes('page not available') ||
+            titleNorm.includes('checkpoint') ||
+            titleNorm.includes('suspens') ||
+            titleNorm.includes('recurso');
+          const urlLooksMarketplace = /\/marketplace\b/i.test(hrefNorm) || /\/marketplace\b/i.test(pathNorm);
+          const urlLooksMessagesThread =
+            /\/messages\/t\//i.test(hrefNorm) ||
+            /\/messages\/t\//i.test(pathNorm) ||
+            /messenger\.com\/t\//i.test(hrefNorm);
+          const isMarketplaceCreate = /\/marketplace\/create(?:\/(?:item|vehicle))?(?:\/|$|\?|#)/i.test(pathNorm) ||
+            /\/marketplace\/create(?:\/(?:item|vehicle))?(?:\/|$|\?|#)/i.test(hrefNorm);
+          const hasDialog = !!document.querySelector('div[role="dialog"], [aria-modal="true"]');
+          const hasAymhHref =
+            !!document.querySelector('a[href*="entry_point=aymh"], a[href*="entry_point%3Daymh"]') ||
+            /entry_point=aymh/i.test(href0);
+          const hasCaptchaImg0 = !!document.querySelector('img[src*="/captcha/tfbimage/"]');
+          const hasOfficialPin = !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal');
+          const positiveSurface = !!(urlLooksMarketplace || urlLooksMessagesThread);
+          const blockAnchor = !!(
+            hasRoyal ||
+            hasInputs ||
+            hasEmailInput ||
+            hasPassInput ||
+            hasAymhHref ||
+            hasCaptchaImg0 ||
+            hasOfficialPin ||
+            strongLoginPath ||
+            looksLikeLoginUrl ||
+            looksLikeLoggedOutTitle ||
+            titleLooksError
+          );
+          const dialogBlocksCut = !!(hasDialog && !isMarketplaceCreate);
+          if (positiveSurface && !blockAnchor && !dialogBlocksCut && document.body) {
+            return {
+              hasRoyal: false, hasInputs: false, hasEmailInput: false, hasPassInput: false,
+              hasLoginUiHints: false, hasPersonaText: false, hasCheckpointText: false,
+              hasIdentityText: false, hasTwoFactorText: false, hasAppealSubmitted: false,
+              hasIdentitySubmitted: false, identityStrongHints: false,
+              bodyHasIdentityHints: false, hasHackedReview: false, hasPasswordResetRequired: false,
+              hasBackToFacebookUnlocked: false,
+              hasContentNotAvailable: false, hasPageNotAvailable: false, hasHumanConfirmPreScreen: false,
+              hasCaptchaPromptText: false, hasCaptchaImg: false, hasCaptchaInput: false,
+              hasContinueBtn: false, isAymhContinue: false, hasUsarOutroPerfil: false,
+              hasCriarNovaConta: false, hasContinuarChooserBtn: false, hasAymhEntryPoint: false,
+              href0, path0, title0
+            };
+          }
+        } catch {}
+      }
       // 2) Checkpoint/captcha
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
       // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
@@ -6193,7 +6305,7 @@ async function detectLoginRequired(page) {
         hasCaptchaImg, hasCaptchaInput, hasContinueBtn, isAymhContinue, hasUsarOutroPerfil,
         hasCriarNovaConta, hasContinuarChooserBtn, hasAymhEntryPoint, href0, path0, title0
       };
-    });
+    }, LR_TWO_FLOOR_OFF);
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
     const path = (v && v.path0) ? String(v.path0) : '';
