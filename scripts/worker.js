@@ -6730,10 +6730,6 @@ function evaluateCloseCertainty(nome, reason, signal = '') {
     score
   };
 }
-function _pruneWindow(arr, ms) {
-  const now = Date.now();
-  return arr.filter(ts => (now - ts) < ms);
-}
 
 const AUTO_CFG = {
   // Governor (light/full) — limiares de RAM livre (MB): preferência pelo server_runtime_config.memory
@@ -29112,10 +29108,23 @@ async function periodicAboutBlankCleanup() {
   }
 }
 
-// Roda a cada 3 minutos (180000ms) - não agressivo, apenas limpa o que ficou esquecido
-setInterval(() => { periodicAboutBlankCleanup().catch(() => {}); }, 3 * 60 * 1000);
-// Primeira execução após 30 segundos (dá tempo para sistema inicializar)
-setTimeout(() => { periodicAboutBlankCleanup().catch(() => {}); }, 30000);
+// Lote 1: Camada D desarmada. periodicAboutBlankCleanup permanece no arquivo (parse/escopo).
+// A/B/C/E assumem o controle das abas zumbis. Agendador cego de 3 min + boot 30s mortos.
+// setInterval(() => { periodicAboutBlankCleanup().catch(() => {}); }, 3 * 60 * 1000);
+// setTimeout(() => { periodicAboutBlankCleanup().catch(() => {}); }, 30000);
+try {
+  if (!global.__FAXINA_LOTE_1_STAMPED) {
+    global.__FAXINA_LOTE_1_STAMPED = true;
+    const faxinaLog = path.join(__dirname, '..', 'dados', 'logs', 'multi_engine.log');
+    fs.mkdirSync(path.dirname(faxinaLog), { recursive: true });
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFileSync(
+      faxinaLog,
+      ts + ' [FAXINA_LOTE_1_OK] Camada D desativada e duplicata _pruneWindow exterminada com sucesso.\n',
+      'utf8'
+    );
+  }
+} catch {}
 
 setInterval(() => {
   const now = Date.now();
