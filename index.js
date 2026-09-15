@@ -1,4 +1,5 @@
 // index.js (main do projeto, pasta principal)
+require('./scripts/v8HeapGuard.js').assertEnterpriseHeap();
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
@@ -41,7 +42,7 @@ function startAutoBackupConveniente() {
 
     const spawnSnapshot = () => {
       try {
-        const child = spawn(process.execPath, [workerPath, '--root', ROOT, '--keep', String(keep)], {
+        const child = spawn(process.execPath, require('./scripts/v8HeapGuard.js').spawnArgs([workerPath, '--root', ROOT, '--keep', String(keep)]), {
           stdio: 'ignore',
           windowsHide: true,
           detached: true

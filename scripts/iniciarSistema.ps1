@@ -526,6 +526,7 @@ function Start-ConvenienteNode {
         }
     } catch {}
     Write-StartLog 'launch_host'
+    # V8 8 GB: scripts\convenienteNodeHost.ps1 injeta --max-old-space-size=8192 no node index.js
     [void](Start-ConvenienteNodeHost -NodeExe $node -IndexPath $indexJs -WorkDir 'C:\conveniente')
     Write-StartLog 'started_node'
     return 0

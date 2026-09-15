@@ -71,7 +71,12 @@ function forkWorker() {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_NO_ATTACH_CONSOLE;
-  const forkOpts = { stdio: ['inherit', 'inherit', 'inherit', 'ipc'], execPath: nodeExecPath, env };
+  const forkOpts = {
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+    execPath: nodeExecPath,
+    env,
+    execArgv: require('./v8HeapGuard.js').execArgv()
+  };
   logger.info(`[WORKER][FORK] execPath="${nodeExecPath}"`);
   workerChild = fork(workerPath, [], forkOpts);
 

@@ -15,6 +15,7 @@ const cellRegistry = require('./cellRegistry.js');
 const cellForensic = require('./cellForensic.js');
 const cellLifecycle = require('./cellLifecycle.js');
 const { writeJsonLine, attachLineParser } = require('./cellNet.js');
+const v8HeapGuard = require('./v8HeapGuard.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -610,7 +611,7 @@ async function createCluster() {
       errFd = opened && opened.fd != null ? opened.fd : null;
       if (errFd != null) stdio = ['ignore', 'ignore', errFd];
     } catch {}
-    const proc = spawn(execPath, [entry], {
+    const proc = spawn(execPath, v8HeapGuard.spawnArgs([entry]), {
       cwd: path.join(__dirname, '..'),
       env,
       detached: true,

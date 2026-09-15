@@ -39,7 +39,7 @@ async function createScheduledTask({ taskName, workDir, nodePath, scriptPath, en
     .filter(x => x && x.key)
     .map(x => `set "${x.key}=${String(x.value ?? "")}"`)
     .join(" && ");
-  const cmdLine = (envPrefix ? (envPrefix + " && ") : "") + `"${nodePath}" "${scriptPath}"`;
+  const cmdLine = (envPrefix ? (envPrefix + " && ") : "") + `"${nodePath}" --max-old-space-size=8192 "${scriptPath}"`;
   const tr = `cmd.exe /c ${cmdLine}`;
 
   const args = [
@@ -63,7 +63,7 @@ async function createScheduledTaskInteractive({ taskName, workDir, nodePath, scr
     .filter(x => x && x.key)
     .map(x => `set "${x.key}=${String(x.value ?? "")}"`)
     .join(" && ");
-  const cmdLine = (envPrefix ? (envPrefix + " && ") : "") + `"${nodePath}" "${scriptPath}"`;
+  const cmdLine = (envPrefix ? (envPrefix + " && ") : "") + `"${nodePath}" --max-old-space-size=8192 "${scriptPath}"`;
   const tr = `cmd.exe /c ${cmdLine}`;
   const args = [
     "/Create",
@@ -83,7 +83,7 @@ async function startScheduledTask(taskName) {
 
 async function nssmInstall({ nssmPath, serviceName, nodePath, workDir, scriptPath, envPairs = [], stdoutPath, stderrPath }) {
   // Instala o service
-  let r = await run(nssmPath, ["install", serviceName, nodePath, scriptPath], { cwd: workDir });
+  let r = await run(nssmPath, ["install", serviceName, nodePath, "--max-old-space-size=8192", scriptPath], { cwd: workDir });
   // Se já existe, seguimos para reconfigurar (modo idempotente)
   if (!r.ok) {
     const msg = String(r.stderr || r.stdout || r.error || "");
@@ -303,7 +303,7 @@ async function ensureServiceInstalled() {
   if (!exists) {
     // Se for admin, ONSTART é o ideal
     const r = isAdmin
-      ? await run("schtasks.exe", ["/Create","/F","/SC","ONSTART","/RL","HIGHEST","/TN",taskName,"/TR", `cmd.exe /c "${nodePath}" "${scriptPath}"`], { cwd: repoDir })
+      ? await run("schtasks.exe", ["/Create","/F","/SC","ONSTART","/RL","HIGHEST","/TN",taskName,"/TR", `cmd.exe /c "${nodePath}" --max-old-space-size=8192 "${scriptPath}"`], { cwd: repoDir })
       : await createScheduledTask({ taskName, workDir: repoDir, nodePath, scriptPath, envPairs });
     if (!r.ok) return { ok: false, error: "task_create_failed", details: r.stderr || r.stdout || r.error };
   }

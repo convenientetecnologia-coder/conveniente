@@ -1,4 +1,5 @@
 // scripts/worker.js
+require('./v8HeapGuard.js').assertEnterpriseHeap();
 const path = require('path');
 const fs = require('fs');
 const os = require('os');

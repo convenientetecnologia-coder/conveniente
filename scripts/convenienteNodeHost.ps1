@@ -112,8 +112,9 @@ try { Move-NativeLogAside $outLog $outPrev } catch {}
 Push-Location $wd
 try {
     # PS 5.1 2>> no nativo vira NativeCommandError. cmd /c grava o stderr cru (Zone/heap/stack).
+    # V8: --max-old-space-size=8192 no maestro. Sem isso a trava em index.js recusa o boot.
     # Janela do host continua visivel; a autopcia e o arquivo.
-    cmd.exe /c "`"$node`" `"$idx`" 1>> `"$outLog`" 2>> `"$errLog`""
+    cmd.exe /c "`"$node`" --max-old-space-size=8192 `"$idx`" 1>> `"$outLog`" 2>> `"$errLog`""
 } finally {
     Pop-Location
 }
