@@ -87,6 +87,23 @@ if (Test-Path -LiteralPath $tune) {
         Write-Host '  tuning Apply skip'
     }
 }
+$pagefile = 'C:\conveniente\scripts\winPagefileCommit.ps1'
+$pagefileReboot = $false
+if (Test-Path -LiteralPath $pagefile) {
+    try {
+        & $PsExe -NoProfile -ExecutionPolicy Bypass -File $pagefile -Apply -Quiet
+        if ($LASTEXITCODE -eq 2) {
+            $pagefileReboot = $true
+            Write-Host '  [AVISO_FATAL_REBOOT] pagefile 1:1 gravado. REINICIE O SERVIDOR no fim do Setup.'
+        } elseif ($LASTEXITCODE -eq 0) {
+            Write-Host '  pagefile 1:1 OK'
+        } else {
+            Write-Host ('  pagefile skip exit=' + $LASTEXITCODE)
+        }
+    } catch {
+        Write-Host '  pagefile skip'
+    }
+}
 
 Write-Host '[4] Tarefas (logon + netboot no startup)...'
 Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -191,8 +208,12 @@ foreach ($old in @('PORTEIRO_REDECOLAR.lnk','REDECOLAR_SISTEMA.lnk')) {
 }
 
 Write-Host '[6] Iniciando porteiro v5.2.1-clean-cpu...'
-Start-Process $PsExe -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','C:\auto_vigia\manutencao.ps1','-Action','loop' -WindowStyle Hidden
-Start-Sleep 2
+if ($pagefileReboot) {
+    Write-Host '  [AVISO_FATAL_REBOOT] Pagefile 1:1 gravado. Nao subi o porteiro. REINICIE O SERVIDOR AGORA.'
+} else {
+    Start-Process $PsExe -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','C:\auto_vigia\manutencao.ps1','-Action','loop' -WindowStyle Hidden
+    Start-Sleep 2
+}
 
 Write-Host ''
 Write-Host '=== PRONTO ==='
@@ -202,5 +223,6 @@ Write-Host 'Arquivo unico: C:\auto_vigia\manutencao.ps1'
 & $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action status
 if (-not $okTask) { Write-Host '[AVISO] Tarefa ao logon: o clique Iniciar cria em silencio' }
 if (-not $okNet) { Write-Host '[INFO] ConvenienteNetBoot extra (SYSTEM) nao gravou. O vigia ao logon basta.' }
+if ($pagefileReboot) { Write-Host '[AVISO_FATAL_REBOOT] REINICIE O SERVIDOR AGORA para o pagefile 1:1 valer no ferro.' }
 if (-not (Test-Path (Join-Path $Dest 'manutencao.ps1'))) { exit 1 }
 exit 0

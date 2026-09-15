@@ -46,6 +46,25 @@ check("iniciar_fires_boot", /winTuningMaster\.ps1/.test(iniciar) && /'-Boot'/.te
 check("kit_fires_boot", /Invoke-WinTuningSilent/.test(kit) && /-Boot/.test(kit));
 const install = fs.readFileSync(path.join(root, "porteiro", "kit", "install.ps1"), "utf8");
 check("install_apply_not_watch", /winTuningMaster\.ps1/.test(install) && /-Apply/.test(install) && !/-Boot/.test(install) && !/-Watch/.test(install));
+const pagefile = fs.readFileSync(path.join(root, "scripts", "winPagefileCommit.ps1"), "utf8");
+check("pagefile_exists", pagefile.length > 400);
+check("pagefile_not_in_tuning_apply", !/AutomaticManagedPagefile/.test(tune) && /winPagefileCommit\.ps1/.test(tune));
+check("pagefile_no_runas", !/Verb RunAs/.test(pagefile) && !/Start-Process[\s\S]{0,120}RunAs/.test(pagefile));
+check("pagefile_no_messagebox", !/MessageBox/.test(pagefile));
+check("pagefile_no_fastfail_lie", !/elimina o FastFail/.test(pagefile) && !/saca o erro crônico/.test(pagefile));
+check("pagefile_mirror", /WantMb/.test(pagefile) && /RamGb/.test(pagefile) && /30GB/.test(pagefile) && /pagefile\.sys/.test(pagefile));
+check("pagefile_auto_off", /AutomaticManagedPagefile/.test(pagefile) && /PagingFiles/.test(pagefile));
+check("pagefile_abort", /AbortBoot/.test(pagefile) && /AVISO_FATAL_REBOOT/.test(pagefile) && /exit 2/.test(pagefile));
+check("pagefile_ok_stamp", /\[INFRA_BLINDAGEM_OK\]/.test(pagefile) && /multi_engine\.log/.test(pagefile));
+check("pagefile_skip_honest", /no_admin/.test(pagefile) && /no_disk/.test(pagefile) && /already_ok/.test(pagefile) && /pending_reboot/.test(pagefile) && /exit 3/.test(pagefile));
+check("pagefile_quiet", /\[switch\]\$Quiet/.test(pagefile));
+check("pagefile_no_robe", !/virtusDelta/.test(pagefile) && !/worker\.js/.test(pagefile));
+check("iniciar_pagefile_before_node", /pagefile_check/.test(iniciar) && iniciar.indexOf("pagefile_check") < iniciar.indexOf("$code = Start-ConvenienteNode") && /pagefile_abort_reboot/.test(iniciar));
+check("iniciar_pagefile_stops_loop", /Stop-LoopOnly[\s\S]{0,180}pagefile_abort_reboot/.test(iniciar));
+check("iniciar_tuning_still_after_node", iniciar.indexOf("Start-ConvenienteNode") < iniciar.indexOf("winTuningMaster.ps1"));
+check("install_pagefile", /winPagefileCommit\.ps1/.test(install) && /-Quiet/.test(install) && /pagefileReboot/.test(install) && /pagefile skip exit=/.test(install));
+const allow = fs.readFileSync(path.join(root, "scripts", "logsAllowlist.js"), "utf8");
+check("allow_pagefile", /windows_pagefile_state:/.test(allow) && /windows_pagefile_forensic:/.test(allow) && /windows_pagefile_reboot:/.test(allow));
 
 check("tune_adendo_visualfx", /VisualFXSetting/.test(tune) && /VisualEffects/.test(tune) && /Want 2/.test(tune));
 check("tune_adendo_minanimate", /MinAnimate/.test(tune) && /WindowMetrics/.test(tune) && /Want '0'/.test(tune) && /Type String/.test(tune));

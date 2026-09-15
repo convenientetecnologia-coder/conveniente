@@ -1,4 +1,5 @@
 # Host Windows do Conveniente. Nao mexe em Robe/Virtus/frota.
+# Pagefile 1:1 (Commit Limit) NAO vive aqui: scripts\winPagefileCommit.ps1 no Iniciar, antes do Node.
 # Sem UAC. Sem Wait no Iniciar. Falha local nunca impede o Node.
 # WerSvc fica Manual e LIGADO. Disabled apaga dump. Stop tambem. FastFail 0xC0000409 precisa do servico de pe.
 # Chrome/node so do caminho C:\conveniente. Poll 5s (1ms queima CPU).

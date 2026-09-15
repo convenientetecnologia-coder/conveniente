@@ -396,7 +396,7 @@ function Ensure-PulseTaskSilent {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|winPagefileCommit\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
@@ -532,6 +532,25 @@ function Start-ConvenienteNode {
 }
 
 Write-StartLog 'click'
+$copiedEarly = $false
+try { $copiedEarly = [bool](Copy-KitSilent) } catch { $copiedEarly = $false }
+try {
+    $pagefilePs1 = 'C:\conveniente\scripts\winPagefileCommit.ps1'
+    if (Test-Path -LiteralPath $pagefilePs1) {
+        Write-StartLog 'pagefile_check'
+        & $ps -NoProfile -ExecutionPolicy Bypass -File $pagefilePs1 -Apply
+        $pagefileCode = 0
+        try { $pagefileCode = [int]$LASTEXITCODE } catch { $pagefileCode = 0 }
+        Write-StartLog ('pagefile_exit ' + $pagefileCode)
+        if ($pagefileCode -eq 2) {
+            try { Stop-LoopOnly } catch {}
+            Write-StartLog 'pagefile_abort_reboot'
+            exit 2
+        }
+    }
+} catch {
+    Write-StartLog ('pagefile_exception ' + $_.Exception.Message)
+}
 Write-ConvenienteHumanHold 'human_iniciar'
 # Janela do Node primeiro. Kit/loop/tuning depois, sem esconder o clique.
 $code = Start-ConvenienteNode
@@ -545,6 +564,7 @@ try {
 } catch {}
 $copied = $false
 try { $copied = [bool](Copy-KitSilent) } catch { $copied = $false }
+if ($copiedEarly) { $copied = $true }
 Ensure-LogonTaskSilent
 [void](Wait-ConvenienteUp 1)
 if ($copied) {

@@ -94,6 +94,7 @@ check("installer_runs_without_admin", /Sem admin/.test(instPTxt) && /Nao pede UA
 check("iniciar_no_uac_no_ok", !/AlreadyElevated/.test(iniciarTxt) && !/MessageBox/.test(iniciarTxt) && !/Verb RunAs/.test(iniciarTxt) && !/porteiroEnsure\.ps1/.test(iniciarTxt));
 check("iniciar_tuning_fire_forget", /winTuningMaster\.ps1/.test(iniciarTxt) && /Start-Process/.test(iniciarTxt) && !/Start-Process[\s\S]{0,400}-Wait/.test(iniciarTxt) && iniciarTxt.indexOf("Start-ConvenienteNode") < iniciarTxt.indexOf("winTuningMaster.ps1"));
 check("iniciar_excludes_tuning_host", /winTuningMaster\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("iniciar_excludes_pagefile_host", /winPagefileCommit\\.ps1/.test(iniciarTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("iniciar_starts_node_direct", /function Start-ConvenienteNodeHost/.test(iniciarTxt) && /Conveniente_Node/.test(iniciarTxt) && /-NoExit/.test(iniciarTxt) && /WindowStyle Normal/.test(iniciarTxt) && !/Start-Process cmd\.exe/.test(iniciarTxt) && !/cmd\.exe \/c/.test(iniciarTxt));
 check("host_node_in_window", /cmd\.exe \/c/.test(hostTxt) && /Conveniente_Node/.test(hostTxt) && !/WindowStyle Hidden/.test(hostTxt) && !/TreatControlCAsInput/.test(hostTxt));
 check("host_native_stderr_file", /crash_nativo_index\.log/.test(hostTxt) && /cmd\.exe \/c/.test(hostTxt) && /2>>/.test(hostTxt) && /Format-ExitHex/.test(hostTxt) && /codeName/.test(hostTxt));
@@ -146,8 +147,10 @@ check("kit_state_up_depends_only_on_port", /function Get-SystemState/.test(kitTx
 check("kit_do_start_no_ensure", !/Invoke-PorteiroEnsure/.test(doStartBody) && !/porteiroEnsure\.ps1/.test(doStartBody));
 check("kit_tuning_silent", /function Invoke-WinTuningSilent/.test(kitTxt) && /winTuningMaster\.ps1/.test(kitTxt) && !/Verb RunAs/.test(kitTxt.split("function Invoke-WinTuningSilent")[1] || ""));
 check("kit_tuning_not_in_loop_or_start", !/Invoke-WinTuningSilent/.test(loopBody) && !/Invoke-WinTuningSilent/.test(doStartBody));
+check("kit_pagefile_in_start_quiet", /winPagefileCommit\.ps1/.test(doStartBody) && /-Quiet/.test(doStartBody) && !/winPagefileCommit\.ps1/.test(loopBody));
 check("kit_no_wmi", !/Get-CimInstance/.test(kitTxt) && !/Get-WmiObject/.test(kitTxt) && !/Get-NetTCPConnection/.test(kitTxt) && !/Get-NetAdapter/.test(kitTxt) && !/Win32_/.test(kitTxt));
 check("kit_excludes_tuning_host", /winTuningMaster\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
+check("kit_excludes_pagefile_host", /winPagefileCommit\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_excludes_hammer_host", /crashHammer\\.ps1/.test(kitTxt.split("function Test-IsConvenienteNodeHost")[1] || ""));
 check("kit_crash_dumps_fn", /function Ensure-NodeCrashDumps/.test(kitTxt) && /LocalDumps\\node\.exe/.test(kitTxt) && /DumpType/.test(kitTxt));
 check("kit_wersvc_fn", /function Ensure-WerSvc/.test(kitTxt) && /Start-Service -Name WerSvc/.test(kitTxt) && !/Stop-Service -Name WerSvc/.test(kitTxt) && /sem_admin/.test(kitTxt));

@@ -583,7 +583,7 @@ function Get-ConvenientePsHost {
 function Test-IsConvenienteNodeHost([string]$CommandLine) {
     $c = [string]$CommandLine
     if ([string]::IsNullOrWhiteSpace($c)) { return $false }
-    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
+    if ($c -match 'manutencao\.ps1|iniciarSistema\.ps1|porteiroEnsure\.ps1|winTuningMaster\.ps1|winPagefileCommit\.ps1|windowsForensicDeep|crashHammer\.ps1|-Action loop') { return $false }
     return ($c -match 'Conveniente_Node' -or $c -match 'conveniente\\index\.js')
 }
 
@@ -723,6 +723,24 @@ function Do-Start {
     if ((Count-ConvenienteNodeHosts) -gt 0) {
         Write-Log "$Reason start skipped host_alive2"
         return
+    }
+
+    $pagefilePs1 = Join-Path $Conveniente 'scripts\winPagefileCommit.ps1'
+    if (Test-Path -LiteralPath $pagefilePs1) {
+        try {
+            $psExePf = Get-ConvenientePsHost
+            & $psExePf -NoProfile -ExecutionPolicy Bypass -File $pagefilePs1 -Apply -Quiet
+            $pfCode = 0
+            try { $pfCode = [int]$LASTEXITCODE } catch { $pfCode = 0 }
+            Write-Log "$Reason pagefile_exit=$pfCode"
+            if ($pfCode -eq 2) {
+                Write-Host '[AVISO_FATAL_REBOOT] Pagefile 1:1 gravado. REINICIE O SERVIDOR AGORA. Conveniente nao sobe antes do reboot.'
+                Write-Log "$Reason start aborted pagefile_reboot"
+                return
+            }
+        } catch {
+            Write-Log "$Reason pagefile_exception $($_.Exception.Message)"
+        }
     }
 
     Write-IndexStartLock
