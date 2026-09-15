@@ -563,6 +563,33 @@ function Do-NetBoot {
     Ensure-Dirs
     try { [void](Ensure-NodeCrashDumps) } catch {}
     try { [void](Ensure-WerSvc) } catch {}
+    $pagefileNow = $false
+    $flagPf = Join-Path $Root 'PAGEFILE_NOW.flag'
+    $flagPf2 = Join-Path $Conveniente 'dados\logs\PAGEFILE_NOW.flag'
+    if (Test-Path -LiteralPath $flagPf) {
+        $pagefileNow = $true
+        try { Remove-Item -LiteralPath $flagPf -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    if (Test-Path -LiteralPath $flagPf2) {
+        $pagefileNow = $true
+        try { Remove-Item -LiteralPath $flagPf2 -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    $pagefilePs1 = Join-Path $Conveniente 'scripts\winPagefileCommit.ps1'
+    if (Test-Path -LiteralPath $pagefilePs1) {
+        try {
+            $psExePf = Get-ConvenientePsHost
+            & $psExePf -NoProfile -ExecutionPolicy Bypass -File $pagefilePs1 -Apply -Quiet
+            $pfCode = 0
+            try { $pfCode = [int]$LASTEXITCODE } catch { $pfCode = 0 }
+            Write-Log ("NETBOOT pagefile_exit=$pfCode now=$pagefileNow")
+        } catch {
+            Write-Log ("NETBOOT pagefile_exception $($_.Exception.Message)")
+        }
+    }
+    if ($pagefileNow) {
+        Write-Log 'NETBOOT pagefile_only skip_net_guard'
+        return
+    }
     Write-Log ("NETBOOT $Version uptime={0}m" -f (Get-UptimeMinutes))
     try {
         $r = Invoke-StartupNetworkGuard

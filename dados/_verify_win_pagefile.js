@@ -39,6 +39,10 @@ check("kit_quiet_only_start", /winPagefileCommit\.ps1/.test(kit.split("function 
 check("kit_no_wmi", !/Get-CimInstance/.test(kit) && !/Get-WmiObject/.test(kit) && !/Win32_/.test(kit));
 check("install_no_false_ok", /pagefile skip exit=/.test(install) && /LASTEXITCODE -eq 0/.test(install));
 check("install_skip_loop_on_reboot", /if \(\$pagefileReboot\)/.test(install));
+check("ram_max_not_first_dimm", /function Get-PfRamPick/.test(pf) && /Win32_PhysicalMemory/.test(pf) && /Win32_ComputerSystem/.test(pf) && /TotalVisibleMemorySize/.test(pf) && /ram_max_picks_64_not_32/.test(pf));
+check("iniciar_bounce_system", /Invoke-PfViaSystemTask/.test(pf) && /ConvenienteNetBoot/.test(pf) && /PAGEFILE_NOW/.test(pf) && /Test-PfSystem/.test(pf));
+check("kit_netboot_pagefile", /function Do-NetBoot/.test(kit) && /PAGEFILE_NOW/.test(kit) && /pagefile_only skip_net_guard/.test(kit));
+check("no_uac_still", !/Verb RunAs/.test(iniciar) && !/Verb RunAs/.test(pf));
 
 const ps = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const parsed = spawnSync(ps, ["-NoProfile", "-Command", "$e=$null; $t=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('" + pfPath.replace(/'/g, "''") + "', [ref]$t, [ref]$e); if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }; 'PARSE_OK'"], { encoding: "utf8" });
