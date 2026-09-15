@@ -56,7 +56,7 @@ check("pagefile_mirror", /WantMb/.test(pagefile) && /RamGb/.test(pagefile) && /3
 check("pagefile_auto_off", /AutomaticManagedPagefile/.test(pagefile) && /PagingFiles/.test(pagefile));
 check("pagefile_abort", /AbortBoot/.test(pagefile) && /AVISO_FATAL_REBOOT/.test(pagefile) && /exit 2/.test(pagefile));
 check("pagefile_ok_stamp", /\[INFRA_BLINDAGEM_OK\]/.test(pagefile) && /multi_engine\.log/.test(pagefile));
-check("pagefile_skip_honest", /no_admin/.test(pagefile) && /no_disk/.test(pagefile) && /already_ok/.test(pagefile) && /pending_reboot/.test(pagefile) && /exit 3/.test(pagefile));
+check("pagefile_skip_honest", /no_admin/.test(pagefile) && /no_disk/.test(pagefile) && /already_ok/.test(pagefile) && /pending_reboot/.test(pagefile) && /live_mismatch/.test(pagefile) && /exit 3/.test(pagefile));
 check("pagefile_quiet", /\[switch\]\$Quiet/.test(pagefile));
 check("pagefile_no_robe", !/virtusDelta/.test(pagefile) && !/worker\.js/.test(pagefile));
 check("iniciar_pagefile_before_node", /pagefile_check/.test(iniciar) && iniciar.indexOf("pagefile_check") < iniciar.indexOf("$code = Start-ConvenienteNode") && /pagefile_abort_reboot/.test(iniciar));

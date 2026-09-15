@@ -24,10 +24,14 @@ check("script_exists", fs.existsSync(pfPath) && pf.length > 800);
 check("no_robe_virtus", !/virtusDelta/.test(pf) && !/worker\.js/.test(pf) && !/scripts\\robe/.test(pf));
 check("no_uac", !/Verb RunAs/.test(pf) && !/MessageBox/.test(pf));
 check("exit_codes", /exit 2/.test(pf) && /exit 3/.test(pf) && /if \(\$out\.Ok\) \{ exit 0 \}/.test(pf));
-check("disk_signed_delta", /\$delta = \[int64\]\$wantBytes - \[int64\]\$currentPfBytes/.test(pf) && /30GB/.test(pf));
+check("disk_signed_delta", /function Get-PfDiskMath/.test(pf) && /30GB/.test(pf));
 check("usage_slack", /-le 64/.test(pf));
 check("keep_other_lines", /if \(\$raw -and \(\$raw -notmatch/.test(pf));
 check("throttle_ok_log", /6 \* 60 \* 60 \* 1000/.test(pf) && /\[INFRA_BLINDAGEM_OK\]/.test(pf));
+check("decision_machine", /function Resolve-PfDecision/.test(pf) && /live_mismatch/.test(pf) && /apply_cap/.test(pf) && /should_apply/.test(pf));
+check("no_reboot_loop", /RebootedSinceApply/.test(pf) && /after_reboot_no_loop/.test(pf));
+check("disk_never_unconfig", /DiskOk so autoriza GRAVAR/.test(pf) && /live_then_ssd_below_30_never_unconfig/.test(pf) && /live_guard/.test(pf));
+check("write_if_reg_exact", /\$after\.Configured -or \(\$regOk -and \$after\.RegExact\)/.test(pf));
 check("iniciar_copy_before_pagefile", iniciar.indexOf("copiedEarly") < iniciar.indexOf("pagefile_check") && iniciar.indexOf("pagefile_check") < iniciar.indexOf("$code = Start-ConvenienteNode"));
 check("iniciar_abort_stops_loop", /Stop-LoopOnly[\s\S]{0,180}pagefile_abort_reboot/.test(iniciar));
 check("iniciar_continue_on_skip", /pagefile_exit/.test(iniciar) && /pagefileCode -eq 2/.test(iniciar));
@@ -46,11 +50,28 @@ try { report = JSON.parse(String(chk.stdout || "").trim().split(/\r?\n/).filter(
 check("check_exit0", chk.status === 0);
 check("check_json", !!(report && report.RamOk === true && Number(report.RamGb) >= 1 && Number(report.WantMb) === Number(report.RamGb) * 1024), JSON.stringify(report && { ram: report.RamGb, want: report.WantMb, disk: report.DiskOk, admin: report.Admin, live: report.Live }));
 check("check_no_abort_fields", !!(report && typeof report.DiskOk === "boolean" && typeof report.Admin === "boolean" && typeof report.Configured === "boolean"));
+check("check_current_pf", !!(report && typeof report.CurrentPfMb === "number" && typeof report.UsageMb === "number"));
+
+const ini = Number(report && report.CInitialMb);
+const max = Number(report && report.CMaximumMb);
+const want = Number(report && report.WantMb);
+if (report && ini === want && max === want && report.AutoOff === true) {
+  check("host_11_settings", report.Configured === true);
+} else {
+  check("host_range_never_counts_as_11", report && report.Live === false && report.Configured === false, JSON.stringify({ ini, max, want, live: report && report.Live, cfg: report && report.Configured }));
+}
+
+const self = spawnSync(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", pfPath, "-SelfTest"], { encoding: "utf8" });
+check("selftest_exit0", self.status === 0, (self.stdout || "") + (self.stderr || ""));
+check("selftest_ok", /SELFTEST_OK/.test(self.stdout || "") && !/SELFTEST FAIL/.test(self.stdout || ""), self.stdout || self.stderr);
 
 const dry = spawnSync(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", pfPath, "-Apply", "-DryRun", "-Quiet"], { encoding: "utf8" });
 const dryCode = dry.status === null ? 99 : dry.status;
 check("dryrun_does_not_abort", dryCode !== 2, "exit=" + dryCode);
 check("dryrun_skip_or_ok", dryCode === 0 || dryCode === 3, "exit=" + dryCode);
+if (report && report.Live !== true) {
+  check("dryrun_not_ok_when_not_live", dryCode === 3, "exit=" + dryCode + " live=" + (report && report.Live));
+}
 
 if (failed) {
   console.log("FAILED " + failed);
