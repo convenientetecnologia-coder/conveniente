@@ -133,6 +133,26 @@ function __gateBUpdateRuntime(patch) {
   } catch {}
 }
 
+function __isGateBCloudflaredChildAlive() {
+  try {
+    return !!(__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null && __gateBCloudflaredChild.pid);
+  } catch {
+    return false;
+  }
+}
+
+function __markGateBCloudflaredStartedFromChild() {
+  if (!__isGateBCloudflaredChildAlive()) return false;
+  __gateBCloudflaredStarted = true;
+  __gateBUpdateRuntime({
+    cloudflared: {
+      ...((__gateBRuntime && __gateBRuntime.cloudflared) ? __gateBRuntime.cloudflared : {}),
+      started: true
+    }
+  });
+  return true;
+}
+
 async function maybeBootstrapGateBToken() {
   // Require local: Gate B pode rodar antes do bloco de requires do dashboard (linha ~994).
   const {
@@ -413,7 +433,10 @@ async function maybeBootstrapGateBToken() {
         ).catch(() => {});
       } catch {}
       try {
-        if (__gateBCloudflaredChild && __gateBCloudflaredChild.exitCode == null) return true;
+        if (__isGateBCloudflaredChildAlive()) {
+          __markGateBCloudflaredStartedFromChild();
+          return true;
+        }
       } catch {}
       const candidate = await ensureCloudflaredExe();
       if (!candidate) return false;
@@ -460,6 +483,12 @@ async function maybeBootstrapGateBToken() {
         });
       });
       child.once('exit', (code, signal) => {
+        try {
+          if (__gateBCloudflaredChild && __gateBCloudflaredChild !== child) {
+            try { logger.info('[GATE_B][BOOTSTRAP] cloudflared exit ignorado (nao e o child atual)', { pid: child && child.pid ? child.pid : null }); } catch {}
+            return;
+          }
+        } catch {}
         try {
           __gateBCloudflaredLastExit = { at: Date.now(), code: code == null ? null : Number(code), signal: signal == null ? null : String(signal) };
         } catch {}
@@ -620,8 +649,14 @@ async function maybeBootstrapGateBToken() {
           logger.info('[GATE_B][BOOTSTRAP] bundle_presente: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
         if (shouldReuseExistingToken && ensureCtBaseFromBootstrapUrl()) {
-          if (__gateBCloudflaredStarted) notifyGateBReady();
-          return true;
+          if (__isGateBCloudflaredChildAlive()) {
+            __markGateBCloudflaredStartedFromChild();
+            notifyGateBReady();
+            return true;
+          }
+          logger.warn('[GATE_B][BOOTSTRAP] bundle_presente mas cloudflared nao esta vivo; reagendando');
+          scheduleRetry();
+          return false;
         }
       }
 
@@ -650,8 +685,14 @@ async function maybeBootstrapGateBToken() {
           logger.info('[GATE_B][BOOTSTRAP] token_env: cloudflared_token_start=' + (ok ? 'ok' : 'fail'));
         }
         if (ensureCtBaseFromBootstrapUrl()) {
-          if (__gateBCloudflaredStarted) notifyGateBReady();
-          return true;
+          if (__isGateBCloudflaredChildAlive()) {
+            __markGateBCloudflaredStartedFromChild();
+            notifyGateBReady();
+            return true;
+          }
+          logger.warn('[GATE_B][BOOTSTRAP] token_env mas cloudflared nao esta vivo; reagendando');
+          scheduleRetry();
+          return false;
         }
       }
 
@@ -882,8 +923,14 @@ async function maybeBootstrapGateBToken() {
           } else {
             logger.info('[GATE_B][BOOTSTRAP] ct_bootstrap_ok: bundle atualizado (cloudflared já ativo)', { forceRefresh, tokenRotated });
           }
-          if (__gateBCloudflaredStarted) notifyGateBReady();
-          return;
+          if (__isGateBCloudflaredChildAlive()) {
+            __markGateBCloudflaredStartedFromChild();
+            notifyGateBReady();
+            return true;
+          }
+          logger.warn('[GATE_B][BOOTSTRAP] ct_bootstrap_ok mas cloudflared nao esta vivo; reagendando');
+          scheduleRetry();
+          return false;
         } finally {
           clearTimeout(to);
         }
@@ -1385,6 +1432,45 @@ function __edgeExtractStockProvisionAccountIds(payload) {
   return ids;
 }
 
+function __edgeListStockProvisionOutboxSync() {
+  __edgeEnsureStockProvisionOutboxDirsSync();
+  const accountIds = [];
+  const seen = new Set();
+  let pendingCount = 0;
+  let oldestEnqueuedAt = 0;
+  try {
+    const files = fs.readdirSync(STOCK_PROVISION_PENDING_DIR)
+      .filter((f) => String(f || '').toLowerCase().endsWith('.json'));
+    pendingCount = files.length;
+    for (const fileName of files) {
+      let rec = null;
+      try {
+        rec = JSON.parse(String(fs.readFileSync(path.join(STOCK_PROVISION_PENDING_DIR, fileName), 'utf8') || '{}'));
+      } catch {
+        continue;
+      }
+      const enq = Number(rec && rec.enqueuedAt || 0) || 0;
+      if (enq && (!oldestEnqueuedAt || enq < oldestEnqueuedAt)) oldestEnqueuedAt = enq;
+      const ids = Array.isArray(rec && rec.stockAccountIds)
+        ? rec.stockAccountIds
+        : __edgeExtractStockProvisionAccountIds(rec && rec.payload);
+      for (const oid of ids) {
+        const n = Number(oid || 0) || 0;
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        accountIds.push(n);
+      }
+    }
+  } catch {}
+  return {
+    pendingCount,
+    pendingAccountIds: accountIds,
+    pumpInFlight: !!__stockProvisionPumpInFlight,
+    oldestEnqueuedAt: oldestEnqueuedAt || null,
+    oldestAgeMs: oldestEnqueuedAt ? Math.max(0, Date.now() - oldestEnqueuedAt) : 0
+  };
+}
+
 function __edgeAcceptStockProvisionToDiskSync(cmd) {
   __edgeEnsureStockProvisionOutboxDirsSync();
   const cmdId = String(cmd && cmd.id || '').trim()
@@ -1428,12 +1514,17 @@ function __edgeAcceptStockProvisionToDiskSync(cmd) {
       for (const oid of otherIds) {
         const n = Number(oid || 0) || 0;
         if (n && want.has(n)) {
+          // Já está na fila deste Robe: o CT deve tratar como dono (não devolver ao estoque).
           return {
-            ok: false,
+            ok: true,
+            alreadyInflight: true,
+            deliveryAccepted: true,
             error: 'stock_account_already_inflight',
             cmdId,
             stockAccountId: n,
-            otherCmdId: String(other && other.id || fileName.replace(/\.json$/i, '')) || null
+            stockAccountIds: [n],
+            otherCmdId: String(other && other.id || fileName.replace(/\.json$/i, '')) || null,
+            batchId: String(payload.batchId || '').trim() || null
           };
         }
       }
@@ -1502,6 +1593,8 @@ async function __edgePumpStockProvisionOutbox() {
         payload: (rec && rec.payload && typeof rec.payload === 'object') ? rec.payload : {}
       };
       try {
+        // Só tira da fila quando o cadastro devolve. Timeout artificial aqui
+        // movia o JSON pra done com o Chrome ainda nascendo e o CT reenviava.
         await applyInfraCommands([cmd]);
       } catch (e) {
         try {
@@ -3617,26 +3710,32 @@ app.post('/api/infra/command-bus', async (req, res) => {
             error: String((accepted && accepted.error) || 'stock_provision_accept_failed'),
             details: null
           };
+          try { __edgeKickStockProvisionPump(); } catch {}
           continue;
         }
         __edgeKickStockProvisionPump();
         const stockAccountIds = Array.isArray(accepted.stockAccountIds) ? accepted.stockAccountIds : [];
+        const alreadyInflight = !!accepted.alreadyInflight;
         results[i] = {
           id: cmdId,
           type: 'stock_provision',
           ok: true,
-          status: 'received_by_edge',
+          status: alreadyInflight ? 'already_inflight_owned' : 'received_by_edge',
           deliveryAccepted: true,
+          alreadyInflight,
           details: {
             deliveryAccepted: true,
-            stage: 'received_by_edge',
+            alreadyInflight,
+            stage: alreadyInflight ? 'already_inflight_owned' : 'received_by_edge',
             batchId: accepted.batchId || null,
             duplicate: !!accepted.duplicate,
+            otherCmdId: accepted.otherCmdId || null,
             results: stockAccountIds.map((sid) => ({
               stockAccountId: sid,
               ok: true,
               deliveryAccepted: true,
-              stage: 'received_by_edge',
+              alreadyInflight,
+              stage: alreadyInflight ? 'already_inflight_owned' : 'received_by_edge',
               profileName: null
             }))
           }
@@ -3966,7 +4065,8 @@ function __buildServerEventTelemetry(status) {
       freeMB: Number(sys.freeMB || 0) || 0,
       totalMB: Number(sys.totalMB || 0) || 0,
       cpuApprox: Number(sys.cpuApprox || 0) || 0
-    }
+    },
+    stockProvisionOutbox: __edgeListStockProvisionOutboxSync()
   };
 
   // Assinatura estável: não inclui métricas voláteis (cpu/ram) para evitar ruído.
@@ -3987,10 +4087,16 @@ function __buildServerEventTelemetry(status) {
     };
   }).sort((x, y) => String(x.n || '').localeCompare(String(y.n || '')));
 
+  const ob = (quick && quick.stockProvisionOutbox) || {};
   const signature = {
     perfis: perfisStable,
     accountsAgg,
     flagsAgg,
+    stockProvisionOutbox: {
+      pendingCount: Number(ob.pendingCount || 0) || 0,
+      pendingAccountIds: Array.isArray(ob.pendingAccountIds) ? ob.pendingAccountIds.slice(0, 80) : [],
+      pumpInFlight: !!ob.pumpInFlight
+    },
     // Mudança false→true força snapshot completo quando Gate B/tunnel fica pronto.
     gateBReady: !!(
       status &&
@@ -4333,7 +4439,11 @@ async function __serverEventBridgeTick(reason) {
       // CT novo devolve ctBaseUrl na própria resposta; zero dependência do
       // tunnel reverso e zero push DNS prematuro.
       acceptCtConfigReply: true,
-      ...(includeFullStatus ? { status } : {}),
+      ...(includeFullStatus ? {
+        status: Object.assign({}, status || {}, {
+          stockProvisionOutbox: (telemetry.quick && telemetry.quick.stockProvisionOutbox) || null
+        })
+      } : {}),
       ...(serverConfigPayload ? { serverConfig: serverConfigPayload } : {})
     };
     const out = await __postServerEventToCt(payload);
