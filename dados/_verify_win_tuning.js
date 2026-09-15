@@ -49,7 +49,7 @@ check("install_apply_not_watch", /winTuningMaster\.ps1/.test(install) && /-Apply
 const pagefile = fs.readFileSync(path.join(root, "scripts", "winPagefileCommit.ps1"), "utf8");
 check("pagefile_exists", pagefile.length > 400);
 check("pagefile_not_in_tuning_apply", !/AutomaticManagedPagefile/.test(tune) && /winPagefileCommit\.ps1/.test(tune));
-check("pagefile_no_runas", !/Verb RunAs/.test(pagefile) && !/Start-Process[\s\S]{0,120}RunAs/.test(pagefile));
+check("pagefile_auto_elevate", /Verb RunAs/.test(pagefile) && /WindowsBuiltInRole\]::Administrator/.test(pagefile));
 check("pagefile_no_messagebox", !/MessageBox/.test(pagefile));
 check("pagefile_no_fastfail_lie", !/elimina o FastFail/.test(pagefile) && !/saca o erro crônico/.test(pagefile));
 check("pagefile_mirror", /WantMb/.test(pagefile) && /RamGb/.test(pagefile) && /30GB/.test(pagefile) && /pagefile\.sys/.test(pagefile));

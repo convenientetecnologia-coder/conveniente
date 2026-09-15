@@ -3,8 +3,9 @@
 # So grava se o C:\pagefile.sys NAO esta fixo em RAM/RAM. Faixa 128-8192 ou 2-4GB NAO e 1:1.
 # So aborta o boot se gravou NESTE boot ou se o ferro ainda nao reiniciou depois da gravacao.
 # Depois do reboot, se o Windows nao honrou o tamanho: nao pede reboot eterno, nao trava o Iniciar.
-# Sem UAC proprio. Iniciar no token filtrado nao grava HKLM: pede ConvenienteNetBoot (SYSTEM).
-# RAM = MAX das fontes (DIMM, ComputerSystem, OS visivel). Nao fica no primeiro DIMM.
+# RAM = SOMA de todas as Capacity de Win32_PhysicalMemory. Proibido primeiro slot / MAX de fonte virtual.
+# Espelho 1:1: WantMb = Floor(RAM_bytes / 1GB) * 1024. Trava: C:\ com >= 30 GB livres apos criar o arquivo.
+# Sem admin: auto-eleva (UAC RunAs). Se o operador recusar, cai no bounce ConvenienteNetBoot (SYSTEM).
 
 param(
     [switch]$Apply,
@@ -16,6 +17,26 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
+
+$script:ConvenientePagefileDotSourced = ($MyInvocation.InvocationName -eq '.')
+
+# Barreira de privilegio: gravar Win32_PageFileSetting / HKLM exige Administrador.
+# Check/SelfTest/DryRun nao disparam UAC (leitura / prova / simulacao).
+if (-not $script:ConvenientePagefileDotSourced -and -not $Check -and -not $SelfTest -and -not $DryRun) {
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $elevateArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        if ($Apply) { $elevateArgs += ' -Apply' }
+        if ($Quiet) { $elevateArgs += ' -Quiet' }
+        $psElevate = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        try {
+            $elev = Start-Process -FilePath $psElevate -ArgumentList $elevateArgs -Verb RunAs -Wait -PassThru
+            if ($null -ne $elev) { exit [int]$elev.ExitCode }
+            exit 0
+        } catch {
+            # UAC recusado ou sessao sem desktop: segue no token atual.
+        }
+    }
+}
 
 $Root = 'C:\conveniente'
 $LogDir = Join-Path $Root 'dados\logs'
@@ -134,57 +155,79 @@ function Save-PfState($Obj) {
 
 function Get-PfRamPick {
     param([object[]]$Cands)
-    $bestBytes = [int64]0
-    $bestSource = 'none'
+    $sumBytes = [int64]0
     $all = @()
+    $n = 0
     foreach ($c in @($Cands)) {
         if ($null -eq $c) { continue }
         $b = [int64]0
         try { $b = [int64]$c.Bytes } catch { $b = [int64]0 }
         $s = [string]$c.Source
-        if ($b -gt 0) { $all += ($s + '=' + [int][math]::Round(([double]$b) / 1GB) + 'GB') }
-        if ($b -gt $bestBytes) {
-            $bestBytes = $b
-            $bestSource = $s
-        }
+        if ($b -le 0) { continue }
+        $n++
+        $sumBytes = [int64]($sumBytes + $b)
+        $all += ($s + '=' + [int][Math]::Floor(([double]$b) / 1GB) + 'GB')
     }
-    if ($bestBytes -le 0) {
-        return [pscustomobject]@{ Ok = $false; Bytes = [int64]0; Gb = 0; Mb = 0; Source = $bestSource; Sources = ($all -join ',') }
+    if ($sumBytes -le 0) {
+        return [pscustomobject]@{ Ok = $false; Bytes = [int64]0; Gb = 0; Mb = 0; Source = 'Win32_PhysicalMemory'; Sources = ($all -join ',') }
     }
-    $gb = [int][math]::Round(([double]$bestBytes) / 1GB)
+    $gb = [int][Math]::Floor(([double]$sumBytes) / 1GB)
     if ($gb -lt 1) {
-        return [pscustomobject]@{ Ok = $false; Bytes = $bestBytes; Gb = 0; Mb = 0; Source = $bestSource; Sources = ($all -join ',') }
+        return [pscustomobject]@{ Ok = $false; Bytes = $sumBytes; Gb = 0; Mb = 0; Source = 'Win32_PhysicalMemory'; Sources = ($all -join ',') }
     }
     return [pscustomobject]@{
         Ok = $true
-        Bytes = $bestBytes
+        Bytes = $sumBytes
         Gb = $gb
         Mb = ($gb * 1024)
-        Source = $bestSource
+        Source = 'Win32_PhysicalMemory'
         Sources = ($all -join ',')
+        DimmCount = $n
     }
 }
 
 function Get-PhysicalRamGb {
+    $totalRamBytes = [int64]0
+    $totalRamGB = 0
     $cands = @()
     try {
-        $dimms = @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction Stop)
-        if ($dimms.Count -gt 0) {
-            $sum = [int64](($dimms | Measure-Object -Property Capacity -Sum).Sum)
-            if ($sum -gt 0) { $cands += [pscustomobject]@{ Bytes = $sum; Source = 'Win32_PhysicalMemory' } }
+        $dimms = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+        $slot = 0
+        foreach ($d in @($dimms)) {
+            $cap = [int64]0
+            try { $cap = [int64]$d.Capacity } catch { $cap = [int64]0 }
+            $slot++
+            if ($cap -gt 0) {
+                $cands += [pscustomobject]@{ Bytes = $cap; Source = ('DIMM' + $slot) }
+            }
         }
-    } catch {}
-    try {
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-        $b = [int64]$cs.TotalPhysicalMemory
-        if ($b -gt 0) { $cands += [pscustomobject]@{ Bytes = $b; Source = 'Win32_ComputerSystem' } }
-    } catch {}
-    try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        $b = [int64]$os.TotalVisibleMemorySize * 1024
-        if ($b -gt 0) { $cands += [pscustomobject]@{ Bytes = $b; Source = 'Win32_OperatingSystem' } }
-    } catch {}
-    return (Get-PfRamPick -Cands $cands)
+        $totalRamBytes = (Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum
+        $totalRamGB = [Math]::Floor($totalRamBytes / 1GB)
+    } catch {
+        $totalRamBytes = [int64]0
+        $totalRamGB = 0
+    }
+    $gb = [int]$totalRamGB
+    if ($totalRamBytes -le 0 -or $gb -lt 1) {
+        return [pscustomobject]@{
+            Ok = $false
+            Bytes = [int64]$totalRamBytes
+            Gb = 0
+            Mb = 0
+            Source = 'Win32_PhysicalMemory'
+            Sources = 'Win32_PhysicalMemory'
+            DimmCount = @($cands).Count
+        }
+    }
+    return [pscustomobject]@{
+        Ok = $true
+        Bytes = [int64]$totalRamBytes
+        Gb = $gb
+        Mb = ($gb * 1024)
+        Source = 'Win32_PhysicalMemory'
+        Sources = ('Win32_PhysicalMemory sum dimms=' + @($cands).Count)
+        DimmCount = @($cands).Count
+    }
 }
 
 function Get-CDriveFreeBytes {
@@ -391,6 +434,7 @@ function Get-ConvenientePagefileCommitReport {
         RamSources = $(if ($ram.PSObject.Properties['Sources']) { [string]$ram.Sources } else { [string]$ram.Source })
         RamBytes = [int64]$ram.Bytes
         RamGb = [int]$ram.Gb
+        RamDimmCount = $(if ($ram.PSObject.Properties['DimmCount']) { [int]$ram.DimmCount } else { 0 })
         WantMb = [int]$wantMb
         AutoManaged = $auto
         AutoOff = $autoOff
@@ -657,6 +701,7 @@ function New-PfResult {
         ramGb = $ramGb
         ramSource = $ramSource
         ramSources = $ramSources
+        ramDimmCount = $(if ($Report -and $Report.PSObject.Properties['RamDimmCount']) { [int]$Report.RamDimmCount } else { 0 })
         wantMb = $wantMb
         detail = $Detail
         live = $(if ($Report) { [bool]$Report.Live } else { $false })
@@ -834,16 +879,20 @@ function Invoke-PfSelfTest {
     Assert-PfDec 'already_ok_live' (Resolve-PfDecision -Report $live -DoApply $true) 'already_ok' $false
 
     $ramPick = Get-PfRamPick -Cands @(
-        [pscustomobject]@{ Bytes = ([int64]32GB); Source = 'Win32_PhysicalMemory' },
-        [pscustomobject]@{ Bytes = ([int64]65442 * 1MB); Source = 'Win32_OperatingSystem' }
+        [pscustomobject]@{ Bytes = ([int64]32GB); Source = 'DIMM1' },
+        [pscustomobject]@{ Bytes = ([int64]32GB); Source = 'DIMM2' }
     )
-    Assert-PfTrue 'ram_max_picks_64_not_32' ([int]$ramPick.Gb -eq 64) ('gb=' + $ramPick.Gb + ' src=' + $ramPick.Source)
+    Assert-PfTrue 'ram_sum_picks_64_not_32' (([int]$ramPick.Gb -eq 64) -and ([int]$ramPick.Mb -eq 65536)) ('gb=' + $ramPick.Gb + ' mb=' + $ramPick.Mb + ' src=' + $ramPick.Sources)
 
-    $ramPickDimm = Get-PfRamPick -Cands @(
-        [pscustomobject]@{ Bytes = ([int64]64GB); Source = 'Win32_PhysicalMemory' },
-        [pscustomobject]@{ Bytes = ([int64]32GB); Source = 'Win32_OperatingSystem' }
+    $ramPickFirst = Get-PfRamPick -Cands @(
+        [pscustomobject]@{ Bytes = ([int64]32GB); Source = 'DIMM1' }
     )
-    Assert-PfTrue 'ram_max_picks_dimm_64' ([int]$ramPickDimm.Gb -eq 64) ('gb=' + $ramPickDimm.Gb + ' src=' + $ramPickDimm.Source)
+    Assert-PfTrue 'ram_one_dimm_is_32_not_host_64' ([int]$ramPickFirst.Gb -eq 32 -and [int]$ramPickFirst.Mb -eq 32768) ('gb=' + $ramPickFirst.Gb)
+
+    $ramFloor = Get-PfRamPick -Cands @(
+        [pscustomobject]@{ Bytes = ([int64](64GB - 1)); Source = 'DIMM_ALMOST_64' }
+    )
+    Assert-PfTrue 'ram_floor_not_round_up' ([int]$ramFloor.Gb -eq 63) ('gb=' + $ramFloor.Gb)
 
     $lowDiskLive = New-PfFakeReport -Ini 16384 -Max 16384 -UsageMb 16384 -FreeBytes ([int64]5GB) -Admin $true
     Assert-PfTrue 'live_then_ssd_below_30_diskok_false' (-not [bool]$lowDiskLive.DiskOk)
@@ -912,7 +961,6 @@ function Invoke-PfSelfTest {
     return 0
 }
 
-$script:ConvenientePagefileDotSourced = ($MyInvocation.InvocationName -eq '.')
 if (-not $script:ConvenientePagefileDotSourced) {
     if ($SelfTest) {
         $stCode = Invoke-PfSelfTest
