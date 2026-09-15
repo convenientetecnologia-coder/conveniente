@@ -17393,6 +17393,13 @@ function isPinWorkUrl(u) {
   return /messenger\.com/i.test(s) || /\/messages\b/i.test(s) || /\/marketplace\/t\//i.test(s);
 }
 
+// Mesma superfície positiva do Andar 0 (browser.js). Se o 2AB pular o evaluate aqui,
+// um dialog SPA na MESMA URL fica invisível por até 60s — Andar 0 nem roda.
+function isAndar0PositiveSurfaceUrl(u) {
+  const s = String(u || '');
+  return /\/marketplace\b/i.test(s) || /\/messages\/t\//i.test(s) || /messenger\.com\/t\//i.test(s);
+}
+
 function shouldReuseCheapTabScan({ tabs, url, now, robeRunning, emergency, invalidated, kind }) {
   if (!(LR_CHEAP_IDLE_MS > 0)) return { skip: false, reason: 'flag_off' };
   if (robeRunning) return { skip: false, reason: 'robe_running' };
@@ -17400,6 +17407,9 @@ function shouldReuseCheapTabScan({ tabs, url, now, robeRunning, emergency, inval
   if (invalidated) return { skip: false, reason: 'invalidated' };
   const u = String(url || '');
   if (!u) return { skip: false, reason: 'no_url' };
+  // Heartbeat Andar 0: Marketplace/Messages e PIN work URL sempre reentram no evaluate barato.
+  if (kind === 'lr' && isAndar0PositiveSurfaceUrl(u)) return { skip: false, reason: 'andar0_heartbeat' };
+  if (kind === 'pin') return { skip: false, reason: 'pin_andar0_heartbeat' };
   const tab = tabs && tabs[u];
   if (!tab) return { skip: false, reason: 'no_tab' };
   if (String(tab.url || '') !== u) return { skip: false, reason: 'url_changed' };
@@ -19971,6 +19981,7 @@ async function nurseTick() {
           cheapCacheLive.flagsFp = flagsFpNow;
           const cheapEmergency = cheapScanHasEmergencyFlags(flagsCheap);
           const cheapRobeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+          const cheapHuman = !!(ctrl && ctrl.humanControl === true);
           const cheapNow = Date.now();
           let cheapBusted = false;
           for (const pg of (pages || []).slice(0, 8)) {
@@ -19983,7 +19994,7 @@ async function nurseTick() {
               tabs: cheapCacheLive.lrTabs,
               url: u,
               now: cheapNow,
-              robeRunning: cheapRobeRunning,
+              robeRunning: cheapRobeRunning || cheapHuman,
               emergency: cheapEmergency,
               invalidated: !!cheapCacheLive.invalidated,
               kind: 'lr'
@@ -20385,7 +20396,7 @@ async function nurseTick() {
             let firstMatch = null;
             const pinCache = __ensureLrCheapCache(nome);
             const pinNow = Date.now();
-            const pinRobeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+            const pinRobeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true) || !!(ctrl && ctrl.humanControl === true);
             let pinFlags = null;
             try { pinFlags = await readAccountFlags(nome).catch(() => null); } catch { pinFlags = null; }
             const pinFpNow = cheapScanFlagsFp(pinFlags);
