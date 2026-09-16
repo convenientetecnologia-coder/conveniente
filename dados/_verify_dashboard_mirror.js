@@ -49,6 +49,7 @@ assert.match(apiStatus, /setTimeout\(\(\) => resolve\(null\), 3000\)/);
 assert.match(apiStatus, /prevStock > 0 && !\(nextStock > 0\)/);
 
 assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/);
+assert.match(indexJs, /setTimeout\(\(\) => resolve\(null\), 4000\)/);
 assert.match(indexJs, /aggAge >= 0 && aggAge <= 1000/);
 assert.doesNotMatch(indexJs, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/api\/status/);
 assert.match(indexJs, /includeFullStatus/);

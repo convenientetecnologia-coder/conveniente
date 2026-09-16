@@ -84,6 +84,12 @@ check(
     indexJs.includes("hasOwnProperty.call(p, 'humanHold')")
 );
 check(
+  "bridge_pre_refresh_has_local_timeout",
+  indexJs.includes("Promise.race([") &&
+    indexJs.includes("setTimeout(() => resolve(null), 4000)") &&
+    indexJs.includes("sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true })")
+);
+check(
   "bridge_omits_zero_quick_without_hud",
   indexJs.includes("...(statusHasHud ? {") &&
     indexJs.includes("quick: telemetry.quick") &&

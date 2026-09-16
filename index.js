@@ -4363,7 +4363,11 @@ async function __serverEventBridgeTick(reason) {
       try { aggAge = Date.now() - Number(fs.statSync(aggPath).mtimeMs || 0); } catch {}
       if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 1000)) {
         if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
-          await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true });
+          await Promise.race([
+            Promise.resolve(clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true }))
+              .catch(() => null),
+            new Promise((resolve) => setTimeout(() => resolve(null), 4000))
+          ]);
         }
       }
     } catch {}

@@ -213,6 +213,8 @@ check(
   "d2_bridge_remount_1s",
   /aggAge >= 0 && aggAge <= 1000/.test(indexSrc) &&
     /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/.test(indexSrc) &&
+    indexSrc.includes("Promise.race([") &&
+    indexSrc.includes("setTimeout(() => resolve(null), 4000)") &&
     !indexSrc.includes("http://127.0.0.1:${PORT}/api/status"),
   "ponte remonta se status.json >1s; nunca HTTP GET /api/status"
 );
