@@ -1484,7 +1484,7 @@ async function createCluster() {
             warningParts.push('rpc_boot_fail');
             continue;
           }
-          if (payload && Array.isArray(payload.perfis)) {
+          if (payload && Array.isArray(payload.perfis) && payload.perfis.length) {
             const di = nodesDebug.findIndex((n) => n && n.node === (i + 1) && n.ok === false);
             if (di >= 0) nodesDebug.splice(di, 1);
             applyPayload(payload, staleFallback.has(i) ? 'rpc_refresh' : 'rpc_boot', i, null);

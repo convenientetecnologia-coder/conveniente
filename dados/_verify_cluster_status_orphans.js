@@ -35,6 +35,7 @@ assert(src.includes("stale_ignored("), "aggregate precisa marcar stale órfão c
 assert(src.includes("ignored: true"), "debug do aggregate precisa expor ignored");
 assert(src.includes("CLUSTER_STATUS_FILE_MAX_AGE_MS || '5000'"), "limiar de pintura 5s");
 assert(src.includes("journal_stale_fallback"), "RPC falho de cell viva reusa jornal fresco em vez de zerar HUD");
+assert(src.includes("payload.perfis.length"), "RPC com perfis vazio não conta como sucesso — cai no jornal");
 assert(src.includes("rpc_fail_keep_prev"), "jornal de minutos no RPC fail não pisa o last HUD");
 assert(src.includes("CLUSTER_STATUS_RPC_STALE_MS"), "timeout curto no RPC de jornal stale");
 assert(src.includes("CLUSTER_STATUS_HUD_REFRESH_MS"), "refresh HUD pede clone RAM na cell viva");

@@ -122,7 +122,8 @@ check(
   /CLUSTER_STATUS_RPC_STALE_MS \|\| '3000'/.test(clusterSrc) &&
     clusterSrc.includes("journal_stale_fallback") &&
     clusterSrc.includes("rpc_fail_keep_prev") &&
-    clusterSrc.includes("shouldApplyNodeStatusJournal({ liveChild: true, ageMs })"),
+    clusterSrc.includes("shouldApplyNodeStatusJournal({ liveChild: true, ageMs })") &&
+    clusterSrc.includes("payload.perfis.length"),
   "RPC stale 3s; jornal ≤5s fallback; jornal de minutos não pisa o HUD anterior"
 );
 check(
