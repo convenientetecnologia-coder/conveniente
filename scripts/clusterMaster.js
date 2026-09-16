@@ -1474,7 +1474,9 @@ async function createCluster() {
         const rpcResults = await Promise.allSettled(
           missingIdx.map((i) => {
             const timeoutMs = staleFallback.has(i) ? STATUS_RPC_STALE_MS : STATUS_TIMEOUT_MS;
-            return sendTo(i, 'get-status', {}, { timeoutMs }).then((v) => ({ i, v }));
+            return sendTo(i, 'get-status', {}, { timeoutMs })
+              .then((v) => ({ i, v }))
+              .catch(() => ({ i, v: null }));
           })
         );
         for (const r of rpcResults) {
@@ -1499,6 +1501,7 @@ async function createCluster() {
             if (
               fbJson &&
               Array.isArray(fbJson.perfis) &&
+              fbJson.perfis.length &&
               shouldApplyNodeStatusJournal({ liveChild: true, ageMs })
             ) {
               applyPayload(fbJson, 'journal_stale_fallback', i, ageMs);

@@ -123,7 +123,9 @@ check(
     clusterSrc.includes("journal_stale_fallback") &&
     clusterSrc.includes("rpc_fail_keep_prev") &&
     clusterSrc.includes("shouldApplyNodeStatusJournal({ liveChild: true, ageMs })") &&
-    clusterSrc.includes("payload.perfis.length"),
+    clusterSrc.includes("payload.perfis.length") &&
+    clusterSrc.includes("fbJson.perfis.length") &&
+    clusterSrc.includes(".catch(() => ({ i, v: null }))"),
   "RPC stale 3s; jornal ≤5s fallback; jornal de minutos não pisa o HUD anterior"
 );
 check(
@@ -159,7 +161,9 @@ check(
     apiStatusSrc.includes("prevByNome") &&
     apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
     apiStatusSrc.includes("if (!o || !Object.prototype.hasOwnProperty.call(o, 'humanHold')) continue") &&
-    apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
+    apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)") &&
+    apiStatusSrc.includes("setTimeout(() => resolve(null), 3000)") &&
+    apiStatusSrc.includes("setTimeout(() => resolve(null), 7500)"),
   "GET pinta status.json real, funde RAM, não troca HUD do arquivo por esqueleto de catálogo"
 );
 check(

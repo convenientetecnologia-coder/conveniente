@@ -669,7 +669,11 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   } catch {}
   if (!overlayINST) {
     try {
-      overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true });
+      overlayINST = await Promise.race([
+        Promise.resolve(workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true }))
+          .catch(() => null),
+        new Promise((resolve) => setTimeout(() => resolve(null), 7500))
+      ]);
       const hudLive = !!(overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.some((p) =>
         p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
       if (hudLive) {
@@ -691,7 +695,11 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     // Jornal no disco existe: nunca zera o HTML. Sempre funde RAM agora (≤3s).
     // Pular com arquivo <250ms era a janela do Invocar: o poll pintava o agregado velho.
     try {
-      const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true });
+      const live = await Promise.race([
+        Promise.resolve(workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true }))
+          .catch(() => null),
+        new Promise((resolve) => setTimeout(() => resolve(null), 3000))
+      ]);
       if (live && Array.isArray(live.perfis) && live.perfis.length) {
         const prevOverlay = overlayINST;
         const prevPerfis = overlayINST && Array.isArray(overlayINST.perfis) ? overlayINST.perfis : null;

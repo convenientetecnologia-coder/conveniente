@@ -45,6 +45,7 @@ assert.ok(cluster.includes("missingIdx.push(i)"), "stale vivo ou jornal ausente 
 assert.match(cluster, /if \(statusAggInflight\) \{\s*return statusAggInflight;/);
 assert.doesNotMatch(apiStatus, /overlayAgeMs >= 0 && overlayAgeMs <= 250/);
 assert.match(apiStatus, /timeoutMs: 3000, fresh: true/);
+assert.match(apiStatus, /setTimeout\(\(\) => resolve\(null\), 3000\)/);
 assert.match(apiStatus, /prevStock > 0 && !\(nextStock > 0\)/);
 
 assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/);

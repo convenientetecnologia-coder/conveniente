@@ -49,7 +49,8 @@ check("api_journal_before_rpc", /readJsonSafe\(fileStore\.statusPath, null\)/.te
 check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
 check("api_stale_journal_paints_immediately", /overlayINST = snap;/.test(api) && /__scheduleStatusJournalRefresh/.test(api) && /warningINST === 'status_journal_stale'/.test(api));
 check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000, fresh: true \}\)/.test(api));
-check("api_overlay_always_merge_live", /timeoutMs: 3000, fresh: true/.test(api) && !/overlayAgeMs <= 250/.test(api) && /janela do Invocar/.test(api));
+check("api_overlay_always_merge_live", /timeoutMs: 3000, fresh: true/.test(api) && !/overlayAgeMs <= 250/.test(api) && /janela do Invocar/.test(api) && /setTimeout\(\(\) => resolve\(null\), 3000\)/.test(api));
+check("api_no_file_rpc_budget", /setTimeout\(\(\) => resolve\(null\), 7500\)/.test(api));
 check("api_keep_file_robes_on_live", /prevRobes/.test(api) && /overlayINST\.robes\[nome\] = row/.test(api));
 check("api_keep_file_skeleton_hud", /prevByNome/.test(api) && /hasOwnProperty.call\(o, 'humanHold'\)/.test(api));
 check("api_status_seed_from_status", /baseline_seeded_from_status/.test(api) && /if \(!baseMap\.size && overlayINST/.test(api));
