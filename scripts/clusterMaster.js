@@ -1337,7 +1337,7 @@ async function createCluster() {
       let lastEngineEvent = null;
       let lastEngineEventAt = null;
       const nodesDebug = [];
-      let combinedRobes = {};
+      const robesByNode = new Map();
       const queueByNode = new Map();
       const warningParts = [];
       const missingIdx = [];
@@ -1373,7 +1373,16 @@ async function createCluster() {
           }
         }
         if (payload.robes && typeof payload.robes === 'object') {
-          combinedRobes = Object.assign(combinedRobes, payload.robes);
+          const owned = new Set();
+          for (const p of payload.perfis || []) {
+            if (p && p.nome) owned.add(String(p.nome));
+          }
+          const nodeRobes = {};
+          for (const nome of owned) {
+            const row = payload.robes[nome];
+            if (row && typeof row === 'object') nodeRobes[nome] = Object.assign({}, row);
+          }
+          robesByNode.set(i, nodeRobes);
         }
         if (Array.isArray(payload.robeQueue)) {
           queueByNode.set(i, payload.robeQueue.slice());
@@ -1458,8 +1467,13 @@ async function createCluster() {
         }
       }
 
+      let combinedRobes = {};
       let combinedQueue = [];
       for (const i of uniqIdx) {
+        const nodeRobes = robesByNode.get(i);
+        if (nodeRobes && typeof nodeRobes === 'object') {
+          combinedRobes = Object.assign(combinedRobes, nodeRobes);
+        }
         const q = queueByNode.get(i);
         if (!Array.isArray(q) || !q.length) continue;
         combinedQueue.push(...q);

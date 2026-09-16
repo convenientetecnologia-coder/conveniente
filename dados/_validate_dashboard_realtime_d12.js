@@ -57,6 +57,9 @@ check(
     workerSrc.includes("humanHold: hold") &&
     workerSrc.includes("status.robeQueue = robeQueue.queueList()") &&
     workerSrc.includes("emFila = !!robeQueue.inQueue(nome)") &&
+    workerSrc.includes("function __hudOwnsNome") &&
+    workerSrc.includes("hasOwnProperty.call(meta, 'pauseReason')") &&
+    /if \(ready\) \{\s*try \{ __overlayLiveHudFields\(ready\)/.test(workerSrc) &&
     /Array\.isArray\(ready\.perfis\) && ready\.perfis\.length/.test(workerSrc) &&
     /await snapshotStatusAndWrite\(\{ force: true \}\)/.test(workerSrc),
   "get-status clona jornal, recusa perfis vazio e pinta HUD da RAM (humano/hold/robe/fila)"
@@ -64,10 +67,13 @@ check(
 check(
   "d1_cluster_queue_by_node",
   clusterSrc.includes("const queueByNode = new Map()") &&
+    clusterSrc.includes("const robesByNode = new Map()") &&
     clusterSrc.includes("queueByNode.set(i, payload.robeQueue.slice())") &&
+    clusterSrc.includes("robesByNode.set(i, nodeRobes)") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
-    !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc),
-  "RPC substitui a fila daquele node; nome que saiu não fica em mFila"
+    !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
+    !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),
+  "RPC substitui robes/fila daquele node; nome que saiu não fica no HUD"
 );
 check(
   "d1_worker_force_snapshot",
