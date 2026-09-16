@@ -77,6 +77,11 @@ check(
   "ct_ui_marks_stale_live_as_atrasado",
   ctHtml.includes("atrasado") && ctHtml.includes("countsAgeSec")
 );
+check(
+  "bridge_status_json_requires_hud",
+  indexJs.includes("hasHud") &&
+    indexJs.includes("hasOwnProperty.call(p, 'humanHold')")
+);
 
 if (failed) {
   console.log("FAILED " + failed);

@@ -2568,8 +2568,13 @@
       }
       const [stFreshRaw, netRotate] = await Promise.all([statusP, netP]);
       let stFresh = stFreshRaw;
+      const stWarn = String((stFresh && stFresh.warning) || '');
+      const stHasHud = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
       const stFreshUsable = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length
-        && String(stFresh.warning || '') !== 'status_failed');
+        && stWarn !== 'status_failed'
+        && stWarn !== 'status temporarily unavailable'
+        && (stHasHud || !__lastStatusPaint));
       if (stFreshUsable && __lastStatusPaint && Array.isArray(__lastStatusPaint.perfis)) {
         const lastByNome = new Map();
         for (const p of __lastStatusPaint.perfis) {

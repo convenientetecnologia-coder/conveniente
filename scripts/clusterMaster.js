@@ -1645,7 +1645,9 @@ async function createCluster() {
             }
           }
         }
-        fileStore.writeJsonAtomic(aggPath, out);
+        const outHasHud = Array.isArray(out.perfis) && out.perfis.some((p) =>
+          p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+        if (outHasHud) fileStore.writeJsonAtomic(aggPath, out);
       } catch {}
 
       statusAggCache = { at: Date.now(), value: out };

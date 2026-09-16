@@ -16305,8 +16305,10 @@ const handlers = {
       ts: Date.now(),
       _debug: __statusJournalDebug()
     };
-    try { __overlayLiveHudFields(out); } catch {}
-    return out;
+    let overlaidOut = false;
+    try { __overlayLiveHudFields(out); overlaidOut = true; } catch {}
+    if (overlaidOut && Array.isArray(out.perfis) && out.perfis.length) return out;
+    return Object.assign({}, out, { perfis: [] });
   },
   async unfreeze({ nome, setBy }) {
     return lockProfileAction(nome, async () => {

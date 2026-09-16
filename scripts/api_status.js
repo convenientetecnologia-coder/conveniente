@@ -657,25 +657,34 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       overlayAgeMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
     } catch {}
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
-      overlayINST = snap;
-      if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 5000)) {
-        staleSnapINST = snap;
-        warningINST = 'status_journal_stale';
+      const snapHud = snap.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+      if (snapHud) {
+        overlayINST = snap;
+        if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 5000)) {
+          staleSnapINST = snap;
+          warningINST = 'status_journal_stale';
+        }
       }
     }
   } catch {}
   if (!overlayINST) {
     try {
       overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true });
-      if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length) {
+      const hudLive = !!(overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
+      if (hudLive) {
         warningINST = undefined;
+      } else {
+        overlayINST = null;
+        warningINST = 'status_failed';
       }
     } catch (e) {
       if (staleSnapINST && Array.isArray(staleSnapINST.perfis) && staleSnapINST.perfis.length > 0) {
         overlayINST = staleSnapINST;
         warningINST = 'status_journal_stale';
       } else {
-        warningINST = 'status temporarily unavailable';
+        overlayINST = null;
+        warningINST = 'status_failed';
       }
     }
   } else {
@@ -861,18 +870,21 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   try {
     const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
-      const serverConfigEffective = (() => {
-        try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
-      })();
-      res.json(Object.assign({}, snap, {
-        warning: snap.warning
-          ? (String(snap.warning) + '; status_handler_error')
-          : 'status_handler_error',
-        error: String(e && e.message || e),
-        serverConfig: serverConfigEffective || snap.serverConfig || null,
-        ts: Date.now()
-      }));
-      return;
+      const snapHud = snap.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+      if (snapHud) {
+        const serverConfigEffective = (() => {
+          try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+        })();
+        res.json(Object.assign({}, snap, {
+          warning: snap.warning
+            ? (String(snap.warning) + '; status_handler_error')
+            : 'status_handler_error',
+          error: String(e && e.message || e),
+          serverConfig: serverConfigEffective || snap.serverConfig || null,
+          ts: Date.now()
+        }));
+        return;
+      }
     }
   } catch {}
   // Anti-spam: não log, só payload!

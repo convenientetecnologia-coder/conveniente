@@ -63,6 +63,8 @@ check(
     workerSrc.includes("paused_limit") &&
     /if \(ready\) \{\s*let overlaid = false;\s*try \{ __overlayLiveHudFields\(ready\); overlaid = true; \}/.test(workerSrc) &&
     /overlaid && Array\.isArray\(ready\.perfis\) && ready\.perfis\.length/.test(workerSrc) &&
+    workerSrc.includes("overlaidOut") &&
+    /overlaidOut && Array\.isArray\(out\.perfis\) && out\.perfis\.length/.test(workerSrc) &&
     /await snapshotStatusAndWrite\(\{ force: true \}\)/.test(workerSrc),
   "get-status clona jornal, recusa perfis vazio e pinta HUD da RAM (humano/hold/robe/fila)"
 );
@@ -81,6 +83,7 @@ check(
     clusterSrc.includes("const fillUnpaintedFrom =") &&
     clusterSrc.includes("hasOwnProperty.call(dst, 'humanHold')") &&
     clusterSrc.includes("out.perfis = out.perfis.map") &&
+    clusterSrc.includes("outHasHud") &&
     clusterSrc.includes("const journalNameInNode =") &&
     clusterSrc.includes("if (!journalNameInNode(i, nome)) continue") &&
     !clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
@@ -146,6 +149,9 @@ check(
     apiStatusSrc.includes("readJsonSafe(fileStore.statusPath, null)") &&
     !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
     apiStatusSrc.includes("status_handler_error") &&
+    apiStatusSrc.includes("warningINST = 'status_failed'") &&
+    apiStatusSrc.includes("hudLive") &&
+    apiStatusSrc.includes("snapHud") &&
     apiStatusSrc.includes("prevRobes") &&
     apiStatusSrc.includes("prevByNome") &&
     apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
@@ -159,7 +165,9 @@ check(
     htmlSrc.includes("__reloadInflight") &&
     htmlSrc.includes("stFreshUsable") &&
     htmlSrc.includes("status_failed") &&
+    htmlSrc.includes("status temporarily unavailable") &&
     htmlSrc.includes("lastByNome") &&
+    htmlSrc.includes("stHasHud") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
   "poll HUD 1s; esqueleto status_failed/catálogo não pisa a última pintura"
 );
@@ -176,7 +184,9 @@ check(
   indexSrc.includes("function __serverEventIdentitySig") &&
     indexSrc.includes("identityChanged") &&
     /sid: Number\(p && \(p\.stockAccountId \|\| p\.stock_account_id\)/.test(indexSrc) &&
-    /needConfigPush \|\| identityChanged/.test(indexSrc),
+    /needConfigPush \|\| identityChanged/.test(indexSrc) &&
+    indexSrc.includes("hasHud") &&
+    /hasOwnProperty.call\(p, 'humanHold'\)/.test(indexSrc),
   "CT recebe status cheio na hora se human/hold/stock mudar"
 );
 check(

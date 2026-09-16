@@ -4145,6 +4145,8 @@ function __readFreshStatusJson(maxAgeMs) {
     const json = JSON.parse(fs.readFileSync(p, 'utf8'));
     if (!json || typeof json !== 'object') return null;
     if (!Array.isArray(json.perfis) || !json.perfis.length) return null;
+    const hasHud = json.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+    if (!hasHud) return null;
     return json;
   } catch {
     return null;
