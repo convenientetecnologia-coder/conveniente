@@ -1361,6 +1361,7 @@ async function createCluster() {
       };
 
       const claimedByRpc = new Set();
+      const paintedNames = new Set();
       let painted = 0;
       const applyPayload = (payload, source, i, ageMs) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
@@ -1377,6 +1378,7 @@ async function createCluster() {
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
             painted += 1;
+            paintedNames.add(nome);
           }
           if (isRpc) claimedByRpc.add(nome);
         }
@@ -1484,8 +1486,23 @@ async function createCluster() {
         }
       }
 
-      if (!painted && statusAggCache.value) {
-        return statusAggCache.value;
+      const prevAgg = statusAggCache.value;
+      if (prevAgg && Array.isArray(prevAgg.perfis)) {
+        for (const prev of prevAgg.perfis) {
+          const nome = prev && prev.nome ? String(prev.nome) : '';
+          if (!nome || paintedNames.has(nome)) continue;
+          const dst = baseMap.get(prev.nome) || baseMap.get(nome);
+          if (!dst) continue;
+          const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+          Object.assign(dst, prev);
+          const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+          if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
+          painted += 1;
+        }
+      }
+
+      if (!painted && prevAgg) {
+        return prevAgg;
       }
 
       let combinedRobes = {};
@@ -1499,6 +1516,20 @@ async function createCluster() {
         if (!Array.isArray(q) || !q.length) continue;
         combinedQueue.push(...q);
       }
+      if (prevAgg && prevAgg.robes && typeof prevAgg.robes === 'object') {
+        for (const nome of Object.keys(prevAgg.robes)) {
+          if (!nome || paintedNames.has(nome) || combinedRobes[nome]) continue;
+          const row = prevAgg.robes[nome];
+          if (row && typeof row === 'object') combinedRobes[nome] = Object.assign({}, row);
+        }
+      }
+      if (prevAgg && Array.isArray(prevAgg.robeQueue)) {
+        for (const n of prevAgg.robeQueue) {
+          const nome = String(n || '');
+          if (!nome || paintedNames.has(nome)) continue;
+          combinedQueue.push(nome);
+        }
+      }
       if (combinedQueue.length) {
         const seen = new Set();
         combinedQueue = combinedQueue.filter(n => {
@@ -1507,6 +1538,8 @@ async function createCluster() {
           return true;
         });
       }
+      if (!sysPick && prevAgg && prevAgg.sys) sysPick = prevAgg.sys;
+      if (!autoModePick && prevAgg && prevAgg.autoMode) autoModePick = prevAgg.autoMode;
 
       const perfis = Array.from(baseMap.values());
       const out = {
