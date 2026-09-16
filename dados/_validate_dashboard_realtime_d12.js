@@ -112,8 +112,10 @@ check(
 check(
   "d1_cluster_rpc_stale_3s",
   /CLUSTER_STATUS_RPC_STALE_MS \|\| '3000'/.test(clusterSrc) &&
-    clusterSrc.includes("journal_stale_fallback"),
-  "RPC stale 3s + fallback de jornal"
+    clusterSrc.includes("journal_stale_fallback") &&
+    clusterSrc.includes("rpc_fail_keep_prev") &&
+    clusterSrc.includes("shouldApplyNodeStatusJournal({ liveChild: true, ageMs })"),
+  "RPC stale 3s; jornal ≤5s fallback; jornal de minutos não pisa o HUD anterior"
 );
 check(
   "d1_cluster_hud_refresh_live",
@@ -139,16 +141,19 @@ check(
     /timeoutMs: 8000, fresh: true/.test(apiStatusSrc) &&
     apiStatusSrc.includes("readJsonSafe(fileStore.statusPath, null)") &&
     !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
+    apiStatusSrc.includes("status_handler_error") &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
-  "GET pinta status.json real (não catálogo inventado) e funde RAM; estoque do cadastro não some"
+  "GET pinta status.json real (não catálogo inventado) e funde RAM; erro devolve jornal, não zero"
 );
 check(
   "d1_html_poll_1s_inflight",
   /setInterval\(reloadPerfis, 1000\)/.test(htmlSrc) &&
     !/setInterval\(reloadPerfis, 5000\)/.test(htmlSrc) &&
     htmlSrc.includes("__reloadInflight") &&
+    htmlSrc.includes("stFreshUsable") &&
+    htmlSrc.includes("status_failed") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
-  "poll HUD 1s com trava inflight"
+  "poll HUD 1s com trava inflight; esqueleto status_failed não pisa a última pintura"
 );
 
 check(

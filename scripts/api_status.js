@@ -832,6 +832,23 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // ======= FIM DA INSTRUÇÃO/ALTERAÇÃO PEDIDA =======
 
 } catch (e) {
+  try {
+    const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
+    if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
+      const serverConfigEffective = (() => {
+        try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+      })();
+      res.json(Object.assign({}, snap, {
+        warning: snap.warning
+          ? (String(snap.warning) + '; status_handler_error')
+          : 'status_handler_error',
+        error: String(e && e.message || e),
+        serverConfig: serverConfigEffective || snap.serverConfig || null,
+        ts: Date.now()
+      }));
+      return;
+    }
+  } catch {}
   // Anti-spam: não log, só payload!
   // CRÍTICO: sempre baseline de perfis.json
   let perfisSkeleton = [];

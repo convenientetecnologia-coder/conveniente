@@ -1489,10 +1489,22 @@ async function createCluster() {
             if (di >= 0) nodesDebug.splice(di, 1);
             applyPayload(payload, staleFallback.has(i) ? 'rpc_refresh' : 'rpc_boot', i, null);
           } else {
-            const fbJson = staleFallback.get(i);
-            if (fbJson && Array.isArray(fbJson.perfis)) {
-              applyPayload(fbJson, 'journal_stale_fallback', i, null);
+            const fbNow = readNodeStatusFile(i);
+            const fbJson = (fbNow && fbNow.json && Array.isArray(fbNow.json.perfis))
+              ? fbNow.json
+              : staleFallback.get(i);
+            const ageMs = fbNow && Number.isFinite(Number(fbNow.ageMs))
+              ? Number(fbNow.ageMs)
+              : Number.POSITIVE_INFINITY;
+            if (
+              fbJson &&
+              Array.isArray(fbJson.perfis) &&
+              shouldApplyNodeStatusJournal({ liveChild: true, ageMs })
+            ) {
+              applyPayload(fbJson, 'journal_stale_fallback', i, ageMs);
               warningParts.push(`node${i + 1}: rpc_fail_stale_fallback`);
+            } else if (fbJson && Array.isArray(fbJson.perfis)) {
+              warningParts.push(`node${i + 1}: rpc_fail_keep_prev`);
             } else {
               warningParts.push(`node${i + 1}: no_journal`);
             }

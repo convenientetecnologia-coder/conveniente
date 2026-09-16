@@ -2567,13 +2567,13 @@
         try { paintTopSummary(lastOverlay, (__lastStatusPaint && __lastStatusPaint.robeQueue) || []); } catch {}
       }
       const [stFresh, netRotate] = await Promise.all([statusP, netP]);
-      const st = (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length)
-        ? stFresh
-        : __lastStatusPaint;
+      const stFreshUsable = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length
+        && String(stFresh.warning || '') !== 'status_failed');
+      const st = stFreshUsable ? stFresh : __lastStatusPaint;
       const perfisResp = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
         ? perfisRespFresh
         : __lastPerfisPaint;
-      if (stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length) __lastStatusPaint = stFresh;
+      if (stFreshUsable) __lastStatusPaint = stFresh;
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
