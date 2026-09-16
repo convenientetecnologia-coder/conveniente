@@ -78,12 +78,13 @@ check(
     clusterSrc.includes("if (!isRpc && claimedByRpc.has(nome)) continue") &&
     clusterSrc.includes("const paintedNames = new Set()") &&
     clusterSrc.includes("if (!nome || paintedNames.has(nome)) continue") &&
-    clusterSrc.includes("if (!painted && prevAgg)") &&
+    clusterSrc.includes("if (!painted && prevAgg &&") &&
     clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
     clusterSrc.includes("const fillUnpaintedFrom =") &&
     clusterSrc.includes("hasOwnProperty.call(dst, 'humanHold')") &&
     clusterSrc.includes("out.perfis = out.perfis.map") &&
     clusterSrc.includes("outHasHud") &&
+    clusterSrc.includes("prevHasHud") &&
     clusterSrc.includes("const journalNameInNode =") &&
     clusterSrc.includes("if (!journalNameInNode(i, nome)) continue") &&
     !clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
@@ -152,6 +153,7 @@ check(
     apiStatusSrc.includes("warningINST = 'status_failed'") &&
     apiStatusSrc.includes("hudLive") &&
     apiStatusSrc.includes("snapHud") &&
+    apiStatusSrc.includes("mergedHud") &&
     apiStatusSrc.includes("prevRobes") &&
     apiStatusSrc.includes("prevByNome") &&
     apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
@@ -168,6 +170,9 @@ check(
     htmlSrc.includes("status temporarily unavailable") &&
     htmlSrc.includes("lastByNome") &&
     htmlSrc.includes("stHasHud") &&
+    !htmlSrc.includes("stHasHud || !__lastStatusPaint") &&
+    htmlSrc.includes("paintTopSummary(lastOverlay") &&
+    !htmlSrc.includes("const catalogNow =") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
   "poll HUD 1s; esqueleto status_failed/catálogo não pisa a última pintura"
 );

@@ -2557,12 +2557,9 @@
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) {
         __lastPerfisPaint = perfisRespFresh;
       }
-      const catalogNow = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
-        ? perfisRespFresh.perfis
-        : ((__lastPerfisPaint && Array.isArray(__lastPerfisPaint.perfis)) ? __lastPerfisPaint.perfis : []);
       const lastOverlay = (__lastStatusPaint && Array.isArray(__lastStatusPaint.perfis) && __lastStatusPaint.perfis.length)
         ? __lastStatusPaint.perfis
-        : catalogNow;
+        : [];
       if (lastOverlay.length) {
         try { paintTopSummary(lastOverlay, (__lastStatusPaint && __lastStatusPaint.robeQueue) || []); } catch {}
       }
@@ -2574,7 +2571,7 @@
       const stFreshUsable = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length
         && stWarn !== 'status_failed'
         && stWarn !== 'status temporarily unavailable'
-        && (stHasHud || !__lastStatusPaint));
+        && stHasHud);
       if (stFreshUsable && __lastStatusPaint && Array.isArray(__lastStatusPaint.perfis)) {
         const lastByNome = new Map();
         for (const p of __lastStatusPaint.perfis) {

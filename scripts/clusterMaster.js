@@ -1544,7 +1544,8 @@ async function createCluster() {
         }
       } catch {}
 
-      if (!painted && prevAgg) {
+      if (!painted && prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold'))) {
         return prevAgg;
       }
 
@@ -1650,8 +1651,16 @@ async function createCluster() {
         if (outHasHud) fileStore.writeJsonAtomic(aggPath, out);
       } catch {}
 
-      statusAggCache = { at: Date.now(), value: out };
-      return out;
+      const outHasHud = Array.isArray(out.perfis) && out.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+      const prevHasHud = !!(prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
+      if (!outHasHud && prevHasHud) {
+        statusAggCache = { at: Date.now(), value: prevAgg };
+        return prevAgg;
+      }
+      if (outHasHud) statusAggCache = { at: Date.now(), value: out };
+      return outHasHud ? out : (prevAgg || out);
       })();
       statusAggInflight = runAgg.finally(() => { statusAggInflight = null; });
       return runAgg;

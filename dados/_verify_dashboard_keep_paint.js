@@ -24,12 +24,13 @@ check("html_fetch_timeout", /function fetchJsonTimeout/.test(html) && /fetchJson
 check("html_network_rotation_timeout", (html.match(/fetchJsonTimeout\('\/api\/network-rotation\/state', 8000\)/g) || []).length >= 2);
 check("html_keep_last_paint", /__lastStatusPaint/.test(html) && /__lastPerfisPaint/.test(html) && /__reloadInflight/.test(html));
 check("html_keep_last_skeleton_hud", /lastByNome/.test(html) && /hasOwnProperty.call\(o, 'humanHold'\)/.test(html));
-check("html_ignore_status_failed_skeleton", /stFreshUsable/.test(html) && /status_failed/.test(html) && /status temporarily unavailable/.test(html) && /stHasHud/.test(html));
+check("html_ignore_status_failed_skeleton", /stFreshUsable/.test(html) && /status_failed/.test(html) && /status temporarily unavailable/.test(html) && /stHasHud/.test(html) && !/stHasHud \|\| !__lastStatusPaint/.test(html));
 check("api_no_file_rpc_requires_hud", /hudLive/.test(api) && /warningINST = 'status_failed'/.test(api));
 check("api_file_overlay_requires_hud", /snapHud/.test(api) && /warningINST = 'status_failed'/.test(api));
+check("api_live_merge_keeps_file_names", /mergedHud/.test(api) && /prevOverlay/.test(api));
 check("html_inflight_finally", /finally \{\s*__reloadInflight = false;/.test(html));
 check("html_no_zero_without_cache", /if \(!st && !perfisResp\) \{ __reloadInflight = false; return; \}/.test(html));
-check("html_catalog_paints_before_status", /const catalogNow =/.test(html) && /paintTopSummary\(lastOverlay/.test(html) && /await Promise\.all\(\[statusP, netP\]\)/.test(html));
+check("html_keep_hud_before_status", /paintTopSummary\(lastOverlay/.test(html) && /__lastStatusPaint/.test(html) && /await Promise\.all\(\[statusP, netP\]\)/.test(html) && !/const catalogNow =/.test(html));
 check("html_cells_timeout", /fetchJsonTimeout\('\/api\/cells', 4000\)/.test(html) && /updateSysMetrics\(\);/.test(html));
 check("html_top_summary_early_paint", /function paintTopSummary/.test(html) && /paintTopSummary\(earlyPerfis, earlyRobeQueue\)/.test(html) && /console\.error\('\[reloadPerfis\] fail'/.test(html));
 check("html_inline_script_parses", (() => {

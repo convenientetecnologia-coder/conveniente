@@ -693,6 +693,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     try {
       const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true });
       if (live && Array.isArray(live.perfis) && live.perfis.length) {
+        const prevOverlay = overlayINST;
         const prevPerfis = overlayINST && Array.isArray(overlayINST.perfis) ? overlayINST.perfis : null;
         const prevRobes = overlayINST && overlayINST.robes && typeof overlayINST.robes === 'object'
           ? overlayINST.robes
@@ -711,6 +712,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
             if (Object.prototype.hasOwnProperty.call(o, 'humanHold')) return o;
             return prevByNome.get(String(o.nome)) || o;
           });
+          const have = new Set(overlayINST.perfis.map((o) => (o && o.nome) ? String(o.nome) : '').filter(Boolean));
+          for (const p of prevPerfis) {
+            const nome = p && p.nome ? String(p.nome) : '';
+            if (!nome || have.has(nome)) continue;
+            overlayINST.perfis.push(p);
+            have.add(nome);
+          }
         }
         if (prevRobes) {
           if (!overlayINST.robes || typeof overlayINST.robes !== 'object') overlayINST.robes = {};
@@ -720,7 +728,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
             if (row && typeof row === 'object') overlayINST.robes[nome] = row;
           }
         }
-        warningINST = undefined;
+        const mergedHud = overlayINST.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+        if (!mergedHud) {
+          overlayINST = prevOverlay;
+        } else {
+          const liveHud = live.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+          if (liveHud) warningINST = undefined;
+        }
       } else if (warningINST === 'status_journal_stale') {
         try { __scheduleStatusJournalRefresh(workerClient); } catch {}
       }

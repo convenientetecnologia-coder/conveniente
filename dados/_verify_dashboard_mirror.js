@@ -12,8 +12,8 @@ const cluster = fs.readFileSync(path.join(ROOT, "scripts", "clusterMaster.js"), 
 const indexJs = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
 const fileStore = require(path.join(ROOT, "scripts", "fileStore.js"));
 
-assert.match(html, /const catalogNow =/);
 assert.match(html, /paintTopSummary\(lastOverlay/);
+assert.doesNotMatch(html, /const catalogNow =/);
 assert.match(html, /await Promise\.all\(\[statusP, netP\]\)/);
 assert.match(html, /fetchJsonTimeout\('\/api\/cells', 4000\)/);
 assert.match(html, /updateSysMetrics\(\);/);
