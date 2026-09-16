@@ -592,6 +592,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     label: p.label || null,
     cidade: p.cidade,
     uaPresetId: p.uaPresetId,
+    stockAccountId: (p.stockAccountId || p.stock_account_id)
+      ? (Number(p.stockAccountId || p.stock_account_id) || null)
+      : null,
     active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
     ramMB: null, cpuPercent: null, numPages: null, robeEstado: null, robeCooldownSec: null,
     robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
@@ -643,7 +646,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // 2) Overlay: jornal no disco primeiro (fresco ou stale). Esperar get-status de 8s
   // no F5 deixava o dashboard no HTML zerado — o browser corta no mesmo 8s.
   // Lote D1: aviso status_journal_stale em 5s. Poll da UI = 1s.
-  // Agregado >250ms (ciclo MIN do worker) funde agora — pular 1s deixava o HUD 2s atrás.
+  // Sempre funde RAM depois de pintar o arquivo — pular <250ms era a janela do Invocar.
   let overlayINST = null;
   let staleSnapINST = null;
   let overlayAgeMs = Number.POSITIVE_INFINITY;
@@ -675,8 +678,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
         warningINST = 'status temporarily unavailable';
       }
     }
-  } else if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 250)) {
-    // Jornal no disco existe: nunca zera o HTML. Se passou de 250ms, funde nodes agora (≤3s).
+  } else {
+    // Jornal no disco existe: nunca zera o HTML. Sempre funde RAM agora (≤3s).
+    // Pular com arquivo <250ms era a janela do Invocar: o poll pintava o agregado velho.
     try {
       const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true });
       if (live && Array.isArray(live.perfis) && live.perfis.length) {
@@ -724,9 +728,12 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       const prevActive = !!b.active;
       const prevRam = b.ramMB;
       const prevCpu = b.cpuPercent;
+      const prevStock = Number(b.stockAccountId || b.stock_account_id || 0) || 0;
       Object.assign(b, o);
       // Blindagem: nunca deixe "active" voltar a false se alguma fonte já marcou como true
       b.active = !!o.active || prevActive;
+      const nextStock = Number(b.stockAccountId || b.stock_account_id || 0) || 0;
+      if (prevStock > 0 && !(nextStock > 0)) b.stockAccountId = prevStock;
       // Se overlay trouxe null/undefined para RAM/CPU, preserva valores numéricos anteriores
       if (typeof o.ramMB !== 'number' && typeof prevRam === 'number') {
         b.ramMB = prevRam;

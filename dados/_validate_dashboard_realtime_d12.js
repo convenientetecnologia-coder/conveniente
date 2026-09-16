@@ -101,12 +101,13 @@ check(
   "warning stale em 5s"
 );
 check(
-  "d1_api_await_merge_250",
-  /overlayAgeMs >= 0 && overlayAgeMs <= 250/.test(apiStatusSrc) &&
-    /timeoutMs: 3000, fresh: true/.test(apiStatusSrc) &&
+  "d1_api_await_merge_live",
+  /timeoutMs: 3000, fresh: true/.test(apiStatusSrc) &&
+    !/overlayAgeMs <= 250/.test(apiStatusSrc) &&
     /if \(!overlayINST\) \{/.test(apiStatusSrc) &&
-    /timeoutMs: 8000, fresh: true/.test(apiStatusSrc),
-  "GET pinta arquivo; >250ms espera get-status fresco 3s; sem arquivo 8s"
+    /timeoutMs: 8000, fresh: true/.test(apiStatusSrc) &&
+    apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
+  "GET pinta arquivo e sempre funde RAM; estoque do cadastro não some"
 );
 check(
   "d1_html_poll_1s_inflight",
@@ -115,6 +116,13 @@ check(
     htmlSrc.includes("__reloadInflight") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
   "poll HUD 1s com trava inflight"
+);
+
+check(
+  "d1_cluster_stock_keep",
+  clusterSrc.includes("if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid") &&
+    /if \(statusAggInflight\) \{\s*return statusAggInflight;/.test(clusterSrc),
+  "aggregate não apaga stockAccountId e coalese RPC em voo"
 );
 
 check(
@@ -133,11 +141,11 @@ check(
   "cadência 30s de status cheio permanece como fallback"
 );
 check(
-  "d2_bridge_remount_5s",
-  /aggAge >= 0 && aggAge <= 5000/.test(indexSrc) &&
-    /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000 \}\)/.test(indexSrc) &&
+  "d2_bridge_remount_1s",
+  /aggAge >= 0 && aggAge <= 1000/.test(indexSrc) &&
+    /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/.test(indexSrc) &&
     !indexSrc.includes("http://127.0.0.1:${PORT}/api/status"),
-  "ponte remonta se status.json >5s; nunca HTTP GET /api/status"
+  "ponte remonta se status.json >1s; nunca HTTP GET /api/status"
 );
 check(
   "d2_config_mirror_30s",

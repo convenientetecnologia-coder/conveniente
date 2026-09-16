@@ -4359,9 +4359,9 @@ async function __serverEventBridgeTick(reason) {
       const aggPath = path.join(__dirname, 'dados', 'status.json');
       let aggAge = Number.POSITIVE_INFINITY;
       try { aggAge = Date.now() - Number(fs.statSync(aggPath).mtimeMs || 0); } catch {}
-      if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 5000)) {
+      if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 1000)) {
         if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
-          await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000 });
+          await clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true });
         }
       }
     } catch {}

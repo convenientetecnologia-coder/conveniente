@@ -42,10 +42,13 @@ assert.match(cluster, /CLUSTER_STATUS_FILE_MAX_AGE_MS \|\| '5000'/);
 assert.match(cluster, /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '0'/);
 assert.match(cluster, /journal_stale_fallback/);
 assert.ok(cluster.includes("missingIdx.push(i)"), "stale vivo ou jornal ausente dispara RPC");
-assert.match(apiStatus, /overlayAgeMs >= 0 && overlayAgeMs <= 250/);
+assert.match(cluster, /if \(statusAggInflight\) \{\s*return statusAggInflight;/);
+assert.doesNotMatch(apiStatus, /overlayAgeMs >= 0 && overlayAgeMs <= 250/);
 assert.match(apiStatus, /timeoutMs: 3000, fresh: true/);
+assert.match(apiStatus, /prevStock > 0 && !\(nextStock > 0\)/);
 
-assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000 \}\)/);
+assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/);
+assert.match(indexJs, /aggAge >= 0 && aggAge <= 1000/);
 assert.doesNotMatch(indexJs, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/api\/status/);
 assert.match(indexJs, /includeFullStatus/);
 assert.match(indexJs, /__serverEventLastFullStatusAt/);

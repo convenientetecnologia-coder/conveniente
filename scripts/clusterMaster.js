@@ -1305,7 +1305,7 @@ async function createCluster() {
       if (!bypass && STATUS_CACHE_MS > 0 && statusAggCache.value && (nowTs - statusAggCache.at) < STATUS_CACHE_MS) {
         return statusAggCache.value;
       }
-      if (!bypass && STATUS_CACHE_MS > 0 && statusAggInflight) {
+      if (statusAggInflight) {
         return statusAggInflight;
       }
       const runAgg = (async () => {
@@ -1318,6 +1318,9 @@ async function createCluster() {
           cidade: p.cidade,
           uaPresetId: p.uaPresetId,
           active: false, trabalhando: false, configurando: false, humanControl: false,
+          stockAccountId: (p.stockAccountId || p.stock_account_id)
+            ? (Number(p.stockAccountId || p.stock_account_id) || null)
+            : null,
           issuesCount: 0,
           ramMB: null, cpuPercent: null, numPages: null,
           robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
@@ -1362,7 +1365,12 @@ async function createCluster() {
         pushNodeDebug(payload, source, i, ageMs);
         for (const p of payload.perfis || []) {
           const dst = baseMap.get(p.nome);
-          if (dst) Object.assign(dst, p);
+          if (dst) {
+            const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+            Object.assign(dst, p);
+            const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+            if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
+          }
         }
         if (payload.robes && typeof payload.robes === 'object') {
           combinedRobes = Object.assign(combinedRobes, payload.robes);
@@ -1484,9 +1492,7 @@ async function createCluster() {
       statusAggCache = { at: Date.now(), value: out };
       return out;
       })();
-      if (!bypass && STATUS_CACHE_MS > 0) {
-        statusAggInflight = runAgg.finally(() => { statusAggInflight = null; });
-      }
+      statusAggInflight = runAgg.finally(() => { statusAggInflight = null; });
       return runAgg;
     }
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
