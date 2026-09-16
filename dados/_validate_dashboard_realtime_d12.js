@@ -157,6 +157,7 @@ check(
     apiStatusSrc.includes("prevRobes") &&
     apiStatusSrc.includes("prevByNome") &&
     apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
+    apiStatusSrc.includes("if (!o || !Object.prototype.hasOwnProperty.call(o, 'humanHold')) continue") &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
   "GET pinta status.json real, funde RAM, não troca HUD do arquivo por esqueleto de catálogo"
 );
@@ -170,6 +171,7 @@ check(
     htmlSrc.includes("status temporarily unavailable") &&
     htmlSrc.includes("lastByNome") &&
     htmlSrc.includes("stHasHud") &&
+    htmlSrc.includes("overlayHasHud") &&
     !htmlSrc.includes("stHasHud || !__lastStatusPaint") &&
     htmlSrc.includes("paintTopSummary(lastOverlay") &&
     !htmlSrc.includes("const catalogNow =") &&
@@ -191,6 +193,7 @@ check(
     /sid: Number\(p && \(p\.stockAccountId \|\| p\.stock_account_id\)/.test(indexSrc) &&
     /needConfigPush \|\| identityChanged/.test(indexSrc) &&
     indexSrc.includes("hasHud") &&
+    indexSrc.includes("statusHasHud") &&
     /hasOwnProperty.call\(p, 'humanHold'\)/.test(indexSrc),
   "CT recebe status cheio na hora se human/hold/stock mudar"
 );

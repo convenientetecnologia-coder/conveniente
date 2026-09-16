@@ -4368,10 +4368,12 @@ async function __serverEventBridgeTick(reason) {
       }
     } catch {}
     const status = await __readLocalStatusForEventBridge();
+    const statusHasHud = !!(status && Array.isArray(status.perfis) && status.perfis.some((p) =>
+      p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
     const hostId = __readOrCreateServerEventHostId();
     const telemetry = __buildServerEventTelemetry(status);
     const now = Date.now();
-    const changed = telemetry.stateHash !== __serverEventLastHash;
+    const changed = !!(statusHasHud && telemetry.stateHash !== __serverEventLastHash);
     const heartbeatDue = !__serverEventLastSentAt || ((now - __serverEventLastSentAt) >= SERVER_EVENT_HEARTBEAT_MS);
     if (changed) {
       if (__serverEventPendingHash === telemetry.stateHash) {
@@ -4390,13 +4392,13 @@ async function __serverEventBridgeTick(reason) {
       reason === 'ct_config_applied' ||
       reason === 'force_full_report';
     const prevQuick = (__serverEventLastQuick && typeof __serverEventLastQuick === 'object') ? __serverEventLastQuick : null;
-    const countsChanged = !!(prevQuick && telemetry.quick && (
+    const countsChanged = !!(statusHasHud && prevQuick && telemetry.quick && (
       Number(prevQuick.activeCount || 0) !== Number(telemetry.quick.activeCount || 0) ||
       Number(prevQuick.workingCount || 0) !== Number(telemetry.quick.workingCount || 0) ||
       Number(prevQuick.perfisCount || 0) !== Number(telemetry.quick.perfisCount || 0)
     ));
-    const identitySig = __serverEventIdentitySig(status);
-    const identityChanged = identitySig !== __serverEventLastIdentitySig;
+    const identitySig = statusHasHud ? __serverEventIdentitySig(status) : __serverEventLastIdentitySig;
+    const identityChanged = !!(statusHasHud && identitySig !== __serverEventLastIdentitySig);
     const deltaConfirmed = changed && (forceStatusEvent || countsChanged || identityChanged || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
     const shouldSendDelta = forceStatusEvent || countsChanged || identityChanged || (deltaConfirmed && deltaRateOk);
@@ -4428,9 +4430,7 @@ async function __serverEventBridgeTick(reason) {
     const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_FULL_STATUS_MS);
     const includeFullStatus = !!(
       (forceStatusEvent || fullStatusDue || needConfigPush || identityChanged) &&
-      status &&
-      Array.isArray(status.perfis) &&
-      status.perfis.length
+      statusHasHud
     );
 
     if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush && !needsConfig && !fullStatusDue) {
@@ -4471,13 +4471,15 @@ async function __serverEventBridgeTick(reason) {
       sentAt: now,
       eventType,
       stateHash: telemetry.stateHash,
-      quick: telemetry.quick,
-      accountsAgg: telemetry.accountsAgg,
-      flagsAgg: telemetry.flagsAgg,
       needsConfig,
       // CT novo devolve ctBaseUrl na própria resposta; zero dependência do
       // tunnel reverso e zero push DNS prematuro.
       acceptCtConfigReply: true,
+      ...(statusHasHud ? {
+        quick: telemetry.quick,
+        accountsAgg: telemetry.accountsAgg,
+        flagsAgg: telemetry.flagsAgg
+      } : {}),
       ...(includeFullStatus ? {
         status: Object.assign({}, status || {}, {
           stockProvisionOutbox: (telemetry.quick && telemetry.quick.stockProvisionOutbox) || null
@@ -4495,7 +4497,7 @@ async function __serverEventBridgeTick(reason) {
       }
       __serverEventLastSentAt = now;
       if (includeFullStatus) __serverEventLastFullStatusAt = now;
-      __serverEventLastQuick = telemetry.quick || null;
+      if (statusHasHud) __serverEventLastQuick = telemetry.quick || null;
       if (includeFullStatus) __serverEventLastIdentitySig = identitySig;
       if (out.ctConfigApplied) {
         // Confirma ao CT, em seguida, que a configuração já está persistida e

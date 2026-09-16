@@ -25,6 +25,8 @@ check("html_network_rotation_timeout", (html.match(/fetchJsonTimeout\('\/api\/ne
 check("html_keep_last_paint", /__lastStatusPaint/.test(html) && /__lastPerfisPaint/.test(html) && /__reloadInflight/.test(html));
 check("html_keep_last_skeleton_hud", /lastByNome/.test(html) && /hasOwnProperty.call\(o, 'humanHold'\)/.test(html));
 check("html_ignore_status_failed_skeleton", /stFreshUsable/.test(html) && /status_failed/.test(html) && /status temporarily unavailable/.test(html) && /stHasHud/.test(html) && !/stHasHud \|\| !__lastStatusPaint/.test(html));
+check("html_early_summary_requires_hud", /overlayHasHud/.test(html) && /if \(earlyPerfis\.length\)/.test(html));
+check("html_overlay_skip_catalog_rows", /overlayPerfis\.forEach\(o => \{/.test(html) && /hasOwnProperty.call\(o, 'humanHold'\)/.test(html) && /if \(!o \|\| !o\.nome\) return;/.test(html));
 check("api_no_file_rpc_requires_hud", /hudLive/.test(api) && /warningINST = 'status_failed'/.test(api));
 check("api_file_overlay_requires_hud", /snapHud/.test(api) && /warningINST = 'status_failed'/.test(api));
 check("api_live_merge_keeps_file_names", /mergedHud/.test(api) && /prevOverlay/.test(api));

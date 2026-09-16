@@ -2606,9 +2606,12 @@
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
       const overlayPerfis = Array.isArray(st?.perfis) ? st.perfis.filter(p => p && p.nome) : [];
-      const earlyPerfis = overlayPerfis.length ? overlayPerfis : basePerfis;
+      const overlayHasHud = overlayPerfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
+      const earlyPerfis = overlayHasHud ? overlayPerfis : [];
       const earlyRobeQueue = Array.isArray(st?.robeQueue) ? st.robeQueue : [];
-      try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
+      if (earlyPerfis.length) {
+        try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
+      }
       try {
       if (netRotate && netRotate.ok === true && netRotate.state) {
         __networkRotationState = netRotate.state;
@@ -2726,6 +2729,8 @@
       // Overlay de /api/status (st)
       if (overlayPerfis.length) {
         overlayPerfis.forEach(o => {
+          if (!o || !o.nome) return;
+          if (!Object.prototype.hasOwnProperty.call(o, 'humanHold')) return;
           let dst = perfisMap.get(o.nome);
           if (!dst) {
             dst = makePerfilEntry({

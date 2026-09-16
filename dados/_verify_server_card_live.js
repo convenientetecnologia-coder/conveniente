@@ -80,7 +80,14 @@ check(
 check(
   "bridge_status_json_requires_hud",
   indexJs.includes("hasHud") &&
+    indexJs.includes("statusHasHud") &&
     indexJs.includes("hasOwnProperty.call(p, 'humanHold')")
+);
+check(
+  "bridge_omits_zero_quick_without_hud",
+  indexJs.includes("...(statusHasHud ? {") &&
+    indexJs.includes("quick: telemetry.quick") &&
+    indexJs.includes("if (statusHasHud) __serverEventLastQuick")
 );
 
 if (failed) {

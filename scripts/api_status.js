@@ -772,6 +772,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     // Overlay de status/metrics apenas nos que existem no baseline
     for (const o of overlayINST.perfis) {
+      if (!o || !Object.prototype.hasOwnProperty.call(o, 'humanHold')) continue;
       const b = baseMap.get(o.nome);
       if (!b) continue;
       const prevActive = !!b.active;
