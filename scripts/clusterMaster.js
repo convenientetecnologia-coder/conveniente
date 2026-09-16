@@ -1361,6 +1361,7 @@ async function createCluster() {
       };
 
       const claimedByRpc = new Set();
+      let painted = 0;
       const applyPayload = (payload, source, i, ageMs) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
         const isRpc = source === 'rpc_refresh' || source === 'rpc_boot';
@@ -1375,6 +1376,7 @@ async function createCluster() {
             Object.assign(dst, p);
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
+            painted += 1;
           }
           if (isRpc) claimedByRpc.add(nome);
         }
@@ -1480,6 +1482,10 @@ async function createCluster() {
             }
           }
         }
+      }
+
+      if (!painted && statusAggCache.value) {
+        return statusAggCache.value;
       }
 
       let combinedRobes = {};

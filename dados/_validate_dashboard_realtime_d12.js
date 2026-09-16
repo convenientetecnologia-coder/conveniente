@@ -74,6 +74,7 @@ check(
     clusterSrc.includes("robesByNode.set(i, nodeRobes)") &&
     clusterSrc.includes("const claimedByRpc = new Set()") &&
     clusterSrc.includes("if (!isRpc && claimedByRpc.has(nome)) continue") &&
+    clusterSrc.includes("if (!painted && statusAggCache.value)") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
     !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
     !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),
