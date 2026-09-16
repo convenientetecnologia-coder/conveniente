@@ -17,6 +17,8 @@ assert.match(html, /paintTopSummary\(lastOverlay/);
 assert.match(html, /await Promise\.all\(\[statusP, netP\]\)/);
 assert.match(html, /fetchJsonTimeout\('\/api\/cells', 4000\)/);
 assert.match(html, /updateSysMetrics\(\);/);
+assert.match(html, /setInterval\(reloadPerfis, 1000\)/);
+assert.doesNotMatch(html, /setInterval\(reloadPerfis, 5000\)/);
 
 assert.match(apiStatus, /function __scheduleStatusJournalRefresh/);
 assert.match(apiStatus, /overlayINST = snap;/);
@@ -37,8 +39,11 @@ assert.match(cluster, /for \(let i = 0; i < children\.length; i\+\+\) considerId
 assert.doesNotMatch(cluster, /readdirSync\(dadosDir\)/);
 assert.match(cluster, /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/);
 assert.match(cluster, /CLUSTER_STATUS_FILE_MAX_AGE_MS \|\| '5000'/);
+assert.match(cluster, /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '250'/);
 assert.match(cluster, /journal_stale_fallback/);
 assert.ok(cluster.includes("missingIdx.push(i)"), "stale vivo ou jornal ausente dispara RPC");
+assert.match(apiStatus, /overlayAgeMs >= 0 && overlayAgeMs <= 250/);
+assert.match(apiStatus, /timeoutMs: 3000/);
 
 assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000 \}\)/);
 assert.doesNotMatch(indexJs, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/api\/status/);

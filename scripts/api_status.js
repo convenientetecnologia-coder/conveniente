@@ -642,19 +642,20 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 
   // 2) Overlay: jornal no disco primeiro (fresco ou stale). Esperar get-status de 8s
   // no F5 deixava o dashboard no HTML zerado — o browser corta no mesmo 8s.
-  // Lote D1: aviso status_journal_stale em 5s (cadência do poll da UI).
+  // Lote D1: aviso status_journal_stale em 5s. Poll da UI = 1s.
+  // Agregado >250ms (ciclo MIN do worker) funde agora — pular 1s deixava o HUD 2s atrás.
   let overlayINST = null;
   let staleSnapINST = null;
+  let overlayAgeMs = Number.POSITIVE_INFINITY;
   try {
     const snap = fileStore.getStatusSnapshot();
-    let ageMs = Number.POSITIVE_INFINITY;
     try {
       const stFile = fs.statSync(fileStore.statusPath);
-      ageMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
+      overlayAgeMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
     } catch {}
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
       overlayINST = snap;
-      if (!(Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 5000)) {
+      if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 5000)) {
         staleSnapINST = snap;
         warningINST = 'status_journal_stale';
       }
@@ -663,6 +664,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   if (!overlayINST) {
     try {
       overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+      if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length) {
+        warningINST = undefined;
+      }
     } catch (e) {
       if (staleSnapINST && Array.isArray(staleSnapINST.perfis) && staleSnapINST.perfis.length > 0) {
         overlayINST = staleSnapINST;
@@ -671,8 +675,21 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
         warningINST = 'status temporarily unavailable';
       }
     }
-  } else if (warningINST === 'status_journal_stale') {
-    try { __scheduleStatusJournalRefresh(workerClient); } catch {}
+  } else if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 250)) {
+    // Jornal no disco existe: nunca zera o HTML. Se passou de 250ms, funde nodes agora (≤3s).
+    try {
+      const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000 });
+      if (live && Array.isArray(live.perfis) && live.perfis.length) {
+        overlayINST = live;
+        warningINST = undefined;
+      } else if (warningINST === 'status_journal_stale') {
+        try { __scheduleStatusJournalRefresh(workerClient); } catch {}
+      }
+    } catch {
+      if (warningINST === 'status_journal_stale') {
+        try { __scheduleStatusJournalRefresh(workerClient); } catch {}
+      }
+    }
   }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];

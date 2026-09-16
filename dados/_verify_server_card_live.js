@@ -30,7 +30,8 @@ check(
   "bridge_full_status_not_on_every_count_delta",
   indexJs.includes("includeFullStatus") &&
     indexJs.includes("__serverEventLastFullStatusAt") &&
-    /includeFullStatus \? \{ status \}/.test(indexJs)
+    /includeFullStatus \? \{/.test(indexJs) &&
+    indexJs.includes("status: Object.assign({}, status || {}")
 );
 check(
   "bridge_watchdog_releases_hung_tick",
@@ -58,7 +59,8 @@ check(
   "cluster_ignores_stale_orphan_journals",
   clusterJs.includes("shouldApplyNodeStatusJournal") &&
     clusterJs.includes("stale_ignored(") &&
-    /if \(fb\.ageMs > MAX_FILE_AGE_MS\) \{\s*if \(liveChild\)/.test(clusterJs)
+    clusterJs.includes("journal_stale_fallback") &&
+    /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/.test(clusterJs)
 );
 check(
   "allowlist_has_server_event_bridge",

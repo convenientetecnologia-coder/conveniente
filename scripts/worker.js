@@ -2478,6 +2478,7 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
     }
   } catch {}
   try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
+  try { await snapshotStatusAndWrite({ force: true }); } catch {}
 }
 
 // ===== Captcha flow (OCR + retries) =====
@@ -6901,7 +6902,7 @@ function __cloneStatusJournal() {
   if (!__statusJournal || typeof __statusJournal !== 'object') return null;
   const snap = __statusJournal;
   return {
-    perfis: Array.isArray(snap.perfis) ? snap.perfis : [],
+    perfis: Array.isArray(snap.perfis) ? snap.perfis.slice() : [],
     robes: (snap.robes && typeof snap.robes === 'object') ? snap.robes : {},
     robeQueue: Array.isArray(snap.robeQueue) ? snap.robeQueue : [],
     autoMode: snap.autoMode || null,
@@ -6913,6 +6914,21 @@ function __cloneStatusJournal() {
     ts: snap.ts || __statusJournalAt || Date.now(),
     _debug: __statusJournalDebug()
   };
+}
+
+function __overlayLiveHudFields(status) {
+  if (!status || !Array.isArray(status.perfis)) return status;
+  status.perfis = status.perfis.map((p) => {
+    if (!p || !p.nome) return p;
+    const ctrl = controllers.get(p.nome);
+    if (!ctrl) return p;
+    return Object.assign({}, p, {
+      humanControl: !!ctrl.humanControl,
+      trabalhando: !!ctrl.trabalhando,
+      configurando: !!ctrl.configurando
+    });
+  });
+  return status;
 }
 
 async function milLog(type, msg) {
@@ -14930,6 +14946,7 @@ const handlers = {
       }
 
       ctrl.humanControl = true;
+      try { await snapshotStatusAndWrite({ force: true }); } catch {}
       try { await issues.append(nome, 'invoke_human_set', 'humanControl=true'); } catch {}
       try {
         provisionAudit.append({
@@ -15202,6 +15219,7 @@ const handlers = {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
+      try { await snapshotStatusAndWrite({ force: true }); } catch {}
       try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'human_resume' }); } catch {}
       // Libera browser para o motor: limpa flag + timers de "fora do inbox" antes de qualquer nav/boot.
       try { await syncDeltaHumanHoldBrowserGuard(nome, false, { reason: 'human_resume' }); } catch {}
@@ -16153,11 +16171,15 @@ const handlers = {
   },
 
   async ['get-status']() {
-    // Jornal: devolve o último snapshot. Não remonta manifesto/issue no meio do Robe.
+    // Jornal: não remonta manifesto/issue no meio do Robe.
+    // HUD (humanControl/trabalhando) sai da RAM viva — o debounce MIN não pode mentir o painel.
     const ready = __cloneStatusJournal();
-    if (ready && Array.isArray(ready.perfis)) return ready;
+    if (ready && Array.isArray(ready.perfis)) {
+      try { __overlayLiveHudFields(ready); } catch {}
+      return ready;
+    }
     try { await snapshotStatusAndWrite(); } catch {}
-    return __cloneStatusJournal() || {
+    const out = __cloneStatusJournal() || {
       perfis: [],
       robes: {},
       robeQueue: [],
@@ -16166,6 +16188,8 @@ const handlers = {
       ts: Date.now(),
       _debug: __statusJournalDebug()
     };
+    try { __overlayLiveHudFields(out); } catch {}
+    return out;
   },
   async unfreeze({ nome, setBy }) {
     return lockProfileAction(nome, async () => {
@@ -16509,13 +16533,14 @@ const handlers = {
   }
 };
 
-async function snapshotStatusAndWrite() {
-if (__statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
+async function snapshotStatusAndWrite(opts) {
+const force = !!(opts && opts.force === true);
+if (!force && __statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
   return _statusLock;
 }
 _statusLock = _statusLock.then(async () => {
 try {
-if (__statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
+if (!force && __statusJournal && (Date.now() - __statusJournalAt) < STATUS_JOURNAL_MIN_MS) {
   return;
 }
 try {

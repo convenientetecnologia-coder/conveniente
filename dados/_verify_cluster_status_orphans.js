@@ -36,6 +36,7 @@ assert(src.includes("ignored: true"), "debug do aggregate precisa expor ignored"
 assert(src.includes("CLUSTER_STATUS_FILE_MAX_AGE_MS || '5000'"), "limiar de pintura 5s");
 assert(src.includes("journal_stale_fallback"), "RPC falho de cell viva reusa jornal stale em vez de zerar HUD");
 assert(src.includes("CLUSTER_STATUS_RPC_STALE_MS"), "timeout curto no RPC de jornal stale");
+assert(src.includes("CLUSTER_STATUS_HUD_REFRESH_MS"), "refresh HUD pede clone RAM com jornal >250ms");
 assert(
   /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/.test(src),
   "RPC também quando o jornal do node não existe"

@@ -1049,6 +1049,8 @@ async function createCluster() {
   const STATUS_TIMEOUT_MS = parseInt(process.env.CLUSTER_STATUS_TIMEOUT_MS || '25000', 10);
   // RPC de jornal stale: clone RAM. Não pode competir com o abort 8s do browser.
   const STATUS_RPC_STALE_MS = Math.max(1000, parseInt(process.env.CLUSTER_STATUS_RPC_STALE_MS || '3000', 10) || 3000);
+  // Cell viva com jornal >250ms: pinta o disco e pede clone RAM (humanControl) no mesmo ciclo.
+  const HUD_REFRESH_AGE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_HUD_REFRESH_MS || '250', 10) || 250);
   // Lote D1: agregado sem delay. Rollback: CLUSTER_STATUS_CACHE_MS=4500
   const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '250', 10) || 250);
   let statusAggCache = { at: 0, value: null };
@@ -1390,6 +1392,10 @@ async function createCluster() {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
           if (shouldApplyNodeStatusJournal({ liveChild, ageMs: fb.ageMs })) {
             applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
+            if (liveChild && Number(fb.ageMs) > HUD_REFRESH_AGE_MS) {
+              missingIdx.push(i);
+              staleFallback.set(i, fb.json);
+            }
           } else {
             pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: !!liveChild });
             if (liveChild) {
@@ -1404,7 +1410,7 @@ async function createCluster() {
         }
       }
 
-      // RPC: jornal ausente (boot) OU jornal além do limiar de pintura (não fundir arquivo de minutos).
+      // RPC: jornal ausente (boot), jornal além do limiar, OU refresh HUD (cell viva, jornal >250ms).
       if (missingIdx.length) {
         try {
           logger.info('[CLUSTER][STATUS] jornal ausente/stale, rpc nesses nodes', {

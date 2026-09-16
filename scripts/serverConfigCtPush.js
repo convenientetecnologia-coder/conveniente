@@ -187,6 +187,7 @@ function attachPushedMeta(mirror, { hash, reason } = {}) {
 
 module.exports = {
   STATE_PATH,
+  CONFIG_MIRROR_INTERVAL_MS,
   buildConfigMirror,
   hashConfigMirror,
   readPushState,
