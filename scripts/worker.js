@@ -6959,6 +6959,17 @@ function __overlayLiveHudFields(status) {
     }
   } catch {}
   try {
+    if (robeQueue && typeof robeQueue.queueList === 'function') {
+      for (const nome of robeQueue.queueList() || []) {
+        const n = String(nome || '');
+        if (!n || keptSet.has(n)) continue;
+        kept.push({ nome: n });
+        keptSet.add(n);
+        names.add(n);
+      }
+    }
+  } catch {}
+  try {
     for (const n of Object.keys(robeMeta || {})) {
       if (__hudOwnsNome(n)) names.add(String(n));
     }

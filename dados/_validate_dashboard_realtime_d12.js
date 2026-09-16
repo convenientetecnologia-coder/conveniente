@@ -70,12 +70,14 @@ check(
   "d1_cluster_queue_by_node",
   clusterSrc.includes("const queueByNode = new Map()") &&
     clusterSrc.includes("const robesByNode = new Map()") &&
-    clusterSrc.includes("queueByNode.set(i, payload.robeQueue.slice())") &&
+    clusterSrc.includes("queueByNode.set(i,") &&
     clusterSrc.includes("robesByNode.set(i, nodeRobes)") &&
+    clusterSrc.includes("const claimedByRpc = new Set()") &&
+    clusterSrc.includes("if (!isRpc && claimedByRpc.has(nome)) continue") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
     !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
     !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),
-  "RPC substitui robes/fila daquele node; nome que saiu não fica no HUD"
+  "RPC substitui robes/fila daquele node; fallback de jornal não pisa conta já pintada ao vivo"
 );
 check(
   "d1_worker_force_snapshot",

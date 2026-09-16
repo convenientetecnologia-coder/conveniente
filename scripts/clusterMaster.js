@@ -1360,17 +1360,23 @@ async function createCluster() {
         return true;
       };
 
+      const claimedByRpc = new Set();
       const applyPayload = (payload, source, i, ageMs) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
+        const isRpc = source === 'rpc_refresh' || source === 'rpc_boot';
         pushNodeDebug(payload, source, i, ageMs);
         for (const p of payload.perfis || []) {
-          const dst = baseMap.get(p.nome);
+          if (!p || !p.nome) continue;
+          const nome = String(p.nome);
+          if (!isRpc && claimedByRpc.has(nome)) continue;
+          const dst = baseMap.get(p.nome) || baseMap.get(nome);
           if (dst) {
             const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             Object.assign(dst, p);
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
           }
+          if (isRpc) claimedByRpc.add(nome);
         }
         if (payload.robes && typeof payload.robes === 'object') {
           const owned = new Set();
@@ -1379,13 +1385,20 @@ async function createCluster() {
           }
           const nodeRobes = {};
           for (const nome of owned) {
+            if (!isRpc && claimedByRpc.has(nome)) continue;
             const row = payload.robes[nome];
             if (row && typeof row === 'object') nodeRobes[nome] = Object.assign({}, row);
           }
           robesByNode.set(i, nodeRobes);
         }
         if (Array.isArray(payload.robeQueue)) {
-          queueByNode.set(i, payload.robeQueue.slice());
+          const q = payload.robeQueue.filter((n) => {
+            const nome = String(n || '');
+            if (!nome) return false;
+            if (!isRpc && claimedByRpc.has(nome)) return false;
+            return true;
+          });
+          queueByNode.set(i, q);
         }
         if (!sysPick && payload.sys) sysPick = payload.sys;
         if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
