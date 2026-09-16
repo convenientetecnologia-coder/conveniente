@@ -52,8 +52,10 @@ check(
   "d1_worker_hud_overlay",
   workerSrc.includes("function __overlayLiveHudFields") &&
     workerSrc.includes("__overlayLiveHudFields(ready)") &&
-    /humanControl: !!ctrl\.humanControl/.test(workerSrc),
-  "get-status clona jornal e pinta humanControl da RAM"
+    workerSrc.includes("patch.humanControl = !!ctrl.humanControl") &&
+    workerSrc.includes("humanHold: hold") &&
+    workerSrc.includes("robeEmExecucao: !!meta.emExecucao"),
+  "get-status clona jornal e pinta HUD da RAM (humano/hold/robe)"
 );
 check(
   "d1_worker_force_snapshot",
@@ -86,10 +88,10 @@ check(
   "RPC stale 3s + fallback de jornal"
 );
 check(
-  "d1_cluster_hud_refresh_250",
-  /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '250'/.test(clusterSrc) &&
-    /liveChild && Number\(fb\.ageMs\) > HUD_REFRESH_AGE_MS/.test(clusterSrc),
-  "cell viva com jornal >250ms pinta disco e pede RAM"
+  "d1_cluster_hud_refresh_live",
+  /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '0'/.test(clusterSrc) &&
+    /liveChild && Number\(fb\.ageMs\) >= HUD_REFRESH_AGE_MS/.test(clusterSrc),
+  "cell viva pinta disco e pede RAM no mesmo ciclo"
 );
 
 check(
@@ -101,10 +103,10 @@ check(
 check(
   "d1_api_await_merge_250",
   /overlayAgeMs >= 0 && overlayAgeMs <= 250/.test(apiStatusSrc) &&
-    /timeoutMs: 3000/.test(apiStatusSrc) &&
+    /timeoutMs: 3000, fresh: true/.test(apiStatusSrc) &&
     /if \(!overlayINST\) \{/.test(apiStatusSrc) &&
-    /timeoutMs: 8000/.test(apiStatusSrc),
-  "GET pinta arquivo; >250ms espera get-status 3s; sem arquivo 8s"
+    /timeoutMs: 8000, fresh: true/.test(apiStatusSrc),
+  "GET pinta arquivo; >250ms espera get-status fresco 3s; sem arquivo 8s"
 );
 check(
   "d1_html_poll_1s_inflight",
@@ -116,11 +118,19 @@ check(
 );
 
 check(
+  "d2_identity_full_status",
+  indexSrc.includes("function __serverEventIdentitySig") &&
+    indexSrc.includes("identityChanged") &&
+    /sid: Number\(p && \(p\.stockAccountId \|\| p\.stock_account_id\)/.test(indexSrc) &&
+    /needConfigPush \|\| identityChanged/.test(indexSrc),
+  "CT recebe status cheio na hora se human/hold/stock mudar"
+);
+check(
   "d2_full_status_30s",
   /SERVER_EVENT_FULL_STATUS_MS \|\| 30000/.test(indexSrc) &&
     indexSrc.includes("includeFullStatus") &&
     indexSrc.includes("[DASHBOARD_REALTIME_OK]"),
-  "ponte manda status cheio (stockAccountId) a cada 30s"
+  "cadência 30s de status cheio permanece como fallback"
 );
 check(
   "d2_bridge_remount_5s",

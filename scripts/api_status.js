@@ -663,7 +663,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   } catch {}
   if (!overlayINST) {
     try {
-      overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+      overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true });
       if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length) {
         warningINST = undefined;
       }
@@ -678,7 +678,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   } else if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 250)) {
     // Jornal no disco existe: nunca zera o HTML. Se passou de 250ms, funde nodes agora (≤3s).
     try {
-      const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000 });
+      const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true });
       if (live && Array.isArray(live.perfis) && live.perfis.length) {
         overlayINST = live;
         warningINST = undefined;

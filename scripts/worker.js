@@ -6921,12 +6921,20 @@ function __overlayLiveHudFields(status) {
   status.perfis = status.perfis.map((p) => {
     if (!p || !p.nome) return p;
     const ctrl = controllers.get(p.nome);
-    if (!ctrl) return p;
-    return Object.assign({}, p, {
-      humanControl: !!ctrl.humanControl,
-      trabalhando: !!ctrl.trabalhando,
-      configurando: !!ctrl.configurando
-    });
+    const meta = robeMeta[p.nome] || {};
+    let hold = false;
+    try { hold = readDesiredHumanHoldFlag(p.nome) === true; } catch {}
+    const patch = {
+      humanHold: hold,
+      robeEmExecucao: !!meta.emExecucao
+    };
+    if (ctrl) {
+      patch.humanControl = !!ctrl.humanControl;
+      patch.trabalhando = !!ctrl.trabalhando;
+      patch.configurando = !!ctrl.configurando;
+      patch.virtusOnline = !!ctrl.virtus;
+    }
+    return Object.assign({}, p, patch);
   });
   return status;
 }

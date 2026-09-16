@@ -3982,6 +3982,7 @@ let __serverEventLastSentAt = 0;
 let __serverEventLastFullStatusAt = 0;
 let __serverEventLastDeltaSentAt = 0;
 let __serverEventLastQuick = null;
+let __serverEventLastIdentitySig = '';
 let __serverEventPendingHash = '';
 let __serverEventPendingTicks = 0;
 let __serverEventBridgeStartedAt = 0;
@@ -4087,6 +4088,7 @@ function __buildServerEventTelemetry(status) {
       b: !!(p && p.banned),
       hc: !!(p && p.humanControl),
       hh: !!(p && p.humanHold),
+      sid: Number(p && (p.stockAccountId || p.stock_account_id) || 0) || 0,
       mp: !!(p && p.messengerPin),
       pb: !!(p && p.problem),
       vo: (p && p.virtusOnline === false) ? 0 : 1
@@ -4118,6 +4120,20 @@ function __buildServerEventTelemetry(status) {
 
   const stateHash = crypto.createHash('sha1').update(JSON.stringify(signature)).digest('hex');
   return { accountsAgg, flagsAgg, quick, stateHash };
+}
+
+function __serverEventIdentitySig(status) {
+  const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
+  return perfis
+    .map((p) => {
+      const n = String(p && p.nome || '').trim();
+      const hc = p && p.humanControl === true ? 1 : 0;
+      const hh = p && p.humanHold === true ? 1 : 0;
+      const sid = Number(p && (p.stockAccountId || p.stock_account_id) || 0) || 0;
+      return `${n}:${hc}:${hh}:${sid}`;
+    })
+    .sort()
+    .join('|');
 }
 
 function __readFreshStatusJson(maxAgeMs) {
@@ -4377,9 +4393,11 @@ async function __serverEventBridgeTick(reason) {
       Number(prevQuick.workingCount || 0) !== Number(telemetry.quick.workingCount || 0) ||
       Number(prevQuick.perfisCount || 0) !== Number(telemetry.quick.perfisCount || 0)
     ));
-    const deltaConfirmed = changed && (forceStatusEvent || countsChanged || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
+    const identitySig = __serverEventIdentitySig(status);
+    const identityChanged = identitySig !== __serverEventLastIdentitySig;
+    const deltaConfirmed = changed && (forceStatusEvent || countsChanged || identityChanged || __serverEventPendingTicks >= SERVER_EVENT_CHANGE_CONFIRM_TICKS);
     const deltaRateOk = !__serverEventLastDeltaSentAt || ((now - __serverEventLastDeltaSentAt) >= SERVER_EVENT_DELTA_MIN_INTERVAL_MS);
-    const shouldSendDelta = forceStatusEvent || countsChanged || (deltaConfirmed && deltaRateOk);
+    const shouldSendDelta = forceStatusEvent || countsChanged || identityChanged || (deltaConfirmed && deltaRateOk);
 
     // Config Servidor → CT: boot/save/hash/force na hora; cadência 30s (Lote D2).
     const configPush = (() => {
@@ -4407,7 +4425,7 @@ async function __serverEventBridgeTick(reason) {
 
     const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_FULL_STATUS_MS);
     const includeFullStatus = !!(
-      (forceStatusEvent || fullStatusDue || needConfigPush) &&
+      (forceStatusEvent || fullStatusDue || needConfigPush || identityChanged) &&
       status &&
       Array.isArray(status.perfis) &&
       status.perfis.length
@@ -4476,6 +4494,7 @@ async function __serverEventBridgeTick(reason) {
       __serverEventLastSentAt = now;
       if (includeFullStatus) __serverEventLastFullStatusAt = now;
       __serverEventLastQuick = telemetry.quick || null;
+      if (includeFullStatus) __serverEventLastIdentitySig = identitySig;
       if (out.ctConfigApplied) {
         // Confirma ao CT, em seguida, que a configuração já está persistida e
         // publica um snapshot completo pós-configuração.

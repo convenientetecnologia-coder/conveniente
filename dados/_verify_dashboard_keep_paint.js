@@ -41,8 +41,8 @@ check("html_status_poll_1s", /setInterval\(reloadPerfis, 1000\)/.test(html) && !
 check("api_journal_before_rpc", /getStatusSnapshot\(\)/.test(api) && /status_journal_stale/.test(api) && /HTML zerado/.test(api));
 check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
 check("api_stale_journal_paints_immediately", /overlayINST = snap;/.test(api) && /__scheduleStatusJournalRefresh/.test(api) && /warningINST === 'status_journal_stale'/.test(api));
-check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000 \}\)/.test(api));
-check("api_overlay_await_if_older_than_250", /overlayAgeMs >= 0 && overlayAgeMs <= 250/.test(api) && /timeoutMs: 3000/.test(api));
+check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000, fresh: true \}\)/.test(api));
+check("api_overlay_await_if_older_than_250", /overlayAgeMs >= 0 && overlayAgeMs <= 250/.test(api) && /timeoutMs: 3000, fresh: true/.test(api));
 check("api_status_seed_from_status", /baseline_seeded_from_status/.test(api) && /if \(!baseMap\.size && overlayINST/.test(api));
 const apiPerfis = fs.readFileSync(path.join(root, "scripts", "api_perfis.js"), "utf8");
 const postCfg = apiPerfis.split("app.post('/api/server-config'")[1] || "";
