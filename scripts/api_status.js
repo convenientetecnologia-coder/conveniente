@@ -651,7 +651,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let staleSnapINST = null;
   let overlayAgeMs = Number.POSITIVE_INFINITY;
   try {
-    const snap = fileStore.getStatusSnapshot();
+    const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
     try {
       const stFile = fs.statSync(fileStore.statusPath);
       overlayAgeMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);

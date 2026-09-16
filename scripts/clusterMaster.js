@@ -1363,6 +1363,15 @@ async function createCluster() {
       const claimedByRpc = new Set();
       const paintedNames = new Set();
       let painted = 0;
+      const journalNameInNode = (i, nome) => {
+        const n = String(nome || '');
+        if (!n) return false;
+        try {
+          const shard = children[i] && children[i].shard;
+          if (shard && typeof shard.has === 'function' && shard.size) return shard.has(n);
+        } catch {}
+        return false;
+      };
       const applyPayload = (payload, source, i, ageMs) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
         const isRpc = source === 'rpc_refresh' || source === 'rpc_boot';
@@ -1370,6 +1379,7 @@ async function createCluster() {
         for (const p of payload.perfis || []) {
           if (!p || !p.nome) continue;
           const nome = String(p.nome);
+          if (!isRpc && !journalNameInNode(i, nome)) continue;
           if (!isRpc && claimedByRpc.has(nome)) continue;
           const dst = baseMap.get(p.nome) || baseMap.get(nome);
           if (dst) {
@@ -1385,7 +1395,10 @@ async function createCluster() {
         if (payload.robes && typeof payload.robes === 'object') {
           const owned = new Set();
           for (const p of payload.perfis || []) {
-            if (p && p.nome) owned.add(String(p.nome));
+            if (!p || !p.nome) continue;
+            const nome = String(p.nome);
+            if (!isRpc && !journalNameInNode(i, nome)) continue;
+            owned.add(nome);
           }
           const nodeRobes = {};
           for (const nome of owned) {
@@ -1399,6 +1412,7 @@ async function createCluster() {
           const q = payload.robeQueue.filter((n) => {
             const nome = String(n || '');
             if (!nome) return false;
+            if (!isRpc && !journalNameInNode(i, nome)) return false;
             if (!isRpc && claimedByRpc.has(nome)) return false;
             return true;
           });

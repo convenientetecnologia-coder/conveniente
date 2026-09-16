@@ -78,6 +78,8 @@ check(
     clusterSrc.includes("if (!nome || paintedNames.has(nome)) continue") &&
     clusterSrc.includes("if (!painted && prevAgg)") &&
     clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
+    clusterSrc.includes("const journalNameInNode =") &&
+    clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
     !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
     !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),
@@ -135,8 +137,10 @@ check(
     !/overlayAgeMs <= 250/.test(apiStatusSrc) &&
     /if \(!overlayINST\) \{/.test(apiStatusSrc) &&
     /timeoutMs: 8000, fresh: true/.test(apiStatusSrc) &&
+    apiStatusSrc.includes("readJsonSafe(fileStore.statusPath, null)") &&
+    !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
-  "GET pinta arquivo e sempre funde RAM; estoque do cadastro não some"
+  "GET pinta status.json real (não catálogo inventado) e funde RAM; estoque do cadastro não some"
 );
 check(
   "d1_html_poll_1s_inflight",

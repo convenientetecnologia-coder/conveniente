@@ -38,7 +38,7 @@ check("html_inline_script_parses", (() => {
 })());
 check("html_status_only_merge", /const overlayPerfis = Array\.isArray\(st\?\.perfis\)/.test(html) && /const perfisSeed = basePerfis\.length/.test(html) && /if \(!dst\) \{\s*dst = makePerfilEntry\(/.test(html));
 check("html_status_poll_1s", /setInterval\(reloadPerfis, 1000\)/.test(html) && !/setInterval\(reloadPerfis, 5000\)/.test(html));
-check("api_journal_before_rpc", /getStatusSnapshot\(\)/.test(api) && /status_journal_stale/.test(api) && /HTML zerado/.test(api));
+check("api_journal_before_rpc", /readJsonSafe\(fileStore\.statusPath, null\)/.test(api) && /status_journal_stale/.test(api) && /HTML zerado/.test(api));
 check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
 check("api_stale_journal_paints_immediately", /overlayINST = snap;/.test(api) && /__scheduleStatusJournalRefresh/.test(api) && /warningINST === 'status_journal_stale'/.test(api));
 check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000, fresh: true \}\)/.test(api));
