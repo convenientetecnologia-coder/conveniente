@@ -171,12 +171,14 @@ check(
   /setInterval\(reloadPerfis, 1000\)/.test(htmlSrc) &&
     !/setInterval\(reloadPerfis, 5000\)/.test(htmlSrc) &&
     htmlSrc.includes("__reloadInflight") &&
+    htmlSrc.includes("await safeGetStatus()") &&
     htmlSrc.includes("stFreshUsable") &&
     htmlSrc.includes("status_failed") &&
     htmlSrc.includes("status temporarily unavailable") &&
     htmlSrc.includes("lastByNome") &&
     htmlSrc.includes("stHasHud") &&
     htmlSrc.includes("overlayHasHud") &&
+    (htmlSrc.match(/window\.electronAPI\.getStatus\(/g) || []).length === 1 &&
     !htmlSrc.includes("stHasHud || !__lastStatusPaint") &&
     htmlSrc.includes("paintTopSummary(lastOverlay") &&
     !htmlSrc.includes("const catalogNow =") &&

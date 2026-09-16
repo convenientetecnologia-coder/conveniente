@@ -3462,8 +3462,8 @@
         await fn(p.nome);
         // Espera refletir
         await waitUntil(async () => {
-          const st = await window.electronAPI.getStatus();
-          const cur = (st.perfis||[]).find(x => x.nome === p.nome);
+          const st = await safeGetStatus();
+          const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
           return !!cur && (!!cur.active === wantOpen);
         }, { timeoutMs: 60000, intervalMs: 400 });
         reloadPerfis();
@@ -3818,7 +3818,7 @@
     // 4.1) Esperar Robe terminar (para Invocar Humano)
     async function waitRobeFinish(nome, { timeoutMs = 30601000 } = {}) {
       return await waitUntil(async () => {
-        const st = await window.electronAPI.getStatus();
+        const st = await safeGetStatus();
         const emExec = !!(st && st.robes && st.robes[nome] && st.robes[nome].emExecucao);
         return !emExec;
       }, { timeoutMs, intervalMs: 1000 });
@@ -3829,20 +3829,20 @@
       try {
         setBtnLoading(btn, true, 'Verificando...');
         // Garante navegador ativo (com confirmação)
-        let st = await window.electronAPI.getStatus();
-        let cur = (st.perfis || []).find(x => x.nome === p.nome);
+        let st = await safeGetStatus();
+        let cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
         if (!cur || !cur.active) {
           const ok = confirm(`O navegador da conta "${p.label || p.nome}" está fechado. Abrir e invocar humano agora?`);
           if (!ok) { setBtnLoading(btn, false); return; }
           await window.electronAPI.activate(p.nome);
           await waitUntil(async () => {
-            const s2 = await window.electronAPI.getStatus();
-            const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+            const s2 = await safeGetStatus();
+            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
             return c2 && c2.active;
           }, { timeoutMs: 60000, intervalMs: 400 });
         }
         // Se Robe estiver executando para esta conta, aguarda finalizar
-        st = await window.electronAPI.getStatus();
+        st = await safeGetStatus();
         const emExec = !!(st && st.robes && st.robes[p.nome] && st.robes[p.nome].emExecucao);
         if (emExec) {
           setBtnLoading(btn, true, 'Aguardando Robe concluir...');
@@ -3865,13 +3865,13 @@
       try {
         setBtnLoading(btn, true, 'Iniciando...');
         // Garante navegador ativo
-        let st = await window.electronAPI.getStatus();
-        let cur = (st.perfis || []).find(x => x.nome === p.nome);
+        let st = await safeGetStatus();
+        let cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
         if (!cur || !cur.active) {
           await window.electronAPI.activate(p.nome);
           await waitUntil(async () => {
-            const s2 = await window.electronAPI.getStatus();
-            const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+            const s2 = await safeGetStatus();
+            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
             return c2 && c2.active;
           }, { timeoutMs: 60000, intervalMs: 400 });
           await new Promise(r=>setTimeout(r,1000));
@@ -3879,8 +3879,8 @@
         // Inicia Virtus/24h
         await window.electronAPI.startWork(p.nome);
         await waitUntil(async () => {
-          const s3 = await window.electronAPI.getStatus();
-          const c3 = (s3.perfis || []).find(x => x.nome === p.nome);
+          const s3 = await safeGetStatus();
+          const c3 = Array.isArray(s3 && s3.perfis) ? s3.perfis.find(x => x.nome === p.nome) : null;
           return c3 && c3.trabalhando;
         }, { timeoutMs: 30000, intervalMs: 400 });
         reloadPerfis();
