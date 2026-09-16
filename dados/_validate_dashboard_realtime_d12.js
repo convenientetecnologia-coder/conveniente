@@ -61,8 +61,8 @@ check(
     workerSrc.includes("hasOwnProperty.call(meta, 'pauseReason')") &&
     workerSrc.includes("hasOwnProperty.call(meta, 'cooldownSec')") &&
     workerSrc.includes("paused_limit") &&
-    /if \(ready\) \{\s*try \{ __overlayLiveHudFields\(ready\)/.test(workerSrc) &&
-    /Array\.isArray\(ready\.perfis\) && ready\.perfis\.length/.test(workerSrc) &&
+    /if \(ready\) \{\s*let overlaid = false;\s*try \{ __overlayLiveHudFields\(ready\); overlaid = true; \}/.test(workerSrc) &&
+    /overlaid && Array\.isArray\(ready\.perfis\) && ready\.perfis\.length/.test(workerSrc) &&
     /await snapshotStatusAndWrite\(\{ force: true \}\)/.test(workerSrc),
   "get-status clona jornal, recusa perfis vazio e pinta HUD da RAM (humano/hold/robe/fila)"
 );
@@ -79,7 +79,8 @@ check(
     clusterSrc.includes("if (!painted && prevAgg)") &&
     clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
     clusterSrc.includes("const journalNameInNode =") &&
-    clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
+    clusterSrc.includes("if (!journalNameInNode(i, nome)) continue") &&
+    !clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
     !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
     !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),
@@ -142,8 +143,9 @@ check(
     apiStatusSrc.includes("readJsonSafe(fileStore.statusPath, null)") &&
     !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
     apiStatusSrc.includes("status_handler_error") &&
+    apiStatusSrc.includes("prevRobes") &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
-  "GET pinta status.json real (não catálogo inventado) e funde RAM; erro devolve jornal, não zero"
+  "GET pinta status.json real, funde RAM, preserva robes do arquivo se o live omitir a conta"
 );
 check(
   "d1_html_poll_1s_inflight",

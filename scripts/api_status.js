@@ -684,7 +684,18 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     try {
       const live = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true });
       if (live && Array.isArray(live.perfis) && live.perfis.length) {
+        const prevRobes = overlayINST && overlayINST.robes && typeof overlayINST.robes === 'object'
+          ? overlayINST.robes
+          : null;
         overlayINST = live;
+        if (prevRobes) {
+          if (!overlayINST.robes || typeof overlayINST.robes !== 'object') overlayINST.robes = {};
+          for (const nome of Object.keys(prevRobes)) {
+            if (!nome || overlayINST.robes[nome]) continue;
+            const row = prevRobes[nome];
+            if (row && typeof row === 'object') overlayINST.robes[nome] = row;
+          }
+        }
         warningINST = undefined;
       } else if (warningINST === 'status_journal_stale') {
         try { __scheduleStatusJournalRefresh(workerClient); } catch {}

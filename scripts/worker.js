@@ -16291,8 +16291,9 @@ const handlers = {
     // HUD (humanControl/trabalhando) sai da RAM viva — o debounce MIN não pode mentir o painel.
     const ready = __cloneStatusJournal();
     if (ready) {
-      try { __overlayLiveHudFields(ready); } catch {}
-      if (Array.isArray(ready.perfis) && ready.perfis.length) return ready;
+      let overlaid = false;
+      try { __overlayLiveHudFields(ready); overlaid = true; } catch {}
+      if (overlaid && Array.isArray(ready.perfis) && ready.perfis.length) return ready;
     }
     try { await snapshotStatusAndWrite({ force: true }); } catch {}
     const out = __cloneStatusJournal() || {

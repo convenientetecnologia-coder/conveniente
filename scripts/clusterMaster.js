@@ -1379,7 +1379,7 @@ async function createCluster() {
         for (const p of payload.perfis || []) {
           if (!p || !p.nome) continue;
           const nome = String(p.nome);
-          if (!isRpc && !journalNameInNode(i, nome)) continue;
+          if (!journalNameInNode(i, nome)) continue;
           if (!isRpc && claimedByRpc.has(nome)) continue;
           const dst = baseMap.get(p.nome) || baseMap.get(nome);
           if (dst) {
@@ -1397,7 +1397,7 @@ async function createCluster() {
           for (const p of payload.perfis || []) {
             if (!p || !p.nome) continue;
             const nome = String(p.nome);
-            if (!isRpc && !journalNameInNode(i, nome)) continue;
+            if (!journalNameInNode(i, nome)) continue;
             owned.add(nome);
           }
           const nodeRobes = {};
@@ -1412,7 +1412,7 @@ async function createCluster() {
           const q = payload.robeQueue.filter((n) => {
             const nome = String(n || '');
             if (!nome) return false;
-            if (!isRpc && !journalNameInNode(i, nome)) return false;
+            if (!journalNameInNode(i, nome)) return false;
             if (!isRpc && claimedByRpc.has(nome)) return false;
             return true;
           });

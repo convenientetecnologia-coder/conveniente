@@ -44,6 +44,7 @@ check("api_status_rpc_short", /timeoutMs: 8000/.test(api));
 check("api_stale_journal_paints_immediately", /overlayINST = snap;/.test(api) && /__scheduleStatusJournalRefresh/.test(api) && /warningINST === 'status_journal_stale'/.test(api));
 check("api_rpc_only_when_no_journal", /if \(!overlayINST\) \{/.test(api) && /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 8000, fresh: true \}\)/.test(api));
 check("api_overlay_always_merge_live", /timeoutMs: 3000, fresh: true/.test(api) && !/overlayAgeMs <= 250/.test(api) && /janela do Invocar/.test(api));
+check("api_keep_file_robes_on_live", /prevRobes/.test(api) && /overlayINST\.robes\[nome\] = row/.test(api));
 check("api_status_seed_from_status", /baseline_seeded_from_status/.test(api) && /if \(!baseMap\.size && overlayINST/.test(api));
 const apiPerfis = fs.readFileSync(path.join(root, "scripts", "api_perfis.js"), "utf8");
 const postCfg = apiPerfis.split("app.post('/api/server-config'")[1] || "";
