@@ -23,6 +23,7 @@ function check(name, ok, extra) {
 check("html_fetch_timeout", /function fetchJsonTimeout/.test(html) && /fetchJsonTimeout\('\/api\/status', 8000\)/.test(html) && /fetchJsonTimeout\('\/api\/perfis', 8000\)/.test(html));
 check("html_network_rotation_timeout", (html.match(/fetchJsonTimeout\('\/api\/network-rotation\/state', 8000\)/g) || []).length >= 2);
 check("html_keep_last_paint", /__lastStatusPaint/.test(html) && /__lastPerfisPaint/.test(html) && /__reloadInflight/.test(html));
+check("html_keep_last_skeleton_hud", /lastByNome/.test(html) && /hasOwnProperty.call\(o, 'humanHold'\)/.test(html));
 check("html_ignore_status_failed_skeleton", /stFreshUsable/.test(html) && /status_failed/.test(html));
 check("html_inflight_finally", /finally \{\s*__reloadInflight = false;/.test(html));
 check("html_no_zero_without_cache", /if \(!st && !perfisResp\) \{ __reloadInflight = false; return; \}/.test(html));

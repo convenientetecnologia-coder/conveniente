@@ -1624,6 +1624,27 @@ async function createCluster() {
 
       try {
         const aggPath = path.join(__dirname, '..', 'dados', 'status.json');
+        const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
+        if (snap && Array.isArray(snap.perfis) && Array.isArray(out.perfis)) {
+          const byNome = new Map();
+          for (const p of snap.perfis) {
+            if (p && p.nome) byNome.set(String(p.nome), p);
+          }
+          out.perfis = out.perfis.map((p) => {
+            if (!p || !p.nome) return p;
+            if (Object.prototype.hasOwnProperty.call(p, 'humanHold')) return p;
+            const prev = byNome.get(String(p.nome));
+            return prev || p;
+          });
+          if (snap.robes && typeof snap.robes === 'object') {
+            if (!out.robes || typeof out.robes !== 'object') out.robes = {};
+            for (const nome of Object.keys(snap.robes)) {
+              if (!nome || out.robes[nome]) continue;
+              const row = snap.robes[nome];
+              if (row && typeof row === 'object') out.robes[nome] = Object.assign({}, row);
+            }
+          }
+        }
         fileStore.writeJsonAtomic(aggPath, out);
       } catch {}
 

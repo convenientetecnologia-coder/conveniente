@@ -80,6 +80,7 @@ check(
     clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
     clusterSrc.includes("const fillUnpaintedFrom =") &&
     clusterSrc.includes("hasOwnProperty.call(dst, 'humanHold')") &&
+    clusterSrc.includes("out.perfis = out.perfis.map") &&
     clusterSrc.includes("const journalNameInNode =") &&
     clusterSrc.includes("if (!journalNameInNode(i, nome)) continue") &&
     !clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
@@ -158,8 +159,9 @@ check(
     htmlSrc.includes("__reloadInflight") &&
     htmlSrc.includes("stFreshUsable") &&
     htmlSrc.includes("status_failed") &&
+    htmlSrc.includes("lastByNome") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
-  "poll HUD 1s com trava inflight; esqueleto status_failed não pisa a última pintura"
+  "poll HUD 1s; esqueleto status_failed/catálogo não pisa a última pintura"
 );
 
 check(

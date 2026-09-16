@@ -2566,9 +2566,35 @@
       if (lastOverlay.length) {
         try { paintTopSummary(lastOverlay, (__lastStatusPaint && __lastStatusPaint.robeQueue) || []); } catch {}
       }
-      const [stFresh, netRotate] = await Promise.all([statusP, netP]);
+      const [stFreshRaw, netRotate] = await Promise.all([statusP, netP]);
+      let stFresh = stFreshRaw;
       const stFreshUsable = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length
         && String(stFresh.warning || '') !== 'status_failed');
+      if (stFreshUsable && __lastStatusPaint && Array.isArray(__lastStatusPaint.perfis)) {
+        const lastByNome = new Map();
+        for (const p of __lastStatusPaint.perfis) {
+          if (p && p.nome) lastByNome.set(String(p.nome), p);
+        }
+        const lastRobes = (__lastStatusPaint.robes && typeof __lastStatusPaint.robes === 'object')
+          ? __lastStatusPaint.robes
+          : null;
+        const robes = Object.assign({}, stFresh.robes || {});
+        if (lastRobes) {
+          for (const nome of Object.keys(lastRobes)) {
+            if (!nome || robes[nome]) continue;
+            const row = lastRobes[nome];
+            if (row && typeof row === 'object') robes[nome] = row;
+          }
+        }
+        stFresh = Object.assign({}, stFresh, {
+          perfis: stFresh.perfis.map((o) => {
+            if (!o || !o.nome) return o;
+            if (Object.prototype.hasOwnProperty.call(o, 'humanHold')) return o;
+            return lastByNome.get(String(o.nome)) || o;
+          }),
+          robes
+        });
+      }
       const st = stFreshUsable ? stFresh : __lastStatusPaint;
       const perfisResp = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
         ? perfisRespFresh
