@@ -1512,6 +1512,22 @@ async function createCluster() {
         }
       }
 
+      const fillUnpaintedFrom = (prev) => {
+        if (!prev || !Array.isArray(prev.perfis)) return;
+        for (const prevRow of prev.perfis) {
+          const nome = prevRow && prevRow.nome ? String(prevRow.nome) : '';
+          if (!nome || paintedNames.has(nome)) continue;
+          const dst = baseMap.get(prevRow.nome) || baseMap.get(nome);
+          if (!dst) continue;
+          if (Object.prototype.hasOwnProperty.call(dst, 'humanHold')) continue;
+          const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+          Object.assign(dst, prevRow);
+          const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
+          if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
+          painted += 1;
+        }
+      };
+
       let prevAgg = statusAggCache.value;
       if (!(prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.length)) {
         try {
@@ -1519,19 +1535,14 @@ async function createCluster() {
           if (snap && Array.isArray(snap.perfis) && snap.perfis.length) prevAgg = snap;
         } catch {}
       }
-      if (prevAgg && Array.isArray(prevAgg.perfis)) {
-        for (const prev of prevAgg.perfis) {
-          const nome = prev && prev.nome ? String(prev.nome) : '';
-          if (!nome || paintedNames.has(nome)) continue;
-          const dst = baseMap.get(prev.nome) || baseMap.get(nome);
-          if (!dst) continue;
-          const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
-          Object.assign(dst, prev);
-          const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
-          if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
-          painted += 1;
+      fillUnpaintedFrom(prevAgg);
+      try {
+        const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
+        if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
+          fillUnpaintedFrom(snap);
+          if (!prevAgg) prevAgg = snap;
         }
-      }
+      } catch {}
 
       if (!painted && prevAgg) {
         return prevAgg;
@@ -1555,6 +1566,26 @@ async function createCluster() {
           if (row && typeof row === 'object') combinedRobes[nome] = Object.assign({}, row);
         }
       }
+      try {
+        const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
+        if (snap && snap.robes && typeof snap.robes === 'object') {
+          for (const nome of Object.keys(snap.robes)) {
+            if (!nome || paintedNames.has(nome) || combinedRobes[nome]) continue;
+            const row = snap.robes[nome];
+            if (row && typeof row === 'object') combinedRobes[nome] = Object.assign({}, row);
+          }
+        }
+        if (snap && Array.isArray(snap.robeQueue)) {
+          for (const n of snap.robeQueue) {
+            const nome = String(n || '');
+            if (!nome || paintedNames.has(nome)) continue;
+            combinedQueue.push(nome);
+          }
+        }
+        if (!sysPick && snap && snap.sys) sysPick = snap.sys;
+        if (!autoModePick && snap && snap.autoMode) autoModePick = snap.autoMode;
+        if (!serverConfigPick && snap && snap.serverConfig) serverConfigPick = snap.serverConfig;
+      } catch {}
       if (prevAgg && Array.isArray(prevAgg.robeQueue)) {
         for (const n of prevAgg.robeQueue) {
           const nome = String(n || '');

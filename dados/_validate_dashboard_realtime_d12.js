@@ -78,6 +78,8 @@ check(
     clusterSrc.includes("if (!nome || paintedNames.has(nome)) continue") &&
     clusterSrc.includes("if (!painted && prevAgg)") &&
     clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
+    clusterSrc.includes("const fillUnpaintedFrom =") &&
+    clusterSrc.includes("hasOwnProperty.call(dst, 'humanHold')") &&
     clusterSrc.includes("const journalNameInNode =") &&
     clusterSrc.includes("if (!journalNameInNode(i, nome)) continue") &&
     !clusterSrc.includes("if (!isRpc && !journalNameInNode(i, nome)) continue") &&
@@ -144,8 +146,10 @@ check(
     !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
     apiStatusSrc.includes("status_handler_error") &&
     apiStatusSrc.includes("prevRobes") &&
+    apiStatusSrc.includes("prevByNome") &&
+    apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)"),
-  "GET pinta status.json real, funde RAM, preserva robes do arquivo se o live omitir a conta"
+  "GET pinta status.json real, funde RAM, não troca HUD do arquivo por esqueleto de catálogo"
 );
 check(
   "d1_html_poll_1s_inflight",
