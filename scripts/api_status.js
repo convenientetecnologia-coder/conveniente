@@ -66,7 +66,7 @@ function __scheduleStatusJournalRefresh(workerClient) {
   __statusJournalRefreshInflight = true;
   setImmediate(() => {
     Promise.resolve()
-      .then(() => workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 }))
+      .then(() => workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true }))
       .catch(() => null)
       .finally(() => { __statusJournalRefreshInflight = false; });
   });

@@ -6901,10 +6901,16 @@ function __statusJournalDebug() {
 function __cloneStatusJournal() {
   if (!__statusJournal || typeof __statusJournal !== 'object') return null;
   const snap = __statusJournal;
+  const robesIn = (snap.robes && typeof snap.robes === 'object') ? snap.robes : {};
+  const robes = {};
+  for (const k of Object.keys(robesIn)) {
+    const row = robesIn[k];
+    robes[k] = row && typeof row === 'object' ? Object.assign({}, row) : row;
+  }
   return {
     perfis: Array.isArray(snap.perfis) ? snap.perfis.slice() : [],
-    robes: (snap.robes && typeof snap.robes === 'object') ? snap.robes : {},
-    robeQueue: Array.isArray(snap.robeQueue) ? snap.robeQueue : [],
+    robes,
+    robeQueue: Array.isArray(snap.robeQueue) ? snap.robeQueue.slice() : [],
     autoMode: snap.autoMode || null,
     last_engine_event: snap.last_engine_event,
     last_engine_event_at: snap.last_engine_event_at,
@@ -6917,25 +6923,51 @@ function __cloneStatusJournal() {
 }
 
 function __overlayLiveHudFields(status) {
-  if (!status || !Array.isArray(status.perfis)) return status;
-  status.perfis = status.perfis.map((p) => {
-    if (!p || !p.nome) return p;
-    const ctrl = controllers.get(p.nome);
-    const meta = robeMeta[p.nome] || {};
-    let hold = false;
-    try { hold = readDesiredHumanHoldFlag(p.nome) === true; } catch {}
-    const patch = {
-      humanHold: hold,
-      robeEmExecucao: !!meta.emExecucao
-    };
-    if (ctrl) {
-      patch.humanControl = !!ctrl.humanControl;
-      patch.trabalhando = !!ctrl.trabalhando;
-      patch.configurando = !!ctrl.configurando;
-      patch.virtusOnline = !!ctrl.virtus;
+  if (!status || typeof status !== 'object') return status;
+  if (!status.robes || typeof status.robes !== 'object') status.robes = {};
+  const names = new Set();
+  if (Array.isArray(status.perfis)) {
+    for (const p of status.perfis) {
+      if (p && p.nome) names.add(String(p.nome));
     }
-    return Object.assign({}, p, patch);
-  });
+  }
+  try {
+    for (const n of Object.keys(robeMeta || {})) names.add(String(n));
+  } catch {}
+  status.perfis = Array.isArray(status.perfis)
+    ? status.perfis.map((p) => {
+      if (!p || !p.nome) return p;
+      const ctrl = controllers.get(p.nome);
+      const meta = robeMeta[p.nome] || {};
+      let hold = false;
+      try { hold = readDesiredHumanHoldFlag(p.nome) === true; } catch {}
+      const patch = {
+        humanHold: hold,
+        robeEmExecucao: !!meta.emExecucao
+      };
+      if (ctrl) {
+        patch.humanControl = !!ctrl.humanControl;
+        patch.trabalhando = !!ctrl.trabalhando;
+        patch.configurando = !!ctrl.configurando;
+        patch.virtusOnline = !!ctrl.virtus;
+      }
+      return Object.assign({}, p, patch);
+    })
+    : [];
+  for (const nome of names) {
+    if (!nome) continue;
+    const meta = robeMeta[nome] || {};
+    const prev = status.robes[nome] && typeof status.robes[nome] === 'object' ? status.robes[nome] : {};
+    status.robes[nome] = Object.assign({}, prev, {
+      emExecucao: !!meta.emExecucao,
+      emFila: !!meta.emFila
+    });
+  }
+  try {
+    if (robeQueue && typeof robeQueue.queueList === 'function') {
+      status.robeQueue = robeQueue.queueList();
+    }
+  } catch {}
   return status;
 }
 

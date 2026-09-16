@@ -54,7 +54,9 @@ check(
     workerSrc.includes("__overlayLiveHudFields(ready)") &&
     workerSrc.includes("patch.humanControl = !!ctrl.humanControl") &&
     workerSrc.includes("humanHold: hold") &&
-    workerSrc.includes("robeEmExecucao: !!meta.emExecucao"),
+    workerSrc.includes("robeEmExecucao: !!meta.emExecucao") &&
+    workerSrc.includes("emExecucao: !!meta.emExecucao") &&
+    workerSrc.includes("status.robeQueue = robeQueue.queueList()"),
   "get-status clona jornal e pinta HUD da RAM (humano/hold/robe)"
 );
 check(
