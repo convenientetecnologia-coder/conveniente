@@ -6941,26 +6941,44 @@ function __overlayLiveHudFields(status) {
       const meta = robeMeta[p.nome] || {};
       let hold = false;
       try { hold = readDesiredHumanHoldFlag(p.nome) === true; } catch {}
-      const patch = {
+      let robeEmExecucao = !!meta.emExecucao;
+      try {
+        if (robeQueue && typeof robeQueue.isActive === 'function') {
+          robeEmExecucao = !!robeQueue.isActive(p.nome) || robeEmExecucao;
+        }
+      } catch {}
+      return Object.assign({}, p, {
         humanHold: hold,
-        robeEmExecucao: !!meta.emExecucao
-      };
-      if (ctrl) {
-        patch.humanControl = !!ctrl.humanControl;
-        patch.trabalhando = !!ctrl.trabalhando;
-        patch.configurando = !!ctrl.configurando;
-        patch.virtusOnline = !!ctrl.virtus;
-      }
-      return Object.assign({}, p, patch);
+        robeEmExecucao,
+        active: !!ctrl,
+        humanControl: !!(ctrl && ctrl.humanControl),
+        trabalhando: !!(ctrl && ctrl.trabalhando),
+        configurando: !!(ctrl && ctrl.configurando),
+        virtusOnline: !!(ctrl && ctrl.virtus)
+      });
     })
     : [];
   for (const nome of names) {
     if (!nome) continue;
     const meta = robeMeta[nome] || {};
     const prev = status.robes[nome] && typeof status.robes[nome] === 'object' ? status.robes[nome] : {};
+    let emExecucao = !!meta.emExecucao;
+    let emFila = !!meta.emFila;
+    try {
+      if (robeQueue && typeof robeQueue.isActive === 'function') {
+        emExecucao = !!robeQueue.isActive(nome) || emExecucao;
+      }
+    } catch {}
+    try {
+      if (robeQueue && typeof robeQueue.inQueue === 'function') {
+        emFila = !!robeQueue.inQueue(nome);
+      }
+    } catch {}
     status.robes[nome] = Object.assign({}, prev, {
-      emExecucao: !!meta.emExecucao,
-      emFila: !!meta.emFila
+      emExecucao,
+      emFila,
+      estado: (meta.estado != null && String(meta.estado) !== '') ? meta.estado : prev.estado,
+      pauseReason: (meta.pauseReason != null && String(meta.pauseReason) !== '') ? meta.pauseReason : prev.pauseReason
     });
   }
   try {
@@ -16214,11 +16232,11 @@ const handlers = {
     // Jornal: não remonta manifesto/issue no meio do Robe.
     // HUD (humanControl/trabalhando) sai da RAM viva — o debounce MIN não pode mentir o painel.
     const ready = __cloneStatusJournal();
-    if (ready && Array.isArray(ready.perfis)) {
+    if (ready && Array.isArray(ready.perfis) && ready.perfis.length) {
       try { __overlayLiveHudFields(ready); } catch {}
       return ready;
     }
-    try { await snapshotStatusAndWrite(); } catch {}
+    try { await snapshotStatusAndWrite({ force: true }); } catch {}
     const out = __cloneStatusJournal() || {
       perfis: [],
       robes: {},

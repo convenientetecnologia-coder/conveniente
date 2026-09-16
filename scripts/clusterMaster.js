@@ -1338,7 +1338,7 @@ async function createCluster() {
       let lastEngineEventAt = null;
       const nodesDebug = [];
       let combinedRobes = {};
-      let combinedQueue = [];
+      const queueByNode = new Map();
       const warningParts = [];
       const missingIdx = [];
       const staleFallback = new Map();
@@ -1376,7 +1376,7 @@ async function createCluster() {
           combinedRobes = Object.assign(combinedRobes, payload.robes);
         }
         if (Array.isArray(payload.robeQueue)) {
-          combinedQueue.push(...payload.robeQueue);
+          queueByNode.set(i, payload.robeQueue.slice());
         }
         if (!sysPick && payload.sys) sysPick = payload.sys;
         if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
@@ -1458,6 +1458,12 @@ async function createCluster() {
         }
       }
 
+      let combinedQueue = [];
+      for (const i of uniqIdx) {
+        const q = queueByNode.get(i);
+        if (!Array.isArray(q) || !q.length) continue;
+        combinedQueue.push(...q);
+      }
       if (combinedQueue.length) {
         const seen = new Set();
         combinedQueue = combinedQueue.filter(n => {
