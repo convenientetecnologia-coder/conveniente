@@ -77,6 +77,7 @@ check(
     clusterSrc.includes("const paintedNames = new Set()") &&
     clusterSrc.includes("if (!nome || paintedNames.has(nome)) continue") &&
     clusterSrc.includes("if (!painted && prevAgg)") &&
+    clusterSrc.includes("fileStore.readJsonSafe(fileStore.statusPath, null)") &&
     clusterSrc.includes("const q = queueByNode.get(i)") &&
     !/combinedQueue\.push\(\.\.\.payload\.robeQueue\)/.test(clusterSrc) &&
     !/combinedRobes = Object\.assign\(combinedRobes, payload\.robes\)/.test(clusterSrc),

@@ -1486,7 +1486,13 @@ async function createCluster() {
         }
       }
 
-      const prevAgg = statusAggCache.value;
+      let prevAgg = statusAggCache.value;
+      if (!(prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.length)) {
+        try {
+          const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
+          if (snap && Array.isArray(snap.perfis) && snap.perfis.length) prevAgg = snap;
+        } catch {}
+      }
       if (prevAgg && Array.isArray(prevAgg.perfis)) {
         for (const prev of prevAgg.perfis) {
           const nome = prev && prev.nome ? String(prev.nome) : '';
@@ -1540,6 +1546,7 @@ async function createCluster() {
       }
       if (!sysPick && prevAgg && prevAgg.sys) sysPick = prevAgg.sys;
       if (!autoModePick && prevAgg && prevAgg.autoMode) autoModePick = prevAgg.autoMode;
+      if (!serverConfigPick && prevAgg && prevAgg.serverConfig) serverConfigPick = prevAgg.serverConfig;
 
       const perfis = Array.from(baseMap.values());
       const out = {
