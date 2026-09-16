@@ -7009,11 +7009,22 @@ function __overlayLiveHudFields(status) {
         emFila = !!robeQueue.inQueue(nome);
       }
     } catch {}
+    const pauseReason = Object.prototype.hasOwnProperty.call(meta, 'pauseReason')
+      ? meta.pauseReason
+      : prev.pauseReason;
+    let estado = (meta.estado != null && String(meta.estado) !== '') ? meta.estado : prev.estado;
+    if (Object.prototype.hasOwnProperty.call(meta, 'pauseReason') && !meta.pauseReason) {
+      if (String(estado || '').toLowerCase() === 'paused_limit') estado = '';
+    }
+    const cooldownSec = Object.prototype.hasOwnProperty.call(meta, 'cooldownSec')
+      ? meta.cooldownSec
+      : prev.cooldownSec;
     nextRobes[nome] = Object.assign({}, prev, {
       emExecucao,
       emFila,
-      estado: (meta.estado != null && String(meta.estado) !== '') ? meta.estado : prev.estado,
-      pauseReason: Object.prototype.hasOwnProperty.call(meta, 'pauseReason') ? meta.pauseReason : prev.pauseReason
+      estado,
+      pauseReason,
+      cooldownSec
     });
   }
   status.robes = nextRobes;

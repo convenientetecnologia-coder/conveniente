@@ -1409,10 +1409,12 @@ async function createCluster() {
         if (fb && fb.json && Array.isArray(fb.json.perfis)) {
           const ageSec = Math.round((fb.ageMs || 0) / 1000);
           if (shouldApplyNodeStatusJournal({ liveChild, ageMs: fb.ageMs })) {
-            applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
             if (liveChild && Number(fb.ageMs) >= HUD_REFRESH_AGE_MS) {
               missingIdx.push(i);
               staleFallback.set(i, fb.json);
+              pushNodeDebug(fb.json, `journal_deferred_rpc(${ageSec}s)`, i, fb.ageMs, { deferred: true });
+            } else {
+              applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
             }
           } else {
             pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: !!liveChild });

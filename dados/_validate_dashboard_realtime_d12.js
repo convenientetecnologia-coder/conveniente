@@ -59,6 +59,8 @@ check(
     workerSrc.includes("emFila = !!robeQueue.inQueue(nome)") &&
     workerSrc.includes("function __hudOwnsNome") &&
     workerSrc.includes("hasOwnProperty.call(meta, 'pauseReason')") &&
+    workerSrc.includes("hasOwnProperty.call(meta, 'cooldownSec')") &&
+    workerSrc.includes("paused_limit") &&
     /if \(ready\) \{\s*try \{ __overlayLiveHudFields\(ready\)/.test(workerSrc) &&
     /Array\.isArray\(ready\.perfis\) && ready\.perfis\.length/.test(workerSrc) &&
     /await snapshotStatusAndWrite\(\{ force: true \}\)/.test(workerSrc),
@@ -108,8 +110,11 @@ check(
 check(
   "d1_cluster_hud_refresh_live",
   /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '0'/.test(clusterSrc) &&
-    /liveChild && Number\(fb\.ageMs\) >= HUD_REFRESH_AGE_MS/.test(clusterSrc),
-  "cell viva pinta disco e pede RAM no mesmo ciclo"
+    /liveChild && Number\(fb\.ageMs\) >= HUD_REFRESH_AGE_MS/.test(clusterSrc) &&
+    clusterSrc.includes("journal_deferred_rpc") &&
+    clusterSrc.includes("staleFallback.set(i, fb.json)") &&
+    !/applyPayload\(fb\.json, `journal\(\$\{ageSec\}s\)`, i, fb\.ageMs\);\s*if \(liveChild/.test(clusterSrc),
+  "cell viva não pinta jornal no agregado; RPC substitui, jornal só se RPC falhar"
 );
 
 check(
