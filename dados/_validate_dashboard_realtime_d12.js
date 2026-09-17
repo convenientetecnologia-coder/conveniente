@@ -130,12 +130,12 @@ check(
 );
 check(
   "d1_cluster_hud_refresh_live",
-  /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '0'/.test(clusterSrc) &&
+  /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '5000'/.test(clusterSrc) &&
     /liveChild && Number\(fb\.ageMs\) >= HUD_REFRESH_AGE_MS/.test(clusterSrc) &&
     clusterSrc.includes("journal_deferred_rpc") &&
     clusterSrc.includes("staleFallback.set(i, fb.json)") &&
-    !/applyPayload\(fb\.json, `journal\(\$\{ageSec\}s\)`, i, fb\.ageMs\);\s*if \(liveChild/.test(clusterSrc),
-  "cell viva não pinta jornal no agregado; RPC substitui, jornal só se RPC falhar"
+    /applyPayload\(fb\.json, `journal\(\$\{ageSec\}s\)`, i, fb\.ageMs\);/.test(clusterSrc),
+  "jornal fresco pinta na hora; RPC só se o arquivo passou do limiar 5s"
 );
 
 check(
@@ -145,26 +145,22 @@ check(
   "warning stale em 5s"
 );
 check(
-  "d1_api_await_merge_live",
-  /timeoutMs: 3000, fresh: true/.test(apiStatusSrc) &&
-    !/overlayAgeMs <= 250/.test(apiStatusSrc) &&
-    /if \(!overlayINST\) \{/.test(apiStatusSrc) &&
+  "d1_api_journal_first_no_rpc_wait",
+  /if \(!overlayINST\) \{/.test(apiStatusSrc) &&
     /timeoutMs: 8000, fresh: true/.test(apiStatusSrc) &&
     apiStatusSrc.includes("readJsonSafe(fileStore.statusPath, null)") &&
-    !/const snap = fileStore.getStatusSnapshot\(\)/.test(apiStatusSrc) &&
+    !/timeoutMs: 3000, fresh: true/.test(apiStatusSrc) &&
+    !/setTimeout\(\(\) => resolve\(null\), 3000\)/.test(apiStatusSrc) &&
+    apiStatusSrc.includes("Jornal HUD no disco: responde agora") &&
     apiStatusSrc.includes("status_handler_error") &&
     apiStatusSrc.includes("warningINST = 'status_failed'") &&
     apiStatusSrc.includes("hudLive") &&
     apiStatusSrc.includes("snapHud") &&
-    apiStatusSrc.includes("mergedHud") &&
-    apiStatusSrc.includes("prevRobes") &&
-    apiStatusSrc.includes("prevByNome") &&
-    apiStatusSrc.includes("hasOwnProperty.call(o, 'humanHold')") &&
     apiStatusSrc.includes("if (!o || !Object.prototype.hasOwnProperty.call(o, 'humanHold')) continue") &&
     apiStatusSrc.includes("prevStock > 0 && !(nextStock > 0)") &&
-    apiStatusSrc.includes("setTimeout(() => resolve(null), 3000)") &&
-    apiStatusSrc.includes("setTimeout(() => resolve(null), 7500)"),
-  "GET pinta status.json real, funde RAM, não troca HUD do arquivo por esqueleto de catálogo"
+    apiStatusSrc.includes("setTimeout(() => resolve(null), 7500)") &&
+    apiStatusSrc.includes("__scheduleStatusJournalRefresh(workerClient)"),
+  "GET pinta status.json na hora; RPC só se não há jornal HUD"
 );
 check(
   "d1_html_poll_1s_inflight",
@@ -178,12 +174,14 @@ check(
     htmlSrc.includes("lastByNome") &&
     htmlSrc.includes("stHasHud") &&
     htmlSrc.includes("overlayHasHud") &&
-    (htmlSrc.match(/window\.electronAPI\.getStatus\(/g) || []).length === 1 &&
+    htmlSrc.includes("HUD_KEEP_KEY") &&
+    htmlSrc.includes("function hudListSig") &&
+    (htmlSrc.match(/window\.electronAPI\.getStatus\(/g) || []).length === 0 &&
     !htmlSrc.includes("stHasHud || !__lastStatusPaint") &&
     htmlSrc.includes("paintTopSummary(lastOverlay") &&
     !htmlSrc.includes("const catalogNow =") &&
     /finally \{\s*__reloadInflight = false;/.test(htmlSrc),
-  "poll HUD 1s; esqueleto status_failed/catálogo não pisa a última pintura"
+  "poll HUD 1s; F5 keep-last; um fetch abortável; lista não recria se HUD igual"
 );
 
 check(

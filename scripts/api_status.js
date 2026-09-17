@@ -643,10 +643,10 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let warningINST = undefined;
   let erroMsgINST = undefined;
 
-  // 2) Overlay: jornal no disco primeiro (fresco ou stale). Esperar get-status de 8s
-  // no F5 deixava o dashboard no HTML zerado — o browser corta no mesmo 8s.
-  // Lote D1: aviso status_journal_stale em 5s. Poll da UI = 1s.
-  // Sempre funde RAM depois de pintar o arquivo — pular <250ms era a janela do Invocar.
+  // 2) Overlay: jornal no disco primeiro. GET do browser NÃO espera RPC.
+  // Esperar get-status de 8s no F5 deixava o dashboard no HTML zerado — o abort do browser é 8s.
+  // Lote HUD: pinta status.json agora; RAM em fundo via __scheduleStatusJournalRefresh.
+  // Aviso status_journal_stale em 5s. Poll da UI = 1s.
   let overlayINST = null;
   let staleSnapINST = null;
   let overlayAgeMs = Number.POSITIVE_INFINITY;
@@ -692,65 +692,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       }
     }
   } else {
-    // Jornal no disco existe: nunca zera o HTML. Sempre funde RAM agora (≤3s).
-    // Pular com arquivo <250ms era a janela do Invocar: o poll pintava o agregado velho.
-    try {
-      const live = await Promise.race([
-        Promise.resolve(workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 3000, fresh: true }))
-          .catch(() => null),
-        new Promise((resolve) => setTimeout(() => resolve(null), 3000))
-      ]);
-      if (live && Array.isArray(live.perfis) && live.perfis.length) {
-        const prevOverlay = overlayINST;
-        const prevPerfis = overlayINST && Array.isArray(overlayINST.perfis) ? overlayINST.perfis : null;
-        const prevRobes = overlayINST && overlayINST.robes && typeof overlayINST.robes === 'object'
-          ? overlayINST.robes
-          : null;
-        overlayINST = Object.assign({}, live, {
-          perfis: Array.isArray(live.perfis) ? live.perfis.slice() : [],
-          robes: (live.robes && typeof live.robes === 'object') ? Object.assign({}, live.robes) : {}
-        });
-        if (prevPerfis && Array.isArray(overlayINST.perfis)) {
-          const prevByNome = new Map();
-          for (const p of prevPerfis) {
-            if (p && p.nome) prevByNome.set(String(p.nome), p);
-          }
-          overlayINST.perfis = overlayINST.perfis.map((o) => {
-            if (!o || !o.nome) return o;
-            if (Object.prototype.hasOwnProperty.call(o, 'humanHold')) return o;
-            return prevByNome.get(String(o.nome)) || o;
-          });
-          const have = new Set(overlayINST.perfis.map((o) => (o && o.nome) ? String(o.nome) : '').filter(Boolean));
-          for (const p of prevPerfis) {
-            const nome = p && p.nome ? String(p.nome) : '';
-            if (!nome || have.has(nome)) continue;
-            overlayINST.perfis.push(p);
-            have.add(nome);
-          }
-        }
-        if (prevRobes) {
-          if (!overlayINST.robes || typeof overlayINST.robes !== 'object') overlayINST.robes = {};
-          for (const nome of Object.keys(prevRobes)) {
-            if (!nome || overlayINST.robes[nome]) continue;
-            const row = prevRobes[nome];
-            if (row && typeof row === 'object') overlayINST.robes[nome] = row;
-          }
-        }
-        const mergedHud = overlayINST.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-        if (!mergedHud) {
-          overlayINST = prevOverlay;
-        } else {
-          const liveHud = live.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-          if (liveHud) warningINST = undefined;
-        }
-      } else if (warningINST === 'status_journal_stale') {
-        try { __scheduleStatusJournalRefresh(workerClient); } catch {}
-      }
-    } catch {
-      if (warningINST === 'status_journal_stale') {
-        try { __scheduleStatusJournalRefresh(workerClient); } catch {}
-      }
-    }
+    // Jornal HUD no disco: responde agora. Nunca zera o HTML. RPC não entra no abort 8s.
+    try { __scheduleStatusJournalRefresh(workerClient); } catch {}
   }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];

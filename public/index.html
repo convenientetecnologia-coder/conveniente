@@ -2270,8 +2270,44 @@
       });
     }
     // RENDER LOCAL — usa apenas caches (sem backend)
+    function hudListSig(perfis, robes, robeQueue) {
+      const q = (uiSearch && uiSearch.query) ? String(uiSearch.query) : '';
+      const f = typeof currentFilter === 'string' ? currentFilter : 'all';
+      const bits = [f, q];
+      for (const p of (perfis || [])) {
+        if (!p || !p.nome) continue;
+        const r = (robes && robes[p.nome]) || {};
+        bits.push([
+          p.nome,
+          p.active ? 1 : 0,
+          p.trabalhando ? 1 : 0,
+          p.humanControl ? 1 : 0,
+          Object.prototype.hasOwnProperty.call(p, 'humanHold') ? (p.humanHold ? 1 : 0) : 'x',
+          p.configurando ? 1 : 0,
+          p.virtusOnline ? 1 : 0,
+          p.loginRequired ? 1 : 0,
+          p.banned ? 1 : 0,
+          p.marketplaceDisabled ? 1 : 0,
+          p.captchaCheckpoint ? 1 : 0,
+          p.twoFactor ? 1 : 0,
+          p.problem ? 1 : 0,
+          Number(p.issuesCount || 0) || 0,
+          p.ramMB == null ? 'x' : Math.round(Number(p.ramMB) || 0),
+          p.cpuPercent == null ? 'x' : Math.round(Number(p.cpuPercent) || 0),
+          p.numPages == null ? 'x' : Number(p.numPages) || 0,
+          Number(p.robeFrozenUntil || 0) || 0,
+          r.emExecucao ? 1 : 0,
+          r.emFila ? 1 : 0,
+          String(r.estado || ''),
+          Number(r.cooldownSec || 0) || 0
+        ].join(':'));
+      }
+      bits.push('Q' + (Array.isArray(robeQueue) ? robeQueue.join(',') : ''));
+      return bits.join('|');
+    }
     function renderListFromCache() {
       try {
+        __lastListSig = '';
         buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
       } catch {}
     }
@@ -2440,8 +2476,33 @@
     }
 
     let __reloadInflight = false;
-    let __lastStatusPaint = null;
+    const HUD_KEEP_KEY = 'conveniente_hud_last_status_v1';
+    function hudHasHold(st) {
+      return !!(st && Array.isArray(st.perfis) && st.perfis.some((p) =>
+        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
+    }
+    function loadHudKeep() {
+      try {
+        const raw = sessionStorage.getItem(HUD_KEEP_KEY);
+        if (!raw) return null;
+        const j = JSON.parse(raw);
+        return hudHasHold(j) ? j : null;
+      } catch { return null; }
+    }
+    function saveHudKeep(st) {
+      if (!hudHasHold(st)) return;
+      try {
+        sessionStorage.setItem(HUD_KEEP_KEY, JSON.stringify({
+          perfis: st.perfis,
+          robes: st.robes || {},
+          robeQueue: Array.isArray(st.robeQueue) ? st.robeQueue : [],
+          ts: Date.now()
+        }));
+      } catch {}
+    }
+    let __lastStatusPaint = loadHudKeep();
     let __lastPerfisPaint = null;
+    let __lastListSig = '';
     function fetchJsonTimeout(url, ms, init) {
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), Math.max(1000, Number(ms) || 8000));
@@ -2452,15 +2513,6 @@
         .finally(() => { try { clearTimeout(t); } catch {} });
     }
     async function safeGetStatus() {
-      try {
-        if (window.electronAPI && typeof window.electronAPI.getStatus === 'function') {
-          const raced = await Promise.race([
-            window.electronAPI.getStatus().catch(() => null),
-            new Promise((resolve) => setTimeout(() => resolve(null), 8000))
-          ]);
-          if (raced) return raced;
-        }
-      } catch {}
       return await fetchJsonTimeout('/api/status', 8000);
     }
     async function safeListPerfis() {
@@ -2601,7 +2653,10 @@
       const perfisResp = (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length)
         ? perfisRespFresh
         : __lastPerfisPaint;
-      if (stFreshUsable) __lastStatusPaint = stFresh;
+      if (stFreshUsable) {
+        __lastStatusPaint = stFresh;
+        try { saveHudKeep(stFresh); } catch {}
+      }
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
@@ -2852,7 +2907,11 @@
       lastRobesCache = robes;
       lastRobeQueueCache = robeQueue;
       lastSearchIndexCache = buildSearchIndex(lastPerfisCache, lastRobesCache);
-      buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+      const listSig = hudListSig(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+      if (listSig !== __lastListSig) {
+        __lastListSig = listSig;
+        buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+      }
       } catch (e) {
         try { console.error('[reloadPerfis] fail', e && e.stack || e); } catch {}
         try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
@@ -3459,13 +3518,9 @@
         const wantOpen = !p.active;
         setBtnLoading(btn, true, wantOpen ? 'Abrindo...' : 'Fechando...');
         const fn = wantOpen ? window.electronAPI.activate : window.electronAPI.deactivate;
-        await fn(p.nome);
-        // Espera refletir
-        await waitUntil(async () => {
-          const st = await safeGetStatus();
-          const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
-          return !!cur && (!!cur.active === wantOpen);
-        }, { timeoutMs: 60000, intervalMs: 400 });
+        const r = await fn(p.nome);
+        if (r && r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'toggle_failed');
+        p.active = wantOpen;
         reloadPerfis();
       } catch (e) {
         alert('Falha no toggle do navegador: ' + (e && e.message || e));
@@ -3834,12 +3889,8 @@
         if (!cur || !cur.active) {
           const ok = confirm(`O navegador da conta "${p.label || p.nome}" está fechado. Abrir e invocar humano agora?`);
           if (!ok) { setBtnLoading(btn, false); return; }
-          await window.electronAPI.activate(p.nome);
-          await waitUntil(async () => {
-            const s2 = await safeGetStatus();
-            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
-            return c2 && c2.active;
-          }, { timeoutMs: 60000, intervalMs: 400 });
+          const act = await window.electronAPI.activate(p.nome);
+          if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
         }
         // Se Robe estiver executando para esta conta, aguarda finalizar
         st = await safeGetStatus();
@@ -3868,21 +3919,12 @@
         let st = await safeGetStatus();
         let cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
         if (!cur || !cur.active) {
-          await window.electronAPI.activate(p.nome);
-          await waitUntil(async () => {
-            const s2 = await safeGetStatus();
-            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
-            return c2 && c2.active;
-          }, { timeoutMs: 60000, intervalMs: 400 });
-          await new Promise(r=>setTimeout(r,1000));
+          const act = await window.electronAPI.activate(p.nome);
+          if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
         }
         // Inicia Virtus/24h
-        await window.electronAPI.startWork(p.nome);
-        await waitUntil(async () => {
-          const s3 = await safeGetStatus();
-          const c3 = Array.isArray(s3 && s3.perfis) ? s3.perfis.find(x => x.nome === p.nome) : null;
-          return c3 && c3.trabalhando;
-        }, { timeoutMs: 30000, intervalMs: 400 });
+        const sw = await window.electronAPI.startWork(p.nome);
+        if (sw && sw.ok === false) throw new Error((sw && sw.error) ? String(sw.error) : 'start_work_failed');
         reloadPerfis();
       } catch (e) {
         alert('Falha ao iniciar 24h: ' + (e && e.message || e));

@@ -22,7 +22,7 @@ assert.doesNotMatch(html, /setInterval\(reloadPerfis, 5000\)/);
 
 assert.match(apiStatus, /function __scheduleStatusJournalRefresh/);
 assert.match(apiStatus, /overlayINST = snap;/);
-assert.match(apiStatus, /warningINST === 'status_journal_stale'/);
+assert.match(apiStatus, /warningINST = 'status_journal_stale'/);
 const statusGet = apiStatus.split("app.get('/api/status'")[1] || "";
 assert.ok(
   statusGet.indexOf("overlayINST = snap;") >= 0 &&
@@ -39,13 +39,15 @@ assert.match(cluster, /for \(let i = 0; i < children\.length; i\+\+\) considerId
 assert.doesNotMatch(cluster, /readdirSync\(dadosDir\)/);
 assert.match(cluster, /else if \(liveChild\) \{\s*missingIdx\.push\(i\);/);
 assert.match(cluster, /CLUSTER_STATUS_FILE_MAX_AGE_MS \|\| '5000'/);
-assert.match(cluster, /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '0'/);
+assert.match(cluster, /CLUSTER_STATUS_HUD_REFRESH_MS \|\| '5000'/);
 assert.match(cluster, /journal_stale_fallback/);
 assert.ok(cluster.includes("missingIdx.push(i)"), "stale vivo ou jornal ausente dispara RPC");
+assert.match(cluster, /applyPayload\(fb\.json, `journal\(\$\{ageSec\}s\)`, i, fb\.ageMs\)/);
+assert.match(cluster, /if \(liveChild && Number\(fb\.ageMs\) >= HUD_REFRESH_AGE_MS\)/);
 assert.match(cluster, /if \(statusAggInflight\) \{\s*return statusAggInflight;/);
 assert.doesNotMatch(apiStatus, /overlayAgeMs >= 0 && overlayAgeMs <= 250/);
-assert.match(apiStatus, /timeoutMs: 3000, fresh: true/);
-assert.match(apiStatus, /setTimeout\(\(\) => resolve\(null\), 3000\)/);
+assert.doesNotMatch(apiStatus, /timeoutMs: 3000, fresh: true/);
+assert.match(apiStatus, /Jornal HUD no disco: responde agora/);
 assert.match(apiStatus, /prevStock > 0 && !\(nextStock > 0\)/);
 
 assert.match(indexJs, /sendWorkerCommand\('get-status', \{\}, \{ timeoutMs: 4000, fresh: true \}\)/);

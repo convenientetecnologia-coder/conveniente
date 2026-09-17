@@ -2,7 +2,14 @@
 
 // Wrapper api (troca window.electronAPI por api)
 const api = {
-  getStatus:       () => fetch('/api/status').then(r => r.json()),
+  getStatus: () => {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 8000);
+    return fetch('/api/status', { signal: ac.signal })
+      .then((r) => r.json())
+      .catch(() => null)
+      .finally(() => { try { clearTimeout(t); } catch {} });
+  },
   activate:        (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method: 'POST' }).then(r => r.json()),
   deactivate:      (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method: 'POST' }).then(r => r.json()),
   configure:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST' }).then(r => r.json()),
