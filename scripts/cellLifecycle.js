@@ -85,6 +85,44 @@ function isTopologyStale() {
   }
 }
 
+function wantedCountryId() {
+  try {
+    const sc = require('./serverConfig.js');
+    const pack = (typeof sc.readCountryPackEffective === 'function')
+      ? sc.readCountryPackEffective()
+      : null;
+    const id = String((pack && pack.id) || 'br').trim().toLowerCase();
+    return id === 'us' ? 'us' : 'br';
+  } catch {
+    return 'br';
+  }
+}
+
+function savedLocaleId() {
+  try {
+    const loc = cellRegistry.read().locale;
+    return String((loc && loc.countryId) || '').trim().toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function setLocale({ countryId } = {}) {
+  const reg = cellRegistry.read();
+  const id = String(countryId || wantedCountryId() || 'br').trim().toLowerCase();
+  reg.locale = { countryId: id === 'us' ? 'us' : 'br' };
+  cellRegistry.write(reg);
+  return reg.locale;
+}
+
+function isLocaleStale() {
+  if (!cellRegistry.hasAliveCells()) return false;
+  const want = wantedCountryId();
+  const saved = savedLocaleId();
+  if (!saved) return want !== 'br';
+  return saved !== want;
+}
+
 function setStamp(stamp) {
   const reg = cellRegistry.read();
   reg.codeStamp = String(stamp || currentStamp());
@@ -462,7 +500,7 @@ function terminateCellEntriesByCmd() {
 
 function needRestart() {
   if (!cellRegistry.hasAliveCells()) return true;
-  return isStampStale() || isTopologyStale();
+  return isStampStale() || isTopologyStale() || isLocaleStale();
 }
 
 function realCellListenRows() {
@@ -555,9 +593,9 @@ function consumeBootRecycle() {
 
 function stopAllCells({ reason = 'manual' } = {}) {
   const why = String(reason || 'manual');
-  const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology|iniciar_stamp/.test(why);
+  const mustDie = /api_cells_stop|stop_workers|code_stamp|boot_hold|topology|locale|iniciar_stamp/.test(why);
   const bootFast = !mustDie && /boot_|index_ctrl_c|maestro_kill/.test(why);
-  if (mustDie || /boot_|code_stamp|topology/.test(why)) bootRecycled = true;
+  if (mustDie || /boot_|code_stamp|topology|locale/.test(why)) bootRecycled = true;
   const listen1 = mustDie ? 1500 : (bootFast ? 800 : 2000);
   const listen2 = mustDie ? 800 : (bootFast ? 400 : 800);
   const t0 = Date.now();
@@ -645,6 +683,10 @@ if (require.main === module) {
     process.stdout.write(isTopologyStale() ? '1' : '0');
     process.exit(0);
   }
+  if (arg === 'locale-stale') {
+    process.stdout.write(isLocaleStale() ? '1' : '0');
+    process.exit(0);
+  }
   if (arg === 'need-restart') {
     process.stdout.write(needRestart() ? '1' : '0');
     process.exit(0);
@@ -659,7 +701,7 @@ if (require.main === module) {
     process.stdout.write(JSON.stringify(r));
     process.exit(0);
   }
-  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|need-restart|stop|reap-chrome\n');
+  process.stderr.write('usage: cellLifecycle.js stamp|stale|topo-stale|locale-stale|need-restart|stop|reap-chrome\n');
   process.exit(2);
 }
 
@@ -668,9 +710,13 @@ module.exports = {
   savedStamp,
   isStampStale,
   isTopologyStale,
+  isLocaleStale,
+  wantedCountryId,
+  savedLocaleId,
   needRestart,
   setStamp,
   setTopology,
+  setLocale,
   forceKillPid,
   taskkillPids,
   killListenUntilFree,

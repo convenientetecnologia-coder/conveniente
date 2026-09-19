@@ -16237,6 +16237,53 @@ const handlers = {
     }
   },
 
+  async ['apply-country']({ operator } = {}) {
+    const pack = (typeof serverConfig.readCountryPackEffective === 'function')
+      ? serverConfig.readCountryPackEffective()
+      : null;
+    if (!pack || !pack.timezone) {
+      return { ok: false, error: 'country_pack_unavailable' };
+    }
+    let browsers = 0;
+    let pages = 0;
+    let failed = 0;
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+      browsers += 1;
+      try {
+        const out = await browserHelper.applyCountryLocaleToOpenBrowser(ctrl.browser, pack);
+        pages += Number(out && out.applied || 0) || 0;
+        failed += Number(out && out.failed || 0) || 0;
+      } catch (e) {
+        failed += 1;
+        try {
+          await issues.append(nome, 'mil_action', `apply_country_runtime_error ${String((e && e.message) || e).slice(0, 180)}`);
+        } catch {}
+      }
+    }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'apply_country_runtime',
+        by: String(operator || 'worker').slice(0, 180),
+        country: pack.id,
+        timezone: pack.timezone,
+        browsers,
+        pages,
+        failed
+      });
+    } catch {}
+    return {
+      ok: true,
+      country: pack.id,
+      timezone: pack.timezone,
+      navigatorLanguage: pack.navigatorLanguage,
+      browsers,
+      pages,
+      failed
+    };
+  },
+
   // ====== HANDLER apply-city - aplica coordenadas da nova cidade em runtime ======
   async ['apply-city']({ nome }) {
     return lockProfileAction(nome, async () => {

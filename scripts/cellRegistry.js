@@ -18,6 +18,7 @@ function empty() {
     basePort: BASE_PORT,
     codeStamp: '',
     topology: null,
+    locale: null,
     cells: []
   };
 }

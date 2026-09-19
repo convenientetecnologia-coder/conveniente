@@ -94,7 +94,9 @@ module.exports = (app, workerClient, fileStore) => {
       (p.networkRotation && typeof p.networkRotation === 'object') ||
       (p.dailyWindow && typeof p.dailyWindow === 'object') ||
       (p.marketplaceRenew && typeof p.marketplaceRenew === 'object') ||
-      (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === 'object')
+      (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === 'object') ||
+      (p.country && (typeof p.country === 'object' || typeof p.country === 'string')) ||
+      (p.pais && (typeof p.pais === 'object' || typeof p.pais === 'string'))
     );
   };
   const marketplaceRenewConfigChanged = (prev, next) => {
@@ -220,6 +222,9 @@ module.exports = (app, workerClient, fileStore) => {
           totalMemMB,
           itemTitlesPacks: (typeof serverConfig.listItemTitlesPacks === "function")
             ? serverConfig.listItemTitlesPacks()
+            : [],
+          countryPacks: (typeof serverConfig.listCountryPacks === "function")
+            ? serverConfig.listCountryPacks()
             : []
         }
       });
@@ -246,6 +251,7 @@ module.exports = (app, workerClient, fileStore) => {
       const previousVirtusEngine = readDesiredVirtusEngine();
       let engineChanged = false;
       let renewReplanResult = null;
+      let countryAlignResult = null;
       let workerRamDivisorChanged = false;
       let previousWorkerRamDivisorGb = null;
       const hasConfigFields = hasServerConfigFields(payload);
@@ -269,6 +275,9 @@ module.exports = (app, workerClient, fileStore) => {
         ) || 16;
         const previousTc = (previousCfg && previousCfg.terminalAccountCleanup) ? previousCfg.terminalAccountCleanup : null;
         const previousRenew = (previousCfg && previousCfg.marketplaceRenew) ? previousCfg.marketplaceRenew : null;
+        const previousCountryId = String(
+          (previousCfg && previousCfg.country && previousCfg.country.id) || 'br'
+        ).trim().toLowerCase() || 'br';
         const wr = serverConfig.writeServerConfigAtomic({ payload, updatedBy: operator });
         if (!wr || wr.ok !== true) return res.json({ ok: false, error: wr && wr.error ? wr.error : 'write_failed', details: wr && wr.details ? wr.details : undefined });
         const nextWorkerRamDivisorGb = Number(
@@ -282,6 +291,94 @@ module.exports = (app, workerClient, fileStore) => {
           workerTopologyRestartRequired: workerRamDivisorChanged,
           workerTopologyApply: workerRamDivisorChanged ? 'next_index_restart' : 'unchanged'
         };
+        try {
+          const pack = (typeof serverConfig.readCountryPackEffective === 'function')
+            ? serverConfig.readCountryPackEffective()
+            : null;
+          if (pack && pack.id && pack.timezone) {
+            const perfis = (typeof fileStore.loadPerfisJson === 'function')
+              ? (fileStore.loadPerfisJson() || [])
+              : [];
+            const stats = {
+              country: pack.id,
+              timezone: pack.timezone,
+              previousCountryId,
+              total: 0,
+              updated: 0,
+              unchanged: 0,
+              failed: 0,
+              errors: []
+            };
+            for (const row of (Array.isArray(perfis) ? perfis : [])) {
+              const nome = String(row && row.nome || '').trim();
+              if (!nome) continue;
+              stats.total += 1;
+              try {
+                const cur = await manifestStore.read(nome);
+                const anti = (cur && cur.antiDetect && typeof cur.antiDetect === 'object') ? cur.antiDetect : {};
+                const langs = Array.isArray(anti.navigatorLanguages) ? anti.navigatorLanguages : [];
+                const langsSame = langs.length === pack.navigatorLanguages.length
+                  && langs.every((v, i) => String(v || '') === String(pack.navigatorLanguages[i] || ''));
+                if (
+                  String(anti.country || '') === pack.id &&
+                  String(anti.timezone || '') === pack.timezone &&
+                  String(anti.navigatorLanguage || '') === pack.navigatorLanguage &&
+                  String(anti.acceptLanguage || '') === pack.acceptLanguage &&
+                  langsSame
+                ) {
+                  stats.unchanged += 1;
+                  continue;
+                }
+                await manifestStore.update(nome, (man) => {
+                  const next = Object.assign({}, man || {});
+                  next.antiDetect = Object.assign({}, next.antiDetect || {}, {
+                    country: pack.id,
+                    timezone: pack.timezone,
+                    navigatorLanguage: pack.navigatorLanguage,
+                    navigatorLanguages: pack.navigatorLanguages.slice(),
+                    acceptLanguage: pack.acceptLanguage,
+                    countryAlignedAt: Date.now()
+                  });
+                  return next;
+                });
+                stats.updated += 1;
+              } catch (eAlign) {
+                stats.failed += 1;
+                if (stats.errors.length < 20) {
+                  stats.errors.push({
+                    nome,
+                    error: String((eAlign && eAlign.message) || eAlign || 'align_failed').slice(0, 180)
+                  });
+                }
+              }
+            }
+            countryAlignResult = stats;
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'server_config_country_aligned',
+                by: operator,
+                country: pack.id,
+                timezone: pack.timezone,
+                previousCountryId,
+                total: stats.total,
+                updated: stats.updated,
+                unchanged: stats.unchanged,
+                failed: stats.failed
+              });
+            } catch {}
+          }
+        } catch (eCountry) {
+          countryAlignResult = {
+            ok: false,
+            error: String((eCountry && eCountry.message) || eCountry || 'country_align_failed')
+          };
+          try {
+            logger.warn('[SERVER_CONFIG] falha ao alinhar país nas contas', {
+              error: (eCountry && eCountry.message) || String(eCountry)
+            });
+          } catch {}
+        }
         try {
           const nextTc = (wr.saved && wr.saved.terminalAccountCleanup)
             ? wr.saved.terminalAccountCleanup
@@ -390,7 +487,9 @@ module.exports = (app, workerClient, fileStore) => {
           previousWorkerRamDivisorGb,
           workerRamDivisorChanged,
           workerTopologyApply: workerRamDivisorChanged ? 'next_index_restart' : 'unchanged',
-          applyNowRequested: applyNow
+          applyNowRequested: applyNow,
+          country: effective && effective.country ? effective.country.id : null,
+          timezone: effective && effective.country ? effective.country.timezone : null
         });
       } catch {}
       const tryWarmupV2 = async () => {
@@ -447,6 +546,7 @@ module.exports = (app, workerClient, fileStore) => {
           config: effectiveWithVirtusEngine,
           applyNowResult: result || (applyNow ? { ok: true, queued: true } : null),
           renewReplanResult: renewReplanResult || null,
+          countryAlignResult: countryAlignResult || null,
           robeV2WarmupResult: { queued: true },
           engineRolloverResult: shouldEngineRollover ? { queued: true } : null,
           sidecarQueued: true
@@ -466,6 +566,14 @@ module.exports = (app, workerClient, fileStore) => {
               }
               try { await tryWarmupV2(); } catch {}
               try { await tryEngineRollover(); } catch {}
+              try {
+                if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
+                  await workerClient.sendWorkerCommand('apply-country', {
+                    operator,
+                    reason: 'ui_server_config_save'
+                  }, { timeoutMs: 60000 });
+                }
+              } catch {}
               if (applyNow) {
                 try {
                   if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {

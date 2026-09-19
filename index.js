@@ -4778,8 +4778,10 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 function wipeStaleCellsBeforeListen() {
   let codeStale = false;
+  let localeStale = false;
   let holdStopWorkers = false;
   try { codeStale = require('./scripts/cellLifecycle.js').isStampStale(); } catch {}
+  try { localeStale = require('./scripts/cellLifecycle.js').isLocaleStale(); } catch {}
   try {
     if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
       require('./scripts/bootIntent.js').setHumanHold({ reason: 'human_iniciar', by: 'index_boot' });
@@ -4789,19 +4791,23 @@ function wipeStaleCellsBeforeListen() {
     const hold = require('./scripts/bootIntent.js').readHumanHold();
     holdStopWorkers = !!(hold && hold.active && require('./scripts/bootIntent.js').isStopWorkersHold(hold.reason));
   } catch {}
-  if (codeStale) {
+  if (codeStale || localeStale) {
     try {
       if (String(process.env.CONVENIENTE_BOOT_SOURCE || '').trim().toLowerCase() === 'iniciar') {
         require('./scripts/bootIntent.js').setHumanHold({ reason: 'human_iniciar', by: 'index_boot' });
       }
     } catch {}
     try {
-      logger.info('[BOOT] Código novo: mata células antes do painel.');
-      require('./scripts/cellLifecycle.js').stopAllCells({ reason: 'boot_code_stamp_stale' });
+      logger.info(codeStale
+        ? '[BOOT] Código novo: mata células antes do painel.'
+        : '[BOOT] País novo: mata células antes do painel para o Chrome nascer no fuso/idioma certos.');
+      require('./scripts/cellLifecycle.js').stopAllCells({
+        reason: codeStale ? 'boot_code_stamp_stale' : 'boot_locale_mismatch'
+      });
     } catch (e) {
       try { logger.warn('[BOOT] recycle antes do painel falhou', { error: (e && e.message) || String(e) }); } catch {}
     }
-    return { wiped: true, codeStale: true, holdStopWorkers };
+    return { wiped: true, codeStale: !!codeStale, localeStale: !!localeStale, holdStopWorkers };
   }
   if (holdStopWorkers) {
     try {

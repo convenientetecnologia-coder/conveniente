@@ -15,6 +15,68 @@ const ITEM_TITLES_PACKS = Object.freeze({
   titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve" }
 });
 
+const COUNTRY_ID_DEFAULT = "br";
+const COUNTRY_PACKS = Object.freeze({
+  br: Object.freeze({
+    id: "br",
+    label: "Brasil",
+    timezone: "America/Sao_Paulo",
+    navigatorLanguage: "pt-BR",
+    navigatorLanguages: Object.freeze(["pt-BR", "pt", "en-US", "en"]),
+    acceptLanguage: "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+  }),
+  us: Object.freeze({
+    id: "us",
+    label: "Estados Unidos",
+    timezone: "America/New_York",
+    navigatorLanguage: "en-US",
+    navigatorLanguages: Object.freeze(["en-US", "en"]),
+    acceptLanguage: "en-US,en;q=0.9"
+  })
+});
+
+function isCountryId(id) {
+  return Object.prototype.hasOwnProperty.call(COUNTRY_PACKS, String(id || "").trim().toLowerCase());
+}
+
+function normalizeCountryId(id) {
+  const key = String(id || "").trim().toLowerCase();
+  if (key === "eua" || key === "usa") return "us";
+  if (key === "brasil" || key === "brazil") return "br";
+  return isCountryId(key) ? key : COUNTRY_ID_DEFAULT;
+}
+
+function resolveCountryPack(id) {
+  const pack = COUNTRY_PACKS[normalizeCountryId(id)] || COUNTRY_PACKS[COUNTRY_ID_DEFAULT];
+  return {
+    id: pack.id,
+    label: pack.label,
+    timezone: pack.timezone,
+    navigatorLanguage: pack.navigatorLanguage,
+    navigatorLanguages: pack.navigatorLanguages.slice(),
+    acceptLanguage: pack.acceptLanguage
+  };
+}
+
+function extractCountryIdFromUnknown(input) {
+  if (input == null) return null;
+  if (typeof input === "string") return input;
+  if (typeof input === "object" && input.id != null) return input.id;
+  return null;
+}
+
+function listCountryPacks() {
+  return Object.keys(COUNTRY_PACKS).map((id) => {
+    const p = resolveCountryPack(id);
+    return {
+      id: p.id,
+      label: p.label,
+      timezone: p.timezone,
+      navigatorLanguage: p.navigatorLanguage
+    };
+  });
+}
+
 function isItemTitlesPackId(id) {
   return Object.prototype.hasOwnProperty.call(ITEM_TITLES_PACKS, String(id || "").trim());
 }
@@ -45,6 +107,9 @@ const DEFAULTS = Object.freeze({
   version: CONFIG_VERSION,
   updatedAt: 0,
   updatedBy: "default",
+  country: {
+    id: COUNTRY_ID_DEFAULT
+  },
   capacity: {
     mode: "per_8gb",
     accountsPer8Gb: 15,
@@ -315,6 +380,12 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     ? r.terminalAccountCleanup
     : {};
   const logRaw = (r.logging && typeof r.logging === "object") ? r.logging : {};
+  const countryRaw = (r.country && typeof r.country === "object") ? r.country : {};
+  const countryPack = resolveCountryPack(
+    extractCountryIdFromUnknown(countryRaw.id != null ? countryRaw : r.country) ||
+    extractCountryIdFromUnknown(r.pais) ||
+    COUNTRY_ID_DEFAULT
+  );
   const v2 = (robe.v2Tuning && typeof robe.v2Tuning === "object") ? robe.v2Tuning : {};
 
   let mode = String(cap.mode || DEFAULTS.capacity.mode).trim().toLowerCase();
@@ -572,6 +643,14 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     })(),
     logging: {
       silentConsole: logRaw.silentConsole !== false
+    },
+    country: {
+      id: countryPack.id,
+      label: countryPack.label,
+      timezone: countryPack.timezone,
+      navigatorLanguage: countryPack.navigatorLanguage,
+      navigatorLanguages: countryPack.navigatorLanguages.slice(),
+      acceptLanguage: countryPack.acceptLanguage
     }
   };
 
@@ -599,7 +678,14 @@ function validateServerConfigPayload(payload) {
     return { ok: false, error: "validation_failed", details: ["logging_invalido"] };
   }
   const log = (p.logging && typeof p.logging === "object") ? p.logging : null;
-  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean && !log) {
+  const countryIn = (() => {
+    if (p.country && typeof p.country === "object") return p.country;
+    if (typeof p.country === "string") return { id: p.country };
+    if (p.pais && typeof p.pais === "object") return p.pais;
+    if (typeof p.pais === "string") return { id: p.pais };
+    return null;
+  })();
+  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean && !log && !countryIn) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -800,6 +886,18 @@ function validateServerConfigPayload(payload) {
       errors.push("logging.silentConsole_invalido");
     }
   }
+  if (countryIn) {
+    const cid = extractCountryIdFromUnknown(countryIn);
+    if (cid == null || String(cid).trim() === "") {
+      errors.push("country.id_invalido");
+    } else {
+      const key = String(cid).trim().toLowerCase();
+      const aliased = (key === "eua" || key === "usa")
+        ? "us"
+        : ((key === "brasil" || key === "brazil") ? "br" : key);
+      if (!isCountryId(aliased)) errors.push("country.id_invalido");
+    }
+  }
   if (errors.length) return { ok: false, error: "validation_failed", details: errors };
 
   const merged = {
@@ -824,6 +922,13 @@ function validateServerConfigPayload(payload) {
       ...DEFAULTS.logging,
       ...((readServerConfigRaw() || {}).logging || {}),
       ...(log || {})
+    },
+    country: {
+      ...DEFAULTS.country,
+      ...((readServerConfigRaw() || {}).country && typeof (readServerConfigRaw() || {}).country === "object"
+        ? (readServerConfigRaw() || {}).country
+        : {}),
+      ...(countryIn || {})
     }
   };
   const normalized = buildNormalizedConfig(merged, { source: "file" });
@@ -967,6 +1072,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
     },
     logging: {
       silentConsole: v.normalized.logging.silentConsole !== false
+    },
+    country: {
+      id: v.normalized.country.id
     }
   };
   try {
@@ -984,20 +1092,36 @@ function readServerConfigEffective({ totalMemMB = getTotalMemMB() } = {}) {
   return buildNormalizedConfig(base, { totalMemMB, source });
 }
 
+function readCountryPackEffective() {
+  try {
+    const cfg = readServerConfigEffective({});
+    return resolveCountryPack(cfg && cfg.country && cfg.country.id);
+  } catch {
+    return resolveCountryPack(COUNTRY_ID_DEFAULT);
+  }
+}
+
 module.exports = {
   CONFIG_PATH,
   DEFAULTS,
   ITEM_TITLES_PACKS,
   ITEM_TITLES_PACK_DEFAULT,
+  COUNTRY_ID_DEFAULT,
+  COUNTRY_PACKS,
   getTotalMemMB,
   readServerConfigRaw,
   readServerConfigEffective,
+  readCountryPackEffective,
   validateServerConfigPayload,
   writeServerConfigAtomic,
   calcMaxAccountsEffective,
   isItemTitlesPackId,
   normalizeItemTitlesPack,
   listItemTitlesPacks,
-  resolveItemTitlesPath
+  resolveItemTitlesPath,
+  isCountryId,
+  normalizeCountryId,
+  resolveCountryPack,
+  listCountryPacks
 };
 

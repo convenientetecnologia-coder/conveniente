@@ -106,6 +106,18 @@ async function createCluster() {
     recycledThisBoot = true;
     aliveAtBoot = [];
   }
+  if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isLocaleStale()) {
+    try {
+      logger.warn('[CLUSTER] país novo (BR/US): reciclando células para o Chrome nascer no fuso/idioma certos', {
+        saved: cellLifecycle.savedLocaleId(),
+        want: cellLifecycle.wantedCountryId(),
+        alive: aliveAtBoot.length
+      });
+    } catch {}
+    try { cellLifecycle.stopAllCells({ reason: 'locale_mismatch' }); } catch {}
+    recycledThisBoot = true;
+    aliveAtBoot = [];
+  }
   if (!recycledThisBoot && cellLifecycle.isStampStale() && cellLifecycle.listCellEntryPids().length > 0) {
     try {
       logger.warn('[CLUSTER] código novo e porta de célula ainda ocupada: mata o listener, não spawna em cima', {
@@ -120,7 +132,7 @@ async function createCluster() {
   }
   try { cellRegistry.clearDead(); } catch {}
   if (aliveAtBoot.length > 0) aliveAtBoot = cellRegistry.listAlive();
-  const adopting = !recycledThisBoot && !cellLifecycle.isStampStale() && aliveAtBoot.length > 0;
+  const adopting = !recycledThisBoot && !cellLifecycle.isStampStale() && !cellLifecycle.isLocaleStale() && aliveAtBoot.length > 0;
   if (adopting) {
     const maxIdx = Math.max(
       plan.nodes - 1,
@@ -721,7 +733,7 @@ async function createCluster() {
       child.shard.forEach((n) => { route[n] = idx; });
     }
 
-    if (!replace && !recycledThisBoot && !cellLifecycle.isStampStale()) {
+    if (!replace && !recycledThisBoot && !cellLifecycle.isStampStale() && !cellLifecycle.isLocaleStale()) {
       if (await adoptIfListening(child, idx, 'port_live')) return child;
       if (aliveRow && cellRegistry.pidAlive(aliveRow.pid)) {
         const liveOwner = cellRegistry.tcpListenPid(child.port);
@@ -966,6 +978,7 @@ async function createCluster() {
       nodes: children.length
     });
   } catch {}
+  try { cellLifecycle.setLocale({ countryId: cellLifecycle.wantedCountryId() }); } catch {}
 
   try {
     const watch = setInterval(() => {
@@ -1250,6 +1263,31 @@ async function createCluster() {
           merged.failed += Number(r.failed || 0) || 0;
           if (Array.isArray(r.changes)) merged.changes.push(...r.changes);
           if (Array.isArray(r.failures)) merged.failures.push(...r.failures);
+        }
+        if (!allOk) merged.error = 'partial_fail';
+        return merged;
+      }
+      if (type === 'apply-country') {
+        const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
+        const allOk = results.every((r) => r && r.ok !== false);
+        const merged = {
+          ok: allOk,
+          country: null,
+          timezone: null,
+          navigatorLanguage: null,
+          browsers: 0,
+          pages: 0,
+          failed: 0,
+          results
+        };
+        for (const r of results) {
+          if (!r) continue;
+          if (!merged.country && r.country) merged.country = r.country;
+          if (!merged.timezone && r.timezone) merged.timezone = r.timezone;
+          if (!merged.navigatorLanguage && r.navigatorLanguage) merged.navigatorLanguage = r.navigatorLanguage;
+          merged.browsers += Number(r.browsers || 0) || 0;
+          merged.pages += Number(r.pages || 0) || 0;
+          merged.failed += Number(r.failed || 0) || 0;
         }
         if (!allOk) merged.error = 'partial_fail';
         return merged;

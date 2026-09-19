@@ -94,6 +94,7 @@ function buildConfigMirror() {
     dailyWindow: effective.dailyWindow || null,
     marketplaceRenew: effective.marketplaceRenew || null,
     terminalAccountCleanup: effective.terminalAccountCleanup || null,
+    country: effective.country || null,
     virtusEngine,
     totalMemMB: Number.isFinite(Number(totalMemMB)) ? Number(totalMemMB) : null
   };

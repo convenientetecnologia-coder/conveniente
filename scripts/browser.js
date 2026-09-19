@@ -12,6 +12,7 @@ const gptFallback = require('./gptFallback.js');
 const { readGroqConfig } = require('./groqConfig.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
+const serverConfig = require('./serverConfig.js');
 const fileStore = require('./fileStore.js');
 const glassViewer = require('./glassViewer.js');
 const chromeHeapFaxina = require('./chromeHeapFaxina.js');
@@ -270,21 +271,26 @@ async function injectCookies(page, cookies) {
 const manifestStore = require('./manifestStore.js');
 const cohortLedgerPath = path.join(__dirname, '..', 'dados', 'cohort_ledger.json');
 
-const COUNTRY_LOCALE_PROFILES = {
-  br: {
-    timezones: ['America/Sao_Paulo', 'America/Fortaleza', 'America/Manaus', 'America/Belem'],
-    languages: [
-      { navigatorLanguage: 'pt-BR', navigatorLanguages: ['pt-BR', 'pt', 'en-US', 'en'], acceptLanguage: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' },
-      { navigatorLanguage: 'pt-BR', navigatorLanguages: ['pt-BR', 'pt', 'en'], acceptLanguage: 'pt-BR,pt;q=0.9,en;q=0.7' }
-    ]
-  },
-  us: {
-    timezones: ['America/New_York', 'America/Chicago', 'America/Los_Angeles'],
-    languages: [
-      { navigatorLanguage: 'en-US', navigatorLanguages: ['en-US', 'en'], acceptLanguage: 'en-US,en;q=0.9' }
-    ]
-  }
-};
+function resolveServerCountryLocale() {
+  const pack = (typeof serverConfig.readCountryPackEffective === 'function')
+    ? serverConfig.readCountryPackEffective()
+    : {
+      id: 'br',
+      timezone: 'America/Sao_Paulo',
+      navigatorLanguage: 'pt-BR',
+      navigatorLanguages: ['pt-BR', 'pt', 'en-US', 'en'],
+      acceptLanguage: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    };
+  return {
+    country: String((pack && pack.id) || 'br'),
+    timezone: String((pack && pack.timezone) || 'America/Sao_Paulo'),
+    navigatorLanguage: String((pack && pack.navigatorLanguage) || 'pt-BR'),
+    navigatorLanguages: Array.isArray(pack && pack.navigatorLanguages)
+      ? pack.navigatorLanguages.map((x) => String(x || '')).filter(Boolean)
+      : ['pt-BR', 'pt', 'en-US', 'en'],
+    acceptLanguage: String((pack && pack.acceptLanguage) || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7')
+  };
+}
 
 const FINGERPRINT_COHORTS = [
   {
@@ -423,18 +429,8 @@ function pickBySeed(arr, seed) {
   return arr[idx];
 }
 
-function resolveLocaleByCountry({ country, seed }) {
-  const cc = String(country || 'br').trim().toLowerCase();
-  const profile = COUNTRY_LOCALE_PROFILES[cc] || COUNTRY_LOCALE_PROFILES.br;
-  const tz = pickBySeed(profile.timezones, seed) || 'America/Sao_Paulo';
-  const langPack = pickBySeed(profile.languages, seed >> 1) || profile.languages[0];
-  return {
-    country: cc,
-    timezone: String(tz || 'America/Sao_Paulo'),
-    navigatorLanguage: String(langPack.navigatorLanguage || 'pt-BR'),
-    navigatorLanguages: Array.isArray(langPack.navigatorLanguages) ? langPack.navigatorLanguages.slice() : ['pt-BR', 'pt', 'en-US', 'en'],
-    acceptLanguage: String(langPack.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7')
-  };
+function resolveLocaleByCountry() {
+  return resolveServerCountryLocale();
 }
 
 function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
@@ -520,7 +516,7 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
     seed = hashToUInt32(`${nome}|${m0.uaPresetId || ''}|${cUser || ''}|${m0.createdAt || ''}`);
   }
   if (!seed) seed = hashToUInt32(nome || 'profile');
-  const locale = resolveLocaleByCountry({ country: proxyCountry || anti.country || 'br', seed });
+  const locale = resolveLocaleByCountry();
   let forcedCohortId = '';
   try {
     const byCt = gatewayProxy.resolveCohortForProfile({ profileName: nome, manifest: m0 });
@@ -577,6 +573,9 @@ function resolveAccountWindowBounds(manifest) {
 function installAccountFingerprintHooks(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
   try {
+    window.__convenienteFpCfg = Object.assign({}, window.__convenienteFpCfg || {}, cfg);
+  } catch {}
+  try {
     if (window.__convenienteFpHooks === true) return;
     window.__convenienteFpHooks = true;
   } catch {}
@@ -628,8 +627,18 @@ function installAccountFingerprintHooks(cfg) {
     } catch {}
   };
 
-  safeDefine(navigator, 'language', () => cfg.navigatorLanguage);
-  safeDefine(navigator, 'languages', () => (cfg.navigatorLanguages || []).slice());
+  const liveCfg = () => {
+    try {
+      return (window.__convenienteFpCfg && typeof window.__convenienteFpCfg === 'object')
+        ? window.__convenienteFpCfg
+        : cfg;
+    } catch {
+      return cfg;
+    }
+  };
+
+  safeDefine(navigator, 'language', () => liveCfg().navigatorLanguage);
+  safeDefine(navigator, 'languages', () => (liveCfg().navigatorLanguages || []).slice());
   safeDefine(navigator, 'platform', () => 'Win32');
   safeDefine(navigator, 'webdriver', () => undefined);
   safeDefine(navigator, 'deviceMemory', () => cfg.deviceMemory);
@@ -642,7 +651,8 @@ function installAccountFingerprintHooks(cfg) {
   if (typeof ro === 'function') {
     Intl.DateTimeFormat.prototype.resolvedOptions = function () {
       const out = ro.apply(this, arguments);
-      return Object.assign({}, out, { timeZone: cfg.timezone, locale: cfg.navigatorLanguage });
+      const c = liveCfg();
+      return Object.assign({}, out, { timeZone: c.timezone, locale: c.navigatorLanguage });
     };
   }
 
@@ -973,9 +983,10 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- IDIOMA E REGION ---
-  // ATENÇÃO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
-  const patchLang = process.env.BROWSER_LANG || antiState.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
-  const patchTz = process.env.BROWSER_TZ || antiState.timezone || 'America/Sao_Paulo';
+  // Dono: Config Servidor → País. Env BROWSER_LANG/BROWSER_TZ não sobrescrevem.
+  const localeFallback = resolveServerCountryLocale();
+  const patchLang = antiState.acceptLanguage || localeFallback.acceptLanguage;
+  const patchTz = antiState.timezone || localeFallback.timezone;
   await page.setExtraHTTPHeaders({ 'accept-language': patchLang });
   await page.emulateTimezone(patchTz);
 
@@ -1983,9 +1994,17 @@ function writeJsonAtomic(file, obj) {
  * - Em "Local State": exited_cleanly=true
  * - Janela: só maximized. Sem tamanho/posição do preset (dance da moldura).
  */
-function ensureChromeProfilePreferences(userDataDir) {
+function ensureChromeProfilePreferences(userDataDir, locale) {
   try {
     if (!userDataDir) return;
+    const pack = (locale && typeof locale === 'object') ? locale : resolveServerCountryLocale();
+    const langs = Array.isArray(pack.navigatorLanguages)
+      ? pack.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+    const acceptList = langs.length
+      ? langs.join(',')
+      : String(pack.navigatorLanguage || 'pt-BR');
+    const appLocale = String(pack.navigatorLanguage || 'pt-BR');
 
     // Default/Preferences
     const defaultDir = path.join(userDataDir, 'Default');
@@ -2000,12 +2019,17 @@ function ensureChromeProfilePreferences(userDataDir) {
     prefs.session.startup_urls = [];
     prefs.browser = prefs.browser || {};
     prefs.browser.window_placement = { maximized: true };
+    prefs.intl = prefs.intl || {};
+    prefs.intl.accept_languages = acceptList;
+    prefs.intl.selected_languages = acceptList;
     writeJsonAtomic(prefsPath, prefs);
 
     // Local State
     const localStatePath = path.join(userDataDir, 'Local State');
     const ls = readJsonSafe(localStatePath, {}) || {};
     ls.exited_cleanly = true;
+    ls.intl = ls.intl || {};
+    ls.intl.app_locale = appLocale;
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
@@ -2327,8 +2351,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     ensureUserDataDirUnderChrome(manifest);
     const userDataDir = manifest.userDataDir;
     const accountNome = String((manifest && manifest.nome) || nome || '').trim();
+    const launchFallbackLocale = resolveServerCountryLocale();
     let launchAntiState = null;
     try { launchAntiState = await syncStealthFromManifest(accountNome, manifest); } catch {}
+    const launchLocale = launchAntiState || launchFallbackLocale;
 
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
       logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
@@ -2340,7 +2366,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
     try { clearChromeSessionRestore(userDataDir); } catch {}
-    ensureChromeProfilePreferences(userDataDir);
+    ensureChromeProfilePreferences(userDataDir, launchLocale);
 
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
@@ -2350,7 +2376,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY!
-    const launchLang = String((launchAntiState && launchAntiState.navigatorLanguage) || 'pt-BR');
+    const launchLang = String(
+      (launchLocale && launchLocale.navigatorLanguage) ||
+      launchFallbackLocale.navigatorLanguage ||
+      'pt-BR'
+    );
     const launchArgs = [
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
@@ -8098,6 +8128,97 @@ async function detectAccountSuspended(page) {
   return { banned: false };
 }
 
+function applyCountryLocaleDocumentHooks(p) {
+  if (!p || typeof p !== 'object') return;
+  try {
+    window.__convenienteFpCfg = Object.assign({}, window.__convenienteFpCfg || {}, {
+      timezone: p.timezone,
+      navigatorLanguage: p.navigatorLanguage,
+      navigatorLanguages: p.navigatorLanguages
+    });
+  } catch {}
+  try {
+    Object.defineProperty(navigator, 'language', {
+      get: () => {
+        try {
+          if (window.__convenienteFpCfg && window.__convenienteFpCfg.navigatorLanguage) {
+            return window.__convenienteFpCfg.navigatorLanguage;
+          }
+        } catch {}
+        return p.navigatorLanguage;
+      },
+      configurable: true
+    });
+    Object.defineProperty(navigator, 'languages', {
+      get: () => {
+        try {
+          const langs = window.__convenienteFpCfg && window.__convenienteFpCfg.navigatorLanguages;
+          if (Array.isArray(langs) && langs.length) return langs.slice();
+        } catch {}
+        return (p.navigatorLanguages || []).slice();
+      },
+      configurable: true
+    });
+  } catch {}
+  try {
+    const proto = Intl.DateTimeFormat.prototype;
+    if (!window.__convenienteTzOrig && typeof proto.resolvedOptions === 'function') {
+      window.__convenienteTzOrig = proto.resolvedOptions;
+    }
+    const orig = window.__convenienteTzOrig || proto.resolvedOptions;
+    proto.resolvedOptions = function () {
+      const out = orig.apply(this, arguments);
+      let tz = p.timezone;
+      let loc = p.navigatorLanguage;
+      try {
+        if (window.__convenienteFpCfg) {
+          if (window.__convenienteFpCfg.timezone) tz = window.__convenienteFpCfg.timezone;
+          if (window.__convenienteFpCfg.navigatorLanguage) loc = window.__convenienteFpCfg.navigatorLanguage;
+        }
+      } catch {}
+      return Object.assign({}, out, { timeZone: tz, locale: loc });
+    };
+  } catch {}
+}
+
+async function applyCountryLocaleToPage(page, pack) {
+  const locale = pack && typeof pack === 'object' ? pack : resolveServerCountryLocale();
+  const timezone = String(locale.timezone || 'America/Sao_Paulo');
+  const navigatorLanguage = String(locale.navigatorLanguage || 'pt-BR');
+  const navigatorLanguages = Array.isArray(locale.navigatorLanguages)
+    ? locale.navigatorLanguages.map((x) => String(x || '')).filter(Boolean)
+    : [navigatorLanguage];
+  const acceptLanguage = String(locale.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7');
+  if (!page) throw new Error('apply_country_no_page');
+  if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) {
+    throw new Error('apply_country_page_closed');
+  }
+  await page.emulateTimezone(timezone);
+  await page.setExtraHTTPHeaders({ 'accept-language': acceptLanguage });
+  const payload = { timezone, navigatorLanguage, navigatorLanguages };
+  // Sem isso, o hook velho do patchPage volta no próximo reload da mesma aba.
+  await page.evaluateOnNewDocument(applyCountryLocaleDocumentHooks, payload);
+  await page.evaluate(applyCountryLocaleDocumentHooks, payload);
+  return { ok: true, timezone, navigatorLanguage, acceptLanguage };
+}
+
+async function applyCountryLocaleToOpenBrowser(browser, pack) {
+  const locale = pack && typeof pack === 'object' ? pack : resolveServerCountryLocale();
+  syncStealthVoiceForAccount({ languages: locale.navigatorLanguages });
+  const pages = await (browser && browser.pages ? browser.pages() : Promise.resolve([])).catch(() => []);
+  let applied = 0;
+  let failed = 0;
+  for (const page of (pages || [])) {
+    try {
+      await applyCountryLocaleToPage(page, locale);
+      applied++;
+    } catch {
+      failed++;
+    }
+  }
+  return { ok: true, applied, failed, country: locale.country || locale.id || null };
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -8109,6 +8230,9 @@ module.exports = {
   newPageDaConta,
   bindAccountIdentity,
   resolvePatchCoordsForProfile,
+  applyCountryLocaleToPage,
+  applyCountryLocaleToOpenBrowser,
+  resolveServerCountryLocale,
   injectCookies,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)

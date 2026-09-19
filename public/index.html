@@ -1280,6 +1280,7 @@
         <div id="serverCfgInfo" class="pill info" style="margin-bottom:10px;"><span class="dot"></span>Carregando configuração...</div>
         <div class="srv-cfg-tabs" role="tablist">
           <button type="button" class="srv-cfg-tab active" data-srv-cfg-tab="servidor">Servidor</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="pais">País</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="rede">Rede</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="robe">Robe</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="virtus">Virtus</button>
@@ -1376,6 +1377,17 @@
               </label>
             </div>
             <div class="muted" style="margin-top:6px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia só os tipos marcados. Não afeta login/AYMH/identity selfie.</div>
+          </div>
+        </div>
+
+        <div class="srv-cfg-panel" data-srv-cfg-panel="pais">
+          <div class="form-row">
+            <label>País deste servidor</label>
+            <select id="srvCountryId">
+              <option value="br">Brasil — horário de Brasília</option>
+              <option value="us">Estados Unidos — relógio do Leste</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Um relógio e um idioma para todas as contas deste servidor. Brasil = <code>America/Sao_Paulo</code> + português. EUA = <code>America/New_York</code> + inglês. A cidade da conta continua sendo só o GPS. Proxy é só o IP. Salvar grava o país. Depois: Iniciar Sistema (ou Ctrl+C + Iniciar) — as células morrem e o Chrome nasce de novo no país certo. Sem esse restart, navegador já aberto pode ficar com o idioma velho do processo.</div>
           </div>
         </div>
 
@@ -1541,6 +1553,7 @@
       let workerDivisorSupported = false;
       const workModeEl = box.querySelector('#srvRobeWorkMode');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
+      const countryIdEl = box.querySelector('#srvCountryId');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
       const photoPolicyEl = box.querySelector('#srvPhotoDeletePolicy');
       const globalCitiesFilterEl = box.querySelector('#srvGlobalCitiesFilter');
@@ -1740,6 +1753,10 @@
         const wm = String(robe.workMode || 'v3_pmg');
         workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
+        if (countryIdEl) {
+          const cid = String((cfg.country && cfg.country.id) || 'br').trim().toLowerCase();
+          countryIdEl.value = cid === 'us' ? 'us' : 'br';
+        }
         if (itemTitlesPackEl) {
           const pack = String(robe.itemTitlesPack || 'titulos');
           const hasOpt = Array.from(itemTitlesPackEl.options || []).some((o) => String(o.value) === pack);
@@ -2106,6 +2123,9 @@
                 id_virtus: !!(box.querySelector('#srvTcKindIdVirtus') && box.querySelector('#srvTcKindIdVirtus').checked)
               }
             },
+            country: {
+              id: String((countryIdEl && countryIdEl.value) || 'br') === 'us' ? 'us' : 'br'
+            },
             robe: {
               cooldownMinMinutes: cooldownMin,
               cooldownMaxMinutes: cooldownMax,
@@ -2142,7 +2162,14 @@
             : '';
           await showSystemMessageModal({
             title: (renewReplanFailed || partialFailure) ? 'Configuração salva com alerta' : 'Configuração salva',
-            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + workerRestartMsg + renewReplanMsg + partialFailureMsg,
+            message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + workerRestartMsg + renewReplanMsg + (() => {
+              const ca = r && r.countryAlignResult;
+              if (!ca || ca.error) {
+                return ca && ca.error ? ` País: falha ao alinhar contas (${String(ca.error)}).` : '';
+              }
+              const tz = String(ca.timezone || (r.config && r.config.country && r.config.country.timezone) || '').trim();
+              return ` País ${String(ca.country || '').toUpperCase() || 'BR'} (${tz || 'fuso padrão'}): ${Number(ca.updated || 0)} conta(s) alinhada(s), ${Number(ca.unchanged || 0)} já no padrão, ${Number(ca.failed || 0)} falha(s).`;
+            })() + partialFailureMsg,
             tone: (renewReplanFailed || partialFailure) ? 'bad' : 'good'
           });
           try { await reloadPerfis(); } catch {}
