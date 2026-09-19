@@ -16,22 +16,31 @@ const ITEM_TITLES_PACKS = Object.freeze({
 });
 
 const COUNTRY_ID_DEFAULT = "br";
+// Idioma do Chrome/Facebook é sempre pt-BR. País manda só no fuso. Robe lê o DOM em português.
+const BROWSER_LANGUAGE = Object.freeze({
+  navigatorLanguage: "pt-BR",
+  navigatorLanguages: Object.freeze(["pt-BR", "pt", "en-US", "en"]),
+  acceptLanguage: "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+});
+
+function browserLanguageVoice() {
+  return {
+    navigatorLanguage: BROWSER_LANGUAGE.navigatorLanguage,
+    navigatorLanguages: BROWSER_LANGUAGE.navigatorLanguages.slice(),
+    acceptLanguage: BROWSER_LANGUAGE.acceptLanguage
+  };
+}
+
 const COUNTRY_PACKS = Object.freeze({
   br: Object.freeze({
     id: "br",
     label: "Brasil",
-    timezone: "America/Sao_Paulo",
-    navigatorLanguage: "pt-BR",
-    navigatorLanguages: Object.freeze(["pt-BR", "pt", "en-US", "en"]),
-    acceptLanguage: "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+    timezone: "America/Sao_Paulo"
   }),
   us: Object.freeze({
     id: "us",
     label: "Estados Unidos",
-    timezone: "America/New_York",
-    navigatorLanguage: "en-US",
-    navigatorLanguages: Object.freeze(["en-US", "en"]),
-    acceptLanguage: "en-US,en;q=0.9"
+    timezone: "America/New_York"
   })
 });
 
@@ -48,13 +57,14 @@ function normalizeCountryId(id) {
 
 function resolveCountryPack(id) {
   const pack = COUNTRY_PACKS[normalizeCountryId(id)] || COUNTRY_PACKS[COUNTRY_ID_DEFAULT];
+  const voice = browserLanguageVoice();
   return {
     id: pack.id,
     label: pack.label,
     timezone: pack.timezone,
-    navigatorLanguage: pack.navigatorLanguage,
-    navigatorLanguages: pack.navigatorLanguages.slice(),
-    acceptLanguage: pack.acceptLanguage
+    navigatorLanguage: voice.navigatorLanguage,
+    navigatorLanguages: voice.navigatorLanguages,
+    acceptLanguage: voice.acceptLanguage
   };
 }
 
@@ -1108,6 +1118,8 @@ module.exports = {
   ITEM_TITLES_PACK_DEFAULT,
   COUNTRY_ID_DEFAULT,
   COUNTRY_PACKS,
+  BROWSER_LANGUAGE,
+  browserLanguageVoice,
   getTotalMemMB,
   readServerConfigRaw,
   readServerConfigEffective,

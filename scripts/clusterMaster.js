@@ -108,7 +108,7 @@ async function createCluster() {
   }
   if (!recycledThisBoot && aliveAtBoot.length > 0 && cellLifecycle.isLocaleStale()) {
     try {
-      logger.warn('[CLUSTER] país novo (BR/US): reciclando células para o Chrome nascer no fuso/idioma certos', {
+      logger.warn('[CLUSTER] país novo (BR/US): reciclando células para o Chrome nascer no fuso certo (idioma continua pt-BR)', {
         saved: cellLifecycle.savedLocaleId(),
         want: cellLifecycle.wantedCountryId(),
         alive: aliveAtBoot.length

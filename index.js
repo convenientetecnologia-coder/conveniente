@@ -4800,7 +4800,7 @@ function wipeStaleCellsBeforeListen() {
     try {
       logger.info(codeStale
         ? '[BOOT] Código novo: mata células antes do painel.'
-        : '[BOOT] País novo: mata células antes do painel para o Chrome nascer no fuso/idioma certos.');
+        : '[BOOT] País novo: mata células antes do painel para o Chrome nascer no fuso certo (idioma continua pt-BR).');
       require('./scripts/cellLifecycle.js').stopAllCells({
         reason: codeStale ? 'boot_code_stamp_stale' : 'boot_locale_mismatch'
       });

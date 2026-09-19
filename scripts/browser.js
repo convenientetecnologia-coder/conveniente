@@ -66,7 +66,7 @@ async function syncStealthFromManifest(nome, manifest) {
   const proxyCountry = String(proxyResolved && proxyResolved.slot && proxyResolved.slot.country || '').trim().toLowerCase() || 'br';
   const antiState = await ensureFingerprintProfileState({ nome: who, manifest: man, proxyCountry });
   syncStealthVoiceForAccount({
-    languages: antiState.navigatorLanguages,
+    languages: browserLanguageVoice().navigatorLanguages,
     hardwareConcurrency: (man.fp && man.fp.hardwareConcurrency) || 8,
     webglVendor: antiState.webglVendor,
     webglRenderer: antiState.webglRenderer
@@ -271,24 +271,29 @@ async function injectCookies(page, cookies) {
 const manifestStore = require('./manifestStore.js');
 const cohortLedgerPath = path.join(__dirname, '..', 'dados', 'cohort_ledger.json');
 
+function browserLanguageVoice() {
+  if (typeof serverConfig.browserLanguageVoice === 'function') {
+    const voice = serverConfig.browserLanguageVoice();
+    if (voice && voice.navigatorLanguage) return voice;
+  }
+  return {
+    navigatorLanguage: 'pt-BR',
+    navigatorLanguages: ['pt-BR', 'pt', 'en-US', 'en'],
+    acceptLanguage: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+  };
+}
+
 function resolveServerCountryLocale() {
   const pack = (typeof serverConfig.readCountryPackEffective === 'function')
     ? serverConfig.readCountryPackEffective()
-    : {
-      id: 'br',
-      timezone: 'America/Sao_Paulo',
-      navigatorLanguage: 'pt-BR',
-      navigatorLanguages: ['pt-BR', 'pt', 'en-US', 'en'],
-      acceptLanguage: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
-    };
+    : { id: 'br', timezone: 'America/Sao_Paulo' };
+  const voice = browserLanguageVoice();
   return {
     country: String((pack && pack.id) || 'br'),
     timezone: String((pack && pack.timezone) || 'America/Sao_Paulo'),
-    navigatorLanguage: String((pack && pack.navigatorLanguage) || 'pt-BR'),
-    navigatorLanguages: Array.isArray(pack && pack.navigatorLanguages)
-      ? pack.navigatorLanguages.map((x) => String(x || '')).filter(Boolean)
-      : ['pt-BR', 'pt', 'en-US', 'en'],
-    acceptLanguage: String((pack && pack.acceptLanguage) || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7')
+    navigatorLanguage: voice.navigatorLanguage,
+    navigatorLanguages: voice.navigatorLanguages.slice(),
+    acceptLanguage: voice.acceptLanguage
   };
 }
 
@@ -941,7 +946,7 @@ async function patchPage(nome, page, coords) {
   const proxyCountry = String(proxyResolved && proxyResolved.slot && proxyResolved.slot.country || '').trim().toLowerCase() || 'br';
   const antiState = await ensureFingerprintProfileState({ nome, manifest, proxyCountry });
   syncStealthVoiceForAccount({
-    languages: antiState.navigatorLanguages,
+    languages: browserLanguageVoice().navigatorLanguages,
     hardwareConcurrency,
     webglVendor: antiState.webglVendor,
     webglRenderer: antiState.webglRenderer
@@ -983,16 +988,17 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- IDIOMA E REGION ---
-  // Dono: Config Servidor → País. Env BROWSER_LANG/BROWSER_TZ não sobrescrevem.
+  // Idioma é sempre pt-BR (Robe/DOM). País manda só no fuso. Env não sobrescreve.
   const localeFallback = resolveServerCountryLocale();
-  const patchLang = antiState.acceptLanguage || localeFallback.acceptLanguage;
+  const voice = browserLanguageVoice();
+  const patchLang = voice.acceptLanguage;
   const patchTz = antiState.timezone || localeFallback.timezone;
   await page.setExtraHTTPHeaders({ 'accept-language': patchLang });
   await page.emulateTimezone(patchTz);
 
   const fingerprintCfg = {
-    navigatorLanguage: antiState.navigatorLanguage,
-    navigatorLanguages: antiState.navigatorLanguages,
+    navigatorLanguage: voice.navigatorLanguage,
+    navigatorLanguages: voice.navigatorLanguages.slice(),
     timezone: patchTz,
     webglVendor: antiState.webglVendor,
     webglRenderer: antiState.webglRenderer,
@@ -1997,14 +2003,13 @@ function writeJsonAtomic(file, obj) {
 function ensureChromeProfilePreferences(userDataDir, locale) {
   try {
     if (!userDataDir) return;
-    const pack = (locale && typeof locale === 'object') ? locale : resolveServerCountryLocale();
-    const langs = Array.isArray(pack.navigatorLanguages)
-      ? pack.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
+    const voice = browserLanguageVoice();
+    const langs = Array.isArray(voice.navigatorLanguages)
+      ? voice.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
       : [];
-    const acceptList = langs.length
-      ? langs.join(',')
-      : String(pack.navigatorLanguage || 'pt-BR');
-    const appLocale = String(pack.navigatorLanguage || 'pt-BR');
+    const acceptList = langs.length ? langs.join(',') : 'pt-BR,pt,en-US,en';
+    const appLocale = String(voice.navigatorLanguage || 'pt-BR');
+    void locale;
 
     // Default/Preferences
     const defaultDir = path.join(userDataDir, 'Default');
@@ -2376,11 +2381,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY!
-    const launchLang = String(
-      (launchLocale && launchLocale.navigatorLanguage) ||
-      launchFallbackLocale.navigatorLanguage ||
-      'pt-BR'
-    );
+    const launchLang = String(browserLanguageVoice().navigatorLanguage || 'pt-BR');
     const launchArgs = [
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
@@ -8183,12 +8184,11 @@ function applyCountryLocaleDocumentHooks(p) {
 
 async function applyCountryLocaleToPage(page, pack) {
   const locale = pack && typeof pack === 'object' ? pack : resolveServerCountryLocale();
+  const voice = browserLanguageVoice();
   const timezone = String(locale.timezone || 'America/Sao_Paulo');
-  const navigatorLanguage = String(locale.navigatorLanguage || 'pt-BR');
-  const navigatorLanguages = Array.isArray(locale.navigatorLanguages)
-    ? locale.navigatorLanguages.map((x) => String(x || '')).filter(Boolean)
-    : [navigatorLanguage];
-  const acceptLanguage = String(locale.acceptLanguage || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7');
+  const navigatorLanguage = voice.navigatorLanguage;
+  const navigatorLanguages = voice.navigatorLanguages.slice();
+  const acceptLanguage = voice.acceptLanguage;
   if (!page) throw new Error('apply_country_no_page');
   if (page.isClosed && typeof page.isClosed === 'function' && page.isClosed()) {
     throw new Error('apply_country_page_closed');
@@ -8204,7 +8204,8 @@ async function applyCountryLocaleToPage(page, pack) {
 
 async function applyCountryLocaleToOpenBrowser(browser, pack) {
   const locale = pack && typeof pack === 'object' ? pack : resolveServerCountryLocale();
-  syncStealthVoiceForAccount({ languages: locale.navigatorLanguages });
+  const voice = browserLanguageVoice();
+  syncStealthVoiceForAccount({ languages: voice.navigatorLanguages });
   const pages = await (browser && browser.pages ? browser.pages() : Promise.resolve([])).catch(() => []);
   let applied = 0;
   let failed = 0;
