@@ -372,8 +372,8 @@ module.exports = (app, workerClient, fileStore) => {
                 let nextCidade = curCidade;
                 const knownCity = countryGeo.isKnownCity(curCidade, { countryId: pack.id });
                 if (!knownCity && (pack.id === 'us' || countryChanged)) {
-                  const picked = countryGeo.pickLeastUsedCity({
-                    countryId: pack.id,
+                  const working = countryGeo.listWorkingCitiesFromPersistedConfig({ countryId: pack.id });
+                  const picked = countryGeo.pickLeastUsedFromList(working, {
                     perfis,
                     extraTaken: cityRemaps
                   });
@@ -823,9 +823,9 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       const { cidade: cidadeIn, cookies, login, password, stockAccountId } = req.body || {};
-      if (!cidadeIn || !cookies) {
-        logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade: cidadeIn });
-        return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
+      if (!cookies) {
+        logger.warn('Tentativa de criação de perfil sem cookies', { cidadeHint: cidadeIn || null });
+        return res.json({ ok: false, error: 'Cookies obrigatórios.' });
       }
       const countryGeo = require('./countryGeo.js');
       const cityResolved = countryGeo.resolveCityForNewAccount(cidadeIn, {
@@ -834,7 +834,9 @@ module.exports = (app, workerClient, fileStore) => {
       if (!cityResolved || cityResolved.ok !== true || !cityResolved.cidade) {
         return res.json({
           ok: false,
-          error: (cityResolved && cityResolved.error) || 'cidade_pais_indisponivel'
+          error: (cityResolved && cityResolved.error) || 'servidor_sem_cidades_de_trabalho',
+          country: cityResolved && cityResolved.country ? cityResolved.country : null,
+          from: cidadeIn ? String(cidadeIn).trim() : null
         });
       }
       const cidade = cityResolved.cidade;
@@ -880,9 +882,7 @@ module.exports = (app, workerClient, fileStore) => {
         geoCreate = countryGeo.getCoords(cidade);
         if (!geoCreate || !geoCreate.latitude || !geoCreate.longitude) {
           logger.warn('Cidade sem coordenadas no catálogo do país', { cidade, country: cityResolved.country });
-          if (String(cityResolved.country || '') === 'us') {
-            return res.json({ ok: false, error: 'cidade_sem_coordenadas', cidade });
-          }
+          return res.json({ ok: false, error: 'cidade_sem_coordenadas', cidade, country: cityResolved.country || null });
         }
       } catch (e) {
         logger.error('Erro durante checagem de coordenadas', { cidade, error: e && e.message }, e);
@@ -918,6 +918,18 @@ module.exports = (app, workerClient, fileStore) => {
         try { return serverConfig.readServerConfigEffective({ totalMemMB: serverConfig.getTotalMemMB() }); } catch { return null; }
       })();
       const capacityMax = Math.max(1, Number(capacityEffective && capacityEffective.capacity && capacityEffective.capacity.maxAccountsEffective || 0) || 1);
+      const existingCityOf = (profileName) => {
+        const n = String(profileName || '').trim();
+        if (!n) return null;
+        try {
+          const arr = (typeof fileStore.loadPerfisJson === 'function') ? (fileStore.loadPerfisJson() || []) : [];
+          const hit = (Array.isArray(arr) ? arr : []).find((p) => p && String(p.nome || '').trim() === n);
+          const c = String((hit && hit.cidade) || '').trim();
+          return c || null;
+        } catch {
+          return null;
+        }
+      };
       const wr = fileStore.withPerfisFileLockUpdate((arr) => {
         const next = Array.isArray(arr) ? arr.slice() : [];
         if (next.length >= capacityMax) {
@@ -954,10 +966,22 @@ module.exports = (app, workerClient, fileStore) => {
           return res.json({ ok: false, error: 'capacity_limit_reached', details: e.slice('capacity_limit_reached:'.length) || null });
         }
         if (e.startsWith('duplicate_c_user:')) {
-          return res.json({ ok: false, error: 'duplicate_c_user', existingProfile: e.slice('duplicate_c_user:'.length) || null });
+          const existingProfile = e.slice('duplicate_c_user:'.length) || null;
+          return res.json({
+            ok: false,
+            error: 'duplicate_c_user',
+            existingProfile,
+            cidade: existingCityOf(existingProfile)
+          });
         }
         if (e.startsWith('duplicate_stockAccountId:')) {
-          return res.json({ ok: false, error: 'duplicate_stockAccountId', existingProfile: e.slice('duplicate_stockAccountId:'.length) || null });
+          const existingProfile = e.slice('duplicate_stockAccountId:'.length) || null;
+          return res.json({
+            ok: false,
+            error: 'duplicate_stockAccountId',
+            existingProfile,
+            cidade: existingCityOf(existingProfile)
+          });
         }
         return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'perfis_write_failed' });
       }
@@ -1010,8 +1034,24 @@ module.exports = (app, workerClient, fileStore) => {
         }
       } catch {}
 
-      logger.info('Perfil criado com sucesso', { nome, cidade });
-      res.json({ ok: true, perfil: perfilObj, clusterGrowQueued: true });
+      logger.info('Perfil criado com sucesso', {
+        nome,
+        cidade,
+        country: cityResolved.country || null,
+        fromHint: cityResolved.from || null,
+        ignoredHint: cityResolved.ignoredHint === true,
+        workingPool: Array.isArray(cityResolved.pool) ? cityResolved.pool : []
+      });
+      res.json({
+        ok: true,
+        perfil: perfilObj,
+        cidade,
+        cityAssignedByServer: true,
+        country: cityResolved.country || null,
+        fromHint: cityResolved.from || null,
+        ignoredHint: cityResolved.ignoredHint === true,
+        clusterGrowQueued: true
+      });
     } catch (e) {
       logger.error('Erro fatal na rota criação de perfil', { rota: '/api/perfis', cidade: req.body && req.body.cidade, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

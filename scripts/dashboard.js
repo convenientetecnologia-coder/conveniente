@@ -2714,7 +2714,12 @@ async function execStockProvision(cmd) {
             const err = String((r && r.error) || 'create_profile_failed');
             const existingProfile = String((r && r.existingProfile) || '').trim();
             if ((err === 'duplicate_c_user' || err === 'duplicate_stockAccountId') && existingProfile) {
-              return { ok: true, perfil: { nome: existingProfile }, reusedExisting: true };
+              const existingCity = String((r && (r.cidade || r.city)) || '').trim();
+              return {
+                ok: true,
+                perfil: { nome: existingProfile, cidade: existingCity || undefined },
+                reusedExisting: true
+              };
             }
             throw new Error(err);
           }
@@ -2723,8 +2728,23 @@ async function execStockProvision(cmd) {
         const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
         if (!nome) throw new Error('create_profile_missing_name');
         out.profileName = nome;
+        const assignedCity = String(
+          (created && created.perfil && created.perfil.cidade) ||
+          (created && created.cidade) ||
+          ''
+        ).trim();
+        if (assignedCity) out.city = assignedCity;
         try {
-          provisionAudit.append({ event: 'stock_provision_profile_created', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, profileName: nome });
+          provisionAudit.append({
+            event: 'stock_provision_profile_created',
+            cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+            batchId,
+            profileName: nome,
+            city: out.city || null,
+            fromHint: city || null,
+            ignoredHint: !!(created && created.ignoredHint === true),
+            reusedExisting: !!(created && created.reusedExisting === true)
+          });
         } catch {}
 
         // 2) set label (interno)

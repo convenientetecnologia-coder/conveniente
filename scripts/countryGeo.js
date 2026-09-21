@@ -198,13 +198,21 @@ function countCitiesInUse(cities, perfis, extraTaken) {
   return counts;
 }
 
-function pickLeastUsedCity({ countryId, perfis, extraTaken } = {}) {
-  const cities = listCities({ countryId });
-  if (!cities.length) return "";
-  const counts = countCitiesInUse(cities, perfis, extraTaken);
-  let best = cities[0];
+function pickLeastUsedFromList(cities, { perfis, extraTaken } = {}) {
+  const pool = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(cities) ? cities : [])) {
+    const name = String(raw || "").trim();
+    const key = cityNormKey(name);
+    if (!name || !key || seen.has(key)) continue;
+    seen.add(key);
+    pool.push(name);
+  }
+  if (!pool.length) return "";
+  const counts = countCitiesInUse(pool, perfis, extraTaken);
+  let best = pool[0];
   let bestCount = Number(counts.get(cityNormKey(best)) || 0);
-  for (const name of cities) {
+  for (const name of pool) {
     const n = Number(counts.get(cityNormKey(name)) || 0);
     if (n < bestCount) {
       best = name;
@@ -214,31 +222,86 @@ function pickLeastUsedCity({ countryId, perfis, extraTaken } = {}) {
   return best;
 }
 
-function resolveCityForNewAccount(cidade, { countryId, perfis } = {}) {
+function pickLeastUsedCity({ countryId, cities, perfis, extraTaken } = {}) {
+  const pool = Array.isArray(cities) ? cities : listCities({ countryId });
+  return pickLeastUsedFromList(pool, { perfis, extraTaken });
+}
+
+function sanitizeWorkingCities(list, countryId) {
   const id = effectiveCountryId(countryId);
-  const cities = listCities({ countryId: id });
-  if (!cities.length) return { ok: false, error: "pais_sem_cidades", country: id };
-  const canonical = findCanonicalCity(cidade, { countryId: id });
-  if (canonical) {
-    return { ok: true, cidade: canonical, remapped: false, country: id };
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    const canonical = findCanonicalCity(raw, { countryId: id });
+    if (!canonical) continue;
+    const coords = getCoords(canonical, { countryId: id });
+    if (!coords || !coords.latitude || !coords.longitude) continue;
+    const key = cityNormKey(canonical);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(canonical);
   }
-  if (id === "us") {
-    const picked = pickLeastUsedCity({ countryId: id, perfis });
-    if (!picked) return { ok: false, error: "pais_sem_cidades", country: id };
+  return out;
+}
+
+function listWorkingCitiesFromPersistedConfig({ countryId } = {}) {
+  const id = effectiveCountryId(countryId);
+  let raw = null;
+  try {
+    const sc = require("./serverConfig.js");
+    raw = typeof sc.readServerConfigRaw === "function" ? sc.readServerConfigRaw() : null;
+  } catch {
+    raw = null;
+  }
+  if (!raw || typeof raw !== "object") return [];
+  const extras = raw.robe && raw.robe.cidadesExtrasGlobais;
+  return sanitizeWorkingCities(extras, id);
+}
+
+function resolveCityForNewAccount(cidadeHint, { countryId, perfis, extras } = {}) {
+  const id = effectiveCountryId(countryId);
+  const hint = String(cidadeHint || "").trim();
+  const working = extras !== undefined
+    ? sanitizeWorkingCities(extras, id)
+    : listWorkingCitiesFromPersistedConfig({ countryId: id });
+  if (!working.length) {
     return {
-      ok: true,
+      ok: false,
+      error: "servidor_sem_cidades_de_trabalho",
+      country: id,
+      from: hint || null,
+      ignoredHint: true
+    };
+  }
+  const picked = pickLeastUsedFromList(working, { perfis });
+  if (!picked) {
+    return {
+      ok: false,
+      error: "servidor_sem_cidades_de_trabalho",
+      country: id,
+      from: hint || null,
+      ignoredHint: true
+    };
+  }
+  const coords = getCoords(picked, { countryId: id });
+  if (!coords || !coords.latitude || !coords.longitude) {
+    return {
+      ok: false,
+      error: "cidade_sem_coordenadas",
       cidade: picked,
-      remapped: true,
-      from: String(cidade || "").trim(),
-      country: id
+      country: id,
+      from: hint || null,
+      ignoredHint: true
     };
   }
   return {
     ok: true,
-    cidade: String(cidade || "").trim(),
-    remapped: false,
-    unknown: true,
-    country: id
+    cidade: picked,
+    remapped: true,
+    from: hint || null,
+    ignoredHint: !hint || cityNormKey(hint) !== cityNormKey(picked),
+    country: id,
+    pool: working.slice()
   };
 }
 
@@ -268,7 +331,10 @@ module.exports = {
   isKnownCity,
   getCoords,
   listLocations,
+  pickLeastUsedFromList,
   pickLeastUsedCity,
+  sanitizeWorkingCities,
+  listWorkingCitiesFromPersistedConfig,
   resolveCityForNewAccount,
   allowsVehicles,
   describeDataPack
