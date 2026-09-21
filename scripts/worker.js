@@ -10679,7 +10679,10 @@ setTimeout(ramCpuMonitorTick, 5000);
 async function getRobeModuleFor(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
-    const mode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
+    let mode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
+    try {
+      if (require('./countryGeo.js').allowsVehicles() !== true) mode = 'itens';
+    } catch {}
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_mode', nome: String(nome || ''), robeMode: String(mode || 'itens') }); } catch {}
     // #endregion

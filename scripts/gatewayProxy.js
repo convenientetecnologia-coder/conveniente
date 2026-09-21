@@ -582,6 +582,7 @@ function resolveProxyForProfile({ profileName, manifest }) {
   };
 }
 
+// Inventário do slot (diagnóstico). Chrome NÃO injeta isso: GPS é da cidade da conta.
 function resolveGeoForProfile({ profileName, manifest }) {
   const resolved = resolveProxyForProfile({ profileName, manifest });
   if (!resolved || resolved.enabled !== true) {

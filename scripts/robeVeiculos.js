@@ -882,36 +882,18 @@ async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hre
   }
 }
 
-// Fonte de localizações (JSON)
+// Fonte de localizações (JSON do país atual). Sem fallback para Brasil.
 function listLocalizacoesPorCidade(cidade) {
   try {
-    const localPath = path.join(__dirname, '..', 'dados', 'localizacoes.json');
-    const raw = readJsonSafe(localPath, null);
-    if (!raw) return [];
-    const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
-
-    if (Array.isArray(raw)) {
-      const hit = raw.find(ent =>
-        norm(ent?.cidade) === norm(cidade) ||
-        norm(ent?.nome) === norm(cidade) ||
-        norm(ent?.id) === norm(cidade)
-      );
-      if (hit && Array.isArray(hit.localizacoes)) return hit.localizacoes.slice(0);
-      return [];
-    }
-
-    const key = Object.keys(raw).find(k => norm(k) === norm(cidade));
-    if (key && Array.isArray(raw[key])) return raw[key].slice(0);
-    return Array.isArray(raw['default']) ? raw['default'].slice(0) : [];
+    return require('./countryGeo.js').listLocations(cidade);
   } catch {
     return [];
   }
 }
 
-// Fallback aleatório
 function pickLocalizacaoAleatoria(cidade) {
   const lista = listLocalizacoesPorCidade(cidade);
-  if (!lista.length) return 'São Paulo';
+  if (!lista.length) return null;
   return lista[Math.floor(Math.random() * lista.length)];
 }
 
@@ -953,8 +935,11 @@ function buildPostingCityPool(manifest) {
       return [];
     }
   })();
-  const pool = normalizeCityList([principal, ...extras.filter(c => c !== principal), ...globalExtras]);
-  return pool.length ? pool : ['São Paulo'];
+  const pool = normalizeCityList([principal, ...extras.filter(c => c !== principal), ...globalExtras])
+    .filter((c) => {
+      try { return require('./countryGeo.js').isKnownCity(c) === true; } catch { return false; }
+    });
+  return pool;
 }
 
 function isCycleCompatible(cycle, pool) {
@@ -988,10 +973,14 @@ async function pickPostingCityForRun(nome) {
     if (!city) throw new Error(workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable');
     return city;
   }
-  let chosen = 'São Paulo';
+  let chosen = '';
   await manifestStore.update(nome, (m) => {
     m = m || {};
     const pool = buildPostingCityPool(m);
+    if (!pool.length) {
+      chosen = '';
+      return m;
+    }
     let cycle = isCycleCompatible(m.postCityCycle, pool)
       ? { ...m.postCityCycle, order: normalizeCityList(m.postCityCycle.order) }
       : { order: shuffleCityOrder(pool), idx: 0, updatedAt: Date.now() };
@@ -1001,7 +990,7 @@ async function pickPostingCityForRun(nome) {
     }
     let idx = Number(cycle.idx || 0);
     if (!Number.isFinite(idx) || idx < 0 || idx >= cycle.order.length) idx = 0;
-    chosen = String(cycle.order[idx] || pool[0] || 'São Paulo').trim() || 'São Paulo';
+    chosen = String(cycle.order[idx] || pool[0] || '').trim();
     idx += 1;
     if (idx >= cycle.order.length) {
       cycle.order = shuffleCityOrder(pool);
@@ -1012,6 +1001,7 @@ async function pickPostingCityForRun(nome) {
     m.postCityCycle = cycle;
     return m;
   });
+  if (!chosen) throw new Error('pais_sem_cidade_de_postagem');
   return chosen;
 }
 
@@ -2451,7 +2441,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     try {
       cidadePerfil = await pickPostingCityForRun(nome);
     } catch {}
-    if (!cidadePerfil) cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    if (!cidadePerfil) {
+      const fallbackCity = String(manifest.cidade || manifest.localizacao || manifest['localização'] || '').trim();
+      let known = false;
+      try { known = require('./countryGeo.js').isKnownCity(fallbackCity) === true; } catch {}
+      if (!known) throw new Error('pais_sem_cidade_de_postagem');
+      cidadePerfil = fallbackCity;
+    } else {
+      let knownPick = false;
+      try { knownPick = require('./countryGeo.js').isKnownCity(cidadePerfil) === true; } catch {}
+      if (!knownPick) throw new Error('cidade_fora_do_pais');
+    }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
     localUsada = await preencherLocalizacao(page, cidadePerfil);

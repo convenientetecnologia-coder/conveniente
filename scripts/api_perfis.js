@@ -211,13 +211,48 @@ module.exports = (app, workerClient, fileStore) => {
   app.get('/api/server-config', (req, res) => {
     try {
       const totalMemMB = serverConfig.getTotalMemMB();
+      const probe = (typeof serverConfig.ensurePersistedConfigLoaded === 'function')
+        ? serverConfig.ensurePersistedConfigLoaded()
+        : null;
+      if (probe && probe.unreadable) {
+        return res.json({
+          ok: false,
+          error: 'server_config_unreadable',
+          meta: {
+            source: 'unavailable',
+            persisted: true,
+            recovered: false,
+            path: serverConfig.CONFIG_PATH,
+            lastGoodPath: serverConfig.LAST_GOOD_PATH || null,
+            totalMemMB
+          }
+        });
+      }
       const effective = serverConfig.readServerConfigEffective({ totalMemMB });
+      if (effective && effective.unreadable === true) {
+        return res.json({
+          ok: false,
+          error: 'server_config_unreadable',
+          meta: {
+            source: 'unavailable',
+            persisted: true,
+            recovered: false,
+            path: serverConfig.CONFIG_PATH,
+            totalMemMB
+          }
+        });
+      }
       const virtusEngine = readDesiredVirtusEngine();
+      const persisted = effective && effective.persisted === true;
+      const source = persisted ? 'file' : (effective && effective.source ? String(effective.source) : 'default');
       return res.json({
         ok: true,
-        config: { ...effective, virtusEngine },
+        config: { ...effective, virtusEngine, persisted, unreadable: false },
         meta: {
-          source: effective.source,
+          source,
+          persisted,
+          recovered: !!(effective && effective.recovered),
+          newServer: persisted !== true,
           path: serverConfig.CONFIG_PATH,
           totalMemMB,
           itemTitlesPacks: (typeof serverConfig.listItemTitlesPacks === "function")
@@ -299,6 +334,10 @@ module.exports = (app, workerClient, fileStore) => {
             const perfis = (typeof fileStore.loadPerfisJson === 'function')
               ? (fileStore.loadPerfisJson() || [])
               : [];
+            const countryGeo = require('./countryGeo.js');
+            const countryChanged = String(previousCountryId || 'br') !== String(pack.id || 'br');
+            const allowVehicles = countryGeo.allowsVehicles({ countryId: pack.id }) === true;
+            const cityRemaps = [];
             const stats = {
               country: pack.id,
               timezone: pack.timezone,
@@ -307,7 +346,10 @@ module.exports = (app, workerClient, fileStore) => {
               updated: 0,
               unchanged: 0,
               failed: 0,
-              errors: []
+              cityRemapped: 0,
+              vehiclesPinned: 0,
+              errors: [],
+              applyCityNames: []
             };
             for (const row of (Array.isArray(perfis) ? perfis : [])) {
               const nome = String(row && row.nome || '').trim();
@@ -319,18 +361,58 @@ module.exports = (app, workerClient, fileStore) => {
                 const langs = Array.isArray(anti.navigatorLanguages) ? anti.navigatorLanguages : [];
                 const langsSame = langs.length === pack.navigatorLanguages.length
                   && langs.every((v, i) => String(v || '') === String(pack.navigatorLanguages[i] || ''));
-                if (
+                const localeSame = (
                   String(anti.country || '') === pack.id &&
                   String(anti.timezone || '') === pack.timezone &&
                   String(anti.navigatorLanguage || '') === pack.navigatorLanguage &&
                   String(anti.acceptLanguage || '') === pack.acceptLanguage &&
                   langsSame
-                ) {
+                );
+                const curCidade = String((cur && cur.cidade) || row.cidade || '').trim();
+                let nextCidade = curCidade;
+                const knownCity = countryGeo.isKnownCity(curCidade, { countryId: pack.id });
+                if (!knownCity && (pack.id === 'us' || countryChanged)) {
+                  const picked = countryGeo.pickLeastUsedCity({
+                    countryId: pack.id,
+                    perfis,
+                    extraTaken: cityRemaps
+                  });
+                  if (picked) {
+                    nextCidade = picked;
+                    cityRemaps.push({ nome, cidade: picked });
+                  }
+                } else if (knownCity) {
+                  nextCidade = countryGeo.findCanonicalCity(curCidade, { countryId: pack.id }) || curCidade;
+                }
+                const extrasIn = Array.isArray(cur && cur.cidadesExtras) ? cur.cidadesExtras : [];
+                const extrasOut = extrasIn
+                  .map((c) => String(c || '').trim())
+                  .filter(Boolean)
+                  .filter((c, i, arr) => (
+                    arr.findIndex((x) => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i
+                  ))
+                  .filter((c) => (
+                    c !== nextCidade &&
+                    countryGeo.isKnownCity(c, { countryId: pack.id })
+                  ));
+                const extrasSame = extrasIn.length === extrasOut.length
+                  && extrasIn.every((c, i) => String(c || '') === String(extrasOut[i] || ''));
+                const curMode = String((cur && cur.robeMode) || 'itens').toLowerCase();
+                const nextMode = (!allowVehicles && curMode === 'veiculos') ? 'itens' : (curMode === 'veiculos' ? 'veiculos' : 'itens');
+                const citySame = nextCidade === curCidade;
+                const modeSame = nextMode === curMode;
+                if (localeSame && citySame && extrasSame && modeSame) {
                   stats.unchanged += 1;
                   continue;
                 }
+                if (!citySame) stats.cityRemapped += 1;
+                if (!modeSame) stats.vehiclesPinned += 1;
+                if (!citySame) stats.applyCityNames.push(nome);
                 await manifestStore.update(nome, (man) => {
                   const next = Object.assign({}, man || {});
+                  next.cidade = nextCidade;
+                  next.robeMode = nextMode;
+                  next.cidadesExtras = extrasOut.slice();
                   next.antiDetect = Object.assign({}, next.antiDetect || {}, {
                     country: pack.id,
                     timezone: pack.timezone,
@@ -351,6 +433,20 @@ module.exports = (app, workerClient, fileStore) => {
                   });
                 }
               }
+            }
+            if (cityRemaps.length) {
+              try {
+                fileStore.withPerfisFileLockUpdate((arr) => {
+                  const next = Array.isArray(arr) ? arr.slice() : [];
+                  const byNome = new Map(cityRemaps.map((r) => [r.nome, r.cidade]));
+                  for (let i = 0; i < next.length; i++) {
+                    const n = String(next[i] && next[i].nome || '').trim();
+                    if (!n || !byNome.has(n)) continue;
+                    next[i] = Object.assign({}, next[i], { cidade: byNome.get(n) });
+                  }
+                  return next;
+                }, { caller: 'api_perfis_country_city_align', reason: `country:${pack.id}` });
+              } catch {}
             }
             countryAlignResult = stats;
             try {
@@ -574,6 +670,27 @@ module.exports = (app, workerClient, fileStore) => {
                   }, { timeoutMs: 60000 });
                 }
               } catch {}
+              try {
+                const countryChanged = countryAlignResult
+                  && String(countryAlignResult.previousCountryId || '') !== String(countryAlignResult.country || '');
+                if (countryChanged && workerClient && typeof workerClient.sendWorkerCommand === 'function') {
+                  await workerClient.sendWorkerCommand('robe-replan-all', {
+                    reason: 'country_changed',
+                    operator
+                  }, { timeoutMs: 180000 });
+                }
+              } catch {}
+              try {
+                const names = (countryAlignResult && Array.isArray(countryAlignResult.applyCityNames))
+                  ? countryAlignResult.applyCityNames
+                  : [];
+                for (const nomeApply of names) {
+                  if (!nomeApply) continue;
+                  try {
+                    await workerClient.sendWorkerCommand('apply-city', { nome: nomeApply }, { timeoutMs: 12000 });
+                  } catch {}
+                }
+              } catch {}
               if (applyNow) {
                 try {
                   if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
@@ -705,11 +822,22 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
       }
 
-      const { cidade, cookies, login, password, stockAccountId } = req.body || {};
-      if (!cidade || !cookies) {
-        logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
+      const { cidade: cidadeIn, cookies, login, password, stockAccountId } = req.body || {};
+      if (!cidadeIn || !cookies) {
+        logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade: cidadeIn });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
       }
+      const countryGeo = require('./countryGeo.js');
+      const cityResolved = countryGeo.resolveCityForNewAccount(cidadeIn, {
+        perfis: (typeof fileStore.loadPerfisJson === 'function') ? (fileStore.loadPerfisJson() || []) : []
+      });
+      if (!cityResolved || cityResolved.ok !== true || !cityResolved.cidade) {
+        return res.json({
+          ok: false,
+          error: (cityResolved && cityResolved.error) || 'cidade_pais_indisponivel'
+        });
+      }
+      const cidade = cityResolved.cidade;
 
       // Memória livre (warning only)
       /*
@@ -746,11 +874,15 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'Cookies inválidos: c_user ausente.' });
       }
 
-      // Checagem de coordenadas (AVISO só)
+      // Checagem de coordenadas no arquivo do país. EUA sem coords = recusa.
+      let geoCreate = null;
       try {
-        const geo = require('./utils').getCoords(cidade);
-        if (!geo || !geo.latitude || !geo.longitude) {
-          logger.warn('Cidade sem coordenadas definida em cidades_coords.json', { cidade });
+        geoCreate = countryGeo.getCoords(cidade);
+        if (!geoCreate || !geoCreate.latitude || !geoCreate.longitude) {
+          logger.warn('Cidade sem coordenadas no catálogo do país', { cidade, country: cityResolved.country });
+          if (String(cityResolved.country || '') === 'us') {
+            return res.json({ ok: false, error: 'cidade_sem_coordenadas', cidade });
+          }
         }
       } catch (e) {
         logger.error('Erro durante checagem de coordenadas', { cidade, error: e && e.message }, e);
@@ -1511,9 +1643,13 @@ module.exports = (app, workerClient, fileStore) => {
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       return res.json({ ok:false, error:e.message });
     }
-    const m = String(mode || '').toLowerCase();
+    let m = String(mode || '').toLowerCase();
     if (m !== 'itens' && m !== 'veiculos') {
       return res.json({ ok: false, error: 'mode inválido (use "itens" ou "veiculos")' });
+    }
+    const countryGeo = require('./countryGeo.js');
+    if (m === 'veiculos' && countryGeo.allowsVehicles() !== true) {
+      m = 'itens';
     }
     try {
       await manifestStore.update(nome, (man) => {
@@ -1521,7 +1657,7 @@ module.exports = (app, workerClient, fileStore) => {
         man.robeMode = m;
         return man;
       });
-      res.json({ ok:true });
+      res.json({ ok:true, robeMode: m });
     } catch (e) {
       res.json({ ok:false, error: (e && e.message) || String(e) });
     }
@@ -2505,13 +2641,16 @@ module.exports = (app, workerClient, fileStore) => {
 
       assertPerfilExists(fileStore, nome);
 
-      // Validação de coordenadas — não aceite cidades sem coords
-      const utils = require('./utils.js');
-      const coords = utils.getCoords(novaCidade);
-
+      const countryGeo = require('./countryGeo.js');
+      const canonicalCity = countryGeo.findCanonicalCity(novaCidade);
+      if (!canonicalCity) {
+        return res.json({ ok: false, error: 'cidade_fora_do_pais' });
+      }
+      const coords = countryGeo.getCoords(canonicalCity);
       if (!coords || !coords.latitude || !coords.longitude) {
         return res.json({ ok:false, error:'cidade_sem_coordenadas' });
       }
+      const novaCidadeOk = canonicalCity;
 
       // Leitura de perfis.json e manifest
       const perfisArr = fileStore.loadPerfisJson();
@@ -2521,7 +2660,7 @@ module.exports = (app, workerClient, fileStore) => {
 
       const oldCidade = perfisArr[idx].cidade || '';
 
-      if (oldCidade === novaCidade) {
+      if (oldCidade === novaCidadeOk) {
         await issues.append(nome, 'mil_action', `admin_update_city_noop old=${oldCidade||''}`);
         return res.json({ ok:true, changed:false });
       }
@@ -2529,12 +2668,12 @@ module.exports = (app, workerClient, fileStore) => {
       // 1) Atualiza manifest primeiro (fonte de verdade para flows)
       await manifestStore.update(nome, (m) => {
         m = m || {};
-        m.cidade = String(novaCidade);
+        m.cidade = String(novaCidadeOk);
         const extras = Array.isArray(m.cidadesExtras) ? m.cidadesExtras : [];
         m.cidadesExtras = extras
           .map(c => String(c || '').trim())
           .filter(Boolean)
-          .filter((c, i, arr) => c !== String(novaCidade) && arr.findIndex(x => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i);
+          .filter((c, i, arr) => c !== String(novaCidadeOk) && arr.findIndex(x => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i);
         const cycle = m.postCityCycle && typeof m.postCityCycle === 'object' ? m.postCityCycle : null;
         if (cycle) {
           delete cycle.order;
@@ -2549,14 +2688,14 @@ module.exports = (app, workerClient, fileStore) => {
       const wr2 = fileStore.withPerfisFileLockUpdate((arr) => {
         const next = Array.isArray(arr) ? arr.slice() : [];
         const i2 = next.findIndex(p => p && p.nome === nome);
-        if (i2 >= 0) next[i2] = Object.assign({}, next[i2], { cidade: String(novaCidade) });
+        if (i2 >= 0) next[i2] = Object.assign({}, next[i2], { cidade: String(novaCidadeOk) });
         return next;
       }, { caller: 'api_perfis_update_city', reason: `update_city:${nome}` });
       if (!wr2 || wr2.ok === false) {
         return res.json({ ok: false, error: (wr2 && wr2.error) ? String(wr2.error) : 'perfis_write_failed' });
       }
 
-      await issues.append(nome, 'mil_action', `admin_update_city from="${oldCidade||''}" to="${novaCidade}" by=${op}`);
+      await issues.append(nome, 'mil_action', `admin_update_city from="${oldCidade||''}" to="${novaCidadeOk}" by=${op}`);
 
       // 3) Se navegador está ativo, aplica geolocalização imediatamente
       let applied = false;
@@ -2601,7 +2740,11 @@ module.exports = (app, workerClient, fileStore) => {
         if (c === cidadePrincipal) continue;
         const k = c.toLocaleLowerCase('pt-BR');
         if (seen.has(k)) continue;
-        const coords = utils.getCoords(c);
+        const countryGeo = require('./countryGeo.js');
+        if (!countryGeo.isKnownCity(c) || !countryGeo.getCoords(c)) {
+          return res.json({ ok: false, error: 'cidade_extra_sem_coordenadas', cidade: c });
+        }
+        const coords = countryGeo.getCoords(c);
         if (!coords || !coords.latitude || !coords.longitude) {
           return res.json({ ok: false, error: 'cidade_extra_sem_coordenadas', cidade: c });
         }

@@ -1,28 +1,22 @@
 // scripts/api_cidades.js
-const fs = require('fs');
-const path = require('path');
+const countryGeo = require('./countryGeo.js');
 
 module.exports = (app, workerClient, fileStore) => {
-  // Listar cidades (GET /api/cidades) — retorna sempre array de nomes (strings)
+  // Listar cidades (GET /api/cidades) — catálogo do país salvo no servidor
   app.get('/api/cidades', (req, res) => {
     try {
-      const cidadesPath = path.join(fileStore.dadosDir, 'cidades.json');
-      if (fs.existsSync(cidadesPath)) {
-        const raw = JSON.parse(fs.readFileSync(cidadesPath, 'utf8'));
-        // Transforma em array de strings, seja string, objeto, etc
-        const arr = Array.isArray(raw)
-          ? raw.map(c =>
-              typeof c === 'string'
-                ? c
-                : (c && typeof c === 'object')
-                  ? (c.nome || c.label || c.id || '').toString()
-                  : ''
-            ).filter(Boolean)
-          : [];
-        res.json({ ok: true, cidades: arr });
-        return;
-      }
-      res.json({ ok: true, cidades: [] });
+      const pack = countryGeo.describeDataPack();
+      const arr = countryGeo.listCities();
+      res.json({
+        ok: true,
+        cidades: arr,
+        country: pack.id,
+        files: {
+          cities: pack.citiesFile,
+          coords: pack.coordsFile,
+          locations: pack.locationsFile
+        }
+      });
     } catch (e) {
       res.json({ ok: false, cidades: [], error: e && e.message || String(e) });
     }
@@ -38,23 +32,8 @@ module.exports = (app, workerClient, fileStore) => {
         const key = cid || '—';
         counts[key] = (counts[key] || 0) + 1;
       }
-      // Carrega cidades conhecidas do arquivo
-      const cidadesPath = path.join(fileStore.dadosDir, 'cidades.json');
       let known = [];
-      try {
-        if (fs.existsSync(cidadesPath)) {
-          const raw = JSON.parse(fs.readFileSync(cidadesPath, 'utf8'));
-          if (Array.isArray(raw)) {
-            known = raw.map(x => (
-              typeof x === 'string'
-                ? x
-                : (x && typeof x === 'object')
-                  ? (x.nome || x.label || x.id || '').toString()
-                  : ''
-            )).filter(Boolean);
-          }
-        }
-      } catch {}
+      try { known = countryGeo.listCities(); } catch { known = []; }
       const cidadesSet = new Set([...Object.keys(counts), ...known].filter(Boolean));
       const contagens = Array.from(cidadesSet).map(cidade => ({
         cidade,

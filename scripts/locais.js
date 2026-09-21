@@ -55,7 +55,7 @@ function logBadLocation(cidade, location, reason) {
 // Arquivos de dados
 const DADOS_DIR = path.join(__dirname, '..', 'dados');
 const CYCLE_FILE = path.join(DADOS_DIR, 'locais_ciclo.json');
-const LOCALIZACOES_FILE = path.join(DADOS_DIR, 'localizacoes.json');
+const countryGeo = require('./countryGeo.js');
 
 // Serialização simples para evitar corridas entre chamadas
 let _queue = Promise.resolve();
@@ -109,48 +109,10 @@ function saveCycle(idx) {
   return writeJsonAtomic(CYCLE_FILE, idx);
 }
 
-// Carrega lista de localizações da cidade a partir de dados/localizacoes.json
+// Carrega lista de localizações da cidade no arquivo do país atual. Sem fallback BR↔EUA.
 function listLocsFromSource(cidade) {
-  const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
   try {
-    const raw = readJsonSafe(LOCALIZACOES_FILE, null);
-    if (!raw) return [];
-
-    // Formato array de objetos: [{cidade, localizacoes:[...]}]
-    if (Array.isArray(raw)) {
-      const hit = raw.find(ent =>
-        norm(ent?.cidade) === norm(cidade) ||
-        norm(ent?.nome) === norm(cidade) ||
-        norm(ent?.id) === norm(cidade)
-      );
-      if (!hit || !Array.isArray(hit.localizacoes)) return [];
-      const dedup = [];
-      const seen = new Set();
-      for (const loc of hit.localizacoes) {
-        const key = norm(loc);
-        if (!seen.has(key) && String(loc || '').trim()) {
-          seen.add(key);
-          dedup.push(String(loc));
-        }
-      }
-      return dedup;
-    }
-
-    // Formato mapa { "Cidade": [locs], ... }
-    const key = Object.keys(raw).find(k => norm(k) === norm(cidade));
-    const arr = key ? raw[key] : null;
-    if (!Array.isArray(arr)) return [];
-    const dedup = [];
-    const seen = new Set();
-    for (const loc of arr) {
-      const kk = norm(loc);
-      if (!seen.has(kk) && String(loc || '').trim()) {
-        seen.add(kk);
-        dedup.push(String(loc));
-      }
-    }
-    return dedup;
-
+    return countryGeo.listLocations(cidade);
   } catch {
     return [];
   }

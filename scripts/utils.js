@@ -236,27 +236,12 @@ function normalizeCookies(cookiesInput) {
   }
 }
 
-function getCoords(cidade) {
+function getCoords(cidade, opts) {
   try {
-    if (!cidade) return null;
-    const cidadesPath = path.join(__dirname, '..', 'dados', 'cidades_coords.json');
-    const arr = readJsonSafe(cidadesPath, []);
-    const norm = (s) => slugify(String(s||''));
-    const cidadeNorm = norm(cidade);
-    for (const ent of arr) {
-      if (ent &&
-          (norm(ent.nome) === cidadeNorm ||
-           norm(ent.label) === cidadeNorm ||
-           norm(ent.id) === cidadeNorm)) {
-        return {
-          latitude: Number(ent.lat || ent.latitude),
-          longitude: Number(ent.lon || ent.lng || ent.longitude),
-          accuracy: Number(ent.accuracy || 30)
-        };
-      }
-    }
+    return require('./countryGeo.js').getCoords(cidade, opts);
+  } catch {
     return null;
-  } catch { return null; }
+  }
 }
 
 /**

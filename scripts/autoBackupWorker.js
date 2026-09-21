@@ -158,10 +158,17 @@ function runOnce({ ROOT, keep }) {
       path.join("dados", "status.json"),
       path.join("dados", "supervisor_state.json"),
       path.join("dados", "ct_config.json"),
+      path.join("dados", "server_runtime_config.json"),
+      path.join("dados", "server_runtime_config.last-good.json"),
+      path.join("dados", "server_runtime_config.stamp.json"),
       path.join("dados", "cidades.json"),
       path.join("dados", "cidades_coords.json"),
+      path.join("dados", "cidadesEUA.json"),
+      path.join("dados", "cidadesEUA_coords.json"),
       path.join("dados", "ua_presets.json"),
       path.join("dados", "localizacoes.json"),
+      path.join("dados", "localizacoesEUA.json"),
+      path.join("dados", "titulosEUA.json"),
       path.join("dados", "atendimento.json")
     ];
     for (const rel of dadosFiles) {

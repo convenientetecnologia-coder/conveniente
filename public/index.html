@@ -1036,6 +1036,15 @@
             const isVeiculos = (String(rm).toLowerCase() === 'veiculos');
             const modeCk = box.querySelector('#modeVeiculosCk');
             if (modeCk) modeCk.checked = isVeiculos;
+            try {
+              const cfgR = await fetch('/api/server-config').then((x) => x.json()).catch(() => null);
+              const cid = String((cfgR && cfgR.config && cfgR.config.country && cfgR.config.country.id) || 'br').toLowerCase();
+              if (cid === 'us' && modeCk) {
+                modeCk.checked = false;
+                modeCk.disabled = true;
+                modeCk.title = 'EUA: só itens. Veículos desligados neste país.';
+              }
+            } catch {}
           }
         } catch {}
       })();
@@ -1205,10 +1214,66 @@
       for (let p = 10; p <= 100; p += 10) out.push(`<option value="${p}">${p}%</option>`);
       return out.join('');
     }
+    let __serverConfigCache = null;
+    function ingestServerConfigObject(cfg, extraMeta) {
+      if (!cfg || typeof cfg !== 'object') return false;
+      if (cfg.unreadable === true) return false;
+      const persisted = cfg.persisted === true || String(cfg.source || '') === 'file';
+      __serverConfigCache = {
+        at: Date.now(),
+        payload: {
+          ok: true,
+          config: cfg,
+          meta: Object.assign({
+            source: persisted ? 'file' : 'default',
+            persisted,
+            recovered: !!cfg.recovered,
+            newServer: persisted !== true
+          }, extraMeta || {})
+        }
+      };
+      return true;
+    }
+    async function fetchServerConfigFresh() {
+      const r = await fetchJsonTimeout('/api/server-config', 20000);
+      if (r && r.ok === true && r.config && r.error !== 'server_config_unreadable') {
+        __serverConfigCache = { at: Date.now(), payload: r };
+        return r;
+      }
+      return r || null;
+    }
+    async function preloadServerConfig() {
+      const age = (__serverConfigCache && __serverConfigCache.at)
+        ? (Date.now() - Number(__serverConfigCache.at || 0))
+        : Number.POSITIVE_INFINITY;
+      if (__serverConfigCache && __serverConfigCache.payload && age < 30000) return __serverConfigCache;
+      try { await fetchServerConfigFresh(); } catch {}
+      return __serverConfigCache;
+    }
+    function getCachedServerConfig() {
+      if (__serverConfigCache && __serverConfigCache.payload && __serverConfigCache.payload.config) {
+        return __serverConfigCache.payload;
+      }
+      const stCfg = __lastStatusPaint && __lastStatusPaint.serverConfig;
+      if (stCfg && ingestServerConfigObject(stCfg, { fromStatus: true })) {
+        return __serverConfigCache.payload;
+      }
+      return null;
+    }
     async function getServerConfig() {
-      const r = await fetchJsonTimeout('/api/server-config', 8000);
-      if (!r || r.ok !== true || !r.config) throw new Error((r && r.error) ? String(r.error) : 'server_config_get_failed');
-      return r;
+      const fresh = await fetchServerConfigFresh();
+      if (fresh && fresh.ok === true && fresh.config) return fresh;
+      const cached = getCachedServerConfig();
+      if (cached) {
+        return {
+          ...cached,
+          meta: { ...(cached.meta || {}), fromCache: true }
+        };
+      }
+      if (fresh && fresh.ok === false) {
+        throw new Error(String(fresh.error || 'server_config_get_failed'));
+      }
+      throw new Error((fresh && fresh.error) ? String(fresh.error) : 'server_config_get_failed');
     }
     async function saveServerConfig(payload, { applyNow = false } = {}) {
       const r = await fetchJsonTimeout('/api/server-config', 12000, {
@@ -1387,7 +1452,7 @@
               <option value="br">Brasil — horário de Brasília</option>
               <option value="us">Estados Unidos — relógio do Leste</option>
             </select>
-            <div class="muted" style="margin-top:6px;">Chrome e Facebook ficam sempre em português (<code>pt-BR</code>), em qualquer país — o Robe lê o DOM em português. O que muda é só o relógio: Brasil = <code>America/Sao_Paulo</code>. EUA = <code>America/New_York</code>. Cidade da conta = GPS. Proxy = IP. Salvar grava o país. Depois: Iniciar Sistema — as células morrem e o Chrome nasce no fuso certo, ainda em português.</div>
+            <div class="muted" style="margin-top:6px;">Chrome e Facebook ficam sempre em português (<code>pt-BR</code>). O que muda com o país: relógio, catálogo de cidades, GPS, localizações e títulos. Brasil usa os arquivos de sempre. EUA usa <code>cidadesEUA.json</code>, coords, <code>localizacoesEUA.json</code> e <code>titulosEUA.json</code> — sem misturar com o Brasil. EUA é só itens, sem veículos. Conta nova ganha cidade do catálogo do país. Salvar alinha contas. Depois: Iniciar Sistema para o Chrome nascer no fuso certo.</div>
           </div>
         </div>
 
@@ -1564,8 +1629,46 @@
       const rotateNowBtn = box.querySelector('#srvRotateNow');
       const saveBtn = box.querySelector('#srvCfgSave');
       let loadedServerConfig = null;
+      let loadedServerConfigMeta = null;
+      let configHydrated = false;
       let globalCitiesAll = [];
       let globalCitiesSelected = [];
+      let itemTitlesPacksAll = [];
+      function setConfigHydrated(ok) {
+        configHydrated = !!ok;
+        if (saveBtn) {
+          saveBtn.disabled = !configHydrated;
+          saveBtn.title = configHydrated
+            ? 'Salva a configuração deste servidor no disco'
+            : 'Bloqueado: a config persistida ainda não carregou. Não grava fábrica por cima.';
+        }
+      }
+      setConfigHydrated(false);
+
+      function currentCountryId() {
+        return String((countryIdEl && countryIdEl.value) || 'br').trim().toLowerCase() === 'us' ? 'us' : 'br';
+      }
+      function renderItemTitlePacks(countryId, selectedId) {
+        if (!itemTitlesPackEl) return;
+        const cid = String(countryId || 'br') === 'us' ? 'us' : 'br';
+        const packs = (Array.isArray(itemTitlesPacksAll) ? itemTitlesPacksAll : []).filter((p) => {
+          const countries = (p && Array.isArray(p.countries)) ? p.countries : ['br'];
+          return countries.indexOf(cid) >= 0;
+        });
+        const list = packs.length ? packs : [{ id: cid === 'us' ? 'titulosEUA' : 'titulos', label: cid === 'us' ? 'EUA' : 'Padrão', file: cid === 'us' ? 'titulosEUA.json' : 'titulos.json' }];
+        const want = String(selectedId || (cid === 'us' ? 'titulosEUA' : 'titulos'));
+        itemTitlesPackEl.innerHTML = '';
+        for (const p of list) {
+          const opt = document.createElement('option');
+          opt.value = String((p && p.id) || '');
+          const label = String((p && p.label) || (p && p.id) || '');
+          const file = String((p && p.file) || '');
+          opt.textContent = file ? (label + ' (' + file + ')') : label;
+          itemTitlesPackEl.appendChild(opt);
+        }
+        const hasOpt = Array.from(itemTitlesPackEl.options || []).some((o) => String(o.value) === want);
+        itemTitlesPackEl.value = hasOpt ? want : String((list[0] && list[0].id) || 'titulos');
+      }
 
       function uniqueCities(arr) {
         const seen = new Set();
@@ -1665,8 +1768,9 @@
         renderGlobalCities();
       }
 
-      const fillFromConfig = (cfg) => {
+      const fillFromConfig = (cfg, meta) => {
         loadedServerConfig = (cfg && typeof cfg === 'object') ? cfg : {};
+        loadedServerConfigMeta = (meta && typeof meta === 'object') ? meta : {};
         const cap = (cfg && cfg.capacity) ? cfg.capacity : {};
         const robe = (cfg && cfg.robe) ? cfg.robe : {};
         const mem = (cfg && cfg.memory) ? cfg.memory : {};
@@ -1757,11 +1861,10 @@
           const cid = String((cfg.country && cfg.country.id) || 'br').trim().toLowerCase();
           countryIdEl.value = cid === 'us' ? 'us' : 'br';
         }
-        if (itemTitlesPackEl) {
-          const pack = String(robe.itemTitlesPack || 'titulos');
-          const hasOpt = Array.from(itemTitlesPackEl.options || []).some((o) => String(o.value) === pack);
-          itemTitlesPackEl.value = hasOpt ? pack : 'titulos';
-        }
+        renderItemTitlePacks(
+          (countryIdEl && countryIdEl.value) || 'br',
+          String(robe.itemTitlesPack || '')
+        );
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
@@ -1778,34 +1881,40 @@
         if (memPer8El) memPer8El.value = Number(mem.reservePer8GbMb != null ? mem.reservePer8GbMb : 768);
         if (memProvSpikeEl) memProvSpikeEl.value = Number(mem.provisionSpikeMb != null ? mem.provisionSpikeMb : 1536);
         infoEl.className = 'pill info';
+        const persisted = cfg.persisted === true || !!(meta && meta.persisted === true);
+        const fonte = persisted
+          ? 'config deste servidor'
+          : 'fábrica (servidor novo)';
         infoEl.innerHTML = workerDivisorSupported
-          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${String(cfg.source || 'default')} — Governor/reservas: runtime. Células (${Number(mem.workerRamDivisorGb || 16)} GB cada): conta nova já usa o valor salvo; 4→8 ou 8→4 só no próximo reinício do index (Ctrl+C + Iniciar, ou só Iniciar). Encerrar workers não é preciso.`
-          : `<span class="dot"></span>Backend anterior detectado. Reinicie o index.js uma vez para habilitar a configuração do divisor de Workers; os demais campos continuam operacionais.`;
+          ? `<span class="dot"></span>Capacidade: ${modeLabel(cap.mode)} | Máx efetivo: ${Number(cap.maxAccountsEffective || 0)} conta(s) | Fonte: ${fonte} — Governor/reservas: runtime. Células (${Number(mem.workerRamDivisorGb || 16)} GB cada): conta nova já usa o valor salvo; 4→8 ou 8→4 só no próximo reinício do index (Ctrl+C + Iniciar, ou só Iniciar). Encerrar workers não é preciso.`
+          : `<span class="dot"></span>Backend anterior detectado. Reinicie o index.js uma vez para habilitar a configuração do divisor de Workers; os demais campos continuam operacionais. Fonte: ${fonte}`;
         renderGlobalCities();
+        setConfigHydrated(true);
       };
 
       (async () => {
+        const cached = getCachedServerConfig();
+        if (cached && cached.config) {
+          itemTitlesPacksAll = (cached.meta && Array.isArray(cached.meta.itemTitlesPacks)) ? cached.meta.itemTitlesPacks : itemTitlesPacksAll;
+          fillFromConfig(cached.config, cached.meta || {});
+        }
         try {
           const r = await getServerConfig();
-          const packs = (r && r.meta && Array.isArray(r.meta.itemTitlesPacks)) ? r.meta.itemTitlesPacks : [];
-          if (itemTitlesPackEl && packs.length) {
-            itemTitlesPackEl.innerHTML = '';
-            for (const p of packs) {
-              const opt = document.createElement('option');
-              opt.value = String((p && p.id) || '');
-              const label = String((p && p.label) || (p && p.id) || '');
-              const file = String((p && p.file) || '');
-              opt.textContent = file ? (label + ' (' + file + ')') : label;
-              itemTitlesPackEl.appendChild(opt);
-            }
-          }
-          fillFromConfig(r.config);
+          itemTitlesPacksAll = (r && r.meta && Array.isArray(r.meta.itemTitlesPacks)) ? r.meta.itemTitlesPacks : itemTitlesPacksAll;
+          fillFromConfig(r.config, r.meta || {});
         } catch (e) {
+          if (configHydrated) return;
           infoEl.className = 'pill bad';
-          infoEl.innerHTML = `<span class="dot"></span>Falha ao carregar configuração: ${String(e && e.message || e)}`;
+          infoEl.innerHTML = `<span class="dot"></span>Falha ao carregar a config deste servidor: ${String(e && e.message || e)}`;
+          setConfigHydrated(false);
         }
       })();
 
+      if (countryIdEl) {
+        countryIdEl.onchange = () => {
+          renderItemTitlePacks(currentCountryId(), currentCountryId() === 'us' ? 'titulosEUA' : 'titulos');
+        };
+      }
       closeBtn.onclick = () => overlay.remove();
       if (rotateNowBtn) {
         rotateNowBtn.onclick = async () => {
@@ -1870,6 +1979,14 @@
       }
       saveBtn.onclick = async () => {
         try {
+          if (!configHydrated || !loadedServerConfig) {
+            await showSystemMessageModal({
+              title: 'Configuração não carregou',
+              message: 'A config persistida deste servidor não está na tela. Salvar está bloqueado para não gravar fábrica por cima.',
+              tone: 'bad'
+            });
+            return;
+          }
           const cooldownMin = Math.floor(Number(cdMinEl.value || 60));
           const cooldownMax = Math.floor(Number(cdMaxEl.value || 120));
           const netEnabled = String((netRotateEnabledEl && netRotateEnabledEl.value) || '0') === '1';
@@ -2081,12 +2198,7 @@
               enabled: netEnabled,
               intervalMinMinutes: netMin,
               intervalMaxMinutes: netMax,
-              maxAttemptsPerCycle: netAttempts,
-              gatewayHost: '',
-              loginUrl: '',
-              rebootUrl: '',
-              modemUsername: '',
-              modemPassword: ''
+              maxAttemptsPerCycle: netAttempts
             },
             dailyWindow: {
               enabled: dailyEnabled,
@@ -2145,7 +2257,9 @@
           };
           setBtnLoading(saveBtn, true, 'Salvando...');
           const r = await saveServerConfig(payload, { applyNow: false });
-          fillFromConfig(r.config);
+          fillFromConfig(r.config, { ...(r.meta || {}), persisted: true, fromCache: false });
+          try { __serverConfigCache = { at: Date.now(), payload: r }; } catch {}
+          try { await loadCitiesCatalog(); } catch {}
           const partialFailure = !!(r && r.partialFailure);
           const renewReplan = r && r.renewReplanResult;
           const renewReplanFailed = !!(renewReplan && renewReplan.ok === false);
@@ -2168,7 +2282,11 @@
                 return ca && ca.error ? ` País: falha ao alinhar contas (${String(ca.error)}).` : '';
               }
               const tz = String(ca.timezone || (r.config && r.config.country && r.config.country.timezone) || '').trim();
-              return ` País ${String(ca.country || '').toUpperCase() || 'BR'} (${tz || 'fuso padrão'}): ${Number(ca.updated || 0)} conta(s) alinhada(s), ${Number(ca.unchanged || 0)} já no padrão, ${Number(ca.failed || 0)} falha(s).`;
+              const remapped = Number(ca.cityRemapped || 0);
+              const pinned = Number(ca.vehiclesPinned || 0);
+              return ` País ${String(ca.country || '').toUpperCase() || 'BR'} (${tz || 'fuso padrão'}): ${Number(ca.updated || 0)} conta(s) alinhada(s), ${Number(ca.unchanged || 0)} já no padrão, ${Number(ca.failed || 0)} falha(s).` +
+                (remapped ? ` ${remapped} cidade(s) passada(s) para o catálogo do país.` : '') +
+                (pinned ? ` ${pinned} conta(s) de veículo presa(s) em itens.` : '');
             })() + partialFailureMsg,
             tone: (renewReplanFailed || partialFailure) ? 'bad' : 'good'
           });
@@ -2628,6 +2746,7 @@
     async function reloadPerfis() {
       if (__reloadInflight) return;
       __reloadInflight = true;
+      try { void preloadServerConfig(); } catch {}
       const statusP = safeGetStatus();
       const perfisP = safeListPerfis();
       const netP = fetchJsonTimeout('/api/network-rotation/state', 8000);
@@ -2684,6 +2803,12 @@
         __lastStatusPaint = stFresh;
         try { saveHudKeep(stFresh); } catch {}
       }
+      try {
+        const liveCfg = (stFreshUsable && stFresh && stFresh.serverConfig)
+          ? stFresh.serverConfig
+          : (st && st.serverConfig);
+        if (liveCfg) ingestServerConfigObject(liveCfg, { fromStatus: true });
+      } catch {}
       if (perfisRespFresh && Array.isArray(perfisRespFresh.perfis) && perfisRespFresh.perfis.length) __lastPerfisPaint = perfisRespFresh;
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
@@ -3414,7 +3539,7 @@
     // Nova Conta (chama o modal; o modal faz a criação com loading)
     document.getElementById('addPerfilBtn').onclick = async () => {
       let cidades = [];
-      try { cidades = await window.electronAPI.listarCidades(); } catch { cidades = ['São Paulo','Rio de Janeiro']; }
+      try { cidades = await window.electronAPI.listarCidades(); } catch { cidades = []; }
       showCriarContaModal({ cidades });
     };
 
@@ -4554,6 +4679,7 @@
     })();
 
     reloadPerfis();
+    try { void preloadServerConfig(); } catch {}
     setInterval(reloadPerfis, 1000);
 
     // Chamada inicial das métricas:

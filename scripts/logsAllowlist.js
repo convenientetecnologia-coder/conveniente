@@ -78,6 +78,8 @@ function logsAllowlist() {
     connect_lane_events: path.join(base, 'connect_lane_events.jsonl'),
     connect_lane_fail: path.join(base, 'connect_lane_fail.json'),
     server_runtime_config: path.join(base, 'server_runtime_config.json'),
+    server_runtime_config_last_good: path.join(base, 'server_runtime_config.last-good.json'),
+    server_runtime_config_stamp: path.join(base, 'server_runtime_config.stamp.json'),
     ct_config: path.join(base, 'ct_config.json'),
     delta_thread_state: path.join(base, 'delta_thread_state.json'),
     delta_queue: path.join(base, 'mensagens_pendentes.jsonl'),

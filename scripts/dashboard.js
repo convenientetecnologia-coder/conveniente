@@ -2613,7 +2613,10 @@ async function execStockProvision(cmd) {
       const login = String(a && (a.login || a.user || a.email || a.username) || '').trim();
       const password = String(a && (a.password || a.pass) || '').trim();
       const category = String(a && a.category || '').trim().toLowerCase();
-      const robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
+      let robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
+      try {
+        if (require('./countryGeo.js').allowsVehicles() !== true) robeMode = 'itens';
+      } catch {}
 
       const out = {
         ok: false,

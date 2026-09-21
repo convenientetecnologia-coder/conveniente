@@ -6,13 +6,16 @@ const os = require("os");
 const utils = require("./utils.js");
 
 const CONFIG_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.json");
+const LAST_GOOD_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.last-good.json");
+const STAMP_PATH = path.join(__dirname, "..", "dados", "server_runtime_config.stamp.json");
 const CONFIG_VERSION = 1;
 
 const ITEM_TITLES_PACK_DEFAULT = "titulos";
 const ITEM_TITLES_PACKS = Object.freeze({
-  titulos: { file: "titulos.json", label: "Padrão" },
-  titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico" },
-  titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve" }
+  titulos: { file: "titulos.json", label: "Padrão", countries: Object.freeze(["br"]) },
+  titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico", countries: Object.freeze(["br"]) },
+  titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve", countries: Object.freeze(["br"]) },
+  titulosEUA: { file: "titulosEUA.json", label: "EUA", countries: Object.freeze(["us"]) }
 });
 
 const COUNTRY_ID_DEFAULT = "br";
@@ -100,12 +103,33 @@ function listItemTitlesPacks() {
   return Object.keys(ITEM_TITLES_PACKS).map((id) => ({
     id,
     file: ITEM_TITLES_PACKS[id].file,
-    label: ITEM_TITLES_PACKS[id].label
+    label: ITEM_TITLES_PACKS[id].label,
+    countries: Array.isArray(ITEM_TITLES_PACKS[id].countries)
+      ? ITEM_TITLES_PACKS[id].countries.slice()
+      : [COUNTRY_ID_DEFAULT]
   }));
 }
 
+function pinItemTitlesPack(countryId, packId) {
+  const country = normalizeCountryId(countryId);
+  const requested = String(packId || "").trim();
+  const allowed = Object.keys(ITEM_TITLES_PACKS).filter((id) => {
+    const countries = ITEM_TITLES_PACKS[id].countries || [COUNTRY_ID_DEFAULT];
+    return countries.indexOf(country) >= 0;
+  });
+  if (allowed.indexOf(requested) >= 0) return requested;
+  if (country === "us" && allowed.indexOf("titulosEUA") >= 0) return "titulosEUA";
+  return ITEM_TITLES_PACK_DEFAULT;
+}
+
 function resolveItemTitlesPath(packId) {
-  const spec = ITEM_TITLES_PACKS[normalizeItemTitlesPack(packId)] || ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT];
+  let countryId = COUNTRY_ID_DEFAULT;
+  try {
+    const live = readCountryPackEffective();
+    if (live && live.id) countryId = live.id;
+  } catch {}
+  const pinned = pinItemTitlesPack(countryId, packId);
+  const spec = ITEM_TITLES_PACKS[pinned] || ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT];
   const file = String((spec && spec.file) || ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT].file);
   if (file !== path.basename(file) || file.indexOf("..") >= 0) {
     return path.join(__dirname, "..", "dados", ITEM_TITLES_PACKS[ITEM_TITLES_PACK_DEFAULT].file);
@@ -354,15 +378,120 @@ function writeJsonAtomic(fp, obj) {
   fs.renameSync(tmp, fp);
 }
 
-function readServerConfigRaw() {
+function parseConfigFile(fp) {
   try {
-    if (!fs.existsSync(CONFIG_PATH)) return null;
-    const raw = fs.readFileSync(CONFIG_PATH, "utf8");
-    const j = JSON.parse(raw);
-    return (j && typeof j === "object") ? j : null;
+    if (!fs.existsSync(fp)) return { exists: false, raw: null, corrupt: false };
+    const txt = fs.readFileSync(fp, "utf8");
+    if (!String(txt || "").trim()) return { exists: true, raw: null, corrupt: true };
+    const j = JSON.parse(txt);
+    if (!j || typeof j !== "object" || Array.isArray(j)) {
+      return { exists: true, raw: null, corrupt: true };
+    }
+    return { exists: true, raw: j, corrupt: false };
   } catch {
-    return null;
+    return { exists: true, raw: null, corrupt: true };
   }
+}
+
+function persistReplicaAndStamp(obj, { updatedBy, updatedAt } = {}) {
+  if (!obj || typeof obj !== "object") return false;
+  try { writeJsonAtomic(LAST_GOOD_PATH, obj); } catch {}
+  try {
+    writeJsonAtomic(STAMP_PATH, {
+      persisted: true,
+      savedAt: Number(updatedAt || obj.updatedAt || Date.now()) || Date.now(),
+      updatedBy: String(updatedBy || obj.updatedBy || "").slice(0, 180)
+    });
+  } catch {}
+  return true;
+}
+
+function healLastGoodFromPrimary(raw) {
+  try {
+    if (!raw || typeof raw !== "object") return;
+    const replica = parseConfigFile(LAST_GOOD_PATH);
+    if (replica.raw) return;
+    writeJsonAtomic(LAST_GOOD_PATH, raw);
+  } catch {}
+}
+
+function ensurePersistedConfigLoaded() {
+  const primary = parseConfigFile(CONFIG_PATH);
+  if (primary.raw) {
+    healLastGoodFromPrimary(primary.raw);
+    const stamp = parseConfigFile(STAMP_PATH);
+    if (!(stamp.raw && stamp.raw.persisted === true)) {
+      try {
+        persistReplicaAndStamp(primary.raw, {
+          updatedBy: primary.raw.updatedBy,
+          updatedAt: primary.raw.updatedAt
+        });
+      } catch {}
+    }
+    return {
+      raw: primary.raw,
+      source: "file",
+      persisted: true,
+      recovered: false,
+      unreadable: false
+    };
+  }
+  const lastGood = parseConfigFile(LAST_GOOD_PATH);
+  if (lastGood.raw) {
+    try { writeJsonAtomic(CONFIG_PATH, lastGood.raw); } catch {}
+    return {
+      raw: lastGood.raw,
+      source: "file",
+      persisted: true,
+      recovered: true,
+      unreadable: false
+    };
+  }
+  const stamp = parseConfigFile(STAMP_PATH);
+  const stamped = !!(stamp.raw && stamp.raw.persisted === true);
+  if (stamped || primary.exists || lastGood.exists) {
+    return {
+      raw: null,
+      source: "unavailable",
+      persisted: true,
+      recovered: false,
+      unreadable: true
+    };
+  }
+  return {
+    raw: null,
+    source: "default",
+    persisted: false,
+    recovered: false,
+    unreadable: false
+  };
+}
+
+function readServerConfigRaw() {
+  const probe = ensurePersistedConfigLoaded();
+  return probe.raw || null;
+}
+
+function filterCitiesForCountry(list, countryId) {
+  const input = Array.isArray(list) ? list.slice() : [];
+  let geo = null;
+  try { geo = require("./countryGeo.js"); } catch { return input; }
+  if (!geo || typeof geo.getCoords !== "function") return input;
+  const kept = [];
+  let resolved = 0;
+  for (const c of input) {
+    try {
+      const coords = geo.getCoords(c, { countryId });
+      if (coords && Number(coords.latitude) && Number(coords.longitude)) {
+        kept.push(c);
+        resolved += 1;
+      }
+    } catch {
+      kept.push(c);
+    }
+  }
+  if (input.length > 0 && resolved === 0) return input;
+  return kept;
 }
 
 function getTotalMemMB() {
@@ -444,12 +573,27 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const v2PrefetchMaxRaw = clamp(Math.floor(toNum(v2.prefetchMax, DEFAULTS.robe.v2Tuning.prefetchMax)), 1, 500);
   const v2PrefetchMin = Math.min(v2PrefetchMinRaw, v2PrefetchMaxRaw);
   const v2PrefetchMax = Math.max(v2PrefetchMinRaw, v2PrefetchMaxRaw);
-  const cidadesExtrasGlobais = normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 });
+  let cidadesExtrasGlobais = filterCitiesForCountry(
+    normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 }),
+    countryPack.id
+  );
+  if (source === "default" && countryPack.id === "us" && !cidadesExtrasGlobais.length) {
+    try {
+      const geo = require("./countryGeo.js");
+      cidadesExtrasGlobais = geo.listCities({ countryId: "us" }).filter((c) => {
+        const coords = geo.getCoords(c, { countryId: "us" });
+        return !!(coords && Number(coords.latitude) && Number(coords.longitude));
+      });
+    } catch {}
+  }
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
     ? "after_first_confirmed_post"
     : "after_all_working_posted";
-  const itemTitlesPack = normalizeItemTitlesPack(robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack);
+  const itemTitlesPack = pinItemTitlesPack(
+    countryPack.id,
+    robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack
+  );
 
   const workerRamDivisorGb = clamp(
     Math.floor(toNum(memRaw.workerRamDivisorGb, DEFAULTS.memory.workerRamDivisorGb)),
@@ -699,6 +843,12 @@ function validateServerConfigPayload(payload) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
+  const existingProbe = ensurePersistedConfigLoaded();
+  if (existingProbe.unreadable) {
+    return { ok: false, error: "server_config_unreadable" };
+  }
+  const existingRaw = (existingProbe.raw && typeof existingProbe.raw === "object") ? existingProbe.raw : {};
+
   const errors = [];
   if (cap) {
     if (cap.mode !== undefined) {
@@ -752,13 +902,22 @@ function validateServerConfigPayload(payload) {
       } else {
         const normalized = normalizeCityList(robe.cidadesExtrasGlobais, { max: 201 });
         if (normalized.length > 200) errors.push("robe.cidadesExtrasGlobais_limite_excedido");
-        for (const c of normalized) {
-          const coords = utils.getCoords(c);
-          if (!coords || !coords.latitude || !coords.longitude) {
-            errors.push(`robe.cidadesExtrasGlobais_sem_coordenadas:${c}`);
-            break;
+        const countryIdForCoords = normalizeCountryId(
+          extractCountryIdFromUnknown(p.country) ||
+          extractCountryIdFromUnknown(p.pais) ||
+          COUNTRY_ID_DEFAULT
+        );
+        try {
+          const countryGeo = require("./countryGeo.js");
+          for (const c of normalized) {
+            if (!countryGeo.isKnownCity(c, { countryId: countryIdForCoords })) continue;
+            const coords = countryGeo.getCoords(c, { countryId: countryIdForCoords });
+            if (!coords || !coords.latitude || !coords.longitude) {
+              errors.push(`robe.cidadesExtrasGlobais_sem_coordenadas:${c}`);
+              break;
+            }
           }
-        }
+        } catch {}
       }
     }
     if (robe.v2Tuning !== undefined) {
@@ -912,36 +1071,36 @@ function validateServerConfigPayload(payload) {
 
   const merged = {
     ...DEFAULTS,
-    ...(readServerConfigRaw() || {}),
-    capacity: { ...DEFAULTS.capacity, ...((readServerConfigRaw() || {}).capacity || {}), ...(cap || {}) },
-    robe: { ...DEFAULTS.robe, ...((readServerConfigRaw() || {}).robe || {}), ...(robe || {}) },
-    memory: { ...DEFAULTS.memory, ...((readServerConfigRaw() || {}).memory || {}), ...(mem || {}) },
-    networkRotation: { ...DEFAULTS.networkRotation, ...((readServerConfigRaw() || {}).networkRotation || {}), ...(net || {}) },
-    dailyWindow: { ...DEFAULTS.dailyWindow, ...((readServerConfigRaw() || {}).dailyWindow || {}), ...(daily || {}) },
+    ...existingRaw,
+    capacity: { ...DEFAULTS.capacity, ...(existingRaw.capacity || {}), ...(cap || {}) },
+    robe: { ...DEFAULTS.robe, ...(existingRaw.robe || {}), ...(robe || {}) },
+    memory: { ...DEFAULTS.memory, ...(existingRaw.memory || {}), ...(mem || {}) },
+    networkRotation: { ...DEFAULTS.networkRotation, ...(existingRaw.networkRotation || {}), ...(net || {}) },
+    dailyWindow: { ...DEFAULTS.dailyWindow, ...(existingRaw.dailyWindow || {}), ...(daily || {}) },
     marketplaceRenew: {
       ...DEFAULTS.marketplaceRenew,
-      ...((readServerConfigRaw() || {}).marketplaceRenew || {}),
+      ...(existingRaw.marketplaceRenew || {}),
       ...(renew || {})
     },
     terminalAccountCleanup: {
       ...DEFAULTS.terminalAccountCleanup,
-      ...((readServerConfigRaw() || {}).terminalAccountCleanup || {}),
+      ...(existingRaw.terminalAccountCleanup || {}),
       ...(termClean || {})
     },
     logging: {
       ...DEFAULTS.logging,
-      ...((readServerConfigRaw() || {}).logging || {}),
+      ...(existingRaw.logging || {}),
       ...(log || {})
     },
     country: {
       ...DEFAULTS.country,
-      ...((readServerConfigRaw() || {}).country && typeof (readServerConfigRaw() || {}).country === "object"
-        ? (readServerConfigRaw() || {}).country
-        : {}),
+      ...(existingRaw.country && typeof existingRaw.country === "object" ? existingRaw.country : {}),
       ...(countryIn || {})
     }
   };
-  const normalized = buildNormalizedConfig(merged, { source: "file" });
+  const normalized = buildNormalizedConfig(merged, {
+    source: existingProbe.persisted ? "file" : "default"
+  });
   if (normalized.robe.windowEndMin <= normalized.robe.windowStartMin) {
     return { ok: false, error: "validation_failed", details: ["robe.window_intervalo_invalido"] };
   }
@@ -1089,6 +1248,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
   };
   try {
     writeJsonAtomic(CONFIG_PATH, next);
+    persistReplicaAndStamp(next, { updatedBy: next.updatedBy, updatedAt: next.updatedAt });
     return { ok: true, saved: next };
   } catch (e) {
     return { ok: false, error: "write_failed", details: (e && e.message) || String(e) };
@@ -1096,10 +1256,26 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
 }
 
 function readServerConfigEffective({ totalMemMB = getTotalMemMB() } = {}) {
-  const raw = readServerConfigRaw();
-  const source = raw ? "file" : "default";
-  const base = raw || DEFAULTS;
-  return buildNormalizedConfig(base, { totalMemMB, source });
+  const probe = ensurePersistedConfigLoaded();
+  if (probe.raw) {
+    const n = buildNormalizedConfig(probe.raw, { totalMemMB, source: "file" });
+    n.persisted = true;
+    n.recovered = !!probe.recovered;
+    n.unreadable = false;
+    return n;
+  }
+  if (probe.unreadable) {
+    const n = buildNormalizedConfig(DEFAULTS, { totalMemMB, source: "unavailable" });
+    n.persisted = true;
+    n.recovered = false;
+    n.unreadable = true;
+    return n;
+  }
+  const n = buildNormalizedConfig(DEFAULTS, { totalMemMB, source: "default" });
+  n.persisted = false;
+  n.recovered = false;
+  n.unreadable = false;
+  return n;
 }
 
 function readCountryPackEffective() {
@@ -1113,6 +1289,8 @@ function readCountryPackEffective() {
 
 module.exports = {
   CONFIG_PATH,
+  LAST_GOOD_PATH,
+  STAMP_PATH,
   DEFAULTS,
   ITEM_TITLES_PACKS,
   ITEM_TITLES_PACK_DEFAULT,
@@ -1123,12 +1301,14 @@ module.exports = {
   getTotalMemMB,
   readServerConfigRaw,
   readServerConfigEffective,
+  ensurePersistedConfigLoaded,
   readCountryPackEffective,
   validateServerConfigPayload,
   writeServerConfigAtomic,
   calcMaxAccountsEffective,
   isItemTitlesPackId,
   normalizeItemTitlesPack,
+  pinItemTitlesPack,
   listItemTitlesPacks,
   resolveItemTitlesPath,
   isCountryId,

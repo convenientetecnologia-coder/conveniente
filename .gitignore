@@ -21,6 +21,10 @@ Thumbs.db
 motores/
 
 # Runtime local (cada servidor tem o seu estado)
+# Config do servidor é sagrada: nunca versionar — git pull não pode sobrescrever.
+dados/server_runtime_config.json
+dados/server_runtime_config.last-good.json
+dados/server_runtime_config.stamp.json
 dados/.telemetry_hostid
 dados/status.json
 dados/status_node_*.json

@@ -1169,28 +1169,17 @@ async function patchPage(nome, page, coords) {
 }
 
 function resolvePatchCoordsForProfile(profileName, manifest) {
+  // GPS é da cidade da conta. Proxy/modem mandam só o IP. Slot.geo não injeta.
   const nome = String(profileName || '').trim();
-  const strictGateway = gatewayProxy.isStrictProxyRequired();
-  const geoProxy = gatewayProxy.resolveGeoForProfile({ profileName: nome, manifest });
-  if (strictGateway) {
-    if (!geoProxy || geoProxy.enabled !== true || !geoProxy.coords) {
-      const reason = String(geoProxy && geoProxy.reason || 'geo_proxy_unresolved').trim() || 'geo_proxy_unresolved';
-      throw new Error(`gateway_geo_required:${reason}`);
-    }
+  let cidade = String((manifest && manifest.cidade) || '').trim();
+  if (!cidade && nome) {
     try {
-      logger.info('[GEO_PROXY][strict]', {
-        nome,
-        slotId: String(geoProxy.slotId || ''),
-        source: String(geoProxy.source || 'slot_geo'),
-        ipCurrent: String(geoProxy.ipCurrent || '')
-      });
+      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json'), 'utf8'));
+      const perfil = (Array.isArray(perfisArr) ? perfisArr : []).find((p) => p && p.nome === nome);
+      cidade = String((perfil && perfil.cidade) || '').trim();
     } catch {}
-    return geoProxy.coords;
   }
-  if (geoProxy && geoProxy.enabled === true && geoProxy.coords) {
-    return geoProxy.coords;
-  }
-  return utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
+  return utils.getCoords(cidade);
 }
 
 const BLINDAR_TRIES = 3;
@@ -2405,7 +2394,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
 
     if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer) {
       launchArgs.push(`--proxy-server=${gatewayResolved.proxyServer}`);
-      // Só com proxy: sem túnel, HTTP e WebRTC já saem no mesmo IP do modem.
+      // Proxy = só IP. GPS da conta não vem daqui.
       launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
     }
@@ -5142,14 +5131,13 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   try {
     manifest = await manifestStore.read(nome).catch(()=>null);
     if (manifest && manifest.robeMode) robeMode = String(manifest.robeMode);
+    try {
+      if (require('./countryGeo.js').allowsVehicles() !== true) robeMode = 'itens';
+    } catch {}
   } catch {}
   try {
-    // Sem fallback para cidade da conta quando gateway estrito está ON.
     coords = resolvePatchCoordsForProfile(nome, manifest || {});
   } catch (e) {
-    const msg = (e && e.message) ? String(e.message) : String(e || '');
-    if (/gateway_geo_required:/i.test(msg)) throw e;
-    // Fora do modo estrito, mantém robustez sem travar o fluxo.
     try {
       const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
       const perfil = perfisArr.find(p => p && p.nome === nome);
