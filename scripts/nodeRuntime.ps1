@@ -332,3 +332,87 @@ function Get-ConvenienteNpmCmd {
     }
     return [string]$result.NpmCmd
 }
+
+function Test-ConvenienteNpmModulesOk {
+    $repoRoot = Get-ConvenienteRepoRoot
+    $express = Join-Path $repoRoot 'node_modules\express\package.json'
+    return (Test-Path -LiteralPath $express)
+}
+
+function Ensure-ConvenienteNpmModules {
+    try {
+        $repoRoot = Get-ConvenienteRepoRoot
+        if (Test-ConvenienteNpmModulesOk) {
+            $out = [ordered]@{
+                Ok       = $true
+                Source   = 'existing'
+                RepoRoot = $repoRoot
+            }
+            Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_ok' -Data $out
+            return $out
+        }
+
+        $rt = Ensure-ConvenienteNodeRuntime -RequireNpm
+        if (-not $rt -or -not $rt.Ok) {
+            $out = [ordered]@{
+                Ok     = $false
+                Error  = 'npm_runtime_fail'
+                Detail = [string]$rt.Error
+            }
+            Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_fail' -Data $out
+            return $out
+        }
+
+        Write-Host ''
+        Write-Host 'Bibliotecas npm ausentes (express). Instalando com o Node pinado...'
+        Write-ConvenienteNodeRuntimeEvent -Event 'npm_install_start' -Data @{
+            RepoRoot = $repoRoot
+            NpmCmd   = [string]$rt.NpmCmd
+        }
+
+        $code = 1
+        Push-Location $repoRoot
+        try {
+            & $rt.NpmCmd install --no-fund --no-audit
+            $code = 0
+            try { $code = [int]$LASTEXITCODE } catch { $code = 0 }
+        } finally {
+            Pop-Location
+        }
+
+        if ($code -ne 0) {
+            $out = [ordered]@{
+                Ok       = $false
+                Error    = ('npm_install_exit_' + $code)
+                RepoRoot = $repoRoot
+            }
+            Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_fail' -Data $out
+            return $out
+        }
+        if (-not (Test-ConvenienteNpmModulesOk)) {
+            $out = [ordered]@{
+                Ok       = $false
+                Error    = 'npm_install_missing_express'
+                RepoRoot = $repoRoot
+            }
+            Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_fail' -Data $out
+            return $out
+        }
+
+        Write-Host 'Bibliotecas npm instaladas.'
+        $out = [ordered]@{
+            Ok       = $true
+            Source   = 'installed'
+            RepoRoot = $repoRoot
+        }
+        Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_installed' -Data $out
+        return $out
+    } catch {
+        $out = [ordered]@{
+            Ok    = $false
+            Error = $_.Exception.Message
+        }
+        Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_exception' -Data $out
+        return $out
+    }
+}

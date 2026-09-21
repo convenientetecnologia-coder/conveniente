@@ -513,6 +513,14 @@ function Start-ConvenienteNode {
         Write-StartLog 'node_missing'
         return 1
     }
+    if (Get-Command Ensure-ConvenienteNpmModules -ErrorAction SilentlyContinue) {
+        $mods = Ensure-ConvenienteNpmModules
+        if (-not $mods -or -not $mods.Ok) {
+            Write-StartLog ('npm_modules_fail ' + [string]$mods.Error)
+            return 1
+        }
+        Write-StartLog ('npm_modules_' + [string]$mods.Source)
+    }
     [void](Stop-ConvenienteConsoleHosts)
     try {
         $needCells = $false

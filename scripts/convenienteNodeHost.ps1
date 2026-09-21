@@ -56,6 +56,14 @@ if ($ver -ne 'v20.20.2') {
     try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'node_version_unexpected'; NodeExe = $node; Version = $ver; WantedTag = 'v20.20.2'; IndexPath = $idx } } catch {}
     throw "node_version_unexpected: $ver wanted=v20.20.2 path=$node"
 }
+if (Get-Command Ensure-ConvenienteNpmModules -ErrorAction SilentlyContinue) {
+    $mods = Ensure-ConvenienteNpmModules
+    if (-not $mods -or -not $mods.Ok) {
+        $why = [string]$mods.Error
+        try { Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_fail' -Data @{ Error = 'npm_modules_fail'; Detail = $why; NodeExe = $node; IndexPath = $idx } } catch {}
+        throw ("npm_modules_fail: " + $why)
+    }
+}
 try {
     Write-ConvenienteNodeRuntimeEvent -Event 'node_runtime_host_launch' -Data @{ NodeExe = $node; Version = $ver; IndexPath = $idx; WorkDir = $wd }
 } catch {}

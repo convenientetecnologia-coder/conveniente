@@ -5,7 +5,13 @@ function Log($msg) {
     Write-Host ("[CONVENIENTE-INSTALADOR] " + $msg) -ForegroundColor Cyan
 }
 
-# 1. Instalar dependências via Winget (Chrome, Chromium, Git)
+# 1. Instalar dependências via Winget (Node no PATH, Chrome, Chromium, Git)
+# Node LTS no PATH é o que faz o ritual wipe+clone+npm install funcionar.
+# Em 08/09/2026 o instalador tirou isso e ficou só o Node pinado dentro da pasta;
+# o wipe apaga o pinado e o `npm` da PATH some. Volta o LTS no Windows.
+Log "Instalando Node.js LTS (Se necessário)..."
+winget install -e --id OpenJS.NodeJS.LTS -h
+
 Log "Instalando Google Chrome (Se necessário)..."
 winget install -e --id Google.Chrome -h
 
@@ -17,6 +23,7 @@ winget install -e --id Git.Git -h
 
 # Aguarda alguns segundos para evitar falhas de ambiente
 Start-Sleep -Seconds 10
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
 # 2. Clonar o projeto do GitHub em C:\conveniente
 if (Test-Path "C:\conveniente") {
@@ -26,25 +33,25 @@ if (Test-Path "C:\conveniente") {
 Log "Clonando o sistema do GitHub em C:\conveniente..."
 git clone https://github.com/convenientetecnologia-coder/conveniente.git "C:\conveniente"
 
-# 3. Instalar bibliotecas node (NPM) usando o runtime pinado do projeto
+# 3. Instalar bibliotecas node (NPM): pinado se existir, senão o npm do PATH
 Set-Location "C:\conveniente"
+$npmOk = $false
 $nodeRuntime = Join-Path $PWD "scripts\nodeRuntime.ps1"
-if (!(Test-Path -LiteralPath $nodeRuntime)) {
-    throw "Node runtime helper ausente: $nodeRuntime"
+if (Test-Path -LiteralPath $nodeRuntime) {
+    . $nodeRuntime
+    $rt = Ensure-ConvenienteNodeRuntime -RequireNpm
+    if ($rt -and $rt.Ok -and (Test-Path -LiteralPath ([string]$rt.NpmCmd))) {
+        Log "Instalando bibliotecas npm com o Node pinado..."
+        & $rt.NpmCmd install
+        if (-not $LASTEXITCODE -or $LASTEXITCODE -eq 0) { $npmOk = $true }
+    }
 }
-. $nodeRuntime
-$rt = Ensure-ConvenienteNodeRuntime -RequireNpm
-if (-not $rt -or -not $rt.Ok) {
-    throw "Falha ao preparar Node pinado: $($rt.Error)"
-}
-$npmCmd = [string]$rt.NpmCmd
-if (!(Test-Path -LiteralPath $npmCmd)) {
-    throw "npm.cmd pinado ausente: $npmCmd"
-}
-Log "Instalando bibliotecas npm com o Node pinado..."
-& $npmCmd install
-if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-    throw "npm install falhou com o Node pinado (codigo $LASTEXITCODE)"
+if (-not $npmOk) {
+    Log "Instalando bibliotecas npm..."
+    npm install
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "npm install falhou (codigo $LASTEXITCODE)"
+    }
 }
 
 # 4. Criar estrutura de dados mínima (caso não exista)
