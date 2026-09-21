@@ -1732,7 +1732,7 @@
           uniqueCities(globalCitiesSelected).map(v => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR'))
         );
         const terms = parseSearchTerms(globalCitiesFilterEl && globalCitiesFilterEl.value);
-        const options = uniqueCities([...(Array.isArray(globalCitiesAll) ? globalCitiesAll : []), ...globalCitiesSelected]);
+        const options = uniqueCities(Array.isArray(globalCitiesAll) ? globalCitiesAll : []);
         const filtered = !terms.length ? options : options.filter((city) => {
           const k = String(city || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
           return terms.some(t => k === t || k.includes(t));
@@ -1754,9 +1754,20 @@
         }).join('');
         updateGlobalToggleLabel();
       }
-      async function loadCitiesCatalog() {
+      function cityKey(v) {
+        return String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR');
+      }
+      function pinSelectedToCatalog() {
+        const catalog = uniqueCities(Array.isArray(globalCitiesAll) ? globalCitiesAll : []);
+        const catalogSet = new Set(catalog.map(cityKey));
+        const kept = uniqueCities(globalCitiesSelected).filter((c) => catalogSet.has(cityKey(c)));
+        globalCitiesSelected = kept.length ? kept : catalog.slice();
+      }
+      async function loadCitiesCatalog(countryId) {
+        const id = String(countryId || (countryIdEl && countryIdEl.value) || '').trim().toLowerCase();
+        const q = (id === 'us' || id === 'br') ? ('?country=' + encodeURIComponent(id)) : '';
         try {
-          const r = await fetch('/api/cidades').then(x => x.json()).catch(() => null);
+          const r = await fetch('/api/cidades' + q).then(x => x.json()).catch(() => null);
           if (r && r.ok === true && Array.isArray(r.cidades)) {
             globalCitiesAll = uniqueCities(r.cidades);
           } else {
@@ -1765,6 +1776,7 @@
         } catch {
           globalCitiesAll = uniqueCities(globalCitiesAll);
         }
+        pinSelectedToCatalog();
         renderGlobalCities();
       }
 
@@ -1867,6 +1879,7 @@
         );
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
+        pinSelectedToCatalog();
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
         if (memGovExitEl) memGovExitEl.value = Number(mem.governorExitMb != null ? mem.governorExitMb : 2048);
         if (memHostBaseEl) memHostBaseEl.value = Number(mem.hostBaseMb != null ? mem.hostBaseMb : 2048);
@@ -1911,8 +1924,11 @@
       })();
 
       if (countryIdEl) {
-        countryIdEl.onchange = () => {
-          renderItemTitlePacks(currentCountryId(), currentCountryId() === 'us' ? 'titulosEUA' : 'titulos');
+        countryIdEl.onchange = async () => {
+          const id = currentCountryId();
+          renderItemTitlePacks(id, id === 'us' ? 'titulosEUA' : 'titulos');
+          globalCitiesSelected = [];
+          await loadCitiesCatalog(id);
         };
       }
       closeBtn.onclick = () => overlay.remove();
@@ -2250,6 +2266,7 @@
               photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted'),
               cidadesExtrasGlobais: (() => {
                 syncGlobalSelectedFromChecks();
+                pinSelectedToCatalog();
                 return uniqueCities(globalCitiesSelected);
               })()
             },

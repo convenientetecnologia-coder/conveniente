@@ -5,8 +5,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Listar cidades (GET /api/cidades) — catálogo do país salvo no servidor
   app.get('/api/cidades', (req, res) => {
     try {
-      const pack = countryGeo.describeDataPack();
-      const arr = countryGeo.listCities();
+      const qCountry = (req.query && (req.query.country || req.query.pais)) || undefined;
+      const pack = countryGeo.describeDataPack({ countryId: qCountry });
+      const arr = countryGeo.listCities({ countryId: qCountry });
       res.json({
         ok: true,
         cidades: arr,

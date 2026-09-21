@@ -472,25 +472,35 @@ function readServerConfigRaw() {
   return probe.raw || null;
 }
 
+function catalogCitiesWithCoords(countryId) {
+  let geo = null;
+  try { geo = require("./countryGeo.js"); } catch { return []; }
+  if (!geo || typeof geo.listCities !== "function" || typeof geo.getCoords !== "function") return [];
+  const id = normalizeCountryId(countryId);
+  const out = [];
+  for (const c of geo.listCities({ countryId: id })) {
+    try {
+      const coords = geo.getCoords(c, { countryId: id });
+      if (coords && Number(coords.latitude) && Number(coords.longitude)) out.push(c);
+    } catch {}
+  }
+  return out;
+}
+
 function filterCitiesForCountry(list, countryId) {
   const input = Array.isArray(list) ? list.slice() : [];
   let geo = null;
   try { geo = require("./countryGeo.js"); } catch { return input; }
-  if (!geo || typeof geo.getCoords !== "function") return input;
+  if (!geo || typeof geo.getCoords !== "function" || typeof geo.isKnownCity !== "function") return input;
+  const id = normalizeCountryId(countryId);
   const kept = [];
-  let resolved = 0;
   for (const c of input) {
     try {
-      const coords = geo.getCoords(c, { countryId });
-      if (coords && Number(coords.latitude) && Number(coords.longitude)) {
-        kept.push(c);
-        resolved += 1;
-      }
-    } catch {
-      kept.push(c);
-    }
+      if (!geo.isKnownCity(c, { countryId: id })) continue;
+      const coords = geo.getCoords(c, { countryId: id });
+      if (coords && Number(coords.latitude) && Number(coords.longitude)) kept.push(c);
+    } catch {}
   }
-  if (input.length > 0 && resolved === 0) return input;
   return kept;
 }
 
@@ -577,14 +587,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 }),
     countryPack.id
   );
-  if (source === "default" && countryPack.id === "us" && !cidadesExtrasGlobais.length) {
-    try {
-      const geo = require("./countryGeo.js");
-      cidadesExtrasGlobais = geo.listCities({ countryId: "us" }).filter((c) => {
-        const coords = geo.getCoords(c, { countryId: "us" });
-        return !!(coords && Number(coords.latitude) && Number(coords.longitude));
-      });
-    } catch {}
+  if (!cidadesExtrasGlobais.length) {
+    cidadesExtrasGlobais = catalogCitiesWithCoords(countryPack.id);
   }
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
@@ -1314,6 +1318,9 @@ module.exports = {
   isCountryId,
   normalizeCountryId,
   resolveCountryPack,
-  listCountryPacks
+  listCountryPacks,
+  filterCitiesForCountry,
+  catalogCitiesWithCoords,
+  buildNormalizedConfig
 };
 
