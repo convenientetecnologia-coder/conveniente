@@ -4160,7 +4160,37 @@ async function __readLocalStatusForEventBridge() {
   // Jornal do dashboard. Nunca GET /api/status — compete no event loop e aborta em 8s.
   const fresh = __readFreshStatusJson(60000);
   if (fresh) return fresh;
-  return __readFreshStatusJson(24 * 60 * 60 * 1000);
+  const recent = __readFreshStatusJson(24 * 60 * 60 * 1000);
+  if (recent) return recent;
+  return __confirmedEmptyFleetStatus();
+}
+
+// perfis.json existe e é []: o servidor não tem conta. Isso é status, não ausência de status.
+// Arquivo ausente ou com conta não entra aqui — aí vale o jornal do worker.
+function __confirmedEmptyFleetStatus() {
+  const perfisPath = path.join(__dirname, 'dados', 'perfis.json');
+  try {
+    if (!fs.existsSync(perfisPath)) return null;
+    const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
+    if (!Array.isArray(arr) || arr.length !== 0) return null;
+  } catch {
+    return null;
+  }
+  const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+  const freeMB = Math.round(os.freemem() / (1024 * 1024));
+  return {
+    perfis: [],
+    robes: {},
+    robeQueue: [],
+    sys: {
+      freeMB,
+      totalMB,
+      usedMB: (Number.isFinite(totalMB) && Number.isFinite(freeMB)) ? (totalMB - freeMB) : null,
+      cores: (os.cpus() || []).length
+    },
+    ts: Date.now(),
+    source: 'empty_fleet'
+  };
 }
 
 function __resolveCtServerEventConfig() {
