@@ -5170,6 +5170,12 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   await injectCookies(p0, cookies);
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
+  try {
+    const hygiene = require('./robeTabHygiene.js');
+    if (hygiene && typeof hygiene.waitForMessengerShellOrGate === 'function') {
+      await hygiene.waitForMessengerShellOrGate(p0, { timeoutMs: 8000, pollMs: 500 }).catch(()=>null);
+    }
+  } catch {}
   // Fail-fast ANTES do GPT unblock: se já é captcha/checkpoint/login, não gasta rounds.
   try {
     const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));

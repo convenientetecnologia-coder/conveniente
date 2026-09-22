@@ -574,6 +574,36 @@ function formatRobeQueueItemLabel(item) {
   return slot.size ? `${slot.city} [${slot.size}]` : slot.city;
 }
 
+function getRobeQueueCountryId(cfg) {
+  try {
+    const id = cfg && cfg.country && cfg.country.id ? String(cfg.country.id || '').trim().toLowerCase() : '';
+    if (id) return id;
+  } catch {}
+  try {
+    const pack = serverConfig.readCountryPackEffective();
+    if (pack && pack.id) return String(pack.id || '').trim().toLowerCase() || 'br';
+  } catch {}
+  return 'br';
+}
+
+function clearRobeV2LastBlockState(state, reason = '') {
+  if (!state || typeof state !== 'object') return state;
+  state.lastBlock = null;
+  state.lastBlockQueueLen = 0;
+  state.lastBlockStartAtConsumedTotal = Math.max(0, Number(state.consumedTotal || 0) || 0);
+  const nextMeta = {
+    ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
+    lastBlockClearedAt: Date.now(),
+    lastBlockClearedReason: String(reason || 'manual').slice(0, 120)
+  };
+  try {
+    delete nextMeta.lastError;
+    delete nextMeta.lastErrorAt;
+  } catch {}
+  state.meta = nextMeta;
+  return state;
+}
+
 function readRobeV2QueueState() {
   const d = defaultRobeV2QueueState();
   const raw = readJsonSafe(ROBE_V2_QUEUE_PATH, d);
@@ -946,7 +976,7 @@ function buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty = 0.35 } = {}
   return queue;
 }
 
-async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
+async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3, country = '' } = {}) {
   const ct = resolveCtSecretConfig();
   if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
   const hostId = readHostIdSafe();
@@ -962,14 +992,25 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
           'Content-Type': 'application/json',
           ...(ct.secret ? { 'X-Log-Secret': ct.secret } : {})
         },
-        body: JSON.stringify({ hostId, windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))), cities }),
+        body: JSON.stringify({
+          hostId,
+          country,
+          windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))),
+          cities
+        }),
         signal: ac.signal
       });
       const j = await resp.json().catch(() => null);
       if (!j || j.ok !== true) {
         return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
       }
-      return { ok: true, statsByCity: j.statsByCity || {}, requestId: j.requestId || null, missingCities: Array.isArray(j.missingCities) ? j.missingCities : [] };
+      return {
+        ok: true,
+        statsByCity: j.statsByCity || {},
+        requestId: j.requestId || null,
+        missingCities: Array.isArray(j.missingCities) ? j.missingCities : [],
+        country: j.country || country || ''
+      };
     } finally {
       clearTimeout(timeout);
     }
@@ -993,6 +1034,7 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3 } = {}) {
 async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const countryId = getRobeQueueCountryId(cfg);
   const workMode = String(robeCfg.workMode || 'v1').trim().toLowerCase();
   const isV3 = workMode === 'v3_pmg';
   if (isV3) {
@@ -1004,10 +1046,9 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
   if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
   const plan = calcRobeV2PlanTargetN(cfg);
-  const stats = await fetchRobeV2CityStatsFromCT(cities, { windowDays: tuning.statsWindowDays || 3 });
+  const stats = await fetchRobeV2CityStatsFromCT(cities, { windowDays: tuning.statsWindowDays || 3, country: countryId });
   if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
   // IMPORTANTE: missingCities no CT significa "sem grupo/motoristas", não "cidade inválida".
-  // Fail-closed apenas quando NÃO há sinal nenhum para nenhuma cidade (evita fallback igualitário burro).
   const statsByCity = (stats && stats.statsByCity && typeof stats.statsByCity === 'object') ? stats.statsByCity : {};
   let keyed = 0;
   let signal = 0;
@@ -1022,8 +1063,10 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
     const hasInsight = (ins != null) && Number.isFinite(ins) && ins > 0;
     if (hasPop || hasDrivers || hasInsight) signal += 1;
   }
-  if (keyed === 0) return { ok: false, error: 'stats_missing_keys_all' };
-  if (signal === 0) return { ok: false, error: 'stats_no_signal_all' };
+  const degradedReasons = [];
+  if (keyed === 0) degradedReasons.push('missing_keys_fallback');
+  if (signal === 0) degradedReasons.push('no_signal_fallback');
+  const degradedReason = degradedReasons.join('+') || null;
   const calc = computeRobeV2Counts({ cities, statsByCity: statsByCity, targetN: plan.targetN, tuning });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
 
@@ -1073,9 +1116,12 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       reason,
       requestId: stats.requestId || null,
       generatedAt: now,
+      country: countryId,
+      statsCountry: stats.country || countryId,
       citiesCount: cities.length,
       queueMode: isV3 ? 'v3_pmg' : 'v2_auto',
       configSig: JSON.stringify({
+        country: countryId,
         workMode: String(robeCfg.workMode || 'v1'),
         cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
         cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
@@ -1086,6 +1132,9 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       avgCooldownMin: Number(plan.avgCooldownMin.toFixed(3)),
       targetN: plan.targetN,
       missingCities: stats.missingCities || [],
+      signalSummary: { keyed, signal, totalCities: cities.length },
+      degraded: !!degradedReason,
+      degradedReason,
       params: calc.params || null,
       rows: rowsOut
     },
@@ -1185,8 +1234,10 @@ async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false }
 async function pickPostingSlotForRunV2() {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
+  const countryId = getRobeQueueCountryId(cfg);
   const cfgCities = normalizeCityList(robeCfg.cidadesExtrasGlobais);
   const expectedSig = JSON.stringify({
+    country: countryId,
     workMode: String(robeCfg.workMode || 'v1'),
     cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
     cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
@@ -1221,6 +1272,7 @@ async function pickPostingSlotForRunV2() {
       state.queue = [];
       state.planValidUntil = 0;
       state.planGeneratedAt = 0;
+      clearRobeV2LastBlockState(state, 'config_mismatch');
       state.meta = {
         ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
         configMismatchDetectedAt: Date.now(),
@@ -1283,6 +1335,7 @@ async function robeV2WarmupNow({ reason = 'manual', force = false } = {}) {
         state.regenPending = false;
         state.regenInFlightId = null;
         state.failures = { count: 0, lastAt: 0, backoffUntil: 0 };
+        clearRobeV2LastBlockState(state, 'forced_reset');
         state.meta = {
           ...(state.meta && typeof state.meta === 'object' ? state.meta : {}),
           forcedResetAt: Date.now(),

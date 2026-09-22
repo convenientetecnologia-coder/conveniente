@@ -4397,9 +4397,13 @@
           const tsLabel = new Date(Number(data.ts||Date.now())).toLocaleString('pt-BR');
           const lastErr = data && data.meta && data.meta.lastError ? String(data.meta.lastError) : '';
           const lastErrAt = data && data.meta && data.meta.lastErrorAt ? Number(data.meta.lastErrorAt) : 0;
+          const degradedReason = data && data.meta && data.meta.degradedReason ? String(data.meta.degradedReason) : '';
           if (lastErr) {
             infoEl.className = 'pill bad';
             infoEl.innerHTML = `<span class="dot"></span>ERRO | ${lastErr} ${lastErrAt ? ('| ' + new Date(lastErrAt).toLocaleString('pt-BR')) : ''} | ts=${tsLabel}`;
+          } else if (degradedReason) {
+            infoEl.className = 'pill';
+            infoEl.innerHTML = `<span class="dot"></span>DEGRADADO | ${escapeHtml(degradedReason)} | ts=${tsLabel}`;
           } else {
             infoEl.className = 'pill info';
             infoEl.innerHTML = `<span class="dot"></span>OK | ts=${tsLabel}`;

@@ -7988,6 +7988,7 @@ async function activateOnce(nome, source = '', operator = '') {
   // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
   const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
   const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
+  const _isStockProvisionOpen = /^stock_provision:/i.test(opTrim);
   let _flagsAtOpenStart = null;
   let _manualHumanReason = '';
   try {
@@ -8388,7 +8389,7 @@ async function activateOnce(nome, source = '', operator = '') {
               // - manual com flag persistida => entra direto em humano para inspeção
               // Importante: NÃO navegar pra home se já estamos numa tela real (ex.: identidade),
               // senão removemos o contexto e atrasamos/impedimos o fluxo.
-              if (_isBulkOpen || _isManualOpen) {
+              if (_isBulkOpen || _isManualOpen || _isStockProvisionOpen) {
                 try {
                   const p0 = pages && pages[0];
                   let u0 = '';
@@ -8402,12 +8403,12 @@ async function activateOnce(nome, source = '', operator = '') {
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
                     const preferEntry = _manualHumanFromFlags
                       ? 'facebook'
-                      : (desiredEngineAtOpen === 'delta' ? 'facebook_messages' : 'messenger');
+                      : ((_isStockProvisionOpen || desiredEngineAtOpen === 'delta') ? 'facebook_messages' : 'messenger');
                     await ensureNonBlankEntryPage(nome, ctrl, {
                       prefer: preferEntry,
                       reasonBase: _manualHumanFromFlags
                         ? 'open_manual_flag_entry'
-                        : (_isBulkOpen ? 'open_all_entry' : 'open_manual_entry')
+                        : (_isBulkOpen ? 'open_all_entry' : (_isStockProvisionOpen ? 'open_stock_entry' : 'open_manual_entry'))
                     });
                   }
                 } catch {}
@@ -8422,7 +8423,7 @@ async function activateOnce(nome, source = '', operator = '') {
                     });
                   } catch {}
                   try { await enterHumanMode(nome, ctrl, { reason: _manualHumanReason }); } catch {}
-                } else {
+                } else if (_isBulkOpen || _isManualOpen) {
                   try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
                 }
               }
