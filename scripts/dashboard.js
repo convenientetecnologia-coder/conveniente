@@ -31,6 +31,7 @@ const GATEWAY_RECYCLE_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'gateway_
 // Endpoint do notificador (centralizado)
 const { resolveEndpoints } = require('./notifierEndpoints');
 const { readCtConfig } = require('./ctConfig');
+const serverConfig = require('./serverConfig.js');
 
 let timer = null;
 let inFlight = false;
@@ -844,12 +845,21 @@ function buildPollLightTelemetry(status) {
   };
   // Fábrica única (= CT fbAccountState + anti-redundância human_invoked).
   const { accountsAgg, flagsAgg } = buildServerCardAggs(status);
+  let countryId = '';
+  try {
+    const pack = (serverConfig && typeof serverConfig.readCountryPackEffective === 'function')
+      ? serverConfig.readCountryPackEffective()
+      : null;
+    const id = String(pack && pack.id || '').trim().toLowerCase();
+    if (id === 'br' || id === 'us') countryId = id;
+  } catch {}
 
   const quick = buildQuickSnapshot(status);
   return {
     counts,
     accountsAgg,
     flagsAgg,
+    ...(countryId ? { country: countryId } : {}),
     quick: {
       perfisCount: Number(quick && quick.perfisCount || 0) || 0,
       activeCount: Number(quick && quick.activeCount || 0) || 0,

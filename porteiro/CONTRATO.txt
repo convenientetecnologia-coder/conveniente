@@ -6,7 +6,8 @@ O Porteiro (C:\auto_vigia, tarefa ConvenientePorteiro ao logon) e um
 sistema a parte. Ele TEM que funcionar com o Conveniente DESLIGADO:
   - reboot 04:00-04:20 + TEMP + Lixeira
   - AUTO_BOOT: se o index nao estiver no ar, o Porteiro sobe o PowerShell Conveniente_Node
-  - NetGuard / ConvenienteNetBoot no startup (sem net = ate 3 reboot extra/dia)
+  - NetGuard / ConvenienteNetBoot (sem net 8 min seguidos = ate 3 reboot extra/dia;
+    queda curta tipo rotacao de IP nao reboota. Diario 04:00 e outro cartucho.)
 
 O index.js NAO e o dono. O index so CORRIGE a versao quando voce liga
 o Conveniente:
@@ -58,3 +59,10 @@ sem gate de CPU.
    Arquivos: dados/crash_hammer.jsonl + crash_hammer_last.json
    + dados/crash_dumps\*.dmp
    Iniciar continua com mais poder. Sem misturar nurse/tinta/EWS.
+
+6. NETGUARD vs ROTACAO DE IP (2026-09-18)
+   Watchdog de WAN o dia inteiro e saudavel (queda real de link = reboot).
+   Get-BootId no Win10 nao trava o “1x por boot” (PID 4 sem StartTime).
+   Contrato: WAN morta 8 min SEGUIDOS = reboot. Rotacao de modem 1-5 min
+   volta a WAN e zera o relogio. Placa visivel nao livra. Sem handshake
+   entre MAE. Diario 04:00-04:20 nao gasta os 3 extras de net.

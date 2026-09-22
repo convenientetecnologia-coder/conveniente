@@ -893,7 +893,31 @@ function extractCityFromLocationAnchorText(bodyText) {
 }
 
 /** Extrai Cidade (UF) de qualquer blob — nao exige match da string inteira nem do ·. */
+function serverCountryIsUs() {
+  try {
+    const sc = require("./serverConfig.js");
+    const pack = typeof sc.readCountryPackEffective === "function" ? sc.readCountryPackEffective() : null;
+    return String(pack && pack.id || "").trim().toLowerCase() === "us";
+  } catch {
+    return false;
+  }
+}
+
+/** Servidor EUA: rótulo canônico do grupo. Não usa UF do Brasil. */
+function normalizeUsMarketCityLabel(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s || s.length > 120) return "";
+  const key = s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const ny = /(nova york|nova iorque|new york|new york city|\bnyc\b|manhattan|brooklyn|queens|\bbronx\b|staten island)/i.test(key);
+  if (!ny) return "";
+  return "Nova York (NY)";
+}
+
 function normalizeCityUfLabel(raw) {
+  if (serverCountryIsUs()) return normalizeUsMarketCityLabel(raw);
   const s0 = stripMarketplaceConditionNoise(String(raw || "").replace(/\s+/g, " ").trim());
   if (!s0) return "";
 

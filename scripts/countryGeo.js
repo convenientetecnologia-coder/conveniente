@@ -152,31 +152,33 @@ function listLocations(cidade, { countryId } = {}) {
   const raw = readJsonSafe(file, null);
   if (!raw) return [];
 
-  const pushUnique = (arr) => {
+  const pushUnique = (arr, { exact = false } = {}) => {
     const dedup = [];
     const seen = new Set();
     for (const loc of (Array.isArray(arr) ? arr : [])) {
-      const text = String(loc || "").trim();
-      const key = cityNormKey(text);
-      if (!text || !key || seen.has(key)) continue;
+      const text = String(loc == null ? "" : loc).replace(/\r/g, "");
+      if (!text.trim()) continue;
+      const key = exact ? text : cityNormKey(text);
+      if (!key || seen.has(key)) continue;
       seen.add(key);
       dedup.push(text);
     }
     return dedup;
   };
+  const exactUs = String(pack && pack.id || "") === "us";
 
   if (Array.isArray(raw)) {
     const hit = raw.find((ent) => (
       cityNormKey(ent && (ent.cidade || ent.nome || ent.id)) === want
     ));
     if (!hit || !Array.isArray(hit.localizacoes)) return [];
-    return pushUnique(hit.localizacoes);
+    return pushUnique(hit.localizacoes, { exact: exactUs });
   }
 
   if (raw && typeof raw === "object") {
     const key = Object.keys(raw).find((k) => cityNormKey(k) === want);
     if (!key) return [];
-    return pushUnique(raw[key]);
+    return pushUnique(raw[key], { exact: exactUs });
   }
   return [];
 }

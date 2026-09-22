@@ -43,9 +43,11 @@ try {
 $RebootHour      = 4
 $RebootMinute    = 0
 $RebootWindowMin = 20
-# Em TODO boot: espera N min, confirma sem net de verdade, ate 3 reboot extra/dia.
-# Sem internet = reboot. Com internet = segue. Placa visivel nao livra.
+# Watchdog de WAN o dia inteiro (nao 1x por boot). Placa visivel nao livra.
+# Sem internet = reboot. Queda curta (rotacao de IP 1-5 min) NAO reboota:
+# so dispara depois de NetDownConfirmMin seguidos sem WAN. Ate 3 extra/dia.
 $NetCheckWaitMin   = 4
+$NetDownConfirmMin = 8
 $NetConfirmTries   = 4
 $NetConfirmGapSec  = 15
 $NetRetryMax       = 3
@@ -394,6 +396,18 @@ function Get-NetRetryCountToday {
     try { return [math]::Max(0, [int]$raw) } catch { return 1 }
 }
 
+function Get-NetworkDownElapsedMin {
+    $st = Get-Estado
+    $raw = Get-EstadoProp $st 'lastNetworkDownSinceUtc'
+    if ($null -eq $raw -or "$raw" -eq '') { return $null }
+    try {
+        $dt = [datetime]::Parse([string]$raw)
+        $mins = [double](((Get-Date).ToUniversalTime() - $dt.ToUniversalTime()).TotalMinutes)
+        if ($mins -lt 0) { return 0 }
+        return [math]::Round($mins, 1)
+    } catch { return 0 }
+}
+
 function Open-NetGuardLock {
     $path = Join-Path $Root 'netguard.lock'
     try {
@@ -409,14 +423,12 @@ function Open-NetGuardLock {
 }
 
 function Invoke-StartupNetworkGuard {
-    # Em TODO boot: espera NetCheckWaitMin, confirma sem net.
-    # Sem internet = reboot. Com internet = segue. Placa visivel nao livra.
-    # Max NetRetryMax reboots extras no dia. Lock: NetBoot + loop nao decidem juntos.
+    # Watchdog diurno. NAO usa lastNetGuardBootId como skip (Get-BootId no Win10
+    # cai em tick:TickCount e nunca trava — 4 falhas x 15s virava reboot as 14h).
+    # Sem internet = reboot so depois de NetDownConfirmMin seguidos sem WAN.
+    # Rotacao de IP (1-5 min) reseta o relogio quando a WAN volta. Placa nao livra.
+    # Max NetRetryMax extras/dia. Lock: NetBoot + loop nao decidem juntos.
     if (Test-NoReboot) { return $null }
-
-    $bootId = Get-BootId
-    $st = Get-Estado
-    if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
 
     $lock = Open-NetGuardLock
     if (-not $lock) {
@@ -424,9 +436,6 @@ function Invoke-StartupNetworkGuard {
         return 'net_busy'
     }
     try {
-        $st = Get-Estado
-        if ((Get-EstadoProp $st 'lastNetGuardBootId') -eq $bootId) { return $null }
-
         $uptime = Get-UptimeMinutes
         if ($uptime -lt $NetCheckWaitMin) {
             Write-Log "net_wait later uptime=${uptime}m need=${NetCheckWaitMin}m"
@@ -441,29 +450,48 @@ function Invoke-StartupNetworkGuard {
         $hasNet = $false
         $nicOk = $true
         if ($forceFail) {
-            Save-EstadoFields @{ testNetFailUsed = $true }
+            $ago = (Get-Date).ToUniversalTime().AddMinutes(-($NetDownConfirmMin + 1)).ToString('o')
+            Save-EstadoFields @{
+                testNetFailUsed         = $true
+                lastNetworkDownSinceUtc = $ago
+            }
             Write-Log 'TEST force net fail (1x) - validar reboot_net_retry'
             $hasNet = $false
             $nicOk = $false
         } else {
-            $hasNet = Test-InternetConfirmed
+            $hasNet = Test-HasInternet
             $nicOk = Test-NicVisible
         }
 
         $nicTxt = if ($nicOk) { 'nic_ok' } else { 'nic_missing' }
         $used = Get-NetRetryCountToday
+        $bootId = Get-BootId
 
         if ($hasNet) {
+            $stOk = Get-Estado
+            $wasDown = Get-EstadoProp $stOk 'lastNetworkDownSinceUtc'
+            $hadOk = Get-EstadoProp $stOk 'lastNetworkOkUtc'
+            $elapsedOk = Get-NetworkDownElapsedMin
             Save-EstadoFields @{
-                lastNetGuardBootId = $bootId
-                lastAction         = 'net_ok_after_boot'
-                lastNetworkOkUtc   = (Get-Date).ToUniversalTime().ToString('o')
+                lastNetworkDownSinceUtc = ''
+                lastAction              = 'net_ok'
+                lastNetworkOkUtc        = (Get-Date).ToUniversalTime().ToString('o')
             }
-            Write-Log "net_ok_after_boot $nicTxt retryUsed=$used/$NetRetryMax"
-            return 'net_ok'
+            if ($null -ne $wasDown -and "$wasDown" -ne '') {
+                Write-Log ("net_ok recovered after {0}m $nicTxt retryUsed=$used/$NetRetryMax" -f $elapsedOk)
+                return 'net_ok'
+            }
+            if ($null -eq $hadOk -or "$hadOk" -eq '') {
+                Write-Log "net_ok_after_boot $nicTxt retryUsed=$used/$NetRetryMax"
+                return 'net_ok'
+            }
+            return $null
         }
 
         if ($used -ge $NetRetryMax) {
+            $stGu = Get-Estado
+            $already = [string](Get-EstadoProp $stGu 'lastAction')
+            if ($already -eq 'net_fail_give_up') { return $null }
             Save-EstadoFields @{
                 lastNetGuardBootId = $bootId
                 lastAction         = 'net_fail_give_up'
@@ -472,14 +500,42 @@ function Invoke-StartupNetworkGuard {
             return 'net_fail_give_up'
         }
 
+        $elapsed = Get-NetworkDownElapsedMin
+        if ($null -eq $elapsed) {
+            Save-EstadoFields @{
+                lastNetworkDownSinceUtc = (Get-Date).ToUniversalTime().ToString('o')
+                lastAction              = 'net_fail_wait'
+            }
+            Write-Log "net_fail_wait start $nicTxt need=${NetDownConfirmMin}m (rotacao curta nao reboota)"
+            return 'net_fail_wait'
+        }
+
+        if ($elapsed -lt $NetDownConfirmMin) {
+            Write-Log "net_fail_wait elapsed=${elapsed}m need=${NetDownConfirmMin}m $nicTxt"
+            return 'net_fail_wait'
+        }
+
+        if (-not $forceFail) {
+            if (Test-InternetConfirmed) {
+                Save-EstadoFields @{
+                    lastNetworkDownSinceUtc = ''
+                    lastAction              = 'net_ok'
+                    lastNetworkOkUtc        = (Get-Date).ToUniversalTime().ToString('o')
+                }
+                Write-Log "net_ok recovered at_confirm after ${elapsed}m $nicTxt"
+                return 'net_ok'
+            }
+        }
+
         $next = $used + 1
         Save-EstadoFields @{
-            lastNetworkRetryDate  = $todayKey
-            lastNetworkRetryCount = $next
-            lastNetGuardBootId    = $bootId
-            lastAction            = 'reboot_net_retry'
+            lastNetworkRetryDate    = $todayKey
+            lastNetworkRetryCount   = $next
+            lastNetGuardBootId      = $bootId
+            lastAction              = 'reboot_net_retry'
+            lastNetworkDownSinceUtc = ''
         }
-        Write-Log "reboot_net_retry (sem internet $nicTxt, reboot $next/$NetRetryMax)"
+        Write-Log "reboot_net_retry (sem internet $nicTxt down=${elapsed}m/${NetDownConfirmMin}m, reboot $next/$NetRetryMax)"
         Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
         & "$env:SystemRoot\System32\shutdown.exe" /r /t 30 /c "Porteiro: sem internet (retry $next/$NetRetryMax)"
         Write-Log "shutdown_net_retry exit=$LASTEXITCODE n=$next"
@@ -594,7 +650,7 @@ function Do-NetBoot {
     try {
         $r = Invoke-StartupNetworkGuard
         if ($r) { Write-Log "NETBOOT result=$r" }
-        else { Write-Log 'NETBOOT ja checou este boot (ou cedo demais)' }
+        else { Write-Log 'NETBOOT sem acao (net ok ou cedo demais)' }
     } catch {
         Write-Log "NETBOOT ERROR $($_.Exception.Message)"
     }
@@ -809,7 +865,7 @@ function Do-Status {
         Write-Host 'RebootDaily=DESLIGADO (arquivo C:\auto_vigia\NO_REBOOT.flag)'
     } else {
         Write-Host ("RebootDaily={0:D2}:{1:D2}-{2:D2}:{3:D2} (1x/dia; limpeza+reboot)" -f $RebootHour, $RebootMinute, $RebootHour, ($RebootMinute + $RebootWindowMin))
-        Write-Host ("NetGuardTodoBoot={0} min / {1} testes / sem net = ate {2} reboot extra/dia" -f $NetCheckWaitMin, $NetConfirmTries, $NetRetryMax)
+        Write-Host ("NetGuard wait={0}min down={1}min extra={2}/dia (placa nao livra; queda curta nao reboota)" -f $NetCheckWaitMin, $NetDownConfirmMin, $NetRetryMax)
     }
     Write-Host 'MemClean=OFF (StandbyList no Conveniente, nao neste loop)'
     $dcTask = Get-ScheduledTask -TaskName 'ConvenienteDiskClean' -ErrorAction SilentlyContinue
@@ -1157,7 +1213,7 @@ function Do-Loop {
                 }
             }
 
-            # Rede: se NETBOOT ainda nao rodou / estava cedo demais
+            # Rede: watchdog WAN. Reboot so apos NetDownConfirmMin sem internet.
             $netAct = Invoke-StartupNetworkGuard
             if ($netAct) { $actions += $netAct }
 

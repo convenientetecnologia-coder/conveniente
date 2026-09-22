@@ -217,7 +217,7 @@ if ($pagefileReboot) {
 
 Write-Host ''
 Write-Host '=== PRONTO ==='
-Write-Host 'STATUS: Ver=v5.2.1-clean-cpu | MemClean=OFF | RebootDaily=04:00-04:20 | NetGuard=4min+4testes+3reboot | NetBoot=ConvenienteNetBoot | AutoStartAposBoot=SIM'
+Write-Host 'STATUS: Ver=v5.2.1-clean-cpu | MemClean=OFF | RebootDaily=04:00-04:20 | NetGuard=wait4min+down8min+3reboot | NetBoot=ConvenienteNetBoot | AutoStartAposBoot=SIM'
 Write-Host 'So isso: PARAR / INICIAR / STATUS'
 Write-Host 'Arquivo unico: C:\auto_vigia\manutencao.ps1'
 & $PsExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Dest 'manutencao.ps1') -Action status

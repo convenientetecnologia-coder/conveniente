@@ -49,10 +49,11 @@ REBOOT DIARIO:
   - So entre 04:00 e 04:20: limpa TEMP+Lixeira e reinicia (1x/dia)
   - Instalar de tarde/noite NAO dispara reboot
 
-GUARDA DE REDE (TODO BOOT) — sem internet = reboot:
-  - Espera 4 min apos ligar
-  - Testa internet 4 vezes (nao reinicia por 1 ping falho)
-  - Sem internet (4 falhas) = reboot, placa visivel ou nao
+GUARDA DE REDE — sem internet de verdade = reboot (qualquer hora):
+  - Espera 4 min apos ligar (NIC/DHCP)
+  - Sem internet continua: so reboot depois de 8 min seguidos sem WAN
+  - 1 ping falho ou queda curta (rotacao de IP 1-5 min) NAO reboota
+  - Placa visivel nao livra
   - Max 3 reboots extras por dia; se ainda falhar, para
   - ConvenienteNetBoot (SYSTEM) + porteiro no logon
   - Lock exclusivo: os dois nao decidem juntos

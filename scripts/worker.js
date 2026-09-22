@@ -25945,10 +25945,20 @@ function __deltaBuildCtIngestPayload(payload) {
   );
   const ts = __deltaNormalizeTimestampMs(tsRaw, Date.now());
 
+  let countryId = '';
+  try {
+    const pack = (typeof serverConfig.readCountryPackEffective === 'function')
+      ? serverConfig.readCountryPackEffective()
+      : null;
+    const id = String(pack && pack.id || '').trim().toLowerCase();
+    if (id === 'br' || id === 'us') countryId = id;
+  } catch {}
+
   return {
     server_id,
     account_login,
     thread_key,
+    ...(countryId ? { country: countryId } : {}),
     timestamp_ms: ts,
     texto_limpo: String(p.texto_limpo || '').trim() || undefined,
     mensagens_cliente_concatenadas: mensagensCliente,

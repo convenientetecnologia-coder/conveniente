@@ -61,6 +61,8 @@ check("kit_loop_ensures_task", /Ensure-DiskCleanTask/.test(loopBody));
 check("kit_loop_does_not_run_task", !/Start-ScheduledTask/.test(kitTxt) && !/schtasks\.exe \/Run/.test(kitTxt));
 check("kit_reboot_04", /\$RebootHour\s*=\s*4/.test(kitTxt) && /Invoke-DailyReboot/.test(kitTxt));
 check("kit_net_retry_max_3", /\$NetRetryMax\s*=\s*3/.test(kitTxt));
+check("kit_net_down_confirm_min_8", /\$NetDownConfirmMin\s*=\s*8/.test(kitTxt) && /lastNetworkDownSinceUtc/.test(kitTxt) && /net_fail_wait/.test(kitTxt));
+check("kit_net_no_bootid_skip", !/lastNetGuardBootId'\) -eq \$bootId\) \{ return \$null \}/.test(kitTxt));
 check("kit_net_reboot_on_no_internet", /reboot_net_retry \(sem internet/.test(kitTxt) && /Sem internet = reboot/.test(kitTxt));
 check("kit_net_no_nic_ok_bail", !/return 'net_fail_nic_ok'/.test(kitTxt) && !/ping falhou mas placa existe/.test(kitTxt));
 check("kit_net_lock", /netguard\.lock/.test(kitTxt) && /net_guard_busy/.test(kitTxt) && /function Open-NetGuardLock/.test(kitTxt));
@@ -179,7 +181,7 @@ const leiaTxt = fs.readFileSync(path.join(root, "porteiro", "LEIA-ME.txt"), "utf
 const contratoTxt = fs.readFileSync(path.join(root, "porteiro", "CONTRATO.txt"), "utf8");
 check("leia_index_not_owner", !/Dono: o index\.js/.test(leiaTxt));
 check("leia_windows_owns", /tarefa ConvenientePorteiro/.test(leiaTxt) && /so CORRIGE/.test(leiaTxt));
-check("leia_net_3_reboot", /Max 3 reboots extras por dia/.test(leiaTxt) && /Sem internet \(4 falhas\) = reboot/.test(leiaTxt));
+check("leia_net_3_reboot", /Max 3 reboots extras por dia/.test(leiaTxt) && /8 min seguidos sem WAN/.test(leiaTxt) && /rotacao de IP/.test(leiaTxt));
 check("contrato_index_not_owner", /NAO e o dono/.test(contratoTxt) && /sistema a parte/.test(contratoTxt));
 check("contrato_iniciar_silencio", /Clique o S/.test(contratoTxt) && /Sem admin/.test(contratoTxt));
 check("sync_loop_via_start_process", /start_process/.test(syncTxt));
