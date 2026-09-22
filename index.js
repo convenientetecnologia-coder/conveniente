@@ -4144,7 +4144,10 @@ function __readFreshStatusJson(maxAgeMs) {
     if (!(Number.isFinite(age) && age >= 0 && age <= Math.max(1000, Number(maxAgeMs || 8000) || 8000))) return null;
     const json = JSON.parse(fs.readFileSync(p, 'utf8'));
     if (!json || typeof json !== 'object') return null;
-    if (!Array.isArray(json.perfis) || !json.perfis.length) return null;
+    if (!Array.isArray(json.perfis)) return null;
+    // Servidor novo, sem conta: perfis [] é status válido. Sem isso o CT
+    // só vê heartbeat, o card fica no snapshot do túnel e o estoque diz sem pulso.
+    if (json.perfis.length === 0) return json;
     const hasHud = json.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
     if (!hasHud) return null;
     return json;
@@ -4432,9 +4435,10 @@ async function __serverEventBridgeTick(reason) {
     }
 
     const fullStatusDue = !__serverEventLastFullStatusAt || ((now - __serverEventLastFullStatusAt) >= SERVER_EVENT_FULL_STATUS_MS);
+    const emptyFleet = !!(status && Array.isArray(status.perfis) && status.perfis.length === 0);
     const includeFullStatus = !!(
-      (forceStatusEvent || fullStatusDue || needConfigPush || identityChanged) &&
-      statusHasHud
+      (forceStatusEvent || fullStatusDue || needConfigPush || identityChanged || emptyFleet) &&
+      (statusHasHud || emptyFleet)
     );
 
     if (!shouldSendDelta && !heartbeatDue && reason !== 'boot' && !needConfigPush && !needsConfig && !fullStatusDue) {
