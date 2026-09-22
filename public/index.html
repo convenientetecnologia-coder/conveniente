@@ -1759,9 +1759,9 @@
       }
       function pinSelectedToCatalog() {
         const catalog = uniqueCities(Array.isArray(globalCitiesAll) ? globalCitiesAll : []);
+        if (!catalog.length) return;
         const catalogSet = new Set(catalog.map(cityKey));
-        const kept = uniqueCities(globalCitiesSelected).filter((c) => catalogSet.has(cityKey(c)));
-        globalCitiesSelected = kept.length ? kept : catalog.slice();
+        globalCitiesSelected = uniqueCities(globalCitiesSelected).filter((c) => catalogSet.has(cityKey(c)));
       }
       async function loadCitiesCatalog(countryId) {
         const id = String(countryId || (countryIdEl && countryIdEl.value) || '').trim().toLowerCase();

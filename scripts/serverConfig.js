@@ -583,13 +583,11 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const v2PrefetchMaxRaw = clamp(Math.floor(toNum(v2.prefetchMax, DEFAULTS.robe.v2Tuning.prefetchMax)), 1, 500);
   const v2PrefetchMin = Math.min(v2PrefetchMinRaw, v2PrefetchMaxRaw);
   const v2PrefetchMax = Math.max(v2PrefetchMinRaw, v2PrefetchMaxRaw);
-  let cidadesExtrasGlobais = filterCitiesForCountry(
-    normalizeCityList(robe.cidadesExtrasGlobais, { max: 200 }),
-    countryPack.id
-  );
-  if (!cidadesExtrasGlobais.length) {
-    cidadesExtrasGlobais = catalogCitiesWithCoords(countryPack.id);
-  }
+  const explicitCities = Array.isArray(robe.cidadesExtrasGlobais);
+  const citySource = explicitCities ? robe.cidadesExtrasGlobais : DEFAULTS.robe.cidadesExtrasGlobais;
+  const normalizedCities = normalizeCityList(citySource, { max: 200 });
+  const filteredCities = filterCitiesForCountry(normalizedCities, countryPack.id);
+  const cidadesExtrasGlobais = filteredCities.length ? filteredCities : normalizedCities;
   const photoDeletePolicyRaw = String(robe.photoDeletePolicy || DEFAULTS.robe.photoDeletePolicy).trim().toLowerCase();
   const photoDeletePolicy = (photoDeletePolicyRaw === "after_first_confirmed_post")
     ? "after_first_confirmed_post"
