@@ -168,6 +168,8 @@ function runOnce({ ROOT, keep }) {
       path.join("dados", "ua_presets.json"),
       path.join("dados", "localizacoes.json"),
       path.join("dados", "localizacoesEUA.json"),
+      path.join("dados", "descricaoItens.json"),
+      path.join("dados", "descricaoItensEUA.json"),
       path.join("dados", "titulosEUA.json"),
       path.join("dados", "atendimento.json")
     ];

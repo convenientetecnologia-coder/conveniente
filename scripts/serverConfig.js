@@ -17,6 +17,10 @@ const ITEM_TITLES_PACKS = Object.freeze({
   titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve", countries: Object.freeze(["br"]) },
   titulosEUA: { file: "titulosEUA.json", label: "EUA", countries: Object.freeze(["us"]) }
 });
+const ITEM_DESCRIPTION_FILES = Object.freeze({
+  br: "descricaoItens.json",
+  us: "descricaoItensEUA.json"
+});
 
 const COUNTRY_ID_DEFAULT = "br";
 // Idioma do Chrome/Facebook é sempre pt-BR. País manda só no fuso. Robe lê o DOM em português.
@@ -137,6 +141,20 @@ function resolveItemTitlesPath(packId) {
   return path.join(__dirname, "..", "dados", file);
 }
 
+function resolveItemDescriptionPath(countryId) {
+  let id = COUNTRY_ID_DEFAULT;
+  try {
+    const live = readCountryPackEffective();
+    if (live && live.id) id = live.id;
+  } catch {}
+  const normalized = normalizeCountryId(countryId || id);
+  const file = ITEM_DESCRIPTION_FILES[normalized] || ITEM_DESCRIPTION_FILES[COUNTRY_ID_DEFAULT];
+  if (file !== path.basename(file) || file.indexOf("..") >= 0) {
+    return path.join(__dirname, "..", "dados", ITEM_DESCRIPTION_FILES[COUNTRY_ID_DEFAULT]);
+  }
+  return path.join(__dirname, "..", "dados", file);
+}
+
 const DEFAULTS = Object.freeze({
   version: CONFIG_VERSION,
   updatedAt: 0,
@@ -191,6 +209,7 @@ const DEFAULTS = Object.freeze({
     },
     photoDeletePolicy: "after_all_working_posted",
     itemTitlesPack: ITEM_TITLES_PACK_DEFAULT,
+    useItemDescriptionInAds: false,
     cidadesExtrasGlobais: [
       "Anápolis",
       "Aracaju",
@@ -596,6 +615,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     countryPack.id,
     robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack
   );
+  const useItemDescriptionInAds = robe.useItemDescriptionInAds === true;
 
   const workerRamDivisorGb = clamp(
     Math.floor(toNum(memRaw.workerRamDivisorGb, DEFAULTS.memory.workerRamDivisorGb)),
@@ -704,6 +724,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       },
       photoDeletePolicy,
       itemTitlesPack,
+      useItemDescriptionInAds,
       cidadesExtrasGlobais
     },
     networkRotation: {
@@ -897,6 +918,9 @@ function validateServerConfigPayload(payload) {
       if (!isItemTitlesPackId(robe.itemTitlesPack)) {
         errors.push("robe.itemTitlesPack_invalido");
       }
+    }
+    if (robe.useItemDescriptionInAds !== undefined && typeof robe.useItemDescriptionInAds !== "boolean") {
+      errors.push("robe.useItemDescriptionInAds_invalido");
     }
     if (robe.cidadesExtrasGlobais !== undefined) {
       if (!Array.isArray(robe.cidadesExtrasGlobais)) {
@@ -1181,6 +1205,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       itemTitlesPack: v.normalized.robe.itemTitlesPack,
+      useItemDescriptionInAds: v.normalized.robe.useItemDescriptionInAds,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     },
     networkRotation: {
@@ -1295,6 +1320,7 @@ module.exports = {
   STAMP_PATH,
   DEFAULTS,
   ITEM_TITLES_PACKS,
+  ITEM_DESCRIPTION_FILES,
   ITEM_TITLES_PACK_DEFAULT,
   COUNTRY_ID_DEFAULT,
   COUNTRY_PACKS,
@@ -1313,6 +1339,7 @@ module.exports = {
   pinItemTitlesPack,
   listItemTitlesPacks,
   resolveItemTitlesPath,
+  resolveItemDescriptionPath,
   isCountryId,
   normalizeCountryId,
   resolveCountryPack,

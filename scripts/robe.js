@@ -2005,7 +2005,12 @@ async function preencherPreco(page) {
 }
 
 async function preencherDescricaoItem(page) {
-  const arquivo = path.join(__dirname, '..', 'dados', 'descricaoItens.json');
+  let arquivo = path.join(__dirname, '..', 'dados', 'descricaoItens.json');
+  try {
+    if (serverConfig && typeof serverConfig.resolveItemDescriptionPath === 'function') {
+      arquivo = serverConfig.resolveItemDescriptionPath();
+    }
+  } catch {}
   const arr = readJsonSafe(arquivo, []);
   let descricao = '';
   if (Array.isArray(arr) && arr.length) {
@@ -4033,12 +4038,29 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       method: (cond && cond.method) ? cond.method : 'unknown'
     });
 
-    // DESCRIÇÃO removida por regra operacional: publicar item sem descrição.
-    stepLog.appendJSONL(nome, 'robe', {
-      attempt: attId,
-      step: 'description_skipped',
-      reason: 'disabled_by_runtime_rule'
-    });
+    let useItemDescriptionInAds = false;
+    try {
+      const cfgDesc = serverConfig.readServerConfigEffective();
+      useItemDescriptionInAds = !!(cfgDesc && cfgDesc.robe && cfgDesc.robe.useItemDescriptionInAds === true);
+    } catch {}
+    if (useItemDescriptionInAds) {
+      await waitBeforeComposeAction(composePlan, 'before_description', { nome, attId });
+      const descRes = await preencherDescricaoItem(page);
+      if (!descRes || descRes.ok !== true) {
+        throw new Error(`descricao_item_falhou:${String((descRes && descRes.reason) || 'unknown')}`);
+      }
+      stepLog.appendJSONL(nome, 'robe', {
+        attempt: attId,
+        step: 'description_ok',
+        len: Number(descRes.len || 0) || null
+      });
+    } else {
+      stepLog.appendJSONL(nome, 'robe', {
+        attempt: attId,
+        step: 'description_skipped',
+        reason: 'config_disabled'
+      });
+    }
 
     // LOCALIZAÇÃO
     let robeWorkMode = 'v1';
