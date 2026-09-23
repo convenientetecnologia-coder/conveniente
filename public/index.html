@@ -2299,6 +2299,9 @@
                 return ca && ca.error ? ` País: falha ao alinhar contas (${String(ca.error)}).` : '';
               }
               const tz = String(ca.timezone || (r.config && r.config.country && r.config.country.timezone) || '').trim();
+              if (ca.queued === true) {
+                return ` País ${String(ca.country || '').toUpperCase() || 'BR'} (${tz || 'fuso padrão'}): alinhamento das contas enfileirado em background.`;
+              }
               const remapped = Number(ca.cityRemapped || 0);
               const pinned = Number(ca.vehiclesPinned || 0);
               return ` País ${String(ca.country || '').toUpperCase() || 'BR'} (${tz || 'fuso padrão'}): ${Number(ca.updated || 0)} conta(s) alinhada(s), ${Number(ca.unchanged || 0)} já no padrão, ${Number(ca.failed || 0)} falha(s).` +
@@ -2640,8 +2643,7 @@
     let __reloadInflight = false;
     const HUD_KEEP_KEY = 'conveniente_hud_last_status_v1';
     function hudHasHold(st) {
-      return !!(st && Array.isArray(st.perfis) && st.perfis.some((p) =>
-        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
+      return !!(st && Array.isArray(st.perfis) && st.perfis.length);
     }
     function loadHudKeep() {
       try {
@@ -2675,19 +2677,19 @@
         .finally(() => { try { clearTimeout(t); } catch {} });
     }
     async function safeGetStatus() {
-      return await fetchJsonTimeout('/api/status', 8000);
+      return await fetchJsonTimeout('/api/status', 15000);
     }
     async function safeListPerfis() {
       try {
         if (window.electronAPI && typeof window.electronAPI.listPerfis === 'function') {
           const raced = await Promise.race([
             window.electronAPI.listPerfis().catch(() => null),
-            new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+            new Promise((resolve) => setTimeout(() => resolve(null), 15000))
           ]);
           if (raced) return raced;
         }
       } catch {}
-      return await fetchJsonTimeout('/api/perfis', 8000);
+      return await fetchJsonTimeout('/api/perfis', 15000);
     }
     let __networkRotationState = null;
     function fmtNextRotation(ts, countdownSec) {
@@ -2763,7 +2765,6 @@
     async function reloadPerfis() {
       if (__reloadInflight) return;
       __reloadInflight = true;
-      try { void preloadServerConfig(); } catch {}
       const statusP = safeGetStatus();
       const perfisP = safeListPerfis();
       const netP = fetchJsonTimeout('/api/network-rotation/state', 8000);
@@ -2781,12 +2782,9 @@
       const [stFreshRaw, netRotate] = await Promise.all([statusP, netP]);
       let stFresh = stFreshRaw;
       const stWarn = String((stFresh && stFresh.warning) || '');
-      const stHasHud = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.some((p) =>
-        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
       const stFreshUsable = !!(stFresh && Array.isArray(stFresh.perfis) && stFresh.perfis.length
         && stWarn !== 'status_failed'
-        && stWarn !== 'status temporarily unavailable'
-        && stHasHud);
+        && stWarn !== 'status temporarily unavailable');
       if (stFreshUsable && __lastStatusPaint && Array.isArray(__lastStatusPaint.perfis)) {
         const lastByNome = new Map();
         for (const p of __lastStatusPaint.perfis) {
@@ -2830,8 +2828,7 @@
       if (!st && !perfisResp) { __reloadInflight = false; return; }
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
       const overlayPerfis = Array.isArray(st?.perfis) ? st.perfis.filter(p => p && p.nome) : [];
-      const overlayHasHud = overlayPerfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-      const earlyPerfis = overlayHasHud ? overlayPerfis : [];
+      const earlyPerfis = overlayPerfis;
       const earlyRobeQueue = Array.isArray(st?.robeQueue) ? st.robeQueue : [];
       if (earlyPerfis.length) {
         try { paintTopSummary(earlyPerfis, earlyRobeQueue); } catch {}
@@ -2954,7 +2951,6 @@
       if (overlayPerfis.length) {
         overlayPerfis.forEach(o => {
           if (!o || !o.nome) return;
-          if (!Object.prototype.hasOwnProperty.call(o, 'humanHold')) return;
           let dst = perfisMap.get(o.nome);
           if (!dst) {
             dst = makePerfilEntry({
@@ -3154,7 +3150,8 @@
         btnStartLeft.className = 'btn btn-roxo';
         btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
-        if (isFrozen) btnStartLeft.disabled = true;
+        if (isFrozen || p.humanControl || p.humanHold) btnStartLeft.disabled = true;
+        if (p.humanControl || p.humanHold) btnStartLeft.title = 'Conta em modo humano/hold; retome o trabalho primeiro.';
         left.append(btnStartLeft);
 
         // ------------------- RAM VISUAL (ADICIONADO) -------------------
@@ -3459,7 +3456,7 @@
         if (isFrozen) btnLog.disabled = true;
 
         // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
-        if (p.humanControl) {
+        if (p.humanControl || p.humanHold) {
           // Botão “Retomar Trabalho”
           const btnResume = document.createElement('button');
           btnResume.className='icon-btn';
@@ -3469,7 +3466,14 @@
             btnResume.disabled = true;
             btnResume.innerText = 'Resumindo...';
             try {
-              await window.electronAPI.resumeHuman(p.nome);
+              const rr = await window.electronAPI.resumeHuman(p.nome);
+              if (rr && rr.ok === false) throw new Error((rr && rr.error) ? String(rr.error) : 'resume_human_failed');
+              const resumed = await waitUntil(async () => {
+                const st = await safeGetStatus();
+                const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
+                return !!cur && !cur.humanControl && !cur.humanHold;
+              }, { timeoutMs: 30000, intervalMs: 400 });
+              if (!resumed) throw new Error('timeout_waiting_resume_human');
               await new Promise(r=>setTimeout(r,800));
               reloadPerfis();
             } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
@@ -3689,7 +3693,12 @@
         const fn = wantOpen ? window.electronAPI.activate : window.electronAPI.deactivate;
         const r = await fn(p.nome);
         if (r && r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'toggle_failed');
-        p.active = wantOpen;
+        const ok = await waitUntil(async () => {
+          const st = await safeGetStatus();
+          const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
+          return !!cur && (!!cur.active === wantOpen);
+        }, { timeoutMs: 60000, intervalMs: 400 });
+        if (!ok) throw new Error('timeout_waiting_toggle_status');
         reloadPerfis();
       } catch (e) {
         alert('Falha no toggle do navegador: ' + (e && e.message || e));
@@ -4060,17 +4069,31 @@
           if (!ok) { setBtnLoading(btn, false); return; }
           const act = await window.electronAPI.activate(p.nome);
           if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
+          const ready = await waitUntil(async () => {
+            const s2 = await safeGetStatus();
+            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
+            return !!(c2 && c2.active);
+          }, { timeoutMs: 60000, intervalMs: 400 });
+          if (!ready) throw new Error('timeout_waiting_activate_for_human');
         }
         // Se Robe estiver executando para esta conta, aguarda finalizar
         st = await safeGetStatus();
         const emExec = !!(st && st.robes && st.robes[p.nome] && st.robes[p.nome].emExecucao);
         if (emExec) {
           setBtnLoading(btn, true, 'Aguardando Robe concluir...');
-          await waitRobeFinish(p.nome);
+          const robeDone = await waitRobeFinish(p.nome);
+          if (!robeDone) throw new Error('timeout_waiting_robe_finish');
         }
 
         setBtnLoading(btn, true, 'Invocando Humano...');
-        await window.electronAPI.invokeHuman(p.nome);
+        const ih = await window.electronAPI.invokeHuman(p.nome);
+        if (ih && ih.ok === false) throw new Error((ih && ih.error) ? String(ih.error) : 'invoke_human_failed');
+        const invoked = await waitUntil(async () => {
+          const s4 = await safeGetStatus();
+          const c4 = Array.isArray(s4 && s4.perfis) ? s4.perfis.find(x => x.nome === p.nome) : null;
+          return !!(c4 && (c4.humanControl || c4.humanHold));
+        }, { timeoutMs: 30000, intervalMs: 400 });
+        if (!invoked) throw new Error('timeout_waiting_human_invoke');
         await new Promise(r=>setTimeout(r,800));
         reloadPerfis();
       } catch (e) {
@@ -4090,10 +4113,23 @@
         if (!cur || !cur.active) {
           const act = await window.electronAPI.activate(p.nome);
           if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
+          const ready = await waitUntil(async () => {
+            const s2 = await safeGetStatus();
+            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
+            return !!(c2 && c2.active);
+          }, { timeoutMs: 60000, intervalMs: 400 });
+          if (!ready) throw new Error('timeout_waiting_activate_for_start_work');
+          await new Promise(r=>setTimeout(r,1000));
         }
         // Inicia Virtus/24h
         const sw = await window.electronAPI.startWork(p.nome);
         if (sw && sw.ok === false) throw new Error((sw && sw.error) ? String(sw.error) : 'start_work_failed');
+        const started = await waitUntil(async () => {
+          const s3 = await safeGetStatus();
+          const c3 = Array.isArray(s3 && s3.perfis) ? s3.perfis.find(x => x.nome === p.nome) : null;
+          return !!(c3 && c3.trabalhando);
+        }, { timeoutMs: 30000, intervalMs: 400 });
+        if (!started) throw new Error('timeout_waiting_start_work');
         reloadPerfis();
       } catch (e) {
         alert('Falha ao iniciar 24h: ' + (e && e.message || e));
@@ -4701,7 +4737,7 @@
 
     reloadPerfis();
     try { void preloadServerConfig(); } catch {}
-    setInterval(reloadPerfis, 1000);
+    setInterval(reloadPerfis, 5000);
 
     // Chamada inicial das métricas:
     updateSysMetrics();

@@ -575,6 +575,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // Implementação SOLICITADA — substitua toda a estrutura da rota por este bloco DO INÍCIO AO FIM!
 
   // 1) Baseline do perfis.json SEMPRE — nunca array vazia (usa cache se falhar)
+  let warningINST = undefined;
+  let erroMsgINST = undefined;
   let perfisArr = [];
   try { perfisArr = fileStore.loadPerfisJson() || []; } catch { perfisArr = []; }
   // Se veio vazio mas já tivemos baseline recente, assume falha transitória (produção não fica realmente "0 perfis").
@@ -640,60 +642,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       .filter((p) => p && p.nome)
       .map((p) => [p.nome, buildBasePerfil(p)])
   );
-  let warningINST = undefined;
-  let erroMsgINST = undefined;
 
-  // 2) Overlay: jornal no disco primeiro. GET do browser NÃO espera RPC.
-  // Esperar get-status de 8s no F5 deixava o dashboard no HTML zerado — o abort do browser é 8s.
-  // Lote HUD: pinta status.json agora; RAM em fundo via __scheduleStatusJournalRefresh.
-  // Aviso status_journal_stale em 5s. Poll da UI = 1s.
+  // 2) Overlay vivo do cluster. Se não vier, o baseline continua e a UI não zera.
   let overlayINST = null;
-  let staleSnapINST = null;
-  let overlayAgeMs = Number.POSITIVE_INFINITY;
   try {
-    const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
-    try {
-      const stFile = fs.statSync(fileStore.statusPath);
-      overlayAgeMs = Date.now() - Number(stFile && stFile.mtimeMs || 0);
-    } catch {}
-    if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
-      const snapHud = snap.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-      if (snapHud) {
-        overlayINST = snap;
-        if (!(Number.isFinite(overlayAgeMs) && overlayAgeMs >= 0 && overlayAgeMs <= 5000)) {
-          staleSnapINST = snap;
-          warningINST = 'status_journal_stale';
-        }
-      }
-    }
-  } catch {}
-  if (!overlayINST) {
-    try {
-      overlayINST = await Promise.race([
-        Promise.resolve(workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true }))
-          .catch(() => null),
-        new Promise((resolve) => setTimeout(() => resolve(null), 7500))
-      ]);
-      const hudLive = !!(overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.some((p) =>
-        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
-      if (hudLive) {
-        warningINST = undefined;
-      } else {
-        overlayINST = null;
-        warningINST = 'status_failed';
-      }
-    } catch (e) {
-      if (staleSnapINST && Array.isArray(staleSnapINST.perfis) && staleSnapINST.perfis.length > 0) {
-        overlayINST = staleSnapINST;
-        warningINST = 'status_journal_stale';
-      } else {
-        overlayINST = null;
-        warningINST = 'status_failed';
-      }
-    }
-  } else {
-    // Jornal HUD no disco: responde agora. Nunca zera o HTML. RPC não entra no abort 8s.
-    try { __scheduleStatusJournalRefresh(workerClient); } catch {}
+    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000, fresh: true });
+  } catch (e) {
+    warningINST = 'status temporarily unavailable';
   }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];
@@ -723,7 +678,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     // Overlay de status/metrics apenas nos que existem no baseline
     for (const o of overlayINST.perfis) {
-      if (!o || !Object.prototype.hasOwnProperty.call(o, 'humanHold')) continue;
+      if (!o || !o.nome) continue;
       const b = baseMap.get(o.nome);
       if (!b) continue;
       const prevActive = !!b.active;
@@ -836,21 +791,18 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   try {
     const snap = fileStore.readJsonSafe(fileStore.statusPath, null);
     if (snap && Array.isArray(snap.perfis) && snap.perfis.length) {
-      const snapHud = snap.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-      if (snapHud) {
-        const serverConfigEffective = (() => {
-          try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
-        })();
-        res.json(Object.assign({}, snap, {
-          warning: snap.warning
-            ? (String(snap.warning) + '; status_handler_error')
-            : 'status_handler_error',
-          error: String(e && e.message || e),
-          serverConfig: serverConfigEffective || snap.serverConfig || null,
-          ts: Date.now()
-        }));
-        return;
-      }
+      const serverConfigEffective = (() => {
+        try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+      })();
+      res.json(Object.assign({}, snap, {
+        warning: snap.warning
+          ? (String(snap.warning) + '; status_handler_error')
+          : 'status_handler_error',
+        error: String(e && e.message || e),
+        serverConfig: serverConfigEffective || snap.serverConfig || null,
+        ts: Date.now()
+      }));
+      return;
     }
   } catch {}
   // Anti-spam: não log, só payload!

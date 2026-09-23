@@ -287,6 +287,7 @@ module.exports = (app, workerClient, fileStore) => {
       let engineChanged = false;
       let renewReplanResult = null;
       let countryAlignResult = null;
+      let countryAlignDeferred = null;
       let workerRamDivisorChanged = false;
       let previousWorkerRamDivisorGb = null;
       const hasConfigFields = hasServerConfigFields(payload);
@@ -334,15 +335,13 @@ module.exports = (app, workerClient, fileStore) => {
             const perfis = (typeof fileStore.loadPerfisJson === 'function')
               ? (fileStore.loadPerfisJson() || [])
               : [];
-            const countryGeo = require('./countryGeo.js');
-            const countryChanged = String(previousCountryId || 'br') !== String(pack.id || 'br');
-            const allowVehicles = countryGeo.allowsVehicles({ countryId: pack.id }) === true;
-            const cityRemaps = [];
-            const stats = {
+            countryAlignResult = {
+              ok: true,
               country: pack.id,
               timezone: pack.timezone,
               previousCountryId,
-              total: 0,
+              queued: true,
+              total: Array.isArray(perfis) ? perfis.length : 0,
               updated: 0,
               unchanged: 0,
               failed: 0,
@@ -351,118 +350,138 @@ module.exports = (app, workerClient, fileStore) => {
               errors: [],
               applyCityNames: []
             };
-            for (const row of (Array.isArray(perfis) ? perfis : [])) {
-              const nome = String(row && row.nome || '').trim();
-              if (!nome) continue;
-              stats.total += 1;
-              try {
-                const cur = await manifestStore.read(nome);
-                const anti = (cur && cur.antiDetect && typeof cur.antiDetect === 'object') ? cur.antiDetect : {};
-                const langs = Array.isArray(anti.navigatorLanguages) ? anti.navigatorLanguages : [];
-                const langsSame = langs.length === pack.navigatorLanguages.length
-                  && langs.every((v, i) => String(v || '') === String(pack.navigatorLanguages[i] || ''));
-                const localeSame = (
-                  String(anti.country || '') === pack.id &&
-                  String(anti.timezone || '') === pack.timezone &&
-                  String(anti.navigatorLanguage || '') === pack.navigatorLanguage &&
-                  String(anti.acceptLanguage || '') === pack.acceptLanguage &&
-                  langsSame
-                );
-                const curCidade = String((cur && cur.cidade) || row.cidade || '').trim();
-                let nextCidade = curCidade;
-                const knownCity = countryGeo.isKnownCity(curCidade, { countryId: pack.id });
-                if (!knownCity && (pack.id === 'us' || countryChanged)) {
-                  const working = countryGeo.listWorkingCitiesFromPersistedConfig({ countryId: pack.id });
-                  const picked = countryGeo.pickLeastUsedFromList(working, {
-                    perfis,
-                    extraTaken: cityRemaps
-                  });
-                  if (picked) {
-                    nextCidade = picked;
-                    cityRemaps.push({ nome, cidade: picked });
-                  }
-                } else if (knownCity) {
-                  nextCidade = countryGeo.findCanonicalCity(curCidade, { countryId: pack.id }) || curCidade;
-                }
-                const extrasIn = Array.isArray(cur && cur.cidadesExtras) ? cur.cidadesExtras : [];
-                const extrasOut = extrasIn
-                  .map((c) => String(c || '').trim())
-                  .filter(Boolean)
-                  .filter((c, i, arr) => (
-                    arr.findIndex((x) => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i
-                  ))
-                  .filter((c) => (
-                    c !== nextCidade &&
-                    countryGeo.isKnownCity(c, { countryId: pack.id })
-                  ));
-                const extrasSame = extrasIn.length === extrasOut.length
-                  && extrasIn.every((c, i) => String(c || '') === String(extrasOut[i] || ''));
-                const curMode = String((cur && cur.robeMode) || 'itens').toLowerCase();
-                const nextMode = (!allowVehicles && curMode === 'veiculos') ? 'itens' : (curMode === 'veiculos' ? 'veiculos' : 'itens');
-                const citySame = nextCidade === curCidade;
-                const modeSame = nextMode === curMode;
-                if (localeSame && citySame && extrasSame && modeSame) {
-                  stats.unchanged += 1;
-                  continue;
-                }
-                if (!citySame) stats.cityRemapped += 1;
-                if (!modeSame) stats.vehiclesPinned += 1;
-                if (!citySame) stats.applyCityNames.push(nome);
-                await manifestStore.update(nome, (man) => {
-                  const next = Object.assign({}, man || {});
-                  next.cidade = nextCidade;
-                  next.robeMode = nextMode;
-                  next.cidadesExtras = extrasOut.slice();
-                  next.antiDetect = Object.assign({}, next.antiDetect || {}, {
-                    country: pack.id,
-                    timezone: pack.timezone,
-                    navigatorLanguage: pack.navigatorLanguage,
-                    navigatorLanguages: pack.navigatorLanguages.slice(),
-                    acceptLanguage: pack.acceptLanguage,
-                    countryAlignedAt: Date.now()
-                  });
-                  return next;
-                });
-                stats.updated += 1;
-              } catch (eAlign) {
-                stats.failed += 1;
-                if (stats.errors.length < 20) {
-                  stats.errors.push({
-                    nome,
-                    error: String((eAlign && eAlign.message) || eAlign || 'align_failed').slice(0, 180)
-                  });
-                }
-              }
-            }
-            if (cityRemaps.length) {
-              try {
-                fileStore.withPerfisFileLockUpdate((arr) => {
-                  const next = Array.isArray(arr) ? arr.slice() : [];
-                  const byNome = new Map(cityRemaps.map((r) => [r.nome, r.cidade]));
-                  for (let i = 0; i < next.length; i++) {
-                    const n = String(next[i] && next[i].nome || '').trim();
-                    if (!n || !byNome.has(n)) continue;
-                    next[i] = Object.assign({}, next[i], { cidade: byNome.get(n) });
-                  }
-                  return next;
-                }, { caller: 'api_perfis_country_city_align', reason: `country:${pack.id}` });
-              } catch {}
-            }
-            countryAlignResult = stats;
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'server_config_country_aligned',
-                by: operator,
+            countryAlignDeferred = async () => {
+              const countryGeo = require('./countryGeo.js');
+              const countryChanged = String(previousCountryId || 'br') !== String(pack.id || 'br');
+              const allowVehicles = countryGeo.allowsVehicles({ countryId: pack.id }) === true;
+              const cityRemaps = [];
+              const stats = {
+                ok: true,
                 country: pack.id,
                 timezone: pack.timezone,
                 previousCountryId,
-                total: stats.total,
-                updated: stats.updated,
-                unchanged: stats.unchanged,
-                failed: stats.failed
-              });
-            } catch {}
+                total: 0,
+                updated: 0,
+                unchanged: 0,
+                failed: 0,
+                cityRemapped: 0,
+                vehiclesPinned: 0,
+                errors: [],
+                applyCityNames: []
+              };
+              for (const row of (Array.isArray(perfis) ? perfis : [])) {
+                const nome = String(row && row.nome || '').trim();
+                if (!nome) continue;
+                stats.total += 1;
+                try {
+                  const cur = await manifestStore.read(nome);
+                  const anti = (cur && cur.antiDetect && typeof cur.antiDetect === 'object') ? cur.antiDetect : {};
+                  const langs = Array.isArray(anti.navigatorLanguages) ? anti.navigatorLanguages : [];
+                  const langsSame = langs.length === pack.navigatorLanguages.length
+                    && langs.every((v, i) => String(v || '') === String(pack.navigatorLanguages[i] || ''));
+                  const localeSame = (
+                    String(anti.country || '') === pack.id &&
+                    String(anti.timezone || '') === pack.timezone &&
+                    String(anti.navigatorLanguage || '') === pack.navigatorLanguage &&
+                    String(anti.acceptLanguage || '') === pack.acceptLanguage &&
+                    langsSame
+                  );
+                  const curCidade = String((cur && cur.cidade) || row.cidade || '').trim();
+                  let nextCidade = curCidade;
+                  const knownCity = countryGeo.isKnownCity(curCidade, { countryId: pack.id });
+                  if (!knownCity && (pack.id === 'us' || countryChanged)) {
+                    const working = countryGeo.listWorkingCitiesFromPersistedConfig({ countryId: pack.id });
+                    const picked = countryGeo.pickLeastUsedFromList(working, {
+                      perfis,
+                      extraTaken: cityRemaps
+                    });
+                    if (picked) {
+                      nextCidade = picked;
+                      cityRemaps.push({ nome, cidade: picked });
+                    }
+                  } else if (knownCity) {
+                    nextCidade = countryGeo.findCanonicalCity(curCidade, { countryId: pack.id }) || curCidade;
+                  }
+                  const extrasIn = Array.isArray(cur && cur.cidadesExtras) ? cur.cidadesExtras : [];
+                  const extrasOut = extrasIn
+                    .map((c) => String(c || '').trim())
+                    .filter(Boolean)
+                    .filter((c, i, arr) => (
+                      arr.findIndex((x) => String(x).toLocaleLowerCase('pt-BR') === String(c).toLocaleLowerCase('pt-BR')) === i
+                    ))
+                    .filter((c) => (
+                      c !== nextCidade &&
+                      countryGeo.isKnownCity(c, { countryId: pack.id })
+                    ));
+                  const extrasSame = extrasIn.length === extrasOut.length
+                    && extrasIn.every((c, i) => String(c || '') === String(extrasOut[i] || ''));
+                  const curMode = String((cur && cur.robeMode) || 'itens').toLowerCase();
+                  const nextMode = (!allowVehicles && curMode === 'veiculos') ? 'itens' : (curMode === 'veiculos' ? 'veiculos' : 'itens');
+                  const citySame = nextCidade === curCidade;
+                  const modeSame = nextMode === curMode;
+                  if (localeSame && citySame && extrasSame && modeSame) {
+                    stats.unchanged += 1;
+                    continue;
+                  }
+                  if (!citySame) stats.cityRemapped += 1;
+                  if (!modeSame) stats.vehiclesPinned += 1;
+                  if (!citySame) stats.applyCityNames.push(nome);
+                  await manifestStore.update(nome, (man) => {
+                    const next = Object.assign({}, man || {});
+                    next.cidade = nextCidade;
+                    next.robeMode = nextMode;
+                    next.cidadesExtras = extrasOut.slice();
+                    next.antiDetect = Object.assign({}, next.antiDetect || {}, {
+                      country: pack.id,
+                      timezone: pack.timezone,
+                      navigatorLanguage: pack.navigatorLanguage,
+                      navigatorLanguages: pack.navigatorLanguages.slice(),
+                      acceptLanguage: pack.acceptLanguage,
+                      countryAlignedAt: Date.now()
+                    });
+                    return next;
+                  });
+                  stats.updated += 1;
+                } catch (eAlign) {
+                  stats.failed += 1;
+                  if (stats.errors.length < 20) {
+                    stats.errors.push({
+                      nome,
+                      error: String((eAlign && eAlign.message) || eAlign || 'align_failed').slice(0, 180)
+                    });
+                  }
+                }
+              }
+              if (cityRemaps.length) {
+                try {
+                  fileStore.withPerfisFileLockUpdate((arr) => {
+                    const next = Array.isArray(arr) ? arr.slice() : [];
+                    const byNome = new Map(cityRemaps.map((r) => [r.nome, r.cidade]));
+                    for (let i = 0; i < next.length; i++) {
+                      const n = String(next[i] && next[i].nome || '').trim();
+                      if (!n || !byNome.has(n)) continue;
+                      next[i] = Object.assign({}, next[i], { cidade: byNome.get(n) });
+                    }
+                    return next;
+                  }, { caller: 'api_perfis_country_city_align', reason: `country:${pack.id}` });
+                } catch {}
+              }
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'server_config_country_aligned',
+                  by: operator,
+                  country: pack.id,
+                  timezone: pack.timezone,
+                  previousCountryId,
+                  total: stats.total,
+                  updated: stats.updated,
+                  unchanged: stats.unchanged,
+                  failed: stats.failed
+                });
+              } catch {}
+              return stats;
+            };
           }
         } catch (eCountry) {
           countryAlignResult = {
@@ -650,6 +669,22 @@ module.exports = (app, workerClient, fileStore) => {
         setImmediate(() => {
           Promise.resolve()
             .then(async () => {
+              let countryAlignFinal = countryAlignResult || null;
+              if (countryAlignDeferred) {
+                try {
+                  countryAlignFinal = await countryAlignDeferred();
+                } catch (eAlignDeferred) {
+                  countryAlignFinal = {
+                    ok: false,
+                    error: String((eAlignDeferred && eAlignDeferred.message) || eAlignDeferred || 'country_align_deferred_failed')
+                  };
+                  try {
+                    logger.warn('[SERVER_CONFIG] falha no alinhamento assíncrono de país', {
+                      error: (eAlignDeferred && eAlignDeferred.message) || String(eAlignDeferred)
+                    });
+                  } catch {}
+                }
+              }
               if (renewReplanResult && renewReplanResult.queued === true) {
                 try {
                   if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
@@ -671,8 +706,8 @@ module.exports = (app, workerClient, fileStore) => {
                 }
               } catch {}
               try {
-                const countryChanged = countryAlignResult
-                  && String(countryAlignResult.previousCountryId || '') !== String(countryAlignResult.country || '');
+                const countryChanged = countryAlignFinal
+                  && String(countryAlignFinal.previousCountryId || '') !== String(countryAlignFinal.country || '');
                 if (countryChanged && workerClient && typeof workerClient.sendWorkerCommand === 'function') {
                   await workerClient.sendWorkerCommand('robe-replan-all', {
                     reason: 'country_changed',
@@ -681,8 +716,8 @@ module.exports = (app, workerClient, fileStore) => {
                 }
               } catch {}
               try {
-                const names = (countryAlignResult && Array.isArray(countryAlignResult.applyCityNames))
-                  ? countryAlignResult.applyCityNames
+                const names = (countryAlignFinal && Array.isArray(countryAlignFinal.applyCityNames))
+                  ? countryAlignFinal.applyCityNames
                   : [];
                 for (const nomeApply of names) {
                   if (!nomeApply) continue;

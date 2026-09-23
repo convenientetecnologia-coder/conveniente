@@ -4148,8 +4148,6 @@ function __readFreshStatusJson(maxAgeMs) {
     // Servidor novo, sem conta: perfis [] é status válido. Sem isso o CT
     // só vê heartbeat, o card fica no snapshot do túnel e o estoque diz sem pulso.
     if (json.perfis.length === 0) return json;
-    const hasHud = json.perfis.some((p) => p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-    if (!hasHud) return null;
     return json;
   } catch {
     return null;
@@ -4388,13 +4386,13 @@ async function __serverEventBridgeTick(reason) {
   __serverEventBridgeInFlight = true;
   __serverEventBridgeStartedAt = now0;
   try {
-    // Lote D1/D2: a ponte lia status.json congelado (nada chamava get-status).
-    // Agrega status_node_N no disco; timeout curto para não estourar TICK_MAX.
+    // A ponte não deve competir agressivamente com o operador a cada segundo.
+    // Só força refresh se o agregado estiver realmente envelhecido.
     try {
       const aggPath = path.join(__dirname, 'dados', 'status.json');
       let aggAge = Number.POSITIVE_INFINITY;
       try { aggAge = Date.now() - Number(fs.statSync(aggPath).mtimeMs || 0); } catch {}
-      if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 1000)) {
+      if (!(Number.isFinite(aggAge) && aggAge >= 0 && aggAge <= 15000)) {
         if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
           await Promise.race([
             Promise.resolve(clusterClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true }))
@@ -4405,8 +4403,7 @@ async function __serverEventBridgeTick(reason) {
       }
     } catch {}
     const status = await __readLocalStatusForEventBridge();
-    const statusHasHud = !!(status && Array.isArray(status.perfis) && status.perfis.some((p) =>
-      p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
+    const statusHasHud = !!(status && Array.isArray(status.perfis));
     const hostId = __readOrCreateServerEventHostId();
     const telemetry = __buildServerEventTelemetry(status);
     const now = Date.now();

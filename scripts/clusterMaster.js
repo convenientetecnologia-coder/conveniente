@@ -56,11 +56,10 @@ function readNodeStatusFile(idx) {
   } catch { return null; }
 }
 
-// Lote D1: limiar de pintura 5s. Jornal de minutos NÃO entra no aggregate (nem com cell viva).
-// Rollback: CLUSTER_STATUS_FILE_MAX_AGE_MS=60000
+// Jornal serve como fallback/atalho; não deve expirar agressivamente para o dashboard operacional.
 const MAX_FILE_AGE_MS = Math.max(
   1000,
-  parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '5000', 10) || 5000
+  parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10) || 60000
 );
 
 function shouldApplyNodeStatusJournal({ liveChild = false, ageMs = Number.POSITIVE_INFINITY } = {}) {
@@ -1062,11 +1061,10 @@ async function createCluster() {
   const STATUS_TIMEOUT_MS = parseInt(process.env.CLUSTER_STATUS_TIMEOUT_MS || '25000', 10);
   // RPC de jornal stale: clone RAM. Não pode competir com o abort 8s do browser.
   const STATUS_RPC_STALE_MS = Math.max(1000, parseInt(process.env.CLUSTER_STATUS_RPC_STALE_MS || '3000', 10) || 3000);
-  // Jornal fresco pinta na hora. RPC só se o arquivo passou do limiar.
-  // 0 = RPC em toda cell viva (rollback; compete com o GET do painel).
-  const HUD_REFRESH_AGE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_HUD_REFRESH_MS || '5000', 10) || 0);
-  // Lote D1: agregado sem delay. Rollback: CLUSTER_STATUS_CACHE_MS=4500
-  const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '250', 10) || 250);
+  // Enquanto o journal estiver razoavelmente fresco, não force RPC extra só para repintar o HUD.
+  const HUD_REFRESH_AGE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_HUD_REFRESH_MS || '60000', 10) || 0);
+  // Cache curto, porém não agressivo o bastante para disparar agregação sem parar.
+  const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '4500', 10) || 4500);
   let statusAggCache = { at: 0, value: null };
   let statusAggInflight = null;
 
@@ -1559,7 +1557,6 @@ async function createCluster() {
           if (!nome || paintedNames.has(nome)) continue;
           const dst = baseMap.get(prevRow.nome) || baseMap.get(nome);
           if (!dst) continue;
-          if (Object.prototype.hasOwnProperty.call(dst, 'humanHold')) continue;
           const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
           Object.assign(dst, prevRow);
           const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
@@ -1673,7 +1670,7 @@ async function createCluster() {
           }
           out.perfis = out.perfis.map((p) => {
             if (!p || !p.nome) return p;
-            if (Object.prototype.hasOwnProperty.call(p, 'humanHold')) return p;
+            if (paintedNames.has(String(p.nome))) return p;
             const prev = byNome.get(String(p.nome));
             return prev || p;
           });
@@ -1686,21 +1683,15 @@ async function createCluster() {
             }
           }
         }
-        const outHasHud = Array.isArray(out.perfis) && out.perfis.some((p) =>
-          p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-        if (outHasHud) fileStore.writeJsonAtomic(aggPath, out);
+        if (!painted && prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.length) {
+          statusAggCache = { at: Date.now(), value: prevAgg };
+          return prevAgg;
+        }
+        fileStore.writeJsonAtomic(aggPath, out);
       } catch {}
 
-      const outHasHud = Array.isArray(out.perfis) && out.perfis.some((p) =>
-        p && Object.prototype.hasOwnProperty.call(p, 'humanHold'));
-      const prevHasHud = !!(prevAgg && Array.isArray(prevAgg.perfis) && prevAgg.perfis.some((p) =>
-        p && Object.prototype.hasOwnProperty.call(p, 'humanHold')));
-      if (!outHasHud && prevHasHud) {
-        statusAggCache = { at: Date.now(), value: prevAgg };
-        return prevAgg;
-      }
-      if (outHasHud) statusAggCache = { at: Date.now(), value: out };
-      return outHasHud ? out : (prevAgg || out);
+      statusAggCache = { at: Date.now(), value: out };
+      return out;
       })();
       statusAggInflight = runAgg.finally(() => { statusAggInflight = null; });
       return runAgg;
