@@ -773,6 +773,21 @@ const BR_VALID_UF = new Set([
   "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN",
   "RS", "RO", "RR", "SC", "SP", "SE", "TO",
 ]);
+const US_VALID_STATE = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+  "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+  "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+  "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+  "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+]);
+function leadRegionCodes() {
+  try {
+    const sc = require("./serverConfig.js");
+    const pack = typeof sc.readCountryPackEffective === "function" ? sc.readCountryPackEffective() : null;
+    if (String(pack && pack.id || "").trim().toLowerCase() === "us") return US_VALID_STATE;
+  } catch {}
+  return BR_VALID_UF;
+}
 function normalizeCityToUfPattern(raw) {
   const s0 = String(raw || "")
     .replace(/\s+/g, " ")
@@ -793,14 +808,24 @@ function normalizeCityToUfPattern(raw) {
   const m1 = s.match(/^(.+?)\s*\(\s*([A-Za-z]{2})\s*\)$/);
   if (m1 && m1[1] && m1[2]) {
     const uf = String(m1[2]).toUpperCase();
-    if (!BR_VALID_UF.has(uf)) return "";
-    return `${toTitleCaseCityName(m1[1].trim())} (${uf})`.slice(0, 80);
+    if (!leadRegionCodes().has(uf)) return "";
+    const city = toTitleCaseCityName(m1[1].trim());
+    const key = city.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (uf === "NY" && (key === "new york" || key === "new york city" || key === "nyc" || key === "nova york" || key === "nova iorque")) {
+      return "Nova York (NY)";
+    }
+    return `${city} (${uf})`.slice(0, 80);
   }
   const m2 = s.match(/^(.+?)\s*[-,\/]\s*([A-Za-z]{2})$/);
   if (m2 && m2[1] && m2[2]) {
     const uf = String(m2[2]).toUpperCase();
-    if (!BR_VALID_UF.has(uf)) return "";
-    return `${toTitleCaseCityName(m2[1].trim())} (${uf})`.slice(0, 80);
+    if (!leadRegionCodes().has(uf)) return "";
+    const city = toTitleCaseCityName(m2[1].trim());
+    const key = city.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (uf === "NY" && (key === "new york" || key === "new york city" || key === "nyc" || key === "nova york" || key === "nova iorque")) {
+      return "Nova York (NY)";
+    }
+    return `${city} (${uf})`.slice(0, 80);
   }
   return "";
 }

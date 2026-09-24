@@ -455,6 +455,32 @@ const BR_VALID_UF = new Set([
   "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN",
   "RS", "RO", "RR", "SC", "SP", "SE", "TO",
 ]);
+const US_VALID_STATE = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+  "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+  "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+  "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+  "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+]);
+
+function activeRegionCodes() {
+  return serverCountryIsUs() ? US_VALID_STATE : BR_VALID_UF;
+}
+
+function isPrimaryNewYorkName(name) {
+  const key = normalizeStateKey(name);
+  return key === "nova york" || key === "nova iorque" || key === "new york" || key === "new york city" || key === "nyc";
+}
+
+function finalizeUsCityLabel(label) {
+  const s = String(label || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  const m = s.match(/^(.+?) \(([A-Z]{2})\)$/);
+  if (!m && isPrimaryNewYorkName(s)) return "Nova York (NY)";
+  if (!m || !US_VALID_STATE.has(m[2])) return "";
+  if (m[2] === "NY" && isPrimaryNewYorkName(m[1])) return "Nova York (NY)";
+  return s;
+}
 
 function normalizeStateKey(value) {
   return String(value || "")
@@ -595,7 +621,7 @@ function collectGeoHitsFromBlob(raw) {
   let um;
   while ((um = markRe.exec(chunk)) !== null) {
     const uf = String(um[1] || um[2] || "").toUpperCase();
-    if (!BR_VALID_UF.has(uf)) continue;
+    if (!activeRegionCodes().has(uf)) continue;
     const before = chunk.slice(0, um.index).trim();
     const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
     if (!tail || !tail[1]) continue;
@@ -792,7 +818,7 @@ function isWeakCityCandidateSource(source) {
 /** Resolve Cidade+UF a partir do miolo capturado: sufixos da direita no DOM. */
 function resolveCityUfCapture(cityRaw, ufRaw) {
   const uf = String(ufRaw || "").trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
+  if (!/^[A-Z]{2}$/.test(uf) || !activeRegionCodes().has(uf)) return "";
   const words = String(cityRaw || "")
     .replace(/\s+/g, " ")
     .trim()
@@ -819,8 +845,8 @@ function buildCityUf(cityRaw, ufRaw) {
   const city = toTitleCaseCityName(String(cityRaw || "").trim());
   const uf = String(ufRaw || "").trim().toUpperCase();
   if (!isPlausibleCityName(city)) return "";
-  if (!/^[A-Z]{2}$/.test(uf) || !BR_VALID_UF.has(uf)) return "";
-  return `${city} (${uf})`.slice(0, 80);
+  if (!/^[A-Z]{2}$/.test(uf) || !activeRegionCodes().has(uf)) return "";
+  return finalizeUsCityLabel(`${city} (${uf})`.slice(0, 80));
 }
 
 /**
@@ -848,7 +874,7 @@ function extractCityFromLocationAnchorText(bodyText) {
     let um;
     while ((um = markRe.exec(chunk)) !== null) {
       const uf = String(um[1] || um[2] || "").toUpperCase();
-      if (!BR_VALID_UF.has(uf)) continue;
+      if (!activeRegionCodes().has(uf)) continue;
       ufMarks.push({ index: um.index, uf });
     }
     for (let i = ufMarks.length - 1; i >= 0; i -= 1) {
@@ -903,21 +929,15 @@ function serverCountryIsUs() {
   }
 }
 
-/** Servidor EUA: rótulo canônico do grupo. Não usa UF do Brasil. */
-function normalizeUsMarketCityLabel(raw) {
-  const s = String(raw || "").replace(/\s+/g, " ").trim();
-  if (!s || s.length > 120) return "";
-  const key = s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-  const ny = /(nova york|nova iorque|new york|new york city|\bnyc\b|manhattan|brooklyn|queens|\bbronx\b|staten island)/i.test(key);
-  if (!ny) return "";
-  return "Nova York (NY)";
+function normalizeCityUfLabel(raw) {
+  const built = normalizeCityUfLabelRaw(raw);
+  if (!serverCountryIsUs()) return built;
+  const finalized = finalizeUsCityLabel(built);
+  if (finalized) return finalized;
+  return finalizeUsCityLabel(raw);
 }
 
-function normalizeCityUfLabel(raw) {
-  if (serverCountryIsUs()) return normalizeUsMarketCityLabel(raw);
+function normalizeCityUfLabelRaw(raw) {
   const s0 = stripMarketplaceConditionNoise(String(raw || "").replace(/\s+/g, " ").trim());
   if (!s0) return "";
 
@@ -951,7 +971,7 @@ function normalizeCityUfLabel(raw) {
   let best = "";
   while ((m = ufRe.exec(s0)) !== null) {
     const uf = String(m[1] || m[2] || "").toUpperCase();
-    if (!BR_VALID_UF.has(uf)) continue;
+    if (!activeRegionCodes().has(uf)) continue;
     const before = stripMarketplaceConditionNoise(s0.slice(Math.max(0, m.index - 70), m.index));
     const tail = before.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*){0,6})\s*$/);
     if (!tail || !tail[1]) continue;
