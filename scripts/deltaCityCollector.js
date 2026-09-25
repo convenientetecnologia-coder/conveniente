@@ -846,7 +846,11 @@ function buildCityUf(cityRaw, ufRaw) {
   const uf = String(ufRaw || "").trim().toUpperCase();
   if (!isPlausibleCityName(city)) return "";
   if (!/^[A-Z]{2}$/.test(uf) || !activeRegionCodes().has(uf)) return "";
-  return finalizeUsCityLabel(`${city} (${uf})`.slice(0, 80));
+  const label = `${city} (${uf})`.slice(0, 80);
+  // A lista de siglas já é a do país do servidor. A limpeza dos EUA apaga RJ/PR/RN/PE
+  // e só deixa sigla que também é estado americano (SC). No Brasil ela não entra.
+  if (!serverCountryIsUs()) return label;
+  return finalizeUsCityLabel(label);
 }
 
 /**
