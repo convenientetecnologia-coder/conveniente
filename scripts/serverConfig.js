@@ -13,6 +13,7 @@ const CONFIG_VERSION = 1;
 const ITEM_TITLES_PACK_DEFAULT = "titulos";
 const ITEM_TITLES_PACKS = Object.freeze({
   titulos: { file: "titulos.json", label: "Padrão", countries: Object.freeze(["br"]) },
+  titulosBR: { file: "titulosBR.json", label: "Brasil", countries: Object.freeze(["br"]) },
   titulosCirilicos: { file: "titulosCirilicos.json", label: "Cirílico", countries: Object.freeze(["br"]) },
   titulosCirilicosLeve: { file: "titulosCirilicosLeve.json", label: "Cirílico leve", countries: Object.freeze(["br"]) },
   titulosEUA: { file: "titulosEUA.json", label: "EUA", countries: Object.freeze(["us"]) }

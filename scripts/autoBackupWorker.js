@@ -171,6 +171,7 @@ function runOnce({ ROOT, keep }) {
       path.join("dados", "descricaoItens.json"),
       path.join("dados", "descricaoItensEUA.json"),
       path.join("dados", "titulosEUA.json"),
+      path.join("dados", "titulosBR.json"),
       path.join("dados", "atendimento.json")
     ];
     for (const rel of dadosFiles) {
