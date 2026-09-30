@@ -11,6 +11,7 @@ const chromeHeapFaxina = require('./chromeHeapFaxina.js');
 const chromeWorkingSetShrink = require('./chromeWorkingSetShrink.js');
 const { createEnsureWorkingTick } = require('./ensureWorking.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+const deltaHistoryContract = require('./deltaHistoryContract.js');
 
 // ===================== FORENSIC_EDGE (Caixa-preta Universal) =====================
 const FORENSIC_EDGE_LOG_PATH = path.join(__dirname, '..', 'dados', 'forensic_edge.log');
@@ -21417,6 +21418,8 @@ const DELTA_INGEST_KICK_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pe
 const DELTA_FORENSIC_QUEUE_PATH = path.join(__dirname, '..', 'dados', 'mensagens_forense.jsonl');
 const DELTA_THREAD_STATE_PATH = path.join(__dirname, '..', 'dados', 'delta_thread_state.json');
 const DELTA_RESPONDED_HISTORY_FILENAME = 'chats_respondidos_delta.json';
+const DELTA_INGEST_CONTRACT_VERSION = deltaHistoryContract.INGEST_CONTRACT_VERSION;
+const DELTA_HISTORY_CONTRACT = deltaHistoryContract.HISTORY_CONTRACT;
 const DELTA_GATE_B_BUNDLE_PATH = path.join(__dirname, '..', 'dados', 'gate_b_bundle.json');
 const DELTA_INGEST_DEADLETTER_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.jsonl');
 const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 'mensagens_pendentes.deadletter.cursor.json');
@@ -21555,11 +21558,6 @@ const DELTA_CT_CANONICAL_BASE = (() => {
   const normalized = normalizeCtBaseUrl(raw, { allowLegacyNgrok: true });
   return String(normalized || 'https://painel.convenientetecnologia.com').replace(/\/+$/, '');
 })();
-const DELTA_HISTORY_LOOKBACK_HOURS = Math.max(
-  1,
-  Math.min(48, Number(process.env.DELTA_HISTORY_LOOKBACK_HOURS || 12) || 12)
-);
-const DELTA_HISTORY_LOOKBACK_MS = DELTA_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1000;
 const DELTA_FIRST_BOOT_BASELINE_GRACE_MS = Math.max(
   0,
   Number(process.env.DELTA_FIRST_BOOT_BASELINE_GRACE_MS || 3000) || 3000
@@ -22366,6 +22364,24 @@ function __deltaExtractMetaTimestampMs(ev, fallbackNowMs) {
   }
 }
 
+function __deltaHasTrustedMetaTimestamp(ev) {
+  try {
+    const e = ev && typeof ev === 'object' ? ev : {};
+    const raw =
+      e.timestamp_ms ||
+      e.timestampMs ||
+      e.created_at ||
+      e.createdAt ||
+      e.server_timestamp_ms ||
+      e.serverTimestampMs ||
+      e.message_at ||
+      0;
+    return __deltaNormalizeTimestampMs(raw, 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
 function __deltaRememberMetaIdSeenOnDisk(id) {
   const k = String(id || '').trim();
   if (!k) return;
@@ -22616,12 +22632,14 @@ function __deltaEnsureAccountHistoryBootstrapSync(nome) {
   if (!hadExistingFile) seededThisRuntime = true;
 
   const payload = {
-    version: 1,
+    ...(existingParsed && typeof existingParsed === 'object' ? existingParsed : {}),
+    version: Math.max(2, Number(existingParsed && existingParsed.version || 0) || 0),
     account_login: n,
     initialized_at_ms: initializedAtMs,
-    lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
     created_at_ms: createdAtMs,
     updated_at_ms: now,
+    history_contract: DELTA_HISTORY_CONTRACT,
+    ingest_contract_version: DELTA_INGEST_CONTRACT_VERSION,
     bootstrap_mode: seededThisRuntime
       ? 'first_boot_seed_without_history'
       : String(existingParsed && existingParsed.bootstrap_mode || 'existing_history')
@@ -22643,7 +22661,8 @@ function __deltaEnsureAccountHistoryBootstrapSync(nome) {
         nome: n,
         filePath: String(filePath || ''),
         initializedAtMs,
-        lookbackHours: DELTA_HISTORY_LOOKBACK_HOURS
+        historyContract: DELTA_HISTORY_CONTRACT,
+        ingestContractVersion: DELTA_INGEST_CONTRACT_VERSION
       });
     } catch {}
   }
@@ -24622,6 +24641,12 @@ async function __deltaHandleBufferedThreadTimer(nome, threadKey, { reason = 'ini
     __deltaSchedulePersistThreadState();
     return;
   }
+  // A marca d'água só avança depois que pelo menos um registro ficou durável
+  // na fila do CT. Assim, replay da mesma frase não reabre o atendimento e
+  // falha de persistência continua elegível para retry.
+  if (queuedDispatchCount > 0 && messageAt > 0) {
+    try { __deltaUpdateThreadHighWatermarkOnDiskSync(n, tk, messageAt); } catch {}
+  }
   const cursorFlush = __deltaFlushPostHandsTimerCursorSync(n, tk);
   if (
     !cursorFlush ||
@@ -24872,6 +24897,8 @@ function __deltaBuildCompactQueuePayload(payload) {
   return {
     idempotency_key: __deltaClampQueueString(p.idempotency_key, 120) || null,
     server_id: String(p.server_id || '').trim() || null,
+    ingest_contract_version: Math.max(0, Number(p.ingest_contract_version || 0) || 0),
+    history_contract: __deltaClampQueueString(p.history_contract, 80) || null,
     account_login: __deltaClampQueueString(p.account_login, 180) || null,
     thread_key: __deltaClampQueueString(p.thread_key, 220) || null,
     ...(compactThreadCandidates.length ? { thread_key_candidates: compactThreadCandidates } : {}),
@@ -24919,6 +24946,14 @@ function __deltaBuildCompactQueuePayload(payload) {
 
 function __deltaAppendPendingJsonlSync(payload) {
   const pIn = payload && typeof payload === 'object' ? payload : {};
+  const dispatchToCt = pIn.dispatch_ct !== false;
+  const carriesCustomerInbound = !!String(
+    pIn.mensagens_cliente_concatenadas || pIn.texto_limpo || ''
+  ).trim();
+  const replayingLegacyDeadletter = !!(
+    pIn.ingest_deadletter_replayed === true &&
+    (Number(pIn.ingest_contract_version || 0) || 0) < DELTA_INGEST_CONTRACT_VERSION
+  );
   let serverId = String(pIn.server_id || pIn.serverId || pIn.hostId || pIn.host_id || '').trim();
   if (!serverId) {
     try {
@@ -24929,9 +24964,12 @@ function __deltaAppendPendingJsonlSync(payload) {
   }
   const p = {
     ...pIn,
-    server_id: serverId || null
+    server_id: serverId || null,
+    ...(dispatchToCt && carriesCustomerInbound && !replayingLegacyDeadletter ? {
+      ingest_contract_version: DELTA_INGEST_CONTRACT_VERSION,
+      history_contract: DELTA_HISTORY_CONTRACT,
+    } : {})
   };
-  const dispatchToCt = p.dispatch_ct !== false;
   const idempotencyKey = String(p.idempotency_key || '').trim() || __deltaComputeIdempotencyKey(p);
   let record = __deltaBuildQueueRecord(
     dispatchToCt ? p : __deltaBuildCompactQueuePayload({
@@ -27961,6 +27999,9 @@ async function __deltaAttachCdpEar(nome, page) {
   try {
     cdp = await page.target().createCDPSession();
     try { chromeHeapFaxina.elevateMaxListeners(cdp); } catch {}
+    // Fronteira da conta nasce antes de habilitar a rede e antes de qualquer
+    // callback. Não existe janela em que o primeiro frame possa criar o arquivo.
+    try { __deltaEnsureAccountHistoryBootstrapSync(nome); } catch {}
     await cdp.send('Network.enable');
     if (
       controllers.get(nome) !== ctrl ||
@@ -28160,12 +28201,12 @@ async function __deltaAttachCdpEar(nome, page) {
           ev && (ev.server_timestamp_ms || ev.server_timestampMs || ev.message_at),
           Date.now()
         );
-        // Regra nova (Delta 12h):
-        // decisões de histórico devem considerar timestamp/metaTs.
-        // Portanto, o gate vitalício por thread foi substituído pela avaliação abaixo.
+        // O relógio real da Meta separa baseline histórico de mensagem nova.
+        // Sem relógio confiável, só a pequena folga do primeiro boot é aplicada.
 
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const metaDedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
+        const metaTimestampTrusted = __deltaHasTrustedMetaTimestamp(ev);
         const metaTsMs = __deltaExtractMetaTimestampMs(ev, nowMs);
         let dedupMetaId = metaDedupMetaId;
         let dedupMetaIdSynthetic = false;
@@ -28310,28 +28351,40 @@ async function __deltaAttachCdpEar(nome, page) {
         };
         const accountHistState = __deltaEnsureAccountHistoryBootstrapSync(nome);
         const tsForWindow = Number(metaTsMs || nowMs) || nowMs;
-        const nowWindowRef = Date.now();
-        const lookbackCutoffMs = nowWindowRef - DELTA_HISTORY_LOOKBACK_MS;
         const initAtMs = Number(accountHistState && accountHistState.initializedAtMs || 0) || 0;
-        const shouldSkipOutsideLookback = tsForWindow < lookbackCutoffMs;
-        const shouldSkipFirstBootSeed = !!(
-          accountHistState &&
-          accountHistState.seededThisRuntime === true &&
-          initAtMs > 0 &&
-          tsForWindow <= (initAtMs + DELTA_FIRST_BOOT_BASELINE_GRACE_MS)
-        );
-        if (shouldSkipOutsideLookback || shouldSkipFirstBootSeed) {
-          const skipReason = shouldSkipOutsideLookback
-            ? 'outside_12h_lookback_window'
-            : 'first_boot_seed_without_delta_history';
-          const hwMark = shouldSkipFirstBootSeed
-            ? Math.max(tsForWindow, initAtMs)
-            : Math.max(tsForWindow, lookbackCutoffMs);
+
+        const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
+        const diskCityRaw = String(diskRow && diskRow.city || '').trim();
+        const diskCity = diskCityRaw || null;
+        const diskLink = __deltaPickBestItemLink(diskRow && diskRow.link_anuncio);
+        const normalizedWindowTs = Math.max(0, Number(tsForWindow || 0) || 0);
+        let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
+        const diskHighWatermark = Math.max(0, Number(__deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey) || 0) || 0);
+        const threadKnown = __deltaIsKnownProcessedStatus(diskStatus)
+          || String(diskStatus || '').trim().toLowerCase() === 'active';
+        const historyDecision = deltaHistoryContract.classifyInbound({
+          messageAt: normalizedWindowTs,
+          arrivalAt: nowMs,
+          initializedAt: initAtMs,
+          baselineGraceMs: DELTA_FIRST_BOOT_BASELINE_GRACE_MS,
+          messageTimestampTrusted: metaTimestampTrusted,
+          threadKnown,
+          threadHighWatermark: diskHighWatermark,
+        });
+        if (historyDecision.action === 'skip') {
+          const skipReason = String(historyDecision.reason || 'history_contract_skip');
+          const baselineSkip = skipReason === 'predates_account_baseline';
+          const skipHighWatermark = Math.max(
+            normalizedWindowTs,
+            Number(historyDecision.baselineThrough || historyDecision.highWatermark || 0) || 0
+          );
           try {
-            __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, {
-              highWatermark: hwMark,
-              reason: skipReason
-            });
+            if (baselineSkip) {
+              __deltaMarkThreadProcessedHistoricalOnDiskSync(nome, threadKey, {
+                highWatermark: skipHighWatermark,
+                reason: skipReason
+              });
+            }
           } catch {}
           try {
             __forensicEdgeEmit({
@@ -28340,12 +28393,13 @@ async function __deltaAttachCdpEar(nome, page) {
               flow_stage: 'discard_filter_triggered',
               details: {
                 reason: skipReason,
-                state_status: 'processed_historical',
+                state_status: baselineSkip ? 'processed_historical' : String(diskStatus || ''),
                 op: op || null,
-                message_at: tsForWindow,
-                lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
-                lookback_cutoff_ms: lookbackCutoffMs,
+                message_at: normalizedWindowTs,
                 bootstrap_initialized_at_ms: initAtMs || null,
+                baseline_through_ms: Number(historyDecision.baselineThrough || 0) || null,
+                high_watermark: diskHighWatermark || null,
+                history_contract: DELTA_HISTORY_CONTRACT,
                 text_preview: String(texto || '').slice(0, 220)
               }
             });
@@ -28361,33 +28415,25 @@ async function __deltaAttachCdpEar(nome, page) {
             mensagem_seq: 0,
             dispatch_ct: false,
             queue_mode: 'capture_only',
-            flow_stage: 'skip_delta_history_bootstrap',
-            state_status: 'processed_historical',
+            flow_stage: baselineSkip ? 'skip_account_baseline' : 'skip_thread_high_watermark',
+            state_status: baselineSkip ? 'processed_historical' : String(diskStatus || ''),
             history_reason: skipReason,
-            lookback_hours: DELTA_HISTORY_LOOKBACK_HOURS,
-            lookback_cutoff_ms: lookbackCutoffMs,
             bootstrap_initialized_at_ms: initAtMs || null,
-            message_at: tsForWindow,
+            baseline_through_ms: Number(historyDecision.baselineThrough || 0) || null,
+            high_watermark: diskHighWatermark || null,
+            history_contract: DELTA_HISTORY_CONTRACT,
+            message_at: normalizedWindowTs,
             ...networkCtx
           });
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
         }
-
-        const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
-        const diskCityRaw = String(diskRow && diskRow.city || '').trim();
-        const diskCity = diskCityRaw || null;
-        const diskLink = __deltaPickBestItemLink(diskRow && diskRow.link_anuncio);
-        const normalizedWindowTs = Math.max(0, Number(tsForWindow || 0) || 0);
-        let diskStatus = __deltaReadKnownThreadStatusFromDiskSync(nome, threadKey);
-        const diskHighWatermark = Math.max(0, Number(__deltaReadKnownThreadHighWatermarkFromDiskSync(nome, threadKey) || 0) || 0);
         if (__deltaIsKnownProcessedStatus(diskStatus)) {
           const previousDiskStatus = String(diskStatus || '');
           const canReactivateByTimestamp = normalizedWindowTs > diskHighWatermark;
           if (canReactivateByTimestamp) {
             // Thread histórica reativada: já teve ciclo de vida — não rearmar hands.
             try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
-            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
             diskStatus = 'active';
             try {
               __forensicEdgeEmit({
@@ -28507,7 +28553,7 @@ async function __deltaAttachCdpEar(nome, page) {
           }
           // Trava de ciclo de vida: "active" com hands concluído — POST imediato ao CT (timer 30–90s no CT).
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
-          __deltaQueueActiveChatDebouncedDispatch({
+          const queuedActive = __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
             threadKey,
             payload: {
@@ -28536,7 +28582,9 @@ async function __deltaAttachCdpEar(nome, page) {
               ...networkCtx
             }
           });
-          try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
+          if (queuedActive) {
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
+          }
           try { __deltaThreadStateMap.delete(__deltaThreadStateKey(nome, threadKey)); } catch {}
           continue;
           }
@@ -28552,7 +28600,6 @@ async function __deltaAttachCdpEar(nome, page) {
             st.handsCompletedAt = Number(st.handsCompletedAt || 0) || Date.now();
             st.updatedAt = nowMs;
             try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true, handsCompletedAt: st.handsCompletedAt }); } catch {}
-            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, normalizedWindowTs); } catch {}
           } else {
             try {
               __forensicEdgeEmit({
@@ -28679,7 +28726,7 @@ async function __deltaAttachCdpEar(nome, page) {
             hasCanonicalCity: !!(st.city && !__deltaIsPendingCityLabel(st.city))
           });
           // POST imediato ao CT — debounce 30–90s é CT-owned.
-          __deltaQueueActiveChatDebouncedDispatch({
+          const queuedRamActive = __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
             threadKey,
             payload: {
@@ -28711,6 +28758,9 @@ async function __deltaAttachCdpEar(nome, page) {
               ...networkCtx
             }
           });
+          if (queuedRamActive) {
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
+          }
           st.lastDispatchAt = nowMs;
           st.updatedAt = nowMs;
           __deltaSchedulePersistThreadState();
@@ -28722,7 +28772,7 @@ async function __deltaAttachCdpEar(nome, page) {
         if (st.status === 'hands_in_progress' || st.inFlight) {
           // Midflight: não perde — POST imediato ao CT.
           const stLinkPending = __deltaPickBestItemLink(st.link_anuncio);
-          __deltaQueueActiveChatDebouncedDispatch({
+          const queuedMidflight = __deltaQueueActiveChatDebouncedDispatch({
             nome: String(nome || ''),
             threadKey,
             payload: {
@@ -28751,6 +28801,9 @@ async function __deltaAttachCdpEar(nome, page) {
               ...networkCtx
             }
           });
+          if (queuedMidflight) {
+            try { __deltaUpdateThreadHighWatermarkOnDiskSync(nome, threadKey, metaTsMs); } catch {}
+          }
           st.updatedAt = nowMs;
           __deltaSchedulePersistThreadState();
         } else {
@@ -29035,7 +29088,6 @@ async function __deltaAttachCdpEar(nome, page) {
     // Caixa vazia: o próximo chat (depois da folga de 3s) é atendido.
     // Caixa antiga no mesmo boot: relógio anterior ao nascimento continua marcado.
     // Arquivo já existente: a função não rearma o primeiro boot, então não reatende o passado.
-    try { __deltaEnsureAccountHistoryBootstrapSync(nome); } catch {}
     cdp.on('Network.webSocketCreated', onWsCreated);
     cdp.on('Network.webSocketWillSendHandshakeRequest', onWsHandshakeReq);
     cdp.on('Network.webSocketHandshakeResponseReceived', onWsHandshakeRes);
