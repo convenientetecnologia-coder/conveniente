@@ -27849,6 +27849,9 @@ async function __deltaAttachCdpEar(nome, page) {
           try { ctrl0.deltaCdpEarPage = page; } catch {}
         }
         __deltaMarkBootEarState(nome, { earAttached: true, earAttachedAt: earAttachTs });
+        // Ouvido já vivo e ainda sem chats_respondidos_delta.json: cria agora.
+        // A primeira frase do cliente não pode ser o evento que nasce o arquivo.
+        try { __deltaEnsureAccountHistoryBootstrapSync(nome); } catch {}
         return;
       }
       try { page.__deltaCdpEarAttached = false; } catch {}
@@ -29028,6 +29031,11 @@ async function __deltaAttachCdpEar(nome, page) {
     ctrl.deltaCdpOnWsHandshakeRes = onWsHandshakeRes;
     ctrl.deltaCdpOnWsClosed = onWsClosed;
     ctrl.deltaCdpOnResponseReceived = onResponseReceived;
+    // Arquivo de histórico nasce ANTES do primeiro frame.
+    // Caixa vazia: o próximo chat (depois da folga de 3s) é atendido.
+    // Caixa antiga no mesmo boot: relógio anterior ao nascimento continua marcado.
+    // Arquivo já existente: a função não rearma o primeiro boot, então não reatende o passado.
+    try { __deltaEnsureAccountHistoryBootstrapSync(nome); } catch {}
     cdp.on('Network.webSocketCreated', onWsCreated);
     cdp.on('Network.webSocketWillSendHandshakeRequest', onWsHandshakeReq);
     cdp.on('Network.webSocketHandshakeResponseReceived', onWsHandshakeRes);
