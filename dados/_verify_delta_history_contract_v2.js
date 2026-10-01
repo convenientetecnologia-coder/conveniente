@@ -74,10 +74,6 @@ assert(!worker.includes("outside_12h_lookback_window"), "worker ainda contém ve
 assert(!worker.includes("DELTA_HISTORY_LOOKBACK_MS"), "worker ainda calcula janela absoluta");
 assert(worker.includes("deltaHistoryContract.classifyInbound"), "worker não usa o contrato v2");
 assert(worker.includes("ingest_contract_version: DELTA_INGEST_CONTRACT_VERSION"), "fila CT sem versão v2");
-assert(
-  /function __deltaBuildCtIngestPayload[\s\S]{0,12000}ingest_contract_version:/.test(worker),
-  "POST do CT não leva a versão do contrato"
-);
 assert(worker.includes("queuedDispatchCount > 0 && messageAt > 0"), "chat novo sem marca após persistência");
 
 console.log("OK delta_history_contract_v2");

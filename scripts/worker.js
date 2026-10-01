@@ -26024,12 +26024,6 @@ function __deltaBuildCtIngestPayload(payload) {
     direction: String(p.direction || p.message_direction || '').trim() || undefined,
     ingest_boot_replay: p.ingest_boot_replay === true ? true : undefined,
     forensic_boot_replay: p.forensic_boot_replay === true ? true : undefined,
-    ...(Math.max(0, Number(p.ingest_contract_version || 0) || 0) > 0
-      ? { ingest_contract_version: Math.max(0, Number(p.ingest_contract_version || 0) || 0) }
-      : {}),
-    ...(String(p.history_contract || '').trim()
-      ? { history_contract: String(p.history_contract || '').trim().slice(0, 80) }
-      : {}),
   };
 }
 
