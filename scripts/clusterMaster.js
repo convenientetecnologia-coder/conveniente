@@ -1067,6 +1067,8 @@ async function createCluster() {
   const STATUS_CACHE_MS = Math.max(0, parseInt(process.env.CLUSTER_STATUS_CACHE_MS || '4500', 10) || 4500);
   let statusAggCache = { at: 0, value: null };
   let statusAggInflight = null;
+  // nome -> índice da célula cujo RPC viu o Chrome vivo. Só comandos do operador usam isto.
+  const liveChromeNode = new Map();
 
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
@@ -1437,8 +1439,13 @@ async function createCluster() {
             const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             Object.assign(dst, p);
             if (keptLive) Object.assign(dst, keptLive);
-            else if (isRpc && open) rpcChromeOpen.add(nome);
-            else if (isRpc && inNode && !open) rpcChromeOpen.delete(nome);
+            else if (isRpc && open) {
+              rpcChromeOpen.add(nome);
+              liveChromeNode.set(nome, i);
+            } else if (isRpc && !open && liveChromeNode.get(nome) === i) {
+              liveChromeNode.delete(nome);
+              rpcChromeOpen.delete(nome);
+            }
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
             painted += 1;
@@ -1767,6 +1774,33 @@ async function createCluster() {
     }
     try {
       const i = findChildByPerfil(nome);
+      const nomeKey = String(nome);
+      const live = liveChromeNode.get(nomeKey);
+      const operatorBrowser = type === 'invoke_human' || type === 'human-resume' || type === 'deactivate' || type === 'activate' || type === 'start_work';
+      if (operatorBrowser && typeof live === 'number' && live !== i && children[live]) {
+        if (type === 'deactivate') {
+          const both = await Promise.all([
+            sendTo(live, type, payload, opts),
+            sendTo(i, type, payload, opts)
+          ]);
+          const liveRes = both[0];
+          const routeRes = both[1];
+          if ((liveRes && liveRes.ok === true) || (routeRes && routeRes.ok === true)) {
+            return { ok: true, live: liveRes || null, route: routeRes || null };
+          }
+          return liveRes || routeRes || { ok: false, error: 'deactivate_failed' };
+        }
+        const liveRes = await sendTo(live, type, payload, opts);
+        const err = String(liveRes && liveRes.error || '');
+        const transport = !liveRes || /timeout|send_failed|child_not_found|cell_socket/i.test(err);
+        const gone = /wrong_shard|não está aberto|nao esta aberto|browser_not_connected/i.test(err);
+        if (liveRes && liveRes.ok === true) return liveRes;
+        if (transport || gone) {
+          if (liveChromeNode.get(nomeKey) === live) liveChromeNode.delete(nomeKey);
+        } else {
+          return liveRes;
+        }
+      }
       return sendTo(i, type, payload, opts);
     } catch (err) {
       if (String(err).startsWith('Error: profile_not_assigned_to_any_worker')) {
