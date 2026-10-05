@@ -15294,7 +15294,7 @@ const handlers = {
     };
   },
 
-  async ['human-resume']({ nome }) {
+  async ['human-resume']({ nome, noReconcile }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
@@ -15302,6 +15302,9 @@ const handlers = {
       const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','captchaCheckpoint','twoFactor','idVirtus'];
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        if (noReconcile === true) {
+          return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+        }
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
         // Hardening: quando não há browser vivo, tente auto-reconciliação segura para evitar conta "presa".
         try {

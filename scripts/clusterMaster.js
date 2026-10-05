@@ -1785,17 +1785,23 @@ async function createCluster() {
           ]);
           const liveRes = both[0];
           const routeRes = both[1];
-          if ((liveRes && liveRes.ok === true) || (routeRes && routeRes.ok === true)) {
-            return { ok: true, live: liveRes || null, route: routeRes || null };
+          if (liveRes && liveRes.ok === true && routeRes && routeRes.ok === true) {
+            return { ok: true };
           }
-          return liveRes || routeRes || { ok: false, error: 'deactivate_failed' };
+          return (liveRes && liveRes.ok !== true)
+            ? liveRes
+            : (routeRes || { ok: false, error: 'deactivate_failed' });
         }
-        const liveRes = await sendTo(live, type, payload, opts);
+        const livePayload = (type === 'human-resume')
+          ? Object.assign({}, payload, { noReconcile: true })
+          : payload;
+        const liveRes = await sendTo(live, type, livePayload, opts);
         const err = String(liveRes && liveRes.error || '');
         const transport = !liveRes || /timeout|send_failed|child_not_found|cell_socket/i.test(err);
         const gone = /wrong_shard|não está aberto|nao esta aberto|browser_not_connected/i.test(err);
-        if (liveRes && liveRes.ok === true) return liveRes;
-        if (transport || gone) {
+        const resumedNowhere = !!(liveRes && liveRes.reconciled === 'no_browser_activate_scheduled');
+        if (liveRes && liveRes.ok === true && !resumedNowhere) return liveRes;
+        if (transport || gone || resumedNowhere) {
           if (liveChromeNode.get(nomeKey) === live) liveChromeNode.delete(nomeKey);
         } else {
           return liveRes;
