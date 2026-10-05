@@ -2691,7 +2691,11 @@
         .finally(() => { try { clearTimeout(t); } catch {} });
     }
     async function safeGetStatus() {
-      return await fetchJsonTimeout('/api/status', 15000);
+      return await fetchJsonTimeout('/api/status', 8000);
+    }
+    function browserClosedError(err) {
+      const s = String(err || '').toLowerCase();
+      return s.includes('não está aberto') || s.includes('nao esta aberto') || s.includes('browser_not_connected');
     }
     async function safeListPerfis() {
       try {
@@ -2779,6 +2783,16 @@
     async function reloadPerfis() {
       if (__reloadInflight) return;
       __reloadInflight = true;
+      try {
+        const listaNow = document.getElementById('listaPerfis');
+        const keep = (__lastStatusPaint && Array.isArray(__lastStatusPaint.perfis) && __lastStatusPaint.perfis.length)
+          ? __lastStatusPaint
+          : null;
+        if (keep && listaNow && !listaNow.childElementCount) {
+          paintTopSummary(keep.perfis, keep.robeQueue || []);
+          buildList(keep.perfis, keep.robes || {}, keep.robeQueue || []);
+        }
+      } catch {}
       const statusP = safeGetStatus();
       const perfisP = safeListPerfis();
       const netP = fetchJsonTimeout('/api/network-rotation/state', 8000);
@@ -3481,14 +3495,8 @@
             btnResume.innerText = 'Resumindo...';
             try {
               const rr = await window.electronAPI.resumeHuman(p.nome);
-              if (rr && rr.ok === false) throw new Error((rr && rr.error) ? String(rr.error) : 'resume_human_failed');
-              const resumed = await waitUntil(async () => {
-                const st = await safeGetStatus();
-                const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
-                return !!cur && !cur.humanControl && !cur.humanHold;
-              }, { timeoutMs: 30000, intervalMs: 400 });
-              if (!resumed) throw new Error('timeout_waiting_resume_human');
-              await new Promise(r=>setTimeout(r,800));
+              if (!rr) throw new Error('sem_resposta_do_painel');
+              if (rr.ok === false) throw new Error((rr && rr.error) ? String(rr.error) : 'resume_human_failed');
               reloadPerfis();
             } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
             finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
@@ -3706,13 +3714,8 @@
         setBtnLoading(btn, true, wantOpen ? 'Abrindo...' : 'Fechando...');
         const fn = wantOpen ? window.electronAPI.activate : window.electronAPI.deactivate;
         const r = await fn(p.nome);
-        if (r && r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'toggle_failed');
-        const ok = await waitUntil(async () => {
-          const st = await safeGetStatus();
-          const cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
-          return !!cur && (!!cur.active === wantOpen);
-        }, { timeoutMs: 60000, intervalMs: 400 });
-        if (!ok) throw new Error('timeout_waiting_toggle_status');
+        if (!r) throw new Error('sem_resposta_do_painel');
+        if (r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'toggle_failed');
         reloadPerfis();
       } catch (e) {
         alert('Falha no toggle do navegador: ' + (e && e.message || e));
@@ -4074,41 +4077,21 @@
     // 4.2) Invocar Humano robusto com loading e espera do Robe
     async function invocarHumanoUI(p, btn) {
       try {
-        setBtnLoading(btn, true, 'Verificando...');
-        // Garante navegador ativo (com confirmação)
-        let st = await safeGetStatus();
-        let cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
-        if (!cur || !cur.active) {
-          const ok = confirm(`O navegador da conta "${p.label || p.nome}" está fechado. Abrir e invocar humano agora?`);
-          if (!ok) { setBtnLoading(btn, false); return; }
-          const act = await window.electronAPI.activate(p.nome);
-          if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
-          const ready = await waitUntil(async () => {
-            const s2 = await safeGetStatus();
-            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
-            return !!(c2 && c2.active);
-          }, { timeoutMs: 60000, intervalMs: 400 });
-          if (!ready) throw new Error('timeout_waiting_activate_for_human');
-        }
-        // Se Robe estiver executando para esta conta, aguarda finalizar
-        st = await safeGetStatus();
-        const emExec = !!(st && st.robes && st.robes[p.nome] && st.robes[p.nome].emExecucao);
-        if (emExec) {
-          setBtnLoading(btn, true, 'Aguardando Robe concluir...');
-          const robeDone = await waitRobeFinish(p.nome);
-          if (!robeDone) throw new Error('timeout_waiting_robe_finish');
-        }
-
         setBtnLoading(btn, true, 'Invocando Humano...');
-        const ih = await window.electronAPI.invokeHuman(p.nome);
-        if (ih && ih.ok === false) throw new Error((ih && ih.error) ? String(ih.error) : 'invoke_human_failed');
-        const invoked = await waitUntil(async () => {
-          const s4 = await safeGetStatus();
-          const c4 = Array.isArray(s4 && s4.perfis) ? s4.perfis.find(x => x.nome === p.nome) : null;
-          return !!(c4 && (c4.humanControl || c4.humanHold));
-        }, { timeoutMs: 30000, intervalMs: 400 });
-        if (!invoked) throw new Error('timeout_waiting_human_invoke');
-        await new Promise(r=>setTimeout(r,800));
+        let ih = await window.electronAPI.invokeHuman(p.nome);
+        if (!ih) throw new Error('sem_resposta_do_painel');
+        if (ih.ok === false && browserClosedError(ih.error)) {
+          const ok = confirm(`O navegador da conta "${p.label || p.nome}" está fechado. Abrir e invocar humano agora?`);
+          if (!ok) return;
+          setBtnLoading(btn, true, 'Abrindo...');
+          const act = await window.electronAPI.activate(p.nome);
+          if (!act) throw new Error('sem_resposta_do_painel');
+          if (act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
+          setBtnLoading(btn, true, 'Invocando Humano...');
+          ih = await window.electronAPI.invokeHuman(p.nome);
+          if (!ih) throw new Error('sem_resposta_do_painel');
+        }
+        if (ih.ok === false) throw new Error((ih && ih.error) ? String(ih.error) : 'invoke_human_failed');
         reloadPerfis();
       } catch (e) {
         alert('Falha ao invocar humano: ' + (e && e.message || e));
@@ -4121,29 +4104,21 @@
     async function startWorkUI(p, btn) {
       try {
         setBtnLoading(btn, true, 'Iniciando...');
-        // Garante navegador ativo
-        let st = await safeGetStatus();
-        let cur = Array.isArray(st && st.perfis) ? st.perfis.find(x => x.nome === p.nome) : null;
-        if (!cur || !cur.active) {
+        let sw = await window.electronAPI.startWork(p.nome);
+        if (!sw) throw new Error('sem_resposta_do_painel');
+        if (sw.ok === false && browserClosedError(sw.error)) {
+          setBtnLoading(btn, true, 'Abrindo...');
           const act = await window.electronAPI.activate(p.nome);
-          if (act && act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
-          const ready = await waitUntil(async () => {
-            const s2 = await safeGetStatus();
-            const c2 = Array.isArray(s2 && s2.perfis) ? s2.perfis.find(x => x.nome === p.nome) : null;
-            return !!(c2 && c2.active);
-          }, { timeoutMs: 60000, intervalMs: 400 });
-          if (!ready) throw new Error('timeout_waiting_activate_for_start_work');
-          await new Promise(r=>setTimeout(r,1000));
+          if (!act) throw new Error('sem_resposta_do_painel');
+          if (act.ok === false) throw new Error((act && act.error) ? String(act.error) : 'activate_failed');
+          setBtnLoading(btn, true, 'Iniciando...');
+          sw = await window.electronAPI.startWork(p.nome);
+          if (!sw) throw new Error('sem_resposta_do_painel');
         }
-        // Inicia Virtus/24h
-        const sw = await window.electronAPI.startWork(p.nome);
-        if (sw && sw.ok === false) throw new Error((sw && sw.error) ? String(sw.error) : 'start_work_failed');
-        const started = await waitUntil(async () => {
-          const s3 = await safeGetStatus();
-          const c3 = Array.isArray(s3 && s3.perfis) ? s3.perfis.find(x => x.nome === p.nome) : null;
-          return !!(c3 && c3.trabalhando);
-        }, { timeoutMs: 30000, intervalMs: 400 });
-        if (!started) throw new Error('timeout_waiting_start_work');
+        if (sw.ok === false) throw new Error((sw && sw.error) ? String(sw.error) : 'start_work_failed');
+        if (sw.skipped === 'robe_busy') throw new Error('O Robe está nesta conta agora. O atendimento não ligou. Tente de novo quando ele soltar.');
+        if (sw.skipped === 'oxy_faxina_hold') throw new Error('A conta está em limpeza. O atendimento não ligou agora.');
+        if (sw.skipped) throw new Error('Não iniciou: ' + String(sw.skipped));
         reloadPerfis();
       } catch (e) {
         alert('Falha ao iniciar 24h: ' + (e && e.message || e));

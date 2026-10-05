@@ -1398,6 +1398,7 @@ async function createCluster() {
 
       const claimedByRpc = new Set();
       const paintedNames = new Set();
+      const rpcChromeOpen = new Set();
       let painted = 0;
       const journalNameInNode = (i, nome) => {
         const n = String(nome || '');
@@ -1408,6 +1409,9 @@ async function createCluster() {
         } catch {}
         return false;
       };
+      const rowChromeOpen = (p) => !!(p && (
+        p.active === true || p.humanControl === true || p.trabalhando === true || p.configurando === true
+      ));
       const applyPayload = (payload, source, i, ageMs) => {
         if (!payload || !Array.isArray(payload.perfis)) return false;
         const isRpc = source === 'rpc_refresh' || source === 'rpc_boot';
@@ -1415,25 +1419,39 @@ async function createCluster() {
         for (const p of payload.perfis || []) {
           if (!p || !p.nome) continue;
           const nome = String(p.nome);
-          if (!journalNameInNode(i, nome)) continue;
+          const open = rowChromeOpen(p);
+          const inNode = journalNameInNode(i, nome);
+          // Jornal de outra célula não pinta. RPC com Chrome vivo pinta, mesmo se o mapa do pai divergir.
+          if (!inNode && !(isRpc && open)) continue;
           if (!isRpc && claimedByRpc.has(nome)) continue;
           const dst = baseMap.get(p.nome) || baseMap.get(nome);
           if (dst) {
+            const keepLive = isRpc && rpcChromeOpen.has(nome) && !open;
+            const keptLive = keepLive ? {
+              active: dst.active,
+              humanControl: dst.humanControl,
+              humanHold: dst.humanHold,
+              trabalhando: dst.trabalhando,
+              configurando: dst.configurando
+            } : null;
             const prevSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             Object.assign(dst, p);
+            if (keptLive) Object.assign(dst, keptLive);
+            else if (isRpc && open) rpcChromeOpen.add(nome);
+            else if (isRpc && inNode && !open) rpcChromeOpen.delete(nome);
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
             painted += 1;
             paintedNames.add(nome);
           }
-          if (isRpc) claimedByRpc.add(nome);
+          if (isRpc && (inNode || open)) claimedByRpc.add(nome);
         }
         if (payload.robes && typeof payload.robes === 'object') {
           const owned = new Set();
           for (const p of payload.perfis || []) {
             if (!p || !p.nome) continue;
             const nome = String(p.nome);
-            if (!journalNameInNode(i, nome)) continue;
+            if (!journalNameInNode(i, nome) && !(isRpc && rowChromeOpen(p))) continue;
             owned.add(nome);
           }
           const nodeRobes = {};
@@ -1448,7 +1466,7 @@ async function createCluster() {
           const q = payload.robeQueue.filter((n) => {
             const nome = String(n || '');
             if (!nome) return false;
-            if (!journalNameInNode(i, nome)) return false;
+            if (!journalNameInNode(i, nome) && !rpcChromeOpen.has(nome)) return false;
             if (!isRpc && claimedByRpc.has(nome)) return false;
             return true;
           });
@@ -1478,21 +1496,22 @@ async function createCluster() {
           if (shouldApplyNodeStatusJournal({ liveChild, ageMs: fb.ageMs })) {
             applyPayload(fb.json, `journal(${ageSec}s)`, i, fb.ageMs);
             if (liveChild && Number(fb.ageMs) >= HUD_REFRESH_AGE_MS) {
-              missingIdx.push(i);
-              staleFallback.set(i, fb.json);
               pushNodeDebug(fb.json, `journal_deferred_rpc(${ageSec}s)`, i, fb.ageMs, { deferred: true });
             }
           } else {
             pushNodeDebug(fb.json, `stale_ignored(${ageSec}s)`, i, fb.ageMs, { ignored: true, liveChild: !!liveChild });
             if (liveChild) {
               warningParts.push(`node${i + 1}: journal_stale(${ageSec}s)`);
-              missingIdx.push(i);
               staleFallback.set(i, fb.json);
             }
           }
         } else if (liveChild) {
-          missingIdx.push(i);
           try { nodesDebug.push({ node: i + 1, source: 'none', ok: false }); } catch {}
+        }
+        // Célula viva: o HUD (aberto/humano/trabalhando) sai da RAM, não do arquivo.
+        if (liveChild && missingIdx.indexOf(i) < 0) {
+          missingIdx.push(i);
+          if (fb && fb.json && !staleFallback.has(i)) staleFallback.set(i, fb.json);
         }
       }
 
@@ -1508,7 +1527,10 @@ async function createCluster() {
         }
         const rpcResults = await Promise.allSettled(
           missingIdx.map((i) => {
-            const timeoutMs = staleFallback.has(i) ? STATUS_RPC_STALE_MS : STATUS_TIMEOUT_MS;
+            const callerCap = Math.max(800, Number(opts && opts.timeoutMs) || STATUS_RPC_STALE_MS);
+            const timeoutMs = staleFallback.has(i)
+              ? Math.min(callerCap, STATUS_RPC_STALE_MS, 2500)
+              : Math.min(callerCap, STATUS_TIMEOUT_MS);
             return sendTo(i, 'get-status', {}, { timeoutMs })
               .then((v) => ({ i, v }))
               .catch(() => ({ i, v: null }));

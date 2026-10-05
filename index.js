@@ -4932,7 +4932,13 @@ function wipeStaleCellsBeforeListen() {
       } catch {}
       resolve(srv);
     });
-    srv.on('error', reject);
+    srv.on('error', (err) => {
+      const code = err && err.code ? String(err.code) : '';
+      const msg = (err && err.message) ? String(err.message) : String(err || 'listen_failed');
+      try { logger.error('[START] painel não subiu', { code, error: msg, port: PORT }); } catch {}
+      try { console.error('[START] painel não subiu na porta ' + PORT + ': ' + code + ' ' + msg); } catch {}
+      reject(err);
+    });
   });
   try { logger.info('[BOOT] painel no ar', { ms: Date.now() - bootT0 }); } catch {}
   try {

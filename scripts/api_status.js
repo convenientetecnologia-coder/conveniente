@@ -646,7 +646,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // 2) Overlay vivo do cluster. Se não vier, o baseline continua e a UI não zera.
   let overlayINST = null;
   try {
-    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000, fresh: true });
+    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true });
   } catch (e) {
     warningINST = 'status temporarily unavailable';
   }

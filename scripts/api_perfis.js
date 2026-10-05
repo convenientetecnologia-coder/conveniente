@@ -112,6 +112,17 @@ module.exports = (app, workerClient, fileStore) => {
       Number(a.scrollDaysMax || 0) !== Number(b.scrollDaysMax || 0)
     );
   };
+  async function chromeAbertoNoCluster(nome) {
+    try {
+      const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 2500, fresh: true });
+      if (st && Array.isArray(st.perfis)) {
+        const row = st.perfis.find((p) => p && p.nome === nome);
+        if (row && typeof row.active === 'boolean') return row.active === true;
+        return false;
+      }
+    } catch {}
+    return null;
+  }
   const extractRequestedVirtusEngine = (payload) => {
     const p = (payload && typeof payload === 'object') ? payload : {};
     const candidates = [
@@ -1521,8 +1532,10 @@ module.exports = (app, workerClient, fileStore) => {
       }
       return res.json({ ok: false, error: (r2 && r2.error) || 'start_work_failed' });
     }
-    logger.info('Start work realizado por API', { nome });
-    return res.json({ ok: true });
+    logger.info('Start work realizado por API', { nome, skipped: r2 && r2.skipped ? r2.skipped : null });
+    const out = { ok: true };
+    if (r2 && r2.skipped) out.skipped = r2.skipped;
+    return res.json(out);
   });
 
   // Verificar ID (documento Marketplace) — overlay/humano; NÃO marca ID-sim do dia
@@ -1865,7 +1878,11 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de renomear perfil inexistente', { nome, error: e && e.message });
         return res.json({ ok:false, error:e.message });
       }
-      if (fileStore.isPerfilAtivo(nome)) {
+      const abertoRename = await chromeAbertoNoCluster(nome);
+      if (abertoRename === null) {
+        return res.json({ ok: false, error: 'Não consegui confirmar se o navegador está fechado. Tente de novo.' });
+      }
+      if (abertoRename) {
         logger.warn('Tentativa de renomear perfil ativo', { nome });
         return res.json({ ok: false, error: 'Feche o navegador desta conta antes de renomear.' });
       }
@@ -1941,7 +1958,7 @@ module.exports = (app, workerClient, fileStore) => {
       // Tombstone cedo (anti-ressurreição no boot/recovery)
       try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'manual_delete', by: String(op||'').slice(0, 120), stage: 'begin' }); } catch {}
       // Enterprise: delete deve ser robusto — se estiver ativo, fecha automaticamente (hard close) antes de excluir.
-      if (fileStore.isPerfilAtivo(nome)) {
+      if ((await chromeAbertoNoCluster(nome)) !== false) {
         logger.warn('Delete solicitado para perfil ativo — tentando fechar automaticamente', { nome });
         // 1) marca desired inactive (melhora reconciliação e evita reabrir)
         try {
