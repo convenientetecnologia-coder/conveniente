@@ -4760,6 +4760,10 @@ const apiClient = {
   resumeAfterStop: (...args) => {
     if (!clusterClient || typeof clusterClient.resumeAfterStop !== 'function') return;
     return clusterClient.resumeAfterStop(...args);
+  },
+  chromeProvado: (nome) => {
+    if (!clusterClient || typeof clusterClient.chromeProvado !== 'function') return null;
+    return clusterClient.chromeProvado(nome);
   }
 };
 require('./scripts/api_status.js')(app, apiClient, fileStore);
