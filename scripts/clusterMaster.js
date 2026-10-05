@@ -1069,6 +1069,8 @@ async function createCluster() {
   let statusAggInflight = null;
   // nome -> índice da célula cujo RPC viu o Chrome vivo. Só comandos do operador usam isto.
   const liveChromeNode = new Map();
+  // Prova recente, só de RPC. Diário não autoriza renomear nem excluir.
+  const hudProof = new Map();
 
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
@@ -1446,6 +1448,7 @@ async function createCluster() {
               liveChromeNode.delete(nome);
               rpcChromeOpen.delete(nome);
             }
+            if (isRpc) hudProof.set(nome, { at: Date.now(), open: liveChromeNode.has(nome) || open });
             const nextSid = Number(dst.stockAccountId || dst.stock_account_id || 0) || 0;
             if (prevSid > 0 && !(nextSid > 0)) dst.stockAccountId = prevSid;
             painted += 1;
@@ -2001,7 +2004,13 @@ async function createCluster() {
     };
   }
 
-  return { plan, children, sendWorkerCommand, kill, detach, beginStop, haltRespawn, resumeAfterStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, silentConsole, adopting };
+  function chromeProvado(nome) {
+    const row = hudProof.get(String(nome || ''));
+    if (!row || !(row.at > 0) || (Date.now() - row.at) > 15000) return null;
+    return row.open === true;
+  }
+
+  return { plan, children, sendWorkerCommand, kill, detach, beginStop, haltRespawn, resumeAfterStop, ensureCellsRunning, rebalance, reshuffleFairIfIdle, chromeProvado, silentConsole, adopting };
 }
 
 module.exports = { createCluster, workerStdioSlots, resolveClusterSilentConsole, shouldApplyNodeStatusJournal };

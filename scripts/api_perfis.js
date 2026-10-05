@@ -114,11 +114,10 @@ module.exports = (app, workerClient, fileStore) => {
   };
   async function chromeAbertoNoCluster(nome) {
     try {
-      const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 2500, fresh: true });
-      if (st && Array.isArray(st.perfis)) {
-        const row = st.perfis.find((p) => p && p.nome === nome);
-        if (row && typeof row.active === 'boolean') return row.active === true;
-        return false;
+      await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 2500, fresh: true });
+      if (workerClient && typeof workerClient.chromeProvado === 'function') {
+        const proved = workerClient.chromeProvado(nome);
+        if (proved === true || proved === false) return proved;
       }
     } catch {}
     return null;
