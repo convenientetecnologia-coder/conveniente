@@ -891,6 +891,54 @@ function listLocalizacoesPorCidade(cidade) {
   }
 }
 
+function listLocalizacoesPorEscopo(cidade, locationScope) {
+  const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
+  if (scope === 'directed') {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
+    if (neighborhoodId) {
+      try { return require('./countryGeo.js').listLocationsByNeighborhood(cidade, neighborhoodId); } catch {}
+    }
+  }
+  if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of locationScope.locationPool) {
+      const text = String(raw == null ? '' : raw).trim();
+      const key = String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+      if (!text || !key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(text);
+    }
+    if (out.length) return out;
+  }
+  return listLocalizacoesPorCidade(cidade);
+}
+
+function buildLocaisScopeOptions(locationScope) {
+  const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
+  if (scope === 'directed') {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
+    if (!neighborhoodId) return null;
+    return {
+      scopeId: `bairro_${neighborhoodId}`,
+      neighborhoodId
+    };
+  }
+  if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    return {
+      scopeId: 'universal',
+      locations: locationScope.locationPool
+    };
+  }
+  return null;
+}
+
+async function confirmUsedByLocationScope(cidade, location, locationScope) {
+  const scopeOptions = buildLocaisScopeOptions(locationScope);
+  if (scopeOptions) return locais.confirmUsedForScope(cidade, location, scopeOptions);
+  return locais.confirmUsed(cidade, location);
+}
+
 function pickLocalizacaoAleatoria(cidade) {
   const lista = listLocalizacoesPorCidade(cidade);
   if (!lista.length) return null;
@@ -957,21 +1005,42 @@ function isCycleCompatible(cycle, pool) {
 }
 
 async function pickPostingCityForRun(nome) {
+  const plan = await pickPostingPlanForRun(nome);
+  return String(plan && plan.city || '').trim();
+}
+
+async function pickPostingPlanForRun(nome) {
   let workMode = 'v1';
   try {
     const cfg = serverConfig.readServerConfigEffective();
     workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
   } catch {}
-  if (workMode === 'v2_auto' || workMode === 'v3_pmg') {
+  if (workMode === 'v2_auto' || workMode === 'v3_pmg' || workMode === 'v4_bairros') {
     // Em V2/V3, a cidade vem da fila global do servidor (não do ciclo por conta).
-    // V3: o tamanho da fila é ignorado aqui — robe veículos usa fotosveiculos por modelo.
+    // V3/V4: o tamanho da fila é ignorado aqui — robe veículos usa fotosveiculos por modelo.
     const robeMod = require('./robe.js');
-    if (!robeMod || typeof robeMod.pickPostingCityForRunV2 !== 'function') {
+    if (!robeMod || typeof robeMod.pickPostingSlotForRunV2 !== 'function') {
       throw new Error('robe_v2_picker_unavailable');
     }
-    const city = await robeMod.pickPostingCityForRunV2();
-    if (!city) throw new Error(workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable');
-    return city;
+    const slot = await robeMod.pickPostingSlotForRunV2();
+    const city = slot && slot.city ? String(slot.city).trim() : '';
+    if (!city) {
+      throw new Error(
+        workMode === 'v4_bairros'
+          ? 'robe_v4_city_unavailable'
+          : (workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable')
+      );
+    }
+    return {
+      city,
+      size: slot && slot.size ? String(slot.size).trim().toUpperCase() : null,
+      locationScope: slot && slot.scope ? {
+        scope: String(slot.scope || '').trim().toLowerCase() || null,
+        neighborhoodId: String(slot.neighborhoodId || '').trim() || null,
+        neighborhoodName: String(slot.neighborhoodName || '').trim() || null,
+        locationPool: Array.isArray(slot.locationPool) ? slot.locationPool.slice() : null
+      } : null
+    };
   }
   let chosen = '';
   await manifestStore.update(nome, (m) => {
@@ -1002,7 +1071,7 @@ async function pickPostingCityForRun(nome) {
     return m;
   });
   if (!chosen) throw new Error('pais_sem_cidade_de_postagem');
-  return chosen;
+  return { city: chosen, size: null, locationScope: null };
 }
 
 async function humanTypeText(page, inputHandle, text, {
@@ -1302,7 +1371,7 @@ async function waitForCreateItemReady(page, { timeout = 3500 } = {}) {
 }
 
 // Preenche Localização via ciclo global (locais.js) e retorna a localização usada
-async function preencherLocalizacao(page, cidade) {
+async function preencherLocalizacao(page, cidade, locationScope = null) {
   let inp = await findInputByLabel(page, 'Localização', 6000);
   if (!inp) inp = await page.$('input[aria-label="Localização"]');
   if (!inp) {
@@ -1314,16 +1383,22 @@ async function preencherLocalizacao(page, cidade) {
 
   // Anti-loop: controle de sessões
   const visited = new Set();
-  const allLocs = listLocalizacoesPorCidade(cidade); // lista bruta para medir ciclo
+  const allLocs = listLocalizacoesPorEscopo(cidade, locationScope); // lista bruta para medir ciclo
+  const scopeOptions = buildLocaisScopeOptions(locationScope);
 
   // Tenta até 20 candidatos do ciclo
   for (let tent = 0; tent < 20; tent++) {
-    const sug = await locais.nextLocationForCity(cidade);
+    const sug = scopeOptions
+      ? await locais.nextLocationForScope(cidade, scopeOptions)
+      : await locais.nextLocationForCity(cidade);
     if (!sug.ok) throw new Error('Sem localizações disponíveis para esta cidade.');
     const cand = sug.location;
 
     if (visited.has(cand)) {
-      try { await locais.reportInvalid(cidade, cand, 'repeat_in_session'); } catch {}
+      try {
+        if (scopeOptions) await locais.reportInvalidForScope(cidade, cand, 'repeat_in_session', scopeOptions);
+        else await locais.reportInvalid(cidade, cand, 'repeat_in_session');
+      } catch {}
       continue;
     }
     visited.add(cand);
@@ -1345,14 +1420,23 @@ async function preencherLocalizacao(page, cidade) {
 
       if (await isLocalizacaoValida(page)) {
         // sucesso! consome localização e retorna
-        try { await locais.confirmUsed(cidade, cand); } catch {}
+        try {
+          if (scopeOptions) await locais.confirmUsedForScope(cidade, cand, scopeOptions);
+          else await locais.confirmUsed(cidade, cand);
+        } catch {}
         return cand;
       }
     }
 
     // NÃO validou; consome localização, marca como inválida e passa:
-    try { await locais.confirmUsed(cidade, cand); } catch {}
-    try { await locais.reportInvalid(cidade, cand, 'not_valid_on_fb'); } catch {}
+    try {
+      if (scopeOptions) await locais.confirmUsedForScope(cidade, cand, scopeOptions);
+      else await locais.confirmUsed(cidade, cand);
+    } catch {}
+    try {
+      if (scopeOptions) await locais.reportInvalidForScope(cidade, cand, 'not_valid_on_fb', scopeOptions);
+      else await locais.reportInvalid(cidade, cand, 'not_valid_on_fb');
+    } catch {}
     await sleep(120);
 
     // Anti-loop: se tentamos todas localizações do ciclo, aborta!
@@ -2162,6 +2246,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let fotoPath = null;
   let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
   let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
+  let postingLocationScope = null;
 
   // V2: cooldown preferencial vem do worker (sessão/lote) em robePauseMs.
   // Fallback legado permanece para segurança em caso de ausência do plano.
@@ -2439,7 +2524,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // LOCALIZAÇÃO (preenchida imediatamente após Tipo de veículo)
     try {
-      cidadePerfil = await pickPostingCityForRun(nome);
+      const postingPlan = await pickPostingPlanForRun(nome);
+      cidadePerfil = postingPlan && postingPlan.city ? String(postingPlan.city) : null;
+      postingLocationScope = postingPlan && postingPlan.locationScope ? postingPlan.locationScope : null;
     } catch {}
     if (!cidadePerfil) {
       const fallbackCity = String(manifest.cidade || manifest.localizacao || manifest['localização'] || '').trim();
@@ -2452,9 +2539,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { knownPick = require('./countryGeo.js').isKnownCity(cidadePerfil) === true; } catch {}
       if (!knownPick) throw new Error('cidade_fora_do_pais');
     }
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_city_selected', value: cidadePerfil });
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'posting_city_selected',
+      value: cidadePerfil,
+      scope: postingLocationScope ? postingLocationScope.scope : null,
+      neighborhoodId: postingLocationScope ? postingLocationScope.neighborhoodId : null,
+      neighborhoodName: postingLocationScope ? postingLocationScope.neighborhoodName : null
+    });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
-    localUsada = await preencherLocalizacao(page, cidadePerfil);
+    localUsada = await preencherLocalizacao(page, cidadePerfil, postingLocationScope);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await sleep(jitter(120, 220));
 
@@ -2531,7 +2625,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
 
     // Confirmar localização usada (após publicar — mantém)
-    try { await locais.confirmUsed(cidadePerfil, localUsada); } catch {}
+    try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
 
     // Pós-publish: dismiss upsell + verificação ID documento (1x/dia). Nunca invalida publish_ok.
     if (page) {
@@ -2685,7 +2779,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // ADEQUAÇÃO: "tentou ⇒ consumiu" para localização mesmo em erro
     try {
       if (localUsada) {
-        await locais.confirmUsed(cidadePerfil, localUsada);
+        await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope);
       }
     } catch {}
 

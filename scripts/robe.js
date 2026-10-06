@@ -556,22 +556,44 @@ function normalizeRobeQueueRawItem(x) {
     if (!city) return null;
     const sizeRaw = String(x.size || x.tamanho || '').trim().toUpperCase();
     const size = (sizeRaw === 'P' || sizeRaw === 'M' || sizeRaw === 'G') ? sizeRaw : null;
-    return { city, size };
+    const scopeRaw = String(x.scope || '').trim().toLowerCase();
+    const scope = (scopeRaw === 'directed' || scopeRaw === 'universal' || scopeRaw === 'city_fallback') ? scopeRaw : null;
+    const neighborhoodId = String(x.neighborhoodId || x.neighborhood_id || '').trim() || null;
+    const neighborhoodName = String(x.neighborhoodName || x.neighborhood_name || x.bairro || '').trim() || null;
+    const locationPool = Array.isArray(x.locationPool || x.location_pool)
+      ? (x.locationPool || x.location_pool).map((row) => String(row == null ? '' : row).trim()).filter(Boolean)
+      : null;
+    return { city, size, scope, neighborhoodId, neighborhoodName, locationPool };
   }
   return null;
 }
 
 function robeQueueItemToSlot(item) {
   const n = normalizeRobeQueueRawItem(item);
-  if (!n) return { city: '', size: null };
-  if (typeof n === 'string') return { city: n, size: null };
-  return { city: String(n.city || '').trim(), size: n.size || null };
+  if (!n) return { city: '', size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
+  if (typeof n === 'string') return { city: n, size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
+  return {
+    city: String(n.city || '').trim(),
+    size: n.size || null,
+    scope: n.scope || null,
+    neighborhoodId: n.neighborhoodId || null,
+    neighborhoodName: n.neighborhoodName || null,
+    locationPool: Array.isArray(n.locationPool) ? n.locationPool.slice() : null
+  };
 }
 
 function formatRobeQueueItemLabel(item) {
   const slot = robeQueueItemToSlot(item);
   if (!slot.city) return '';
-  return slot.size ? `${slot.city} [${slot.size}]` : slot.city;
+  let label = slot.city;
+  if (slot.scope === 'directed' && (slot.neighborhoodName || slot.neighborhoodId)) {
+    label += ` > ${slot.neighborhoodName || slot.neighborhoodId}`;
+  } else if (slot.scope === 'universal') {
+    label += ' > [universal]';
+  } else if (slot.scope === 'city_fallback') {
+    label += ' > [cidade inteira]';
+  }
+  return slot.size ? `${label} [${slot.size}]` : label;
 }
 
 function getRobeQueueCountryId(cfg) {
@@ -976,7 +998,373 @@ function buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty = 0.35 } = {}
   return queue;
 }
 
-async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3, country = '' } = {}) {
+function allocateWeightedCounts(total, weightedRows) {
+  const target = Math.max(0, Math.floor(Number(total || 0) || 0));
+  const rows = (Array.isArray(weightedRows) ? weightedRows : [])
+    .map((row, idx) => ({
+      key: String(row && row.key || '').trim(),
+      weight: Math.max(0, Number(row && row.weight || 0) || 0),
+      idx
+    }))
+    .filter((row) => row.key && row.weight > 0);
+  const out = {};
+  for (const row of rows) out[row.key] = 0;
+  if (!target || !rows.length) return out;
+  const totalWeight = rows.reduce((acc, row) => acc + row.weight, 0);
+  if (!(totalWeight > 0)) return out;
+  let assigned = 0;
+  const fractions = [];
+  for (const row of rows) {
+    const raw = target * (row.weight / totalWeight);
+    const base = Math.floor(raw);
+    out[row.key] = base;
+    assigned += base;
+    fractions.push({ key: row.key, frac: raw - base, idx: row.idx });
+  }
+  let rest = target - assigned;
+  fractions.sort((a, b) => {
+    if (b.frac !== a.frac) return b.frac - a.frac;
+    return a.idx - b.idx;
+  });
+  for (let i = 0; i < fractions.length && rest > 0; i++, rest--) {
+    out[fractions[i].key] = Math.max(0, Number(out[fractions[i].key] || 0) || 0) + 1;
+  }
+  return out;
+}
+
+function createEmptyPmgCounters() {
+  return { p: 0, m: 0, g: 0, fixo: 0 };
+}
+
+function accumulatePmgFromCoverage(target, row) {
+  if (!target || typeof target !== 'object') return target;
+  const hasP = !!(row && row.p);
+  const hasM = !!(row && row.m);
+  const hasG = !!(row && row.g);
+  if (hasP) target.p += 1;
+  if (hasM) target.m += 1;
+  if (hasG) target.g += 1;
+  if (!hasP && !hasM && !hasG) target.fixo += 1;
+  return target;
+}
+
+function buildCityFallbackV4Plan({ city, target, cityPmg, reason = 'city_fallback', directedPercent = 90 } = {}) {
+  const alloc = allocatePmgSlots(target, cityPmg);
+  const slotBuckets = [];
+  for (const [size, count] of [['P', alloc.nP], ['M', alloc.nM], ['G', alloc.nG]]) {
+    const n = Math.max(0, Number(count || 0) || 0);
+    if (!n) continue;
+    slotBuckets.push({
+      count: n,
+      slot: {
+        city,
+        size,
+        scope: 'city_fallback',
+        neighborhoodId: null,
+        neighborhoodName: null
+      }
+    });
+  }
+  return {
+    ok: true,
+    mode: 'city_fallback',
+    reason,
+    slotBuckets,
+    universalLocations: [],
+    summary: {
+      mode: 'city_fallback',
+      reason,
+      target: Math.max(0, Number(target || 0) || 0),
+      directedPercent: Math.max(0, Math.min(100, Math.floor(Number(directedPercent || 0) || 0))),
+      neighborhoodsCount: 0,
+      coveredNeighborhoodsCount: 0,
+      directedTarget: 0,
+      universalTarget: 0,
+      universalLocationsCount: 0,
+      neighborhoods: []
+    }
+  };
+}
+
+function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPercent = 90 } = {}) {
+  const targetN = Math.max(0, Math.floor(Number(target || 0) || 0));
+  const directedPercentClamped = Math.max(0, Math.min(100, Math.floor(Number(directedPercent || 0) || 0)));
+  const cityPmg = (statsEntry && statsEntry.pmg && typeof statsEntry.pmg === 'object')
+    ? statsEntry.pmg
+    : { p: 0, m: 0, g: 0, fixo: Math.max(0, Number(statsEntry && statsEntry.motoristas || 0) || 0) };
+  if (targetN <= 0) {
+    return {
+      ok: true,
+      mode: 'empty',
+      reason: 'target_zero',
+      slotBuckets: [],
+      universalLocations: [],
+      summary: {
+        mode: 'empty',
+        reason: 'target_zero',
+        target: 0,
+        directedPercent: directedPercentClamped,
+        neighborhoodsCount: 0,
+        coveredNeighborhoodsCount: 0,
+        directedTarget: 0,
+        universalTarget: 0,
+        universalLocationsCount: 0,
+        neighborhoods: []
+      }
+    };
+  }
+  let catalog = null;
+  const geoMod = require('./countryGeo.js');
+  const normalizeNeighborhoodId = (geoMod && typeof geoMod.normalizeNeighborhoodId === 'function')
+    ? geoMod.normalizeNeighborhoodId
+    : ((value) => String(value || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, ''));
+  try {
+    catalog = geoMod.getLocationCatalogEntry(city, { countryId });
+  } catch {
+    catalog = null;
+  }
+  const cityLocations = Array.isArray(catalog && catalog.locations) ? catalog.locations.slice() : [];
+  const neighborhoods = Array.isArray(catalog && catalog.neighborhoods)
+    ? catalog.neighborhoods
+        .map((row) => ({
+          id: normalizeNeighborhoodId(row && row.id || row && row.name || ''),
+          name: String(row && row.name || row && row.nome || '').trim(),
+          locations: Array.isArray(row && row.locations) ? row.locations.slice() : []
+        }))
+        .filter((row) => row.id && row.name && row.locations.length)
+    : [];
+  if (!cityLocations.length || !neighborhoods.length) {
+    return buildCityFallbackV4Plan({
+      city,
+      target: targetN,
+      cityPmg,
+      reason: !cityLocations.length ? 'no_city_locations' : 'no_neighborhoods',
+      directedPercent: directedPercentClamped
+    });
+  }
+
+  const byNeighborhoodId = new Map(neighborhoods.map((row) => [row.id, row]));
+  const coverageRows = Array.isArray(statsEntry && statsEntry.coverage) ? statsEntry.coverage : [];
+  const neighborhoodWeights = new Map();
+  const neighborhoodPmg = new Map();
+  for (const raw of coverageRows) {
+    const mode = String(raw && raw.coverage_mode || '').trim().toLowerCase() === 'selected' ? 'selected' : 'all';
+    const wanted = mode === 'selected'
+      ? (Array.isArray(raw && raw.coverage_neighborhood_ids) ? raw.coverage_neighborhood_ids : [])
+      : neighborhoods.map((row) => row.id);
+    const ids = Array.from(new Set(
+      wanted
+        .map((row) => normalizeNeighborhoodId(row))
+        .filter((row) => row && byNeighborhoodId.has(row))
+    ));
+    if (!ids.length) continue;
+    for (const id of ids) {
+      neighborhoodWeights.set(id, Math.max(0, Number(neighborhoodWeights.get(id) || 0) || 0) + 1);
+      if (!neighborhoodPmg.has(id)) neighborhoodPmg.set(id, createEmptyPmgCounters());
+      accumulatePmgFromCoverage(neighborhoodPmg.get(id), raw);
+    }
+  }
+  const coveredNeighborhoods = neighborhoods.filter((row) => Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0) > 0);
+  if (!coveredNeighborhoods.length) {
+    return buildCityFallbackV4Plan({
+      city,
+      target: targetN,
+      cityPmg,
+      reason: 'no_valid_coverage',
+      directedPercent: directedPercentClamped
+    });
+  }
+
+  const coveredLocationKeys = new Set();
+  for (const row of coveredNeighborhoods) {
+    for (const loc of row.locations) coveredLocationKeys.add(cityNormKey(loc));
+  }
+  const universalLocations = cityLocations.filter((loc) => !coveredLocationKeys.has(cityNormKey(loc)));
+  let directedTarget = targetN;
+  let universalTarget = 0;
+  if (universalLocations.length > 0) {
+    if (directedPercentClamped <= 0) {
+      directedTarget = 0;
+      universalTarget = targetN;
+    } else if (directedPercentClamped >= 100) {
+      directedTarget = targetN;
+      universalTarget = 0;
+    } else {
+      const split = allocateWeightedCounts(targetN, [
+        { key: 'directed', weight: directedPercentClamped / 100 },
+        { key: 'universal', weight: (100 - directedPercentClamped) / 100 }
+      ]);
+      directedTarget = Math.max(0, Number(split.directed || 0) || 0);
+      universalTarget = Math.max(0, Number(split.universal || 0) || 0);
+    }
+  }
+
+  const directedCounts = allocateWeightedCounts(
+    directedTarget,
+    coveredNeighborhoods.map((row) => ({
+      key: row.id,
+      weight: Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0)
+    }))
+  );
+  const slotBuckets = [];
+  const neighborhoodSummaries = [];
+  for (const row of coveredNeighborhoods) {
+    const countForNeighborhood = Math.max(0, Number(directedCounts[row.id] || 0) || 0);
+    const pmg = neighborhoodPmg.get(row.id) || createEmptyPmgCounters();
+    const alloc = allocatePmgSlots(countForNeighborhood, pmg);
+    neighborhoodSummaries.push({
+      id: row.id,
+      name: row.name,
+      weight: Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0),
+      locationsCount: row.locations.length,
+      count: countForNeighborhood,
+      slots: { P: alloc.nP, M: alloc.nM, G: alloc.nG },
+      pmg: { ...pmg }
+    });
+    for (const [size, count] of [['P', alloc.nP], ['M', alloc.nM], ['G', alloc.nG]]) {
+      const n = Math.max(0, Number(count || 0) || 0);
+      if (!n) continue;
+      slotBuckets.push({
+        count: n,
+        slot: {
+          city,
+          size,
+          scope: 'directed',
+          neighborhoodId: row.id,
+          neighborhoodName: row.name
+        }
+      });
+    }
+  }
+
+  if (universalTarget > 0) {
+    const universalAlloc = allocatePmgSlots(universalTarget, cityPmg);
+    for (const [size, count] of [['P', universalAlloc.nP], ['M', universalAlloc.nM], ['G', universalAlloc.nG]]) {
+      const n = Math.max(0, Number(count || 0) || 0);
+      if (!n) continue;
+      slotBuckets.push({
+        count: n,
+        slot: {
+          city,
+          size,
+          scope: 'universal',
+          neighborhoodId: null,
+          neighborhoodName: null,
+          locationPool: universalLocations.slice()
+        }
+      });
+    }
+  }
+
+  if (!slotBuckets.length) {
+    return buildCityFallbackV4Plan({
+      city,
+      target: targetN,
+      cityPmg,
+      reason: 'empty_v4_slots'
+    });
+  }
+
+  return {
+    ok: true,
+    mode: 'v4_bairros',
+    reason: universalTarget > 0 ? 'mixed_city_universal' : 'fully_directed',
+    slotBuckets,
+    universalLocations,
+    summary: {
+      mode: 'v4_bairros',
+      reason: universalTarget > 0 ? 'mixed_city_universal' : 'fully_directed',
+      target: targetN,
+      directedPercent: directedPercentClamped,
+      neighborhoodsCount: neighborhoods.length,
+      coveredNeighborhoodsCount: coveredNeighborhoods.length,
+      directedTarget,
+      universalTarget,
+      universalLocationsCount: universalLocations.length,
+      neighborhoods: neighborhoodSummaries
+    }
+  };
+}
+
+function buildRobeV4ShuffledQueue(slotBuckets, { antiStreakPenalty = 0.35 } = {}) {
+  const rem = [];
+  let total = 0;
+  for (const raw of (Array.isArray(slotBuckets) ? slotBuckets : [])) {
+    const count = Math.max(0, Number(raw && raw.count || 0) || 0);
+    const slot = raw && raw.slot && typeof raw.slot === 'object' ? raw.slot : null;
+    if (!count || !slot || !slot.city) continue;
+    rem.push({
+      remaining: count,
+      slot: {
+        city: String(slot.city || '').trim(),
+        size: String(slot.size || '').trim().toUpperCase() || null,
+        scope: String(slot.scope || '').trim() || null,
+        neighborhoodId: String(slot.neighborhoodId || '').trim() || null,
+        neighborhoodName: String(slot.neighborhoodName || '').trim() || null,
+        locationPool: Array.isArray(slot.locationPool) ? slot.locationPool.slice() : null
+      }
+    });
+    total += count;
+  }
+  const queue = [];
+  let prevCity = '';
+  let prevScope = '';
+  let prevSize = '';
+  while (total > 0) {
+    const live = rem.filter((row) => row.remaining > 0);
+    if (!live.length) break;
+    const hasOtherCity = live.some((row) => row.slot.city !== prevCity);
+    let sum = 0;
+    const weighted = live.map((row) => {
+      let w = Math.max(0.0001, Number(row.remaining || 0) || 0);
+      const scopeKey = `${row.slot.scope || ''}:${row.slot.neighborhoodId || ''}`;
+      const hasOtherScope = live.some((other) => (`${other.slot.scope || ''}:${other.slot.neighborhoodId || ''}`) !== scopeKey);
+      const hasOtherSizeInSameScope = live.some((other) => {
+        if (other === row) return false;
+        return other.slot.city === row.slot.city
+          && String(other.slot.scope || '') === String(row.slot.scope || '')
+          && String(other.slot.neighborhoodId || '') === String(row.slot.neighborhoodId || '')
+          && String(other.slot.size || '') !== String(row.slot.size || '');
+      });
+      if (row.slot.city === prevCity && hasOtherCity) {
+        w *= Math.max(0.01, Math.min(1, Number(antiStreakPenalty) || 0.35));
+      }
+      if (row.slot.city === prevCity && scopeKey === prevScope && hasOtherScope) {
+        w *= 0.72;
+      }
+      if (row.slot.city === prevCity && scopeKey === prevScope && String(row.slot.size || '') === prevSize && hasOtherSizeInSameScope) {
+        w *= 0.55;
+      }
+      w = Math.max(0.0001, w);
+      sum += w;
+      return { row, w };
+    });
+    let pick = Math.random() * sum;
+    let chosen = weighted[weighted.length - 1].row;
+    for (const row of weighted) {
+      pick -= row.w;
+      if (pick <= 0) {
+        chosen = row.row;
+        break;
+      }
+    }
+    queue.push({ ...chosen.slot });
+    chosen.remaining -= 1;
+    total -= 1;
+    prevCity = chosen.slot.city;
+    prevScope = `${chosen.slot.scope || ''}:${chosen.slot.neighborhoodId || ''}`;
+    prevSize = String(chosen.slot.size || '');
+  }
+  return queue;
+}
+
+async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3, country = '', includeCoverage = false } = {}) {
   const ct = resolveCtSecretConfig();
   if (!ct.ok) return { ok: false, error: ct.error || 'ct_config_missing' };
   const hostId = readHostIdSafe();
@@ -995,6 +1383,7 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3, country = ''
         body: JSON.stringify({
           hostId,
           country,
+          includeCoverage: includeCoverage === true,
           windowDays: Math.max(1, Math.min(10, Math.floor(Number(windowDays || 3) || 3))),
           cities
         }),
@@ -1037,7 +1426,13 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const countryId = getRobeQueueCountryId(cfg);
   const workMode = String(robeCfg.workMode || 'v1').trim().toLowerCase();
   const isV3 = workMode === 'v3_pmg';
-  if (isV3) {
+  const isV4 = workMode === 'v4_bairros';
+  const v4NeighborhoodDirectedPercent = Math.max(
+    0,
+    Math.min(100, Math.floor(Number(robeCfg.v4NeighborhoodDirectedPercent != null ? robeCfg.v4NeighborhoodDirectedPercent : 90) || 90))
+  );
+  const v4ConfigSigExtra = isV4 ? { v4NeighborhoodDirectedPercent } : {};
+  if (isV3 || isV4) {
     try {
       if (fotos && typeof fotos.ensurePmgDirs === 'function') fotos.ensurePmgDirs();
     } catch {}
@@ -1046,7 +1441,11 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const cities = normalizeCityList(cfg && cfg.robe && cfg.robe.cidadesExtrasGlobais);
   if (!cities.length) return { ok: false, error: 'robe_v2_no_global_cities' };
   const plan = calcRobeV2PlanTargetN(cfg);
-  const stats = await fetchRobeV2CityStatsFromCT(cities, { windowDays: tuning.statsWindowDays || 3, country: countryId });
+  const stats = await fetchRobeV2CityStatsFromCT(cities, {
+    windowDays: tuning.statsWindowDays || 3,
+    country: countryId,
+    includeCoverage: isV4
+  });
   if (!stats.ok) return { ok: false, error: `stats_fetch_failed:${stats.error}` };
   // IMPORTANTE: missingCities no CT significa "sem grupo/motoristas", não "cidade inválida".
   const statsByCity = (stats && stats.statsByCity && typeof stats.statsByCity === 'object') ? stats.statsByCity : {};
@@ -1099,6 +1498,46 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       };
     });
     queue = buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
+  } else if (isV4) {
+    const slotBuckets = [];
+    rowsOut = rowsOut.map((r) => {
+      const city = String(r.city || '').trim();
+      const L = Math.max(0, Number(r.count || 0) || 0);
+      const st = (statsByCity && statsByCity[city]) ? statsByCity[city] : null;
+      const motoristas = st ? (Number(st.motoristas || 0) || 0) : (Number(r.motoristas || 0) || 0);
+      const pmg = (st && st.pmg && typeof st.pmg === 'object') ? st.pmg : { p: 0, m: 0, g: 0, fixo: motoristas };
+      const planV4 = buildRobeV4CityPlan({
+        city,
+        target: L,
+        statsEntry: st || { motoristas, pmg, coverage: [] },
+        countryId,
+        directedPercent: v4NeighborhoodDirectedPercent
+      });
+      if (planV4 && Array.isArray(planV4.slotBuckets)) slotBuckets.push(...planV4.slotBuckets);
+      return {
+        ...r,
+        motoristas,
+        pmg: {
+          p: Math.max(0, Number(pmg.p || 0) || 0),
+          m: Math.max(0, Number(pmg.m || 0) || 0),
+          g: Math.max(0, Number(pmg.g || 0) || 0),
+          fixo: Math.max(0, Number(pmg.fixo || 0) || 0)
+        },
+        v4: planV4 && planV4.summary ? planV4.summary : {
+          mode: 'city_fallback',
+          reason: 'plan_unavailable',
+          target: L,
+          directedPercent: v4NeighborhoodDirectedPercent,
+          neighborhoodsCount: 0,
+          coveredNeighborhoodsCount: 0,
+          directedTarget: 0,
+          universalTarget: 0,
+          universalLocationsCount: 0,
+          neighborhoods: []
+        }
+      };
+    });
+    queue = buildRobeV4ShuffledQueue(slotBuckets, { antiStreakPenalty: tuning.antiStreakPenalty });
   } else {
     queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
   }
@@ -1119,12 +1558,13 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       country: countryId,
       statsCountry: stats.country || countryId,
       citiesCount: cities.length,
-      queueMode: isV3 ? 'v3_pmg' : 'v2_auto',
+      queueMode: isV4 ? 'v4_bairros' : (isV3 ? 'v3_pmg' : 'v2_auto'),
       configSig: JSON.stringify({
         country: countryId,
         workMode: String(robeCfg.workMode || 'v1'),
         cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
         cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
+        ...v4ConfigSigExtra,
         cities: cities.map((c) => cityNormKey(c)),
         v2Tuning: tuning || null
       }),
@@ -1135,7 +1575,10 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       signalSummary: { keyed, signal, totalCities: cities.length },
       degraded: !!degradedReason,
       degradedReason,
-      params: calc.params || null,
+      params: {
+        ...((calc.params && typeof calc.params === 'object') ? calc.params : {}),
+        ...(isV4 ? { v4NeighborhoodDirectedPercent } : {})
+      },
       rows: rowsOut
     },
     planGeneratedAt: now,
@@ -1235,18 +1678,25 @@ async function pickPostingSlotForRunV2() {
   const cfg = serverConfig.readServerConfigEffective();
   const robeCfg = (cfg && cfg.robe) ? cfg.robe : {};
   const countryId = getRobeQueueCountryId(cfg);
+  const workMode = String(robeCfg.workMode || 'v1').trim().toLowerCase();
   const cfgCities = normalizeCityList(robeCfg.cidadesExtrasGlobais);
+  const v4NeighborhoodDirectedPercent = Math.max(
+    0,
+    Math.min(100, Math.floor(Number(robeCfg.v4NeighborhoodDirectedPercent != null ? robeCfg.v4NeighborhoodDirectedPercent : 90) || 90))
+  );
+  const v4ConfigSigExtra = workMode === 'v4_bairros' ? { v4NeighborhoodDirectedPercent } : {};
   const expectedSig = JSON.stringify({
     country: countryId,
     workMode: String(robeCfg.workMode || 'v1'),
     cooldownMinMinutes: Number(robeCfg.cooldownMinMinutes || 0) || 0,
     cooldownMaxMinutes: Number(robeCfg.cooldownMaxMinutes || 0) || 0,
+    ...v4ConfigSigExtra,
     cities: cfgCities.map((c) => cityNormKey(c)),
     // IMPORTANTÍSSIMO: precisa espelhar exatamente o que foi salvo em meta.configSig,
     // senão cada consumo detecta "configMismatch", zera a fila e força regeneração.
     v2Tuning: (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : null
   });
-  let chosen = { city: '', size: null };
+  let chosen = { city: '', size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
   let queueAfter = 0;
   let threshold = 20;
   let expiredPlan = false;
@@ -1312,14 +1762,14 @@ async function pickPostingCityForRunV2() {
 
 async function robeV2WarmupNow({ reason = 'manual', force = false } = {}) {
   try {
-    // V3: garante pastas Desktop/fotos/{p,m,g} antes de gerar a fila.
+    // V3/V4: garante pastas Desktop/fotos/{p,m,g} antes de gerar a fila.
     try {
       const cfg = serverConfig.readServerConfigEffective();
       const wm = String(cfg && cfg.robe && cfg.robe.workMode || '').trim().toLowerCase();
-      if (wm === 'v3_pmg' && fotos && typeof fotos.ensurePmgDirs === 'function') {
+      if ((wm === 'v3_pmg' || wm === 'v4_bairros') && fotos && typeof fotos.ensurePmgDirs === 'function') {
         const ensured = fotos.ensurePmgDirs();
         try {
-          logger.info('[ROBE][v3] ensurePmgDirs no warmup', {
+          logger.info('[ROBE][v3-v4] ensurePmgDirs no warmup', {
             reason: String(reason || '').slice(0, 80),
             created: (ensured && ensured.created) || [],
             ok: !!(ensured && ensured.ok)
@@ -1828,6 +2278,54 @@ function listLocalizacoesPorCidade(cidade) {
   }
 }
 
+function listLocalizacoesPorEscopo(cidade, locationScope) {
+  const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
+  if (scope === 'directed') {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
+    if (neighborhoodId) {
+      try { return require('./countryGeo.js').listLocationsByNeighborhood(cidade, neighborhoodId); } catch {}
+    }
+  }
+  if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of locationScope.locationPool) {
+      const text = String(raw == null ? '' : raw).trim();
+      const key = cityNormKey(text);
+      if (!text || !key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(text);
+    }
+    if (out.length) return out;
+  }
+  return listLocalizacoesPorCidade(cidade);
+}
+
+function buildLocaisScopeOptions(locationScope) {
+  const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
+  if (scope === 'directed') {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
+    if (!neighborhoodId) return null;
+    return {
+      scopeId: `bairro_${neighborhoodId}`,
+      neighborhoodId
+    };
+  }
+  if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    return {
+      scopeId: 'universal',
+      locations: locationScope.locationPool
+    };
+  }
+  return null;
+}
+
+async function confirmUsedByLocationScope(cidade, location, locationScope) {
+  const scopeOptions = buildLocaisScopeOptions(locationScope);
+  if (scopeOptions) return locais.confirmUsedForScope(cidade, location, scopeOptions);
+  return locais.confirmUsed(cidade, location);
+}
+
 function pickLocalizacaoAleatoria(cidade) {
   const lista = listLocalizacoesPorCidade(cidade);
   if (!lista.length) return null;
@@ -1899,9 +2397,15 @@ async function pickPostingCityForRun(nome) {
     const cfg = serverConfig.readServerConfigEffective();
     workMode = String(cfg && cfg.robe && cfg.robe.workMode || 'v1').trim().toLowerCase();
   } catch {}
-  if (workMode === 'v2_auto' || workMode === 'v3_pmg') {
+  if (workMode === 'v2_auto' || workMode === 'v3_pmg' || workMode === 'v4_bairros') {
     const city = await pickPostingCityForRunV2();
-    if (!city) throw new Error(workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable');
+    if (!city) {
+      throw new Error(
+        workMode === 'v4_bairros'
+          ? 'robe_v4_city_unavailable'
+          : (workMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable')
+      );
+    }
     return city;
   }
   let chosen = '';
@@ -2564,7 +3068,7 @@ async function waitForCreateItemReady(page, { timeout = 3500 } = {}) {
 }
 
 // Preenche Localização via ciclo global (locais.js) e retorna a localização usada
-async function preencherLocalizacao(page, cidade) {
+async function preencherLocalizacao(page, cidade, locationScope = null) {
   const okMaisDetalhes = await ensureMaisDetalhesAberto(page, 8000);
   if (!okMaisDetalhes) throw new Error('Não foi possível expandir “Mais detalhes”.');
 
@@ -2590,16 +3094,22 @@ async function preencherLocalizacao(page, cidade) {
 
   // Anti-loop: controle de sessões
   const visited = new Set();
-  const allLocs = listLocalizacoesPorCidade(cidade); // lista bruta para medir ciclo
+  const allLocs = listLocalizacoesPorEscopo(cidade, locationScope); // lista bruta do escopo para medir ciclo
+  const scopeOptions = buildLocaisScopeOptions(locationScope);
 
   // Tenta até 20 candidatos do ciclo
   for (let tent = 0; tent < 20; tent++) {
-    const sug = await locais.nextLocationForCity(cidade);
+    const sug = scopeOptions
+      ? await locais.nextLocationForScope(cidade, scopeOptions)
+      : await locais.nextLocationForCity(cidade);
     if (!sug.ok) throw new Error('Sem localizações disponíveis para esta cidade.');
     const cand = sug.location;
 
     if (visited.has(cand)) {
-      try { await locais.reportInvalid(cidade, cand, 'repeat_in_session'); } catch {}
+      try {
+        if (scopeOptions) await locais.reportInvalidForScope(cidade, cand, 'repeat_in_session', scopeOptions);
+        else await locais.reportInvalid(cidade, cand, 'repeat_in_session');
+      } catch {}
       continue;
     }
     visited.add(cand);
@@ -2621,14 +3131,23 @@ async function preencherLocalizacao(page, cidade) {
 
       if (await isLocalizacaoValida(page)) {
         // sucesso! consome localização e retorna
-        try { await locais.confirmUsed(cidade, cand); } catch {}
+        try {
+          if (scopeOptions) await locais.confirmUsedForScope(cidade, cand, scopeOptions);
+          else await locais.confirmUsed(cidade, cand);
+        } catch {}
         return cand;
       }
     }
 
     // NÃO validou; consome localização, marca como inválida e passa:
-    try { await locais.confirmUsed(cidade, cand); } catch {}
-    try { await locais.reportInvalid(cidade, cand, 'not_valid_on_fb'); } catch {}
+    try {
+      if (scopeOptions) await locais.confirmUsedForScope(cidade, cand, scopeOptions);
+      else await locais.confirmUsed(cidade, cand);
+    } catch {}
+    try {
+      if (scopeOptions) await locais.reportInvalidForScope(cidade, cand, 'not_valid_on_fb', scopeOptions);
+      else await locais.reportInvalid(cidade, cand, 'not_valid_on_fb');
+    } catch {}
     await sleep(120);
 
     // Anti-loop: se tentamos todas localizações do ciclo, aborta!
@@ -3575,6 +4094,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let fotoUploaded = false;
   let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
   let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
+  let postingLocationScope = null;
 
   // V2: cooldown preferencial vem do worker (sessão/lote) em robePauseMs.
   // Fallback legado permanece para segurança em caso de ausência do plano.
@@ -3645,29 +4165,40 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = resolvePatchCoordsForProfile(nome, manifest || {});
     // Pré-seleciona foto antes de abrir/create para reduzir janela de degradação entre recovery e upload.
-    // V3 PMG: consome slot {city,size} ANTES da foto (pasta Desktop/fotos/{p,m,g}).
+    // V3/V4: consome slot {city,size,...} ANTES da foto (pasta Desktop/fotos/{p,m,g}).
     let robeWorkModeEarly = 'v1';
     try {
       const cfgEarly = serverConfig.readServerConfigEffective();
       robeWorkModeEarly = String(cfgEarly && cfgEarly.robe && cfgEarly.robe.workMode || 'v1').trim().toLowerCase();
     } catch {}
     let postingSize = null;
-    if (robeWorkModeEarly === 'v3_pmg') {
+    if (robeWorkModeEarly === 'v3_pmg' || robeWorkModeEarly === 'v4_bairros') {
       try {
         const slot = await pickPostingSlotForRunV2();
         cidadePerfil = slot && slot.city ? String(slot.city) : null;
         postingSize = slot && slot.size ? String(slot.size).toUpperCase() : null;
-        if (!cidadePerfil || !postingSize) throw new Error('robe_v3_slot_unavailable');
+        postingLocationScope = slot && slot.scope ? {
+          scope: String(slot.scope || '').trim().toLowerCase() || null,
+          neighborhoodId: String(slot.neighborhoodId || '').trim() || null,
+          neighborhoodName: String(slot.neighborhoodName || '').trim() || null,
+          locationPool: Array.isArray(slot.locationPool) ? slot.locationPool.slice() : null
+        } : null;
+        if (!cidadePerfil || !postingSize) {
+          throw new Error(robeWorkModeEarly === 'v4_bairros' ? 'robe_v4_slot_unavailable' : 'robe_v3_slot_unavailable');
+        }
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
-          step: 'posting_slot_selected_v3',
+          step: robeWorkModeEarly === 'v4_bairros' ? 'posting_slot_selected_v4' : 'posting_slot_selected_v3',
           city: cidadePerfil,
-          size: postingSize
+          size: postingSize,
+          scope: postingLocationScope ? postingLocationScope.scope : null,
+          neighborhoodId: postingLocationScope ? postingLocationScope.neighborhoodId : null,
+          neighborhoodName: postingLocationScope ? postingLocationScope.neighborhoodName : null
         });
       } catch (e) {
         const msg = (e && e.message) ? String(e.message) : String(e);
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'posting_slot_pick_failed', error: msg });
-        throw new Error(`robe_v3_city_unavailable:${msg}`);
+        throw new Error(`${robeWorkModeEarly === 'v4_bairros' ? 'robe_v4_city_unavailable' : 'robe_v3_city_unavailable'}:${msg}`);
       }
     }
     const photoPickStartedAt = Date.now();
@@ -4069,8 +4600,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       robeWorkMode = String(cfgNow && cfgNow.robe && cfgNow.robe.workMode || 'v1').trim().toLowerCase();
     } catch {}
     let cityPickErr = null;
-    // V3 já consumiu o slot no início (antes da foto) — não puxar de novo da fila.
-    if (robeWorkMode !== 'v3_pmg' || !cidadePerfil) {
+    // V3/V4 já consumiram o slot no início (antes da foto) — não puxar de novo da fila.
+    if ((robeWorkMode !== 'v3_pmg' && robeWorkMode !== 'v4_bairros') || !cidadePerfil) {
       try {
         cidadePerfil = await pickPostingCityForRun(nome);
       } catch (e) {
@@ -4082,9 +4613,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         });
       }
     }
-    if (!cidadePerfil && (robeWorkMode === 'v2_auto' || robeWorkMode === 'v3_pmg')) {
+    if (!cidadePerfil && (robeWorkMode === 'v2_auto' || robeWorkMode === 'v3_pmg' || robeWorkMode === 'v4_bairros')) {
       throw new Error(
-        `${robeWorkMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable'}${cityPickErr ? `:${cityPickErr}` : ''}`
+        `${
+          robeWorkMode === 'v4_bairros'
+            ? 'robe_v4_city_unavailable'
+            : (robeWorkMode === 'v3_pmg' ? 'robe_v3_city_unavailable' : 'robe_v2_city_unavailable')
+        }${cityPickErr ? `:${cityPickErr}` : ''}`
       );
     }
     if (!cidadePerfil) {
@@ -4102,10 +4637,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       attempt: attId,
       step: 'posting_city_selected',
       value: cidadePerfil,
-      size: postingSize || null
+      size: postingSize || null,
+      scope: postingLocationScope ? postingLocationScope.scope : null,
+      neighborhoodId: postingLocationScope ? postingLocationScope.neighborhoodId : null,
+      neighborhoodName: postingLocationScope ? postingLocationScope.neighborhoodName : null
     });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
-    localUsada = await preencherLocalizacao(page, cidadePerfil);
+    localUsada = await preencherLocalizacao(page, cidadePerfil, postingLocationScope);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await waitBeforeComposeAction(composePlan, 'before_publish', { nome, attId });
 
@@ -4155,7 +4693,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
 
     // Confirmar localização usada (após publicar — mantém)
-    try { await locais.confirmUsed(cidadePerfil, localUsada); } catch {}
+    try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
 
     // Pós-publish: dismiss upsell + verificação ID documento (1x/dia). Nunca invalida publish_ok.
     if (page) {
@@ -4309,7 +4847,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // ADEQUAÇÃO: "tentou ⇒ consumiu" para localização mesmo em erro
     try {
       if (localUsada) {
-        await locais.confirmUsed(cidadePerfil, localUsada);
+        await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope);
       }
     } catch {}
 

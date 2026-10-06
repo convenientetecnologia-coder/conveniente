@@ -192,6 +192,7 @@ const DEFAULTS = Object.freeze({
     cooldownMinMinutes: 60,
     cooldownMaxMinutes: 120,
     workMode: "v3_pmg",
+    v4NeighborhoodDirectedPercent: 90,
     v2Tuning: {
       alpha: 0.10,
       beta: 1.0,
@@ -584,9 +585,16 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cooldownMinMinutes = clamp(Math.min(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), 1, 24 * 60);
   const cooldownMaxMinutes = clamp(Math.max(cooldownMinMinutesRaw, cooldownMaxMinutesRaw), cooldownMinMinutes, 24 * 60);
   const workModeRaw = String(robe.workMode || DEFAULTS.robe.workMode).trim().toLowerCase();
-  const workMode = (workModeRaw === "v3_pmg")
+  const workMode = (workModeRaw === "v4_bairros")
+    ? "v4_bairros"
+    : ((workModeRaw === "v3_pmg")
     ? "v3_pmg"
-    : ((workModeRaw === "v2_auto") ? "v2_auto" : "v1");
+    : ((workModeRaw === "v2_auto") ? "v2_auto" : "v1"));
+  const v4NeighborhoodDirectedPercent = clamp(
+    Math.floor(toNum(robe.v4NeighborhoodDirectedPercent, DEFAULTS.robe.v4NeighborhoodDirectedPercent)),
+    0,
+    100
+  );
   const v2Alpha = Number(clamp(toNum(v2.alpha, DEFAULTS.robe.v2Tuning.alpha), 0, 0.6).toFixed(4));
   const v2Beta = Number(clamp(toNum(v2.beta, DEFAULTS.robe.v2Tuning.beta), 0.05, 6.0).toFixed(4));
   const v2MinBoost = Number(clamp(toNum(v2.minBoost, DEFAULTS.robe.v2Tuning.minBoost), 0.01, 2.0).toFixed(4));
@@ -707,6 +715,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       cooldownMinMinutes,
       cooldownMaxMinutes,
       workMode,
+      v4NeighborhoodDirectedPercent,
       v2Tuning: {
         alpha: v2Alpha,
         beta: v2Beta,
@@ -911,8 +920,14 @@ function validateServerConfigPayload(payload) {
     }
     if (robe.workMode !== undefined) {
       const wm = String(robe.workMode || "").trim().toLowerCase();
-      if (!["v1", "v2_auto", "v3_pmg"].includes(wm)) {
+      if (!["v1", "v2_auto", "v3_pmg", "v4_bairros"].includes(wm)) {
         errors.push("robe.workMode_invalido");
+      }
+    }
+    if (robe.v4NeighborhoodDirectedPercent !== undefined) {
+      const n = Number(robe.v4NeighborhoodDirectedPercent);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        errors.push("robe.v4NeighborhoodDirectedPercent_invalido");
       }
     }
     if (robe.itemTitlesPack !== undefined) {
@@ -1203,6 +1218,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       cooldownMinMinutes: v.normalized.robe.cooldownMinMinutes,
       cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
       workMode: v.normalized.robe.workMode,
+      v4NeighborhoodDirectedPercent: v.normalized.robe.v4NeighborhoodDirectedPercent,
       v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       itemTitlesPack: v.normalized.robe.itemTitlesPack,

@@ -620,9 +620,9 @@ module.exports = (app, workerClient, fileStore) => {
       const tryWarmupV2 = async () => {
         try {
           if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return null;
-          if (!effective || !effective.robe || !['v2_auto', 'v3_pmg'].includes(String(effective.robe.workMode || ''))) return null;
-          // V3: cria pastas p/m/g imediatamente ao salvar (mesmo sem worker).
-          if (String(effective.robe.workMode) === 'v3_pmg') {
+          if (!effective || !effective.robe || !['v2_auto', 'v3_pmg', 'v4_bairros'].includes(String(effective.robe.workMode || ''))) return null;
+          // V3/V4: cria pastas p/m/g imediatamente ao salvar (mesmo sem worker).
+          if (String(effective.robe.workMode) === 'v3_pmg' || String(effective.robe.workMode) === 'v4_bairros') {
             try {
               const fotosMod = require('./fotos.js');
               if (fotosMod && typeof fotosMod.ensurePmgDirs === 'function') {

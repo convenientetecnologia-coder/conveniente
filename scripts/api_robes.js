@@ -186,15 +186,14 @@ module.exports = (app, workerClient, fileStore) => {
       const DADOS_DIR = path.join(__dirname, '..', 'dados');
       const fp = path.join(DADOS_DIR, 'robe_v2_queue.json');
       const st = readJsonSafe(fp, null);
+      const robeMod = require('./robe.js');
       const formatItem = (x) => {
-        if (typeof x === 'string') return String(x || '').trim();
-        if (x && typeof x === 'object') {
-          const city = String(x.city || x.cidade || '').trim();
-          const size = String(x.size || x.tamanho || '').trim().toUpperCase();
-          if (!city) return '';
-          return (size === 'P' || size === 'M' || size === 'G') ? `${city} [${size}]` : city;
-        }
-        return '';
+        try {
+          if (robeMod && typeof robeMod.formatRobeQueueItemLabel === 'function') {
+            return String(robeMod.formatRobeQueueItemLabel(x) || '').trim();
+          }
+        } catch {}
+        return typeof x === 'string' ? String(x || '').trim() : '';
       };
       const queueRaw = (st && Array.isArray(st.queue)) ? st.queue : [];
       const queue = queueRaw.map(formatItem).filter(Boolean);

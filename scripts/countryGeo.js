@@ -77,6 +77,20 @@ function cityNormKey(value) {
   return s;
 }
 
+function cityLookupKeys(value) {
+  const raw = String(value || "").trim();
+  const bare = raw.replace(/\s*\([a-z]{2}\)\s*$/i, "").trim();
+  const out = [];
+  const seen = new Set();
+  for (const candidate of [raw, bare]) {
+    const key = cityNormKey(candidate);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
 function parseCityNames(raw) {
   if (!Array.isArray(raw)) return [];
   const out = [];
@@ -144,43 +158,133 @@ function getCoords(cidade, { countryId } = {}) {
   }
 }
 
-function listLocations(cidade, { countryId } = {}) {
-  const want = cityNormKey(cidade);
-  if (!want) return [];
+function dedupeLocations(arr, { exact = false } = {}) {
+  const dedup = [];
+  const seen = new Set();
+  for (const loc of (Array.isArray(arr) ? arr : [])) {
+    const text = String(loc == null ? "" : loc).replace(/\r/g, "").trim();
+    if (!text) continue;
+    const key = exact ? text : cityNormKey(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(text);
+  }
+  return dedup;
+}
+
+function normalizeNeighborhoodId(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function parseNeighborhoods(entries, { exact = false } = {}) {
+  const out = [];
+  const byId = new Map();
+  for (const raw of (Array.isArray(entries) ? entries : [])) {
+    if (!raw || typeof raw !== "object") continue;
+    const name = String(raw.nome || raw.name || raw.bairro || raw.label || raw.id || raw.slug || "").trim();
+    const id = normalizeNeighborhoodId(raw.id || raw.slug || raw.key || name);
+    const locations = dedupeLocations(raw.localizacoes || raw.locations, { exact });
+    if (!name || !id || !locations.length) continue;
+    if (byId.has(id)) {
+      const prev = byId.get(id);
+      prev.locations = dedupeLocations(prev.locations.concat(locations), { exact });
+      continue;
+    }
+    const row = { id, name, locations };
+    byId.set(id, row);
+    out.push(row);
+  }
+  return out;
+}
+
+function normalizeLocationCatalogEntry(rawEntry, fallbackCity, { exact = false } = {}) {
+  const city = String(
+    (rawEntry && (rawEntry.cidade || rawEntry.nome || rawEntry.name || rawEntry.label || rawEntry.id))
+      || fallbackCity
+      || ""
+  ).trim();
+  if (!city) return null;
+  const neighborhoods = parseNeighborhoods(rawEntry && (rawEntry.bairros || rawEntry.neighborhoods), { exact });
+  let locations = dedupeLocations(rawEntry && (rawEntry.localizacoes || rawEntry.locations), { exact });
+  if (neighborhoods.length) {
+    locations = dedupeLocations(locations.concat(neighborhoods.flatMap((row) => row.locations)), { exact });
+  }
+  const mappedKeys = new Set();
+  for (const row of neighborhoods) {
+    for (const loc of row.locations) mappedKeys.add(exact ? String(loc) : cityNormKey(loc));
+  }
+  const universalLocations = locations.filter((loc) => !mappedKeys.has(exact ? String(loc) : cityNormKey(loc)));
+  return {
+    city,
+    locations,
+    neighborhoods,
+    universalLocations,
+    mappedLocationsCount: Math.max(0, locations.length - universalLocations.length),
+    unmappedLocationsCount: universalLocations.length
+  };
+}
+
+function getLocationCatalogEntry(cidade, { countryId } = {}) {
+  const wantKeys = cityLookupKeys(cidade);
+  if (!wantKeys.length) return null;
   const pack = resolveDataPack(countryId);
   const file = safeDadosFile(pack.locationsFile, COUNTRY_DATA[COUNTRY_ID_DEFAULT].locationsFile);
   const raw = readJsonSafe(file, null);
-  if (!raw) return [];
-
-  const pushUnique = (arr, { exact = false } = {}) => {
-    const dedup = [];
-    const seen = new Set();
-    for (const loc of (Array.isArray(arr) ? arr : [])) {
-      const text = String(loc == null ? "" : loc).replace(/\r/g, "");
-      if (!text.trim()) continue;
-      const key = exact ? text : cityNormKey(text);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      dedup.push(text);
-    }
-    return dedup;
-  };
+  if (!raw) return null;
   const exactUs = String(pack && pack.id || "") === "us";
-
   if (Array.isArray(raw)) {
-    const hit = raw.find((ent) => (
-      cityNormKey(ent && (ent.cidade || ent.nome || ent.id)) === want
-    ));
-    if (!hit || !Array.isArray(hit.localizacoes)) return [];
-    return pushUnique(hit.localizacoes, { exact: exactUs });
+    const hit = raw.find((ent) => wantKeys.includes(cityNormKey(ent && (ent.cidade || ent.nome || ent.name || ent.id))));
+    return hit ? normalizeLocationCatalogEntry(hit, "", { exact: exactUs }) : null;
   }
-
   if (raw && typeof raw === "object") {
-    const key = Object.keys(raw).find((k) => cityNormKey(k) === want);
-    if (!key) return [];
-    return pushUnique(raw[key], { exact: exactUs });
+    const key = Object.keys(raw).find((entryKey) => {
+      const keyNorm = cityNormKey(entryKey);
+      if (wantKeys.includes(keyNorm)) return true;
+      const value = raw[entryKey];
+      if (value && typeof value === "object") {
+        const cityLabel = cityNormKey(value.cidade || value.nome || value.name || value.label || value.id);
+        if (wantKeys.includes(cityLabel)) return true;
+      }
+      return false;
+    });
+    if (!key) return null;
+    const value = raw[key];
+    return Array.isArray(value)
+      ? normalizeLocationCatalogEntry({ cidade: key, localizacoes: value }, key, { exact: exactUs })
+      : normalizeLocationCatalogEntry({ cidade: key, ...(value && typeof value === "object" ? value : {}) }, key, { exact: exactUs });
   }
-  return [];
+  return null;
+}
+
+function listLocations(cidade, { countryId } = {}) {
+  const entry = getLocationCatalogEntry(cidade, { countryId });
+  return entry && Array.isArray(entry.locations) ? entry.locations.slice() : [];
+}
+
+function listNeighborhoods(cidade, { countryId } = {}) {
+  const entry = getLocationCatalogEntry(cidade, { countryId });
+  return entry && Array.isArray(entry.neighborhoods)
+    ? entry.neighborhoods.map((row) => ({
+        id: row.id,
+        name: row.name,
+        locations: Array.isArray(row.locations) ? row.locations.slice() : []
+      }))
+    : [];
+}
+
+function listLocationsByNeighborhood(cidade, neighborhoodId, { countryId } = {}) {
+  const entry = getLocationCatalogEntry(cidade, { countryId });
+  if (!entry || !Array.isArray(entry.neighborhoods)) return [];
+  const want = normalizeNeighborhoodId(neighborhoodId);
+  if (!want) return [];
+  const hit = entry.neighborhoods.find((row) => normalizeNeighborhoodId(row.id) === want);
+  return hit && Array.isArray(hit.locations) ? hit.locations.slice() : [];
 }
 
 function countCitiesInUse(cities, perfis, extraTaken) {
@@ -328,11 +432,15 @@ module.exports = {
   effectiveCountryId,
   resolveDataPack,
   cityNormKey,
+  normalizeNeighborhoodId,
   listCities,
   findCanonicalCity,
   isKnownCity,
   getCoords,
+  getLocationCatalogEntry,
   listLocations,
+  listNeighborhoods,
+  listLocationsByNeighborhood,
   pickLeastUsedFromList,
   pickLeastUsedCity,
   sanitizeWorkingCities,

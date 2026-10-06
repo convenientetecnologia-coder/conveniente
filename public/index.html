@@ -1493,11 +1493,17 @@
           <div class="form-row">
             <label>Robe — tipo de trabalho</label>
             <select id="srvRobeWorkMode">
+              <option value="v4_bairros">Robe V4 bairros (cidade + bairro + fotos P/M/G)</option>
               <option value="v3_pmg">Robe V3 PMG (cidades + fotos P/M/G)</option>
               <option value="v2_auto">Robe V2 automatizado</option>
               <option value="v1">Robe V1</option>
             </select>
-            <div class="muted" style="margin-top:6px;">Robe V1 usa cidade da conta + extras. Robe V2 usa cidades globais (Habitantes × Insight). Robe V3 = V2 + fotos em Desktop/fotos/p|m|g (pastas criadas automaticamente ao salvar). Se a pasta do tamanho estiver vazia, usa a raiz e depois as outras pastas — só aborta sem nenhuma foto.</div>
+            <div class="muted" style="margin-top:6px;">Robe V1 usa cidade da conta + extras. Robe V2 usa cidades globais (Habitantes × Insight). Robe V3 = V2 + fotos em Desktop/fotos/p|m|g. Robe V4 mantém PMG e, quando a cidade tiver bairros mapeados, direciona por bairro com fallback por cidade inteira. Se a pasta do tamanho estiver vazia, usa a raiz e depois as outras pastas — só aborta sem nenhuma foto.</div>
+          </div>
+          <div class="form-row">
+            <label>Robe V4 — % dirigido por bairro</label>
+            <input type="number" id="srvRobeV4DirectedPercent" min="0" max="100" step="1" />
+            <div class="muted" style="margin-top:6px;">Padrão de fábrica: 90. Ex.: 100 = sem bloco universal; 80 = 80% dirigido por bairro e 20% para o restante da cidade, quando houver sobra fora dos bairros cobertos.</div>
           </div>
           <div class="form-row">
             <label>Robe — títulos de itens</label>
@@ -1626,6 +1632,7 @@
       const memProvSpikeEl = box.querySelector('#srvMemProvisionSpike');
       let workerDivisorSupported = false;
       const workModeEl = box.querySelector('#srvRobeWorkMode');
+      const v4DirectedPercentEl = box.querySelector('#srvRobeV4DirectedPercent');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
       const countryIdEl = box.querySelector('#srvCountryId');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
@@ -1877,7 +1884,10 @@
           setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
         }
         const wm = String(robe.workMode || 'v3_pmg');
-        workModeEl.value = (wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
+        workModeEl.value = (wm === 'v4_bairros' || wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
+        if (v4DirectedPercentEl) {
+          v4DirectedPercentEl.value = Number(robe.v4NeighborhoodDirectedPercent != null ? robe.v4NeighborhoodDirectedPercent : 90);
+        }
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         if (countryIdEl) {
           const cid = String((cfg.country && cfg.country.id) || 'br').trim().toLowerCase();
@@ -2272,8 +2282,13 @@
               cooldownMaxMinutes: cooldownMax,
               workMode: (() => {
                 const wm = String((workModeEl && workModeEl.value) || 'v3_pmg');
-                if (wm === 'v3_pmg' || wm === 'v2_auto') return wm;
+                if (wm === 'v4_bairros' || wm === 'v3_pmg' || wm === 'v2_auto') return wm;
                 return 'v1';
+              })(),
+              v4NeighborhoodDirectedPercent: (() => {
+                const raw = Number((v4DirectedPercentEl && v4DirectedPercentEl.value) || 90);
+                if (!Number.isFinite(raw)) return 90;
+                return Math.max(0, Math.min(100, Math.floor(raw)));
               })(),
               itemTitlesPack: String((itemTitlesPackEl && itemTitlesPackEl.value) || 'titulos'),
               useItemDescriptionInAds: String((useItemDescriptionInAdsEl && useItemDescriptionInAdsEl.value) || '0') === '1',
@@ -4344,7 +4359,7 @@
 
       function renderCounts(lastBlock) {
         if (!lastBlock) {
-          countsEl.innerHTML = `<div class="muted">Nenhum bloco gerado ainda. (Robe V2/V3 precisa rodar/gerar a fila.)</div>`;
+          countsEl.innerHTML = `<div class="muted">Nenhum bloco gerado ainda. (Robe V2/V3/V4 precisa rodar/gerar a fila.)</div>`;
           paramsEl.textContent = 'Parâmetros: —';
           return;
         }
@@ -4365,18 +4380,43 @@
             `driverBonusCap=${fmtFloat(p.driverBonusCap, 4)}`,
             `antiStreakPenalty=${fmtFloat(p.antiStreakPenalty, 4)}`
           ];
+          if (p.v4NeighborhoodDirectedPercent != null) {
+            parts.push(`v4DirectedPercent=${fmtInt(p.v4NeighborhoodDirectedPercent)}%`);
+          }
           paramsEl.textContent = `Parâmetros (último bloco): ${parts.join(' | ')}`;
         }
         if (!rows.length) {
           countsEl.innerHTML = `<div class="muted">Sem detalhes do último bloco (rows vazias).</div>`;
           return;
         }
-        const isV3 = currentWorkMode === 'v3_pmg' || String(lastBlock.queueMode || '') === 'v3_pmg'
-          || rows.some(r => r && (r.slots || r.pmg));
+        const isV4 = currentWorkMode === 'v4_bairros' || String(lastBlock.queueMode || '') === 'v4_bairros'
+          || rows.some(r => r && r.v4);
+        const isV3 = !isV4 && (currentWorkMode === 'v3_pmg' || String(lastBlock.queueMode || '') === 'v3_pmg'
+          || rows.some(r => r && (r.slots || r.pmg)));
         const sorted = rows.slice(0).sort((a, b) => (Number(b.count||0)||0) - (Number(a.count||0)||0));
         const lines = sorted.map(r => {
           const city = String(r.city || '').trim() || '—';
           const count = fmtInt(r.count);
+          if (isV4) {
+            const mot = fmtInt(r.motoristas);
+            const pmg = (r.pmg && typeof r.pmg === 'object') ? r.pmg : {};
+            const v4 = (r.v4 && typeof r.v4 === 'object') ? r.v4 : {};
+            const pCnt = fmtInt(pmg.p);
+            const mCnt = fmtInt(pmg.m);
+            const gCnt = fmtInt(pmg.g);
+            const fixo = fmtInt(pmg.fixo);
+            const covered = fmtInt(v4.coveredNeighborhoodsCount);
+            const totalBairros = fmtInt(v4.neighborhoodsCount);
+            const directed = fmtInt(v4.directedTarget);
+            const universal = fmtInt(v4.universalTarget);
+            const fallbackReason = String(v4.reason || '').trim();
+            return `<div style="margin-bottom:8px; line-height:1.55;">
+              <div><b>${escapeHtml(city)}</b>: <b>${count}</b> localizações</div>
+              <div class="muted" style="margin-left:8px;">Motoristas: ${mot} · PMG: P${pCnt} M${mCnt} G${gCnt} · Fixos: ${fixo}</div>
+              <div class="muted" style="margin-left:8px;">Cobertura: ${covered}/${totalBairros} bairros · Dirigido: ${directed} · Universal: ${universal}</div>
+              ${fallbackReason ? `<div class="muted" style="margin-left:8px;">Modo: ${escapeHtml(String(v4.mode || 'v4_bairros'))} · Motivo: ${escapeHtml(fallbackReason)}</div>` : ``}
+            </div>`;
+          }
           if (!isV3) {
             return `<div><b>${escapeHtml(city)}</b>: ${count}</div>`;
           }
@@ -4436,9 +4476,11 @@
 
           currentWorkMode = String(data.workMode || 'v1');
           if (titleEl) {
-            titleEl.textContent = currentWorkMode === 'v3_pmg'
-              ? 'Postagens (Robe V3)'
-              : (currentWorkMode === 'v2_auto' ? 'Postagens (Robe V2)' : 'Postagens');
+            titleEl.textContent = currentWorkMode === 'v4_bairros'
+              ? 'Postagens (Robe V4)'
+              : (currentWorkMode === 'v3_pmg'
+                  ? 'Postagens (Robe V3)'
+                  : (currentWorkMode === 'v2_auto' ? 'Postagens (Robe V2)' : 'Postagens'));
           }
           pillMode.innerHTML = `<span class="dot"></span>Modo: <b>${escapeHtml(currentWorkMode)}</b>`;
           queueTotal = Number(data.queueTotal || 0) || 0;

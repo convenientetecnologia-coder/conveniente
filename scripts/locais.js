@@ -109,9 +109,32 @@ function saveCycle(idx) {
   return writeJsonAtomic(CYCLE_FILE, idx);
 }
 
-// Carrega lista de localizações da cidade no arquivo do país atual. Sem fallback BR↔EUA.
-function listLocsFromSource(cidade) {
+function dedupeLocations(input) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(input) ? input : [])) {
+    const text = String(raw == null ? '' : raw).replace(/\r/g, '').trim();
+    if (!text) continue;
+    const key = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
+}
+
+function buildScopeKey(cidade, scopeId = '') {
+  const cityKey = utils.slugify(cidade || '');
+  const scopeKey = utils.slugify(scopeId || '');
+  if (!cityKey) return '';
+  return scopeKey ? `${cityKey}__${scopeKey}` : cityKey;
+}
+
+// Carrega lista de localizações da cidade/escopo no arquivo do país atual. Sem fallback BR↔EUA.
+function listLocsFromSource(cidade, { neighborhoodId = '', locations = null } = {}) {
   try {
+    if (Array.isArray(locations)) return dedupeLocations(locations);
+    if (neighborhoodId) return dedupeLocations(countryGeo.listLocationsByNeighborhood(cidade, neighborhoodId));
     return countryGeo.listLocations(cidade);
   } catch {
     return [];
@@ -147,16 +170,16 @@ function rebuildCycleForCity(idx, cityKey, allLocs) {
   @param {string} cidade
   @returns {Promise<{ok:true, cidadeKey:string, location:string}|{ok:false,error:string}>}
 */
-async function nextLocationForCity(cidade) {
+async function nextLocationForScope(cidade, { scopeId = '', neighborhoodId = '', locations = null } = {}) {
   return _serialize(async () => {
-    const cityKey = utils.slugify(cidade || '');
+    const cityKey = buildScopeKey(cidade, scopeId || (neighborhoodId ? `bairro_${neighborhoodId}` : ''));
     if (!cityKey) return { ok: false, error: 'cidade_invalida' };
 
     const cycle = loadCycle();
     let rec = cycle[cityKey] || { order: [], used: [], invalid: {} };
 
     // Lista oficial da cidade
-    const sourceLocs = listLocsFromSource(cidade);
+    const sourceLocs = listLocsFromSource(cidade, { neighborhoodId, locations });
     if (!sourceLocs.length) return { ok: false, error: 'sem_localizacoes_na_fonte' };
 
     // Necessita reconstruir?
@@ -195,21 +218,25 @@ async function nextLocationForCity(cidade) {
   });
 }
 
+async function nextLocationForCity(cidade) {
+  return nextLocationForScope(cidade);
+}
+
 /**
   Marca a localização como utilizada (avança 1 passo no ciclo).
   Se todas foram usadas, prepara ordem nova (embaralhada) para o próximo ciclo (reinclui inválidas).
   @param {string} cidade
   @param {string} location
 */
-async function confirmUsed(cidade, location) {
+async function confirmUsedForScope(cidade, location, { scopeId = '', neighborhoodId = '', locations = null } = {}) {
   return _serialize(async () => {
-    const cityKey = utils.slugify(cidade || '');
+    const cityKey = buildScopeKey(cidade, scopeId || (neighborhoodId ? `bairro_${neighborhoodId}` : ''));
     if (!cityKey || !location) return { ok: false, error: 'args_invalidos' };
 
     const cycle = loadCycle();
     let rec = cycle[cityKey] || { order: [], used: [], invalid: {} };
 
-    const sourceLocs = listLocsFromSource(cidade);
+    const sourceLocs = listLocsFromSource(cidade, { neighborhoodId, locations });
     if (!sourceLocs.length) return { ok: false, error: 'sem_localizacoes_na_fonte' };
 
     // Se a ordem está vazia ou mudou a fonte, reconstrói
@@ -234,6 +261,10 @@ async function confirmUsed(cidade, location) {
   });
 }
 
+async function confirmUsed(cidade, location) {
+  return confirmUsedForScope(cidade, location);
+}
+
 /**
   Marca uma localização como inválida (remove somente do ciclo atual).
   Útil quando o FB não encontra nada para aquele termo/nome.
@@ -241,9 +272,9 @@ async function confirmUsed(cidade, location) {
   @param {string} location
   @param {string} [reason]
 */
-async function reportInvalid(cidade, location, reason) {
+async function reportInvalidForScope(cidade, location, reason, { scopeId = '', neighborhoodId = '', locations = null } = {}) {
   return _serialize(async () => {
-    const cityKey = utils.slugify(cidade || '');
+    const cityKey = buildScopeKey(cidade, scopeId || (neighborhoodId ? `bairro_${neighborhoodId}` : ''));
     if (!cityKey || !location) return { ok: false, error: 'args_invalidos' };
 
     const cycle = loadCycle();
@@ -266,6 +297,10 @@ async function reportInvalid(cidade, location, reason) {
   });
 }
 
+async function reportInvalid(cidade, location, reason) {
+  return reportInvalidForScope(cidade, location, reason);
+}
+
 /**
   Snapshot para depuração/monitoramento.
 */
@@ -279,8 +314,11 @@ async function snapshot(cidade) {
 }
 
 module.exports = {
+  nextLocationForScope,
   nextLocationForCity,
+  confirmUsedForScope,
   confirmUsed,
+  reportInvalidForScope,
   reportInvalid,
   snapshot
 };
