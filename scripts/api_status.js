@@ -8,6 +8,64 @@ const serverConfig = require('./serverConfig.js');
 const path = require('path');
 const fs = require('fs');
 
+// Pintura do painel: o worker já grava status_node_N.json (~1s).
+// Não pergunta à célula. Jornal com mais de 15s não pisa o agregado.
+function __readHudJournalOverlay() {
+  const dir = path.dirname(fileStore.statusPath || path.join(__dirname, '..', 'dados', 'status.json'));
+  const byNome = new Map();
+  let robes = {};
+  let robeQueue = [];
+  let sys = null;
+  let autoMode = null;
+  let serverConfigPick = null;
+  let ts = 0;
+  const take = (j, override) => {
+    if (!j || !Array.isArray(j.perfis)) return;
+    const jts = Number(j.ts || 0) || 0;
+    if (jts >= ts) {
+      ts = jts;
+      if (j.sys) sys = j.sys;
+      if (j.autoMode != null) autoMode = j.autoMode;
+      if (j.serverConfig) serverConfigPick = j.serverConfig;
+    }
+    for (const p of j.perfis) {
+      if (!p || !p.nome) continue;
+      const nome = String(p.nome);
+      if (!override && byNome.has(nome)) continue;
+      byNome.set(nome, p);
+    }
+    if (j.robes && typeof j.robes === 'object') robes = Object.assign(robes, j.robes);
+    if (Array.isArray(j.robeQueue)) robeQueue = robeQueue.concat(j.robeQueue);
+  };
+  try { take(__readJsonSafeFallback(fileStore.statusPath, null), false); } catch {}
+  for (let i = 1; i <= 16; i++) {
+    const fp = path.join(dir, 'status_node_' + i + '.json');
+    try {
+      if (!fs.existsSync(fp)) continue;
+      const st = fs.statSync(fp);
+      const age = Date.now() - Number(st.mtimeMs || 0);
+      if (!(age >= 0 && age <= 15000)) continue;
+      take(JSON.parse(fs.readFileSync(fp, 'utf8')), true);
+    } catch {}
+  }
+  if (!byNome.size) return null;
+  const seen = new Set();
+  robeQueue = robeQueue.filter((n) => {
+    if (!n || seen.has(n)) return false;
+    seen.add(n);
+    return true;
+  });
+  return {
+    perfis: Array.from(byNome.values()),
+    robes,
+    robeQueue,
+    sys,
+    autoMode,
+    serverConfig: serverConfigPick,
+    ts: ts || Date.now()
+  };
+}
+
 function __readJsonSafeFallback(p, defVal) {
   try {
     if (fileStore && typeof fileStore.readJsonSafe === 'function') {
@@ -58,19 +116,6 @@ function __readGateBStateSafe() {
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
 let _lastBaselineAt = 0;
 let __virtusMetricsCache = { at: 0, key: '', value: null };
-let __statusJournalRefreshInflight = false;
-
-function __scheduleStatusJournalRefresh(workerClient) {
-  if (__statusJournalRefreshInflight) return;
-  if (!workerClient || typeof workerClient.sendWorkerCommand !== 'function') return;
-  __statusJournalRefreshInflight = true;
-  setImmediate(() => {
-    Promise.resolve()
-      .then(() => workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000, fresh: true }))
-      .catch(() => null)
-      .finally(() => { __statusJournalRefreshInflight = false; });
-  });
-}
 
 function __buildUtcMinus3DayWindow(dayDelta) {
   const nowMs = Date.now();
@@ -643,27 +688,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       .map((p) => [p.nome, buildBasePerfil(p)])
   );
 
-  // 2) Overlay vivo do cluster. Se não vier, o baseline continua e a UI não zera.
+  // 2) Jornal HUD no disco: responde agora. A célula não entra nessa pintura.
   let overlayINST = null;
-  try {
-    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 4000, fresh: true });
-  } catch (e) {
-    warningINST = 'status temporarily unavailable';
-  }
-  // get-status disputa com o Abrir Todos e estoura em 4s. Sem overlay, a tela
-  // guarda o ultimo quadro (e no F5 perde Abrindo / Tudo aberto). O jornal
-  // status.json e o mesmo que o CT ja mostra.
-  if (!overlayINST || !Array.isArray(overlayINST.perfis) || overlayINST.perfis.length === 0) {
-    try {
-      const journal = (fileStore && typeof fileStore.readJsonSafe === 'function')
-        ? fileStore.readJsonSafe(fileStore.statusPath, null)
-        : null;
-      if (journal && Array.isArray(journal.perfis) && journal.perfis.length > 0) {
-        overlayINST = journal;
-        if (warningINST === 'status temporarily unavailable') warningINST = undefined;
-      }
-    } catch {}
-  }
+  try { overlayINST = __readHudJournalOverlay(); } catch { overlayINST = null; }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];
     for (const o of overlayINST.perfis) {
@@ -779,7 +806,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     }
   })();
   const gateB = __readGateBStateSafe();
-  const virtusMetrics = __getVirtusMetricsCached({ perfis: perfisFinalINST });
+  // chats_respondidos de cada conta não entra na pintura. A tela não lê isso.
+  const virtusMetrics = (__virtusMetricsCache && __virtusMetricsCache.value) || null;
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -911,7 +939,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
   })();
   const gateB = __readGateBStateSafe();
-  const virtusMetrics = __getVirtusMetricsCached({ perfis: perfisSkeleton });
+  const virtusMetrics = (__virtusMetricsCache && __virtusMetricsCache.value) || null;
   res.json({
     perfis: perfisSkeleton,
     robes: {},
