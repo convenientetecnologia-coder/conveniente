@@ -650,6 +650,20 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   } catch (e) {
     warningINST = 'status temporarily unavailable';
   }
+  // get-status disputa com o Abrir Todos e estoura em 4s. Sem overlay, a tela
+  // guarda o ultimo quadro (e no F5 perde Abrindo / Tudo aberto). O jornal
+  // status.json e o mesmo que o CT ja mostra.
+  if (!overlayINST || !Array.isArray(overlayINST.perfis) || overlayINST.perfis.length === 0) {
+    try {
+      const journal = (fileStore && typeof fileStore.readJsonSafe === 'function')
+        ? fileStore.readJsonSafe(fileStore.statusPath, null)
+        : null;
+      if (journal && Array.isArray(journal.perfis) && journal.perfis.length > 0) {
+        overlayINST = journal;
+        if (warningINST === 'status temporarily unavailable') warningINST = undefined;
+      }
+    } catch {}
+  }
   if (!baseMap.size && overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
     const derivedBaseline = [];
     for (const o of overlayINST.perfis) {

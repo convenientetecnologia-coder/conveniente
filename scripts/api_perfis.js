@@ -114,7 +114,7 @@ module.exports = (app, workerClient, fileStore) => {
   };
   async function chromeAbertoNoCluster(nome) {
     try {
-      await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 2500, fresh: true });
+      await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 2500, fresh: true, proveHud: true });
       if (workerClient && typeof workerClient.chromeProvado === 'function') {
         const proved = workerClient.chromeProvado(nome);
         if (proved === true || proved === false) return proved;

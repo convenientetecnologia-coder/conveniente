@@ -1,7 +1,4 @@
 // scripts/api_sys.js
-const fs = require('fs');
-const path = require('path');
-
 // Militar: nenhuma rota duplicada. Só fotos aqui. /api/sys fica em api_status.js.
 
 module.exports = (app, workerClient, fileStore) => {
@@ -9,14 +6,12 @@ module.exports = (app, workerClient, fileStore) => {
   app.get('/api/fotos/count', (req, res) => {
     try {
       const fotosMod = require('./fotos.js');
-      const dir = fotosMod.resolveFotosDir();
-      let count = 0;
-      let list = [];
-      try {
-        list = fs.readdirSync(dir, { withFileTypes: true });
-        count = list.filter(ent => ent.isFile() && /.(jpe?g|png)$/i.test(ent.name)).length;
-      } catch {}
-      res.json({ ok: true, dir, count });
+      const inv = (typeof fotosMod.countFotosInventory === 'function')
+        ? fotosMod.countFotosInventory()
+        : null;
+      const dir = inv && inv.dir ? inv.dir : fotosMod.resolveFotosDir();
+      const count = inv ? (Number(inv.total || 0) || 0) : 0;
+      res.json({ ok: true, dir, count, fotos: inv || null });
     } catch (e) {
       res.json({ ok: false, error: e && e.message || String(e) });
     }

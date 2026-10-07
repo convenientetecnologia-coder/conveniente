@@ -1340,13 +1340,17 @@ async function createCluster() {
       }
     }
     if (type === 'get-status' && !nome) {
-      const bypass = !!(opts && (opts.bypassStatusCache === true || opts.fresh === true));
+      const proveHud = !!(opts && opts.proveHud === true);
+      const bypass = proveHud || !!(opts && (opts.bypassStatusCache === true || opts.fresh === true));
       const nowTs = Date.now();
-      if (!bypass && STATUS_CACHE_MS > 0 && statusAggCache.value && (nowTs - statusAggCache.at) < STATUS_CACHE_MS) {
+      if (!proveHud && !bypass && STATUS_CACHE_MS > 0 && statusAggCache.value && (nowTs - statusAggCache.at) < STATUS_CACHE_MS) {
         return statusAggCache.value;
       }
-      if (statusAggInflight) {
+      if (!proveHud && statusAggInflight) {
         return statusAggInflight;
+      }
+      if (proveHud && statusAggInflight) {
+        try { await statusAggInflight; } catch {}
       }
       const runAgg = (async () => {
       const allPerfis = fileStore.loadPerfisJson() || [];
@@ -1518,8 +1522,13 @@ async function createCluster() {
         } else if (liveChild) {
           try { nodesDebug.push({ node: i + 1, source: 'none', ok: false }); } catch {}
         }
-        // Célula viva: o HUD (aberto/humano/trabalhando) sai da RAM, não do arquivo.
-        if (liveChild && missingIdx.indexOf(i) < 0) {
+        // Jornal fresco (worker grava ~1s) já traz aberto/humano/trabalhando.
+        // Perguntar à célula em toda pintura trava o index no Abrir Todos e a tela fica no quadro velho.
+        // proveHud (renomear/excluir) ainda lê a RAM. Jornal velho também.
+        const proveHud = !!(opts && opts.proveHud === true);
+        const ageMs = fb && Number.isFinite(Number(fb.ageMs)) ? Number(fb.ageMs) : Number.POSITIVE_INFINITY;
+        const journalCoversHud = !proveHud && !!(fb && fb.json && ageMs >= 0 && ageMs < HUD_REFRESH_AGE_MS);
+        if (liveChild && missingIdx.indexOf(i) < 0 && !journalCoversHud) {
           missingIdx.push(i);
           if (fb && fb.json && !staleFallback.has(i)) staleFallback.set(i, fb.json);
         }
