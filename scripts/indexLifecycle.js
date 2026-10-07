@@ -33,6 +33,9 @@ let installed = false;
 let role = "index";
 let extra = {};
 let heartTimer = null;
+let bootTs = 0;
+let lastHeavyHeartbeatAt = 0;
+let heavyHeartbeatCache = null;
 
 function ensureDir() {
   try { fs.mkdirSync(DADOS, { recursive: true }); } catch {}
@@ -166,27 +169,58 @@ function appendPulse(event, patch) {
   } catch {}
 }
 
+function writeJsonAtomic(filePath, obj) {
+  const body = JSON.stringify(obj);
+  const tmp = filePath + "." + String(process.pid) + ".tmp";
+  fs.writeFileSync(tmp, body, "utf8");
+  try {
+    fs.copyFileSync(tmp, filePath);
+  } catch {
+    fs.writeFileSync(filePath, body, "utf8");
+  }
+  try { fs.unlinkSync(tmp); } catch {}
+}
+
+// Pulso leve, so do index. Worker nao pode escrever aqui: o porteiro mata
+// o pid deste arquivo quando o relogio congela. O ts vai pro disco ANTES
+// do trecho pesado (frota / tamanho de log), senao o proprio pulso parece travado.
 function writeHeartbeat() {
   try {
+    if (role !== "index") return;
     ensureDir();
+    if (!bootTs) bootTs = Date.now();
     const mem = process.memoryUsage();
-    const body = JSON.stringify({
-      ts: Date.now(),
-      iso: new Date().toISOString(),
-      role,
+    const now = Date.now();
+    const body = {
+      ts: now,
+      iso: new Date(now).toISOString(),
+      role: "index",
+      indexMain: true,
       pid: process.pid,
       ppid: process.ppid || null,
+      bootTs,
       uptimeSec: Math.round(process.uptime()),
       rssMB: Math.round((mem.rss || 0) / 1048576),
       freeMB: Math.round(os.freemem() / 1048576),
-      totalMB: Math.round(os.totalmem() / 1048576),
-      fleet: readFleetSnap(),
-      jsonlSizes: (function () {
-        try { return require("./nativeCrashLog.js").statJsonlSizes(); } catch { return null; }
-      })()
-    });
-    fs.writeFileSync(HEART_PATH, body, "utf8");
-    try { require("./nativeCrashLog.js").writeReportsIndex(); } catch {}
+      totalMB: Math.round(os.totalmem() / 1048576)
+    };
+    if (heavyHeartbeatCache) {
+      body.fleet = heavyHeartbeatCache.fleet;
+      body.jsonlSizes = heavyHeartbeatCache.jsonlSizes;
+    }
+    writeJsonAtomic(HEART_PATH, body);
+    if ((now - lastHeavyHeartbeatAt) >= 60000) {
+      lastHeavyHeartbeatAt = now;
+      let fleet = null;
+      let jsonlSizes = null;
+      try { fleet = readFleetSnap(); } catch { fleet = null; }
+      try { jsonlSizes = require("./nativeCrashLog.js").statJsonlSizes(); } catch { jsonlSizes = null; }
+      heavyHeartbeatCache = { fleet, jsonlSizes };
+      body.fleet = fleet;
+      body.jsonlSizes = jsonlSizes;
+      writeJsonAtomic(HEART_PATH, body);
+      try { require("./nativeCrashLog.js").writeReportsIndex(); } catch {}
+    }
   } catch {}
 }
 
@@ -300,8 +334,11 @@ function install(opts) {
 
   noteUnexpectedDead();
   append("boot", { cwd: clip(process.cwd(), 200), fleet: readFleetSnap() });
-  writeHeartbeat();
-  writeBootContext();
+  if (role === "index") {
+    if (!bootTs) bootTs = Date.now();
+    writeHeartbeat();
+    writeBootContext();
+  }
 
   const onFatal = (event) => (err) => {
     append(event, {
@@ -341,7 +378,7 @@ function install(opts) {
   } catch {}
 
   if (role === "index") {
-    heartTimer = setInterval(() => { writeHeartbeat(); }, 20000);
+    heartTimer = setInterval(() => { writeHeartbeat(); }, 5000);
     try { heartTimer.unref(); } catch {}
   }
 

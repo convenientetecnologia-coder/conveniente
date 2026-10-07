@@ -1,8 +1,10 @@
 # C:\auto_vigia\manutencao.ps1  (fonte: kit\manutencao.ps1)
 # TUDO-EM-UM: porteiro + start/stop/status
 # Nao altera C:\conveniente
-# Regra: se 8088 ou janela Conveniente_Node, NUNCA mata e NUNCA sobe de novo.
+# Regra: 8088 em LISTEN = index no ar. Nao sobe outro por cima.
 # Host sem 8088 por 3 min = zumbi: ai sim mata e sobe um.
+# Excecao: pulso index_heartbeat.json parado, duas leituras, pid confirmado,
+# folga de boot, no maximo 3 reinicios em 6h. Ai mata a janela e sobe um.
 # RAM (StandbyList) NAO vive neste loop (v5.2.1-clean-cpu).
 # Este script so GARANTE a tarefa SYSTEM ConvenienteDiskClean (on-demand).
 # Quem cronometra 15 min e pede o Run e o Conveniente (chromeMemorySweep.js).
@@ -30,6 +32,16 @@ $PidFile     = Join-Path $Root 'master.pid'
 $PanelPort   = 8088
 $Version     = 'v5.2.1-clean-cpu'
 $IndexStartGraceSec = 180
+# Travamento do index: a porta continua em LISTEN, o event loop nao.
+# 150s e maior que o POST lento (15-60s). Duas leituras do loop (30s).
+# Boot < 4 min nao conta. 15 min entre reinicios. 3 em 6h, depois so loga.
+$IndexStallAgeSec = 150
+$IndexStallBootGraceSec = 240
+$IndexStallCooldownSec = 900
+$IndexStallMaxKills = 3
+$IndexStallWindowSec = 21600
+$IndexStallBootSkewMs = 120000
+$IndexStallAbsurdAgeSec = 43200
 $NodeRuntimePs1 = Join-Path $Conveniente 'scripts\nodeRuntime.ps1'
 
 try {
@@ -1097,6 +1109,185 @@ function Do-Pulse {
     Start-LoopProcess
 }
 
+function Read-IndexHeartbeat {
+    $path = Join-Path $Conveniente 'dados\index_heartbeat.json'
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Get-StallKillEpochs {
+    $raw = [string](Get-EstadoProp (Get-Estado) 'stallKillEpochs')
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $cut = $now - [int64]$IndexStallWindowSec
+    $out = New-Object System.Collections.Generic.List[int64]
+    foreach ($part in ($raw -split ',')) {
+        $txt = ([string]$part).Trim()
+        if (-not $txt) { continue }
+        try {
+            $n = [int64]$txt
+            if ($n -gt $cut) { [void]$out.Add($n) }
+        } catch {}
+    }
+    return ,$out
+}
+
+# Pid do arquivo + node.exe + bootTs bate com o StartTime.
+# Worker nao escreve esse arquivo. Pid reaproveitado nao passa no bootTs.
+function Test-IndexHeartbeatOwner($hb) {
+    $procId = 0
+    try { $procId = [int](Get-EstadoProp $hb 'pid') } catch { return $null }
+    if ($procId -le 0) { return $null }
+    if ([string](Get-EstadoProp $hb 'role') -ne 'index') { return $null }
+    if ((Get-EstadoProp $hb 'indexMain') -ne $true) { return $null }
+    $boot = 0L
+    try { $boot = [int64](Get-EstadoProp $hb 'bootTs') } catch { return $null }
+    if ($boot -le 0) { return $null }
+    $proc = $null
+    try { $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue } catch { $proc = $null }
+    if (-not $proc) { return $null }
+    if ([string]$proc.ProcessName -ne 'node') { return $null }
+    try {
+        $utc = $proc.StartTime.ToUniversalTime()
+        $dto = New-Object System.DateTimeOffset $utc
+        $startMs = $dto.ToUnixTimeMilliseconds()
+        $skew = [math]::Abs($startMs - $boot)
+        if ($skew -gt $IndexStallBootSkewMs) { return $null }
+        $uptime = [int][math]::Floor(((Get-Date) - $proc.StartTime).TotalSeconds)
+        if ($uptime -lt 0) { return $null }
+        return [pscustomobject]@{ Pid = $procId; UptimeSec = $uptime }
+    } catch {
+        return $null
+    }
+}
+
+function Stop-StalledIndex([int]$IndexPid) {
+    try { [void](Stop-ConvenienteConsoleHosts) } catch {}
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        $up = $false
+        $hosts = 0
+        try { $up = [bool](Test-Port8088) } catch { $up = $true }
+        try { $hosts = [int](Count-ConvenienteNodeHosts) } catch { $hosts = 1 }
+        if (-not $up -and $hosts -le 0) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    $listen = 0
+    try { $listen = [int](Get-ListenPid $PanelPort) } catch { $listen = 0 }
+    if ($listen -gt 0 -and $listen -eq $IndexPid) {
+        & taskkill.exe /F /PID $listen 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+    }
+    $up2 = $true
+    $hosts2 = 1
+    try { $up2 = [bool](Test-Port8088) } catch { $up2 = $true }
+    try { $hosts2 = [int](Count-ConvenienteNodeHosts) } catch { $hosts2 = 1 }
+    return (-not $up2 -and $hosts2 -le 0)
+}
+
+# So roda com a porta no ar. Nao mexe em celula, chrome nem worker solto.
+function Invoke-IndexStallGuard {
+    $hb = Read-IndexHeartbeat
+    if (-not $hb) { return $null }
+    $hbTs = 0L
+    try { $hbTs = [int64](Get-EstadoProp $hb 'ts') } catch { return $null }
+    if ($hbTs -le 0) { return $null }
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $age = [int](($nowMs - $hbTs) / 1000)
+    if ($age -lt 0 -or $age -lt $IndexStallAgeSec) {
+        $prevStrikes = 0
+        try { $prevStrikes = [int](Get-EstadoProp (Get-Estado) 'stallStrikes') } catch { $prevStrikes = 0 }
+        if ($prevStrikes -gt 0) {
+            Save-EstadoFields @{ stallSuspectPid = 0; stallSuspectHbTs = 0; stallStrikes = 0 }
+        }
+        return $null
+    }
+    if ($age -gt $IndexStallAbsurdAgeSec) {
+        $logged = [string](Get-EstadoProp (Get-Estado) 'stallAbsurdHbTs')
+        if ($logged -ne [string]$hbTs) {
+            Save-EstadoFields @{ stallAbsurdHbTs = [string]$hbTs }
+            Write-Log "stall_guard_age_absurd age=$age"
+        }
+        return $null
+    }
+    $owner = Test-IndexHeartbeatOwner $hb
+    if (-not $owner) {
+        $loggedId = [string](Get-EstadoProp (Get-Estado) 'stallIdentityHbTs')
+        if ($loggedId -ne [string]$hbTs) {
+            Save-EstadoFields @{ stallIdentityHbTs = [string]$hbTs; stallSuspectPid = 0; stallSuspectHbTs = 0; stallStrikes = 0 }
+            Write-Log "stall_guard_identity age=$age"
+        }
+        return $null
+    }
+    if ([int]$owner.UptimeSec -lt $IndexStallBootGraceSec) { return $null }
+
+    $est = Get-Estado
+    $strikes = 0
+    $prevPid = 0
+    $prevTs = 0L
+    try { $strikes = [int](Get-EstadoProp $est 'stallStrikes') } catch { $strikes = 0 }
+    try { $prevPid = [int](Get-EstadoProp $est 'stallSuspectPid') } catch { $prevPid = 0 }
+    try { $prevTs = [int64](Get-EstadoProp $est 'stallSuspectHbTs') } catch { $prevTs = 0 }
+    if ($prevPid -eq [int]$owner.Pid -and $prevTs -eq $hbTs) { $strikes = $strikes + 1 }
+    else { $strikes = 1 }
+    Save-EstadoFields @{
+        stallSuspectPid = [int]$owner.Pid
+        stallSuspectHbTs = $hbTs
+        stallStrikes = $strikes
+    }
+    if ($strikes -lt 2) {
+        Write-Log ("stall_guard_suspect pid=$($owner.Pid) age=$age uptime=$($owner.UptimeSec) strike=$strikes")
+        return 'stall_suspect'
+    }
+
+    $epochs = Get-StallKillEpochs
+    $nowSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $lastKill = 0L
+    if ($epochs -and $epochs.Count -gt 0) { $lastKill = [int64]$epochs[$epochs.Count - 1] }
+    $sinceKill = [int64]($nowSec - $lastKill)
+    if ($lastKill -gt 0 -and $sinceKill -ge 0 -and $sinceKill -lt $IndexStallCooldownSec) {
+        $loggedCd = [string](Get-EstadoProp (Get-Estado) 'stallCooldownHbTs')
+        if ($loggedCd -ne [string]$hbTs) {
+            Save-EstadoFields @{ stallCooldownHbTs = [string]$hbTs }
+            Write-Log "stall_guard_cooldown pid=$($owner.Pid) age=$age since=$sinceKill"
+        }
+        return $null
+    }
+    if ($epochs -and $epochs.Count -ge $IndexStallMaxKills) {
+        $loggedB = [string](Get-EstadoProp (Get-Estado) 'stallBudgetHbTs')
+        if ($loggedB -ne [string]$hbTs) {
+            Save-EstadoFields @{ stallBudgetHbTs = [string]$hbTs }
+            Write-Log "stall_guard_budget pid=$($owner.Pid) age=$age kills=$($epochs.Count)"
+        }
+        return $null
+    }
+
+    if ($null -eq $epochs) { $epochs = New-Object System.Collections.Generic.List[int64] }
+    [void]$epochs.Add($nowSec)
+    Save-EstadoFields @{
+        stallKillEpochs = ($epochs -join ',')
+        stallLastKillUtc = (Get-Date).ToUniversalTime().ToString('o')
+        stallSuspectPid = 0
+        stallSuspectHbTs = 0
+        stallStrikes = 0
+    }
+    Write-Log ("stall_guard_kill pid=$($owner.Pid) age=$age uptime=$($owner.UptimeSec) kills=$($epochs.Count)")
+    $down = $false
+    try { $down = [bool](Stop-StalledIndex -IndexPid ([int]$owner.Pid)) } catch { $down = $false }
+    if (-not $down) {
+        Write-Log "stall_guard_kill_incomplete pid=$($owner.Pid)"
+        return 'stall_kill_incomplete'
+    }
+    try { Do-Start -Reason 'STALL' | Out-Null } catch {
+        Write-Log "stall_guard_start_fail $($_.Exception.Message)"
+        return 'stall_start_fail'
+    }
+    return 'stall_restart'
+}
+
 function Do-Loop {
     Ensure-Dirs
     Stop-RivalVigia
@@ -1168,6 +1359,9 @@ function Do-Loop {
                 $downStreak = 0
                 $IndexDownSince = $null
                 $hammeredThisDown = $false
+                $stallAct = $null
+                try { $stallAct = Invoke-IndexStallGuard } catch { $stallAct = $null }
+                if ($stallAct) { $actions += [string]$stallAct }
             }
             elseif ($hosts -gt 0) {
                 if (-not $IndexDownSince) { $IndexDownSince = Get-Date }

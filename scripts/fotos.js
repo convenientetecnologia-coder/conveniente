@@ -776,7 +776,22 @@ async function clearAccountHistory(nomeConta) {
  * Inventário enterprise de fotos (raiz Desktop/fotos + subpastas p/m/g).
  * Conta só arquivos de imagem (jpg/jpeg/png). Pastas ausentes = 0.
  */
+let __fotosInvCache = null;
+let __fotosInvCacheAt = 0;
+const FOTOS_INV_CACHE_MS = 120000;
+
 function countFotosInventory() {
+  const nowMs = Date.now();
+  if (__fotosInvCache && (nowMs - __fotosInvCacheAt) >= 0 && (nowMs - __fotosInvCacheAt) < FOTOS_INV_CACHE_MS) {
+    return {
+      dir: __fotosInvCache.dir,
+      root: __fotosInvCache.root,
+      p: __fotosInvCache.p,
+      m: __fotosInvCache.m,
+      g: __fotosInvCache.g,
+      total: __fotosInvCache.total
+    };
+  }
   const dir = resolveFotosDir();
   const out = {
     dir: String(dir || ''),
@@ -802,7 +817,16 @@ function countFotosInventory() {
     out.g = countFilesIn(path.join(dir, 'g'));
     out.total = out.root + out.p + out.m + out.g;
   } catch {}
-  return out;
+  __fotosInvCache = out;
+  __fotosInvCacheAt = nowMs;
+  return {
+    dir: out.dir,
+    root: out.root,
+    p: out.p,
+    m: out.m,
+    g: out.g,
+    total: out.total
+  };
 }
 
 module.exports = {

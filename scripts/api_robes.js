@@ -196,10 +196,18 @@ module.exports = (app, workerClient, fileStore) => {
         return typeof x === 'string' ? String(x || '').trim() : '';
       };
       const queueRaw = (st && Array.isArray(st.queue)) ? st.queue : [];
-      const queue = queueRaw.map(formatItem).filter(Boolean);
       const offset = Math.max(0, Math.floor(Number(req.query?.offset || 0) || 0));
       const limit = Math.max(50, Math.min(5000, Math.floor(Number(req.query?.limit || 800) || 800)));
-      const slice = queue.slice(offset, offset + limit);
+      // Offset da tela e o indice na fila ja filtrada (sem cidade nao conta).
+      // A pagina para quando enche; o total continua a contagem visivel.
+      const slice = [];
+      let queueTotal = 0;
+      for (let i = 0; i < queueRaw.length; i++) {
+        const label = formatItem(queueRaw[i]);
+        if (!label) continue;
+        if (queueTotal >= offset && slice.length < limit) slice.push(label);
+        queueTotal += 1;
+      }
       const consumedTotal = st ? (Math.max(0, Number(st.consumedTotal || 0) || 0)) : 0;
       const lastBlockStartAt = st ? (Math.max(0, Number(st.lastBlockStartAtConsumedTotal || 0) || 0)) : 0;
       const lastBlockLen = st ? (Math.max(0, Number(st.lastBlockQueueLen || 0) || 0)) : 0;
@@ -216,7 +224,7 @@ module.exports = (app, workerClient, fileStore) => {
         regenPending: !!(st && st.regenPending),
         failures: (st && st.failures) ? st.failures : null,
         meta: (st && st.meta && typeof st.meta === 'object') ? st.meta : null,
-        queueTotal: queue.length,
+        queueTotal,
         queuePage: { offset, limit, returned: slice.length },
         queue: slice,
         consumedTotal,

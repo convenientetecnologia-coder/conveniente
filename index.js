@@ -3986,7 +3986,12 @@ let __serverEventLastIdentitySig = '';
 let __serverEventPendingHash = '';
 let __serverEventPendingTicks = 0;
 let __serverEventBridgeStartedAt = 0;
+let __serverEventBridgeGen = 0;
+let __serverEventBridgeHungLogged = false;
 const SERVER_EVENT_TICK_MAX_MS = Math.max(8000, Number(process.env.SERVER_EVENT_TICK_MAX_MS || 12000) || 12000);
+// Await preso com o loop vivo. Nao solta no POST lento de 15s.
+// Stall sincrono nem chega aqui: o timer nao dispara enquanto a thread nao volta.
+const SERVER_EVENT_AWAIT_RELEASE_MS = 150000;
 
 function __serverEventHostIdPath() {
   return path.join(__dirname, 'dados', '.telemetry_hostid');
@@ -4373,16 +4378,27 @@ async function __serverEventBridgeTick(reason) {
   const now0 = Date.now();
   if (__serverEventBridgeInFlight) {
     const hungMs = __serverEventBridgeStartedAt ? (now0 - __serverEventBridgeStartedAt) : 0;
-    if (hungMs > SERVER_EVENT_TICK_MAX_MS) {
+    if (hungMs > SERVER_EVENT_TICK_MAX_MS && !__serverEventBridgeHungLogged) {
+      __serverEventBridgeHungLogged = true;
       __appendServerEventBridgeLog('bridge_tick_watchdog_release', {
         hungMs,
-        reason: String(reason || '')
+        reason: String(reason || ''),
+        held: hungMs < SERVER_EVENT_AWAIT_RELEASE_MS
       });
-      __serverEventBridgeInFlight = false;
-    } else {
-      return { ok: false, skipped: true, error: 'bridge_in_flight' };
     }
+    // Nao abre outro tick por cima do POST de 15s. So larga o lugar se o
+    // await passou de 150s com o loop vivo. O finally do tick velho nao
+    // apaga o tick novo (geracao).
+    if (hungMs >= SERVER_EVENT_AWAIT_RELEASE_MS) {
+      __serverEventBridgeGen += 1;
+      __serverEventBridgeInFlight = false;
+      __serverEventBridgeStartedAt = 0;
+      __serverEventBridgeHungLogged = false;
+    }
+    return { ok: false, skipped: true, error: 'bridge_in_flight' };
   }
+  const __bridgeGen = ++__serverEventBridgeGen;
+  __serverEventBridgeHungLogged = false;
   __serverEventBridgeInFlight = true;
   __serverEventBridgeStartedAt = now0;
   try {
@@ -4618,8 +4634,10 @@ async function __serverEventBridgeTick(reason) {
     logger.warn('[SERVER_EVENT_BRIDGE] tick falhou', { error: (e && e.message) || String(e) });
     return { ok: false, error: (e && e.message) || String(e) };
   } finally {
-    __serverEventBridgeInFlight = false;
-    __serverEventBridgeStartedAt = 0;
+    if (__bridgeGen === __serverEventBridgeGen) {
+      __serverEventBridgeInFlight = false;
+      __serverEventBridgeStartedAt = 0;
+    }
   }
 }
 
