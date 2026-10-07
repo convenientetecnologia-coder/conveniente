@@ -563,22 +563,24 @@ function normalizeRobeQueueRawItem(x) {
     const locationPool = Array.isArray(x.locationPool || x.location_pool)
       ? (x.locationPool || x.location_pool).map((row) => String(row == null ? '' : row).trim()).filter(Boolean)
       : null;
-    return { city, size, scope, neighborhoodId, neighborhoodName, locationPool };
+    const boost = x.boost === true || x.reforco === true;
+    return { city, size, scope, neighborhoodId, neighborhoodName, locationPool, boost };
   }
   return null;
 }
 
 function robeQueueItemToSlot(item) {
   const n = normalizeRobeQueueRawItem(item);
-  if (!n) return { city: '', size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
-  if (typeof n === 'string') return { city: n, size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
+  if (!n) return { city: '', size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null, boost: false };
+  if (typeof n === 'string') return { city: n, size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null, boost: false };
   return {
     city: String(n.city || '').trim(),
     size: n.size || null,
     scope: n.scope || null,
     neighborhoodId: n.neighborhoodId || null,
     neighborhoodName: n.neighborhoodName || null,
-    locationPool: Array.isArray(n.locationPool) ? n.locationPool.slice() : null
+    locationPool: Array.isArray(n.locationPool) ? n.locationPool.slice() : null,
+    boost: n.boost === true
   };
 }
 
@@ -593,7 +595,9 @@ function formatRobeQueueItemLabel(item) {
   } else if (slot.scope === 'city_fallback') {
     label += ' > [cidade inteira]';
   }
-  return slot.size ? `${label} [${slot.size}]` : label;
+  if (slot.size) label = `${label} [${slot.size}]`;
+  if (slot.boost) label += ' [reforço]';
+  return label;
 }
 
 function getRobeQueueCountryId(cfg) {
@@ -872,6 +876,57 @@ function buildRobeV2ShuffledQueue(countsByCity, { antiStreakPenalty = 0.35 } = {
   return queue;
 }
 
+function buildRobeV2ShuffledQueueWithBoost(baseCounts, boostCounts, { antiStreakPenalty = 0.35 } = {}) {
+  const rem = {};
+  let total = 0;
+  const names = new Set([
+    ...Object.keys(baseCounts || {}),
+    ...Object.keys(boostCounts || {})
+  ]);
+  for (const city of names) {
+    const base = Math.max(0, Number(baseCounts && baseCounts[city] || 0) || 0);
+    const boost = Math.max(0, Number(boostCounts && boostCounts[city] || 0) || 0);
+    if (!base && !boost) continue;
+    rem[city] = { base, boost };
+    total += base + boost;
+  }
+  const queue = [];
+  let prev = '';
+  while (total > 0) {
+    const candidates = [];
+    for (const city of Object.keys(rem)) {
+      if (rem[city].base > 0) candidates.push({ city, boost: false, n: rem[city].base });
+      if (rem[city].boost > 0) candidates.push({ city, boost: true, n: rem[city].boost });
+    }
+    if (!candidates.length) break;
+    const hasOtherCity = candidates.some((row) => row.city !== prev);
+    let sum = 0;
+    const weighted = candidates.map((row) => {
+      const penalty = (row.city === prev && hasOtherCity)
+        ? Math.max(0.01, Math.min(1, Number(antiStreakPenalty) || 0.35))
+        : 1;
+      const w = Math.max(0.0001, row.n * penalty);
+      sum += w;
+      return { ...row, w };
+    });
+    let pick = Math.random() * sum;
+    let chosen = weighted[weighted.length - 1];
+    for (const row of weighted) {
+      pick -= row.w;
+      if (pick <= 0) {
+        chosen = row;
+        break;
+      }
+    }
+    queue.push(chosen.boost ? { city: chosen.city, boost: true } : chosen.city);
+    if (chosen.boost) rem[chosen.city].boost -= 1;
+    else rem[chosen.city].base -= 1;
+    total -= 1;
+    prev = chosen.city;
+  }
+  return queue;
+}
+
 /**
  * Aloca L postagens em P/M/G com pesos efetivos (fixo 40/30/30).
  * Largest remainder; desempate P > M > G.
@@ -932,16 +987,21 @@ function allocatePmgSlots(L, pmg) {
 }
 
 function buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty = 0.35 } = {}) {
-  // slotsByCity: { city: { P:n, M:n, G:n } }
+  // slotsByCity: { city: { P, M, G, boostP, boostM, boostG } }
   const rem = {};
   let total = 0;
   for (const [city, sizes] of Object.entries(slotsByCity || {})) {
-    const p = Math.max(0, Number(sizes && sizes.P || 0) || 0);
-    const m = Math.max(0, Number(sizes && sizes.M || 0) || 0);
-    const g = Math.max(0, Number(sizes && sizes.G || 0) || 0);
-    const cityTotal = p + m + g;
+    const piles = [
+      { size: 'P', boost: false, n: Math.max(0, Number(sizes && sizes.P || 0) || 0) },
+      { size: 'M', boost: false, n: Math.max(0, Number(sizes && sizes.M || 0) || 0) },
+      { size: 'G', boost: false, n: Math.max(0, Number(sizes && sizes.G || 0) || 0) },
+      { size: 'P', boost: true, n: Math.max(0, Number(sizes && sizes.boostP || 0) || 0) },
+      { size: 'M', boost: true, n: Math.max(0, Number(sizes && sizes.boostM || 0) || 0) },
+      { size: 'G', boost: true, n: Math.max(0, Number(sizes && sizes.boostG || 0) || 0) }
+    ].filter((row) => row.n > 0);
+    const cityTotal = piles.reduce((acc, row) => acc + row.n, 0);
     if (!cityTotal) continue;
-    rem[city] = { P: p, M: m, G: g, total: cityTotal };
+    rem[city] = { piles, total: cityTotal };
     total += cityTotal;
   }
   const queue = [];
@@ -970,30 +1030,31 @@ function buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty = 0.35 } = {}
       }
     }
     const bucket = rem[chosenCity];
-    const sizeCandidates = ['P', 'M', 'G'].filter((s) => bucket[s] > 0);
+    const sizeCandidates = bucket.piles.filter((row) => row.n > 0);
     let sumSize = 0;
-    const weightedSizes = sizeCandidates.map((size) => {
-      const base = bucket[size];
-      const penalty = (chosenCity === prevCity && size === prevSize && sizeCandidates.length > 1) ? 0.55 : 1;
-      const w = Math.max(0.0001, base * penalty);
+    const weightedSizes = sizeCandidates.map((row) => {
+      const penalty = (chosenCity === prevCity && row.size === prevSize && sizeCandidates.length > 1) ? 0.55 : 1;
+      const w = Math.max(0.0001, row.n * penalty);
       sumSize += w;
-      return { size, w };
+      return { row, w };
     });
     let pickS = Math.random() * sumSize;
-    let chosenSize = weightedSizes[weightedSizes.length - 1].size;
+    let chosen = weightedSizes[weightedSizes.length - 1].row;
     for (const row of weightedSizes) {
       pickS -= row.w;
       if (pickS <= 0) {
-        chosenSize = row.size;
+        chosen = row.row;
         break;
       }
     }
-    queue.push({ city: chosenCity, size: chosenSize });
-    bucket[chosenSize] -= 1;
+    const item = { city: chosenCity, size: chosen.size };
+    if (chosen.boost) item.boost = true;
+    queue.push(item);
+    chosen.n -= 1;
     bucket.total -= 1;
     total -= 1;
     prevCity = chosenCity;
-    prevSize = chosenSize;
+    prevSize = chosen.size;
   }
   return queue;
 }
@@ -1311,6 +1372,7 @@ function buildRobeV4ShuffledQueue(slotBuckets, { antiStreakPenalty = 0.35 } = {}
         locationPool: Array.isArray(slot.locationPool) ? slot.locationPool.slice() : null
       }
     });
+    if (slot.boost === true) rem[rem.length - 1].slot.boost = true;
     total += count;
   }
   const queue = [];
@@ -1397,6 +1459,8 @@ async function fetchRobeV2CityStatsFromCT(cities, { windowDays = 3, country = ''
       return {
         ok: true,
         statsByCity: j.statsByCity || {},
+        statsByCityBase: (j.statsByCityBase && typeof j.statsByCityBase === 'object') ? j.statsByCityBase : (j.statsByCity || {}),
+        boostSig: j.boostSig != null ? String(j.boostSig) : '',
         requestId: j.requestId || null,
         missingCities: Array.isArray(j.missingCities) ? j.missingCities : [],
         country: j.country || country || ''
@@ -1469,6 +1533,35 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   const degradedReason = degradedReasons.join('+') || null;
   const calc = computeRobeV2Counts({ cities, statsByCity: statsByCity, targetN: plan.targetN, tuning });
   if (!calc.ok) return { ok: false, error: calc.error || 'counts_calc_failed' };
+  const statsByCityBase = (stats && stats.statsByCityBase && typeof stats.statsByCityBase === 'object')
+    ? stats.statsByCityBase
+    : statsByCity;
+  const calcBase = computeRobeV2Counts({ cities, statsByCity: statsByCityBase, targetN: plan.targetN, tuning });
+  if (!calcBase.ok) return { ok: false, error: calcBase.error || 'counts_base_failed' };
+  const boostDeltaForCity = (city) => {
+    const effN = Math.max(0, Number(calc.countsByCity && calc.countsByCity[city] || 0) || 0);
+    const baseN = Math.max(0, Number(calcBase.countsByCity && calcBase.countsByCity[city] || 0) || 0);
+    const st = statsByCity && statsByCity[city] ? statsByCity[city] : null;
+    const extra = Math.max(0, Number(st && st.motoristasReforco || 0) || 0);
+    if (!(extra > 0)) return 0;
+    return Math.min(effN, Math.max(0, effN - baseN));
+  };
+  const realMotoristasFor = (city, fallback) => {
+    const base = statsByCityBase && statsByCityBase[city] ? statsByCityBase[city] : null;
+    if (base && Number.isFinite(Number(base.motoristas))) return Math.max(0, Number(base.motoristas || 0) || 0);
+    const st = statsByCity && statsByCity[city] ? statsByCity[city] : null;
+    const shown = st ? (Number(st.motoristas || 0) || 0) : (Number(fallback || 0) || 0);
+    const extra = st ? (Number(st.motoristasReforco || 0) || 0) : 0;
+    return Math.max(0, shown - extra);
+  };
+  const realPmgFor = (city, motoristas) => {
+    const base = statsByCityBase && statsByCityBase[city] ? statsByCityBase[city] : null;
+    const st = (base && base.pmg && typeof base.pmg === 'object')
+      ? base
+      : ((statsByCity && statsByCity[city]) ? statsByCity[city] : null);
+    if (st && st.pmg && typeof st.pmg === 'object') return st.pmg;
+    return { p: 0, m: 0, g: 0, fixo: motoristas };
+  };
 
   let queue = [];
   let rowsOut = Array.isArray(calc.rows) ? calc.rows.slice() : [];
@@ -1477,25 +1570,39 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
     rowsOut = rowsOut.map((r) => {
       const city = String(r.city || '').trim();
       const L = Math.max(0, Number(r.count || 0) || 0);
-      const st = (statsByCity && statsByCity[city]) ? statsByCity[city] : null;
-      const pmgRaw = (st && st.pmg && typeof st.pmg === 'object') ? st.pmg : null;
-      const motoristas = st ? (Number(st.motoristas || 0) || 0) : (Number(r.motoristas || 0) || 0);
-      const pmg = pmgRaw || { p: 0, m: 0, g: 0, fixo: motoristas };
-      const alloc = allocatePmgSlots(L, pmg);
+      const delta = city ? boostDeltaForCity(city) : 0;
+      const Lboost = Math.min(L, delta);
+      const Lbase = Math.max(0, L - Lboost);
+      const motoristas = realMotoristasFor(city, r.motoristas);
+      const pmg = realPmgFor(city, motoristas);
+      const allocBase = allocatePmgSlots(Lbase, pmg);
+      const allocBoost = allocatePmgSlots(Lboost, pmg);
       if (city && L > 0) {
-        slotsByCity[city] = { P: alloc.nP, M: alloc.nM, G: alloc.nG };
+        slotsByCity[city] = {
+          P: allocBase.nP,
+          M: allocBase.nM,
+          G: allocBase.nG,
+          boostP: allocBoost.nP,
+          boostM: allocBoost.nM,
+          boostG: allocBoost.nG
+        };
       }
       return {
         ...r,
         motoristas,
+        reforcoSlots: Lboost,
         pmg: {
-          p: alloc.pmg.p,
-          m: alloc.pmg.m,
-          g: alloc.pmg.g,
-          fixo: alloc.pmg.fixo
+          p: allocBase.pmg.p,
+          m: allocBase.pmg.m,
+          g: allocBase.pmg.g,
+          fixo: allocBase.pmg.fixo
         },
-        slots: { P: alloc.nP, M: alloc.nM, G: alloc.nG },
-        weights: alloc.weights
+        slots: {
+          P: allocBase.nP + allocBoost.nP,
+          M: allocBase.nM + allocBoost.nM,
+          G: allocBase.nG + allocBoost.nG
+        },
+        weights: allocBase.weights
       };
     });
     queue = buildRobeV3ShuffledQueue(slotsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
@@ -1504,27 +1611,55 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
     rowsOut = rowsOut.map((r) => {
       const city = String(r.city || '').trim();
       const L = Math.max(0, Number(r.count || 0) || 0);
-      const st = (statsByCity && statsByCity[city]) ? statsByCity[city] : null;
-      const motoristas = st ? (Number(st.motoristas || 0) || 0) : (Number(r.motoristas || 0) || 0);
-      const pmg = (st && st.pmg && typeof st.pmg === 'object') ? st.pmg : { p: 0, m: 0, g: 0, fixo: motoristas };
-      const planV4 = buildRobeV4CityPlan({
+      const delta = city ? boostDeltaForCity(city) : 0;
+      const Lboost = Math.min(L, delta);
+      const Lbase = Math.max(0, L - Lboost);
+      const motoristas = realMotoristasFor(city, r.motoristas);
+      const pmg = realPmgFor(city, motoristas);
+      const stPlan = (statsByCityBase && statsByCityBase[city]) || (statsByCity && statsByCity[city]) || { motoristas, pmg, coverage: [] };
+      const planBase = buildRobeV4CityPlan({
         city,
-        target: L,
-        statsEntry: st || { motoristas, pmg, coverage: [] },
+        target: Lbase,
+        statsEntry: stPlan,
         countryId,
         directedPercent: v4NeighborhoodDirectedPercent
       });
-      if (planV4 && Array.isArray(planV4.slotBuckets)) slotBuckets.push(...planV4.slotBuckets);
+      const planBoost = Lboost > 0 ? buildRobeV4CityPlan({
+        city,
+        target: Lboost,
+        statsEntry: stPlan,
+        countryId,
+        directedPercent: v4NeighborhoodDirectedPercent
+      }) : null;
+      if (planBase && Array.isArray(planBase.slotBuckets)) slotBuckets.push(...planBase.slotBuckets);
+      if (planBoost && Array.isArray(planBoost.slotBuckets)) {
+        slotBuckets.push(...planBoost.slotBuckets.map((raw) => ({
+          count: raw && raw.count,
+          slot: { ...(raw && raw.slot), boost: true }
+        })));
+      }
+      const summary = (planBase && planBase.summary && Number(planBase.summary.target || 0) > 0)
+        ? planBase.summary
+        : (planBoost && planBoost.summary ? planBoost.summary : null);
+      const merged = (planBase && planBase.summary && planBoost && planBoost.summary)
+        ? {
+            ...summary,
+            target: (Number(planBase.summary.target || 0) || 0) + (Number(planBoost.summary.target || 0) || 0),
+            directedTarget: (Number(planBase.summary.directedTarget || 0) || 0) + (Number(planBoost.summary.directedTarget || 0) || 0),
+            universalTarget: (Number(planBase.summary.universalTarget || 0) || 0) + (Number(planBoost.summary.universalTarget || 0) || 0)
+          }
+        : summary;
       return {
         ...r,
         motoristas,
+        reforcoSlots: Lboost,
         pmg: {
           p: Math.max(0, Number(pmg.p || 0) || 0),
           m: Math.max(0, Number(pmg.m || 0) || 0),
           g: Math.max(0, Number(pmg.g || 0) || 0),
           fixo: Math.max(0, Number(pmg.fixo || 0) || 0)
         },
-        v4: planV4 && planV4.summary ? planV4.summary : {
+        v4: merged || {
           mode: 'city_fallback',
           reason: 'plan_unavailable',
           target: L,
@@ -1540,7 +1675,27 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
     });
     queue = buildRobeV4ShuffledQueue(slotBuckets, { antiStreakPenalty: tuning.antiStreakPenalty });
   } else {
-    queue = buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
+    const baseCounts = {};
+    const boostCounts = {};
+    let anyBoost = false;
+    for (const city of cities) {
+      const effN = Math.max(0, Number(calc.countsByCity && calc.countsByCity[city] || 0) || 0);
+      const delta = boostDeltaForCity(city);
+      if (delta > 0) anyBoost = true;
+      boostCounts[city] = delta;
+      baseCounts[city] = Math.max(0, effN - delta);
+    }
+    rowsOut = rowsOut.map((r) => {
+      const city = String(r.city || '').trim();
+      return {
+        ...r,
+        motoristas: realMotoristasFor(city, r.motoristas),
+        reforcoSlots: city ? (boostCounts[city] || 0) : 0
+      };
+    });
+    queue = anyBoost
+      ? buildRobeV2ShuffledQueueWithBoost(baseCounts, boostCounts, { antiStreakPenalty: tuning.antiStreakPenalty })
+      : buildRobeV2ShuffledQueue(calc.countsByCity, { antiStreakPenalty: tuning.antiStreakPenalty });
   }
   if (!queue.length) return { ok: false, error: 'empty_queue_generated' };
   const now = Date.now();
@@ -1576,6 +1731,7 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
       signalSummary: { keyed, signal, totalCities: cities.length },
       degraded: !!degradedReason,
       degradedReason,
+      boostSig: stats.boostSig != null ? String(stats.boostSig) : '',
       params: {
         ...((calc.params && typeof calc.params === 'object') ? calc.params : {}),
         ...(isV4 ? { v4NeighborhoodDirectedPercent } : {})
@@ -4939,5 +5095,7 @@ module.exports = {
   pickPostingCityForRunV2,
   pickPostingSlotForRunV2,
   allocatePmgSlots,
+  allocateWeightedCounts,
+  computeRobeV2Counts,
   formatRobeQueueItemLabel
 };

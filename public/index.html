@@ -4397,6 +4397,10 @@
         const lines = sorted.map(r => {
           const city = String(r.city || '').trim() || '—';
           const count = fmtInt(r.count);
+          const reforcoN = Math.max(0, Number(r.reforcoSlots || 0) || 0);
+          const reforcoLine = reforcoN > 0
+            ? `<div class="muted" style="margin-left:8px;">Reforço: ${fmtInt(reforcoN)} localizações</div>`
+            : '';
           if (isV4) {
             const mot = fmtInt(r.motoristas);
             const pmg = (r.pmg && typeof r.pmg === 'object') ? r.pmg : {};
@@ -4412,13 +4416,14 @@
             const fallbackReason = String(v4.reason || '').trim();
             return `<div style="margin-bottom:8px; line-height:1.55;">
               <div><b>${escapeHtml(city)}</b>: <b>${count}</b> localizações</div>
+              ${reforcoLine}
               <div class="muted" style="margin-left:8px;">Motoristas: ${mot} · PMG: P${pCnt} M${mCnt} G${gCnt} · Fixos: ${fixo}</div>
               <div class="muted" style="margin-left:8px;">Cobertura: ${covered}/${totalBairros} bairros · Dirigido: ${directed} · Universal: ${universal}</div>
               ${fallbackReason ? `<div class="muted" style="margin-left:8px;">Modo: ${escapeHtml(String(v4.mode || 'v4_bairros'))} · Motivo: ${escapeHtml(fallbackReason)}</div>` : ``}
             </div>`;
           }
           if (!isV3) {
-            return `<div><b>${escapeHtml(city)}</b>: ${count}</div>`;
+            return `<div><b>${escapeHtml(city)}</b>: ${count}</div>${reforcoLine}`;
           }
           const mot = fmtInt(r.motoristas);
           const pmg = (r.pmg && typeof r.pmg === 'object') ? r.pmg : {};
@@ -4432,6 +4437,7 @@
           const sG = fmtInt(slots.G != null ? slots.G : slots.g);
           return `<div style="margin-bottom:8px; line-height:1.55;">
             <div><b>${escapeHtml(city)}</b>: <b>${count}</b> localizações</div>
+            ${reforcoLine}
             <div class="muted" style="margin-left:8px;">Motoristas: ${mot} · PMG: P${pCnt} M${mCnt} G${gCnt} · Fixos: ${fixo}</div>
             <div class="muted" style="margin-left:8px;">Slots do bloco: P${sP} · M${sM} · G${sG}</div>
           </div>`;
