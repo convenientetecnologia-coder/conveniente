@@ -1267,7 +1267,8 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
       city,
       target: targetN,
       cityPmg,
-      reason: 'empty_v4_slots'
+      reason: 'empty_v4_slots',
+      directedPercent: directedPercentClamped
     });
   }
 
