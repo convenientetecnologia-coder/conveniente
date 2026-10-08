@@ -941,8 +941,10 @@ function buildLocaisScopeOptions(locationScope) {
     };
   }
   if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
     return {
-      scopeId: 'universal',
+      scopeId: neighborhoodId ? `universal_${neighborhoodId}` : 'universal',
+      neighborhoodId,
       locations: locationScope.locationPool
     };
   }

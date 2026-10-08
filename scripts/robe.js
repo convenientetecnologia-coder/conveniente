@@ -1279,16 +1279,44 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
     });
   }
 
-  const exactLocationKeys = new Set();
-  for (const row of coveredExactNeighborhoods) {
-    for (const loc of row.locations) exactLocationKeys.add(cityNormKey(loc));
+  const reservedNeighborhoodIds = new Set(
+    coveredExactNeighborhoods.concat(coveredFallbackNeighborhoods).map((row) => row.id)
+  );
+  const reservedLocationKeys = new Set();
+  for (const id of reservedNeighborhoodIds) {
+    const reserved = byNeighborhoodId.get(id);
+    if (!reserved) continue;
+    for (const loc of reserved.locations) {
+      const key = cityNormKey(loc);
+      if (key) reservedLocationKeys.add(key);
+    }
   }
-  const remainingCityLocations = cityLocations.filter((loc) => !exactLocationKeys.has(cityNormKey(loc)));
-  const universalLocations = remainingCityLocations.slice();
-  const directedFallbackLocations = remainingCityLocations.slice();
+  const outsideNeighborhoods = neighborhoods
+    .filter((row) => !reservedNeighborhoodIds.has(row.id))
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      locations: row.locations.filter((loc) => {
+        const key = cityNormKey(loc);
+        return !!key && !reservedLocationKeys.has(key);
+      })
+    }))
+    .filter((row) => row.locations.length > 0);
+  const spilloverLocations = [];
+  const spilloverSeen = new Set();
+  for (const row of outsideNeighborhoods) {
+    for (const loc of row.locations) {
+      const key = cityNormKey(loc);
+      if (!key || spilloverSeen.has(key)) continue;
+      spilloverSeen.add(key);
+      spilloverLocations.push(loc);
+    }
+  }
+  const universalLocations = spilloverLocations.slice();
+  const directedFallbackLocations = spilloverLocations.slice();
   let directedTarget = targetN;
   let universalTarget = 0;
-  if (universalLocations.length > 0) {
+  if (outsideNeighborhoods.length > 0) {
     if (directedPercentClamped <= 0) {
       directedTarget = 0;
       universalTarget = targetN;
@@ -1306,7 +1334,7 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
   }
 
   const hasExactNeighborhoods = coveredExactNeighborhoods.length > 0;
-  const hasDirectedFallback = fallbackWeightTotal > 0 && directedFallbackLocations.length > 0;
+  const hasDirectedFallback = fallbackWeightTotal > 0 && outsideNeighborhoods.length > 0;
   let directedExactTarget = directedTarget;
   let directedFallbackTarget = 0;
   if (!hasExactNeighborhoods) {
@@ -1384,25 +1412,33 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
       count: 0,
       slots: { P: 0, M: 0, G: 0 },
       pmg: { ...fallbackPmg },
-      usesFallbackPool: true
+      usesFallbackPool: false
     });
   }
 
-  if (directedFallbackTarget > 0 && directedFallbackLocations.length > 0) {
+  if (directedFallbackTarget > 0 && outsideNeighborhoods.length > 0) {
     const fallbackCounts = allocateWeightedCounts(
       directedFallbackTarget,
-      coveredFallbackNeighborhoods.map((row) => ({
+      outsideNeighborhoods.map((row) => ({
         key: row.id,
-        weight: Math.max(0, Number(fallbackNeighborhoodWeights.get(row.id) || 0) || 0)
+        weight: row.locations.length
       }))
     );
-    for (const row of coveredFallbackNeighborhoods) {
+    for (const row of outsideNeighborhoods) {
       const countForNeighborhood = Math.max(0, Number(fallbackCounts[row.id] || 0) || 0);
-      const summary = neighborhoodSummaries.find((item) => item.id === row.id);
-      if (summary) summary.count = countForNeighborhood;
       if (!countForNeighborhood) continue;
-      const pmg = fallbackNeighborhoodPmg.get(row.id) || createEmptyPmgCounters();
-      const fallbackAlloc = allocatePmgSlots(countForNeighborhood, pmg);
+      const fallbackAlloc = allocatePmgSlots(countForNeighborhood, cityPmg);
+      neighborhoodSummaries.push({
+        id: row.id,
+        name: row.name,
+        weight: row.locations.length,
+        locationsCount: row.locations.length,
+        count: countForNeighborhood,
+        slots: { P: fallbackAlloc.nP, M: fallbackAlloc.nM, G: fallbackAlloc.nG },
+        pmg: { ...cityPmg },
+        usesFallbackPool: true,
+        spillover: 'fallback'
+      });
       for (const [size, count] of [['P', fallbackAlloc.nP], ['M', fallbackAlloc.nM], ['G', fallbackAlloc.nG]]) {
         const n = Math.max(0, Number(count || 0) || 0);
         if (!n) continue;
@@ -1414,30 +1450,36 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
             scope: 'directed',
             neighborhoodId: row.id,
             neighborhoodName: `[fallback cidade] ${row.name}`,
-            locationPool: directedFallbackLocations.slice()
+            locationPool: row.locations.slice()
           }
         });
       }
     }
   }
 
-  if (universalTarget > 0 && universalLocations.length > 0) {
-    const universalCandidates = coveredExactNeighborhoods.concat(coveredFallbackNeighborhoods);
+  if (universalTarget > 0 && outsideNeighborhoods.length > 0) {
     const universalCounts = allocateWeightedCounts(
       universalTarget,
-      universalCandidates.map((row) => ({
+      outsideNeighborhoods.map((row) => ({
         key: row.id,
-        weight: Math.max(
-          0,
-          Number(exactNeighborhoodWeights.get(row.id) || fallbackNeighborhoodWeights.get(row.id) || 0) || 0
-        )
+        weight: row.locations.length
       }))
     );
-    for (const row of universalCandidates) {
+    for (const row of outsideNeighborhoods) {
       const countForNeighborhood = Math.max(0, Number(universalCounts[row.id] || 0) || 0);
       if (!countForNeighborhood) continue;
-      const pmg = exactNeighborhoodPmg.get(row.id) || fallbackNeighborhoodPmg.get(row.id) || createEmptyPmgCounters();
-      const universalAlloc = allocatePmgSlots(countForNeighborhood, pmg);
+      const universalAlloc = allocatePmgSlots(countForNeighborhood, cityPmg);
+      neighborhoodSummaries.push({
+        id: row.id,
+        name: row.name,
+        weight: row.locations.length,
+        locationsCount: row.locations.length,
+        count: countForNeighborhood,
+        slots: { P: universalAlloc.nP, M: universalAlloc.nM, G: universalAlloc.nG },
+        pmg: { ...cityPmg },
+        usesFallbackPool: false,
+        spillover: 'universal'
+      });
       for (const [size, count] of [['P', universalAlloc.nP], ['M', universalAlloc.nM], ['G', universalAlloc.nG]]) {
         const n = Math.max(0, Number(count || 0) || 0);
         if (!n) continue;
@@ -1449,7 +1491,7 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
             scope: 'universal',
             neighborhoodId: row.id,
             neighborhoodName: row.name,
-            locationPool: universalLocations.slice()
+            locationPool: row.locations.slice()
           }
         });
       }
@@ -1515,7 +1557,7 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
       directedExactTarget,
       directedFallbackTarget,
       universalTarget,
-      remainingCityLocationsCount: remainingCityLocations.length,
+      remainingCityLocationsCount: spilloverLocations.length,
       universalLocationsCount: universalLocations.length,
       neighborhoods: neighborhoodSummaries
     }
@@ -2675,8 +2717,10 @@ function buildLocaisScopeOptions(locationScope) {
     };
   }
   if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
+    const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
     return {
-      scopeId: 'universal',
+      scopeId: neighborhoodId ? `universal_${neighborhoodId}` : 'universal',
+      neighborhoodId,
       locations: locationScope.locationPool
     };
   }
