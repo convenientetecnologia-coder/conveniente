@@ -894,6 +894,18 @@ function listLocalizacoesPorCidade(cidade) {
 function listLocalizacoesPorEscopo(cidade, locationScope) {
   const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
   if (scope === 'directed') {
+    if (Array.isArray(locationScope && locationScope.locationPool)) {
+      const out = [];
+      const seen = new Set();
+      for (const raw of locationScope.locationPool) {
+        const text = String(raw == null ? '' : raw).trim();
+        const key = String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+        if (!text || !key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(text);
+      }
+      if (out.length) return out;
+    }
     const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
     if (neighborhoodId) {
       try { return require('./countryGeo.js').listLocationsByNeighborhood(cidade, neighborhoodId); } catch {}
@@ -918,10 +930,14 @@ function buildLocaisScopeOptions(locationScope) {
   const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
   if (scope === 'directed') {
     const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
-    if (!neighborhoodId) return null;
+    const locations = Array.isArray(locationScope && locationScope.locationPool)
+      ? locationScope.locationPool.slice()
+      : null;
+    if (!neighborhoodId && !locations) return null;
     return {
-      scopeId: `bairro_${neighborhoodId}`,
-      neighborhoodId
+      scopeId: neighborhoodId ? `bairro_${neighborhoodId}` : 'bairro_fallback',
+      neighborhoodId,
+      locations
     };
   }
   if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {

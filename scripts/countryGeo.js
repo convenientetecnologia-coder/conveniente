@@ -190,7 +190,7 @@ function parseNeighborhoods(entries, { exact = false } = {}) {
     const name = String(raw.nome || raw.name || raw.bairro || raw.label || raw.id || raw.slug || "").trim();
     const id = normalizeNeighborhoodId(raw.id || raw.slug || raw.key || name);
     const locations = dedupeLocations(raw.localizacoes || raw.locations, { exact });
-    if (!name || !id || !locations.length) continue;
+    if (!name || !id) continue;
     if (byId.has(id)) {
       const prev = byId.get(id);
       prev.locations = dedupeLocations(prev.locations.concat(locations), { exact });
@@ -220,11 +220,15 @@ function normalizeLocationCatalogEntry(rawEntry, fallbackCity, { exact = false }
     for (const loc of row.locations) mappedKeys.add(exact ? String(loc) : cityNormKey(loc));
   }
   const universalLocations = locations.filter((loc) => !mappedKeys.has(exact ? String(loc) : cityNormKey(loc)));
+  const mappedNeighborhoodsCount = neighborhoods.reduce((sum, row) => sum + (row.locations.length > 0 ? 1 : 0), 0);
+  const emptyNeighborhoodsCount = Math.max(0, neighborhoods.length - mappedNeighborhoodsCount);
   return {
     city,
     locations,
     neighborhoods,
     universalLocations,
+    mappedNeighborhoodsCount,
+    emptyNeighborhoodsCount,
     mappedLocationsCount: Math.max(0, locations.length - universalLocations.length),
     unmappedLocationsCount: universalLocations.length
   };

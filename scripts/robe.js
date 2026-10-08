@@ -1109,7 +1109,7 @@ function accumulatePmgFromCoverage(target, row) {
   return target;
 }
 
-function buildCityFallbackV4Plan({ city, target, cityPmg, reason = 'city_fallback', directedPercent = 90 } = {}) {
+function buildCityFallbackV4Plan({ city, target, cityPmg, reason = 'city_fallback', directedPercent = 90, exactPercent = 50 } = {}) {
   const alloc = allocatePmgSlots(target, cityPmg);
   const slotBuckets = [];
   for (const [size, count] of [['P', alloc.nP], ['M', alloc.nM], ['G', alloc.nG]]) {
@@ -1137,19 +1137,28 @@ function buildCityFallbackV4Plan({ city, target, cityPmg, reason = 'city_fallbac
       reason,
       target: Math.max(0, Number(target || 0) || 0),
       directedPercent: Math.max(0, Math.min(100, Math.floor(Number(directedPercent || 0) || 0))),
+      exactPercent: Math.max(0, Math.min(100, Math.floor(Number(exactPercent || 0) || 0))),
       neighborhoodsCount: 0,
       coveredNeighborhoodsCount: 0,
+      coveredExactNeighborhoodsCount: 0,
+      coveredFallbackNeighborhoodsCount: 0,
+      mappedNeighborhoodsCount: 0,
+      emptyNeighborhoodsCount: 0,
       directedTarget: 0,
+      directedExactTarget: 0,
+      directedFallbackTarget: 0,
       universalTarget: 0,
+      remainingCityLocationsCount: 0,
       universalLocationsCount: 0,
       neighborhoods: []
     }
   };
 }
 
-function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPercent = 90 } = {}) {
+function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPercent = 90, exactPercent = 50 } = {}) {
   const targetN = Math.max(0, Math.floor(Number(target || 0) || 0));
   const directedPercentClamped = Math.max(0, Math.min(100, Math.floor(Number(directedPercent || 0) || 0)));
+  const exactPercentClamped = Math.max(0, Math.min(100, Math.floor(Number(exactPercent || 0) || 0)));
   const cityPmg = (statsEntry && statsEntry.pmg && typeof statsEntry.pmg === 'object')
     ? statsEntry.pmg
     : { p: 0, m: 0, g: 0, fixo: Math.max(0, Number(statsEntry && statsEntry.motoristas || 0) || 0) };
@@ -1165,10 +1174,18 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
         reason: 'target_zero',
         target: 0,
         directedPercent: directedPercentClamped,
+        exactPercent: exactPercentClamped,
         neighborhoodsCount: 0,
         coveredNeighborhoodsCount: 0,
+        coveredExactNeighborhoodsCount: 0,
+        coveredFallbackNeighborhoodsCount: 0,
+        mappedNeighborhoodsCount: 0,
+        emptyNeighborhoodsCount: 0,
         directedTarget: 0,
+        directedExactTarget: 0,
+        directedFallbackTarget: 0,
         universalTarget: 0,
+        remainingCityLocationsCount: 0,
         universalLocationsCount: 0,
         neighborhoods: []
       }
@@ -1198,22 +1215,30 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
           name: String(row && row.name || row && row.nome || '').trim(),
           locations: Array.isArray(row && row.locations) ? row.locations.slice() : []
         }))
-        .filter((row) => row.id && row.name && row.locations.length)
+        .filter((row) => row.id && row.name)
     : [];
+  const mappedNeighborhoods = neighborhoods.filter((row) => row.locations.length > 0);
+  const mappedNeighborhoodsCount = mappedNeighborhoods.length;
+  const emptyNeighborhoodsCount = Math.max(0, neighborhoods.length - mappedNeighborhoodsCount);
   if (!cityLocations.length || !neighborhoods.length) {
     return buildCityFallbackV4Plan({
       city,
       target: targetN,
       cityPmg,
       reason: !cityLocations.length ? 'no_city_locations' : 'no_neighborhoods',
-      directedPercent: directedPercentClamped
+      directedPercent: directedPercentClamped,
+      exactPercent: exactPercentClamped
     });
   }
 
   const byNeighborhoodId = new Map(neighborhoods.map((row) => [row.id, row]));
+  const mappedByNeighborhoodId = new Map(mappedNeighborhoods.map((row) => [row.id, row]));
   const coverageRows = Array.isArray(statsEntry && statsEntry.coverage) ? statsEntry.coverage : [];
-  const neighborhoodWeights = new Map();
-  const neighborhoodPmg = new Map();
+  const exactNeighborhoodWeights = new Map();
+  const exactNeighborhoodPmg = new Map();
+  const fallbackNeighborhoodWeights = new Map();
+  const fallbackPmg = createEmptyPmgCounters();
+  let fallbackWeightTotal = 0;
   for (const raw of coverageRows) {
     const mode = String(raw && raw.coverage_mode || '').trim().toLowerCase() === 'selected' ? 'selected' : 'all';
     const wanted = mode === 'selected'
@@ -1226,27 +1251,38 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
     ));
     if (!ids.length) continue;
     for (const id of ids) {
-      neighborhoodWeights.set(id, Math.max(0, Number(neighborhoodWeights.get(id) || 0) || 0) + 1);
-      if (!neighborhoodPmg.has(id)) neighborhoodPmg.set(id, createEmptyPmgCounters());
-      accumulatePmgFromCoverage(neighborhoodPmg.get(id), raw);
+      if (mappedByNeighborhoodId.has(id)) {
+        exactNeighborhoodWeights.set(id, Math.max(0, Number(exactNeighborhoodWeights.get(id) || 0) || 0) + 1);
+        if (!exactNeighborhoodPmg.has(id)) exactNeighborhoodPmg.set(id, createEmptyPmgCounters());
+        accumulatePmgFromCoverage(exactNeighborhoodPmg.get(id), raw);
+      } else {
+        fallbackNeighborhoodWeights.set(id, Math.max(0, Number(fallbackNeighborhoodWeights.get(id) || 0) || 0) + 1);
+        fallbackWeightTotal += 1;
+        accumulatePmgFromCoverage(fallbackPmg, raw);
+      }
     }
   }
-  const coveredNeighborhoods = neighborhoods.filter((row) => Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0) > 0);
-  if (!coveredNeighborhoods.length) {
+  const coveredExactNeighborhoods = mappedNeighborhoods.filter((row) => Math.max(0, Number(exactNeighborhoodWeights.get(row.id) || 0) || 0) > 0);
+  const coveredFallbackNeighborhoods = neighborhoods.filter((row) => Math.max(0, Number(fallbackNeighborhoodWeights.get(row.id) || 0) || 0) > 0);
+  const coveredNeighborhoodsCount = coveredExactNeighborhoods.length + coveredFallbackNeighborhoods.length;
+  if (!coveredNeighborhoodsCount) {
     return buildCityFallbackV4Plan({
       city,
       target: targetN,
       cityPmg,
       reason: 'no_valid_coverage',
-      directedPercent: directedPercentClamped
+      directedPercent: directedPercentClamped,
+      exactPercent: exactPercentClamped
     });
   }
 
-  const coveredLocationKeys = new Set();
-  for (const row of coveredNeighborhoods) {
-    for (const loc of row.locations) coveredLocationKeys.add(cityNormKey(loc));
+  const exactLocationKeys = new Set();
+  for (const row of coveredExactNeighborhoods) {
+    for (const loc of row.locations) exactLocationKeys.add(cityNormKey(loc));
   }
-  const universalLocations = cityLocations.filter((loc) => !coveredLocationKeys.has(cityNormKey(loc)));
+  const remainingCityLocations = cityLocations.filter((loc) => !exactLocationKeys.has(cityNormKey(loc)));
+  const universalLocations = remainingCityLocations.slice();
+  const directedFallbackLocations = remainingCityLocations.slice();
   let directedTarget = targetN;
   let universalTarget = 0;
   if (universalLocations.length > 0) {
@@ -1266,27 +1302,59 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
     }
   }
 
+  const hasExactNeighborhoods = coveredExactNeighborhoods.length > 0;
+  const hasDirectedFallback = fallbackWeightTotal > 0 && directedFallbackLocations.length > 0;
+  let directedExactTarget = directedTarget;
+  let directedFallbackTarget = 0;
+  if (!hasExactNeighborhoods) {
+    directedExactTarget = 0;
+    directedFallbackTarget = directedTarget;
+  } else if (!hasDirectedFallback) {
+    directedExactTarget = directedTarget;
+    directedFallbackTarget = 0;
+  } else if (exactPercentClamped <= 0) {
+    directedExactTarget = 0;
+    directedFallbackTarget = directedTarget;
+  } else if (exactPercentClamped >= 100) {
+    directedExactTarget = directedTarget;
+    directedFallbackTarget = 0;
+  } else {
+    const split = allocateWeightedCounts(directedTarget, [
+      { key: 'exact', weight: exactPercentClamped / 100 },
+      { key: 'fallback', weight: (100 - exactPercentClamped) / 100 }
+    ]);
+    directedExactTarget = Math.max(0, Number(split.exact || 0) || 0);
+    directedFallbackTarget = Math.max(0, Number(split.fallback || 0) || 0);
+  }
+  if (!hasExactNeighborhoods && hasDirectedFallback) {
+    directedFallbackTarget = directedTarget;
+  }
+  if (!hasDirectedFallback && hasExactNeighborhoods) {
+    directedExactTarget = directedTarget;
+  }
+
   const directedCounts = allocateWeightedCounts(
-    directedTarget,
-    coveredNeighborhoods.map((row) => ({
+    directedExactTarget,
+    coveredExactNeighborhoods.map((row) => ({
       key: row.id,
-      weight: Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0)
+      weight: Math.max(0, Number(exactNeighborhoodWeights.get(row.id) || 0) || 0)
     }))
   );
   const slotBuckets = [];
   const neighborhoodSummaries = [];
-  for (const row of coveredNeighborhoods) {
+  for (const row of coveredExactNeighborhoods) {
     const countForNeighborhood = Math.max(0, Number(directedCounts[row.id] || 0) || 0);
-    const pmg = neighborhoodPmg.get(row.id) || createEmptyPmgCounters();
+    const pmg = exactNeighborhoodPmg.get(row.id) || createEmptyPmgCounters();
     const alloc = allocatePmgSlots(countForNeighborhood, pmg);
     neighborhoodSummaries.push({
       id: row.id,
       name: row.name,
-      weight: Math.max(0, Number(neighborhoodWeights.get(row.id) || 0) || 0),
+      weight: Math.max(0, Number(exactNeighborhoodWeights.get(row.id) || 0) || 0),
       locationsCount: row.locations.length,
       count: countForNeighborhood,
       slots: { P: alloc.nP, M: alloc.nM, G: alloc.nG },
-      pmg: { ...pmg }
+      pmg: { ...pmg },
+      usesFallbackPool: false
     });
     for (const [size, count] of [['P', alloc.nP], ['M', alloc.nM], ['G', alloc.nG]]) {
       const n = Math.max(0, Number(count || 0) || 0);
@@ -1299,6 +1367,38 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
           scope: 'directed',
           neighborhoodId: row.id,
           neighborhoodName: row.name
+        }
+      });
+    }
+  }
+
+  for (const row of coveredFallbackNeighborhoods) {
+    neighborhoodSummaries.push({
+      id: row.id,
+      name: row.name,
+      weight: Math.max(0, Number(fallbackNeighborhoodWeights.get(row.id) || 0) || 0),
+      locationsCount: 0,
+      count: 0,
+      slots: { P: 0, M: 0, G: 0 },
+      pmg: { ...fallbackPmg },
+      usesFallbackPool: true
+    });
+  }
+
+  if (directedFallbackTarget > 0 && directedFallbackLocations.length > 0) {
+    const fallbackAlloc = allocatePmgSlots(directedFallbackTarget, fallbackPmg);
+    for (const [size, count] of [['P', fallbackAlloc.nP], ['M', fallbackAlloc.nM], ['G', fallbackAlloc.nG]]) {
+      const n = Math.max(0, Number(count || 0) || 0);
+      if (!n) continue;
+      slotBuckets.push({
+        count: n,
+        slot: {
+          city,
+          size,
+          scope: 'directed',
+          neighborhoodId: null,
+          neighborhoodName: '[fallback cidade]',
+          locationPool: directedFallbackLocations.slice()
         }
       });
     }
@@ -1329,25 +1429,43 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
       target: targetN,
       cityPmg,
       reason: 'empty_v4_slots',
-      directedPercent: directedPercentClamped
+      directedPercent: directedPercentClamped,
+      exactPercent: exactPercentClamped
     });
   }
+
+  const summaryReason = (() => {
+    if (universalTarget > 0 && directedFallbackTarget > 0 && directedExactTarget > 0) return 'mixed_exact_fallback_universal';
+    if (universalTarget > 0 && directedFallbackTarget > 0) return 'fallback_and_universal';
+    if (universalTarget > 0) return 'mixed_city_universal';
+    if (directedFallbackTarget > 0 && directedExactTarget > 0) return 'mixed_exact_fallback';
+    if (directedFallbackTarget > 0) return 'fallback_only';
+    return 'fully_directed';
+  })();
 
   return {
     ok: true,
     mode: 'v4_bairros',
-    reason: universalTarget > 0 ? 'mixed_city_universal' : 'fully_directed',
+    reason: summaryReason,
     slotBuckets,
     universalLocations,
     summary: {
       mode: 'v4_bairros',
-      reason: universalTarget > 0 ? 'mixed_city_universal' : 'fully_directed',
+      reason: summaryReason,
       target: targetN,
       directedPercent: directedPercentClamped,
+      exactPercent: exactPercentClamped,
       neighborhoodsCount: neighborhoods.length,
-      coveredNeighborhoodsCount: coveredNeighborhoods.length,
+      coveredNeighborhoodsCount,
+      coveredExactNeighborhoodsCount: coveredExactNeighborhoods.length,
+      coveredFallbackNeighborhoodsCount: coveredFallbackNeighborhoods.length,
+      mappedNeighborhoodsCount,
+      emptyNeighborhoodsCount,
       directedTarget,
+      directedExactTarget,
+      directedFallbackTarget,
       universalTarget,
+      remainingCityLocationsCount: remainingCityLocations.length,
       universalLocationsCount: universalLocations.length,
       neighborhoods: neighborhoodSummaries
     }
@@ -1496,7 +1614,11 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
     0,
     Math.min(100, Math.floor(Number(robeCfg.v4NeighborhoodDirectedPercent != null ? robeCfg.v4NeighborhoodDirectedPercent : 90) || 90))
   );
-  const v4ConfigSigExtra = isV4 ? { v4NeighborhoodDirectedPercent } : {};
+  const v4ExactNeighborhoodPercent = Math.max(
+    0,
+    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 50) || 50))
+  );
+  const v4ConfigSigExtra = isV4 ? { v4NeighborhoodDirectedPercent, v4ExactNeighborhoodPercent } : {};
   if (isV3 || isV4) {
     try {
       if (fotos && typeof fotos.ensurePmgDirs === 'function') fotos.ensurePmgDirs();
@@ -1622,14 +1744,16 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
         target: Lbase,
         statsEntry: stPlan,
         countryId,
-        directedPercent: v4NeighborhoodDirectedPercent
+        directedPercent: v4NeighborhoodDirectedPercent,
+        exactPercent: v4ExactNeighborhoodPercent
       });
       const planBoost = Lboost > 0 ? buildRobeV4CityPlan({
         city,
         target: Lboost,
         statsEntry: stPlan,
         countryId,
-        directedPercent: v4NeighborhoodDirectedPercent
+        directedPercent: v4NeighborhoodDirectedPercent,
+        exactPercent: v4ExactNeighborhoodPercent
       }) : null;
       if (planBase && Array.isArray(planBase.slotBuckets)) slotBuckets.push(...planBase.slotBuckets);
       if (planBoost && Array.isArray(planBoost.slotBuckets)) {
@@ -1646,6 +1770,8 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
             ...summary,
             target: (Number(planBase.summary.target || 0) || 0) + (Number(planBoost.summary.target || 0) || 0),
             directedTarget: (Number(planBase.summary.directedTarget || 0) || 0) + (Number(planBoost.summary.directedTarget || 0) || 0),
+            directedExactTarget: (Number(planBase.summary.directedExactTarget || 0) || 0) + (Number(planBoost.summary.directedExactTarget || 0) || 0),
+            directedFallbackTarget: (Number(planBase.summary.directedFallbackTarget || 0) || 0) + (Number(planBoost.summary.directedFallbackTarget || 0) || 0),
             universalTarget: (Number(planBase.summary.universalTarget || 0) || 0) + (Number(planBoost.summary.universalTarget || 0) || 0)
           }
         : summary;
@@ -1664,10 +1790,18 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
           reason: 'plan_unavailable',
           target: L,
           directedPercent: v4NeighborhoodDirectedPercent,
+          exactPercent: v4ExactNeighborhoodPercent,
           neighborhoodsCount: 0,
           coveredNeighborhoodsCount: 0,
+          coveredExactNeighborhoodsCount: 0,
+          coveredFallbackNeighborhoodsCount: 0,
+          mappedNeighborhoodsCount: 0,
+          emptyNeighborhoodsCount: 0,
           directedTarget: 0,
+          directedExactTarget: 0,
+          directedFallbackTarget: 0,
           universalTarget: 0,
+          remainingCityLocationsCount: 0,
           universalLocationsCount: 0,
           neighborhoods: []
         }
@@ -1841,7 +1975,13 @@ async function pickPostingSlotForRunV2() {
     0,
     Math.min(100, Math.floor(Number(robeCfg.v4NeighborhoodDirectedPercent != null ? robeCfg.v4NeighborhoodDirectedPercent : 90) || 90))
   );
-  const v4ConfigSigExtra = workMode === 'v4_bairros' ? { v4NeighborhoodDirectedPercent } : {};
+  const v4ExactNeighborhoodPercent = Math.max(
+    0,
+    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 50) || 50))
+  );
+  const v4ConfigSigExtra = workMode === 'v4_bairros'
+    ? { v4NeighborhoodDirectedPercent, v4ExactNeighborhoodPercent }
+    : {};
   const expectedSig = JSON.stringify({
     country: countryId,
     workMode: String(robeCfg.workMode || 'v1'),
@@ -2438,6 +2578,18 @@ function listLocalizacoesPorCidade(cidade) {
 function listLocalizacoesPorEscopo(cidade, locationScope) {
   const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
   if (scope === 'directed') {
+    if (Array.isArray(locationScope && locationScope.locationPool)) {
+      const out = [];
+      const seen = new Set();
+      for (const raw of locationScope.locationPool) {
+        const text = String(raw == null ? '' : raw).trim();
+        const key = cityNormKey(text);
+        if (!text || !key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(text);
+      }
+      if (out.length) return out;
+    }
     const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
     if (neighborhoodId) {
       try { return require('./countryGeo.js').listLocationsByNeighborhood(cidade, neighborhoodId); } catch {}
@@ -2462,10 +2614,14 @@ function buildLocaisScopeOptions(locationScope) {
   const scope = locationScope && typeof locationScope === 'object' ? String(locationScope.scope || '').trim().toLowerCase() : '';
   if (scope === 'directed') {
     const neighborhoodId = String(locationScope && locationScope.neighborhoodId || '').trim();
-    if (!neighborhoodId) return null;
+    const locations = Array.isArray(locationScope && locationScope.locationPool)
+      ? locationScope.locationPool.slice()
+      : null;
+    if (!neighborhoodId && !locations) return null;
     return {
-      scopeId: `bairro_${neighborhoodId}`,
-      neighborhoodId
+      scopeId: neighborhoodId ? `bairro_${neighborhoodId}` : 'bairro_fallback',
+      neighborhoodId,
+      locations
     };
   }
   if (scope === 'universal' && Array.isArray(locationScope && locationScope.locationPool)) {
@@ -5096,6 +5252,7 @@ module.exports = {
   pickPostingSlotForRunV2,
   allocatePmgSlots,
   allocateWeightedCounts,
+  buildRobeV4CityPlan,
   computeRobeV2Counts,
   formatRobeQueueItemLabel
 };

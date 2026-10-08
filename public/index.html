@@ -1506,6 +1506,11 @@
             <div class="muted" style="margin-top:6px;">Padrão de fábrica: 90. Ex.: 100 = sem bloco universal; 80 = 80% dirigido por bairro e 20% para o restante da cidade, quando houver sobra fora dos bairros cobertos.</div>
           </div>
           <div class="form-row">
+            <label>Robe V4 — % do bloco dirigido para bairros exatos</label>
+            <input type="number" id="srvRobeV4ExactPercent" min="0" max="100" step="1" />
+            <div class="muted" style="margin-top:6px;">Usado só dentro do bloco dirigido. Ex.: 50 = metade vai para bairros com localização própria e metade vira fallback dinâmico da cidade para bairros selecionados sem localização.</div>
+          </div>
+          <div class="form-row">
             <label>Robe — títulos de itens</label>
             <select id="srvItemTitlesPack">
               <option value="titulos">Padrão (titulos.json)</option>
@@ -1633,6 +1638,7 @@
       let workerDivisorSupported = false;
       const workModeEl = box.querySelector('#srvRobeWorkMode');
       const v4DirectedPercentEl = box.querySelector('#srvRobeV4DirectedPercent');
+      const v4ExactPercentEl = box.querySelector('#srvRobeV4ExactPercent');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
       const countryIdEl = box.querySelector('#srvCountryId');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
@@ -1887,6 +1893,9 @@
         workModeEl.value = (wm === 'v4_bairros' || wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
         if (v4DirectedPercentEl) {
           v4DirectedPercentEl.value = Number(robe.v4NeighborhoodDirectedPercent != null ? robe.v4NeighborhoodDirectedPercent : 90);
+        }
+        if (v4ExactPercentEl) {
+          v4ExactPercentEl.value = Number(robe.v4ExactNeighborhoodPercent != null ? robe.v4ExactNeighborhoodPercent : 50);
         }
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         if (countryIdEl) {
@@ -2288,6 +2297,11 @@
               v4NeighborhoodDirectedPercent: (() => {
                 const raw = Number((v4DirectedPercentEl && v4DirectedPercentEl.value) || 90);
                 if (!Number.isFinite(raw)) return 90;
+                return Math.max(0, Math.min(100, Math.floor(raw)));
+              })(),
+              v4ExactNeighborhoodPercent: (() => {
+                const raw = Number((v4ExactPercentEl && v4ExactPercentEl.value) || 50);
+                if (!Number.isFinite(raw)) return 50;
                 return Math.max(0, Math.min(100, Math.floor(raw)));
               })(),
               itemTitlesPack: String((itemTitlesPackEl && itemTitlesPackEl.value) || 'titulos'),
@@ -4412,13 +4426,15 @@
             const covered = fmtInt(v4.coveredNeighborhoodsCount);
             const totalBairros = fmtInt(v4.neighborhoodsCount);
             const directed = fmtInt(v4.directedTarget);
+            const directedExact = fmtInt(v4.directedExactTarget);
+            const directedFallback = fmtInt(v4.directedFallbackTarget);
             const universal = fmtInt(v4.universalTarget);
             const fallbackReason = String(v4.reason || '').trim();
             return `<div style="margin-bottom:8px; line-height:1.55;">
               <div><b>${escapeHtml(city)}</b>: <b>${count}</b> localizações</div>
               ${reforcoLine}
               <div class="muted" style="margin-left:8px;">Motoristas: ${mot} · PMG: P${pCnt} M${mCnt} G${gCnt} · Fixos: ${fixo}</div>
-              <div class="muted" style="margin-left:8px;">Cobertura: ${covered}/${totalBairros} bairros · Dirigido: ${directed} · Universal: ${universal}</div>
+              <div class="muted" style="margin-left:8px;">Cobertura: ${covered}/${totalBairros} bairros · Dirigido: ${directed} · Exato: ${directedExact} · Fallback: ${directedFallback} · Universal: ${universal}</div>
               ${fallbackReason ? `<div class="muted" style="margin-left:8px;">Modo: ${escapeHtml(String(v4.mode || 'v4_bairros'))} · Motivo: ${escapeHtml(fallbackReason)}</div>` : ``}
             </div>`;
           }

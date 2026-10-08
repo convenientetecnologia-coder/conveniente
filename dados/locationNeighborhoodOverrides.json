@@ -1,0 +1,1861 @@
+{
+  "br": {
+    "Aracaju": {
+      "merges": {
+        "Centro Histórico (Nossa Senhora do Socorro)": "Centro (Nossa Senhora do Socorro)"
+      },
+      "drops": [
+        "Centro (Nossa Sra do Socorro)"
+      ],
+      "renames": {
+        "Centro": "Centro (Aracaju)"
+      }
+    },
+    "Balneário Camboriú": {
+      "merges": {
+        "Centro Balneário camboriu": "Centro (Balneário Camboriú)",
+        "Pioneiros Santa Catarina": "dos Pioneiros",
+        "Varzea Do Ranchinho Santa Catarina": "Várzea do Ranchinho",
+        "Várzea do Ranchinho (Camboriú)": "Várzea do Ranchinho",
+        "Praia Ilhota": "Ilhota (Itapema)",
+        "São Judas (Itajaí)": "São Judas Tadeu"
+      },
+      "locations": {
+        "Aririba santa catarina": {
+          "nome": "Ariribá"
+        },
+        "Da barra santa catarina": {
+          "nome": "da Barra"
+        },
+        "Dos estados Santa catarina": {
+          "nome": "dos Estados"
+        },
+        "Dos municipios santa catarina": {
+          "nome": "dos Municípios"
+        },
+        "dos nações santa catarina": {
+          "nome": "das Nações"
+        },
+        "Praia dos amores santa catarina": {
+          "nome": "da Praia dos Amores"
+        },
+        "Vila real santa catarina": {
+          "nome": "Vila Real"
+        },
+        "alto são bento, itape": {
+          "nome": "Alto do São Bento (Itapema)"
+        },
+        "machados, nave": {
+          "nome": "de Machados (Navegantes)"
+        },
+        "pedreiras, san": {
+          "nome": "de Pedreiras (Navegantes)"
+        }
+      },
+      "drops": [
+        "Aririba Santa Catarina",
+        "Da Barra Santa Catarina",
+        "Dos Estados Santa Catarina",
+        "Dos Municipios Santa Catarina",
+        "Dos Nações Santa Catarina",
+        "Praia Dos Amores Santa Catarina",
+        "Vila Real Santa Catarina",
+        "alto são bento",
+        "machados",
+        "pedreiras"
+      ],
+      "renames": {
+        "Centro": "Centro (Balneário Camboriú)"
+      }
+    },
+    "Campinas": {
+      "merges": {
+        "Ponte": "Ponte Preta",
+        "Vila": "Vila Costa E Silva"
+      },
+      "locations": {
+        "Jardim New York": {
+          "nome": "Jardim New York"
+        },
+        "Jardim Do Lago": {
+          "nome": "Jardim Do Lago"
+        }
+      },
+      "drops": [
+        "Jardim"
+      ],
+      "renames": {
+        "Centro": "Centro (Campinas)"
+      }
+    },
+    "Cascavel": {
+      "locations": {
+        "cascavel velho": {
+          "nome": "Cascavel Velho"
+        },
+        "interlagos p": {
+          "nome": "Interlagos"
+        },
+        "morumbi parana": {
+          "nome": "Morumbi"
+        },
+        "regiao do lago um": {
+          "nome": "Região do Lago 1"
+        },
+        "regiao do lago dois": {
+          "nome": "Região do Lago 2"
+        }
+      },
+      "merges": {
+        "Coutry": "Country"
+      },
+      "drops": [
+        "Morumbi Parana",
+        "Região do Lago"
+      ],
+      "renames": {
+        "Centro": "Centro (Cascavel)"
+      }
+    },
+    "Caxias do Sul": {
+      "locations": {
+        "pio x, ri": {
+          "nome": "Pio X"
+        },
+        "pio x, farroupi": {
+          "nome": "Pio X (Farroupilha)"
+        },
+        "cohab, caxias do sul": {
+          "nome": "São Victor COHAB"
+        }
+      },
+      "merges": {
+        "São Peregrino": "São Pelegrino"
+      },
+      "renames": {
+        "Centro": "Centro (Caxias do Sul)"
+      }
+    },
+    "Cuiabá": {
+      "locations": {
+        "barra do morro ma": {
+          "nome": "Barra do Morro"
+        },
+        "coxipo do our": {
+          "nome": "Coxipó do Ouro"
+        }
+      },
+      "drops": [
+        "Centro (Nossa Sra. do Livramento)"
+      ],
+      "merges": {
+        "São Mateus (Várzea Grande)": "São Matheus (Várzea Grande)"
+      },
+      "renames": {
+        "Centro": "Centro (Cuiabá)"
+      }
+    },
+    "Florianópolis": {
+      "merges": {
+        "Armação do Pântano do Sul": "Armação",
+        "Costeira do Pirajube": "Costeira do Pirajubaé",
+        "Lagoa": "Lagoa Da Conceição",
+        "Santo Antônio": "Santo Antônio de Lisboa",
+        "Jurerê Internacional": "Jurerê",
+        "São João Do Rio Vermelho": "Rio Vermelho",
+        "Centro (Gov. Celso Ramos)": "Centro (Governador Celso Ramos)"
+      },
+      "renames": {
+        "Lagoa Da Conceição": "Lagoa da Conceição",
+        "Centro": "Centro (Florianópolis)"
+      },
+      "locations": {
+        "Morro da Cruz, Santa Catarina": {
+          "nome": "Morro da Cruz"
+        },
+        "Pinheira, Santa Catarina, Brazil": {
+          "nome": "Pinheira (Palhoça)"
+        },
+        "Enseada de Brito, S": {
+          "nome": "Enseada de Brito (Palhoça)"
+        },
+        "Guarda do Embaú, S": {
+          "nome": "Guarda do Embaú (Palhoça)"
+        },
+        "Praia de Fora, Santa Catarina": {
+          "nome": "Praia de Fora (Palhoça)"
+        }
+      },
+      "drops": [
+        "Pinheira",
+        "Enseada de Brito",
+        "Guarda do Embaú",
+        "Praia de Fora"
+      ]
+    },
+    "Fortaleza": {
+      "locations": {
+        "Boa Vista ce": {
+          "nome": "Boa Vista / Castelão"
+        },
+        "Conjunto Ceará II ce": {
+          "nome": "Conjunto Ceará II"
+        },
+        "Praia do Futuro I ce": {
+          "nome": "Praia do Futuro I"
+        },
+        "Praia do Futuro I for": {
+          "nome": "Praia do Futuro I"
+        },
+        "Praia do Futuro II": {
+          "nome": "Praia do Futuro II"
+        }
+      },
+      "merges": {
+        "São": "São Bento",
+        "Bela": "Bela Vista",
+        "Prefeito José Walter": "José Walter",
+        "Parque Presidente Vargas": "Presidente Vargas"
+      },
+      "drops": [
+        "Conjunto Ceará",
+        "Praia do Futuro"
+      ],
+      "renames": {
+        "Centro": "Centro (Fortaleza)"
+      }
+    },
+    "Foz do Iguaçu": {
+      "locations": {
+        "puerto iguazu": {
+          "nome": "Puerto Iguazu"
+        }
+      },
+      "renames": {
+        "Centro": "Centro (Foz do Iguaçu)"
+      }
+    },
+    "Goiânia": {
+      "locations": {
+        "bairro da aparecida de goiania": {
+          "nome": "Centro (Aparecida de Goiânia)"
+        },
+        "Setor central, aparecida": {
+          "nome": "Centro (Aparecida de Goiânia)"
+        },
+        "goiania Park Sul": {
+          "nome": "Goiânia Park Sul (Aparecida de Goiânia)"
+        },
+        "cidade vera cruz": {
+          "nome": "Cidade Vera Cruz"
+        },
+        "Conjunto Habitacional Madre Germana I": {
+          "nome": "Conjunto Habitacional Madre Germana I"
+        },
+        "Conjunto Habitacional Madre Germana 2": {
+          "nome": "Conjunto Habitacional Madre Germana 2"
+        },
+        "Jardim Guanabara II, Goi": {
+          "nome": "Jardim Guanabara II"
+        },
+        "Jardim Guanabara III, Go": {
+          "nome": "Jardim Guanabara III"
+        },
+        "Jardim Guanabara IV, Goi": {
+          "nome": "Jardim Guanabara IV"
+        },
+        "setor goiânia 2": {
+          "nome": "Setor Goiânia 2"
+        },
+        "Sítio De Recreio ipê": {
+          "nome": "Sítio de Recreio Ipê"
+        },
+        "Vila Dos Alpes": {
+          "nome": "Vila Dos Alpes"
+        },
+        "residencial carla cris": {
+          "nome": "Residencial Carla Cris"
+        },
+        "monte azul, senador": {
+          "nome": "Monte Azul (Senador Canedo)"
+        },
+        "petroball, senador": {
+          "nome": "Petroball (Senador Canedo)"
+        },
+        "setor comercial, senador": {
+          "nome": "Setor Comercial (Senador Canedo)"
+        },
+        "residencial jardim canedo II, sena": {
+          "nome": "Residencial Jardim Canedo II (Senador Canedo)"
+        }
+      },
+      "drops": [
+        "Cidade",
+        "Conjunto Habitacional Madre Germana",
+        "Setor Goiânia",
+        "Vila",
+        "Residencial",
+        "monte azul",
+        "petroball",
+        "setor comercial",
+        "residencial jardim canedo II"
+      ],
+      "renames": {
+        "Centro": "Centro (Goiânia)"
+      }
+    },
+    "Anápolis": {
+      "locations": {
+        "Jardim Ana Paula": {
+          "nome": "Jardim Ana Paula"
+        },
+        "Jardim Arco Verde": {
+          "nome": "Jardim Arco Verde"
+        },
+        "Jardim Bom Clima": {
+          "nome": "Jardim Bom Clima"
+        },
+        "Jardim Flor de Liz": {
+          "nome": "Jardim Flor de Liz"
+        },
+        "Jardim Suíço": {
+          "nome": "Jardim Suíço"
+        },
+        "Chácaras Vale das Antas": {
+          "nome": "Chácaras Vale das Antas"
+        },
+        "Conjunto Habitacional Vila União": {
+          "nome": "Conjunto Habitacional Vila União"
+        },
+        "Jibran El Hadj": {
+          "nome": "Jibran El Hadj"
+        },
+        "Parque Residencial Ander": {
+          "nome": "Parque Residencial Ander"
+        },
+        "Privê Lírios do Campo": {
+          "nome": "Privê Lírios do Campo"
+        },
+        "Residencial Ayrton Senna": {
+          "nome": "Residencial Ayrton Senna"
+        },
+        "Residencial Caminho das Águas": {
+          "nome": "Residencial Caminho das Águas"
+        },
+        "Residencial Geovanni Braga": {
+          "nome": "Residencial Geovanni Braga"
+        },
+        "Residencial Jardins do Lago": {
+          "nome": "Residencial Jardins do Lago"
+        },
+        "Residencial Terezinha Braga": {
+          "nome": "Residencial Terezinha Braga"
+        },
+        "Setor Residencial das Rosas": {
+          "nome": "Setor Residencial das Rosas"
+        },
+        "Vila Calixto Abrão": {
+          "nome": "Vila Calixto Abrão"
+        },
+        "Vila Miguel Jorge": {
+          "nome": "Vila Miguel Jorge"
+        },
+        "Residencial Bela Vista": {
+          "nome": "Residencial Bela Vista"
+        },
+        "Residencial Monte Sinai": {
+          "nome": "Residencial Monte Sinai"
+        },
+        "Residencial Vila Feliz": {
+          "nome": "Residencial Vila Feliz"
+        },
+        "Vila Góis": {
+          "nome": "Vila Góis"
+        },
+        "Vila Norte, ana": {
+          "nome": "Vila Norte"
+        },
+        "Vila Sul, ana": {
+          "nome": "Vila Sul"
+        },
+        "Parque Calixtópolis II": {
+          "nome": "Parque Calixtópolis II"
+        }
+      },
+      "drops": [
+        "Jardim",
+        "Chácaras",
+        "Residencial",
+        "Vila",
+        "Conjunto Habitacional",
+        "Jibran",
+        "Parque Residencial",
+        "Privê Lírios",
+        "Residencial Ayrton",
+        "Residencial Caminho",
+        "Residencial Geovanni",
+        "Residencial Jardins",
+        "Residencial Terezinha",
+        "Setor Residencial",
+        "Vila Calixto",
+        "Vila Miguel"
+      ],
+      "renames": {
+        "Centro": "Centro (Anápolis)"
+      }
+    },
+    "São Paulo": {
+      "locations": {
+        "Campo Limpo, sao": {
+          "nome": "Campo Limpo"
+        },
+        "itaim bibi, s": {
+          "nome": "Itaim Bibi"
+        },
+        "jardim angela, são": {
+          "nome": "Jardim Ângela"
+        },
+        "jardim são luis, são": {
+          "nome": "Jardim São Luís"
+        },
+        "Santana, são": {
+          "nome": "Santana"
+        },
+        "vila curuçá": {
+          "nome": "Vila Curuçá"
+        },
+        "raposo tavares, são": {
+          "nome": "Raposo Tavares"
+        },
+        "vila andrade, são": {
+          "nome": "Vila Andrade"
+        },
+        "santa cecília, são": {
+          "nome": "santa cecilia"
+        },
+        "Vila prudente, são": {
+          "nome": "vila prudente"
+        },
+        "Jardim mauá,": {
+          "nome": "Jardim Mauá (Mauá)"
+        },
+        "jardim São judas, mauá": {
+          "nome": "Jardim São Judas (Mauá)"
+        },
+        "Jardim Pilar, mauá": {
+          "nome": "Jardim Pilar (Mauá)"
+        },
+        "Jardim Zaira, mauá": {
+          "nome": "Jardim Zaira (Mauá)"
+        },
+        "Jardim Santo André, Santo": {
+          "nome": "Jardim Santo André (Santo André)"
+        },
+        "jardim nova poá": {
+          "nome": "Jardim Nova Poá (Poá)"
+        },
+        "jardim são pedro, baru": {
+          "nome": "Jardim São Pedro (Barueri)"
+        },
+        "vila são francisco, mauá": {
+          "nome": "Vila São Francisco (Mauá)"
+        },
+        "vila são francisco, suzano": {
+          "nome": "Vila São Francisco (Suzano)"
+        },
+        "casa, são ber": {
+          "nome": "Dos Casa (São Bernardo do Campo)"
+        },
+        "são roque, gua": {
+          "nome": "São Roque (Guarulhos)"
+        }
+      },
+      "renames": {
+        "santa cecilia": "Santa Cecília",
+        "vila prudente": "Vila Prudente",
+        "Centro": "Centro (São Paulo)"
+      },
+      "merges": {
+        "vila menk": "Vila Menck (Osasco)"
+      },
+      "drops": [
+        "Jardim (Santo André)",
+        "vila são francisco",
+        "casa"
+      ]
+    },
+    "Manaus": {
+      "locations": {
+        "distrito industrial i am": {
+          "nome": "Distrito Industrial I"
+        },
+        "distrito industrial ii am": {
+          "nome": "Distrito Industrial II"
+        }
+      },
+      "drops": [
+        "Distrito Industrial"
+      ],
+      "renames": {
+        "Centro": "Centro (Manaus)"
+      }
+    },
+    "Porto Alegre": {
+      "locations": {
+        "passo da areia, viamão": {
+          "nome": "Passo da Areia (Viamão)"
+        },
+        "Vila Augusta ,Viamão": {
+          "nome": "Vila Augusta (Viamão)"
+        },
+        "gloria rio grande": {
+          "nome": "Glória"
+        },
+        "teresópolis rio grande": {
+          "nome": "Teresópolis"
+        }
+      },
+      "drops": [
+        "Gloria Rio Grande",
+        "Teresópolis Rio Grande",
+        "Vila Augusta"
+      ],
+      "merges": {
+        "Jardim Itu": "Jardim Itu Sabara",
+        "Jardim Sabará": "Jardim Itu Sabara",
+        "Centro Histórico": "Centro (Porto Alegre)",
+        "Augusta (Viamão)": "Vila Augusta (Viamão)"
+      },
+      "renames": {
+        "Centro": "Centro (Porto Alegre)"
+      }
+    },
+    "Recife": {
+      "locations": {
+        "boa viagem pernamb.": {
+          "nome": "Boa Viagem"
+        },
+        "cajueiro pernambu": {
+          "nome": "Cajueiro"
+        },
+        "cha da tabua pern": {
+          "nome": "Chã de Tábua (São Lourenço da Mata)"
+        },
+        "Guararapes pernamb": {
+          "nome": "Guararapes (Jaboatão dos Guararapes)"
+        },
+        "Jordão pernamb": {
+          "nome": "Jordão"
+        },
+        "paulista Pernambuco": {
+          "nome": "Centro (Paulista)"
+        },
+        "rio doce pernam": {
+          "nome": "Rio Doce (Olinda)"
+        },
+        "curado iv pern": {
+          "nome": "Curado (Jaboatão dos Guararapes)"
+        },
+        "curado ii pern": {
+          "nome": "Curado (Jaboatão dos Guararapes)"
+        },
+        "nova cruz per": {
+          "nome": "Nova Cruz (Igarassu)"
+        },
+        "nova cruz pe": {
+          "nome": "Nova Cruz (Igarassu)"
+        },
+        "vila velha per": {
+          "nome": "Vila Velha (Ilha de Itamaracá)"
+        },
+        "nossa senhora da luz pern": {
+          "nome": "Nossa Senhora da Luz (São Lourenço da Mata)"
+        }
+      },
+      "drops": [
+        "Boa Viagem Pernamb.",
+        "Cajueiro Pernambu",
+        "Cha",
+        "Guararapes Pernamb",
+        "Jordão Pernamb",
+        "Paulista Pernambuco",
+        "Rio Doce Pernam",
+        "Curado",
+        "Nova",
+        "Vila"
+      ],
+      "renames": {
+        "Centro": "Centro (Recife)"
+      }
+    },
+    "Curitiba": {
+      "locations": {
+        "quississana, par": {
+          "nome": "Quissisana (São José dos Pinhais)"
+        }
+      },
+      "drops": [
+        "quississana"
+      ],
+      "renames": {
+        "Centro": "Centro (Curitiba)"
+      }
+    },
+    "Santos": {
+      "locations": {
+        "cidade ocian, pra": {
+          "nome": "Ocian (Praia Grande)"
+        },
+        "forte, praia grande": {
+          "nome": "Canto do Forte (Praia Grande)"
+        },
+        "vila guilhermina, praia grande": {
+          "nome": "Guilhermina (Praia Grande)"
+        },
+        "Vila Nova - Gleba B, C": {
+          "nome": "Vila Nova - Gleba B (Cubatão)"
+        },
+        "Vila Ponte Nova, Cuba": {
+          "nome": "Vila Ponte Nova (Cubatão)"
+        }
+      },
+      "drops": [
+        "cidade ocian",
+        "forte",
+        "vila guilhermina",
+        "Vila Nova - Gleba B",
+        "Vila Ponte Nova",
+        "Porto Alamoa",
+        "Porto Macuco",
+        "Porto Paquetá",
+        "Porto Ponta da Praia",
+        "Porto Saboó",
+        "Porto Valongo"
+      ],
+      "renames": {
+        "Centro": "Centro (Santos)"
+      }
+    },
+    "Jundiaí": {
+      "locations": {
+        "Vila Nambi": {
+          "nome": "Nambi"
+        },
+        "JUNDIAÍ MIRIM": {
+          "nome": "Jundiaí Mirim"
+        }
+      },
+      "drops": [
+        "Vila"
+      ],
+      "renames": {
+        "Centro": "Centro (Jundiaí)"
+      }
+    },
+    "Belém": {
+      "locations": {
+        "curioutinga pa": {
+          "nome": "Curió-Utinga"
+        }
+      },
+      "drops": [
+        "Curioutinga"
+      ],
+      "renames": {
+        "Centro": "Centro (Belém)"
+      }
+    },
+    "Maceió": {
+      "locations": {
+        "dumont al": {
+          "nome": "Santos Dumont"
+        },
+        "cruz das almas alagoas": {
+          "nome": "Cruz das Almas"
+        }
+      },
+      "drops": [
+        "Dumont",
+        "Cruz Das Almas Alagoas"
+      ],
+      "renames": {
+        "Centro": "Centro (Maceió)"
+      }
+    },
+    "Blumenau": {
+      "locations": {
+        "Vila Nova": {
+          "nome": "Vila Nova"
+        },
+        "Itoupava Norte": {
+          "nome": "Itoupava Norte"
+        },
+        "Itoupava Central, Santa": {
+          "nome": "Itoupava Central"
+        }
+      },
+      "drops": [
+        "Vila",
+        "Itoupava"
+      ],
+      "merges": {
+        "Itoupavazinho": "Itoupavazinha",
+        "Salto Norte": "Salto do Norte"
+      },
+      "renames": {
+        "Centro": "Centro (Blumenau)"
+      }
+    },
+    "Natal": {
+      "locations": {
+        "cidade nova rio grande do nor": {
+          "nome": "Cidade Nova"
+        },
+        "liberdade rio grande do nor": {
+          "nome": "Liberdade"
+        },
+        "petropolis rio grande do no": {
+          "nome": "Petrópolis"
+        },
+        "pitimbu rio grande": {
+          "nome": "Pitimbú"
+        },
+        "santos reis rio": {
+          "nome": "Santos Reis"
+        }
+      },
+      "renames": {
+        "Guarapés": "Guarapes",
+        "Centro": "Centro (Natal)"
+      },
+      "merges": {
+        "Santos": "Santos Reis"
+      },
+      "drops": [
+        "Cidade Nova Rio Grande",
+        "Liberdade Rio Grande",
+        "Petropolis Rio Grande",
+        "Pitimbu Rio Grande"
+      ]
+    },
+    "Serra": {
+      "locations": {
+        "serra espirito santo": {
+          "nome": "Centro (Serra)"
+        },
+        "Serra Dourada III": {
+          "nome": "Serra Dourada III"
+        },
+        "praia de carap": {
+          "nome": "Praia de Carapebus"
+        }
+      },
+      "drops": [
+        "Serra Espirito",
+        "Serra Dourada"
+      ],
+      "merges": {
+        "Serra Centro": "Centro (Serra)"
+      },
+      "renames": {
+        "Centro": "Centro (Serra)"
+      }
+    },
+    "Teresina": {
+      "drops": [
+        "Centro (Mosenhor Gil)"
+      ],
+      "renames": {
+        "Centro": "Centro (Teresina)"
+      }
+    },
+    "São José do Rio Preto": {
+      "locations": {
+        "Mirassol": {
+          "nome": "Centro (Mirassol)"
+        },
+        "Vila São José, São J": {
+          "nome": "Vila São José"
+        },
+        "eng schm": {
+          "nome": "Schmitt"
+        }
+      },
+      "drops": [
+        "Eng"
+      ],
+      "renames": {
+        "Centro": "Centro (São José do Rio Preto)"
+      }
+    },
+    "São Luís": {
+      "locations": {
+        "tibiri maranh": {
+          "nome": "Tibiri"
+        }
+      },
+      "drops": [
+        "Tibiri Maranh"
+      ],
+      "renames": {
+        "Centro": "Centro (São Luís)"
+      }
+    },
+    "Salvador": {
+      "locations": {
+        "Cabula VI, b": {
+          "nome": "Cabula VI"
+        },
+        "Cajazeiras V": {
+          "nome": "Cajazeiras V"
+        },
+        "Cajazeiras VI": {
+          "nome": "Cajazeiras VI"
+        },
+        "Cajazeiras VIII": {
+          "nome": "Cajazeiras VIII"
+        },
+        "Cajazeiras X": {
+          "nome": "Cajazeiras X"
+        },
+        "fazenda grande retir": {
+          "nome": "Fazenda Grande do Retiro"
+        },
+        "daniel lisb": {
+          "nome": "Daniel Lisboa"
+        },
+        "luis anselmo, ba": {
+          "nome": "Luiz Anselmo"
+        },
+        "Nordeste de Amaralina, Salv": {
+          "nome": "Nordeste do Amaralina"
+        },
+        "tancredo neves, bah": {
+          "nome": "Beiru / Tancredo Neves"
+        },
+        "vila rui barbosa, ba": {
+          "nome": "Vila Ruy Barbosa / Jardim Cruzeiro"
+        },
+        "parque bela vista, ba": {
+          "nome": "Parque Bela Vista"
+        }
+      },
+      "renames": {
+        "Acupe De Brotas": "Acupe de Brotas",
+        "Centro": "Centro (Salvador)"
+      },
+      "merges": {
+        "Acupe": "Acupe de Brotas",
+        "armação": "Jardim Armação"
+      },
+      "drops": [
+        "Fazenda Grande",
+        "Daniel",
+        "luis anselmo",
+        "Nordeste de Amaralina",
+        "tancredo neves",
+        "vila rui barbosa"
+      ]
+    },
+    "Novo Hamburgo": {
+      "locations": {
+        "cohab, sapucaia": {
+          "nome": "Cohab (Sapucaia do Sul)"
+        },
+        "jardim, sapucaia": {
+          "nome": "Jardim (Sapucaia do Sul)"
+        },
+        "nova sapucaia, sapucaia": {
+          "nome": "Nova Sapucaia (Sapucaia do Sul)"
+        },
+        "primor, sapucaia": {
+          "nome": "Primor (Sapucaia do Sul)"
+        },
+        "sapucaia do sul": {
+          "nome": "Centro (Sapucaia do Sul)"
+        },
+        "walderes, sapuc": {
+          "nome": "Walderez (Sapucaia do Sul)"
+        },
+        "pasqualini, sa": {
+          "nome": "Pasqualini (Sapucaia do Sul)"
+        },
+        "passo sapucaia, r": {
+          "nome": "Passo Sapucaia (Sapucaia do Sul)"
+        },
+        "freitas, rio": {
+          "nome": "Freitas (Sapucaia do Sul)"
+        },
+        "fortuna, rio gra": {
+          "nome": "Fortuna (Sapucaia do Sul)"
+        },
+        "camboim, rio": {
+          "nome": "Camboim (Sapucaia do Sul)"
+        }
+      },
+      "drops": [
+        "cohab",
+        "jardim",
+        "nova sapucaia",
+        "primor",
+        "Sapucaia",
+        "walderes",
+        "pasqualini",
+        "passo sapucaia",
+        "freitas",
+        "fortuna",
+        "camboim"
+      ],
+      "renames": {
+        "Centro": "Centro (Novo Hamburgo)"
+      }
+    },
+    "Duque de Caxias": {
+      "locations": {
+        "duque de": {
+          "nome": "Centro (Duque de Caxias)"
+        },
+        "caju rio de jan": {
+          "nome": "Caju (Rio de Janeiro)"
+        },
+        "iguaçu velho rio": {
+          "nome": "Iguaçu Velho (Nova Iguaçu)"
+        },
+        "acari rio de jan": {
+          "nome": "Acari (Rio de Janeiro)"
+        },
+        "anchieta rio de j": {
+          "nome": "Anchieta (Rio de Janeiro)"
+        },
+        "anchieta rio de janeiro": {
+          "nome": "Anchieta (Rio de Janeiro)"
+        },
+        "costa barros ri": {
+          "nome": "Costa Barros (Rio de Janeiro)"
+        },
+        "deodoro rio de ja": {
+          "nome": "Deodoro (Rio de Janeiro)"
+        },
+        "galeao r": {
+          "nome": "Galeão (Rio de Janeiro)"
+        },
+        "guadalupe rio de jan": {
+          "nome": "Guadalupe (Rio de Janeiro)"
+        },
+        "oswaldo cruz rio de": {
+          "nome": "Oswaldo Cruz (Rio de Janeiro)"
+        },
+        "penha circu": {
+          "nome": "Penha Circular (Rio de Janeiro)"
+        },
+        "praia da bandeira r": {
+          "nome": "Praia da Bandeira (Rio de Janeiro)"
+        },
+        "fregues rio": {
+          "nome": "Freguesia (Rio de Janeiro)"
+        },
+        "grande rio rio de jan": {
+          "nome": "Grande Rio (Itaboraí)"
+        },
+        "bela vista rio de janeir": {
+          "nome": "Bela Vista (Rio de Janeiro)"
+        },
+        "vila pauline rio": {
+          "nome": "Pauline (Belford Roxo)"
+        }
+      },
+      "drops": [
+        "Acari",
+        "Anchieta",
+        "Costa Barros",
+        "Deodoro",
+        "Galeao",
+        "Guadalupe",
+        "Oswaldo",
+        "Penha",
+        "Praia Da Bandeira",
+        "Fregues",
+        "Grande",
+        "Bela Vista Rio De Janeir",
+        "Vila Pauline"
+      ],
+      "merges": {
+        "Grama Rio De Janeiro": "Grama (Nova Iguaçu)",
+        "Centro de Japeri (Japeri)": "Centro (Japeri)"
+      },
+      "renames": {
+        "Centro": "Centro (Duque de Caxias)"
+      }
+    },
+    "São Gonçalo": {
+      "locations": {
+        "maria paula r": {
+          "nome": "Maria Paula"
+        },
+        "largo da id": {
+          "nome": "Largo da Ideia"
+        },
+        "varzea das moças": {
+          "nome": "Várzea das Moças"
+        },
+        "varzea das m": {
+          "nome": "Várzea das Moças"
+        }
+      },
+      "drops": [
+        "Maria",
+        "Largo",
+        "Varzea"
+      ],
+      "renames": {
+        "Centro": "Centro (São Gonçalo)"
+      }
+    },
+    "Vila Velha": {
+      "locations": {
+        "Santa Clara es": {
+          "nome": "Santa Clara"
+        },
+        "vila velha centro": {
+          "nome": "Centro (Vila Velha)"
+        }
+      },
+      "drops": [
+        "Vila Velha Centro"
+      ],
+      "merges": {
+        "Centro de Vila Velha": "Centro (Vila Velha)",
+        "São Toquarto": "São Torquato"
+      },
+      "renames": {
+        "Centro": "Centro (Vila Velha)"
+      }
+    },
+    "Campo Grande": {
+      "locations": {
+        "centro oeste, ma": {
+          "nome": "Centro-Oeste"
+        }
+      },
+      "renames": {
+        "Centro": "Centro (Campo Grande)"
+      }
+    },
+    "Mogi das Cruzes": {
+      "locations": {
+        "Jardim Aracy": {
+          "nome": "Jardim Aracy"
+        },
+        "Jardim Ivete": {
+          "nome": "Jardim Ivete"
+        },
+        "Jardim Layr": {
+          "nome": "Jardim Layr"
+        },
+        "Mogi das Cruzes": {
+          "nome": "Centro (Mogi das Cruzes)"
+        },
+        "Cezar de Souza": {
+          "nome": "Cezar de Souza"
+        }
+      },
+      "renames": {
+        "centro": "Centro",
+        "Centro": "Centro (Mogi das Cruzes)"
+      },
+      "drops": [
+        "Jardim",
+        "Mogi Das Cruzes",
+        "Cezar"
+      ]
+    },
+    "Brasília": {
+      "locations": {
+        "Asa Sul": {
+          "nome": "Asa Sul"
+        },
+        "Asa Norte": {
+          "nome": "Asa Norte"
+        },
+        "Cruzeiro Novo d": {
+          "nome": "Cruzeiro Novo"
+        },
+        "Sobradinho II": {
+          "nome": "Sobradinho II"
+        },
+        "valparaiso I Etapa A": {
+          "nome": "Valparaíso I Etapa A (Valparaíso de Goiás)"
+        },
+        "valparaiso I Etapa B": {
+          "nome": "Valparaíso I Etapa B (Valparaíso de Goiás)"
+        },
+        "valparaiso I Etapa c": {
+          "nome": "Valparaíso I Etapa C (Valparaíso de Goiás)"
+        },
+        "morada Nobre, valp": {
+          "nome": "Morada Nobre (Valparaíso de Goiás)"
+        }
+      },
+      "drops": [
+        "Asa",
+        "morada Nobre"
+      ],
+      "renames": {
+        "Centro": "Centro (Brasília)"
+      }
+    },
+    "João Pessoa": {
+      "locations": {
+        "tambau paraib": {
+          "nome": "Tambaú"
+        },
+        "cristo redentor paraiba": {
+          "nome": "Cristo Redentor"
+        },
+        "jacuma para": {
+          "nome": "Jacumã (Conde)"
+        }
+      },
+      "renames": {
+        "Bairro Das Industrias": "Bairro das Indústrias",
+        "Centro": "Centro (João Pessoa)"
+      },
+      "merges": {
+        "Indústrias": "Bairro das Indústrias"
+      },
+      "drops": [
+        "Tambau Paraib",
+        "Cristo Redentor Paraiba",
+        "Jacuma"
+      ]
+    },
+    "Juiz de Fora": {
+      "locations": {
+        "Cruzeiro Santo Antônio juiz de fora": {
+          "nome": "Cruzeiro de Santo Antônio"
+        }
+      },
+      "drops": [
+        "Cruzeiro Santo Antônio"
+      ],
+      "renames": {
+        "Centro": "Centro (Juiz de Fora)"
+      }
+    },
+    "Boa Vista": {
+      "locations": {
+        "centro ro": {
+          "nome": "Centro (Boa Vista)"
+        },
+        "Doutor Silvio Leite": {
+          "nome": "Dr. Silvio Leite"
+        },
+        "Doutor Silvio Botelho": {
+          "nome": "Dr. Silvio Botelho"
+        },
+        "Estados ro": {
+          "nome": "dos Estados"
+        }
+      },
+      "drops": [
+        "Doutor Silvio",
+        "Doutor Silvio Botelho",
+        "Estados"
+      ],
+      "renames": {
+        "Centro": "Centro (Boa Vista)"
+      }
+    },
+    "Campina Grande": {
+      "locations": {
+        "Bela Vista campina g": {
+          "nome": "Bela Vista"
+        }
+      },
+      "renames": {
+        "Bairro Das Cidades": "Bairro das Cidades",
+        "Centro": "Centro (Campina Grande)"
+      },
+      "merges": {
+        "Cidades": "Bairro das Cidades",
+        "Nações": "Bairro das Nações",
+        "Centro de Campina Grande": "Centro (Campina Grande)"
+      },
+      "drops": [
+        "Bela Vista Campina"
+      ]
+    },
+    "Rio de Janeiro": {
+      "locations": {
+        "Centro, Niterói": {
+          "nome": "Centro (Niterói)"
+        },
+        "Barreto, Niterói - Rio De Janeiro": {
+          "nome": "Barreto (Niterói)"
+        },
+        "Icaraí, Rio De Janeiro, Brazil": {
+          "nome": "Icaraí (Niterói)"
+        },
+        "Santa Rosa, Niterói-Rj": {
+          "nome": "Santa Rosa (Niterói)"
+        },
+        "Piratininga, Rio De Janeiro, Brazil": {
+          "nome": "Piratininga (Niterói)"
+        },
+        "Itaipu, Rio De Janeiro, Brazil": {
+          "nome": "Itaipu (Niterói)"
+        },
+        "Jardim Imbuí": {
+          "nome": "Jardim Imbuí (Niterói)"
+        },
+        "Vila Progresso r": {
+          "nome": "Vila Progresso (Niterói)"
+        },
+        "Itaipuaçu, Rio De Janeiro, Brazil": {
+          "nome": "Itaipuaçu (Maricá)"
+        },
+        "Monjolos, São Gonçalo,rio De Janeiro": {
+          "nome": "Monjolos (São Gonçalo)"
+        },
+        "Jardim Catarina": {
+          "nome": "Jardim Catarina (São Gonçalo)"
+        },
+        "Colubandê": {
+          "nome": "Colubandê (São Gonçalo)"
+        },
+        "Alcântara, Rio De Janeiro, Brazil": {
+          "nome": "Alcântara (São Gonçalo)"
+        },
+        "Cabuis, Nilópolis": {
+          "nome": "Cabuís (Nilópolis)"
+        },
+        "Duque de Caxias (Rio de Janeiro)": {
+          "nome": "Centro (Duque de Caxias)"
+        },
+        "Freguesia de Jacarepaguá": {
+          "nome": "Freguesia (Jacarepaguá)"
+        },
+        "São Cristovam, Rio De Janeiro, Brazil": {
+          "nome": "São Cristóvão"
+        },
+        "Osvaldo Cruz, Rio De Janeiro, Brazil": {
+          "nome": "Oswaldo Cruz"
+        },
+        "Centro (Rio de Janeiro)": {
+          "nome": "Centro (Rio de Janeiro)"
+        },
+        "Rio de Janeiro": {
+          "nome": "Centro (Rio de Janeiro)"
+        }
+      },
+      "merges": {
+        "Bom Sucesso": "Bonsucesso"
+      },
+      "drops": [
+        "Barreto",
+        "Icaraí",
+        "Santa Rosa",
+        "Piratininga",
+        "Itaipu",
+        "Jardim",
+        "Vila Progresso",
+        "Itaipuaçu",
+        "Monjolos",
+        "Jardim Catarina",
+        "Colubandê",
+        "Alcântara",
+        "Cabuis",
+        "Duque De Caxias (Rio De Janeiro)",
+        "Freguesia De Jacarepaguá",
+        "São Cristovam",
+        "Osvaldo Cruz",
+        "Centro (Caçador)"
+      ],
+      "renames": {
+        "Centro": "Centro (Rio de Janeiro)"
+      }
+    },
+    "Belo Horizonte": {
+      "locations": {
+        "Alvorada, Contagem": {
+          "nome": "Alvorada (Contagem)"
+        },
+        "amazonas, cont": {
+          "nome": "Amazonas (Contagem)"
+        },
+        "Eldorado, Contagem": {
+          "nome": "Eldorado (Contagem)"
+        },
+        "beatriz, cont": {
+          "nome": "Beatriz (Contagem)"
+        },
+        "campina verde, con": {
+          "nome": "Campina Verde (Contagem)"
+        },
+        "fonte grande, con": {
+          "nome": "Fonte Grande (Contagem)"
+        },
+        "guanabara, cont": {
+          "nome": "Guanabara (Contagem)"
+        },
+        "jardim laguna, co": {
+          "nome": "Jardim Laguna (Contagem)"
+        },
+        "Jardim Riacho das Pedras, Co": {
+          "nome": "Jardim Riacho das Pedras (Contagem)"
+        },
+        "riacho das pedras, m": {
+          "nome": "Riacho das Pedras (Contagem)"
+        },
+        "Nacional, Con": {
+          "nome": "Nacional (Contagem)"
+        },
+        "Pedra Azul, Contag": {
+          "nome": "Pedra Azul (Contagem)"
+        },
+        "vila beneves, min": {
+          "nome": "Vila Beneves (Contagem)"
+        },
+        "Vila Nova Cachoeirinha I, min": {
+          "nome": "Vila Nova Cachoeirinha I"
+        },
+        "Vila Nova Cachoeirinha II, min": {
+          "nome": "Vila Nova Cachoeirinha II"
+        },
+        "Vila Nova Gameleira II, Belo": {
+          "nome": "Vila Nova Gameleira II"
+        },
+        "Vila Nova Gameleira III, min": {
+          "nome": "Vila Nova Gameleira III"
+        }
+      },
+      "drops": [
+        "beatriz",
+        "campina verde",
+        "fonte grande",
+        "jardim laguna",
+        "Jardim Riacho das Pedras",
+        "riacho das pedras",
+        "Nacional",
+        "Pedra Azul",
+        "vila beneves",
+        "Vila Nova Cachoeirinha",
+        "Vila Nova Gameleira"
+      ],
+      "renames": {
+        "Centro": "Centro (Belo Horizonte)"
+      }
+    },
+    "São José dos Campos": {
+      "locations": {
+        "alto da ponte são": {
+          "nome": "Alto da Ponte"
+        },
+        "jardim por do sol s": {
+          "nome": "Jardim Pôr do Sol"
+        },
+        "jardim del rey sao jo": {
+          "nome": "Jardim Del Rey"
+        },
+        "caçapava sao pa": {
+          "nome": "Centro (Caçapava)"
+        },
+        "eugenio de melo são": {
+          "nome": "Eugênio de Melo"
+        },
+        "campos de sao jose": {
+          "nome": "Campos de São José"
+        },
+        "recanto cae": {
+          "nome": "Recanto Caetê"
+        }
+      },
+      "drops": [
+        "Alto",
+        "Jardim",
+        "Caçapava",
+        "Eugenio",
+        "Campos",
+        "Recanto"
+      ],
+      "renames": {
+        "Centro": "Centro (São José dos Campos)"
+      }
+    },
+    "Ribeirão Preto": {
+      "locations": {
+        "Subsetor Norte Um, Ribeirão Pr": {
+          "nome": "Subsetor Norte - 1 (N-1)"
+        },
+        "Subsetor Sul Cinco, Ribeirão": {
+          "nome": "Subsetor Sul - 5 (S-5)"
+        },
+        "Subsetor Sul Um, Ribeirão P": {
+          "nome": "Subsetor Sul - 1 (S-1)"
+        }
+      },
+      "drops": [
+        "Subsetor Norte Um",
+        "Subsetor Sul Cinco",
+        "Subsetor Sul Um"
+      ],
+      "renames": {
+        "Centro": "Centro (Ribeirão Preto)"
+      }
+    },
+    "Londrina": {
+      "locations": {
+        "cambé parana": {
+          "nome": "Centro (Cambé)"
+        },
+        "sarandi para": {
+          "nome": "Centro (Sarandi)"
+        }
+      },
+      "drops": [
+        "Cambé Parana",
+        "Sarandi"
+      ],
+      "merges": {
+        "Centro Histórico": "Centro (Londrina)"
+      },
+      "renames": {
+        "Centro": "Centro (Londrina)"
+      }
+    },
+    "Vitória da Conquista": {
+      "locations": {
+        "Ayrton Senna ba": {
+          "nome": "Aírton Senna"
+        }
+      },
+      "drops": [
+        "Ayrton"
+      ],
+      "renames": {
+        "Centro": "Centro (Vitória da Conquista)"
+      }
+    },
+    "São Bernardo do Campo": {
+      "locations": {
+        "baeta neves": {
+          "nome": "Baeta Neves"
+        },
+        "jardim santo andre as": {
+          "nome": "Jardim Santo André (Santo André)"
+        },
+        "maua sa": {
+          "nome": "Centro (Mauá)"
+        },
+        "santo and": {
+          "nome": "Centro (Santo André)"
+        },
+        "sao bernardo do campo": {
+          "nome": "Centro (São Bernardo do Campo)"
+        },
+        "taquacetu": {
+          "nome": "Taquacetuba"
+        },
+        "tres divi": {
+          "nome": "Três Divisas (Santo André)"
+        },
+        "vila tibiriç": {
+          "nome": "Vila Tibiriçá (Santo André)"
+        }
+      },
+      "drops": [
+        "Baeta",
+        "Jardim",
+        "Maua",
+        "Santo",
+        "Sao Bernardo",
+        "Taquacetu",
+        "Tres",
+        "Vila Tibiriç"
+      ],
+      "renames": {
+        "Centro": "Centro (São Bernardo do Campo)"
+      }
+    },
+    "Sorocaba": {
+      "locations": {
+        "boa vista soro": {
+          "nome": "Boa Vista"
+        },
+        "jardim do paço": {
+          "nome": "Jardim do Paço"
+        },
+        "parque sao bento são": {
+          "nome": "Parque São Bento"
+        },
+        "vila mine": {
+          "nome": "Vila Mineirão"
+        },
+        "Jardim Portal do Itavuv": {
+          "nome": "Jardim Portal do Itavuvu"
+        },
+        "jardim novo mundo são": {
+          "nome": "Jardim Novo Mundo"
+        },
+        "jardim sorocaba par": {
+          "nome": "Jardim Sorocaba Park"
+        }
+      },
+      "drops": [
+        "Boa",
+        "Jardim",
+        "Parque",
+        "Vila",
+        "Jardim Portal Do Itavuv",
+        "Jardim Sorocaba"
+      ],
+      "renames": {
+        "Centro": "Centro (Sorocaba)"
+      }
+    },
+    "Taubaté": {
+      "locations": {
+        "parque sao luis": {
+          "nome": "Parque São Luís"
+        },
+        "parque senhor do bon, sao": {
+          "nome": "Parque Senhor do Bonfim"
+        }
+      },
+      "drops": [
+        "Parque",
+        "parque senhor do bon"
+      ],
+      "renames": {
+        "Centro": "Centro (Taubaté)"
+      }
+    },
+    "Franca": {
+      "locations": {
+        "chácara ouro": {
+          "nome": "Chácara Ouro Verde"
+        },
+        "jardim antonio petra": {
+          "nome": "Jardim Doutor Antônio Petráglia"
+        },
+        "são josé, fr": {
+          "nome": "São José"
+        },
+        "são joaquim, sao p": {
+          "nome": "São Joaquim"
+        }
+      },
+      "drops": [
+        "Chácara",
+        "Jardim Antonio"
+      ],
+      "renames": {
+        "Centro": "Centro (Franca)"
+      }
+    },
+    "Bauru": {
+      "locations": {
+        "Parque Bauru": {
+          "nome": "Parque Bauru"
+        }
+      },
+      "drops": [
+        "Parque"
+      ],
+      "renames": {
+        "Centro": "Centro (Bauru)"
+      }
+    },
+    "Ipatinga": {
+      "locations": {
+        "águas, ipatinga": {
+          "nome": "das Águas"
+        }
+      },
+      "drops": [
+        "águas"
+      ],
+      "renames": {
+        "Centro": "Centro (Ipatinga)"
+      }
+    },
+    "Rio Verde": {
+      "drops": [
+        "Centro (Caiçara)"
+      ],
+      "locations": {},
+      "renames": {
+        "Centro": "Centro (Rio Verde)"
+      }
+    },
+    "Juazeiro do Norte": {
+      "drops": [
+        "Centro (do Norte)"
+      ],
+      "locations": {},
+      "renames": {
+        "Centro": "Centro (Juazeiro do Norte)"
+      }
+    },
+    "Indaiatuba": {
+      "drops": [
+        "AA (Boituva)",
+        "AB (Boituva)",
+        "AC (Boituva)",
+        "AD (Boituva)",
+        "AE (Boituva)",
+        "AF (Boituva)",
+        "AG (Boituva)",
+        "AH (Boituva)",
+        "AJ (Boituva)",
+        "AK (Boituva)",
+        "AL (Boituva)",
+        "AM (Boituva)",
+        "AN (Boituva)",
+        "AO (Boituva)",
+        "AP (Boituva)",
+        "AQ (Boituva)",
+        "AR (Boituva)",
+        "AT (Boituva)",
+        "AU (Boituva)",
+        "AV (Boituva)",
+        "AX (Boituva)",
+        "AY (Boituva)",
+        "AZ (Boituva)",
+        "BB (Boituva)"
+      ],
+      "locations": {},
+      "renames": {
+        "Centro": "Centro (Indaiatuba)"
+      }
+    },
+    "Piracicaba": {
+      "renames": {
+        "VILA REZENDE": "Vila Rezende",
+        "Centro": "Centro (Piracicaba)"
+      },
+      "merges": {
+        "Vila Resende": "Vila Rezende"
+      }
+    },
+    "Limeira": {
+      "merges": {
+        "Centro (Eng. Coelho)": "Centro (Engenheiro Coelho)"
+      },
+      "renames": {
+        "Centro": "Centro (Limeira)"
+      }
+    },
+    "Macapá": {
+      "merges": {
+        "Central": "Centro (Macapá)"
+      },
+      "renames": {
+        "Centro": "Centro (Macapá)"
+      }
+    },
+    "Uberlândia": {
+      "renames": {
+        "Centro": "Centro (Uberlândia)"
+      }
+    },
+    "Montes Claros": {
+      "renames": {
+        "Centro": "Centro (Montes Claros)"
+      }
+    },
+    "Joinville": {
+      "renames": {
+        "Centro": "Centro (Joinville)"
+      }
+    },
+    "Imperatriz": {
+      "renames": {
+        "Centro": "Centro (Imperatriz)"
+      }
+    },
+    "Porto Velho": {
+      "renames": {
+        "Centro": "Centro (Porto Velho)"
+      }
+    },
+    "Marabá": {
+      "renames": {
+        "Centro": "Centro (Marabá)"
+      }
+    },
+    "Rio Branco": {
+      "renames": {
+        "Centro": "Centro (Rio Branco)"
+      }
+    },
+    "Maringá": {
+      "renames": {
+        "Centro": "Centro (Maringá)"
+      }
+    },
+    "Ponta Grossa": {
+      "renames": {
+        "Centro": "Centro (Ponta Grossa)"
+      }
+    },
+    "Santa Maria": {
+      "renames": {
+        "Centro": "Centro (Santa Maria)"
+      }
+    },
+    "Campos dos Goytacazes": {
+      "renames": {
+        "Centro": "Centro (Campos dos Goytacazes)"
+      }
+    },
+    "Camaçari": {
+      "renames": {
+        "Centro": "Centro (Camaçari)"
+      }
+    },
+    "Caruaru": {
+      "renames": {
+        "Centro": "Centro (Caruaru)"
+      }
+    },
+    "Petrolina": {
+      "renames": {
+        "Centro": "Centro (Petrolina)"
+      }
+    }
+  },
+  "us": {
+    "Nova York": {
+      "locations": {
+        "Alpine (Nova Jérsei": {
+          "nome": "Alpine (NJ)"
+        },
+        "Elizabeth (Nova Jérsia": {
+          "nome": "Elizabeth (NJ)"
+        },
+        "Englewood (Nova Jérsei": {
+          "nome": "Englewood (NJ)"
+        },
+        "Fort Lee (Nova Jérsei": {
+          "nome": "Fort Lee (NJ)"
+        },
+        "Garfield (Nova Jérsei": {
+          "nome": "Garfield (NJ)"
+        },
+        "Guttenberg (Nova Jérsei": {
+          "nome": "Guttenberg (NJ)"
+        },
+        "Lyndhurst (Nova Jérsei": {
+          "nome": "Lyndhurst (NJ)"
+        },
+        "Orange (Nova Jérsei": {
+          "nome": "Orange (NJ)"
+        },
+        "Union City (Nova Jérsei": {
+          "nome": "Union City (NJ)"
+        },
+        "Woodbridge (Nova Jersey": {
+          "nome": "Woodbridge (NJ)"
+        },
+        "Englewood Cliff": {
+          "nome": "Englewood Cliffs (NJ)"
+        },
+        "saddle rock, ne": {
+          "nome": "Saddle Rock (NY)"
+        },
+        "Hewlett Bay Park, New": {
+          "nome": "Hewlett Bay Park (NY)"
+        },
+        "Hewlett Neck, New ": {
+          "nome": "Hewlett Neck (NY)"
+        },
+        "Manhasset Hills, New Yor": {
+          "nome": "Manhasset Hills (NY)"
+        },
+        "Plandome Manor, New Yo": {
+          "nome": "Plandome Manor (NY)"
+        },
+        "Port Washington North, New": {
+          "nome": "Port Washington North (NY)"
+        },
+        "Malverne Park Oaks, New": {
+          "nome": "Malverne Park Oaks (NY)"
+        },
+        "New Dorp Beac": {
+          "nome": "New Dorp Beach (NY)"
+        },
+        "Nova Iorqu": {
+          "nome": "Manhattan (NY)"
+        },
+        "Jamaica (Queens": {
+          "nome": "Jamaica (NY)"
+        },
+        "Forest Hills (bairro": {
+          "nome": "Forest Hills (NY)"
+        },
+        "Passaic Park, n": {
+          "nome": "Passaic Park (NJ)"
+        },
+        "West Carteret, ": {
+          "nome": "Carteret (NJ)"
+        },
+        "two bridges, ": {
+          "nome": "Two Bridges (NY)"
+        },
+        "noho, nova ": {
+          "nome": "NoHo (NY)"
+        },
+        "kips bay, new ": {
+          "nome": "Kips Bay (NY)"
+        },
+        "Westchester square, ": {
+          "nome": "Westchester Square (NY)"
+        },
+        "west new york, ": {
+          "nome": "West New York (NJ)"
+        },
+        "Rochelle Park, ": {
+          "nome": "Rochelle Park (NJ)"
+        },
+        "arden heights, n ": {
+          "nome": "Arden Heights (NY)"
+        },
+        "Plandome Heights, New ": {
+          "nome": "Plandome Heights"
+        },
+        "Atlantic Beach, New ": {
+          "nome": "Atlantic Beach (NY)"
+        }
+      },
+      "merges": {
+        "The Bronx (NY)": "Bronx (NY)",
+        "Southeast Hoboke": "Hoboken (NJ)",
+        "Southwest Hoboke": "Hoboken (NJ)"
+      },
+      "renames": {
+        "Colonia (Nova Jérsei": "Colonia (NJ)",
+        "Chester": "Chester Hill Park (NY)",
+        "Downtown": "Downtown Perth Amboy (NJ)",
+        "Southwestern": "Southwestern Perth Amboy (NJ)",
+        "Bergen - Lafayett": "Bergen-Lafayette (NJ)"
+      },
+      "drops": [
+        "Alpine (Nova Jérsei",
+        "Elizabeth (Nova Jérsia",
+        "Englewood (Nova Jérsei",
+        "Fort Lee (Nova Jérsei",
+        "Garfield (Nova Jérsei",
+        "Guttenberg (Nova Jérsei",
+        "Lyndhurst (Nova Jérsei",
+        "Orange (Nova Jérsei",
+        "Union City (Nova Jérsei",
+        "Woodbridge (Nova Jersey",
+        "Jamaica (Queens",
+        "Forest Hills (bairro",
+        "Nova",
+        "West Carteret"
+      ]
+    }
+  }
+}

@@ -193,6 +193,7 @@ const DEFAULTS = Object.freeze({
     cooldownMaxMinutes: 120,
     workMode: "v3_pmg",
     v4NeighborhoodDirectedPercent: 90,
+    v4ExactNeighborhoodPercent: 50,
     v2Tuning: {
       alpha: 0.10,
       beta: 1.0,
@@ -595,6 +596,11 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     0,
     100
   );
+  const v4ExactNeighborhoodPercent = clamp(
+    Math.floor(toNum(robe.v4ExactNeighborhoodPercent, DEFAULTS.robe.v4ExactNeighborhoodPercent)),
+    0,
+    100
+  );
   const v2Alpha = Number(clamp(toNum(v2.alpha, DEFAULTS.robe.v2Tuning.alpha), 0, 0.6).toFixed(4));
   const v2Beta = Number(clamp(toNum(v2.beta, DEFAULTS.robe.v2Tuning.beta), 0.05, 6.0).toFixed(4));
   const v2MinBoost = Number(clamp(toNum(v2.minBoost, DEFAULTS.robe.v2Tuning.minBoost), 0.01, 2.0).toFixed(4));
@@ -716,6 +722,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       cooldownMaxMinutes,
       workMode,
       v4NeighborhoodDirectedPercent,
+      v4ExactNeighborhoodPercent,
       v2Tuning: {
         alpha: v2Alpha,
         beta: v2Beta,
@@ -928,6 +935,12 @@ function validateServerConfigPayload(payload) {
       const n = Number(robe.v4NeighborhoodDirectedPercent);
       if (!Number.isFinite(n) || n < 0 || n > 100) {
         errors.push("robe.v4NeighborhoodDirectedPercent_invalido");
+      }
+    }
+    if (robe.v4ExactNeighborhoodPercent !== undefined) {
+      const n = Number(robe.v4ExactNeighborhoodPercent);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        errors.push("robe.v4ExactNeighborhoodPercent_invalido");
       }
     }
     if (robe.itemTitlesPack !== undefined) {
@@ -1219,6 +1232,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       cooldownMaxMinutes: v.normalized.robe.cooldownMaxMinutes,
       workMode: v.normalized.robe.workMode,
       v4NeighborhoodDirectedPercent: v.normalized.robe.v4NeighborhoodDirectedPercent,
+      v4ExactNeighborhoodPercent: v.normalized.robe.v4ExactNeighborhoodPercent,
       v2Tuning: v.normalized.robe.v2Tuning,
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       itemTitlesPack: v.normalized.robe.itemTitlesPack,

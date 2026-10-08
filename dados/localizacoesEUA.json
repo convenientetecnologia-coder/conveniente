@@ -261,6 +261,2327 @@
       "Hewlett Neck, New ",
       "Atlantic Beach, New ",
       "East Atlantic Beach,"
+    ],
+    "bairros": [
+      {
+        "id": "albertson-ny",
+        "nome": "Albertson (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "alley-park",
+        "nome": "alley park",
+        "localizacoes": [
+          "alley park, n"
+        ]
+      },
+      {
+        "id": "alpine-nj",
+        "nome": "Alpine (NJ)",
+        "localizacoes": [
+          "Alpine (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "annadale-ny",
+        "nome": "Annadale (NY)",
+        "localizacoes": [
+          "annadale, n"
+        ]
+      },
+      {
+        "id": "arden-heights-ny",
+        "nome": "Arden Heights (NY)",
+        "localizacoes": [
+          "arden heights, n "
+        ]
+      },
+      {
+        "id": "ardsley-ny",
+        "nome": "Ardsley (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "astoria-ny",
+        "nome": "Astoria (NY)",
+        "localizacoes": [
+          "astoria, n"
+        ]
+      },
+      {
+        "id": "atlantic-beach-ny",
+        "nome": "Atlantic Beach (NY)",
+        "localizacoes": [
+          "Atlantic Beach, New "
+        ]
+      },
+      {
+        "id": "baldwin-ny",
+        "nome": "Baldwin (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "bath-beach-ny",
+        "nome": "Bath Beach (NY)",
+        "localizacoes": [
+          "bath beach, n"
+        ]
+      },
+      {
+        "id": "bay-ridge-ny",
+        "nome": "Bay Ridge (NY)",
+        "localizacoes": [
+          "bay ridge, n"
+        ]
+      },
+      {
+        "id": "bayonne-nj",
+        "nome": "Bayonne (NJ)",
+        "localizacoes": [
+          "bayonne, n"
+        ]
+      },
+      {
+        "id": "bayside-ny",
+        "nome": "Bayside (NY)",
+        "localizacoes": [
+          "bayside, n"
+        ]
+      },
+      {
+        "id": "belleville-nj",
+        "nome": "Belleville (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "bellmore-ny",
+        "nome": "Bellmore (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "belmont-ny",
+        "nome": "Belmont (NY)",
+        "localizacoes": [
+          "belmont, n"
+        ]
+      },
+      {
+        "id": "bensonhurst-ny",
+        "nome": "Bensonhurst (NY)",
+        "localizacoes": [
+          "Bensonhurst, n",
+          "bensonhurst, n"
+        ]
+      },
+      {
+        "id": "bergen-lafayette-nj",
+        "nome": "Bergen-Lafayette (NJ)",
+        "localizacoes": [
+          "Bergen - Lafayett"
+        ]
+      },
+      {
+        "id": "bergenfield-nj",
+        "nome": "Bergenfield (NJ)",
+        "localizacoes": [
+          "bergenfield, n"
+        ]
+      },
+      {
+        "id": "bethpage-ny",
+        "nome": "Bethpage (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "bloomfield-nj",
+        "nome": "Bloomfield (NJ)",
+        "localizacoes": [
+          "bloomfield"
+        ]
+      },
+      {
+        "id": "borough-park-ny",
+        "nome": "Borough Park (NY)",
+        "localizacoes": [
+          "borough park, n"
+        ]
+      },
+      {
+        "id": "bowery-ny",
+        "nome": "Bowery (NY)",
+        "localizacoes": [
+          "bowery, nov"
+        ]
+      },
+      {
+        "id": "briarwood-ny",
+        "nome": "Briarwood (NY)",
+        "localizacoes": [
+          "briarwood, n"
+        ]
+      },
+      {
+        "id": "brighton-beach-ny",
+        "nome": "Brighton Beach (NY)",
+        "localizacoes": [
+          "Brighton beach, n"
+        ]
+      },
+      {
+        "id": "broad-channel-ny",
+        "nome": "Broad Channel (NY)",
+        "localizacoes": [
+          "broad channel, n"
+        ]
+      },
+      {
+        "id": "bronx-ny",
+        "nome": "Bronx (NY)",
+        "localizacoes": [
+          "Bronx Park, n",
+          "bronx, no"
+        ]
+      },
+      {
+        "id": "bronxville-ny",
+        "nome": "Bronxville (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "brooklyn-ny",
+        "nome": "Brooklyn (NY)",
+        "localizacoes": [
+          "brooklyn, nov"
+        ]
+      },
+      {
+        "id": "brownsville-ny",
+        "nome": "Brownsville (NY)",
+        "localizacoes": [
+          "brownsville, n"
+        ]
+      },
+      {
+        "id": "bulls-head",
+        "nome": "bulls head",
+        "localizacoes": [
+          "bulls head, n"
+        ]
+      },
+      {
+        "id": "bushwick-ny",
+        "nome": "Bushwick (NY)",
+        "localizacoes": [
+          "bushwick, n"
+        ]
+      },
+      {
+        "id": "caldwell-nj",
+        "nome": "Caldwell (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "canarsie-ny",
+        "nome": "Canarsie (NY)",
+        "localizacoes": [
+          "canarsie, n"
+        ]
+      },
+      {
+        "id": "carle-place-ny",
+        "nome": "Carle Place (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "carlstadt-nj",
+        "nome": "Carlstadt (NJ)",
+        "localizacoes": [
+          "carlstadt, n"
+        ]
+      },
+      {
+        "id": "carteret-nj",
+        "nome": "Carteret (NJ)",
+        "localizacoes": [
+          "carteret, n",
+          "West Carteret, "
+        ]
+      },
+      {
+        "id": "cedar-grove-nj",
+        "nome": "Cedar Grove (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "cedarhurst-ny",
+        "nome": "Cedarhurst (NY)",
+        "localizacoes": [
+          "cedarhurst, n"
+        ]
+      },
+      {
+        "id": "central-park",
+        "nome": "Central Park",
+        "localizacoes": [
+          "Central Park, n"
+        ]
+      },
+      {
+        "id": "chatham-nj",
+        "nome": "Chatham (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "chelsea-ny",
+        "nome": "Chelsea (NY)",
+        "localizacoes": [
+          "Chelsea, nova"
+        ]
+      },
+      {
+        "id": "chester-hill-park-ny",
+        "nome": "Chester Hill Park (NY)",
+        "localizacoes": [
+          "Chester Hill Park"
+        ]
+      },
+      {
+        "id": "chinatown-ny",
+        "nome": "Chinatown (NY)",
+        "localizacoes": [
+          "chinatow"
+        ]
+      },
+      {
+        "id": "civic-center-ny",
+        "nome": "Civic Center (NY)",
+        "localizacoes": [
+          "civic center, n"
+        ]
+      },
+      {
+        "id": "clark-nj",
+        "nome": "Clark (NJ)",
+        "localizacoes": [
+          "clark, n"
+        ]
+      },
+      {
+        "id": "clason-point-ny",
+        "nome": "Clason Point (NY)",
+        "localizacoes": [
+          "clason point, n"
+        ]
+      },
+      {
+        "id": "cliffside-park-nj",
+        "nome": "Cliffside Park (NJ)",
+        "localizacoes": [
+          "cliffside park,"
+        ]
+      },
+      {
+        "id": "clifton-nj",
+        "nome": "Clifton (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "college-point-ny",
+        "nome": "College Point (NY)",
+        "localizacoes": [
+          "college point, n"
+        ]
+      },
+      {
+        "id": "colonia-nj",
+        "nome": "Colonia (NJ)",
+        "localizacoes": [
+          "Colonia (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "coney-island-ny",
+        "nome": "Coney Island (NY)",
+        "localizacoes": [
+          "coney island, n"
+        ]
+      },
+      {
+        "id": "constable-hook",
+        "nome": "constable hook",
+        "localizacoes": [
+          "constable hook, n"
+        ]
+      },
+      {
+        "id": "country-club-ny",
+        "nome": "Country Club (NY)",
+        "localizacoes": [
+          "country club, n"
+        ]
+      },
+      {
+        "id": "cranford-nj",
+        "nome": "Cranford (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "cresskill-nj",
+        "nome": "Cresskill (NJ)",
+        "localizacoes": [
+          "cresskill, n"
+        ]
+      },
+      {
+        "id": "crotona-park-east-ny",
+        "nome": "Crotona Park East (NY)",
+        "localizacoes": [
+          "crotona park east, n"
+        ]
+      },
+      {
+        "id": "crown-heights-ny",
+        "nome": "Crown Heights (NY)",
+        "localizacoes": [
+          "crown heights, n"
+        ]
+      },
+      {
+        "id": "cypress-hills-ny",
+        "nome": "Cypress Hills (NY)",
+        "localizacoes": [
+          "cypress hills, n"
+        ]
+      },
+      {
+        "id": "darien-ct",
+        "nome": "Darien (CT)",
+        "localizacoes": []
+      },
+      {
+        "id": "delawanna",
+        "nome": "delawanna",
+        "localizacoes": [
+          "delawanna, n"
+        ]
+      },
+      {
+        "id": "demarest-nj",
+        "nome": "Demarest (NJ)",
+        "localizacoes": [
+          "demarest, n"
+        ]
+      },
+      {
+        "id": "dobbs-ferry-ny",
+        "nome": "Dobbs Ferry (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "dongan-hills-ny",
+        "nome": "Dongan Hills (NY)",
+        "localizacoes": [
+          "dongan hills, n"
+        ]
+      },
+      {
+        "id": "downtown-brooklyn-ny",
+        "nome": "Downtown Brooklyn (NY)",
+        "localizacoes": [
+          "downtown brooklyn"
+        ]
+      },
+      {
+        "id": "downtown-jersey-city-nj",
+        "nome": "Downtown Jersey City (NJ)",
+        "localizacoes": [
+          "Downtown Jersey City, n"
+        ]
+      },
+      {
+        "id": "downtown-passaic",
+        "nome": "Downtown Passaic",
+        "localizacoes": [
+          "Downtown Passaic, n"
+        ]
+      },
+      {
+        "id": "downtown-perth-amboy-nj",
+        "nome": "Downtown Perth Amboy (NJ)",
+        "localizacoes": [
+          "Downtown Perth Ambo"
+        ]
+      },
+      {
+        "id": "dumbo-ny",
+        "nome": "Dumbo (NY)",
+        "localizacoes": [
+          "dumbo, ne"
+        ]
+      },
+      {
+        "id": "dumont-nj",
+        "nome": "Dumont (NJ)",
+        "localizacoes": [
+          "dumont, n"
+        ]
+      },
+      {
+        "id": "dutch-hill",
+        "nome": "Dutch Hill",
+        "localizacoes": [
+          "Dutch Hill, n"
+        ]
+      },
+      {
+        "id": "dyker-heights-ny",
+        "nome": "Dyker Heights (NY)",
+        "localizacoes": [
+          "dyker heights, n"
+        ]
+      },
+      {
+        "id": "east-atlantic-beach",
+        "nome": "East Atlantic Beach",
+        "localizacoes": [
+          "East Atlantic Beach,"
+        ]
+      },
+      {
+        "id": "east-elmhurst-ny",
+        "nome": "East Elmhurst (NY)",
+        "localizacoes": [
+          "East Elmhurs",
+          "East Elmhurst, n"
+        ]
+      },
+      {
+        "id": "east-flatbush-ny",
+        "nome": "East Flatbush (NY)",
+        "localizacoes": [
+          "East Flatbush, n"
+        ]
+      },
+      {
+        "id": "east-hanover-nj",
+        "nome": "East Hanover (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "east-meadow-ny",
+        "nome": "East Meadow (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "east-new-york-ny",
+        "nome": "East New York (NY)",
+        "localizacoes": [
+          "east new york, n"
+        ]
+      },
+      {
+        "id": "east-orange-nj",
+        "nome": "East Orange (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "east-rockaway-ny",
+        "nome": "East Rockaway (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "east-rutherford-nj",
+        "nome": "East Rutherford (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "east-tremont-ny",
+        "nome": "East Tremont (NY)",
+        "localizacoes": [
+          "East Tremont, n"
+        ]
+      },
+      {
+        "id": "east-village-ny",
+        "nome": "East Village (NY)",
+        "localizacoes": [
+          "east village, nov"
+        ]
+      },
+      {
+        "id": "east-williston-ny",
+        "nome": "East Williston (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "eastchester-ny",
+        "nome": "Eastchester (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "edgewater-nj",
+        "nome": "Edgewater (NJ)",
+        "localizacoes": [
+          "edgewater, n"
+        ]
+      },
+      {
+        "id": "edison-nj",
+        "nome": "Edison (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "elizabeth-nj",
+        "nome": "Elizabeth (NJ)",
+        "localizacoes": [
+          "Elizabeth (Nova Jérsia"
+        ]
+      },
+      {
+        "id": "elmhurst-ny",
+        "nome": "Elmhurst (NY)",
+        "localizacoes": [
+          "elmhurst, n"
+        ]
+      },
+      {
+        "id": "elmont-ny",
+        "nome": "Elmont (NY)",
+        "localizacoes": [
+          "elmont, n"
+        ]
+      },
+      {
+        "id": "elmsford-ny",
+        "nome": "Elmsford (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "elmwood-park-nj",
+        "nome": "Elmwood Park (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "eltingville-ny",
+        "nome": "Eltingville (NY)",
+        "localizacoes": [
+          "eltingville, n"
+        ]
+      },
+      {
+        "id": "englewood-nj",
+        "nome": "Englewood (NJ)",
+        "localizacoes": [
+          "Englewood (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "englewood-cliffs-nj",
+        "nome": "Englewood Cliffs (NJ)",
+        "localizacoes": [
+          "Englewood Cliff"
+        ]
+      },
+      {
+        "id": "fair-lawn-nj",
+        "nome": "Fair Lawn (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "fairview-nj",
+        "nome": "Fairview (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "far-rockaway-ny",
+        "nome": "Far Rockaway (NY)",
+        "localizacoes": [
+          "far rockaway, n",
+          "Far Rockaway, n"
+        ]
+      },
+      {
+        "id": "farmingdale-ny",
+        "nome": "Farmingdale (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "financial-district-ny",
+        "nome": "Financial District (NY)",
+        "localizacoes": [
+          "financial district, n"
+        ]
+      },
+      {
+        "id": "flatbush-ny",
+        "nome": "Flatbush (NY)",
+        "localizacoes": [
+          "flatbush, n"
+        ]
+      },
+      {
+        "id": "flatlands-ny",
+        "nome": "Flatlands (NY)",
+        "localizacoes": [
+          "flatlands, n"
+        ]
+      },
+      {
+        "id": "floral-park-ny",
+        "nome": "Floral Park (NY)",
+        "localizacoes": [
+          "floral park, new"
+        ]
+      },
+      {
+        "id": "florham-park-nj",
+        "nome": "Florham Park (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "flushing-ny",
+        "nome": "Flushing (NY)",
+        "localizacoes": [
+          "flushing, n"
+        ]
+      },
+      {
+        "id": "fordham-heights-ny",
+        "nome": "Fordham Heights (NY)",
+        "localizacoes": [
+          "fordham heights, n"
+        ]
+      },
+      {
+        "id": "fords",
+        "nome": "fords",
+        "localizacoes": [
+          "fords, n"
+        ]
+      },
+      {
+        "id": "forest-hills-ny",
+        "nome": "Forest Hills (NY)",
+        "localizacoes": [
+          "Forest Hills (bairro"
+        ]
+      },
+      {
+        "id": "fort-hamilton-ny",
+        "nome": "Fort Hamilton (NY)",
+        "localizacoes": [
+          "Fort Hamilton, n"
+        ]
+      },
+      {
+        "id": "fort-lee-nj",
+        "nome": "Fort Lee (NJ)",
+        "localizacoes": [
+          "Fort Lee (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "franklin-square-ny",
+        "nome": "Franklin Square (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "freeport-ny",
+        "nome": "Freeport (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "garden-city-ny",
+        "nome": "Garden City (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "garfield-nj",
+        "nome": "Garfield (NJ)",
+        "localizacoes": [
+          "Garfield (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "garment-district-ny",
+        "nome": "Garment District (NY)",
+        "localizacoes": [
+          "Garment District, no"
+        ]
+      },
+      {
+        "id": "gerritsen-beach-ny",
+        "nome": "Gerritsen Beach (NY)",
+        "localizacoes": [
+          "gerritsen beach, n"
+        ]
+      },
+      {
+        "id": "glen-cove-ny",
+        "nome": "Glen Cove (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "glen-oaks-ny",
+        "nome": "Glen Oaks (NY)",
+        "localizacoes": [
+          "glen oaks, n"
+        ]
+      },
+      {
+        "id": "glen-ridge-nj",
+        "nome": "Glen Ridge (NJ)",
+        "localizacoes": [
+          "glen ridge"
+        ]
+      },
+      {
+        "id": "glen-rock-nj",
+        "nome": "Glen Rock (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "glendale-ny",
+        "nome": "Glendale (NY)",
+        "localizacoes": [
+          "glendale, n"
+        ]
+      },
+      {
+        "id": "gramercy-park-ny",
+        "nome": "Gramercy Park (NY)",
+        "localizacoes": [
+          "gramercy park, nov"
+        ]
+      },
+      {
+        "id": "grasmere-ny",
+        "nome": "Grasmere (NY)",
+        "localizacoes": [
+          "grasmere. n"
+        ]
+      },
+      {
+        "id": "gravesend-ny",
+        "nome": "Gravesend (NY)",
+        "localizacoes": [
+          "gravesend, n"
+        ]
+      },
+      {
+        "id": "great-kills-ny",
+        "nome": "Great Kills (NY)",
+        "localizacoes": [
+          "great kills, n"
+        ]
+      },
+      {
+        "id": "great-neck-ny",
+        "nome": "Great Neck (NY)",
+        "localizacoes": [
+          "Great Neck, n"
+        ]
+      },
+      {
+        "id": "great-neck-plaza-ny",
+        "nome": "Great Neck Plaza (NY)",
+        "localizacoes": [
+          "great neck plaza, n"
+        ]
+      },
+      {
+        "id": "greenpoint-ny",
+        "nome": "Greenpoint (NY)",
+        "localizacoes": [
+          "greenpoint, n"
+        ]
+      },
+      {
+        "id": "greenville",
+        "nome": "greenville",
+        "localizacoes": [
+          "greenville, n"
+        ]
+      },
+      {
+        "id": "greenwich-ct",
+        "nome": "Greenwich (CT)",
+        "localizacoes": []
+      },
+      {
+        "id": "greenwich-village-ny",
+        "nome": "Greenwich Village (NY)",
+        "localizacoes": [
+          "greenwich village, nov"
+        ]
+      },
+      {
+        "id": "guttenberg-nj",
+        "nome": "Guttenberg (NJ)",
+        "localizacoes": [
+          "Guttenberg (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "hackensack-nj",
+        "nome": "Hackensack (NJ)",
+        "localizacoes": [
+          "hackensack, n"
+        ]
+      },
+      {
+        "id": "haledon-nj",
+        "nome": "Haledon (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "harbortown",
+        "nome": "harbortown",
+        "localizacoes": [
+          "harbortown, n"
+        ]
+      },
+      {
+        "id": "harlem-ny",
+        "nome": "Harlem (NY)",
+        "localizacoes": [
+          "harlem, no"
+        ]
+      },
+      {
+        "id": "harrison",
+        "nome": "harrison",
+        "localizacoes": [
+          "harrison, n"
+        ]
+      },
+      {
+        "id": "harrison-nj",
+        "nome": "Harrison (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "harrison-ny",
+        "nome": "Harrison (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "hasbrouck-heights-nj",
+        "nome": "Hasbrouck Heights (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "hastings-on-hudson-ny",
+        "nome": "Hastings-on-Hudson (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "hawthorne-nj",
+        "nome": "Hawthorne (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "hell-s-kitchen-ny",
+        "nome": "Hell's Kitchen (NY)",
+        "localizacoes": [
+          "Hell's Kitchen, no"
+        ]
+      },
+      {
+        "id": "hempstead-ny",
+        "nome": "Hempstead (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "hewlett-ny",
+        "nome": "Hewlett (NY)",
+        "localizacoes": [
+          "hewlett, new"
+        ]
+      },
+      {
+        "id": "hewlett-bay-park-ny",
+        "nome": "Hewlett Bay Park (NY)",
+        "localizacoes": [
+          "Hewlett Bay Park, New"
+        ]
+      },
+      {
+        "id": "hewlett-harbor",
+        "nome": "Hewlett Harbor",
+        "localizacoes": [
+          "Hewlett Harbor, New Y"
+        ]
+      },
+      {
+        "id": "hewlett-neck-ny",
+        "nome": "Hewlett Neck (NY)",
+        "localizacoes": [
+          "Hewlett Neck, New "
+        ]
+      },
+      {
+        "id": "hicksville-ny",
+        "nome": "Hicksville (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "highbridge-ny",
+        "nome": "Highbridge (NY)",
+        "localizacoes": [
+          "Highbridge, n"
+        ]
+      },
+      {
+        "id": "hillside-nj",
+        "nome": "Hillside (NJ)",
+        "localizacoes": [
+          "hillside, n"
+        ]
+      },
+      {
+        "id": "hoboken-nj",
+        "nome": "Hoboken (NJ)",
+        "localizacoes": [
+          "Hoboke",
+          "Southeast Hoboke",
+          "Southwest Hoboke"
+        ]
+      },
+      {
+        "id": "hollis-ny",
+        "nome": "Hollis (NY)",
+        "localizacoes": [
+          "hollis, n"
+        ]
+      },
+      {
+        "id": "howard-beach-ny",
+        "nome": "Howard Beach (NY)",
+        "localizacoes": [
+          "howard beach, n"
+        ]
+      },
+      {
+        "id": "huntington-ny",
+        "nome": "Huntington (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "huntington-station-ny",
+        "nome": "Huntington Station (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "hunts-point-ny",
+        "nome": "Hunts Point (NY)",
+        "localizacoes": [
+          "hunts point, n"
+        ]
+      },
+      {
+        "id": "inwood-ny",
+        "nome": "Inwood (NY)",
+        "localizacoes": [
+          "inwood, n"
+        ]
+      },
+      {
+        "id": "irvington-nj",
+        "nome": "Irvington (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "irvington-ny",
+        "nome": "Irvington (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "island-park-ny",
+        "nome": "Island Park (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "jackson-heights-ny",
+        "nome": "Jackson Heights (NY)",
+        "localizacoes": [
+          "jackson heights, n"
+        ]
+      },
+      {
+        "id": "jamaica-ny",
+        "nome": "Jamaica (NY)",
+        "localizacoes": [
+          "Jamaica (Queens"
+        ]
+      },
+      {
+        "id": "jamaica-estates-ny",
+        "nome": "Jamaica Estates (NY)",
+        "localizacoes": [
+          "jamaica estates, n"
+        ]
+      },
+      {
+        "id": "jamaica-hills-ny",
+        "nome": "Jamaica Hills (NY)",
+        "localizacoes": [
+          "Jamaica Hills, n"
+        ]
+      },
+      {
+        "id": "jericho-ny",
+        "nome": "Jericho (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "jersey-city-nj",
+        "nome": "Jersey City (NJ)",
+        "localizacoes": [
+          "Jersey Cit"
+        ]
+      },
+      {
+        "id": "journal-square-nj",
+        "nome": "Journal Square (NJ)",
+        "localizacoes": [
+          "journal square"
+        ]
+      },
+      {
+        "id": "kearny-nj",
+        "nome": "Kearny (NJ)",
+        "localizacoes": [
+          "kearny, n"
+        ]
+      },
+      {
+        "id": "kenilworth-nj",
+        "nome": "Kenilworth (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "kensington-ny",
+        "nome": "Kensington (NY)",
+        "localizacoes": [
+          "kensington, n"
+        ]
+      },
+      {
+        "id": "kew-gardens-ny",
+        "nome": "Kew Gardens (NY)",
+        "localizacoes": [
+          "kew gardens, n"
+        ]
+      },
+      {
+        "id": "kew-gardens-hills-ny",
+        "nome": "Kew Gardens Hills (NY)",
+        "localizacoes": [
+          "Kew Gardens Hills, n"
+        ]
+      },
+      {
+        "id": "kings-point-ny",
+        "nome": "Kings Point (NY)",
+        "localizacoes": [
+          "kings point, new y"
+        ]
+      },
+      {
+        "id": "kingsbridge-ny",
+        "nome": "Kingsbridge (NY)",
+        "localizacoes": [
+          "kingsbridg"
+        ]
+      },
+      {
+        "id": "kips-bay-ny",
+        "nome": "Kips Bay (NY)",
+        "localizacoes": [
+          "kips bay, new "
+        ]
+      },
+      {
+        "id": "larchmont-ny",
+        "nome": "Larchmont (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "laurelton-ny",
+        "nome": "Laurelton (NY)",
+        "localizacoes": [
+          "laurelton, n"
+        ]
+      },
+      {
+        "id": "leonia-nj",
+        "nome": "Leonia (NJ)",
+        "localizacoes": [
+          "leonia, n"
+        ]
+      },
+      {
+        "id": "levittown-ny",
+        "nome": "Levittown (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "linden-nj",
+        "nome": "Linden (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "little-falls-nj",
+        "nome": "Little Falls (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "little-ferry-nj",
+        "nome": "Little Ferry (NJ)",
+        "localizacoes": [
+          "little ferry, n"
+        ]
+      },
+      {
+        "id": "little-italy-ny",
+        "nome": "Little Italy (NY)",
+        "localizacoes": [
+          "little italy, n"
+        ]
+      },
+      {
+        "id": "little-neck-ny",
+        "nome": "Little Neck (NY)",
+        "localizacoes": [
+          "little neck, n"
+        ]
+      },
+      {
+        "id": "livingston-nj",
+        "nome": "Livingston (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "lodi-nj",
+        "nome": "Lodi (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "long-beach-ny",
+        "nome": "Long Beach (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "long-island-city-ny",
+        "nome": "Long Island City (NY)",
+        "localizacoes": [
+          "long island city"
+        ]
+      },
+      {
+        "id": "longwood-ny",
+        "nome": "Longwood (NY)",
+        "localizacoes": [
+          "longwood, n"
+        ]
+      },
+      {
+        "id": "lower-east-side-ny",
+        "nome": "Lower East Side (NY)",
+        "localizacoes": [
+          "lower east side, nov"
+        ]
+      },
+      {
+        "id": "lynbrook-ny",
+        "nome": "Lynbrook (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "lyndhurst-nj",
+        "nome": "Lyndhurst (NJ)",
+        "localizacoes": [
+          "Lyndhurst (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "madison-nj",
+        "nome": "Madison (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "malverne-ny",
+        "nome": "Malverne (NY)",
+        "localizacoes": [
+          "malverne, new"
+        ]
+      },
+      {
+        "id": "malverne-park-oaks-ny",
+        "nome": "Malverne Park Oaks (NY)",
+        "localizacoes": [
+          "Malverne Park Oaks, New"
+        ]
+      },
+      {
+        "id": "mamaroneck-ny",
+        "nome": "Mamaroneck (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "manhasset-ny",
+        "nome": "Manhasset (NY)",
+        "localizacoes": [
+          "manhasset, new"
+        ]
+      },
+      {
+        "id": "manhasset-hills-ny",
+        "nome": "Manhasset Hills (NY)",
+        "localizacoes": [
+          "Manhasset Hills, New Yor"
+        ]
+      },
+      {
+        "id": "manhattan-ny",
+        "nome": "Manhattan (NY)",
+        "localizacoes": [
+          "Manhattan, Nova Iorque",
+          "Manhattan, Nova Iorque,",
+          "Nova Iorqu"
+        ]
+      },
+      {
+        "id": "manhattan-beach-ny",
+        "nome": "Manhattan Beach (NY)",
+        "localizacoes": [
+          "manhattan beach, n"
+        ]
+      },
+      {
+        "id": "maplewood-nj",
+        "nome": "Maplewood (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "maspeth-ny",
+        "nome": "Maspeth (NY)",
+        "localizacoes": [
+          "maspeth, n"
+        ]
+      },
+      {
+        "id": "massapequa-ny",
+        "nome": "Massapequa (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "massapequa-park-ny",
+        "nome": "Massapequa Park (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "maurer",
+        "nome": "maurer",
+        "localizacoes": [
+          "maurer, n"
+        ]
+      },
+      {
+        "id": "maywood-nj",
+        "nome": "Maywood (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "merrick-ny",
+        "nome": "Merrick (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "metuchen-nj",
+        "nome": "Metuchen (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "midland-beach-ny",
+        "nome": "Midland Beach (NY)",
+        "localizacoes": [
+          "midland beach, n"
+        ]
+      },
+      {
+        "id": "midtown-east-ny",
+        "nome": "Midtown East (NY)",
+        "localizacoes": [
+          "midtown east, n"
+        ]
+      },
+      {
+        "id": "midwood-ny",
+        "nome": "Midwood (NY)",
+        "localizacoes": [
+          "midwood, n"
+        ]
+      },
+      {
+        "id": "millburn-nj",
+        "nome": "Millburn (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "mineola-ny",
+        "nome": "Mineola (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "montclair-nj",
+        "nome": "Montclair (NJ)",
+        "localizacoes": [
+          "Montclair, ci"
+        ]
+      },
+      {
+        "id": "moonachie-nj",
+        "nome": "Moonachie (NJ)",
+        "localizacoes": [
+          "moonachie, n"
+        ]
+      },
+      {
+        "id": "morris-heights-ny",
+        "nome": "Morris Heights (NY)",
+        "localizacoes": [
+          "morris heights, n"
+        ]
+      },
+      {
+        "id": "morris-park-ny",
+        "nome": "Morris Park (NY)",
+        "localizacoes": [
+          "morris park, n"
+        ]
+      },
+      {
+        "id": "morris-plains-nj",
+        "nome": "Morris Plains (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "morrisania-ny",
+        "nome": "Morrisania (NY)",
+        "localizacoes": [
+          "morrisania, n"
+        ]
+      },
+      {
+        "id": "morristown-nj",
+        "nome": "Morristown (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "mount-vernon-ny",
+        "nome": "Mount Vernon (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "murray-hill-ny",
+        "nome": "Murray Hill (NY)",
+        "localizacoes": [
+          "murray hill, nov"
+        ]
+      },
+      {
+        "id": "new-dorp-ny",
+        "nome": "New Dorp (NY)",
+        "localizacoes": [
+          "new dorp, n"
+        ]
+      },
+      {
+        "id": "new-dorp-beach-ny",
+        "nome": "New Dorp Beach (NY)",
+        "localizacoes": [
+          "New Dorp Beac"
+        ]
+      },
+      {
+        "id": "new-hyde-park-ny",
+        "nome": "New Hyde Park (NY)",
+        "localizacoes": [
+          "New Hyde Park, New Y"
+        ]
+      },
+      {
+        "id": "new-milford-nj",
+        "nome": "New Milford (NJ)",
+        "localizacoes": [
+          "new milford, n"
+        ]
+      },
+      {
+        "id": "new-rochelle-ny",
+        "nome": "New Rochelle (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "newark-nj",
+        "nome": "Newark (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "nodine-hill",
+        "nome": "nodine hill",
+        "localizacoes": [
+          "nodine hill, n"
+        ]
+      },
+      {
+        "id": "noho-ny",
+        "nome": "NoHo (NY)",
+        "localizacoes": [
+          "noho, nova "
+        ]
+      },
+      {
+        "id": "nomad-ny",
+        "nome": "NoMad (NY)",
+        "localizacoes": [
+          "nomad, new"
+        ]
+      },
+      {
+        "id": "north-arlington-nj",
+        "nome": "North Arlington (NJ)",
+        "localizacoes": [
+          "north arlington, ne"
+        ]
+      },
+      {
+        "id": "north-bergen-nj",
+        "nome": "North Bergen (NJ)",
+        "localizacoes": [
+          "north bergen"
+        ]
+      },
+      {
+        "id": "north-new-hyde-park",
+        "nome": "North New Hyde Park",
+        "localizacoes": [
+          "North New Hyde Park, New"
+        ]
+      },
+      {
+        "id": "north-valley-stream-ny",
+        "nome": "North Valley Stream (NY)",
+        "localizacoes": [
+          "North Valley Stream, New"
+        ]
+      },
+      {
+        "id": "north-woodmere",
+        "nome": "north woodmere",
+        "localizacoes": [
+          "north woodmere, ne"
+        ]
+      },
+      {
+        "id": "norwood-ny",
+        "nome": "Norwood (NY)",
+        "localizacoes": [
+          "norwood, n"
+        ]
+      },
+      {
+        "id": "nutley-nj",
+        "nome": "Nutley (NJ)",
+        "localizacoes": [
+          "nutley"
+        ]
+      },
+      {
+        "id": "oceanside-ny",
+        "nome": "Oceanside (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "oradell-nj",
+        "nome": "Oradell (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "orange-nj",
+        "nome": "Orange (NJ)",
+        "localizacoes": [
+          "Orange (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "ozone-park-ny",
+        "nome": "Ozone Park (NY)",
+        "localizacoes": [
+          "ozone park, n"
+        ]
+      },
+      {
+        "id": "palisades-park-nj",
+        "nome": "Palisades Park (NJ)",
+        "localizacoes": [
+          "palisades park, n"
+        ]
+      },
+      {
+        "id": "paramus-nj",
+        "nome": "Paramus (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "park-slope-ny",
+        "nome": "Park Slope (NY)",
+        "localizacoes": [
+          "park slope, n"
+        ]
+      },
+      {
+        "id": "parkchester-ny",
+        "nome": "Parkchester (NY)",
+        "localizacoes": [
+          "parkchester, n"
+        ]
+      },
+      {
+        "id": "parsippany-nj",
+        "nome": "Parsippany (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "passaic-nj",
+        "nome": "Passaic (NJ)",
+        "localizacoes": [
+          "passaic"
+        ]
+      },
+      {
+        "id": "passaic-park-nj",
+        "nome": "Passaic Park (NJ)",
+        "localizacoes": [
+          "Passaic Park, n"
+        ]
+      },
+      {
+        "id": "paterson-nj",
+        "nome": "Paterson (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "pelham-ny",
+        "nome": "Pelham (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "pelham-gardens-ny",
+        "nome": "Pelham Gardens (NY)",
+        "localizacoes": [
+          "pelham gardens, n"
+        ]
+      },
+      {
+        "id": "pelham-manor-ny",
+        "nome": "Pelham Manor (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "pelham-parkway-ny",
+        "nome": "Pelham Parkway (NY)",
+        "localizacoes": [
+          "pelham parkway, n"
+        ]
+      },
+      {
+        "id": "perth-amboy-nj",
+        "nome": "Perth Amboy (NJ)",
+        "localizacoes": [
+          "Perth Amboy"
+        ]
+      },
+      {
+        "id": "perth-amboy-junction",
+        "nome": "Perth Amboy Junction",
+        "localizacoes": [
+          "Perth Amboy Junction, N"
+        ]
+      },
+      {
+        "id": "plainview-ny",
+        "nome": "Plainview (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "plandome-ny",
+        "nome": "Plandome (NY)",
+        "localizacoes": [
+          "plandome, n"
+        ]
+      },
+      {
+        "id": "plandome-heights",
+        "nome": "Plandome Heights",
+        "localizacoes": [
+          "Plandome Heights, New "
+        ]
+      },
+      {
+        "id": "plandome-manor-ny",
+        "nome": "Plandome Manor (NY)",
+        "localizacoes": [
+          "Plandome Manor, New Yo"
+        ]
+      },
+      {
+        "id": "port-chester-ny",
+        "nome": "Port Chester (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "port-morris-ny",
+        "nome": "Port Morris (NY)",
+        "localizacoes": [
+          "port morris, n"
+        ]
+      },
+      {
+        "id": "port-reading",
+        "nome": "port reading",
+        "localizacoes": [
+          "port reading, n"
+        ]
+      },
+      {
+        "id": "port-washington-ny",
+        "nome": "Port Washington (NY)",
+        "localizacoes": [
+          "port washington, n"
+        ]
+      },
+      {
+        "id": "port-washington-north-ny",
+        "nome": "Port Washington North (NY)",
+        "localizacoes": [
+          "Port Washington North, New"
+        ]
+      },
+      {
+        "id": "prince-s-bay-ny",
+        "nome": "Prince's Bay (NY)",
+        "localizacoes": [
+          "prince's bay, n"
+        ]
+      },
+      {
+        "id": "prospect-heights-ny",
+        "nome": "Prospect Heights (NY)",
+        "localizacoes": [
+          "prospect heights, n"
+        ]
+      },
+      {
+        "id": "prospect-park-nj",
+        "nome": "Prospect Park (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "queens-ny",
+        "nome": "Queens (NY)",
+        "localizacoes": [
+          "queens, n"
+        ]
+      },
+      {
+        "id": "queens-village-ny",
+        "nome": "Queens Village (NY)",
+        "localizacoes": [
+          "queens village, n"
+        ]
+      },
+      {
+        "id": "rahway-nj",
+        "nome": "Rahway (NJ)",
+        "localizacoes": [
+          "rahway, n"
+        ]
+      },
+      {
+        "id": "randalls-wards",
+        "nome": "Randalls-Wards",
+        "localizacoes": [
+          "Randalls-Wards Islan"
+        ]
+      },
+      {
+        "id": "rego-park-ny",
+        "nome": "Rego Park (NY)",
+        "localizacoes": [
+          "rego park, n"
+        ]
+      },
+      {
+        "id": "ridgefield-nj",
+        "nome": "Ridgefield (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "ridgefield-park-nj",
+        "nome": "Ridgefield Park (NJ)",
+        "localizacoes": [
+          "ridgefield park, n"
+        ]
+      },
+      {
+        "id": "ridgewood",
+        "nome": "ridgewood",
+        "localizacoes": [
+          "ridgewood, n"
+        ]
+      },
+      {
+        "id": "ridgewood-nj",
+        "nome": "Ridgewood (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "ridgewood-ny",
+        "nome": "Ridgewood (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "river-edge-nj",
+        "nome": "River Edge (NJ)",
+        "localizacoes": [
+          "river edge, n"
+        ]
+      },
+      {
+        "id": "riverdale-ny",
+        "nome": "Riverdale (NY)",
+        "localizacoes": [
+          "riverdale, n"
+        ]
+      },
+      {
+        "id": "rochelle-park-nj",
+        "nome": "Rochelle Park (NJ)",
+        "localizacoes": [
+          "Rochelle Park, "
+        ]
+      },
+      {
+        "id": "rockaway-beach-ny",
+        "nome": "Rockaway Beach (NY)",
+        "localizacoes": [
+          "Rockaway Beach, n"
+        ]
+      },
+      {
+        "id": "rockville-centre-ny",
+        "nome": "Rockville Centre (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "roosevelt-ny",
+        "nome": "Roosevelt (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "roosevelt-island-ny",
+        "nome": "Roosevelt Island (NY)",
+        "localizacoes": [
+          "roosevelt island, n"
+        ]
+      },
+      {
+        "id": "rosedale-ny",
+        "nome": "Rosedale (NY)",
+        "localizacoes": [
+          "rosedale, new"
+        ]
+      },
+      {
+        "id": "roselle-nj",
+        "nome": "Roselle (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "roselle-park-nj",
+        "nome": "Roselle Park (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "roslyn-ny",
+        "nome": "Roslyn (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "rutherford-nj",
+        "nome": "Rutherford (NJ)",
+        "localizacoes": [
+          "rutherford, n"
+        ]
+      },
+      {
+        "id": "rye-ny",
+        "nome": "Rye (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "saddle-brook-nj",
+        "nome": "Saddle Brook (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "saddle-rock-ny",
+        "nome": "Saddle Rock (NY)",
+        "localizacoes": [
+          "saddle rock, ne"
+        ]
+      },
+      {
+        "id": "sands-point-ny",
+        "nome": "Sands Point (NY)",
+        "localizacoes": [
+          "sands point, n"
+        ]
+      },
+      {
+        "id": "scarsdale-ny",
+        "nome": "Scarsdale (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "sea-cliff-ny",
+        "nome": "Sea Cliff (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "seaford-ny",
+        "nome": "Seaford (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "secaucus-nj",
+        "nome": "Secaucus (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "sheepshead-bay-ny",
+        "nome": "Sheepshead Bay (NY)",
+        "localizacoes": [
+          "sheepshead, n",
+          "Sheepshead Bay, n"
+        ]
+      },
+      {
+        "id": "sleepy-hollow-ny",
+        "nome": "Sleepy Hollow (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "soho-ny",
+        "nome": "SoHo (NY)",
+        "localizacoes": [
+          "SoHo, new ior"
+        ]
+      },
+      {
+        "id": "south-floral-park-ny",
+        "nome": "South Floral Park (NY)",
+        "localizacoes": [
+          "South Floral Park, New"
+        ]
+      },
+      {
+        "id": "south-hackensack-nj",
+        "nome": "South Hackensack (NJ)",
+        "localizacoes": [
+          "South Hackensack, New Jerse"
+        ]
+      },
+      {
+        "id": "south-orange-nj",
+        "nome": "South Orange (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "south-ozone-park-ny",
+        "nome": "South Ozone Park (NY)",
+        "localizacoes": [
+          "South Ozone Park, new"
+        ]
+      },
+      {
+        "id": "south-valley-stream",
+        "nome": "South Valley Stream",
+        "localizacoes": [
+          "South Valley Stream, New Yor",
+          "South Valley Stream, New"
+        ]
+      },
+      {
+        "id": "southwestern-perth-amboy-nj",
+        "nome": "Southwestern Perth Amboy (NJ)",
+        "localizacoes": [
+          "Southwestern Perth Ambo"
+        ]
+      },
+      {
+        "id": "springfield-nj",
+        "nome": "Springfield (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "springfield-gardens-ny",
+        "nome": "Springfield Gardens (NY)",
+        "localizacoes": [
+          "springfield gardens, n"
+        ]
+      },
+      {
+        "id": "stamford-ct",
+        "nome": "Stamford (CT)",
+        "localizacoes": []
+      },
+      {
+        "id": "staten-island-ny",
+        "nome": "Staten Island (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "stewart-manor-ny",
+        "nome": "Stewart Manor (NY)",
+        "localizacoes": [
+          "stewart manor, new"
+        ]
+      },
+      {
+        "id": "stuyvesant-town-ny",
+        "nome": "Stuyvesant Town (NY)",
+        "localizacoes": [
+          "Stuyvesant Town, nov"
+        ]
+      },
+      {
+        "id": "summit-nj",
+        "nome": "Summit (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "syosset-ny",
+        "nome": "Syosset (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "tarrytown-ny",
+        "nome": "Tarrytown (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "teaneck-nj",
+        "nome": "Teaneck (NJ)",
+        "localizacoes": [
+          "teaneck, n"
+        ]
+      },
+      {
+        "id": "tenafly-nj",
+        "nome": "Tenafly (NJ)",
+        "localizacoes": [
+          "tenafly, n"
+        ]
+      },
+      {
+        "id": "the-heights",
+        "nome": "the heights",
+        "localizacoes": [
+          "the heights, n"
+        ]
+      },
+      {
+        "id": "theatre-district-ny",
+        "nome": "Theatre District (NY)",
+        "localizacoes": [
+          "Theatre District, n"
+        ]
+      },
+      {
+        "id": "thomaston-ny",
+        "nome": "Thomaston (NY)",
+        "localizacoes": [
+          "thomaston, n"
+        ]
+      },
+      {
+        "id": "throgs-neck-ny",
+        "nome": "Throgs Neck (NY)",
+        "localizacoes": [
+          "throgs neck, n"
+        ]
+      },
+      {
+        "id": "todt-hill-ny",
+        "nome": "Todt Hill (NY)",
+        "localizacoes": [
+          "todt hill, n"
+        ]
+      },
+      {
+        "id": "totowa-nj",
+        "nome": "Totowa (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "tribeca-ny",
+        "nome": "Tribeca (NY)",
+        "localizacoes": [
+          "tribeca, n"
+        ]
+      },
+      {
+        "id": "tuckahoe-ny",
+        "nome": "Tuckahoe (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "two-bridges-ny",
+        "nome": "Two Bridges (NY)",
+        "localizacoes": [
+          "two bridges, "
+        ]
+      },
+      {
+        "id": "union-nj",
+        "nome": "Union (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "union-city-nj",
+        "nome": "Union City (NJ)",
+        "localizacoes": [
+          "Union City (Nova Jérsei"
+        ]
+      },
+      {
+        "id": "union-square-ny",
+        "nome": "Union Square (NY)",
+        "localizacoes": [
+          "union square, nov"
+        ]
+      },
+      {
+        "id": "uniondale-ny",
+        "nome": "Uniondale (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "unionport-ny",
+        "nome": "Unionport (NY)",
+        "localizacoes": [
+          "unionport, n"
+        ]
+      },
+      {
+        "id": "upper-east-side-ny",
+        "nome": "Upper East Side (NY)",
+        "localizacoes": [
+          "upper east side, nov"
+        ]
+      },
+      {
+        "id": "upper-west-side-ny",
+        "nome": "Upper West Side (NY)",
+        "localizacoes": [
+          "upper west side, no"
+        ]
+      },
+      {
+        "id": "valley-stream-ny",
+        "nome": "Valley Stream (NY)",
+        "localizacoes": [
+          "valley stream, n"
+        ]
+      },
+      {
+        "id": "verona-nj",
+        "nome": "Verona (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "wallington-nj",
+        "nome": "Wallington (NJ)",
+        "localizacoes": [
+          "wallington, n"
+        ]
+      },
+      {
+        "id": "wantagh-ny",
+        "nome": "Wantagh (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "washington-heights-ny",
+        "nome": "Washington Heights (NY)",
+        "localizacoes": [
+          "washington heights, nov"
+        ]
+      },
+      {
+        "id": "wayne-nj",
+        "nome": "Wayne (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "weehawken-nj",
+        "nome": "Weehawken (NJ)",
+        "localizacoes": [
+          "Weehawke",
+          "weehawken, n"
+        ]
+      },
+      {
+        "id": "west-caldwell-nj",
+        "nome": "West Caldwell (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "west-englewood",
+        "nome": "west englewood",
+        "localizacoes": [
+          "west englewood, n"
+        ]
+      },
+      {
+        "id": "west-farms-ny",
+        "nome": "West Farms (NY)",
+        "localizacoes": [
+          "west farms, n"
+        ]
+      },
+      {
+        "id": "west-hempstead-ny",
+        "nome": "West Hempstead (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "west-new-york-nj",
+        "nome": "West New York (NJ)",
+        "localizacoes": [
+          "west new york, "
+        ]
+      },
+      {
+        "id": "west-orange-nj",
+        "nome": "West Orange (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "west-village-ny",
+        "nome": "West Village (NY)",
+        "localizacoes": [
+          "West Village"
+        ]
+      },
+      {
+        "id": "westbury-ny",
+        "nome": "Westbury (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "westchester-square-ny",
+        "nome": "Westchester Square (NY)",
+        "localizacoes": [
+          "Westchester Square, B",
+          "Westchester square, "
+        ]
+      },
+      {
+        "id": "westfield-nj",
+        "nome": "Westfield (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "white-plains-ny",
+        "nome": "White Plains (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "whitestone-ny",
+        "nome": "Whitestone (NY)",
+        "localizacoes": [
+          "whitestone, n"
+        ]
+      },
+      {
+        "id": "williamsburg-ny",
+        "nome": "Williamsburg (NY)",
+        "localizacoes": [
+          "williamsburg, n"
+        ]
+      },
+      {
+        "id": "williston-park-ny",
+        "nome": "Williston Park (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "windsor-terrace-ny",
+        "nome": "Windsor Terrace (NY)",
+        "localizacoes": [
+          "windsor terrace, n"
+        ]
+      },
+      {
+        "id": "wood-ridge-nj",
+        "nome": "Wood-Ridge (NJ)",
+        "localizacoes": [
+          "wood-ridge, ne"
+        ]
+      },
+      {
+        "id": "woodbridge-nj",
+        "nome": "Woodbridge (NJ)",
+        "localizacoes": [
+          "Woodbridge (Nova Jersey"
+        ]
+      },
+      {
+        "id": "woodbury-ny",
+        "nome": "Woodbury (NY)",
+        "localizacoes": []
+      },
+      {
+        "id": "woodhaven-ny",
+        "nome": "Woodhaven (NY)",
+        "localizacoes": [
+          "woodhaven, n"
+        ]
+      },
+      {
+        "id": "woodland-park-nj",
+        "nome": "Woodland Park (NJ)",
+        "localizacoes": []
+      },
+      {
+        "id": "woodsburg",
+        "nome": "woodsburg",
+        "localizacoes": [
+          "woodsburg, n"
+        ]
+      },
+      {
+        "id": "yonkers-ny",
+        "nome": "Yonkers (NY)",
+        "localizacoes": [
+          "yonkers, n"
+        ]
+      }
     ]
   }
 ]
