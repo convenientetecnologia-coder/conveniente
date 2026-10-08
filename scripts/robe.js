@@ -591,7 +591,7 @@ function formatRobeQueueItemLabel(item) {
   if (slot.scope === 'directed' && (slot.neighborhoodName || slot.neighborhoodId)) {
     label += ` > ${slot.neighborhoodName || slot.neighborhoodId}`;
   } else if (slot.scope === 'universal') {
-    label += ' > [universal]';
+    label += slot.neighborhoodName ? ` > [universal] ${slot.neighborhoodName}` : ' > [universal]';
   } else if (slot.scope === 'city_fallback') {
     label += ' > [cidade inteira]';
   }
@@ -1155,7 +1155,7 @@ function buildCityFallbackV4Plan({ city, target, cityPmg, reason = 'city_fallbac
   };
 }
 
-function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPercent = 90, exactPercent = 50 } = {}) {
+function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPercent = 90, exactPercent = 90 } = {}) {
   const targetN = Math.max(0, Math.floor(Number(target || 0) || 0));
   const directedPercentClamped = Math.max(0, Math.min(100, Math.floor(Number(directedPercent || 0) || 0)));
   const exactPercentClamped = Math.max(0, Math.min(100, Math.floor(Number(exactPercent || 0) || 0)));
@@ -1237,6 +1237,7 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
   const exactNeighborhoodWeights = new Map();
   const exactNeighborhoodPmg = new Map();
   const fallbackNeighborhoodWeights = new Map();
+  const fallbackNeighborhoodPmg = new Map();
   const fallbackPmg = createEmptyPmgCounters();
   let fallbackWeightTotal = 0;
   for (const raw of coverageRows) {
@@ -1257,6 +1258,8 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
         accumulatePmgFromCoverage(exactNeighborhoodPmg.get(id), raw);
       } else {
         fallbackNeighborhoodWeights.set(id, Math.max(0, Number(fallbackNeighborhoodWeights.get(id) || 0) || 0) + 1);
+        if (!fallbackNeighborhoodPmg.has(id)) fallbackNeighborhoodPmg.set(id, createEmptyPmgCounters());
+        accumulatePmgFromCoverage(fallbackNeighborhoodPmg.get(id), raw);
         fallbackWeightTotal += 1;
         accumulatePmgFromCoverage(fallbackPmg, raw);
       }
@@ -1386,25 +1389,72 @@ function buildRobeV4CityPlan({ city, target, statsEntry, countryId, directedPerc
   }
 
   if (directedFallbackTarget > 0 && directedFallbackLocations.length > 0) {
-    const fallbackAlloc = allocatePmgSlots(directedFallbackTarget, fallbackPmg);
-    for (const [size, count] of [['P', fallbackAlloc.nP], ['M', fallbackAlloc.nM], ['G', fallbackAlloc.nG]]) {
-      const n = Math.max(0, Number(count || 0) || 0);
-      if (!n) continue;
-      slotBuckets.push({
-        count: n,
-        slot: {
-          city,
-          size,
-          scope: 'directed',
-          neighborhoodId: null,
-          neighborhoodName: '[fallback cidade]',
-          locationPool: directedFallbackLocations.slice()
-        }
-      });
+    const fallbackCounts = allocateWeightedCounts(
+      directedFallbackTarget,
+      coveredFallbackNeighborhoods.map((row) => ({
+        key: row.id,
+        weight: Math.max(0, Number(fallbackNeighborhoodWeights.get(row.id) || 0) || 0)
+      }))
+    );
+    for (const row of coveredFallbackNeighborhoods) {
+      const countForNeighborhood = Math.max(0, Number(fallbackCounts[row.id] || 0) || 0);
+      const summary = neighborhoodSummaries.find((item) => item.id === row.id);
+      if (summary) summary.count = countForNeighborhood;
+      if (!countForNeighborhood) continue;
+      const pmg = fallbackNeighborhoodPmg.get(row.id) || createEmptyPmgCounters();
+      const fallbackAlloc = allocatePmgSlots(countForNeighborhood, pmg);
+      for (const [size, count] of [['P', fallbackAlloc.nP], ['M', fallbackAlloc.nM], ['G', fallbackAlloc.nG]]) {
+        const n = Math.max(0, Number(count || 0) || 0);
+        if (!n) continue;
+        slotBuckets.push({
+          count: n,
+          slot: {
+            city,
+            size,
+            scope: 'directed',
+            neighborhoodId: row.id,
+            neighborhoodName: `[fallback cidade] ${row.name}`,
+            locationPool: directedFallbackLocations.slice()
+          }
+        });
+      }
     }
   }
 
-  if (universalTarget > 0) {
+  if (universalTarget > 0 && universalLocations.length > 0) {
+    const universalCandidates = coveredExactNeighborhoods.concat(coveredFallbackNeighborhoods);
+    const universalCounts = allocateWeightedCounts(
+      universalTarget,
+      universalCandidates.map((row) => ({
+        key: row.id,
+        weight: Math.max(
+          0,
+          Number(exactNeighborhoodWeights.get(row.id) || fallbackNeighborhoodWeights.get(row.id) || 0) || 0
+        )
+      }))
+    );
+    for (const row of universalCandidates) {
+      const countForNeighborhood = Math.max(0, Number(universalCounts[row.id] || 0) || 0);
+      if (!countForNeighborhood) continue;
+      const pmg = exactNeighborhoodPmg.get(row.id) || fallbackNeighborhoodPmg.get(row.id) || createEmptyPmgCounters();
+      const universalAlloc = allocatePmgSlots(countForNeighborhood, pmg);
+      for (const [size, count] of [['P', universalAlloc.nP], ['M', universalAlloc.nM], ['G', universalAlloc.nG]]) {
+        const n = Math.max(0, Number(count || 0) || 0);
+        if (!n) continue;
+        slotBuckets.push({
+          count: n,
+          slot: {
+            city,
+            size,
+            scope: 'universal',
+            neighborhoodId: row.id,
+            neighborhoodName: row.name,
+            locationPool: universalLocations.slice()
+          }
+        });
+      }
+    }
+  } else if (universalTarget > 0) {
     const universalAlloc = allocatePmgSlots(universalTarget, cityPmg);
     for (const [size, count] of [['P', universalAlloc.nP], ['M', universalAlloc.nM], ['G', universalAlloc.nG]]) {
       const n = Math.max(0, Number(count || 0) || 0);
@@ -1616,7 +1666,7 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   );
   const v4ExactNeighborhoodPercent = Math.max(
     0,
-    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 50) || 50))
+    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 90) || 90))
   );
   const v4ConfigSigExtra = isV4 ? { v4NeighborhoodDirectedPercent, v4ExactNeighborhoodPercent } : {};
   if (isV3 || isV4) {
@@ -1977,7 +2027,7 @@ async function pickPostingSlotForRunV2() {
   );
   const v4ExactNeighborhoodPercent = Math.max(
     0,
-    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 50) || 50))
+    Math.min(100, Math.floor(Number(robeCfg.v4ExactNeighborhoodPercent != null ? robeCfg.v4ExactNeighborhoodPercent : 90) || 90))
   );
   const v4ConfigSigExtra = workMode === 'v4_bairros'
     ? { v4NeighborhoodDirectedPercent, v4ExactNeighborhoodPercent }

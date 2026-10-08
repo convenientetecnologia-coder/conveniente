@@ -1508,7 +1508,7 @@
           <div class="form-row">
             <label>Robe V4 — % do bloco dirigido para bairros exatos</label>
             <input type="number" id="srvRobeV4ExactPercent" min="0" max="100" step="1" />
-            <div class="muted" style="margin-top:6px;">Usado só dentro do bloco dirigido. Ex.: 50 = metade vai para bairros com localização própria e metade vira fallback dinâmico da cidade para bairros selecionados sem localização.</div>
+            <div class="muted" style="margin-top:6px;">Padrão de fábrica: 90. Usado só dentro do bloco dirigido. Ex.: 90 = 90% vai para bairros com localização própria e 10% vira fallback da cidade para bairros selecionados sem localização.</div>
           </div>
           <div class="form-row">
             <label>Robe — títulos de itens</label>
@@ -1895,7 +1895,7 @@
           v4DirectedPercentEl.value = Number(robe.v4NeighborhoodDirectedPercent != null ? robe.v4NeighborhoodDirectedPercent : 90);
         }
         if (v4ExactPercentEl) {
-          v4ExactPercentEl.value = Number(robe.v4ExactNeighborhoodPercent != null ? robe.v4ExactNeighborhoodPercent : 50);
+          v4ExactPercentEl.value = Number(robe.v4ExactNeighborhoodPercent != null ? robe.v4ExactNeighborhoodPercent : 90);
         }
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         if (countryIdEl) {
@@ -2300,7 +2300,7 @@
                 return Math.max(0, Math.min(100, Math.floor(raw)));
               })(),
               v4ExactNeighborhoodPercent: (() => {
-                const raw = Number((v4ExactPercentEl && v4ExactPercentEl.value) || 50);
+                const raw = Number((v4ExactPercentEl && v4ExactPercentEl.value) || 90);
                 if (!Number.isFinite(raw)) return 50;
                 return Math.max(0, Math.min(100, Math.floor(raw)));
               })(),

@@ -193,7 +193,7 @@ const DEFAULTS = Object.freeze({
     cooldownMaxMinutes: 120,
     workMode: "v3_pmg",
     v4NeighborhoodDirectedPercent: 90,
-    v4ExactNeighborhoodPercent: 50,
+    v4ExactNeighborhoodPercent: 90,
     v2Tuning: {
       alpha: 0.10,
       beta: 1.0,
