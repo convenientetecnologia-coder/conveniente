@@ -1750,6 +1750,24 @@ function __edgeAckFilePathForCmdId(cmdId) {
   return path.join(EDGE_DELTA_REPLY_OUTBOX_ACK_DIR, `ack_${safe}.json`);
 }
 
+function __edgeForgetInfraDeadLetterAckSync(cmdId) {
+  const cid = String(cmdId || '').trim();
+  if (!cid) return false;
+  try {
+    const fp = __edgeAckFilePathForCmdId(cid);
+    if (!(fp && fs.existsSync(fp))) return false;
+    const raw = JSON.parse(String(fs.readFileSync(fp, 'utf8') || '{}'));
+    if (!(raw && raw.dead_letter === true)) return false;
+    if (!__edgeIsInfraWaitDeltaSendError(raw.error) && !__edgeIsInfraWaitDeltaSendError(raw.dead_reason)) {
+      return false;
+    }
+    fs.unlinkSync(fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function __edgeHasAckSync(cmdId) {
   try {
     const fp = __edgeAckFilePathForCmdId(cmdId);
@@ -1846,6 +1864,29 @@ const __EDGE_ROUTING_ROTATE_COOL_MS = Math.max(
   )
 );
 
+/** Conta/servidor/mãos ainda não prontos. A mensagem espera. Não vira erro final. */
+function __edgeIsInfraWaitDeltaSendError(error) {
+  const e = String(error || '').trim().toLowerCase();
+  if (!e) return false;
+  if (e.includes('thread_content_unavailable')) return false;
+  if (e.includes('composer_text_not_registered')) return false;
+  if (e.includes('send_not_confirmed')) return false;
+  if (e.includes('id_virtus')) return false;
+  if (e.includes('profile_not_found') || e.includes('profile_not_assigned')) return false;
+  return (
+    e.includes('delta_hands_unavailable') ||
+    e.includes('browser_not_connected') ||
+    e.includes('host_boot_not_ready') ||
+    e.includes('delta_runtime_not_ready') ||
+    e.includes('profile_runtime_not_ready') ||
+    e.includes('cluster_unavailable') ||
+    e.includes('browser_offline') ||
+    e.includes('browser has disconnected') ||
+    e.includes('target closed') ||
+    e.includes('session closed')
+  );
+}
+
 function __edgeIsNonRetryableDeltaSendError(error) {
   const e = String(error || '').trim().toLowerCase();
   if (e.includes('thread_content_unavailable')) return true;
@@ -1916,7 +1957,7 @@ function __edgePruneOfflineLogThrottle(nowMs = Date.now()) {
   } catch {}
 }
 
-function __edgeKickCtDeferredBrowserOffline({ rec } = {}) {
+function __edgeKickCtDeferredBrowserOffline({ rec, error } = {}) {
   try {
     const cid = String(rec && (rec.client_message_id || rec.id) || '').trim();
     if (!cid) return;
@@ -1937,7 +1978,7 @@ function __edgeKickCtDeferredBrowserOffline({ rec } = {}) {
       thread_key: String(rec && rec.thread_key || '').trim() || null,
       client_message_id: cid,
       status: 'deferred_browser_offline',
-      error: 'browser_offline'
+      error: String(error || 'browser_offline').slice(0, 500) || 'browser_offline'
     };
     try {
       setTimeout(() => {
@@ -2317,6 +2358,10 @@ function __edgeIsStaleDeltaReplyJunkSync(rec) {
   const isLocal = id.startsWith('local:') || cmid.startsWith('local:');
   if (isLocal) return { junk: true, reason: 'stale_local_cmd' };
   if (ts > 0 && ageMs > __EDGE_DELTA_REPLY_MAX_AGE_MS) {
+    // Servidor/navegador/mãos fora: espera até 24h. Não joga fora às 6h.
+    if (__edgeIsInfraWaitDeltaSendError(rec && rec.last_retry_error) && ageMs < 24 * 3600 * 1000) {
+      return { junk: false, reason: '' };
+    }
     return { junk: true, reason: 'stale_age_exceeded' };
   }
   return { junk: false, reason: '' };
@@ -2580,6 +2625,32 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       : (workerStatus ? workerStatus : 'ipc_not_ok');
     const softRequeue = __edgeIsDeltaReplySoftRequeueStatus(workerStatus)
       || String(retryError || '').trim().toLowerCase() === 'duplicate_inflight_skip';
+
+    if (__edgeIsInfraWaitDeltaSendError(retryError) || __edgeIsInfraWaitDeltaSendError(workerStatus)) {
+      const coolMs = 4_000 + Math.floor(Math.random() * 4_000);
+      __edgeRequeueDeltaReplyRecordSync(rec, {
+        cmdId,
+        reason: 'infra_wait',
+        error: retryError,
+        burnRetry: false,
+        notBefore: Date.now() + coolMs
+      });
+      try { __edgeKickCtDeferredBrowserOffline({ rec, error: retryError }); } catch {}
+      __forensicEdgeEmit({
+        account_login: accountNome || null,
+        thread_key: threadKey || null,
+        flow_stage: 'reverse_command_bus',
+        details: {
+          stage: 'ipc_dispatch_infra_wait',
+          cmd_id: cmdId,
+          error: retryError,
+          cool_ms: coolMs,
+          burn_retry: false
+        }
+      });
+      __edgeScheduleDeltaReplyPumpRetry();
+      return;
+    }
 
     if (softRequeue) {
       __edgeRequeueDeltaReplyRecordSync(rec, {
@@ -3173,6 +3244,8 @@ app.post('/api/infra/command-bus', async (req, res) => {
           continue;
         }
         const clientMessageId = String(cmd.client_message_id || cmd.clientMessageId || cmd.id || '').trim() || null;
+        const edgeCmdId = String(cmd.edge_cmd_id || cmd.edgeCmdId || cmd.id || clientMessageId || '').trim() || clientMessageId;
+        try { __edgeForgetInfraDeadLetterAckSync(edgeCmdId); } catch {}
 
         __forensicEdgeEmit({
           account_login: nome,
@@ -3186,7 +3259,7 @@ app.post('/api/infra/command-bus', async (req, res) => {
           }
         });
         const cmdId = __edgeEnqueueDeltaReplyToDiskSync({
-          id: String(cmd && cmd.id ? cmd.id : '').trim() || clientMessageId,
+          id: edgeCmdId || clientMessageId,
           nome,
           thread_key,
           texto_resposta,
