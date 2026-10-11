@@ -21426,6 +21426,8 @@ const DELTA_INGEST_DEADLETTER_CURSOR_PATH = path.join(__dirname, '..', 'dados', 
 let __deltaIngestKickRequested = false;
 let __deltaIngestPumpLeaderFlag = false;
 let __deltaIngestBootPrunedAsLeader = false;
+let __deltaIngestWatchdogLoopStarted = false;
+let __deltaIngestWatchdogTickRunning = false;
 const DELTA_INGEST_SINGLE_PUMP_OWNER = String(
   process.env.DELTA_INGEST_SINGLE_PUMP_OWNER == null ? '1' : process.env.DELTA_INGEST_SINGLE_PUMP_OWNER
 ).trim() !== '0';
@@ -21436,6 +21438,18 @@ const DELTA_INGEST_PUMP_LEADER_STALE_MS = Math.max(
 const DELTA_INGEST_FOLLOWER_POLL_MS = Math.max(
   250,
   Math.min(15_000, Number(process.env.DELTA_INGEST_FOLLOWER_POLL_MS || 2500) || 2500)
+);
+const DELTA_INGEST_WATCHDOG_INTERVAL_MS = Math.max(
+  5_000,
+  Math.min(60_000, Number(process.env.DELTA_INGEST_WATCHDOG_INTERVAL_MS || 15_000) || 15_000)
+);
+const DELTA_INGEST_WATCHDOG_STALL_MS = Math.max(
+  DELTA_INGEST_PUMP_LEADER_STALE_MS,
+  Math.min(
+    10 * 60_000,
+    Number(process.env.DELTA_INGEST_WATCHDOG_STALL_MS || (DELTA_INGEST_PUMP_LEADER_STALE_MS + 30_000))
+      || (DELTA_INGEST_PUMP_LEADER_STALE_MS + 30_000)
+  )
 );
 const DELTA_FALLBACK_CITY = 'Cidade Pendente';
 const DELTA_FALLBACK_LINK = 'Link Não Coletado';
@@ -24680,16 +24694,23 @@ function __deltaSafeJsonParse(str) {
   try { return JSON.parse(String(str || '')); } catch { return null; }
 }
 
-function __deltaReadCursorOffsetSync() {
+function __deltaReadCursorMetaSync() {
   try {
-    if (!fs.existsSync(DELTA_CURSOR_PATH)) return 0;
+    if (!fs.existsSync(DELTA_CURSOR_PATH)) return { byteOffset: 0, updatedAt: 0 };
     const raw = String(fs.readFileSync(DELTA_CURSOR_PATH, 'utf8') || '').trim();
     const parsed = __deltaSafeJsonParse(raw) || {};
     const off = Number(parsed.byteOffset || 0) || 0;
-    return off >= 0 ? off : 0;
+    return {
+      byteOffset: off >= 0 ? off : 0,
+      updatedAt: Math.max(0, Number(parsed.updatedAt || 0) || 0)
+    };
   } catch {
-    return 0;
+    return { byteOffset: 0, updatedAt: 0 };
   }
+}
+
+function __deltaReadCursorOffsetSync() {
+  return __deltaReadCursorMetaSync().byteOffset;
 }
 
 function __deltaWriteCursorOffsetSync(byteOffset) {
@@ -26557,7 +26578,117 @@ function __deltaConsumeIngestKickSync({ asLeader = false } = {}) {
   return kicked;
 }
 
+function __deltaBuildIngestWatchdogSnapshotSync() {
+  const now = Date.now();
+  const cursor = __deltaReadCursorMetaSync();
+  let queueSize = 0;
+  let queueMtimeMs = 0;
+  try {
+    if (fs.existsSync(DELTA_QUEUE_PATH)) {
+      const st = fs.statSync(DELTA_QUEUE_PATH);
+      queueSize = Math.max(0, Number(st && st.size || 0) || 0);
+      queueMtimeMs = Math.max(0, Number(st && st.mtimeMs || 0) || 0);
+    }
+  } catch {}
+  const lock = __deltaReadIngestPumpLockSync();
+  const lockTs = Math.max(0, Number(lock && lock.ts || 0) || 0);
+  return {
+    now,
+    cursor,
+    queueSize,
+    queueMtimeMs,
+    backlogBytes: Math.max(0, queueSize - Math.max(0, Number(cursor && cursor.byteOffset || 0) || 0)),
+    lock,
+    lockTs
+  };
+}
+
+async function __deltaRunIngestWatchdogTick() {
+  if (__deltaIngestWatchdogTickRunning) return;
+  __deltaIngestWatchdogTickRunning = true;
+  try {
+    if (typeof isDeltaMotorEnabledRuntime === 'function' && !isDeltaMotorEnabledRuntime()) return;
+    if (!__deltaIsHostBootReady()) return;
+    if (!__deltaStartIngestLoopOnce._started) {
+      try { __deltaStartIngestLoopOnce(); } catch {}
+    }
+    const snap = __deltaBuildIngestWatchdogSnapshotSync();
+    if (!(snap.backlogBytes > 0)) return;
+    const cursorAgeMs = snap.cursor && snap.cursor.updatedAt > 0
+      ? Math.max(0, snap.now - snap.cursor.updatedAt)
+      : Number.POSITIVE_INFINITY;
+    const queueAheadOfCursor = snap.queueMtimeMs > Math.max(0, snap.cursor && snap.cursor.updatedAt || 0);
+    const lockStale = __deltaIngestPumpLockIsStale(snap.lock, snap.now);
+    const stalled = queueAheadOfCursor && cursorAgeMs >= DELTA_INGEST_WATCHDOG_STALL_MS;
+    if (!lockStale && !stalled) return;
+
+    try {
+      logger.warn('[DELTA][INGEST] watchdog_rescue_backlog', {
+        pid: process.pid,
+        shard: String(process.env.WORKER_SHARD_INDEX || ''),
+        backlog_bytes: snap.backlogBytes,
+        queue_size: snap.queueSize,
+        cursor_offset: snap.cursor && snap.cursor.byteOffset || 0,
+        cursor_age_ms: Number.isFinite(cursorAgeMs) ? cursorAgeMs : null,
+        queue_mtime_ms: snap.queueMtimeMs || null,
+        lock_pid: snap.lock && snap.lock.pid || null,
+        lock_ts: snap.lockTs || null,
+        lock_stale: !!lockStale,
+        stalled: !!stalled
+      });
+    } catch {}
+    try {
+      if (typeof forensicLog === 'function') {
+        forensicLog('DELTA', 'ingest_watchdog_rescue_backlog', {
+          pid: process.pid,
+          shard: String(process.env.WORKER_SHARD_INDEX || ''),
+          backlog_bytes: snap.backlogBytes,
+          queue_size: snap.queueSize,
+          cursor_offset: snap.cursor && snap.cursor.byteOffset || 0,
+          cursor_age_ms: Number.isFinite(cursorAgeMs) ? cursorAgeMs : null,
+          queue_mtime_ms: snap.queueMtimeMs || null,
+          lock_pid: snap.lock && snap.lock.pid || null,
+          lock_ts: snap.lockTs || null,
+          lock_stale: !!lockStale,
+          stalled: !!stalled
+        });
+      }
+    } catch {}
+
+    if (lockStale) {
+      try {
+        if (fs.existsSync(DELTA_INGEST_PUMP_LOCK_PATH)) fs.unlinkSync(DELTA_INGEST_PUMP_LOCK_PATH);
+      } catch {}
+    }
+
+    __deltaIngestPumpLeaderFlag = false;
+    __deltaKickIngestLoop();
+
+    const rescuedAsLeader = __deltaEnsureIngestPumpLeader();
+    if (!rescuedAsLeader) return;
+    if (__deltaIngestLoopRunning) {
+      try { __deltaWriteIngestPumpLockSync(); } catch {}
+      return;
+    }
+    try { await __deltaIngestTick(); } catch {}
+    try { if (__deltaIngestPumpLeaderFlag) __deltaWriteIngestPumpLockSync(); } catch {}
+  } finally {
+    __deltaIngestWatchdogTickRunning = false;
+  }
+}
+
+function __deltaStartIngestWatchdogOnce() {
+  if (__deltaIngestWatchdogLoopStarted) return;
+  __deltaIngestWatchdogLoopStarted = true;
+  const loop = async () => {
+    try { await __deltaRunIngestWatchdogTick(); } catch {}
+    setTimeout(loop, DELTA_INGEST_WATCHDOG_INTERVAL_MS).unref?.();
+  };
+  setTimeout(loop, Math.min(5_000, DELTA_INGEST_WATCHDOG_INTERVAL_MS)).unref?.();
+}
+
 function __deltaStartIngestLoopOnce() {
+  try { __deltaStartIngestWatchdogOnce(); } catch {}
   if (!__deltaIsHostBootReady()) return;
   if (__deltaStartIngestLoopOnce._started) return;
   __deltaStartIngestLoopOnce._started = true;

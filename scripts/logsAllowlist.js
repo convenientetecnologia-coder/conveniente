@@ -84,6 +84,8 @@ function logsAllowlist() {
     delta_thread_state: path.join(base, 'delta_thread_state.json'),
     delta_queue: path.join(base, 'mensagens_pendentes.jsonl'),
     delta_queue_cursor: path.join(base, 'mensagens_pendentes.cursor.json'),
+    delta_pump_lock: path.join(base, 'mensagens_pendentes.pump.lock'),
+    delta_pump_kick: path.join(base, 'mensagens_pendentes.pump.kick'),
     delta_deadletter: path.join(base, 'mensagens_pendentes.deadletter.jsonl'),
     delta_deadletter_cursor: path.join(base, 'mensagens_pendentes.deadletter.cursor.json'),
     forensic_triagem: path.join(base, 'forensic_triagem.log'),
