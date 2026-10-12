@@ -521,49 +521,41 @@ async function detectIdWizardScreen(page) {
   }
 }
 
-async function readPhoneAdvancePoint(page) {
+async function clickConfirmeSuaIdentidade(page) {
   try {
-    return await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
+    const point = await page.evaluate(() => {
+      const exact = (el) => String(el && (el.innerText || el.textContent) || '').replace(/\s+/g, ' ').trim();
+      const label = Array.from(document.querySelectorAll('span')).find((el) => {
+        return exact(el) === 'Confirme sua identidade' && el.children.length === 0;
+      });
+      if (!label) return null;
+      let box = label;
+      let walk = label.parentElement;
+      while (walk && walk !== document.body) {
+        const overlay = Array.from(walk.children).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+        if (overlay) {
+          box = walk;
+          break;
         }
-      };
-      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
-      const phoneScreen = body.includes('confirme seu numero de celular')
-        || body.includes('confirme sua identidade no marketplace')
-        || body.includes('continue para a verificacao do telefone');
-      if (!phoneScreen) return null;
-      const nodes = Array.from(document.querySelectorAll('button,[role="button"],div[tabindex="0"],span[role="button"]'));
-      for (const el of nodes) {
-        if (el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled')) continue;
-        const txt = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`);
-        const hit = txt === 'avancar'
-          || txt.includes('a seguir: continue para a verificacao do telefone')
-          || txt.includes('continue para a verificacao do telefone');
-        if (!hit) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 40 || rect.height < 16) continue;
-        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-        return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) };
+        walk = walk.parentElement;
       }
-      return null;
+      const rect = box.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) return null;
+      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) };
     });
+    if (!point) return false;
+    await page.mouse.move(point.x, point.y);
+    await sleep(300);
+    await page.mouse.click(point.x, point.y, { delay: 60 });
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
-async function waitForSettledWizardScreen(page, { deadlineAt, minElapsedMs = 12000, stableReads = 3, gapMs = 2500, maxMs = 90000 } = {}) {
+async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 8000, maxMs = 60000 } = {}) {
   const start = Date.now();
-  const accept = new Set([
+  const readyScreens = new Set([
     'marketplace_phone_confirm',
     'marketplace_phone_entry',
     'continuar',
@@ -576,68 +568,24 @@ async function waitForSettledWizardScreen(page, { deadlineAt, minElapsedMs = 120
   let last = '';
   let streak = 0;
   while ((Date.now() - start) < maxMs && deadlineLeft(deadlineAt) > 0) {
-    const scr = await detectIdWizardScreen(page);
-    if (accept.has(scr) && scr === last) streak += 1;
-    else if (accept.has(scr)) {
+    const info = await readMarketplacePhoneConfirmInfo(page);
+    const scr = (info && info.detected) ? 'marketplace_phone_confirm' : await detectIdWizardScreen(page);
+    const ready = readyScreens.has(scr);
+    if (ready && scr === last && (Date.now() - start) >= minMs) {
+      streak += 1;
+      if (streak >= 2) return { ready: true, screen: scr };
+    } else if (ready) {
       last = scr;
       streak = 1;
     } else {
       last = scr;
       streak = 0;
     }
-    if (streak >= stableReads && (Date.now() - start) >= minElapsedMs) {
-      await sleep(4000);
-      const again = await detectIdWizardScreen(page);
-      if (again === scr) return { stable: true, screen: scr };
-      last = again;
-      streak = 0;
-      continue;
-    }
-    await sleep(gapMs);
+    await sleep(1500);
   }
-  return { stable: false, screen: await detectIdWizardScreen(page) };
-}
-
-async function clickSettledPhoneAdvance(page, { deadlineAt, minElapsedMs = 12000, stableReads = 3 } = {}) {
-  const start = Date.now();
-  let streak = 0;
-  while ((Date.now() - start) < 90000 && deadlineLeft(deadlineAt) > 0) {
-    const scr = await detectIdWizardScreen(page);
-    const btn = scr === 'marketplace_phone_confirm' ? await readPhoneAdvancePoint(page) : null;
-    if (scr === 'marketplace_phone_confirm' && btn) {
-      streak += 1;
-      if (streak >= stableReads && (Date.now() - start) >= minElapsedMs) {
-        await sleep(4000);
-        const again = await detectIdWizardScreen(page);
-        const btn2 = again === 'marketplace_phone_confirm' ? await readPhoneAdvancePoint(page) : null;
-        if (!(again === 'marketplace_phone_confirm' && btn2)) {
-          streak = 0;
-          continue;
-        }
-        try {
-          await page.mouse.move(btn2.x, btn2.y);
-          await sleep(400);
-          await page.mouse.click(btn2.x, btn2.y, { delay: 80 });
-        } catch {
-          streak = 0;
-          await sleep(2000);
-          continue;
-        }
-        await sleep(WAIT_STEP_MS);
-        const after = await detectIdWizardScreen(page);
-        if (after === 'confirm') {
-          streak = 0;
-          await sleep(8000);
-          continue;
-        }
-        return true;
-      }
-    } else {
-      streak = 0;
-    }
-    await sleep(2500);
-  }
-  return false;
+  const info = await readMarketplacePhoneConfirmInfo(page);
+  const scr = (info && info.detected) ? 'marketplace_phone_confirm' : await detectIdWizardScreen(page);
+  return { ready: readyScreens.has(scr), screen: scr };
 }
 
 async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } = {}) {
@@ -709,7 +657,7 @@ async function readMarketplacePhoneEntryState(page) {
   }
 }
 
-async function readCountryComboboxPoint(page) {
+async function focusMarketplaceCountryCombobox(page) {
   try {
     return await page.evaluate(() => {
       const normLocal = (s) => {
@@ -728,222 +676,48 @@ async function readCountryComboboxPoint(page) {
         const txt = normLocal(el.innerText || el.textContent || '');
         return txt.includes('codigo de chamada do pais')
           || txt.includes('brazil (+55)')
-          || txt.includes('united states (+1)')
-          || txt.includes('(+55)')
-          || txt.includes('(+1)');
+          || txt.includes('united states (+1)');
       });
-      if (!combo) return null;
-      const icon = combo.querySelector('i[data-visualcompletion="css-img"]');
-      const rect = (icon || combo).getBoundingClientRect();
-      if (rect.width < 4 || rect.height < 4) return null;
-      const x = icon ? (rect.left + rect.width / 2) : (rect.right - 14);
-      const y = rect.top + rect.height / 2;
-      return {
-        x,
-        y,
-        expanded: combo.getAttribute('aria-expanded') === 'true'
-      };
+      if (!combo || typeof combo.focus !== 'function') return false;
+      combo.focus();
+      return document.activeElement === combo || combo.contains(document.activeElement);
     });
   } catch {
-    return null;
-  }
-}
-
-async function countryMenuSnapshot(page, { scroll = false } = {}) {
-  try {
-    return await page.evaluate((doScroll) => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const isUs = (raw) => {
-        const n = normLocal(raw);
-        if (!n || n.includes('minor') || n.includes('virgin') || n.includes('islands')) return false;
-        return n === 'united states (+1)' || (n.startsWith('united states') && n.includes('(+1)'));
-      };
-      const rows = [];
-      const seen = new Set();
-      const nodes = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="listbox"] div, [role="listbox"] span, div, span'));
-      for (const el of nodes) {
-        const raw = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!/\(\+\d+\)/.test(raw) || raw.length > 90) continue;
-        const childSame = Array.from(el.children || []).some((child) => String(child.innerText || '').replace(/\s+/g, ' ').trim() === raw);
-        if (childSame) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 28 || rect.height < 12 || rect.height > 80) continue;
-        const key = `${normLocal(raw)}|${Math.round(rect.top)}|${Math.round(rect.left)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        rows.push({ el, raw, rect });
-      }
-      const combo = Array.from(document.querySelectorAll('[role="combobox"]')).find((el) => {
-        const txt = normLocal(el.innerText || el.textContent || '');
-        return txt.includes('codigo de chamada do pais') || txt.includes('(+55)') || txt.includes('(+1)');
-      });
-      const expanded = !!(combo && combo.getAttribute('aria-expanded') === 'true');
-      const listRows = rows.filter((row) => !(combo && combo.contains(row.el)));
-      if (listRows.length < 4) return { open: expanded, rows: listRows.length, found: false, atEnd: false, moved: false };
-      const anchor = listRows.find((row) => row.rect.top >= 0 && row.rect.bottom <= window.innerHeight) || listRows[0];
-      let scroller = anchor.el.parentElement;
-      let best = null;
-      let bestDelta = 0;
-      let walk = anchor.el;
-      while (walk && walk !== document.body) {
-        const style = window.getComputedStyle(walk);
-        const delta = walk.scrollHeight - walk.clientHeight;
-        const oy = style.overflowY;
-        if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && delta > 12) {
-          scroller = walk;
-          break;
-        }
-        if (delta > bestDelta + 12) {
-          best = walk;
-          bestDelta = delta;
-        }
-        walk = walk.parentElement;
-      }
-      if ((!scroller || scroller === anchor.el.parentElement) && best) scroller = best;
-      if (!scroller || scroller === document.body || scroller === document.documentElement) {
-        return { open: expanded || rows.length >= 4, rows: rows.length, found: false, atEnd: false, moved: false };
-      }
-      const view = scroller.getBoundingClientRect();
-      if (view.height > window.innerHeight * 0.8) {
-        return { open: expanded || rows.length >= 4, rows: rows.length, found: false, atEnd: false, moved: false };
-      }
-      const hit = listRows.find((row) => {
-        if (!isUs(row.raw)) return false;
-        return row.rect.top >= view.top + 2
-          && row.rect.bottom <= view.bottom - 2
-          && row.rect.left >= view.left
-          && row.rect.right <= view.right + 8;
-      });
-      if (hit) {
-        return {
-          open: true,
-        rows: listRows.length,
-        found: true,
-          x: hit.rect.left + hit.rect.width / 2,
-          y: hit.rect.top + hit.rect.height / 2
-        };
-      }
-      if (!doScroll) {
-        return { open: true, rows: listRows.length, found: false, atEnd: false, moved: false };
-      }
-      const before = scroller.scrollTop;
-      const step = Math.max(48, Math.floor((scroller.clientHeight || 180) * 0.35));
-      // Lista alfabetica: Brazil fica antes de United States, entao o conteudo sobe.
-      const canScroll = scroller.scrollHeight > scroller.clientHeight + 12;
-      let moved = false;
-      if (canScroll) {
-        scroller.scrollTop = before + step;
-        moved = scroller.scrollTop !== before;
-      }
-      if (!moved) {
-        scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
-        moved = canScroll ? scroller.scrollTop !== before : true;
-      }
-      const atEnd = canScroll && (scroller.scrollTop + scroller.clientHeight) >= (scroller.scrollHeight - 6);
-      return {
-        open: true,
-        rows: listRows.length,
-        found: false,
-        moved,
-        atEnd,
-        scrollTop: scroller.scrollTop,
-        scrollHeight: scroller.scrollHeight
-      };
-    }, !!scroll);
-  } catch {
-    return { open: false, rows: 0, found: false, atEnd: false, moved: false };
+    return false;
   }
 }
 
 async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = {}) {
-  const start = Date.now();
-  let pass = 0;
-  while ((Date.now() - start) < 120000 && deadlineLeft(deadlineAt) > 0) {
+  for (let attempt = 1; attempt <= 3 && deadlineLeft(deadlineAt) > 0; attempt++) {
     const state = await readMarketplacePhoneEntryState(page);
     if (state && isUnitedStatesDialOption(state.countryText)) return true;
-    pass += 1;
-    const point = await readCountryComboboxPoint(page);
-    if (!point) {
-      await sleep(2000);
-      continue;
-    }
-    try {
-      await page.mouse.move(point.x, point.y);
-      await sleep(400);
-      await page.mouse.click(point.x, point.y, { delay: 80 });
-    } catch {
+    const focused = await focusMarketplaceCountryCombobox(page);
+    if (!focused) {
       await sleep(1500);
       continue;
     }
-    const openedAt = Date.now();
-    let open = false;
-    while (Date.now() - openedAt < 8000 && deadlineLeft(deadlineAt) > 0) {
-      const snap = await countryMenuSnapshot(page, { scroll: false });
-      if (snap && (snap.open || snap.rows >= 4 || snap.found)) {
-        open = true;
-        break;
+    await sleep(400);
+    try {
+      await page.keyboard.press('ArrowDown');
+      await sleep(1200);
+      for (let i = 0; i < 50; i++) {
+        assertBudget(deadlineAt, 'tv_country_arrow_up');
+        await page.keyboard.press('ArrowUp');
+        await sleep(70);
       }
-      await sleep(500);
-    }
-    if (!open) {
-      await sleep(2000);
+      await sleep(400);
+      await page.keyboard.press('ArrowDown');
+      await sleep(140);
+      await page.keyboard.press('ArrowDown');
+      await sleep(250);
+      await page.keyboard.press('Enter');
+    } catch {
+      await sleep(1000);
       continue;
     }
-    await sleep(1200);
-    let wrapped = false;
-    for (let step = 0; step < 90 && deadlineLeft(deadlineAt) > 0; step++) {
-      const snap = await countryMenuSnapshot(page, { scroll: true });
-      if (snap && snap.found && Number.isFinite(snap.x) && Number.isFinite(snap.y)) {
-        try {
-          await page.mouse.move(snap.x, snap.y);
-          await sleep(350);
-          await page.mouse.click(snap.x, snap.y, { delay: 90 });
-        } catch {}
-        await sleep(2500);
-        const after = await readMarketplacePhoneEntryState(page);
-        if (after && isUnitedStatesDialOption(after.countryText)) return true;
-        break;
-      }
-      if (snap && snap.atEnd && !wrapped) {
-        try {
-          await page.evaluate(() => {
-            const rows = Array.from(document.querySelectorAll('div, span')).filter((el) => {
-              const raw = String(el.innerText || '').replace(/\s+/g, ' ').trim();
-              return /\(\+\d+\)/.test(raw) && raw.length < 90;
-            });
-            const el = rows[0];
-            if (!el) return false;
-            let walk = el;
-            while (walk && walk !== document.body) {
-              if (walk.scrollHeight > walk.clientHeight + 12) {
-                walk.scrollTop = 0;
-                return true;
-              }
-              walk = walk.parentElement;
-            }
-            return false;
-          });
-        } catch {}
-        wrapped = true;
-        await sleep(800);
-        continue;
-      }
-      if (snap && snap.atEnd && wrapped) break;
-      await sleep(550);
-    }
-    if (pass >= 4) break;
-    await sleep(1500);
+    await sleep(1800);
+    const after = await readMarketplacePhoneEntryState(page);
+    if (after && isUnitedStatesDialOption(after.countryText)) return true;
   }
   const finalState = await readMarketplacePhoneEntryState(page);
   return !!(finalState && isUnitedStatesDialOption(finalState.countryText));
@@ -2270,18 +2044,22 @@ async function tryOpenActionNeededAtTop(
   return { openedOk, scan };
 }
 
-async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt, advanceMinMs = 12000 } = {}) {
-  logEvt(nome, source, 'marketplace_phone_flow_start', {});
+async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt, skipAdvance = false } = {}) {
+  logEvt(nome, source, 'marketplace_phone_flow_start', { skipAdvance: !!skipAdvance });
 
-  const firstAdvance = await clickSettledPhoneAdvance(page, {
-    deadlineAt,
-    minElapsedMs: Math.max(3000, Number(advanceMinMs) || 12000),
-    stableReads: 3
-  });
-  logEvt(nome, source, 'marketplace_phone_flow_avancar', { ok: !!firstAdvance });
-  if (!firstAdvance) {
-    await setMarketplacePhoneFlag(nome, 'error', { reason: 'marketplace_phone_advance_missing', text: 'Nao foi possivel avancar para a verificacao de telefone.' });
-    return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_advance_missing' };
+  let screenNow = await detectIdWizardScreen(page);
+  if (!skipAdvance && screenNow !== 'marketplace_phone_entry' && screenNow !== 'marketplace_phone_code' && screenNow !== 'marketplace_phone_success') {
+    await sleep(2000);
+    const firstAdvance = await waitClickByText(
+      page,
+      ['a seguir: continue para a verificacao do telefone', 'a seguir: continue para a verificação do telefone', 'avancar', 'avançar'],
+      { maxMs: 60000, deadlineAt, withinDialog: false, exact: false, settleMs: WAIT_STEP_MS + 2000 }
+    );
+    logEvt(nome, source, 'marketplace_phone_flow_avancar', { ok: !!firstAdvance });
+    if (!firstAdvance) {
+      await setMarketplacePhoneFlag(nome, 'error', { reason: 'marketplace_phone_advance_missing', text: 'Nao foi possivel avancar para a verificacao de telefone.' });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_advance_missing' };
+    }
   }
 
   let screen = await waitForWizardScreen(page, ['marketplace_phone_entry', 'marketplace_phone_code', 'marketplace_phone_success'], {
@@ -2302,6 +2080,15 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
   let usedRecentCount = 0;
   for (let attempt = 1; attempt <= 10; attempt++) {
     assertBudget(deadlineAt, 'marketplace_phone_attempt');
+    const countryOk = await selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt });
+    logEvt(nome, source, 'marketplace_phone_country', { attempt, ok: !!countryOk });
+    if (!countryOk) {
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_country_failed',
+        text: 'Nao confirmou United States no campo de pais.'
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_country_failed' };
+    }
     const purchase = await createTextverifiedVerificationRobust({ nome, source });
     if (!purchase.ok) {
       if (purchase.marketplacePhoneNoBalance) {
@@ -2346,8 +2133,7 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
       return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_invalid_number' };
     }
 
-    const countryOk = await selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt });
-    const typedOk = countryOk && await typeMarketplacePhoneNumber(page, phoneNational, { deadlineAt });
+    const typedOk = await typeMarketplacePhoneNumber(page, phoneNational, { deadlineAt });
     const beforeSms = await readMarketplaceSmsMessageIds(page, verification.numberDigits || verification.numberRaw || phoneNational);
     const sendAt = Date.now();
     const sendOk = typedOk && await clickMarketplacePhoneSendCode(page, { deadlineAt });
@@ -2522,18 +2308,20 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   const maybeMarketplacePhoneConfirm = async (where, extra = {}) => {
     const info = await readMarketplacePhoneConfirmInfo(page);
-    if (!(info && info.detected)) return null;
+    const scr = await detectIdWizardScreen(page);
+    const onEntry = scr === 'marketplace_phone_entry';
+    if (!(info && info.detected) && !onEntry && !extra.force) return null;
     logEvt(nome, source, 'wizard_marketplace_phone_confirm', {
       where: String(where || 'unknown'),
-      title: info.title || null,
-      snippet: info.snippet || null,
+      title: info && info.title ? info.title : null,
+      snippet: info && info.snippet ? info.snippet : null,
       humanRequired: false
     });
     return runMarketplacePhoneVerification(page, {
       nome,
       source,
       deadlineAt,
-      advanceMinMs: extra.advanceMinMs
+      skipAdvance: extra.skipAdvance === true || onEntry
     });
   };
 
@@ -2545,7 +2333,6 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   }
 
   let screen = await detectIdWizardScreen(page);
-  let clickedConfirm = false;
   logEvt(nome, source, 'wizard_screen', { screen });
   if (screen === 'marketplace_phone_confirm') {
     const handoff = await maybeMarketplacePhoneConfirm('screen_open');
@@ -2554,66 +2341,38 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   // 1) Confirme sua identidade (página do item / selling)
   if (screen === 'confirm' || screen === 'unknown') {
-    let confirmBtn = await waitClickByText(
-      page,
-      ['confirme sua identidade', 'verifique sua identidade'],
-      { maxMs: 60000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 2000 }
-    );
+    let confirmBtn = await clickConfirmeSuaIdentidade(page);
     if (!confirmBtn) {
-      try {
-        confirmBtn = await page.evaluate(() => {
-          const el =
-            document.querySelector('[aria-label="Confirme sua identidade"]') ||
-            document.querySelector('[aria-label*="Confirme sua identidade"]');
-          if (el && typeof el.click === 'function') {
-            el.click();
-            return true;
-          }
-          return false;
-        });
-        if (confirmBtn) await sleep(WAIT_STEP_MS + 2000);
-      } catch {
-        confirmBtn = false;
-      }
+      confirmBtn = await waitClickByText(
+        page,
+        ['confirme sua identidade', 'verifique sua identidade'],
+        { maxMs: 20000, deadlineAt, withinDialog: false, exact: true, settleMs: 1000 }
+      );
     }
-    clickedConfirm = !!confirmBtn;
     logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
     assertBudget(deadlineAt, 'wizard_after_confirm_btn');
+    if (confirmBtn) await sleep(WAIT_STEP_MS);
     if (await isSuccessScreen(page)) {
       return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn', deadlineAt });
     }
     if (confirmBtn) {
-      const settled = await waitForSettledWizardScreen(page, {
-        deadlineAt,
-        minElapsedMs: 12000,
-        stableReads: 3,
-        gapMs: 2500,
-        maxMs: 90000
-      });
-      screen = settled.screen;
+      const waited = await waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs: 8000, maxMs: 60000 });
+      screen = waited.screen;
       logEvt(nome, source, 'wizard_after_confirm_settled', {
         screen,
-        stable: settled.stable === true
+        ready: waited.ready === true
       });
-      if (!settled.stable) {
-        return { ok: false, error: 'post_confirm_screen_not_settled' };
-      }
-      if (screen === 'marketplace_phone_confirm') {
-        const handoff = await maybeMarketplacePhoneConfirm('after_confirm_settled', { advanceMinMs: 4000 });
-        if (handoff) return handoff;
-      }
     } else {
       screen = await detectIdWizardScreen(page);
-      if (screen === 'marketplace_phone_confirm') {
-        const handoff = await maybeMarketplacePhoneConfirm('after_confirm_btn');
-        if (handoff) return handoff;
-      }
+    }
+    if (screen === 'marketplace_phone_confirm') {
+      const handoff = await maybeMarketplacePhoneConfirm('after_confirm_btn');
+      if (handoff) return handoff;
     }
   }
 
   // 2) Avançar / "A seguir: continue para a verificação…"
   if (
-    !clickedConfirm &&
     screen !== 'continuar' &&
     screen !== 'carregar_doc' &&
     screen !== 'doc_type' &&
@@ -2658,7 +2417,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
     // Atalho: às vezes Avançar → direto "Suas informações foram enviadas..."
     {
-      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'marketplace_phone_confirm'], {
+      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'marketplace_phone_confirm', 'marketplace_phone_entry'], {
         maxMs: 45000,
         deadlineAt
       });
@@ -2666,8 +2425,11 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         return finishAlreadySubmitted(page, { nome, source, where: 'avancar', deadlineAt });
       }
       screen = earlyScr;
-      if (screen === 'marketplace_phone_confirm') {
-        const handoff = await maybeMarketplacePhoneConfirm('after_avancar');
+      if (screen === 'marketplace_phone_confirm' || screen === 'marketplace_phone_entry') {
+        const handoff = await maybeMarketplacePhoneConfirm('after_avancar', {
+          force: true,
+          skipAdvance: screen === 'marketplace_phone_entry'
+        });
         if (handoff) return handoff;
       }
     }
