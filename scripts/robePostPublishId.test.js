@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption } = require("./robePostPublishId.js");
 
 test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   const sample = `
@@ -17,6 +17,13 @@ test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   assert.equal(info.detected, true);
   assert.equal(info.phonePrompt, true);
   assert.equal(info.smsPrompt, true);
+});
+
+test("so aceita United States (+1) no menu de pais", () => {
+  assert.equal(isUnitedStatesDialOption("United States (+1)"), true);
+  assert.equal(isUnitedStatesDialOption("Brazil (+55)"), false);
+  assert.equal(isUnitedStatesDialOption("British Virgin Islands (+1)"), false);
+  assert.equal(isUnitedStatesDialOption("United States Minor Outlying Islands (+1)"), false);
 });
 
 test("nao confunde confirmacao generica de identidade com celular no MKT", () => {
