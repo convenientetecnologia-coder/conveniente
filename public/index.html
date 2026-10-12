@@ -3391,7 +3391,9 @@
         // REMOVIDO (enterprise): “Robe: Limite atingido” duplicava o estado final "Limite excedido".
 
         // ------- ID documento Marketplace (1x/dia; default nao) -------
-        if (p.robeIdDocDoneToday === true) {
+        if (p.robeIdPhoneDoneToday === true) {
+          titleRow.append(buildPill('ID celular sim', 'good'));
+        } else if (p.robeIdDocDoneToday === true) {
           titleRow.append(buildPill('ID - sim', 'good'));
         } else {
           titleRow.append(buildPill('ID - nao', 'info'));

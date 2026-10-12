@@ -90,6 +90,7 @@ function emptyFlagsAgg() {
     marketplace_phone_confirm: 0,
     // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
     id_sim: 0,
+    id_celular_sim: 0,
     renovados: 0,
     renovados_qtd: 0
   };
@@ -139,7 +140,8 @@ function buildServerCardAggs(status, opts = {}) {
     if (p.marketplacePhoneError === true) flagsAgg.marketplace_phone_error++;
     if (p.marketplacePhoneNoBalance === true) flagsAgg.marketplace_phone_no_balance++;
     if (p.marketplacePhoneConfirm === true) flagsAgg.marketplace_phone_confirm++;
-    if (p.robeIdDocDoneToday === true) flagsAgg.id_sim++;
+    if (p.robeIdPhoneDoneToday === true) flagsAgg.id_celular_sim++;
+    else if (p.robeIdDocDoneToday === true) flagsAgg.id_sim++;
 
     // Canônico (= CT snapshot + renewMetrics.aggregateRenovadosFromPerfis): renovadosLastCount.
     const renovN = Math.floor(Number(p.renovadosLastCount || 0) || 0);

@@ -227,13 +227,17 @@ async function isDoneToday(nome, now = Date.now()) {
   return isDoneTodayFromDay(day, now);
 }
 
-async function markDoneToday(nome) {
+async function markDoneToday(nome, { via = 'doc' } = {}) {
   const day = todaySP();
   await manifestStore.update(nome, (m) => {
     m = m || {};
     m.accountFlags = m.accountFlags || {};
     m.accountFlags.robeIdDocDoneDay = day;
     m.accountFlags.robeIdDocDoneAt = Date.now();
+    if (via === 'phone') {
+      m.accountFlags.robeIdPhoneDoneDay = day;
+      m.accountFlags.robeIdPhoneDoneAt = Date.now();
+    }
     return m;
   });
   return day;
@@ -745,6 +749,33 @@ async function typeMarketplacePhoneNumber(page, nationalDigits, { deadlineAt } =
   await sleep(1500);
   const state = await readMarketplacePhoneEntryState(page);
   return !!(state && textverified.digitsOnly(state.phoneValue) === digits);
+}
+
+async function readMarketplacePhoneLaterError(page) {
+  try {
+    return await page.evaluate(() => {
+      const raw = String(document.body && (document.body.innerText || document.body.textContent) || '');
+      const body = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      return body.includes('ocorreu um erro') && body.includes('tente novamente mais tarde');
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function waitSendCodeOutcome(page, { deadlineAt, maxMs = 12000 } = {}) {
+  const start = Date.now();
+  while ((Date.now() - start) < maxMs && deadlineLeft(deadlineAt) > 0) {
+    const scr = await detectIdWizardScreen(page);
+    if (scr === 'marketplace_phone_code' || scr === 'marketplace_phone_success') {
+      return { screen: scr, laterError: false };
+    }
+    const laterError = await readMarketplacePhoneLaterError(page);
+    if (laterError) return { screen: scr, laterError: true };
+    await sleep(1000);
+  }
+  const scr = await detectIdWizardScreen(page);
+  return { screen: scr, laterError: await readMarketplacePhoneLaterError(page) };
 }
 
 async function clickMarketplacePhoneSendCode(page, { deadlineAt } = {}) {
@@ -2137,15 +2168,37 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     const typedOk = await typeMarketplacePhoneNumber(page, phoneNational, { deadlineAt });
     const beforeSms = await readMarketplaceSmsMessageIds(page, verification.numberDigits || verification.numberRaw || phoneNational);
     const sendAt = Date.now();
-    const sendOk = typedOk && await clickMarketplacePhoneSendCode(page, { deadlineAt });
-    logEvt(nome, source, 'marketplace_phone_send_code', {
-      attempt,
-      orderTail: orderIdMasked,
-      phoneTail: phoneMasked,
-      countryOk: !!countryOk,
-      typedOk: !!typedOk,
-      sendOk: !!sendOk
-    });
+    let sendOk = false;
+    let laterError = false;
+    screen = '';
+    for (let sendTry = 1; sendTry <= 3 && deadlineLeft(deadlineAt) > 0; sendTry++) {
+      if (sendTry > 1) {
+        const waitMs = 5000 + Math.floor(Math.random() * 5001);
+        logEvt(nome, source, 'marketplace_phone_send_code_retry', {
+          attempt,
+          sendTry,
+          waitMs,
+          orderTail: orderIdMasked,
+          phoneTail: phoneMasked
+        });
+        await sleep(waitMs);
+      }
+      sendOk = (sendTry === 1 ? typedOk : true) && await clickMarketplacePhoneSendCode(page, { deadlineAt });
+      logEvt(nome, source, 'marketplace_phone_send_code', {
+        attempt,
+        sendTry,
+        orderTail: orderIdMasked,
+        phoneTail: phoneMasked,
+        countryOk: !!countryOk,
+        typedOk: !!typedOk,
+        sendOk: !!sendOk
+      });
+      if (!sendOk) break;
+      const outcome = await waitSendCodeOutcome(page, { deadlineAt, maxMs: 12000 });
+      screen = outcome.screen;
+      laterError = outcome.laterError === true;
+      if (screen === 'marketplace_phone_code' || screen === 'marketplace_phone_success' || !laterError) break;
+    }
     if (!countryOk || !typedOk || !sendOk) {
       try { await textverified.reportVerification(verification.id); } catch {}
       try { await textverified.cancelVerification(verification.id); } catch {}
@@ -2155,15 +2208,20 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
       });
       return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_send_code_failed' };
     }
+    if (laterError && screen !== 'marketplace_phone_code' && screen !== 'marketplace_phone_success') {
+      try { await textverified.reportVerification(verification.id); } catch {}
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_try_later',
+        text: `Facebook pediu para tentar de novo mais tarde apos 3 envios (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_try_later' };
+    }
 
-    await sleep(3000);
-    screen = await waitForWizardScreen(page, ['marketplace_phone_code', 'marketplace_phone_success'], {
-      maxMs: 45000,
-      deadlineAt
-    });
     logEvt(nome, source, 'marketplace_phone_after_send_screen', {
       attempt,
       screen,
+      laterError: !!laterError,
       orderTail: orderIdMasked,
       phoneTail: phoneMasked
     });
@@ -2675,6 +2733,16 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
         durationMs: Date.now() - startedAt
       });
       return Object.assign({ ok: true, marked: false, skipped: true }, wiz);
+    }
+
+    if (wiz && wiz.ok && wiz.marketplacePhoneVerified === true) {
+      await clearMarketplacePhoneFlags(nome);
+      const day = await markDoneToday(nome, { via: 'phone' });
+      logEvt(nome, source, 'marked_phone_sim', {
+        day,
+        durationMs: Date.now() - startedAt
+      });
+      return { ok: true, marked: true, phone: true, day, marketplacePhoneVerified: true };
     }
 
     if (wiz && wiz.ok) {

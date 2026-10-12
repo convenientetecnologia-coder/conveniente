@@ -16924,6 +16924,10 @@ const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDo
   ? String(man.accountFlags.robeIdDocDoneDay)
   : null;
 const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
+const robeIdPhoneDoneDay = man && man.accountFlags && man.accountFlags.robeIdPhoneDoneDay
+  ? String(man.accountFlags.robeIdPhoneDoneDay)
+  : null;
+const robeIdPhoneDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdPhoneDoneDay);
 const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
   ? Number(man.accountFlags.renovadosAt) || null
   : null;
@@ -17126,6 +17130,7 @@ perfis.push({
   identityNextCheckAt,
   robeIdDocDoneDay,
   robeIdDocDoneToday,
+  robeIdPhoneDoneToday,
   renovadosLastCount: effectiveRenovadosLastCount,
   renovadosAt: effectiveRenovadosAt,
   marketplaceRenewEnabled: !!(marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewEnabled),
