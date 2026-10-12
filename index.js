@@ -158,7 +158,8 @@ async function maybeBootstrapGateBToken() {
   // Require local: Gate B pode rodar antes do bloco de requires do dashboard (linha ~994).
   const {
     readCtConfig: readCtConfigLocal,
-    writeCtConfig: writeCtConfigLocal
+    writeCtConfig: writeCtConfigLocal,
+    applyInboundCtConfig
   } = require('./scripts/ctConfig.js');
   const DATA_DIR = path.join(__dirname, 'dados');
   const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
@@ -786,11 +787,10 @@ async function maybeBootstrapGateBToken() {
               const fromPayload = parsed202 && parsed202.ctBaseUrl ? String(parsed202.ctBaseUrl).trim() : '';
               let fromUrl = '';
               try { const u = new URL(String(url)); fromUrl = `${u.protocol}//${u.host}`; } catch {}
-              const ctBaseUrl = fromPayload || fromUrl;
-              if (ctBaseUrl) {
-                const wr = writeCtConfigLocal({ ctBaseUrl });
-                if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
-              }
+              const inbound = Object.assign({}, parsed202 || {});
+              if (!String(inbound.ctBaseUrl || '').trim() && fromUrl) inbound.ctBaseUrl = fromUrl;
+              const applied = applyInboundCtConfig(inbound);
+              if (!applied.ok) throw new Error(applied.error || 'write_ct_config_failed');
             } catch (eWrite) {
               try { logger.warn('[GATE_B][BOOTSTRAP] ctBaseUrl persist fail (202)', { error: (eWrite && eWrite.message) || String(eWrite) }); } catch {}
             }
@@ -846,12 +846,16 @@ async function maybeBootstrapGateBToken() {
               const u = new URL(String(url));
               fromUrl = `${u.protocol}//${u.host}`;
             } catch {}
-            const ctBaseUrl = fromPayload || fromUrl;
-            if (ctBaseUrl) {
-              const wr = writeCtConfigLocal({ ctBaseUrl });
-              if (!wr || wr.ok !== true) throw new Error((wr && wr.error) || 'write_ct_config_failed');
-              logger.info('[GATE_B][BOOTSTRAP] ctBaseUrl persistido', { ctBaseUrl: String(ctBaseUrl).slice(0, 120) });
-            }
+            const inbound = Object.assign({}, parsed || {});
+            if (!String(inbound.ctBaseUrl || '').trim() && fromUrl) inbound.ctBaseUrl = fromUrl;
+            const applied = applyInboundCtConfig(inbound);
+            if (!applied.ok) throw new Error(applied.error || 'write_ct_config_failed');
+            logger.info('[GATE_B][BOOTSTRAP] ct config persistida', {
+              hasBase: applied.hasBase === true,
+              hasTextVerifiedKey: applied.hasTextVerifiedKey === true,
+              hasTextVerifiedUsername: applied.hasTextVerifiedUsername === true,
+              complete: applied.complete === true
+            });
           } catch (eWrite) {
             try { logger.warn('[GATE_B][BOOTSTRAP] ctBaseUrl persist fail', { error: (eWrite && eWrite.message) || String(eWrite) }); } catch {}
           }
@@ -1105,7 +1109,7 @@ const terminalAccountCleanupScheduler = require('./scripts/terminalAccountCleanu
 // Dashboard monitor
 const { applyCommands: applyInfraCommands } = require('./scripts/dashboard.js');
 const logPorter = require('./scripts/logPorter.js');
-const { readCtConfig, writeCtConfig } = require('./scripts/ctConfig.js');
+const { readCtConfig, applyInboundCtConfig } = require('./scripts/ctConfig.js');
 
 // Inicialização
 const app = express();
@@ -4388,21 +4392,11 @@ async function __postServerEventToCt(payload) {
         let ctConfigApplied = false;
         let ctConfigError = null;
         try {
-          const ctBaseUrl = String(
-            reply && reply.ctConfig && reply.ctConfig.ctBaseUrl || ''
-          ).trim();
-          if (ctBaseUrl) {
-            const wr = writeCtConfig({ ctBaseUrl });
-            if (!wr || wr.ok !== true) {
-              ctConfigError = String((wr && wr.error) || 'write_ct_config_failed');
-            } else {
-              const confirmed = readCtConfig();
-              const persistedBase = String(confirmed && confirmed.ctBaseUrl || '').trim();
-              if (!persistedBase) {
-                ctConfigError = 'ct_base_not_persisted';
-              } else {
-                ctConfigApplied = true;
-              }
+          if (reply && reply.ctConfig && typeof reply.ctConfig === 'object') {
+            const applied = applyInboundCtConfig(reply.ctConfig);
+            ctConfigApplied = applied.complete === true;
+            if (!ctConfigApplied) {
+              ctConfigError = applied.ok ? 'ct_config_incomplete' : String(applied.error || 'ct_config_not_applied');
             }
           }
         } catch (eWrite) {
@@ -4539,9 +4533,8 @@ async function __serverEventBridgeTick(reason) {
     })();
     const needConfigPush = !!(configPush && configPush.need);
 
-    // Configuração de transporte é urgente: enquanto ctBaseUrl não persistir,
-    // envia needsConfig em todos os ticks (5s). O CT aplica backoff curto (~12s).
-    // Isso impede o fallback de cair no heartbeat normal.
+    // Enquanto faltar endereco do CT, chave ou usuario do Textverified,
+    // pede a configuracao em todo tick. A resposta precisa gravar os tres.
     let needsConfig = false;
     try {
       const cfgCt = readCtConfig();
@@ -4599,8 +4592,7 @@ async function __serverEventBridgeTick(reason) {
       eventType,
       stateHash: telemetry.stateHash,
       needsConfig,
-      // CT novo devolve ctBaseUrl na própria resposta; zero dependência do
-      // tunnel reverso e zero push DNS prematuro.
+      // A resposta do CT traz o pacote completo. Sem comando manual.
       acceptCtConfigReply: true,
       ...(statusHasHud ? {
         quick: telemetry.quick,

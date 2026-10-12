@@ -136,6 +136,58 @@ function readCtConfig() {
   };
 }
 
+function pickInboundCtConfig(src) {
+  if (!src || typeof src !== "object") return null;
+  const text = (value) => String(value == null ? "" : value).trim();
+  const patch = {};
+  const base = text(src.ctBaseUrl);
+  if (base) patch.ctBaseUrl = base;
+  const apiKey = text(src.textVerifiedApiKey);
+  if (apiKey) patch.textVerifiedApiKey = apiKey;
+  const apiUsername = text(src.textVerifiedApiUsername);
+  if (apiUsername) patch.textVerifiedApiUsername = apiUsername;
+  const baseUrl = text(src.textVerifiedBaseUrl);
+  if (baseUrl) patch.textVerifiedBaseUrl = baseUrl;
+  const serviceName = text(src.textVerifiedServiceName);
+  if (serviceName) patch.textVerifiedServiceName = serviceName;
+  const serviceNotListedName = text(src.textVerifiedServiceNotListedName);
+  if (serviceNotListedName) patch.textVerifiedServiceNotListedName = serviceNotListedName;
+  if (src.textVerifiedMaxPrice != null && src.textVerifiedMaxPrice !== "") {
+    const maxPrice = Number(src.textVerifiedMaxPrice);
+    if (Number.isFinite(maxPrice) && maxPrice > 0) patch.textVerifiedMaxPrice = maxPrice;
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+function ctConfigIsComplete(cfg) {
+  return !!(
+    cfg &&
+    String(cfg.ctBaseUrl || "").trim() &&
+    String(cfg.textVerifiedApiKey || "").trim() &&
+    String(cfg.textVerifiedApiUsername || "").trim()
+  );
+}
+
+function applyInboundCtConfig(src) {
+  const patch = pickInboundCtConfig(src);
+  if (!patch) return { ok: false, complete: false, error: "ct_config_reply_empty" };
+  const wr = writeCtConfig(patch);
+  if (!wr || wr.ok !== true) {
+    return { ok: false, complete: false, error: (wr && wr.error) || "write_ct_config_failed" };
+  }
+  const confirmed = readCtConfig();
+  const hasBase = !!String(confirmed.ctBaseUrl || "").trim();
+  const hasTextVerifiedKey = !!String(confirmed.textVerifiedApiKey || "").trim();
+  const hasTextVerifiedUsername = !!String(confirmed.textVerifiedApiUsername || "").trim();
+  return {
+    ok: true,
+    complete: ctConfigIsComplete(confirmed),
+    hasBase,
+    hasTextVerifiedKey,
+    hasTextVerifiedUsername
+  };
+}
+
 function writeCtConfig({
   ctBaseUrl,
   logIngestSecret,
@@ -198,6 +250,9 @@ module.exports = {
   resolveCtApiBase,
   readCtConfig,
   writeCtConfig,
+  pickInboundCtConfig,
+  ctConfigIsComplete,
+  applyInboundCtConfig,
   normalizeCtBaseUrl,
   isNgrokCtBaseUrl
 };

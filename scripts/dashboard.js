@@ -4343,7 +4343,7 @@ async function tick(reason = 'interval') {
       status.virtusMetrics = getVirtusMetricsCached(status);
     } catch {}
 
-    // Contrato: só ctBaseUrl. logIngestSecret é legado opcional (não bloqueia servidor novo).
+    // Pede de novo enquanto faltar endereco do CT, chave ou usuario do Textverified.
     const cfg = readCtConfig();
     const needsConfig = !cfg.ctBaseUrl || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername;
     // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
