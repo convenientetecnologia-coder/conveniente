@@ -21,6 +21,7 @@ test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
 
 test("so aceita United States (+1) no menu de pais", () => {
   assert.equal(isUnitedStatesDialOption("United States (+1)"), true);
+  assert.equal(isUnitedStatesDialOption("Rotulo do menu suspenso United States (+1)"), true);
   assert.equal(isUnitedStatesDialOption("Brazil (+55)"), false);
   assert.equal(isUnitedStatesDialOption("British Virgin Islands (+1)"), false);
   assert.equal(isUnitedStatesDialOption("United States Minor Outlying Islands (+1)"), false);

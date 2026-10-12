@@ -62,7 +62,7 @@ function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
   if (n.includes('minor') || n.includes('virgin') || n.includes('islands')) return false;
-  return n === 'united states (+1)' || (n.startsWith('united states') && n.includes('(+1)'));
+  return n.includes('united states (+1)');
 }
 
 function extractMarketplacePhoneConfirmInfoFromText(text) {
@@ -634,6 +634,9 @@ async function readMarketplacePhoneEntryState(page) {
         const txt = normLocal(el.innerText || el.textContent || '');
         return txt.includes('codigo de chamada do pais') || txt.includes('united states (+1)') || txt.includes('brazil (+55)');
       }) || null;
+      const visibleDial = combo
+        ? Array.from(combo.querySelectorAll('span')).map((el) => String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).find((txt) => /\(\+\d+\)/.test(txt))
+        : '';
       const send = Array.from(document.querySelectorAll('button,[role="button"],div[tabindex="0"]')).find((el) => {
         const txt = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`);
         return txt === 'enviar codigo' || txt.includes('enviar codigo');
@@ -644,7 +647,7 @@ async function readMarketplacePhoneEntryState(page) {
       });
       return {
         hasPhoneEntry: body.includes('insira o numero do seu celular'),
-        countryText: combo ? normLocal(combo.innerText || combo.textContent || '') : '',
+        countryText: normLocal(visibleDial || (combo ? (combo.innerText || combo.textContent || '') : '')),
         hasPhoneInput: !!phoneInput,
         hasSendCode: !!send,
         usedRecently: !!usedText,
