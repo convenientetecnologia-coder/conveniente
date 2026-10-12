@@ -166,6 +166,26 @@ function isDoneTodayFromDay(doneDay, now = Date.now()) {
   return String(doneDay || '').trim() === todaySP(now);
 }
 
+function isSameSpDay(atMs, now = Date.now()) {
+  const at = Number(atMs);
+  if (!Number.isFinite(at) || at <= 0) return false;
+  return todaySP(at) === todaySP(now);
+}
+
+function phoneAlertFlagsForToday(flags, now = Date.now()) {
+  const f = (flags && typeof flags === 'object') ? flags : {};
+  const errorOn = f.marketplacePhoneError === true;
+  const noBalanceOn = f.marketplacePhoneNoBalance === true;
+  const errorToday = errorOn && isSameSpDay(f.marketplacePhoneErrorAt, now);
+  const noBalanceToday = noBalanceOn && isSameSpDay(f.marketplacePhoneNoBalanceAt, now);
+  return {
+    marketplacePhoneError: errorToday,
+    marketplacePhoneNoBalance: noBalanceToday,
+    staleError: errorOn && !errorToday,
+    staleNoBalance: noBalanceOn && !noBalanceToday
+  };
+}
+
 function classifyIdToday(docDay, phoneDay, now = Date.now()) {
   if (isDoneTodayFromDay(phoneDay, now)) return 'phone';
   if (isDoneTodayFromDay(docDay, now)) return 'doc';
@@ -268,6 +288,32 @@ async function markDoneToday(nome, { via = 'doc' } = {}) {
     return m;
   });
   return day;
+}
+
+async function clearStaleMarketplacePhoneFlags(nome, now = Date.now()) {
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      const f = (m.accountFlags && typeof m.accountFlags === 'object') ? m.accountFlags : null;
+      if (!f) return m;
+      const view = phoneAlertFlagsForToday(f, now);
+      if (view.staleError) {
+        delete f.marketplacePhoneError;
+        delete f.marketplacePhoneErrorAt;
+        delete f.marketplacePhoneErrorReason;
+        delete f.marketplacePhoneErrorText;
+      }
+      if (view.staleNoBalance) {
+        delete f.marketplacePhoneNoBalance;
+        delete f.marketplacePhoneNoBalanceAt;
+        delete f.marketplacePhoneNoBalanceReason;
+        delete f.marketplacePhoneNoBalanceText;
+      }
+      if (Object.keys(f).length) m.accountFlags = f;
+      else delete m.accountFlags;
+      return m;
+    });
+  } catch {}
 }
 
 async function clearMarketplacePhoneFlags(nome) {
@@ -2866,6 +2912,9 @@ module.exports = {
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,
+  isSameSpDay,
+  phoneAlertFlagsForToday,
+  clearStaleMarketplacePhoneFlags,
   classifyIdToday,
   idFlagsForToday,
   isDoneToday,

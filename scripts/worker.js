@@ -16898,14 +16898,18 @@ const marketplaceDisabled = man ? !!(man.accountFlags && man.accountFlags.market
 const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledAt) || null) : null;
 const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
 const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
-const marketplacePhoneError = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneError === true) : false;
-const marketplacePhoneErrorAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorAt) || null) : null;
-const marketplacePhoneErrorReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorReason) || null) : null;
-const marketplacePhoneErrorText = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorText) || null) : null;
-const marketplacePhoneNoBalance = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneNoBalance === true) : false;
-const marketplacePhoneNoBalanceAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceAt) || null) : null;
-const marketplacePhoneNoBalanceReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceReason) || null) : null;
-const marketplacePhoneNoBalanceText = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceText) || null) : null;
+const phoneAlerts = robePostPublishId.phoneAlertFlagsForToday(man && man.accountFlags);
+if (phoneAlerts.staleError || phoneAlerts.staleNoBalance) {
+  await robePostPublishId.clearStaleMarketplacePhoneFlags(nome);
+}
+const marketplacePhoneError = phoneAlerts.marketplacePhoneError;
+const marketplacePhoneErrorAt = marketplacePhoneError && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorAt) || null) : null;
+const marketplacePhoneErrorReason = marketplacePhoneError && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorReason) || null) : null;
+const marketplacePhoneErrorText = marketplacePhoneError && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorText) || null) : null;
+const marketplacePhoneNoBalance = phoneAlerts.marketplacePhoneNoBalance;
+const marketplacePhoneNoBalanceAt = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceAt) || null) : null;
+const marketplacePhoneNoBalanceReason = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceReason) || null) : null;
+const marketplacePhoneNoBalanceText = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceText) || null) : null;
 const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
 const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
 const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
@@ -16971,8 +16975,8 @@ const problem = man
     (man.accountFlags && man.accountFlags.loginRequired === true) ||
     (man.accountFlags && man.accountFlags.banned === true) ||
     (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
-    (man.accountFlags && man.accountFlags.marketplacePhoneError === true) ||
-    (man.accountFlags && man.accountFlags.marketplacePhoneNoBalance === true) ||
+    marketplacePhoneError === true ||
+    marketplacePhoneNoBalance === true ||
     (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||

@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday } = require("./robePostPublishId.js");
 
 test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   const sample = `
@@ -17,6 +17,33 @@ test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   assert.equal(info.detected, true);
   assert.equal(info.phonePrompt, true);
   assert.equal(info.smsPrompt, true);
+});
+
+test("erro e sem saldo do celular saem na virada do dia de SP", () => {
+  const beforeMidnight = Date.parse("2026-10-13T02:30:00Z");
+  const afterMidnight = Date.parse("2026-10-13T03:30:00Z");
+  const today = phoneAlertFlagsForToday({
+    marketplacePhoneError: true,
+    marketplacePhoneErrorAt: beforeMidnight,
+    marketplacePhoneNoBalance: true,
+    marketplacePhoneNoBalanceAt: beforeMidnight
+  }, beforeMidnight);
+  assert.equal(today.marketplacePhoneError, true);
+  assert.equal(today.marketplacePhoneNoBalance, true);
+  assert.equal(today.staleError, false);
+  const nextDay = phoneAlertFlagsForToday({
+    marketplacePhoneError: true,
+    marketplacePhoneErrorAt: beforeMidnight,
+    marketplacePhoneNoBalance: true,
+    marketplacePhoneNoBalanceAt: beforeMidnight
+  }, afterMidnight);
+  assert.equal(nextDay.marketplacePhoneError, false);
+  assert.equal(nextDay.marketplacePhoneNoBalance, false);
+  assert.equal(nextDay.staleError, true);
+  assert.equal(nextDay.staleNoBalance, true);
+  const legacy = phoneAlertFlagsForToday({ marketplacePhoneError: true }, afterMidnight);
+  assert.equal(legacy.marketplacePhoneError, false);
+  assert.equal(legacy.staleError, true);
 });
 
 test("id do dia separa foto, celular e o pulo da verificacao", () => {
