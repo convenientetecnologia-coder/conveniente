@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError } = require("./robePostPublishId.js");
 
 test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   const sample = `
@@ -17,6 +17,16 @@ test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   assert.equal(info.detected, true);
   assert.equal(info.phonePrompt, true);
   assert.equal(info.smsPrompt, true);
+});
+
+test("erro de celular nao vira erro de documento", () => {
+  assert.equal(shouldMarkDocError({ ok: false, marketplacePhoneError: true, error: 'marketplace_phone_try_later' }), false);
+  assert.equal(shouldMarkDocError({ ok: false, marketplacePhoneNoBalance: true }), false);
+  assert.equal(shouldMarkDocError({ ok: true, skipped: true, reason: 'no_action_needed_today' }), false);
+  assert.equal(shouldMarkDocError({ ok: false, error: 'no_action_needed' }), false);
+  assert.equal(shouldMarkDocError({ ok: false, error: 'open_listing_failed' }), true);
+  assert.equal(shouldMarkDocError({ ok: false, error: 'cnh_not_selected' }), true);
+  assert.equal(shouldMarkDocError({ ok: true, marketplacePhoneVerified: true }), false);
 });
 
 test("erro e sem saldo do celular saem na virada do dia de SP", () => {

@@ -178,12 +178,32 @@ function phoneAlertFlagsForToday(flags, now = Date.now()) {
   const noBalanceOn = f.marketplacePhoneNoBalance === true;
   const errorToday = errorOn && isSameSpDay(f.marketplacePhoneErrorAt, now);
   const noBalanceToday = noBalanceOn && isSameSpDay(f.marketplacePhoneNoBalanceAt, now);
+  const docOn = f.marketplaceDocError === true;
+  const docToday = docOn && isSameSpDay(f.marketplaceDocErrorAt, now);
   return {
     marketplacePhoneError: errorToday,
     marketplacePhoneNoBalance: noBalanceToday,
+    marketplaceDocError: docToday,
     staleError: errorOn && !errorToday,
-    staleNoBalance: noBalanceOn && !noBalanceToday
+    staleNoBalance: noBalanceOn && !noBalanceToday,
+    staleDocError: docOn && !docToday
   };
+}
+
+function shouldMarkDocError(result) {
+  if (!result || result.ok === true || result.skipped === true) return false;
+  if (result.marketplacePhoneError === true) return false;
+  if (result.marketplacePhoneNoBalance === true) return false;
+  if (result.marketplacePhoneVerified === true) return false;
+  const reason = String(result.error || result.reason || '');
+  if (
+    reason === 'no_action_needed' ||
+    reason === 'no_action_needed_today' ||
+    reason === 'action_stale_not_today' ||
+    reason === 'page_gone' ||
+    reason === 'already_done_today'
+  ) return false;
+  return true;
 }
 
 function classifyIdToday(docDay, phoneDay, now = Date.now()) {
@@ -309,6 +329,12 @@ async function clearStaleMarketplacePhoneFlags(nome, now = Date.now()) {
         delete f.marketplacePhoneNoBalanceReason;
         delete f.marketplacePhoneNoBalanceText;
       }
+      if (view.staleDocError) {
+        delete f.marketplaceDocError;
+        delete f.marketplaceDocErrorAt;
+        delete f.marketplaceDocErrorReason;
+        delete f.marketplaceDocErrorText;
+      }
       if (Object.keys(f).length) m.accountFlags = f;
       else delete m.accountFlags;
       return m;
@@ -329,8 +355,27 @@ async function clearMarketplacePhoneFlags(nome) {
       delete f.marketplacePhoneNoBalanceAt;
       delete f.marketplacePhoneNoBalanceReason;
       delete f.marketplacePhoneNoBalanceText;
+      delete f.marketplaceDocError;
+      delete f.marketplaceDocErrorAt;
+      delete f.marketplaceDocErrorReason;
+      delete f.marketplaceDocErrorText;
       if (Object.keys(f).length) m.accountFlags = f;
       else delete m.accountFlags;
+      return m;
+    });
+  } catch {}
+}
+
+async function setMarketplaceDocFlag(nome, { reason = '', text = '' } = {}) {
+  const now = Date.now();
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.marketplaceDocError = true;
+      m.accountFlags.marketplaceDocErrorAt = now;
+      m.accountFlags.marketplaceDocErrorReason = String(reason || 'marketplace_doc_error').slice(0, 140);
+      m.accountFlags.marketplaceDocErrorText = String(text || '').slice(0, 400);
       return m;
     });
   } catch {}
@@ -2795,7 +2840,9 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
         method: (scan && scan.method) || null,
         durationMs: Date.now() - startedAt
       });
-      return { ok: false, error: 'open_listing_failed' };
+      const fail = { ok: false, error: 'open_listing_failed' };
+      await setMarketplaceDocFlag(nome, { reason: fail.error, text: 'Nao abriu o anuncio com acao necessaria.' });
+      return fail;
     }
 
     await sleep(WAIT_STEP_MS);
@@ -2837,15 +2884,23 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       return { ok: true, marked: true, day, alreadySubmitted: !!wiz.alreadySubmitted };
     }
 
+    const fail = { ok: false, error: (wiz && wiz.error) || 'wizard_failed' };
     logEvt(nome, source, 'wizard_failed', {
-      error: (wiz && wiz.error) || 'unknown',
+      error: fail.error,
       durationMs: Date.now() - startedAt
     });
-    return { ok: false, error: (wiz && wiz.error) || 'wizard_failed' };
+    if (shouldMarkDocError(fail)) {
+      await setMarketplaceDocFlag(nome, { reason: fail.error, text: `ID de documento nao concluiu: ${fail.error}` });
+    }
+    return fail;
   } catch (e) {
     const msg = (e && e.message) || String(e);
     logEvt(nome, source, 'auto_exception', { error: String(msg).slice(0, 220), durationMs: Date.now() - startedAt });
-    return { ok: false, error: msg };
+    const fail = { ok: false, error: msg };
+    if (shouldMarkDocError(fail)) {
+      await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
+    }
+    return fail;
   }
 }
 
@@ -2883,7 +2938,11 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
         method: (scan && scan.method) || null,
         topOnly: true
       });
-      return { ok: false, error: (scan && scan.found) ? 'open_listing_failed' : 'no_action_needed' };
+      const fail = { ok: false, error: (scan && scan.found) ? 'open_listing_failed' : 'no_action_needed' };
+      if (shouldMarkDocError(fail)) {
+        await setMarketplaceDocFlag(nome, { reason: fail.error, text: 'Nao abriu o anuncio com acao necessaria.' });
+      }
+      return fail;
     }
 
     await sleep(WAIT_STEP_MS);
@@ -2904,11 +2963,19 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       await clearMarketplacePhoneFlags(nome);
       return { ok: true, marked: false };
     }
-    return { ok: false, error: (wiz && wiz.error) || 'wizard_failed', marked: false };
+    const fail = { ok: false, error: (wiz && wiz.error) || 'wizard_failed', marked: false, marketplacePhoneError: !!(wiz && wiz.marketplacePhoneError), marketplacePhoneNoBalance: !!(wiz && wiz.marketplacePhoneNoBalance) };
+    if (shouldMarkDocError(fail)) {
+      await setMarketplaceDocFlag(nome, { reason: fail.error, text: `ID de documento nao concluiu: ${fail.error}` });
+    }
+    return fail;
   } catch (e) {
     const msg = (e && e.message) || String(e);
     logEvt(nome, source, 'human_exception', { error: String(msg).slice(0, 220) });
-    return { ok: false, error: msg, marked: false };
+    const fail = { ok: false, error: msg, marked: false };
+    if (shouldMarkDocError(fail)) {
+      await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
+    }
+    return fail;
   }
 }
 
@@ -2922,7 +2989,9 @@ module.exports = {
   isDoneTodayFromDay,
   isSameSpDay,
   phoneAlertFlagsForToday,
+  shouldMarkDocError,
   clearStaleMarketplacePhoneFlags,
+  setMarketplaceDocFlag,
   classifyIdToday,
   idFlagsForToday,
   isDoneToday,

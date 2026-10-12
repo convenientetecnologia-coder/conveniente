@@ -16899,7 +16899,7 @@ const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marke
 const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
 const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
 const phoneAlerts = robePostPublishId.phoneAlertFlagsForToday(man && man.accountFlags);
-if (phoneAlerts.staleError || phoneAlerts.staleNoBalance) {
+if (phoneAlerts.staleError || phoneAlerts.staleNoBalance || phoneAlerts.staleDocError) {
   await robePostPublishId.clearStaleMarketplacePhoneFlags(nome);
 }
 const marketplacePhoneError = phoneAlerts.marketplacePhoneError;
@@ -16910,6 +16910,10 @@ const marketplacePhoneNoBalance = phoneAlerts.marketplacePhoneNoBalance;
 const marketplacePhoneNoBalanceAt = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceAt) || null) : null;
 const marketplacePhoneNoBalanceReason = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceReason) || null) : null;
 const marketplacePhoneNoBalanceText = marketplacePhoneNoBalance && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceText) || null) : null;
+const marketplaceDocError = phoneAlerts.marketplaceDocError;
+const marketplaceDocErrorAt = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorAt) || null) : null;
+const marketplaceDocErrorReason = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorReason) || null) : null;
+const marketplaceDocErrorText = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorText) || null) : null;
 const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
 const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
 const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
@@ -16977,6 +16981,7 @@ const problem = man
     (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
     marketplacePhoneError === true ||
     marketplacePhoneNoBalance === true ||
+    marketplaceDocError === true ||
     (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||
@@ -17117,6 +17122,10 @@ perfis.push({
   marketplacePhoneNoBalanceAt,
   marketplacePhoneNoBalanceReason,
   marketplacePhoneNoBalanceText,
+  marketplaceDocError,
+  marketplaceDocErrorAt,
+  marketplaceDocErrorReason,
+  marketplaceDocErrorText,
   marketplacePhoneConfirm,
   marketplacePhoneConfirmAt,
   marketplacePhoneConfirmReason,

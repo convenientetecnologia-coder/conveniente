@@ -3407,6 +3407,11 @@
           pill.title = p.marketplacePhoneErrorText || 'Falha na confirmacao automatica do celular no Marketplace';
           titleRow.append(pill);
         }
+        if (p.marketplaceDocError === true) {
+          const pill = buildPill('Documento MKT erro', 'bad');
+          pill.title = p.marketplaceDocErrorText || 'ID de documento do Marketplace nao concluiu';
+          titleRow.append(pill);
+        }
 
         // ------- Renovação Marketplace (só se config ativada) -------
         if (p.marketplaceRenewEnabled === true) {
