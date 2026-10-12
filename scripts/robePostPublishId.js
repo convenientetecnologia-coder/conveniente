@@ -447,6 +447,9 @@ async function detectIdWizardScreen(page) {
         hasAria(/continue para a verificacao do telefone/) ||
         hasAria(/confirme seu numero de celular/);
       const hasFile = !!document.querySelector('input[type="file"]');
+      if (body.includes('sua conta foi verificada')) {
+        return 'marketplace_phone_success';
+      }
       if (
         body.includes('insira o codigo de confirmacao') ||
         body.includes('reenviar codigo')
@@ -461,12 +464,6 @@ async function detectIdWizardScreen(page) {
       }
       if (body.includes('numero de telefone') && body.includes('enviar codigo') && !body.includes('reenviar codigo')) {
         return 'marketplace_phone_entry';
-      }
-      if (
-        body.includes('sua conta foi verificada') &&
-        body.includes('retornar ao classificado')
-      ) {
-        return 'marketplace_phone_success';
       }
       if (
         body.includes('suas informacoes foram enviadas') ||
@@ -2055,8 +2052,8 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
   if (screen === 'marketplace_phone_success') {
     await clearMarketplacePhoneFlags(nome);
     const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
-    logEvt(nome, source, 'marketplace_phone_success_direct', { ok: !!backOk });
-    return backOk ? { ok: true, marketplacePhoneVerified: true } : { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
+    logEvt(nome, source, 'marketplace_phone_success_direct', { ok: true, returnClicked: !!backOk });
+    return { ok: true, marketplacePhoneVerified: true, returnClicked: !!backOk };
   }
   if (screen !== 'marketplace_phone_entry') {
     let markers = null;
@@ -2173,8 +2170,8 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     if (screen === 'marketplace_phone_success') {
       await clearMarketplacePhoneFlags(nome);
       const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
-      logEvt(nome, source, 'marketplace_phone_success_fast', { ok: !!backOk, orderTail: orderIdMasked, phoneTail: phoneMasked });
-      return backOk ? { ok: true, marketplacePhoneVerified: true } : { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
+      logEvt(nome, source, 'marketplace_phone_success_fast', { ok: true, returnClicked: !!backOk, orderTail: orderIdMasked, phoneTail: phoneMasked });
+      return { ok: true, marketplacePhoneVerified: true, returnClicked: !!backOk };
     }
     if (screen === 'marketplace_phone_entry') {
       const state = await readMarketplacePhoneEntryState(page);
@@ -2296,14 +2293,12 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     await clearMarketplacePhoneFlags(nome);
     const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
     logEvt(nome, source, 'marketplace_phone_verified', {
-      ok: !!backOk,
+      ok: true,
+      returnClicked: !!backOk,
       orderTail: orderIdMasked,
       phoneTail: phoneMasked
     });
-    if (!backOk) {
-      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
-    }
-    return { ok: true, marketplacePhoneVerified: true };
+    return { ok: true, marketplacePhoneVerified: true, returnClicked: !!backOk };
   }
 
   await setMarketplacePhoneFlag(nome, 'error', {
