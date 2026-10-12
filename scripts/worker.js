@@ -16923,11 +16923,12 @@ const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identit
 const robeIdDocDoneDay = man && man.accountFlags && man.accountFlags.robeIdDocDoneDay
   ? String(man.accountFlags.robeIdDocDoneDay)
   : null;
-const robeIdDocDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdDocDoneDay);
 const robeIdPhoneDoneDay = man && man.accountFlags && man.accountFlags.robeIdPhoneDoneDay
   ? String(man.accountFlags.robeIdPhoneDoneDay)
   : null;
-const robeIdPhoneDoneToday = robePostPublishId.isDoneTodayFromDay(robeIdPhoneDoneDay);
+const idToday = robePostPublishId.idFlagsForToday(robeIdDocDoneDay, robeIdPhoneDoneDay);
+const robeIdDocDoneToday = idToday.robeIdDocDoneToday;
+const robeIdPhoneDoneToday = idToday.robeIdPhoneDoneToday;
 const renovadosAt = man && man.accountFlags && man.accountFlags.renovadosAt
   ? Number(man.accountFlags.renovadosAt) || null
   : null;

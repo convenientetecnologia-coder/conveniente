@@ -4,8 +4,11 @@
  * ROBE pós-publicação / overlay humano — verificação de documento Marketplace (id.png).
  *
  * Contrato forense:
- * - Default: ID - nao (ausência de robeIdDocDoneDay ou dia ≠ hoje SP).
- * - Só runRobeAutoId marca robeIdDocDoneDay após wizard ok.
+ * - Default: ID - nao (nem foto nem celular feitos hoje, America/Sao_Paulo).
+ * - Foto concluida marca so robeIdDocDoneDay (ID - sim).
+ * - Celular concluido marca so robeIdPhoneDoneDay (ID celular sim).
+ * - Os dois pulam a verificacao no mesmo dia. Na meia-noite de SP os dois voltam a ID - nao.
+ * - ID - nao: cada postagem olha acao necessaria de hoje. Sem acao, nao marca e tenta de novo no proximo post.
  * - runHumanVerifyId NUNCA marca a flag.
  * - Falha/timeout NUNCA invalida publish_ok (caller engole erros).
  * - Auto: se ID - sim → encerra na hora (sem selling/scan).
@@ -163,6 +166,21 @@ function isDoneTodayFromDay(doneDay, now = Date.now()) {
   return String(doneDay || '').trim() === todaySP(now);
 }
 
+function classifyIdToday(docDay, phoneDay, now = Date.now()) {
+  if (isDoneTodayFromDay(phoneDay, now)) return 'phone';
+  if (isDoneTodayFromDay(docDay, now)) return 'doc';
+  return 'none';
+}
+
+function idFlagsForToday(docDay, phoneDay, now = Date.now()) {
+  const kind = classifyIdToday(docDay, phoneDay, now);
+  return {
+    skip: kind !== 'none',
+    robeIdDocDoneToday: kind === 'doc',
+    robeIdPhoneDoneToday: kind === 'phone'
+  };
+}
+
 function getIdPngPath() {
   return ID_PNG_PATH;
 }
@@ -212,31 +230,40 @@ function logEvt(nome, source, step, extra) {
   } catch {}
 }
 
-async function readDoneDay(nome) {
+async function readIdDays(nome) {
   try {
     const man = await manifestStore.read(nome);
     const flags = (man && man.accountFlags) || {};
-    return flags.robeIdDocDoneDay ? String(flags.robeIdDocDoneDay) : null;
+    return {
+      docDay: flags.robeIdDocDoneDay ? String(flags.robeIdDocDoneDay) : '',
+      phoneDay: flags.robeIdPhoneDoneDay ? String(flags.robeIdPhoneDoneDay) : ''
+    };
   } catch {
-    return null;
+    return { docDay: '', phoneDay: '' };
   }
 }
 
 async function isDoneToday(nome, now = Date.now()) {
-  const day = await readDoneDay(nome);
-  return isDoneTodayFromDay(day, now);
+  const days = await readIdDays(nome);
+  return classifyIdToday(days.docDay, days.phoneDay, now) !== 'none';
 }
 
 async function markDoneToday(nome, { via = 'doc' } = {}) {
   const day = todaySP();
+  const now = Date.now();
   await manifestStore.update(nome, (m) => {
     m = m || {};
     m.accountFlags = m.accountFlags || {};
-    m.accountFlags.robeIdDocDoneDay = day;
-    m.accountFlags.robeIdDocDoneAt = Date.now();
     if (via === 'phone') {
       m.accountFlags.robeIdPhoneDoneDay = day;
-      m.accountFlags.robeIdPhoneDoneAt = Date.now();
+      m.accountFlags.robeIdPhoneDoneAt = now;
+      if (String(m.accountFlags.robeIdDocDoneDay || '') === day) {
+        delete m.accountFlags.robeIdDocDoneDay;
+        delete m.accountFlags.robeIdDocDoneAt;
+      }
+    } else {
+      m.accountFlags.robeIdDocDoneDay = day;
+      m.accountFlags.robeIdDocDoneAt = now;
     }
     return m;
   });
@@ -2839,8 +2866,9 @@ module.exports = {
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,
+  classifyIdToday,
+  idFlagsForToday,
   isDoneToday,
-  readDoneDay,
   markDoneToday,
   getIdPngPath,
   idPngExists,

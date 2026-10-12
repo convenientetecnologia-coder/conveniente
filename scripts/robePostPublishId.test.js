@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday } = require("./robePostPublishId.js");
 
 test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   const sample = `
@@ -17,6 +17,26 @@ test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   assert.equal(info.detected, true);
   assert.equal(info.phonePrompt, true);
   assert.equal(info.smsPrompt, true);
+});
+
+test("id do dia separa foto, celular e o pulo da verificacao", () => {
+  const now = Date.parse("2026-10-12T22:00:00Z");
+  assert.equal(classifyIdToday("2026-10-12", "", now), "doc");
+  assert.equal(classifyIdToday("", "2026-10-12", now), "phone");
+  assert.equal(classifyIdToday("2026-10-12", "2026-10-12", now), "phone");
+  assert.equal(classifyIdToday("2026-10-11", "2026-10-11", now), "none");
+  assert.equal(classifyIdToday("", "", now), "none");
+  const phoneOnly = idFlagsForToday("2026-10-12", "2026-10-12", now);
+  assert.equal(phoneOnly.skip, true);
+  assert.equal(phoneOnly.robeIdPhoneDoneToday, true);
+  assert.equal(phoneOnly.robeIdDocDoneToday, false);
+  const docOnly = idFlagsForToday("2026-10-12", "", now);
+  assert.equal(docOnly.robeIdDocDoneToday, true);
+  assert.equal(docOnly.robeIdPhoneDoneToday, false);
+  const none = idFlagsForToday("2026-10-11", "2026-10-11", now);
+  assert.equal(none.skip, false);
+  assert.equal(none.robeIdDocDoneToday, false);
+  assert.equal(none.robeIdPhoneDoneToday, false);
 });
 
 test("so aceita United States (+1) no menu de pais", () => {
