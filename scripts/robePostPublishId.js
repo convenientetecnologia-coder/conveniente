@@ -657,59 +657,42 @@ async function readMarketplacePhoneEntryState(page) {
   }
 }
 
-async function focusMarketplaceCountryCombobox(page) {
-  try {
-    return await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const combo = Array.from(document.querySelectorAll('[role="combobox"]')).find((el) => {
-        const txt = normLocal(el.innerText || el.textContent || '');
-        return txt.includes('codigo de chamada do pais')
-          || txt.includes('brazil (+55)')
-          || txt.includes('united states (+1)');
-      });
-      if (!combo || typeof combo.focus !== 'function') return false;
-      combo.focus();
-      return document.activeElement === combo || combo.contains(document.activeElement);
-    });
-  } catch {
-    return false;
+async function waitForBrazilPhoneField(page, { deadlineAt } = {}) {
+  const start = Date.now();
+  while ((Date.now() - start) < 20000 && deadlineLeft(deadlineAt) > 0) {
+    const state = await readMarketplacePhoneEntryState(page);
+    if (state && isUnitedStatesDialOption(state.countryText)) return state;
+    if (state && state.hasPhoneEntry && (state.countryText.includes('brazil') || state.countryText.includes('(+55)'))) {
+      return state;
+    }
+    await sleep(500);
   }
+  return readMarketplacePhoneEntryState(page);
 }
 
 async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = {}) {
   for (let attempt = 1; attempt <= 3 && deadlineLeft(deadlineAt) > 0; attempt++) {
-    const state = await readMarketplacePhoneEntryState(page);
+    const state = await waitForBrazilPhoneField(page, { deadlineAt });
     if (state && isUnitedStatesDialOption(state.countryText)) return true;
-    const focused = await focusMarketplaceCountryCombobox(page);
-    if (!focused) {
-      await sleep(1500);
+    if (!(state && state.hasPhoneEntry)) {
+      await sleep(1000);
       continue;
     }
-    await sleep(400);
+    try { await page.bringToFront(); } catch {}
+    await sleep(600);
     try {
       await page.keyboard.press('ArrowDown');
-      await sleep(1200);
-      for (let i = 0; i < 50; i++) {
+      await sleep(1000);
+      for (let i = 0; i < 40; i++) {
         assertBudget(deadlineAt, 'tv_country_arrow_up');
         await page.keyboard.press('ArrowUp');
-        await sleep(70);
+        await sleep(90);
       }
-      await sleep(400);
+      await sleep(350);
       await page.keyboard.press('ArrowDown');
-      await sleep(140);
+      await sleep(160);
       await page.keyboard.press('ArrowDown');
-      await sleep(250);
+      await sleep(220);
       await page.keyboard.press('Enter');
     } catch {
       await sleep(1000);
