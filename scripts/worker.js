@@ -2197,6 +2197,7 @@ function _overlayReasonFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
+    if (flags.marketplacePhoneConfirm === true) return `marketplace_phone_confirm:${flags.marketplacePhoneConfirmReason || ''}`.trim();
     if (flags.marketplaceDisabled === true) return `marketplace_disabled:${flags.marketplaceDisabledReason || ''}`.trim();
     if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
     if (flags.captchaCheckpoint === true) return `captcha_checkpoint:${flags.captchaCheckpointReason || ''}`.trim();
@@ -2215,6 +2216,7 @@ function _terminalFlagFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return 'banned';
+    if (flags.marketplacePhoneConfirm === true) return 'marketplace_phone_confirm';
     if (flags.twoFactor === true) return 'two_factor';
     if (flags.marketplaceDisabled === true) return 'marketplace_disabled';
     if (flags.captchaCheckpoint === true) return 'captcha_checkpoint';
@@ -2822,6 +2824,7 @@ async function _buildHumanOverlayData(nome) {
         loginRequired: flags && flags.loginRequired === true,
         loginReason: flags ? (flags.loginReason || '') : '',
         banned: flags && flags.banned === true,
+        marketplacePhoneConfirm: flags && flags.marketplacePhoneConfirm === true,
         captchaCheckpoint: flags && flags.captchaCheckpoint === true,
         idVirtus: flags && flags.idVirtus === true,
         identityRequired: flags && flags.identityRequired === true,
@@ -3793,9 +3796,15 @@ async function _installOverlayOnPage(nome, page) {
                 try {
                   if (typeof window.__ctHumanOverlayVerifyId === 'function') {
                     const r = await window.__ctHumanOverlayVerifyId();
-                    const msg = (r && r.ok)
-                      ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
-                      : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown'));
+                    const msg = (r && r.marketplacePhoneNoBalance)
+                      ? 'Celular no MKT sem saldo. O robô vai tentar de novo na próxima tentativa.'
+                      : ((r && r.marketplacePhoneError)
+                        ? 'Celular no MKT erro. O robô vai tentar de novo na próxima tentativa.'
+                        : ((r && r.marketplacePhoneConfirm)
+                          ? 'Celular no MKT detectado. Conta permanece em humano para confirmar telefone.'
+                          : ((r && r.ok)
+                            ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
+                            : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown')))))
                     try {
                       window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 };
                     } catch {}
@@ -3844,9 +3853,15 @@ async function _installOverlayOnPage(nome, page) {
                 try {
                   if (typeof window.__ctHumanOverlayVerifyId === 'function') {
                     const r = await window.__ctHumanOverlayVerifyId();
-                    const msg = (r && r.ok)
-                      ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
-                      : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown'));
+                    const msg = (r && r.marketplacePhoneNoBalance)
+                      ? 'Celular no MKT sem saldo. O robô vai tentar de novo na próxima tentativa.'
+                      : ((r && r.marketplacePhoneError)
+                        ? 'Celular no MKT erro. O robô vai tentar de novo na próxima tentativa.'
+                        : ((r && r.marketplacePhoneConfirm)
+                          ? 'Celular no MKT detectado. Conta permanece em humano para confirmar telefone.'
+                          : ((r && r.ok)
+                            ? 'ID enviado (humano). Pill do dia NÃO muda — só o ROBE marca ID-sim.'
+                            : ('Falha Verificar ID: ' + String((r && r.error) ? r.error : 'unknown')))));
                     try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
                     try { shadow.getElementById('hint').textContent = msg; } catch {}
                   } else {
@@ -3891,6 +3906,7 @@ async function _installOverlayOnPage(nome, page) {
             const f = d.flags || {};
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida (Humano)';
+            else if (f.marketplacePhoneConfirm) statusTxt = 'Celular no MKT (humano)';
             else if (f.marketplaceDisabled) statusTxt = 'MKT Desativado (Humano)';
             else if (f.twoFactor) statusTxt = '2FA requerido (Humano)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
@@ -5572,6 +5588,54 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
   } catch {}
 }
 
+async function setMarketplacePhoneConfirmFlag(nome, {
+  source = '',
+  title = '',
+  snippet = '',
+  reason = 'marketplace_phone_confirm'
+} = {}) {
+  const now = Date.now();
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.marketplacePhoneConfirm = true;
+      man.accountFlags.marketplacePhoneConfirmAt = Number(man.accountFlags.marketplacePhoneConfirmAt || 0) || now;
+      man.accountFlags.marketplacePhoneConfirmSource = String(source || '').slice(0, 80);
+      man.accountFlags.marketplacePhoneConfirmTitle = String(title || '').slice(0, 200);
+      man.accountFlags.marketplacePhoneConfirmText = String(snippet || '').slice(0, 400);
+      man.accountFlags.marketplacePhoneConfirmReason = String(reason || 'marketplace_phone_confirm').slice(0, 120);
+      return man;
+    });
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'marketplace_phone_confirm_detected',
+        nome: String(nome || ''),
+        source: String(source || '').slice(0, 80),
+        title: String(title || '').slice(0, 120),
+        reason: String(reason || 'marketplace_phone_confirm').slice(0, 120)
+      });
+    } catch {}
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].marketplacePhoneConfirm = true;
+    robeMeta[nome].whyNotOpen = 'marketplace_phone_confirm';
+  } catch {}
+
+  try {
+    await ensureTerminalHumanHoldOnce(nome, {
+      reason: `marketplace_phone_confirm:${String(reason || 'marketplace_phone_confirm').slice(0, 80)}`
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.trabalhando = false;
+      try { await stopVirtus(nome); } catch {}
+    }
+  } catch {}
+}
+
 async function clearIdentityFlags(nome) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -6161,6 +6225,23 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.marketplaceDisabledText;
         }
       }
+      if (which.includes('marketplacePhoneConfirm')) {
+        if (
+          man.accountFlags.marketplacePhoneConfirm ||
+          man.accountFlags.marketplacePhoneConfirmAt ||
+          man.accountFlags.marketplacePhoneConfirmReason ||
+          man.accountFlags.marketplacePhoneConfirmSource ||
+          man.accountFlags.marketplacePhoneConfirmTitle ||
+          man.accountFlags.marketplacePhoneConfirmText
+        ) {
+          delete man.accountFlags.marketplacePhoneConfirm;
+          delete man.accountFlags.marketplacePhoneConfirmAt;
+          delete man.accountFlags.marketplacePhoneConfirmReason;
+          delete man.accountFlags.marketplacePhoneConfirmSource;
+          delete man.accountFlags.marketplacePhoneConfirmTitle;
+          delete man.accountFlags.marketplacePhoneConfirmText;
+        }
+      }
       if (which.includes('captchaCheckpoint')) {
         if (
           man.accountFlags.captchaCheckpoint ||
@@ -6259,6 +6340,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('marketplaceDisabled') && (prev && prev.marketplaceDisabled)) {
       await issues.append(nome, 'mil_action', `marketplace_disabled_cleared at=${new Date().toISOString()}`);
     }
+    if (which.includes('marketplacePhoneConfirm') && (prev && prev.marketplacePhoneConfirm)) {
+      await issues.append(nome, 'mil_action', `marketplace_phone_confirm_cleared at=${new Date().toISOString()}`);
+    }
     if (which.includes('captchaCheckpoint') && (prev && prev.captchaCheckpoint)) {
       await issues.append(nome, 'mil_action', `captcha_checkpoint_cleared at=${new Date().toISOString()}`);
     }
@@ -6290,6 +6374,10 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('marketplaceDisabled')) {
       delete robeMeta[nome].marketplaceDisabled;
       if (robeMeta[nome].whyNotOpen === 'marketplace_disabled_human_hold') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('marketplacePhoneConfirm')) {
+      delete robeMeta[nome].marketplacePhoneConfirm;
+      if (robeMeta[nome].whyNotOpen === 'marketplace_phone_confirm') delete robeMeta[nome].whyNotOpen;
     }
     if (which.includes('captchaCheckpoint')) {
       if (robeMeta[nome].whyNotOpen === 'captcha_checkpoint') delete robeMeta[nome].whyNotOpen;
@@ -10759,6 +10847,24 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDel
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_return', nome: String(nome || ''), ok: !!(res && res.ok), error: (res && res.error) ? String(res.error) : null }); } catch {}
     // #endregion
+    try {
+      const idRes = (res && res.postPublishId && typeof res.postPublishId === 'object') ? res.postPublishId : null;
+      if (idRes && idRes.marketplacePhoneConfirm === true) {
+        await setMarketplacePhoneConfirmFlag(nome, {
+          source: 'robe_post_publish_id',
+          title: String(idRes.phoneConfirmTitle || ''),
+          snippet: String(idRes.phoneConfirmText || ''),
+          reason: String(idRes.reason || 'marketplace_phone_confirm_required')
+        });
+        try {
+          await reportAction(nome, 'mil_action', 'Celular no Marketplace: confirmar telefone; humano invocado.');
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+      } else if (idRes && idRes.ok === true && (idRes.marked === true || idRes.alreadySubmitted === true)) {
+        await clearAccountFlags(nome, ['marketplacePhoneConfirm']).catch(() => {});
+        try { await snapshotStatusAndWrite(); } catch {}
+      }
+    } catch {}
     // Cinto: se módulo antigo engolir semântico em {ok:false}, reconstrói throw para handlers.
     if (res && res.ok === false && res.error) {
       const errTxt = String(res.error || '');
@@ -11804,6 +11910,18 @@ async function start_work({ nome, operator }) {
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'two_factor', reason: String(flags.twoFactorReason||flags.reason||'two_factor').slice(0,120) }); } catch {}
         try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
         return { ok: false, error: 'two_factor' };
+      }
+      if (flags && flags.marketplacePhoneConfirm === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'marketplace_phone_confirm', reason: String(flags.marketplacePhoneConfirmReason||'marketplace_phone_confirm').slice(0,120) }); } catch {}
+        try {
+          await setMarketplacePhoneConfirmFlag(nome, {
+            reason: String(flags.marketplacePhoneConfirmReason || 'marketplace_phone_confirm'),
+            snippet: String(flags.marketplacePhoneConfirmText || ''),
+            title: String(flags.marketplacePhoneConfirmTitle || ''),
+            source: 'start_work_flags'
+          });
+        } catch {}
+        return { ok: false, error: 'marketplace_phone_confirm' };
       }
       if (flags && flags.marketplaceDisabled === true) {
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'marketplace_disabled', reason: String(flags.marketplaceDisabledReason||'cannot_buy_or_sell').slice(0,120) }); } catch {}
@@ -15023,6 +15141,18 @@ const handlers = {
           nome: n,
           deadlineAt: Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000)
         });
+        try {
+          if (r && r.marketplacePhoneConfirm === true) {
+            await setMarketplacePhoneConfirmFlag(n, {
+              source: 'human_verify_id',
+              title: String(r.phoneConfirmTitle || ''),
+              snippet: String(r.phoneConfirmText || ''),
+              reason: String(r.reason || 'marketplace_phone_confirm_required')
+            });
+          } else if (r && r.ok === true) {
+            await clearAccountFlags(n, ['marketplacePhoneConfirm']);
+          }
+        } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         return Object.assign({ marked: false }, r && typeof r === 'object' ? r : { ok: false, error: 'verify_id_failed' });
       } catch (e) {
@@ -15299,7 +15429,7 @@ const handlers = {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
-      const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','captchaCheckpoint','twoFactor','idVirtus'];
+      const resumeClearFlags = ['loginRequired','banned','loginRemediateFailed','messengerPin','marketplaceDisabled','marketplacePhoneConfirm','captchaCheckpoint','twoFactor','idVirtus'];
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         if (noReconcile === true) {
@@ -15339,7 +15469,7 @@ const handlers = {
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
-      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, marketplacePhoneConfirm: !!flagsBefore.marketplacePhoneConfirm, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
       ctrl.humanControl = false;
       try { await snapshotStatusAndWrite({ force: true }); } catch {}
@@ -16768,6 +16898,19 @@ const marketplaceDisabled = man ? !!(man.accountFlags && man.accountFlags.market
 const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledAt) || null) : null;
 const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
 const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
+const marketplacePhoneError = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneError === true) : false;
+const marketplacePhoneErrorAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorAt) || null) : null;
+const marketplacePhoneErrorReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorReason) || null) : null;
+const marketplacePhoneErrorText = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorText) || null) : null;
+const marketplacePhoneNoBalance = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneNoBalance === true) : false;
+const marketplacePhoneNoBalanceAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceAt) || null) : null;
+const marketplacePhoneNoBalanceReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceReason) || null) : null;
+const marketplacePhoneNoBalanceText = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneNoBalanceText) || null) : null;
+const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
+const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
+const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
+const marketplacePhoneConfirmTitle = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmTitle) || null) : null;
+const marketplacePhoneConfirmText = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmText) || null) : null;
 const captchaCheckpoint = man ? !!(man.accountFlags && man.accountFlags.captchaCheckpoint === true) : false;
 const captchaCheckpointReason = man ? ((man.accountFlags && man.accountFlags.captchaCheckpointReason) || null) : null;
 const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
@@ -16823,6 +16966,9 @@ const problem = man
     (man.accountFlags && man.accountFlags.loginRequired === true) ||
     (man.accountFlags && man.accountFlags.banned === true) ||
     (man.accountFlags && man.accountFlags.marketplaceDisabled === true) ||
+    (man.accountFlags && man.accountFlags.marketplacePhoneError === true) ||
+    (man.accountFlags && man.accountFlags.marketplacePhoneNoBalance === true) ||
+    (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||
     (man.accountFlags && man.accountFlags.twoFactor === true) ||
@@ -16831,7 +16977,7 @@ const problem = man
     (man.accountFlags && man.accountFlags.messengerPin === true) ||
     (man.accountFlags && man.accountFlags.appealSubmitted === true)
   )
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).marketplaceDisabled || (robeMeta[nome] || {}).marketplacePhoneConfirm || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 // Estoque (CT): vínculo determinístico do perfil do servidor com a conta do estoque.
@@ -16954,6 +17100,19 @@ perfis.push({
   marketplaceDisabledAt,
   marketplaceDisabledReason,
   marketplaceDisabledText,
+  marketplacePhoneError,
+  marketplacePhoneErrorAt,
+  marketplacePhoneErrorReason,
+  marketplacePhoneErrorText,
+  marketplacePhoneNoBalance,
+  marketplacePhoneNoBalanceAt,
+  marketplacePhoneNoBalanceReason,
+  marketplacePhoneNoBalanceText,
+  marketplacePhoneConfirm,
+  marketplacePhoneConfirmAt,
+  marketplacePhoneConfirmReason,
+  marketplacePhoneConfirmTitle,
+  marketplacePhoneConfirmText,
   captchaCheckpoint,
   captchaCheckpointReason,
   idVirtus,

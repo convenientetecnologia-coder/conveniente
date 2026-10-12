@@ -4525,6 +4525,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   logger.info(`[ROBE][startRobe] INÍCIO`, { nome, robePauseMs, horario: new Date().toLocaleString() });
 
   let perfilPath, manifest;
+  let postPublishIdResult = null;
 
   try {
     // Leitura do manifest via manifestStore (com retry e tolerância)
@@ -5111,14 +5112,26 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
           titulo,
           deadlineAt: Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000)
         });
+        postPublishIdResult = idRes && typeof idRes === 'object' ? idRes : null;
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
           step: 'post_publish_id',
           ok: !!(idRes && idRes.ok),
           skipped: !!(idRes && idRes.skipped),
           marked: !!(idRes && idRes.marked),
+          marketplacePhoneConfirm: !!(idRes && idRes.marketplacePhoneConfirm),
+          humanRequired: !!(idRes && idRes.humanRequired),
           reason: (idRes && (idRes.reason || idRes.error)) || null
         });
+        if (idRes && idRes.marketplacePhoneConfirm === true) {
+          preserveCreatePageForHuman = true;
+          stepLog.appendJSONL(nome, 'robe', {
+            attempt: attId,
+            step: 'post_publish_renew',
+            skipped: true,
+            reason: 'marketplace_phone_confirm'
+          });
+        }
       } catch (eId) {
         stepLog.appendJSONL(nome, 'robe', {
           attempt: attId,
@@ -5127,21 +5140,25 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         });
       }
       // Pós-ID: renovação desacoplada (se due e ainda não renovou hoje). Nunca invalida publish_ok.
-      try {
-        await robePostPublishRenew.runRobeAutoRenewSafe({
-          page,
-          nome,
-          attId,
-          deadlineAt: Date.now() + (robePostPublishRenew.BUDGET_TOTAL_MS || (35 * 60 * 1000))
-        });
-      } catch {}
+      if (!(postPublishIdResult && postPublishIdResult.marketplacePhoneConfirm === true)) {
+        try {
+          await robePostPublishRenew.runRobeAutoRenewSafe({
+            page,
+            nome,
+            attId,
+            deadlineAt: Date.now() + (robePostPublishRenew.BUDGET_TOTAL_MS || (35 * 60 * 1000))
+          });
+        } catch {}
+      }
     } else {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_id', skipped: true, reason: 'page_gone' });
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_renew', skipped: true, reason: 'page_gone' });
     }
 
-    try { await safeClosePage(page); } catch {}
-    page = null;
+    if (!preserveCreatePageForHuman) {
+      try { await safeClosePage(page); } catch {}
+      page = null;
+    }
 
     // COMMIT no índice de fotos — somente após confirmação de publicação
     if (published) {
@@ -5325,7 +5342,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
   }
 
-  return { ok: published, log: stepLogArr };
+  return { ok: published, log: stepLogArr, postPublishId: postPublishIdResult };
 }
 
 // --------------------------------------------------

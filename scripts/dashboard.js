@@ -3567,6 +3567,12 @@ async function execSetCtConfig(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const ctBaseUrl = (payload.ctBaseUrl !== undefined) ? String(payload.ctBaseUrl || '').trim() : undefined;
   const logIngestSecret = (payload.logIngestSecret !== undefined) ? String(payload.logIngestSecret || '').trim() : undefined;
+  const textVerifiedApiKey = (payload.textVerifiedApiKey !== undefined) ? String(payload.textVerifiedApiKey || '').trim() : undefined;
+  const textVerifiedApiUsername = (payload.textVerifiedApiUsername !== undefined) ? String(payload.textVerifiedApiUsername || '').trim() : undefined;
+  const textVerifiedBaseUrl = (payload.textVerifiedBaseUrl !== undefined) ? String(payload.textVerifiedBaseUrl || '').trim() : undefined;
+  const textVerifiedServiceName = (payload.textVerifiedServiceName !== undefined) ? String(payload.textVerifiedServiceName || '').trim() : undefined;
+  const textVerifiedServiceNotListedName = (payload.textVerifiedServiceNotListedName !== undefined) ? String(payload.textVerifiedServiceNotListedName || '').trim() : undefined;
+  const textVerifiedMaxPrice = (payload.textVerifiedMaxPrice !== undefined) ? payload.textVerifiedMaxPrice : undefined;
   const isNgrokCtBase = (() => {
     if (!ctBaseUrl) return false;
     try {
@@ -3580,7 +3586,16 @@ async function execSetCtConfig(cmd) {
     throw new Error('set_ct_config_blocked_ngrok_base');
   }
   const { writeCtConfig } = require('./ctConfig');
-  const r = writeCtConfig({ ctBaseUrl, logIngestSecret });
+  const r = writeCtConfig({
+    ctBaseUrl,
+    logIngestSecret,
+    textVerifiedApiKey,
+    textVerifiedApiUsername,
+    textVerifiedBaseUrl,
+    textVerifiedServiceName,
+    textVerifiedServiceNotListedName,
+    textVerifiedMaxPrice
+  });
   if (!r || r.ok !== true) throw new Error('set_ct_config_failed');
   return { ok: true };
 }
@@ -4330,7 +4345,7 @@ async function tick(reason = 'interval') {
 
     // Contrato: só ctBaseUrl. logIngestSecret é legado opcional (não bloqueia servidor novo).
     const cfg = readCtConfig();
-    const needsConfig = !cfg.ctBaseUrl;
+    const needsConfig = !cfg.ctBaseUrl || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername;
     // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
     // Importante: sem segredos no report — apenas boolean/modelo/metadata.
     const groqCfg = readGroqConfig(); // usado em runtime (OCR)

@@ -116,15 +116,36 @@ function readCtConfig() {
     ctBaseUrl = canonicalCtApiBase();
   }
   const logIngestSecret = String(j.logIngestSecret || "").trim();
+  const textVerifiedApiKey = String(j.textVerifiedApiKey || "").trim();
+  const textVerifiedApiUsername = String(j.textVerifiedApiUsername || "").trim();
+  const textVerifiedBaseUrl = String(j.textVerifiedBaseUrl || "").trim();
+  const textVerifiedServiceName = String(j.textVerifiedServiceName || "").trim();
+  const textVerifiedServiceNotListedName = String(j.textVerifiedServiceNotListedName || "").trim();
+  const textVerifiedMaxPrice = (j.textVerifiedMaxPrice == null || j.textVerifiedMaxPrice === "") ? null : Number(j.textVerifiedMaxPrice);
   return {
     ok: true,
     path: CT_CONFIG_PATH,
     ctBaseUrl: ctBaseUrl || "",
-    logIngestSecret: logIngestSecret || ""
+    logIngestSecret: logIngestSecret || "",
+    textVerifiedApiKey: textVerifiedApiKey || "",
+    textVerifiedApiUsername: textVerifiedApiUsername || "",
+    textVerifiedBaseUrl: textVerifiedBaseUrl || "",
+    textVerifiedServiceName: textVerifiedServiceName || "",
+    textVerifiedServiceNotListedName: textVerifiedServiceNotListedName || "",
+    textVerifiedMaxPrice: Number.isFinite(textVerifiedMaxPrice) ? Number(textVerifiedMaxPrice) : null
   };
 }
 
-function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
+function writeCtConfig({
+  ctBaseUrl,
+  logIngestSecret,
+  textVerifiedApiKey,
+  textVerifiedApiUsername,
+  textVerifiedBaseUrl,
+  textVerifiedServiceName,
+  textVerifiedServiceNotListedName,
+  textVerifiedMaxPrice
+} = {}) {
   try {
     const curRaw = safeReadJson(CT_CONFIG_PATH) || {};
     const cur = readCtConfig();
@@ -137,6 +158,19 @@ function writeCtConfig({ ctBaseUrl, logIngestSecret } = {}) {
       ...(curRaw && typeof curRaw === "object" ? curRaw : {}),
       ctBaseUrl: ctBaseSanitized || "",
       logIngestSecret: (logIngestSecret !== undefined) ? String(logIngestSecret || "").trim() : (cur.logIngestSecret || ""),
+      textVerifiedApiKey: (textVerifiedApiKey !== undefined) ? String(textVerifiedApiKey || "").trim() : (cur.textVerifiedApiKey || ""),
+      textVerifiedApiUsername: (textVerifiedApiUsername !== undefined) ? String(textVerifiedApiUsername || "").trim() : (cur.textVerifiedApiUsername || ""),
+      textVerifiedBaseUrl: (textVerifiedBaseUrl !== undefined) ? String(textVerifiedBaseUrl || "").trim() : (cur.textVerifiedBaseUrl || ""),
+      textVerifiedServiceName: (textVerifiedServiceName !== undefined) ? String(textVerifiedServiceName || "").trim() : (cur.textVerifiedServiceName || ""),
+      textVerifiedServiceNotListedName: (textVerifiedServiceNotListedName !== undefined)
+        ? String(textVerifiedServiceNotListedName || "").trim()
+        : (cur.textVerifiedServiceNotListedName || ""),
+      textVerifiedMaxPrice: (textVerifiedMaxPrice !== undefined)
+        ? (() => {
+          const n = Number(textVerifiedMaxPrice);
+          return Number.isFinite(n) && n > 0 ? n : null;
+        })()
+        : cur.textVerifiedMaxPrice,
       updatedAt: now
     };
     if (!next.ctBaseUrl && ctBaseRaw && isNgrokCtBaseUrl(ctBaseRaw) && !allowLegacyNgrokCtBase()) {

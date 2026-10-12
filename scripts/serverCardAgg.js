@@ -69,6 +69,7 @@ function isHumanAlreadyExplainedByCard(kind, perfil) {
   const p = (perfil && typeof perfil === 'object') ? perfil : {};
   return (
     String(kind || 'ok') !== 'ok' ||
+    p.marketplacePhoneConfirm === true ||
     p.loginRemediateFailed === true ||
     p.appealSubmitted === true
   );
@@ -84,6 +85,9 @@ function emptyFlagsAgg() {
     login_required: 0,
     login_cookies_failed: 0,
     appeal_submitted: 0,
+    marketplace_phone_error: 0,
+    marketplace_phone_no_balance: 0,
+    marketplace_phone_confirm: 0,
     // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
     id_sim: 0,
     renovados: 0,
@@ -132,6 +136,9 @@ function buildServerCardAggs(status, opts = {}) {
     }
     if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
     if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
+    if (p.marketplacePhoneError === true) flagsAgg.marketplace_phone_error++;
+    if (p.marketplacePhoneNoBalance === true) flagsAgg.marketplace_phone_no_balance++;
+    if (p.marketplacePhoneConfirm === true) flagsAgg.marketplace_phone_confirm++;
     if (p.robeIdDocDoneToday === true) flagsAgg.id_sim++;
 
     // Canônico (= CT snapshot + renewMetrics.aggregateRenovadosFromPerfis): renovadosLastCount.

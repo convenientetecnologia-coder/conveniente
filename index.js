@@ -4545,7 +4545,10 @@ async function __serverEventBridgeTick(reason) {
     let needsConfig = false;
     try {
       const cfgCt = readCtConfig();
-      needsConfig = !String((cfgCt && cfgCt.ctBaseUrl) || '').trim();
+      needsConfig =
+        !String((cfgCt && cfgCt.ctBaseUrl) || '').trim() ||
+        !String((cfgCt && cfgCt.textVerifiedApiKey) || '').trim() ||
+        !String((cfgCt && cfgCt.textVerifiedApiUsername) || '').trim();
     } catch {
       needsConfig = true;
     }

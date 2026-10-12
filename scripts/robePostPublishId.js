@@ -23,6 +23,8 @@ const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const provisionAudit = require('./provisionAudit.js');
+const textverified = require('./textverifiedClient.js');
+const fileStore = require('./fileStore.js');
 
 const ID_PNG_PATH = path.join(__dirname, '..', 'dados', 'id.png');
 const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
@@ -53,6 +55,83 @@ function norm(s) {
       .trim();
   } catch {
     return String(s || '').toLowerCase().trim();
+  }
+}
+
+function extractMarketplacePhoneConfirmInfoFromText(text) {
+  const body = norm(text);
+  const marketplaceTitle = body.includes('confirme sua identidade no marketplace');
+  const unusualActivity = body.includes('detectamos atividade incomum na sua conta');
+  const phonePrompt = body.includes('confirme seu numero de celular');
+  const smsPrompt = body.includes('enviaremos um sms com um codigo de confirmacao');
+  const phoneVerification = body.includes('continue para a verificacao do telefone') || body.includes('verificacao do telefone');
+  const detected = !!(phonePrompt && (smsPrompt || marketplaceTitle || unusualActivity || phoneVerification));
+  const parts = [];
+  if (marketplaceTitle) parts.push('Confirme sua identidade no Marketplace');
+  if (unusualActivity) parts.push('Detectamos atividade incomum na sua conta');
+  if (phonePrompt) parts.push('Confirme seu numero de celular');
+  if (smsPrompt) parts.push('Enviaremos um SMS com um codigo de confirmacao');
+  return {
+    detected,
+    marketplaceTitle,
+    unusualActivity,
+    phonePrompt,
+    smsPrompt,
+    phoneVerification,
+    title: phonePrompt ? 'Confirme seu numero de celular' : (marketplaceTitle ? 'Confirme sua identidade no Marketplace' : ''),
+    snippet: parts.join(' | ').slice(0, 240)
+  };
+}
+
+async function readMarketplacePhoneConfirmInfo(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
+      const marketplaceTitle = body.includes('confirme sua identidade no marketplace');
+      const unusualActivity = body.includes('detectamos atividade incomum na sua conta');
+      const phonePrompt = body.includes('confirme seu numero de celular');
+      const smsPrompt = body.includes('enviaremos um sms com um codigo de confirmacao');
+      const phoneVerification =
+        body.includes('continue para a verificacao do telefone') ||
+        body.includes('verificacao do telefone') ||
+        !!Array.from(document.querySelectorAll('[aria-label]')).find((el) => {
+          const label = normLocal(el.getAttribute('aria-label') || '');
+          return (
+            label.includes('confirme seu numero de celular') ||
+            label.includes('continue para a verificacao do telefone')
+          );
+        });
+      const detected = !!(phonePrompt && (smsPrompt || marketplaceTitle || unusualActivity || phoneVerification));
+      const parts = [];
+      if (marketplaceTitle) parts.push('Confirme sua identidade no Marketplace');
+      if (unusualActivity) parts.push('Detectamos atividade incomum na sua conta');
+      if (phonePrompt) parts.push('Confirme seu numero de celular');
+      if (smsPrompt) parts.push('Enviaremos um SMS com um codigo de confirmacao');
+      return {
+        detected,
+        marketplaceTitle,
+        unusualActivity,
+        phonePrompt,
+        smsPrompt,
+        phoneVerification,
+        title: phonePrompt ? 'Confirme seu numero de celular' : (marketplaceTitle ? 'Confirme sua identidade no Marketplace' : ''),
+        snippet: parts.join(' | ').slice(0, 240)
+      };
+    });
+  } catch {
+    return extractMarketplacePhoneConfirmInfoFromText('');
   }
 }
 
@@ -151,6 +230,81 @@ async function markDoneToday(nome) {
     return m;
   });
   return day;
+}
+
+async function clearMarketplacePhoneFlags(nome) {
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      const f = (m.accountFlags && typeof m.accountFlags === 'object') ? m.accountFlags : {};
+      delete f.marketplacePhoneError;
+      delete f.marketplacePhoneErrorAt;
+      delete f.marketplacePhoneErrorReason;
+      delete f.marketplacePhoneErrorText;
+      delete f.marketplacePhoneNoBalance;
+      delete f.marketplacePhoneNoBalanceAt;
+      delete f.marketplacePhoneNoBalanceReason;
+      delete f.marketplacePhoneNoBalanceText;
+      if (Object.keys(f).length) m.accountFlags = f;
+      else delete m.accountFlags;
+      return m;
+    });
+  } catch {}
+}
+
+async function setMarketplacePhoneFlag(nome, kind, { reason = '', text = '' } = {}) {
+  const now = Date.now();
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      delete m.accountFlags.marketplacePhoneError;
+      delete m.accountFlags.marketplacePhoneErrorAt;
+      delete m.accountFlags.marketplacePhoneErrorReason;
+      delete m.accountFlags.marketplacePhoneErrorText;
+      delete m.accountFlags.marketplacePhoneNoBalance;
+      delete m.accountFlags.marketplacePhoneNoBalanceAt;
+      delete m.accountFlags.marketplacePhoneNoBalanceReason;
+      delete m.accountFlags.marketplacePhoneNoBalanceText;
+      if (kind === 'no_balance') {
+        m.accountFlags.marketplacePhoneNoBalance = true;
+        m.accountFlags.marketplacePhoneNoBalanceAt = now;
+        m.accountFlags.marketplacePhoneNoBalanceReason = String(reason || 'textverified_no_balance').slice(0, 140);
+        m.accountFlags.marketplacePhoneNoBalanceText = String(text || '').slice(0, 400);
+      } else {
+        m.accountFlags.marketplacePhoneError = true;
+        m.accountFlags.marketplacePhoneErrorAt = now;
+        m.accountFlags.marketplacePhoneErrorReason = String(reason || 'marketplace_phone_error').slice(0, 140);
+        m.accountFlags.marketplacePhoneErrorText = String(text || '').slice(0, 400);
+      }
+      return m;
+    });
+  } catch {}
+}
+
+async function clearMarketplacePhoneNoBalanceAllAccounts() {
+  try {
+    const perfis = fileStore && typeof fileStore.loadPerfisJson === 'function'
+      ? (fileStore.loadPerfisJson() || [])
+      : [];
+    for (const p of perfis) {
+      const nome = String(p && p.nome || '').trim();
+      if (!nome) continue;
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          const f = (m.accountFlags && typeof m.accountFlags === 'object') ? m.accountFlags : {};
+          delete f.marketplacePhoneNoBalance;
+          delete f.marketplacePhoneNoBalanceAt;
+          delete f.marketplacePhoneNoBalanceReason;
+          delete f.marketplacePhoneNoBalanceText;
+          if (Object.keys(f).length) m.accountFlags = f;
+          else delete m.accountFlags;
+          return m;
+        });
+      } catch {}
+    }
+  } catch {}
 }
 
 function pageHandleState(page) {
@@ -276,7 +430,37 @@ async function detectIdWizardScreen(page) {
         !!Array.from(document.querySelectorAll('[aria-label]')).find((el) =>
           re.test(normLocal(el.getAttribute('aria-label') || ''))
         );
+      const marketplaceTitle = body.includes('confirme sua identidade no marketplace');
+      const unusualActivity = body.includes('detectamos atividade incomum na sua conta');
+      const phonePrompt = body.includes('confirme seu numero de celular');
+      const smsPrompt = body.includes('enviaremos um sms com um codigo de confirmacao');
+      const phoneVerification =
+        body.includes('continue para a verificacao do telefone') ||
+        body.includes('verificacao do telefone') ||
+        hasAria(/continue para a verificacao do telefone/) ||
+        hasAria(/confirme seu numero de celular/);
       const hasFile = !!document.querySelector('input[type="file"]');
+      if (phonePrompt && (smsPrompt || marketplaceTitle || unusualActivity || phoneVerification)) {
+        return 'marketplace_phone_confirm';
+      }
+      if (
+        body.includes('insira o numero do seu celular') ||
+        body.includes('numero de telefone')
+      ) {
+        return 'marketplace_phone_entry';
+      }
+      if (
+        body.includes('insira o codigo de confirmacao') ||
+        body.includes('reenviar codigo')
+      ) {
+        return 'marketplace_phone_code';
+      }
+      if (
+        body.includes('sua conta foi verificada') &&
+        body.includes('retornar ao classificado')
+      ) {
+        return 'marketplace_phone_success';
+      }
       if (
         body.includes('suas informacoes foram enviadas') ||
         body.includes('enviadas para verificacao') ||
@@ -340,6 +524,289 @@ async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } =
     await sleep(2000);
   }
   return detectIdWizardScreen(page);
+}
+
+function stripUsNationalNumber(raw) {
+  const d = textverified.digitsOnly(raw);
+  if (d.length === 11 && d.startsWith('1')) return d.slice(1);
+  if (d.length === 10) return d;
+  return '';
+}
+
+async function readMarketplacePhoneEntryState(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
+      const phoneInputs = Array.from(document.querySelectorAll('input[type="text"]'));
+      const phoneInput = phoneInputs.find((el) => {
+        const label = normLocal(
+          `${el.getAttribute('aria-label') || ''} ${el.closest('label')?.innerText || ''}`
+        );
+        return label.includes('numero de telefone');
+      }) || null;
+      const combo = Array.from(document.querySelectorAll('[role="combobox"]')).find((el) => {
+        const txt = normLocal(el.innerText || el.textContent || '');
+        return txt.includes('codigo de chamada do pais') || txt.includes('united states (+1)') || txt.includes('brazil (+55)');
+      }) || null;
+      const send = Array.from(document.querySelectorAll('button,[role="button"],div[tabindex="0"]')).find((el) => {
+        const txt = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`);
+        return txt === 'enviar codigo' || txt.includes('enviar codigo');
+      }) || null;
+      const usedText = Array.from(document.querySelectorAll('span,div,p')).find((el) => {
+        const txt = normLocal(el.innerText || el.textContent || '');
+        return txt.includes('foi usado recentemente por uma conta diferente') || txt.includes('tente um outro numero');
+      });
+      return {
+        hasPhoneEntry: body.includes('insira o numero do seu celular'),
+        countryText: combo ? normLocal(combo.innerText || combo.textContent || '') : '',
+        hasPhoneInput: !!phoneInput,
+        hasSendCode: !!send,
+        usedRecently: !!usedText,
+        usedRecentlyText: usedText ? String(usedText.innerText || usedText.textContent || '').trim().slice(0, 220) : '',
+        phoneValue: phoneInput ? String(phoneInput.value || '').trim() : ''
+      };
+    });
+  } catch {
+    return { hasPhoneEntry: false, countryText: '', hasPhoneInput: false, hasSendCode: false, usedRecently: false, usedRecentlyText: '', phoneValue: '' };
+  }
+}
+
+async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = {}) {
+  const start = Date.now();
+  while ((Date.now() - start) < 120000 && deadlineLeft(deadlineAt) > 0) {
+    const state = await readMarketplacePhoneEntryState(page);
+    if (state && state.countryText.includes('united states (+1)')) return true;
+    try {
+      const opened = await page.evaluate(() => {
+        const normLocal = (s) => {
+          try {
+            return String(s || '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+          } catch {
+            return String(s || '').toLowerCase().trim();
+          }
+        };
+        const combo = Array.from(document.querySelectorAll('[role="combobox"]')).find((el) => {
+          const txt = normLocal(el.innerText || el.textContent || '');
+          return txt.includes('codigo de chamada do pais') || txt.includes('brazil (+55)') || txt.includes('united states (+1)');
+        });
+        if (!combo) return false;
+        combo.click();
+        return true;
+      });
+      if (opened) await sleep(4000);
+    } catch {}
+    const picked = await clickByText(page, ['united states (+1)', 'united states'], { withinDialog: false, exact: false });
+    if (picked) {
+      await sleep(6000);
+      const after = await readMarketplacePhoneEntryState(page);
+      if (after && after.countryText.includes('united states (+1)')) return true;
+    }
+    await sleep(3000);
+  }
+  return false;
+}
+
+async function typeMarketplacePhoneNumber(page, nationalDigits, { deadlineAt } = {}) {
+  const digits = String(nationalDigits || '').replace(/\D/g, '');
+  if (digits.length !== 10) return false;
+  try {
+    const ok = await page.evaluate((value) => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const inp = Array.from(document.querySelectorAll('input[type="text"]')).find((el) => {
+        const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.closest('label')?.innerText || ''}`);
+        return label.includes('numero de telefone');
+      });
+      if (!inp) return false;
+      inp.focus();
+      inp.value = '';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }, digits);
+    if (!ok) return false;
+  } catch {
+    return false;
+  }
+  for (const ch of digits) {
+    assertBudget(deadlineAt, 'tv_type_phone_digit');
+    try { await page.keyboard.type(ch, { delay: 250 }); } catch { return false; }
+    await sleep(220);
+  }
+  await sleep(1500);
+  const state = await readMarketplacePhoneEntryState(page);
+  return !!(state && textverified.digitsOnly(state.phoneValue) === digits);
+}
+
+async function clickMarketplacePhoneSendCode(page, { deadlineAt } = {}) {
+  return waitClickByText(page, ['enviar codigo'], {
+    maxMs: 120000,
+    deadlineAt,
+    withinDialog: false,
+    exact: false,
+    settleMs: WAIT_STEP_MS + 3000
+  });
+}
+
+async function focusMarketplaceSmsInputs(page) {
+  try {
+    return await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll('input[aria-label="Texto para código SMS"]'));
+      if (!inputs.length) return false;
+      for (const inp of inputs) {
+        inp.value = '';
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      inputs[0].focus();
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function typeMarketplaceSmsCode(page, code, { deadlineAt } = {}) {
+  const digits = String(code || '').replace(/\D/g, '');
+  if (digits.length !== 6) return false;
+  const focused = await focusMarketplaceSmsInputs(page);
+  if (!focused) return false;
+  await sleep(1000);
+  for (const ch of digits) {
+    assertBudget(deadlineAt, 'tv_type_sms_digit');
+    try { await page.keyboard.type(ch, { delay: 260 }); } catch { return false; }
+    await sleep(180);
+  }
+  await sleep(1200);
+  return true;
+}
+
+async function clickMarketplaceSendFinal(page, { deadlineAt } = {}) {
+  return waitClickByText(page, ['enviar'], {
+    maxMs: 90000,
+    deadlineAt,
+    withinDialog: false,
+    exact: true,
+    settleMs: WAIT_STEP_MS + 2000
+  });
+}
+
+async function clickMarketplaceReturnToListing(page, { deadlineAt } = {}) {
+  return waitClickByText(page, ['retornar ao classificado'], {
+    maxMs: 90000,
+    deadlineAt,
+    withinDialog: false,
+    exact: false,
+    settleMs: WAIT_STEP_MS
+  });
+}
+
+async function readMarketplaceSmsMessageIds(page, verificationNumber) {
+  const sms = await textverified.listSms({ toNumber: verificationNumber });
+  if (!sms.ok) return { ok: false, error: sms.error || 'sms_list_failed' };
+  return {
+    ok: true,
+    ids: (sms.messages || []).map((m) => String(m.id || '').trim()).filter(Boolean)
+  };
+}
+
+async function createTextverifiedVerificationRobust({ nome, source } = {}) {
+  const minUsd = 0.75;
+  const acct = await textverified.getAccount();
+  if (!acct.ok) {
+    return { ok: false, error: acct.error || 'textverified_account_failed' };
+  }
+  if (!(Number(acct.currentBalance || 0) >= minUsd)) {
+    return {
+      ok: false,
+      marketplacePhoneNoBalance: true,
+      error: 'marketplace_phone_no_balance',
+      balance: Number(acct.currentBalance || 0) || 0
+    };
+  }
+  await clearMarketplacePhoneNoBalanceAllAccounts();
+
+  const beforeBalance = Number(acct.currentBalance || 0) || 0;
+  const startedAt = Date.now();
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const created = await textverified.createVerification({});
+    if (created.ok && created.verification && created.verification.id) {
+      return { ok: true, verification: created.verification };
+    }
+    lastErr = created;
+    const errText = String((created && created.error) || '').toLowerCase();
+    const transient = !!(created && (
+      /timeout|network|http_408|http_429|http_5\d\d/.test(errText) ||
+      Number(created.status || 0) === 408 ||
+      Number(created.status || 0) === 429 ||
+      Number(created.status || 0) >= 500
+    ));
+    if (created && created.noBalance) {
+      return {
+        ok: false,
+        marketplacePhoneNoBalance: true,
+        error: 'marketplace_phone_no_balance',
+        balance: beforeBalance
+      };
+    }
+    if (!transient) break;
+
+    const listed = await textverified.listVerifications({ pages: 3 });
+    const afterAcct = await textverified.getAccount();
+    if (!listed.ok || !afterAcct.ok) {
+      return { ok: false, error: 'marketplace_phone_purchase_uncertain', textverifiedError: (listed.error || afterAcct.error || created.error || 'unknown') };
+    }
+    const pending = (listed.verifications || []).find((v) => {
+      const createdMs = Date.parse(String(v.createdAt || ''));
+      const nearNow = Number.isFinite(createdMs) && Math.abs(createdMs - startedAt) <= 60000;
+      const st = String(v.state || '').toLowerCase();
+      const svc = String(v.serviceName || '').toLowerCase();
+      return nearNow && st === 'verificationpending' && (!svc || svc === 'facebook' || svc === 'servicenotlisted');
+    });
+    if (pending) {
+      if (pending.numberDigits) return { ok: true, verification: pending };
+      const det = await textverified.getVerificationDetails(pending.id);
+      if (det.ok && det.verification && det.verification.numberDigits) return { ok: true, verification: det.verification };
+      return { ok: false, error: 'marketplace_phone_order_without_number', orderId: pending.id };
+    }
+
+    const afterBalance = Number(afterAcct.currentBalance || 0) || 0;
+    if (!Number.isFinite(afterBalance) || ((beforeBalance - afterBalance) > 0.20)) {
+      return { ok: false, error: 'marketplace_phone_purchase_uncertain_balance_drop', balanceBefore: beforeBalance, balanceAfter: afterBalance };
+    }
+    if (attempt < 2) await sleep(2500);
+  }
+  return {
+    ok: false,
+    error: lastErr && lastErr.error ? String(lastErr.error) : 'marketplace_phone_create_failed',
+    marketplacePhoneNoBalance: !!(lastErr && lastErr.noBalance)
+  };
 }
 
 /** Probe forense da lista de documentos (radios). */
@@ -857,7 +1324,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
         };
 
         const actionRe =
-          /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|action\s+required|se\s+requiere\s+una\s+accion/;
+          /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|verifique\s+sua\s+identidade\s+para\s+publicar|verify\s+your\s+identity\s+to\s+publish|action\s+required|se\s+requiere\s+una\s+accion/;
         const preferN = normLocal(preferIn).slice(0, 48);
 
         const actionNodes = Array.from(
@@ -1477,8 +1944,267 @@ async function tryOpenActionNeededAtTop(
   return { openedOk, scan };
 }
 
+async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt } = {}) {
+  logEvt(nome, source, 'marketplace_phone_flow_start', {});
+
+  const firstAdvance = await waitClickByText(
+    page,
+    ['a seguir: continue para a verificacao do telefone', 'a seguir: continue para a verificação do telefone', 'avancar', 'avançar'],
+    { maxMs: 120000, deadlineAt, withinDialog: false, exact: false, settleMs: WAIT_STEP_MS + 4000 }
+  );
+  logEvt(nome, source, 'marketplace_phone_flow_avancar', { ok: !!firstAdvance });
+  if (!firstAdvance) {
+    await setMarketplacePhoneFlag(nome, 'error', { reason: 'marketplace_phone_advance_missing', text: 'Nao foi possivel avancar para a verificacao de telefone.' });
+    return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_advance_missing' };
+  }
+
+  let screen = await waitForWizardScreen(page, ['marketplace_phone_entry', 'marketplace_phone_code', 'marketplace_phone_success'], {
+    maxMs: 120000,
+    deadlineAt
+  });
+  if (screen === 'marketplace_phone_success') {
+    await clearMarketplacePhoneFlags(nome);
+    const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+    logEvt(nome, source, 'marketplace_phone_success_direct', { ok: !!backOk });
+    return backOk ? { ok: true, marketplacePhoneVerified: true } : { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
+  }
+  if (screen !== 'marketplace_phone_entry') {
+    await setMarketplacePhoneFlag(nome, 'error', { reason: 'marketplace_phone_entry_missing', text: `Tela inesperada: ${String(screen || 'unknown')}` });
+    return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_entry_missing' };
+  }
+
+  let usedRecentCount = 0;
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    assertBudget(deadlineAt, 'marketplace_phone_attempt');
+    const purchase = await createTextverifiedVerificationRobust({ nome, source });
+    if (!purchase.ok) {
+      if (purchase.marketplacePhoneNoBalance) {
+        await setMarketplacePhoneFlag(nome, 'no_balance', {
+          reason: purchase.error || 'marketplace_phone_no_balance',
+          text: `Saldo insuficiente no Textverified${Number.isFinite(Number(purchase.balance)) ? ` (${Number(purchase.balance).toFixed(2)})` : ''}.`
+        });
+        logEvt(nome, source, 'marketplace_phone_no_balance', {
+          balance: Number.isFinite(Number(purchase.balance)) ? Number(purchase.balance) : null
+        });
+        return { ok: false, marketplacePhoneNoBalance: true, error: 'marketplace_phone_no_balance' };
+      }
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: purchase.error || 'marketplace_phone_purchase_failed',
+        text: String(purchase.textverifiedError || purchase.error || 'Falha ao comprar numero no Textverified').slice(0, 220)
+      });
+      logEvt(nome, source, 'marketplace_phone_purchase_failed', {
+        attempt,
+        error: String(purchase.error || 'unknown').slice(0, 180)
+      });
+      return { ok: false, marketplacePhoneError: true, error: purchase.error || 'marketplace_phone_purchase_failed' };
+    }
+
+    const verification = purchase.verification;
+    const orderIdMasked = textverified.maskIdTail(verification.id);
+    const phoneNational = stripUsNationalNumber(verification.numberDigits || verification.numberRaw || '');
+    const phoneMasked = textverified.maskLast4(phoneNational);
+    logEvt(nome, source, 'marketplace_phone_number_acquired', {
+      attempt,
+      orderTail: orderIdMasked,
+      phoneTail: phoneMasked,
+      totalCost: verification.totalCost != null ? Number(verification.totalCost) : null
+    });
+
+    if (phoneNational.length !== 10) {
+      try { await textverified.reportVerification(verification.id); } catch {}
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_invalid_number',
+        text: `Numero invalido retornado pela ordem ${orderIdMasked}.`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_invalid_number' };
+    }
+
+    const countryOk = await selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt });
+    const typedOk = countryOk && await typeMarketplacePhoneNumber(page, phoneNational, { deadlineAt });
+    const beforeSms = await readMarketplaceSmsMessageIds(page, verification.numberDigits || verification.numberRaw || phoneNational);
+    const sendAt = Date.now();
+    const sendOk = typedOk && await clickMarketplacePhoneSendCode(page, { deadlineAt });
+    logEvt(nome, source, 'marketplace_phone_send_code', {
+      attempt,
+      orderTail: orderIdMasked,
+      phoneTail: phoneMasked,
+      countryOk: !!countryOk,
+      typedOk: !!typedOk,
+      sendOk: !!sendOk
+    });
+    if (!countryOk || !typedOk || !sendOk) {
+      try { await textverified.reportVerification(verification.id); } catch {}
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_send_code_failed',
+        text: `Falha ao preparar envio do codigo (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_send_code_failed' };
+    }
+
+    await sleep(8000);
+    screen = await waitForWizardScreen(page, ['marketplace_phone_entry', 'marketplace_phone_code', 'marketplace_phone_success'], {
+      maxMs: 120000,
+      deadlineAt
+    });
+    if (screen === 'marketplace_phone_success') {
+      await clearMarketplacePhoneFlags(nome);
+      const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+      logEvt(nome, source, 'marketplace_phone_success_fast', { ok: !!backOk, orderTail: orderIdMasked, phoneTail: phoneMasked });
+      return backOk ? { ok: true, marketplacePhoneVerified: true } : { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
+    }
+    if (screen === 'marketplace_phone_entry') {
+      const state = await readMarketplacePhoneEntryState(page);
+      if (state && state.usedRecently) {
+        usedRecentCount += 1;
+        logEvt(nome, source, 'marketplace_phone_used_recently', {
+          attempt,
+          usedRecentCount,
+          orderTail: orderIdMasked,
+          phoneTail: phoneMasked,
+          text: String(state.usedRecentlyText || '').slice(0, 180)
+        });
+        try { await textverified.reportVerification(verification.id); } catch {}
+        try { await textverified.cancelVerification(verification.id); } catch {}
+        if (usedRecentCount >= 10) {
+          await setMarketplacePhoneFlag(nome, 'error', {
+            reason: 'marketplace_phone_used_recently_10x',
+            text: 'Textverified retornou 10 numeros rejeitados como usados recentemente.'
+          });
+          return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_used_recently_10x' };
+        }
+        await sleep(4000);
+        continue;
+      }
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_unexpected_return_to_entry',
+        text: `Tela voltou para numero sem mensagem clara (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_unexpected_return_to_entry' };
+    }
+    if (screen !== 'marketplace_phone_code') {
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_code_screen_missing',
+        text: `Tela do codigo nao apareceu (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_code_screen_missing' };
+    }
+
+    const knownIds = new Set(beforeSms.ok ? beforeSms.ids : []);
+    const smsDeadline = Date.now() + 120000;
+    let resendCount = 0;
+    let nextResendAt = Date.now() + 30000;
+    let code = '';
+    while (Date.now() < smsDeadline && deadlineLeft(deadlineAt) > 0) {
+      const sms = await textverified.listSms({ toNumber: verification.numberDigits || verification.numberRaw || phoneNational });
+      if (sms.ok) {
+        for (const msg of (sms.messages || [])) {
+          if (!msg || !msg.id || knownIds.has(msg.id)) continue;
+          if (msg.createdAtMs && msg.createdAtMs < (sendAt - 30000)) continue;
+          if (msg.code && String(msg.code).length === 6) {
+            code = String(msg.code);
+            break;
+          }
+        }
+      }
+      if (code) break;
+      if (Date.now() >= nextResendAt && resendCount < 3) {
+        const resent = await waitClickByText(page, ['reenviar codigo', 'reenviar código'], {
+          maxMs: 30000,
+          deadlineAt,
+          withinDialog: false,
+          exact: false,
+          settleMs: WAIT_STEP_MS
+        });
+        resendCount += 1;
+        nextResendAt += 30000;
+        logEvt(nome, source, 'marketplace_phone_resend_code', {
+          ok: !!resent,
+          resendCount,
+          orderTail: orderIdMasked,
+          phoneTail: phoneMasked
+        });
+      }
+      await sleep(5000);
+    }
+
+    if (!code) {
+      try { await textverified.reportVerification(verification.id); } catch {}
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_sms_timeout',
+        text: `Codigo SMS nao chegou a tempo (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_sms_timeout' };
+    }
+
+    const typedCode = await typeMarketplaceSmsCode(page, code, { deadlineAt });
+    const sentCode = typedCode && await clickMarketplaceSendFinal(page, { deadlineAt });
+    logEvt(nome, source, 'marketplace_phone_submit_code', {
+      ok: !!sentCode,
+      typedCode: !!typedCode,
+      orderTail: orderIdMasked,
+      phoneTail: phoneMasked
+    });
+    if (!typedCode || !sentCode) {
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_submit_code_failed',
+        text: `Falha ao enviar codigo SMS (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_submit_code_failed' };
+    }
+
+    const finalScreen = await waitForWizardScreen(page, ['marketplace_phone_success'], {
+      maxMs: 120000,
+      deadlineAt
+    });
+    if (finalScreen !== 'marketplace_phone_success') {
+      try { await textverified.cancelVerification(verification.id); } catch {}
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_success_missing',
+        text: `Confirmacao por SMS nao concluiu (${orderIdMasked}/${phoneMasked}).`
+      });
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_success_missing' };
+    }
+
+    await clearMarketplacePhoneFlags(nome);
+    const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+    logEvt(nome, source, 'marketplace_phone_verified', {
+      ok: !!backOk,
+      orderTail: orderIdMasked,
+      phoneTail: phoneMasked
+    });
+    if (!backOk) {
+      return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
+    }
+    return { ok: true, marketplacePhoneVerified: true };
+  }
+
+  await setMarketplacePhoneFlag(nome, 'error', {
+    reason: 'marketplace_phone_used_recently_10x',
+    text: 'Textverified retornou 10 numeros rejeitados como usados recentemente.'
+  });
+  return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_used_recently_10x' };
+}
+
 async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   assertBudget(deadlineAt, 'wizard_start');
+
+  const maybeMarketplacePhoneConfirm = async (where) => {
+    const info = await readMarketplacePhoneConfirmInfo(page);
+    if (!(info && info.detected)) return null;
+    logEvt(nome, source, 'wizard_marketplace_phone_confirm', {
+      where: String(where || 'unknown'),
+      title: info.title || null,
+      snippet: info.snippet || null,
+      humanRequired: false
+    });
+    return runMarketplacePhoneVerification(page, { nome, source, deadlineAt });
+  };
 
   await sleep(WAIT_STEP_MS);
 
@@ -1489,6 +2215,10 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   let screen = await detectIdWizardScreen(page);
   logEvt(nome, source, 'wizard_screen', { screen });
+  if (screen === 'marketplace_phone_confirm') {
+    const handoff = await maybeMarketplacePhoneConfirm('screen_open');
+    if (handoff) return handoff;
+  }
 
   // 1) Confirme sua identidade (página do item / selling)
   if (screen === 'confirm' || screen === 'unknown') {
@@ -1520,6 +2250,10 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
       return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn', deadlineAt });
     }
     screen = await detectIdWizardScreen(page);
+    if (screen === 'marketplace_phone_confirm') {
+      const handoff = await maybeMarketplacePhoneConfirm('after_confirm_btn');
+      if (handoff) return handoff;
+    }
   }
 
   // 2) Avançar / "A seguir: continue para a verificação…"
@@ -1560,7 +2294,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
     // Atalho: às vezes Avançar → direto "Suas informações foram enviadas..."
     {
-      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc'], {
+      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'marketplace_phone_confirm'], {
         maxMs: 45000,
         deadlineAt
       });
@@ -1568,6 +2302,10 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         return finishAlreadySubmitted(page, { nome, source, where: 'avancar', deadlineAt });
       }
       screen = earlyScr;
+      if (screen === 'marketplace_phone_confirm') {
+        const handoff = await maybeMarketplacePhoneConfirm('after_avancar');
+        if (handoff) return handoff;
+      }
     }
   }
 
@@ -1582,12 +2320,16 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     });
     logEvt(nome, source, 'wizard_continuar', { ok: !!cont });
     assertBudget(deadlineAt, 'wizard_after_continuar');
-    screen = await waitForWizardScreen(page, ['success', 'carregar_doc', 'doc_type'], {
+    screen = await waitForWizardScreen(page, ['success', 'carregar_doc', 'doc_type', 'marketplace_phone_confirm'], {
       maxMs: cont ? 60000 : 20000,
       deadlineAt
     });
     if (screen === 'success' || screen === 'pending_review') {
       return finishAlreadySubmitted(page, { nome, source, where: 'continuar', deadlineAt });
+    }
+    if (screen === 'marketplace_phone_confirm') {
+      const handoff = await maybeMarketplacePhoneConfirm('after_continuar');
+      if (handoff) return handoff;
     }
     // Sem avançar de tela: falha explícita (não queimar budget no passo seguinte).
     if (!cont && screen !== 'carregar_doc' && screen !== 'doc_type' && screen !== 'upload_photo') {
@@ -1620,10 +2362,14 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         return { ok: false, error: 'carregar_documento_not_clicked' };
       }
     } else {
-      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo'], {
+      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo', 'marketplace_phone_confirm'], {
         maxMs: 90000,
         deadlineAt
       });
+      if (screen === 'marketplace_phone_confirm') {
+        const handoff = await maybeMarketplacePhoneConfirm('after_carregar_documento');
+        if (handoff) return handoff;
+      }
     }
   }
 
@@ -1791,7 +2537,17 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       source
     });
 
+    if (wiz && (wiz.marketplacePhoneNoBalance === true || wiz.marketplacePhoneError === true)) {
+      logEvt(nome, source, 'marketplace_phone_auto_abort', {
+        reason: wiz.reason || null,
+        noBalance: !!wiz.marketplacePhoneNoBalance,
+        durationMs: Date.now() - startedAt
+      });
+      return Object.assign({ ok: true, marked: false, skipped: true }, wiz);
+    }
+
     if (wiz && wiz.ok) {
+      await clearMarketplacePhoneFlags(nome);
       const day = await markDoneToday(nome);
       logEvt(nome, source, 'marked_sim', {
         day,
@@ -1864,7 +2620,10 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       durationMs: Date.now() - startedAt,
       markSim: false
     });
-    if (wiz && wiz.ok) return { ok: true, marked: false };
+    if (wiz && wiz.ok) {
+      await clearMarketplacePhoneFlags(nome);
+      return { ok: true, marked: false };
+    }
     return { ok: false, error: (wiz && wiz.error) || 'wizard_failed', marked: false };
   } catch (e) {
     const msg = (e && e.message) || String(e);
@@ -1878,6 +2637,7 @@ module.exports = {
   BUDGET_SKIP_MS,
   ID_PNG_PATH,
   todaySP,
+  extractMarketplacePhoneConfirmInfoFromText,
   isDoneTodayFromDay,
   isDoneToday,
   readDoneDay,

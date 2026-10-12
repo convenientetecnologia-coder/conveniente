@@ -3396,6 +3396,15 @@
         } else {
           titleRow.append(buildPill('ID - nao', 'info'));
         }
+        if (p.marketplacePhoneNoBalance === true) {
+          const pill = buildPill('Celular MKT sem saldo', 'warn');
+          pill.title = p.marketplacePhoneNoBalanceText || 'Textverified sem saldo para confirmar o celular do Marketplace';
+          titleRow.append(pill);
+        } else if (p.marketplacePhoneError === true) {
+          const pill = buildPill('Celular MKT erro', 'bad');
+          pill.title = p.marketplacePhoneErrorText || 'Falha na confirmacao automatica do celular no Marketplace';
+          titleRow.append(pill);
+        }
 
         // ------- Renovação Marketplace (só se config ativada) -------
         if (p.marketplaceRenewEnabled === true) {
