@@ -670,6 +670,12 @@ async function waitForBrazilPhoneField(page, { deadlineAt } = {}) {
   return readMarketplacePhoneEntryState(page);
 }
 
+async function tapKey(page, key) {
+  await page.keyboard.down(key);
+  await sleep(50);
+  await page.keyboard.up(key);
+}
+
 async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = {}) {
   for (let attempt = 1; attempt <= 3 && deadlineLeft(deadlineAt) > 0; attempt++) {
     const state = await waitForBrazilPhoneField(page, { deadlineAt });
@@ -679,21 +685,13 @@ async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = 
       continue;
     }
     try { await page.bringToFront(); } catch {}
-    await sleep(600);
+    await sleep(800);
     try {
-      await page.keyboard.press('ArrowDown');
+      await tapKey(page, 'u');
       await sleep(1000);
-      for (let i = 0; i < 40; i++) {
-        assertBudget(deadlineAt, 'tv_country_arrow_up');
-        await page.keyboard.press('ArrowUp');
-        await sleep(90);
-      }
-      await sleep(350);
-      await page.keyboard.press('ArrowDown');
-      await sleep(160);
-      await page.keyboard.press('ArrowDown');
-      await sleep(220);
-      await page.keyboard.press('Enter');
+      await tapKey(page, 'u');
+      await sleep(400);
+      await tapKey(page, 'Enter');
     } catch {
       await sleep(1000);
       continue;
@@ -701,6 +699,8 @@ async function selectMarketplacePhoneCountryUnitedStates(page, { deadlineAt } = 
     await sleep(1800);
     const after = await readMarketplacePhoneEntryState(page);
     if (after && isUnitedStatesDialOption(after.countryText)) return true;
+    const stillBrazil = !!(after && (after.countryText.includes('brazil') || after.countryText.includes('(+55)')));
+    if (!stillBrazil) return false;
   }
   const finalState = await readMarketplacePhoneEntryState(page);
   return !!(finalState && isUnitedStatesDialOption(finalState.countryText));
