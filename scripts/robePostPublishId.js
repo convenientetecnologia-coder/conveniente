@@ -447,20 +447,20 @@ async function detectIdWizardScreen(page) {
         hasAria(/continue para a verificacao do telefone/) ||
         hasAria(/confirme seu numero de celular/);
       const hasFile = !!document.querySelector('input[type="file"]');
+      if (
+        body.includes('insira o codigo de confirmacao') ||
+        body.includes('reenviar codigo')
+      ) {
+        return 'marketplace_phone_code';
+      }
       if (body.includes('insira o numero do seu celular')) {
         return 'marketplace_phone_entry';
       }
       if (phonePrompt && (smsPrompt || marketplaceTitle || unusualActivity || phoneVerification)) {
         return 'marketplace_phone_confirm';
       }
-      if (body.includes('numero de telefone') && body.includes('enviar codigo')) {
+      if (body.includes('numero de telefone') && body.includes('enviar codigo') && !body.includes('reenviar codigo')) {
         return 'marketplace_phone_entry';
-      }
-      if (
-        body.includes('insira o codigo de confirmacao') ||
-        body.includes('reenviar codigo')
-      ) {
-        return 'marketplace_phone_code';
       }
       if (
         body.includes('sua conta foi verificada') &&
@@ -2159,10 +2159,16 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
       return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_send_code_failed' };
     }
 
-    await sleep(8000);
-    screen = await waitForWizardScreen(page, ['marketplace_phone_entry', 'marketplace_phone_code', 'marketplace_phone_success'], {
-      maxMs: 120000,
+    await sleep(3000);
+    screen = await waitForWizardScreen(page, ['marketplace_phone_code', 'marketplace_phone_success'], {
+      maxMs: 45000,
       deadlineAt
+    });
+    logEvt(nome, source, 'marketplace_phone_after_send_screen', {
+      attempt,
+      screen,
+      orderTail: orderIdMasked,
+      phoneTail: phoneMasked
     });
     if (screen === 'marketplace_phone_success') {
       await clearMarketplacePhoneFlags(nome);
