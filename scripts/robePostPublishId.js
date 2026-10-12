@@ -583,8 +583,10 @@ async function detectIdWizardScreen(page) {
       }
       if (
         hasAria(/confirme sua identidade/) ||
+        hasAria(/^verificar identidade$/) ||
         body.includes('confirme sua identidade') ||
-        body.includes('verifique sua identidade')
+        body.includes('verifique sua identidade') ||
+        body.includes('verificar identidade')
       ) {
         return 'confirm';
       }
@@ -599,8 +601,13 @@ async function clickConfirmeSuaIdentidade(page) {
   try {
     const point = await page.evaluate(() => {
       const exact = (el) => String(el && (el.innerText || el.textContent) || '').replace(/\s+/g, ' ').trim();
-      const label = Array.from(document.querySelectorAll('span')).find((el) => {
-        return exact(el) === 'Confirme sua identidade' && el.children.length === 0;
+      const wanted = ['Confirme sua identidade', 'Verificar identidade'];
+      const byAria = Array.from(document.querySelectorAll('[role="button"],button')).find((el) => {
+        return wanted.includes(exact(el.getAttribute('aria-label') || ''));
+      });
+      const label = byAria || Array.from(document.querySelectorAll('span')).find((el) => {
+        const text = exact(el);
+        return wanted.includes(text) && el.children.length === 0;
       });
       if (!label) return null;
       let box = label;
@@ -1765,13 +1772,14 @@ async function waitListingIdentityPrompt(page, { maxMs = 45000, deadlineAt } = {
           }
         };
         const body = normLocal(document.body && (document.body.innerText || '') || '');
-        const btn = document.querySelector('[aria-label="Confirme sua identidade"], [aria-label*="Confirme sua identidade"]');
+        const btn = document.querySelector('[aria-label="Confirme sua identidade"], [aria-label*="Confirme sua identidade"], [aria-label="Verificar identidade"]');
         return {
           hasBtn: !!btn,
           hasText:
             body.includes('confirme sua identidade') ||
             body.includes('verifique sua identidade para publicar') ||
-            body.includes('verifique sua identidade'),
+            body.includes('verifique sua identidade') ||
+            body.includes('verificar identidade'),
           onItem: /\/marketplace\/item\//.test(location.pathname || '')
         };
       });
@@ -2481,8 +2489,8 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     if (!confirmBtn) {
       confirmBtn = await waitClickByText(
         page,
-        ['confirme sua identidade', 'verifique sua identidade'],
-        { maxMs: 20000, deadlineAt, withinDialog: false, exact: true, settleMs: 1000 }
+        ['confirme sua identidade', 'verifique sua identidade', 'verificar identidade'],
+        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: 1000 }
       );
     }
     logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
