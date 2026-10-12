@@ -447,13 +447,13 @@ async function detectIdWizardScreen(page) {
         hasAria(/continue para a verificacao do telefone/) ||
         hasAria(/confirme seu numero de celular/);
       const hasFile = !!document.querySelector('input[type="file"]');
+      if (body.includes('insira o numero do seu celular')) {
+        return 'marketplace_phone_entry';
+      }
       if (phonePrompt && (smsPrompt || marketplaceTitle || unusualActivity || phoneVerification)) {
         return 'marketplace_phone_confirm';
       }
-      if (
-        body.includes('insira o numero do seu celular') ||
-        body.includes('numero de telefone')
-      ) {
+      if (body.includes('numero de telefone') && body.includes('enviar codigo')) {
         return 'marketplace_phone_entry';
       }
       if (
@@ -2056,6 +2056,24 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     return backOk ? { ok: true, marketplacePhoneVerified: true } : { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_return_listing_missing' };
   }
   if (screen !== 'marketplace_phone_entry') {
+    let markers = null;
+    try {
+      markers = await page.evaluate(() => {
+        const raw = String(document.body && (document.body.innerText || document.body.textContent) || '');
+        const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const body = normLocal(raw);
+        const combo = document.querySelector('[role="combobox"]');
+        return {
+          hasInsira: body.includes('insira o numero do seu celular'),
+          hasPhonePrompt: body.includes('confirme seu numero de celular'),
+          hasBrazil: body.includes('brazil'),
+          hasEnviarCodigo: body.includes('enviar codigo'),
+          comboExpanded: combo ? combo.getAttribute('aria-expanded') : null,
+          textLen: raw.length
+        };
+      });
+    } catch {}
+    logEvt(nome, source, 'marketplace_phone_entry_missing', { screen, markers });
     await setMarketplacePhoneFlag(nome, 'error', { reason: 'marketplace_phone_entry_missing', text: `Tela inesperada: ${String(screen || 'unknown')}` });
     return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_entry_missing' };
   }
