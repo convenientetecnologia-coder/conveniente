@@ -533,11 +533,82 @@ async function clearGlassPaint(page) {
         html.style.backfaceVisibility = '';
         html.style.overflow = '';
       }
+      const body = document.body;
+      if (body) {
+        body.style.zoom = '';
+        body.style.transform = '';
+        body.style.transformOrigin = '';
+      }
       const hud = document.getElementById('ct-glass-viewer-hud');
       if (hud) hud.remove();
       window.__ctGlassViewerState = null;
+      window.__ctHumanFitState = null;
     } catch (e) {}
   }).catch(() => {});
+}
+
+async function applyHumanFitToBody(page, identity) {
+  if (!page || pageClosed(page)) return null;
+  const snap = (identity && identity.width >= 800 && identity.height >= 600)
+    ? identity
+    : (page._ctGlassIdentityVp || snapshotIdentityViewport(page));
+  if (!snap || snap.width < 800 || snap.height < 600) return null;
+  return page.evaluate((state) => {
+    try {
+      const install = () => {
+        if (window.__ctHumanFitInstalled) return;
+        window.__ctHumanFitInstalled = true;
+        window.__ctHumanFitApply = () => {
+          try {
+            const st = window.__ctHumanFitState;
+            const body = document.body;
+            if (!body) return;
+            if (!st || !st.enabled) {
+              body.style.zoom = '';
+              body.style.transform = '';
+              body.style.transformOrigin = '';
+              return;
+            }
+            const padX = 16;
+            const padY = 16;
+            const vw = Math.max(320, window.innerWidth || 0);
+            const vh = Math.max(240, window.innerHeight || 0);
+            const pw = Math.max(1, Number(st.presetW) || vw);
+            const ph = Math.max(1, Number(st.presetH) || vh);
+            let zoom = Math.min(1, (vw - padX * 2) / pw, (vh - padY * 2) / ph);
+            if (!Number.isFinite(zoom) || zoom <= 0) zoom = 1;
+            if (zoom > 0.999) zoom = 1;
+            body.style.transform = '';
+            body.style.transformOrigin = '';
+            body.style.zoom = zoom === 1 ? '' : String(zoom);
+            st.lastZoom = zoom;
+            st.innerW = vw;
+            st.innerH = vh;
+            window.__ctHumanFitState = st;
+          } catch {}
+        };
+        window.addEventListener('resize', () => {
+          try { clearTimeout(window.__ctHumanFitResizeTimer); } catch {}
+          window.__ctHumanFitResizeTimer = setTimeout(() => {
+            try { window.__ctHumanFitApply && window.__ctHumanFitApply(); } catch {}
+          }, 80);
+        }, true);
+      };
+      install();
+      window.__ctHumanFitState = {
+        enabled: true,
+        presetW: Number(state && state.presetW) || 0,
+        presetH: Number(state && state.presetH) || 0,
+        lastZoom: 1,
+        innerW: window.innerWidth || 0,
+        innerH: window.innerHeight || 0
+      };
+      if (window.__ctHumanFitApply) window.__ctHumanFitApply();
+      return window.__ctHumanFitState;
+    } catch {
+      return null;
+    }
+  }, { presetW: snap.width, presetH: snap.height }).catch(() => null);
 }
 
 async function paint(page) {
@@ -1101,12 +1172,14 @@ async function relockViewportIdentity(page, identity) {
 
 async function fitHumanViewportToScreen(page) {
   if (!page || pageClosed(page)) return null;
-  snapshotIdentityViewport(page);
+  const identity = snapshotIdentityViewport(page);
   await clearGlassPaint(page);
   const bounds = await maximizeWindow(page);
-  // setViewport trava a pagina num tamanho fixo. O F12 ancorado cobre
-  // em vez de dividir a janela. Sem override, o layout segue a janela real.
+  // O viewport precisa ficar livre para o F12 ancorado dividir a janela,
+  // mas o conteúdo humano ainda precisa caber na tela. O ajuste visual é
+  // feito no body, sem tocar no html nem prender as métricas da página.
   await clearDeviceMetricsOverride(page);
+  await applyHumanFitToBody(page, identity);
   if (isGlassArmed(page)) attachNavHookIfArmed(page);
   page._ctGlassPainted = false;
   page._ctGlassSettled = true;
