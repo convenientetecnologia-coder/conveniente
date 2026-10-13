@@ -30,8 +30,8 @@
  *    pixel nao pode capar o zoom do operador no fit/vidro.
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
- *    Sem translateZ, sem backface-visibility e sem overflow no html:
- *    isso apagava checkpoint, captcha e documento no Chrome.
+ *    Checkpoint, captcha, login e documento nao recebem essa pintura:
+ *    o Chrome apagava a pagina e o reload reaplicava o vidro.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
  *    Sem vidro, o overlay cai no inner/outer (ja e o fallback).
  *
@@ -357,6 +357,40 @@ function resolveGlassDimensions({
   };
 }
 
+function glassShouldLeavePageAlone(url) {
+  const u = String(url || '').toLowerCase();
+  if (!u || u === 'about:blank') return false;
+  return (
+    u.includes('/checkpoint') ||
+    u.includes('captcha') ||
+    u.includes('/login') ||
+    u.includes('/recover') ||
+    u.includes('/two_step') ||
+    u.includes('/two_factor') ||
+    u.includes('/identity') ||
+    u.includes('/help/contact') ||
+    u.includes('/appeal') ||
+    u.includes('/privacy/consent') ||
+    u.includes('confirm_identity') ||
+    u.includes('confirm-your-identity')
+  );
+}
+
+async function clearDeviceMetricsOverride(page) {
+  if (pageClosed(page)) return false;
+  try {
+    const client = await page.target().createCDPSession();
+    try {
+      await client.send('Emulation.clearDeviceMetricsOverride');
+      return true;
+    } finally {
+      try { await client.detach(); } catch {}
+    }
+  } catch {
+    return false;
+  }
+}
+
 async function unlockVisibleSize(page) {
   if (pageClosed(page)) return false;
   const vp = (typeof page.viewport === 'function' ? page.viewport() : null) || {};
@@ -469,9 +503,9 @@ function paintScript(st) {
     if (!html) return;
     var none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
     html.style.transformOrigin = '0 0';
-    html.style.backfaceVisibility = '';
-    html.style.overflow = '';
-    html.style.transform = none ? 'none' : ('translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+    html.style.backfaceVisibility = none ? '' : 'hidden';
+    html.style.overflow = none ? '' : 'hidden';
+    html.style.transform = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
     window.__ctGlassViewerState = {
       zoom: z, panX: px, panY: py,
       offsetX: ox, offsetY: oy,
@@ -546,11 +580,11 @@ function pageInstallRuntime() {
         const ox = Number(st.offsetX) || 0;
         const oy = Number(st.offsetY) || 0;
         const none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
-        const want = none ? 'none' : ('translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+        const want = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
         if (html.style.transform !== want) {
           html.style.transformOrigin = '0 0';
-          html.style.backfaceVisibility = '';
-          html.style.overflow = '';
+          html.style.backfaceVisibility = none ? '' : 'hidden';
+          html.style.overflow = none ? '' : 'hidden';
           html.style.transform = want;
         }
       } catch (e) {}
@@ -894,6 +928,19 @@ function detachNavHook(page) {
 async function applyGlassViewerOnce(page, opts = {}) {
   const source = String((opts && opts.source) || 'apply').slice(0, 80);
   const light = source === 'framenavigated';
+  let pageUrl = '';
+  try { pageUrl = (typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
+  if (isGlassArmed(page)) attachNavHookIfArmed(page);
+  if (isGlassArmed(page) && glassShouldLeavePageAlone(pageUrl)) {
+    await clearGlassPaint(page);
+    await clearDeviceMetricsOverride(page);
+    page._ctGlassPainted = false;
+    page._ctGlassSettled = true;
+    return writeState(page, {
+      zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
+      userZoom: false, collapsed: true, disabled: false
+    });
+  }
   if (!isGlassArmed(page)) {
     return readState(page);
   }
@@ -1098,6 +1145,7 @@ module.exports = {
   applyGlassViewer,
   enableGlassForHuman,
   disableGlassForWork,
+  glassShouldLeavePageAlone,
   maximizeWindow,
   scrubIdleGlassPaint,
   snapshotIdentityViewport,
