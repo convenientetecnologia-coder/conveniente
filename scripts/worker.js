@@ -222,6 +222,7 @@ const {
 } = require('./robeTabHygiene.js');
 const facebookNavHosts = require('./facebookNavHosts.js');
 const robePostPublishId = require('./robePostPublishId.js');
+const flowAlertFlags = require('./flowAlertFlags.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
 const fileStore = require('./fileStore.js');
@@ -432,6 +433,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
   const deadlineAt = Date.now() + HARD_MS;
 
   let armedHold = false;
+  let renewFlowStarted = false;
   try {
     // Ordem known-good (igual invoke_human): armar hold ANTES de stopVirtus
     // para fechar orphan do marketplace_enforcer.
@@ -448,6 +450,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
     } catch {}
     try { await stopVirtus(n); } catch {}
 
+    renewFlowStarted = true;
     const r = await marketplaceRenewListings.runMarketplaceRenewListings({
       page,
       nome: n,
@@ -508,16 +511,44 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       } catch {}
     }
 
-    return {
+    const renewResult = {
       ok: !!(r && r.ok),
       renewedCount: count,
       reason: r && r.reason ? String(r.reason) : null,
       error: r && r.error ? String(r.error) : null,
       skipped: false,
+      started: true
+    };
+    try {
+      if (flowAlertFlags.shouldClearRenewError(renewResult)) {
+        await flowAlertFlags.clearRenewError(n);
+      } else if (flowAlertFlags.shouldMarkRenewError(renewResult)) {
+        await flowAlertFlags.setRenewError(n, {
+          reason: renewResult.error || renewResult.reason || 'renew_failed',
+          text: `Renovacao nao concluiu: ${renewResult.error || renewResult.reason || 'renew_failed'}`
+        });
+      }
+    } catch {}
+
+    return {
+      ok: renewResult.ok,
+      renewedCount: count,
+      reason: renewResult.reason,
+      error: renewResult.error,
+      skipped: false,
       scrollStopAgeDays: resolvedScrollDays
     };
   } catch (e) {
-    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), renewedCount: 0 };
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    if (renewFlowStarted) {
+      try {
+        await flowAlertFlags.setRenewError(n, {
+          reason: 'renew_exception',
+          text: `Renovacao nao concluiu: ${String(msg).slice(0, 320)}`
+        });
+      } catch {}
+    }
+    return { ok: false, error: msg, renewedCount: 0 };
   } finally {
     try { ctrl.renewInFlight = false; } catch {}
     // Manual: mantém hold do operador.
@@ -16899,8 +16930,12 @@ const marketplaceDisabledAt = man ? ((man.accountFlags && man.accountFlags.marke
 const marketplaceDisabledReason = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledReason) || null) : null;
 const marketplaceDisabledText = man ? ((man.accountFlags && man.accountFlags.marketplaceDisabledText) || null) : null;
 const phoneAlerts = robePostPublishId.phoneAlertFlagsForToday(man && man.accountFlags);
+const flowAlerts = flowAlertFlags.flagsForToday(man && man.accountFlags);
 if (phoneAlerts.staleError || phoneAlerts.staleNoBalance || phoneAlerts.staleDocError) {
   await robePostPublishId.clearStaleMarketplacePhoneFlags(nome);
+}
+if (flowAlerts.staleRobePostError || flowAlerts.staleRenewError) {
+  await flowAlertFlags.clearStaleFlowAlertFlags(nome);
 }
 const marketplacePhoneError = phoneAlerts.marketplacePhoneError;
 const marketplacePhoneErrorAt = marketplacePhoneError && man ? ((man.accountFlags && man.accountFlags.marketplacePhoneErrorAt) || null) : null;
@@ -16914,6 +16949,14 @@ const marketplaceDocError = phoneAlerts.marketplaceDocError;
 const marketplaceDocErrorAt = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorAt) || null) : null;
 const marketplaceDocErrorReason = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorReason) || null) : null;
 const marketplaceDocErrorText = marketplaceDocError && man ? ((man.accountFlags && man.accountFlags.marketplaceDocErrorText) || null) : null;
+const robePostError = flowAlerts.robePostError;
+const robePostErrorAt = robePostError && man ? ((man.accountFlags && man.accountFlags.robePostErrorAt) || null) : null;
+const robePostErrorReason = robePostError && man ? ((man.accountFlags && man.accountFlags.robePostErrorReason) || null) : null;
+const robePostErrorText = robePostError && man ? ((man.accountFlags && man.accountFlags.robePostErrorText) || null) : null;
+const renewError = flowAlerts.renewError;
+const renewErrorAt = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorAt) || null) : null;
+const renewErrorReason = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorReason) || null) : null;
+const renewErrorText = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorText) || null) : null;
 const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
 const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
 const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
@@ -16982,6 +17025,8 @@ const problem = man
     marketplacePhoneError === true ||
     marketplacePhoneNoBalance === true ||
     marketplaceDocError === true ||
+    robePostError === true ||
+    renewError === true ||
     (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||
@@ -17126,6 +17171,14 @@ perfis.push({
   marketplaceDocErrorAt,
   marketplaceDocErrorReason,
   marketplaceDocErrorText,
+  robePostError,
+  robePostErrorAt,
+  robePostErrorReason,
+  robePostErrorText,
+  renewError,
+  renewErrorAt,
+  renewErrorReason,
+  renewErrorText,
   marketplacePhoneConfirm,
   marketplacePhoneConfirmAt,
   marketplacePhoneConfirmReason,

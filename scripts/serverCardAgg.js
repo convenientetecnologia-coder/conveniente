@@ -87,6 +87,8 @@ function emptyFlagsAgg() {
     appeal_submitted: 0,
     marketplace_phone_error: 0,
     marketplace_doc_error: 0,
+    robe_post_error: 0,
+    renew_error: 0,
     marketplace_phone_no_balance: 0,
     marketplace_phone_confirm: 0,
     // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
@@ -140,6 +142,8 @@ function buildServerCardAggs(status, opts = {}) {
     if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
     if (p.marketplacePhoneError === true) flagsAgg.marketplace_phone_error++;
     if (p.marketplaceDocError === true) flagsAgg.marketplace_doc_error++;
+    if (p.robePostError === true) flagsAgg.robe_post_error++;
+    if (p.renewError === true) flagsAgg.renew_error++;
     if (p.marketplacePhoneNoBalance === true) flagsAgg.marketplace_phone_no_balance++;
     if (p.marketplacePhoneConfirm === true) flagsAgg.marketplace_phone_confirm++;
     if (p.robeIdPhoneDoneToday === true) flagsAgg.id_celular_sim++;

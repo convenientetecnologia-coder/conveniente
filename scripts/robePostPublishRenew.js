@@ -12,6 +12,7 @@
 
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
+const flowAlertFlags = require('./flowAlertFlags.js');
 const provisionAudit = require('./provisionAudit.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
@@ -45,6 +46,7 @@ async function runRobeAutoRenew({
   const hardDeadline = Number(deadlineAt || 0) > 0
     ? Number(deadlineAt)
     : (startedAt + BUDGET_TOTAL_MS);
+  let renewStarted = false;
 
   try {
     const decision = decisionHint || await marketplaceRenewPlan.shouldAutoRenewAfterPublish(profileName);
@@ -79,6 +81,7 @@ async function runRobeAutoRenew({
       dueLabel: decision.plan ? decision.plan.dueLabel : null
     });
 
+    renewStarted = true;
     const r = await marketplaceRenewListings.runMarketplaceRenewListings({
       page,
       nome: profileName,
@@ -92,6 +95,24 @@ async function runRobeAutoRenew({
 
     const renewedCount = Math.max(0, Number(r && r.renewedCount || 0) || 0);
     const flowOk = !!(r && r.ok === true);
+    const renewResult = {
+      ok: flowOk,
+      skipped: false,
+      started: true,
+      renewedCount,
+      error: flowOk ? null : ((r && r.error) ? String(r.error) : 'renew_failed'),
+      reason: (r && r.reason) || null
+    };
+    if (flowAlertFlags.shouldClearRenewError(renewResult)) {
+      try { await flowAlertFlags.clearRenewError(profileName); } catch {}
+    } else if (flowAlertFlags.shouldMarkRenewError(renewResult)) {
+      try {
+        await flowAlertFlags.setRenewError(profileName, {
+          reason: renewResult.error || renewResult.reason || 'renew_failed',
+          text: `Renovacao nao concluiu: ${renewResult.error || renewResult.reason || 'renew_failed'}`
+        });
+      } catch {}
+    }
     if (flowOk) {
       try {
         await marketplaceRenewPlan.markDoneToday(profileName, {
@@ -129,6 +150,14 @@ async function runRobeAutoRenew({
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     audit(profileName, 'exception', { error: msg.slice(0, 220), durationMs: Date.now() - startedAt });
+    if (renewStarted && flowAlertFlags.shouldMarkRenewError({ ok: false, skipped: false, started: true, error: msg })) {
+      try {
+        await flowAlertFlags.setRenewError(profileName, {
+          reason: 'renew_exception',
+          text: `Renovacao nao concluiu: ${msg.slice(0, 320)}`
+        });
+      } catch {}
+    }
     return { ok: false, skipped: false, marked: false, renewedCount: 0, error: msg.slice(0, 220) };
   }
 }

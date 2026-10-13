@@ -16,6 +16,7 @@ const serverConfig = require('./serverConfig.js');
 const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const robePostPublishRenew = require('./robePostPublishRenew.js');
+const flowAlertFlags = require('./flowAlertFlags.js');
 const {
   safeClosePage,
   sweepAboutBlankPages,
@@ -4499,6 +4500,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let fotoNome = null;
   let fotoPath = null;
   let fotoUploaded = false;
+  let postFlowStarted = false;
   let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
   let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
   let postingLocationScope = null;
@@ -4661,6 +4663,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       } catch {}
     }
 
+    postFlowStarted = true;
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     await installCreatePageGraphqlRateGuard(page, nome, attId);
     installCreatePageForensics(page, nome, attId);
@@ -5180,6 +5183,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     // LOG: evento de sucesso (uma mensagem por account/turno já é suficiente)
     try { await logIssue(nome, 'robe_success', 'Publicação concluída com sucesso.'); } catch {}
+    try { await flowAlertFlags.clearRobePostError(nome); } catch {}
 
   // Contrato atual (enterprise):
   // - "postedBy" só é commitado quando há publicação confirmada (published=true).
@@ -5226,6 +5230,22 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
     const isMarketplaceRateLimit = errMsg.includes(MARKETPLACE_RATE_LIMIT_ERR) || /1675004/.test(errMsg);
     const issueType = isNoPhoto ? 'robe_no_photo' : 'robe_error';
+    if (flowAlertFlags.shouldMarkRobePostError({
+      started: postFlowStarted,
+      published: false,
+      limitPosting: limitPostingHit === true || !!(e && e.LIMIT_POSTING === true),
+      loginRequired: !!(e && e.ROBE_LOGIN_REQUIRED === true),
+      marketplaceDisabled: !!(e && e.ROBE_MARKETPLACE_DISABLED === true),
+      rateLimit: isMarketplaceRateLimit,
+      noPhoto: isNoPhoto
+    })) {
+      try {
+        await flowAlertFlags.setRobePostError(nome, {
+          reason: String(errMsg || 'robe_post_error').slice(0, 140),
+          text: `Postagem nao concluiu: ${String(errMsg || 'robe_post_error').slice(0, 320)}`
+        });
+      } catch {}
+    }
 
     // Registra issue (silencioso)
     try { await logIssue(nome, issueType, errMsg); } catch {}

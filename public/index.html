@@ -3412,6 +3412,16 @@
           pill.title = p.marketplaceDocErrorText || 'ID de documento do Marketplace nao concluiu';
           titleRow.append(pill);
         }
+        if (p.robePostError === true) {
+          const pill = buildPill('Robe erro', 'bad');
+          pill.title = p.robePostErrorText || 'Postagem do Robe nao concluiu';
+          titleRow.append(pill);
+        }
+        if (p.renewError === true) {
+          const pill = buildPill('Renovação erro', 'bad');
+          pill.title = p.renewErrorText || 'Renovacao de classificados nao concluiu';
+          titleRow.append(pill);
+        }
 
         // ------- Renovação Marketplace (só se config ativada) -------
         if (p.marketplaceRenewEnabled === true) {
