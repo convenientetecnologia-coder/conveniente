@@ -2560,52 +2560,20 @@ async function execStockProvision(cmd) {
     return { ok: false, freeMB: last, waitedMs: Date.now() - t0 };
   }
   async function hardRecoverRam({ out, minMB }) {
-    const hard = { ok: true, attempts: 0, deactivated: 0, names: [] };
-    while (hard.deactivated < maxHardDeactivations && budgetLeftMs() > 5000) {
-      const free0 = await getFreeMB().catch(()=>0);
-      if (free0 >= minMB) break;
-      hard.attempts++;
-      out.steps.push({ step: 'hard_ram_recover_check', at: Date.now(), freeMB: free0, minFreeMB: minMB });
-      try {
-        provisionAudit.append({ event: 'hard_ram_recover_check', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, attempt: hard.attempts, freeMB: free0, minFreeMB: minMB });
-      } catch {}
-      let st = null;
-      try { st = await httpJson('/api/status'); } catch {}
-      const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
-      const actives = perfis
-        .filter(p => p && p.nome && p.active === true && p.humanControl !== true && p.configurando !== true)
-        .map(p => ({ nome: String(p.nome), ramMB: (typeof p.ramMB === 'number' ? p.ramMB : 0), trabalhando: !!p.trabalhando }))
-        // preferir liberar o que está "menos crítico" primeiro: não trabalhando, depois maior RAM
-        .sort((a, b) => {
-          if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
-          return (Number(b.ramMB || 0) || 0) - (Number(a.ramMB || 0) || 0);
-        });
-      const pick = actives[0];
-      if (!pick || !pick.nome) break;
-      const nome = pick.nome;
-      out.steps.push({ step: 'hard_ram_recover_deactivate', at: Date.now(), nome });
-      try {
-        provisionAudit.append({ event: 'hard_ram_recover_deactivate', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, nome, freeMB_before: free0 });
-      } catch {}
-      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
-        method: 'POST',
-        headers: { 'x-operator': lockOwner },
-        body: { policy: 'preserveDesired', reason: 'ramKill' }
-      });
-      if (!r || r.ok === false) {
-        out.steps.push({ step: 'hard_ram_recover_deactivate_fail', at: Date.now(), nome, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
-        try {
-          provisionAudit.append({ event: 'hard_ram_recover_deactivate_fail', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, nome, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
-        } catch {}
-        break;
-      }
-      hard.deactivated++;
-      hard.names.push(nome);
-      // aguarda o SO liberar RAM
-      await sleep(2000 + jitter(800));
-    }
+    // Não fecha navegador de quem está trabalhando para abrir vaga de RAM.
+    // Sem RAM livre o cadastro espera um pouco e, se continuar curto, recusa.
+    const free0 = await getFreeMB().catch(() => 0);
+    const hard = { ok: true, attempts: 0, deactivated: 0, names: [], skipped: 'no_close_working', freeMB: free0, minFreeMB: minMB };
+    out.steps.push({ step: 'hard_ram_recover_skipped', at: Date.now(), freeMB: free0, minFreeMB: minMB });
     try {
-      provisionAudit.append({ event: 'hard_ram_recover_done', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, deactivated: hard.deactivated, names: hard.names.slice(0, 200) });
+      provisionAudit.append({
+        event: 'hard_ram_recover_skipped',
+        cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+        batchId,
+        freeMB: free0,
+        minFreeMB: minMB,
+        reason: 'fleet_stays_working'
+      });
     } catch {}
     return hard;
   }

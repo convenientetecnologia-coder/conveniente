@@ -12950,60 +12950,25 @@ const handlers = {
       };
 
       try {
-        // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
-        // Importante: se pausarmos Virtus de outros perfis, precisamos retomar ao final.
-        {
-          const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
-          const waitBusyMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_BUSY_MS || 120000) || 120000);
-          const waitPauseMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_PAUSE_MS || 45000) || 45000);
-          try { provisionAudit.append({ ts: Date.now(), event: 'configure_quiesce_begin', nome: String(nome||''), operator: op || null, require, waitBusyMs, waitPauseMs }); } catch {}
-          const q = await waitGlobalQuiesce({ opKind: 'configure', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
-          for (const it of (q && q.paused) ? q.paused : []) pausedGlobal.push(it);
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'configure_quiesce_done',
-              nome: String(nome || ''),
-              operator: op || null,
-              pausedCount: pausedGlobal.length,
-              pausedNames: pausedGlobal.map(x => x && x.nome).filter(Boolean).slice(0, 60)
-            });
-          } catch {}
-        }
-
-        // Headroom (enterprise): se necessário, fecha o mínimo possível (preserveDesired) e o nurse reabre depois.
+        // Cadastro/configure não pausa a frota e não fecha navegador de quem está trabalhando.
+        // Tem RAM e vaga: configura esta conta. Sem RAM: recusa, sem matar as outras.
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'configure_quiesce_skipped',
+            nome: String(nome || ''),
+            operator: op || null,
+            reason: 'fleet_stays_working'
+          });
+        } catch {}
         try {
           const snapPolicy = ramPolicy.snapshotPolicy();
           const minFreeMB = snapPolicy.reserveProvisionMB;
-          const maxHardDeactivations = Math.max(0, Number(process.env.CONFIGURE_MAX_HARD_DEACTIVATIONS || 2) || 2);
-          let free = getAvailableMB();
+          const free = getAvailableMB();
+          try { provisionAudit.append({ ts: Date.now(), event: 'configure_headroom_check', nome, operator: op, freeMB: free, minFreeMB, closeOthers: false }); } catch {}
           if (free < minFreeMB) {
-            try { provisionAudit.append({ ts: Date.now(), event: 'configure_headroom_check', nome, operator: op, freeMB: free, minFreeMB }); } catch {}
-          }
-          while (free < minFreeMB && closedForRam.length < maxHardDeactivations) {
-            const candidates = [];
-            controllers.forEach((c, n) => {
-              if (!n || String(n) === String(nome)) return;
-              if (!c || !c.browser) return;
-              if (c.humanControl === true || c.configurando === true) return;
-              if (c.browser._sendLock && c.browser._sendLock.active) return;
-              if (robeMeta[n] && robeMeta[n].emExecucao === true) return;
-              const ramMB = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : (typeof c.ramMB === 'number' ? c.ramMB : 0);
-              candidates.push({ nome: String(n), trabalhando: !!c.trabalhando, ramMB: Number(ramMB || 0) || 0 });
-            });
-            candidates.sort((a, b) => {
-              if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
-              return (Number(b.ramMB) || 0) - (Number(a.ramMB) || 0);
-            });
-            const pick = candidates[0];
-            if (!pick || !pick.nome) break;
-            try {
-              await handlers.deactivate({ nome: pick.nome, reason: 'ramKill', policy: 'preserveDesired' });
-              closedForRam.push(pick.nome);
-              try { provisionAudit.append({ ts: Date.now(), event: 'configure_headroom_closed', nome: String(nome||''), operator: op || null, closedNome: pick.nome, closedSoFar: closedForRam.length }); } catch {}
-            } catch {}
-            await sleep(1600);
-            free = getAvailableMB();
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_ram_low_no_close', nome, operator: op, freeMB: free, minFreeMB }); } catch {}
+            return { ok: false, error: 'ram_low' };
           }
         } catch {}
 
@@ -13971,77 +13936,17 @@ const handlers = {
       prevConfigurando = !!ctrl.configurando;
       ctrl.configurando = true;
 
-      // 2) Ultra enterprise: quiescência determinística antes de injetar cookies
-      // - espera envios/postagens ativos terminarem (busy)
-      // - pausa Virtus de todos os perfis "pausáveis"
-      // Se não conseguir quiescer dentro do timeout: aborta (sem falso positivo).
-      pausedVirtus = []; // [{ nome, wasWorking }]
-      try {
-        const require = true;
-        const waitPauseMs = Math.max(0, Number(opts.waitPauseMs || 45_000) || 45_000);
-        const q = await waitGlobalQuiesce({ opKind: 'login_remediate', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
-        for (const it of (q && q.paused) ? q.paused : []) pausedVirtus.push(it);
-        pushStep({ step: 'virtus_paused', count: pausedVirtus.length, names: pausedVirtus.map(x => x.nome).slice(0, 30) });
-      } catch (e) {
-        const msg = (e && e.message) ? String(e.message) : String(e);
-        pushStep({ step: 'quiesce_failed', error: msg });
-        try { provisionLock.release({ owner: op }); } catch {}
-        // RUNTIME: durante a espera UI virou AYMH → humano only.
-        // CADASTRO: não aborta AYMH aqui; segue fail do quiesce (sem misturar política).
-        if (!isStockProvisionOp) {
-          try {
-            const pagesQ = await ctrl.browser.pages().catch(() => []);
-            for (const pgQ of (pagesQ || []).slice(0, 8)) {
-              const lrQ = await browserHelper.detectLoginRequired(pgQ).catch(() => null);
-              const rq = String((lrQ && lrQ.reason) || '').toLowerCase();
-              if (lrQ && lrQ.loginRequired && (rq.includes('aymh_continue') || rq === 'aymh')) {
-                pushStep({ step: 'aymh_continue_abort_after_quiesce_fail', reason: rq.slice(0, 80) });
-                try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrQ.domain || 'login_remediate' }); } catch {}
-                try { await clearIdentityFlags(nome); } catch {}
-                try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
-                try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:quiesce_failed' }); } catch {}
-                try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_after_quiesce_fail'); } catch {}
-                return { ok: false, error: 'aymh_continue', steps, pausedVirtus };
-              }
-            }
-          } catch {}
-        }
-        // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
-        await failFastToHuman(msg);
-        return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
-      }
-
-      // 3) garantir headroom (fechar o mínimo necessário)
+      // Login/cookie não pausa a frota e não fecha navegador de quem está trabalhando.
+      pausedVirtus = [];
+      pushStep({ step: 'virtus_paused', count: 0, skipped: 'fleet_stays_working' });
       const closedForRam = [];
       try {
         let free = getAvailableMB();
-        pushStep({ step: 'headroom_check', freeMB: free, minFreeMB });
-        while (free < minFreeMB && closedForRam.length < maxHardDeactivations) {
-          // pick: não-human, não-config, não-robe ativo; preferir não trabalhando, maior RAM
-          const candidates = [];
-          controllers.forEach((c, n) => {
-            if (!n || String(n) === String(nome)) return;
-            if (!c || !c.browser) return;
-            if (c.humanControl === true || c.configurando === true) return;
-            if (c.browser._sendLock && c.browser._sendLock.active) return;
-            if (robeMeta[n] && robeMeta[n].emExecucao === true) return;
-            const ramMB = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : (typeof c.ramMB === 'number' ? c.ramMB : 0);
-            candidates.push({ nome: String(n), trabalhando: !!c.trabalhando, ramMB: Number(ramMB || 0) || 0 });
-          });
-          candidates.sort((a, b) => {
-            if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
-            return (Number(b.ramMB) || 0) - (Number(a.ramMB) || 0);
-          });
-          const pick = candidates[0];
-          if (!pick || !pick.nome) break;
-          pushStep({ step: 'deactivate_for_ram', pick: pick.nome, freeMB_before: free });
-          try {
-            await handlers.deactivate({ nome: pick.nome, reason: 'ramKill', policy: 'preserveDesired' });
-            closedForRam.push(pick.nome);
-          } catch {}
-          await new Promise(r => setTimeout(r, 1800));
-          free = getAvailableMB();
-          pushStep({ step: 'headroom_after_deactivate', freeMB: free, minFreeMB });
+        pushStep({ step: 'headroom_check', freeMB: free, minFreeMB, closeOthers: false });
+        if (free < minFreeMB) {
+          pushStep({ step: 'ram_low_no_close', freeMB: free, minFreeMB });
+          try { provisionLock.release({ owner: op }); } catch {}
+          return { ok: false, error: 'ram_low', steps, closedForRam, pausedVirtus };
         }
       } catch {
         pushStep({ step: 'headroom_recover_failed' });
@@ -18624,6 +18529,7 @@ async function autoLoginRemediateTick() {
     const errLow = String(st.lastError || '').toLowerCase();
     const slotBusy = (
       errLow === 'governor_busy' ||
+      errLow === 'ram_low' ||
       errLow.startsWith('provision_lock_busy') ||
       errLow.startsWith('governor_exception')
     );
