@@ -30,6 +30,8 @@
  *    pixel nao pode capar o zoom do operador no fit/vidro.
  * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
  *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
+ *    Sem translateZ, sem backface-visibility e sem overflow no html:
+ *    isso apagava checkpoint, captcha e documento no Chrome.
  * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
  *    Sem vidro, o overlay cai no inner/outer (ja e o fallback).
  *
@@ -467,9 +469,9 @@ function paintScript(st) {
     if (!html) return;
     var none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
     html.style.transformOrigin = '0 0';
-    html.style.backfaceVisibility = none ? '' : 'hidden';
-    html.style.overflow = none ? '' : 'hidden';
-    html.style.transform = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+    html.style.backfaceVisibility = '';
+    html.style.overflow = '';
+    html.style.transform = none ? 'none' : ('translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
     window.__ctGlassViewerState = {
       zoom: z, panX: px, panY: py,
       offsetX: ox, offsetY: oy,
@@ -544,11 +546,11 @@ function pageInstallRuntime() {
         const ox = Number(st.offsetX) || 0;
         const oy = Number(st.offsetY) || 0;
         const none = (z === 1 && px === 0 && py === 0 && ox === 0 && oy === 0);
-        const want = none ? 'none' : ('translateZ(0) translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
+        const want = none ? 'none' : ('translate(' + ox + 'px,' + oy + 'px) scale(' + z + ') translate(' + (-px) + 'px,' + (-py) + 'px)');
         if (html.style.transform !== want) {
           html.style.transformOrigin = '0 0';
-          html.style.backfaceVisibility = none ? '' : 'hidden';
-          html.style.overflow = none ? '' : 'hidden';
+          html.style.backfaceVisibility = '';
+          html.style.overflow = '';
           html.style.transform = want;
         }
       } catch (e) {}
