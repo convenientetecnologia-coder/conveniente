@@ -2306,7 +2306,12 @@ function shouldSkipHumanInvokeNavigation(reason) {
     r.startsWith('two_factor') ||
     r.startsWith('marketplace_disabled') ||
     r.startsWith('id_virtus') ||
-    r.startsWith('aymh_continue')
+    r.startsWith('aymh_continue') ||
+    // Login/UI bloqueada: o humano precisa ver a tela real. invocarHumano
+    // mandaria a aba 0 (messages) para /marketplace/you/selling.
+    r.includes('ui_blocked') ||
+    r.includes('login_required') ||
+    r.includes('login_form')
   );
 }
 
@@ -14090,7 +14095,7 @@ const handlers = {
         };
 
         // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
-        const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
+        const pMsg = pick((u) => /facebook\.com\/messages/i.test(u)) || pick((u) => /messenger\.com/i.test(u));
         const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)); // Robe create (FB)
         const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
         const pLang = pick((u) => /facebook\.com\/settings\/language/i.test(u)); // sanity
@@ -14101,8 +14106,13 @@ const handlers = {
           // Blindagem: garanta que estamos checando o domínio correto
           try {
             const u0 = safeUrl(page);
-            if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await __gotoMarketplaceTracked(page, { nome, source: 'login_remediate.pre_check_msg_domain_fix', timeoutMs: 45000, swallow: true });
+            if (label === 'msg' && !/facebook\.com\/messages/i.test(u0)) {
+              const isDeltaMsg = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
+              if (isDeltaMsg) {
+                await page.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              } else if (!/messenger\.com/i.test(u0)) {
+                await __gotoMarketplaceTracked(page, { nome, source: 'login_remediate.pre_check_msg_domain_fix', timeoutMs: 45000, swallow: true });
+              }
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -14488,38 +14498,36 @@ const handlers = {
               reason: 'new_account',
               error: (rrPause && rrPause.error) || null
             });
-            // CADASTRO: só aba messages (Virtus). create/item o Robe abre depois.
-            try {
-              const pagesOk = await ctrl.browser.pages().catch(() => []);
-              const uOf = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
-              let keepMsg = null;
-              for (const pg of (pagesOk || [])) { if (/messenger\.com/i.test(uOf(pg))) { keepMsg = pg; break; } }
-              if (!keepMsg) {
-                for (const pg of (pagesOk || [])) { if (/facebook\.com\/messages/i.test(uOf(pg))) { keepMsg = pg; break; } }
-              }
-              if (!keepMsg && pagesOk && pagesOk[0]) keepMsg = pagesOk[0];
-              let closedN = 0;
-              for (const pg of (pagesOk || [])) {
-                if (!pg || pg === keepMsg) continue;
-                try {
-                  await Promise.race([pg.close({ runBeforeUnload: false }).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]);
-                  closedN++;
-                } catch {}
-              }
-              if (keepMsg) {
-                try { ctrl.mainPage = keepMsg; } catch {}
-                const ku = uOf(keepMsg);
-                if (!/messenger\.com/i.test(ku) && !/facebook\.com\/messages/i.test(ku)) {
-                  try { await keepMsg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
-                }
-              }
-              pushStep({ step: 'stock_keep_messages_tab_only', closedExtras: closedN });
-            } catch (eTab) {
-              pushStep({ step: 'stock_keep_messages_tab_only_fail', error: (eTab && eTab.message) || String(eTab) });
-            }
           }
         } catch (e) {
           pushStep({ step: 'new_account_robe_pause_apply_fail', error: (e && e.message) || String(e) });
+        }
+        // Cadastro e relogin: depois de validar, fica só a aba 0 em facebook.com/messages.
+        // create/item o Robe abre quando for postar. Messenger.com não é aba de trabalho.
+        try {
+          const pagesOk = await ctrl.browser.pages().catch(() => []);
+          const uOf = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+          let keepMsg = null;
+          for (const pg of (pagesOk || [])) { if (/facebook\.com\/messages/i.test(uOf(pg))) { keepMsg = pg; break; } }
+          if (!keepMsg && pagesOk && pagesOk[0]) keepMsg = pagesOk[0];
+          let closedN = 0;
+          for (const pg of (pagesOk || [])) {
+            if (!pg || pg === keepMsg) continue;
+            try {
+              await Promise.race([pg.close({ runBeforeUnload: false }).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]);
+              closedN++;
+            } catch {}
+          }
+          if (keepMsg) {
+            try { ctrl.mainPage = keepMsg; } catch {}
+            const ku = uOf(keepMsg);
+            if (!/facebook\.com\/messages/i.test(ku)) {
+              try { await keepMsg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {}); } catch {}
+            }
+          }
+          pushStep({ step: 'keep_messages_tab_only', closedExtras: closedN });
+        } catch (eTab) {
+          pushStep({ step: 'keep_messages_tab_only_fail', error: (eTab && eTab.message) || String(eTab) });
         }
         // Atualiza cookies frescos no manifest (pipeline imediato)
         try {
@@ -15629,7 +15637,9 @@ const handlers = {
             // login_form (ou outros loginRequired "automatable"): agenda login_remediate imediatamente.
             // Conta nova/retomada: pause 24h, mas respeita override humano (Robe Play / Liberar Robe).
             try {
-              await applyNewAccountRobePause24h(nome, {
+              // Só conta nova (janela de 24h). Conta antiga não ganha cooldown novo
+              // só porque o operador retomou um login_form.
+              await ensureNewAccountRobePauseIfNeeded(nome, {
                 operator: 'human_resume',
                 via: 'human_resume_login_form_pre_remediate'
               });
@@ -18356,10 +18366,20 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
 
     const last = Number(st.lastStartAt || 0) || 0;
     const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
+    const prevNext = Number(st.nextAt || 0) || 0;
+    // Já está na fila e o horário já venceu: não empurra nextAt para frente.
+    // O detector reentra a cada ~5s; renovar nextAt=now+2.5s deixava a conta
+    // eternamente "quase pronta" e outra conta furava a fila.
+    const dueWaiting = st.queued === true && prevNext > 0 && prevNext <= now && !force && !immediate;
+    if (dueWaiting) {
+      st.reason = String(reason || '').slice(0, 80);
+      st.source = String(source || '').slice(0, 80);
+      return true;
+    }
     const when = Math.max(
       now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
       earliest,
-      force ? 0 : (Number(st.nextAt || 0) || 0)
+      force ? 0 : prevNext
     );
     st.queued = true;
     st.nextAt = when;

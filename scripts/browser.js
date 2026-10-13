@@ -4992,11 +4992,32 @@ async function _tryDismissFbConsent(page) {
 async function _detectGenericBlockingDialog(page) {
   try {
     const v = await page.evaluate(() => {
-      const dlg = document.querySelector('div[role="dialog"]');
-      if (!dlg) return { present: false };
-      const txt = (dlg.innerText || dlg.textContent || '').slice(0, 1800);
-      const aria = (dlg.getAttribute && (dlg.getAttribute('aria-label') || '')) || '';
-      return { present: true, dialogText: txt, ariaLabel: aria };
+      const norm = (s) => {
+        try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        catch { return String(s || '').toLowerCase(); }
+      };
+      // Bandeja de notificações do Facebook (e o aviso de push dentro dela) usa
+      // role=dialog, mas não trava Messenger nem create/item. Tratar como bloqueio
+      // gera falso ui_blocked:dialog com a sessão já logada.
+      const isNotificationsTray = (aria, txt) => {
+        const blob = norm(`${aria || ''} ${txt || ''}`);
+        if (!blob.includes('notific')) return false;
+        return (
+          blob.includes('nao lidas') ||
+          blob.includes('ver tudo') ||
+          blob.includes('push') ||
+          blob.includes('unread') ||
+          blob.includes('see all')
+        );
+      };
+      const dlgs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+      for (const dlg of dlgs) {
+        const txt = (dlg.innerText || dlg.textContent || '').slice(0, 1800);
+        const aria = (dlg.getAttribute && (dlg.getAttribute('aria-label') || '')) || '';
+        if (isNotificationsTray(aria, txt)) continue;
+        return { present: true, dialogText: txt, ariaLabel: aria };
+      }
+      return { present: false };
     });
     if (!v || !v.present) return { present: false };
     return { present: true, kind: 'dialog', dialogText: v.dialogText || '', ariaLabel: v.ariaLabel || '' };
@@ -6232,7 +6253,15 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('two-factor') ||
         bodyTxt.includes('approvals needed') ||
         bodyTxt.includes('codigo de autenticacao') ||
-        bodyTxt.includes('codigo de login');
+        bodyTxt.includes('codigo de login') ||
+        // SMS/WhatsApp: "Insira o código de confirmação" + "Não recebi o código".
+        // Não é login_form. Cookie por cima abandona o código e entra na sessão velha.
+        h1.some(t => t.includes('insira o codigo de confirmacao') || t.includes('enter the confirmation code') || t.includes('enter the code')) ||
+        bodyTxt.includes('insira o codigo de confirmacao') ||
+        bodyTxt.includes('enter the confirmation code') ||
+        bodyTxt.includes('nao recebi o codigo') ||
+        bodyTxt.includes('didnt get a code') ||
+        bodyTxt.includes("didn't get a code");
 
       // 5) Recurso/Apelação submetida (“você apresentou um recurso…”)
       // Estado: conta não utilizável, mas não é “login_form” — precisa de monitoramento.
@@ -8003,9 +8032,8 @@ async function collectFreshCookies(browser) {
     const pages = await browser.pages();
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
-    // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    await sleep(1200);
+    // Não navegar. O jar já está no browser. Ir para messenger.com/marketplace
+    // jogava a aba 0 no login legado (next=messenger.com/marketplace).
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
     const all = utils.normalizeCookies([...(cookiesMsg||[]), ...(cookiesFb||[])]);
