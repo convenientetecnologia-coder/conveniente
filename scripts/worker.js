@@ -18333,6 +18333,10 @@ const AUTO_LR_CFG = {
 
 let _autoLoginRemediateRunning = false;
 let _autoLoginRemediateRunningNome = null;
+// Depois de soltar a vaga, espera um pouco antes da próxima conta.
+// O tick seguinte pegava o lock no mesmo instante e o cadastro (que espera esse lock)
+// ficava 10–20 min sem entrar.
+let _autoLoginSlotYieldUntil = 0;
 
 function _pruneWindow(arr, winMs) {
   const now = Date.now();
@@ -18409,6 +18413,7 @@ async function autoLoginRemediateTick() {
   if (!__deltaIsHostBootReady()) return;
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
+  if (Date.now() < _autoLoginSlotYieldUntil) return;
   // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
   try {
     if (provisionLock.isActive()) {
@@ -18436,9 +18441,27 @@ async function autoLoginRemediateTick() {
       const reasonNow = String(
         (flags && flags.loginReason) ||
         (st && st.reason) ||
-        'login_required'
+        ''
       ).toLowerCase();
-      const allowRuntimeAuto = reasonNow === 'login_form' || (reasonNow.includes('login_form') && !reasonNow.includes('aymh'));
+      // Fila sem flag = sucesso já limpou o login. Não regrava "login_required" e não chama humano.
+      if (!lrFlag) {
+        try {
+          if (st) st.queued = false;
+        } catch {}
+        continue;
+      }
+      const hardHumanReason = (
+        reasonNow.includes('captcha') ||
+        reasonNow.includes('checkpoint') ||
+        reasonNow.includes('identity') ||
+        reasonNow.includes('two_factor') ||
+        reasonNow.includes('2fa') ||
+        reasonNow.includes('aymh') ||
+        reasonNow.includes('banned')
+      );
+      // login_form e o resíduo genérico login_required seguem no cookie/senha.
+      // Humano só no problema real (captcha, checkpoint, identidade, 2FA, AYMH, ban).
+      const allowRuntimeAuto = !hardHumanReason;
       if (allowRuntimeAuto) {
         hasRuntimeAutoEligible = true;
         continue;
@@ -18451,14 +18474,6 @@ async function autoLoginRemediateTick() {
       if (ctrl.humanControl === true) continue;
       const want = desired && desired.perfis ? desired.perfis[nome] : null;
       if (want && want.humanHold === true) continue;
-      if (!lrFlag) {
-        try {
-          await setLoginRequiredFlag(nome, {
-            reason: String((flags && flags.loginReason) || 'login_required'),
-            source: 'auto_lr_runtime_human_only'
-          });
-        } catch {}
-      }
       try {
         if (ctrl.browser && ctrl.browser.isConnected?.()) {
           await enterHumanMode(nome, ctrl, { reason: 'login_required:runtime_human_only' });
@@ -18571,6 +18586,7 @@ async function autoLoginRemediateTick() {
   _autoLoginRemediateRunningNome = nome;
   st.queued = false;
   st.inFlight = true;
+  const prevLastStartAt = Number(st.lastStartAt || 0) || 0;
   st.lastStartAt = Date.now();
   st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
   st.attempts24h.push(st.lastStartAt);
@@ -18605,18 +18621,43 @@ async function autoLoginRemediateTick() {
     st.lastError = resp && resp.error ? String(resp.error).slice(0, 160) : null;
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
 
-    if (!st.lastOk) {
+    const errLow = String(st.lastError || '').toLowerCase();
+    const slotBusy = (
+      errLow === 'governor_busy' ||
+      errLow.startsWith('provision_lock_busy') ||
+      errLow.startsWith('governor_exception')
+    );
+    if (slotBusy) {
+      // Vaga ocupada não é falha de cookie. Não marca login/cookies falhou,
+      // não gasta tentativa e não empurra 45 min. Tenta de novo já já.
+      st.attempts24h = (st.attempts24h || []).filter((ts) => ts !== st.lastStartAt);
+      st.lastStartAt = prevLastStartAt;
+      st.queued = true;
+      st.nextAt = Date.now() + 1500;
+      st.lastOk = false;
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'auto_login_remediate_slot_busy_retry',
+          nome,
+          error: st.lastError
+        });
+      } catch {}
+    } else if (!st.lastOk) {
       // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
       try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
       // Backoff em falha: evita loop no mesmo perfil.
       st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
       try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
     } else {
-      // Sucesso: limpa fila.
+      // Sucesso: limpa fila. O detector pode ter reenfileirado no meio do cookie;
+      // se sobrar queued=true com reason vazio, o tick seguinte lia "login_required"
+      // e invocava humano em cima de uma conta que já tinha logado.
+      st.queued = false;
       st.nextAt = 0;
       st.reason = null;
       st.source = null;
-      try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
+      try { await clearAccountFlags(nome, ['loginRequired', 'loginRemediateFailed']); } catch {}
     }
   } catch (e) {
     st.lastDoneAt = Date.now();
@@ -18632,6 +18673,7 @@ async function autoLoginRemediateTick() {
     } catch {}
     _autoLoginRemediateRunning = false;
     _autoLoginRemediateRunningNome = null;
+    _autoLoginSlotYieldUntil = Date.now() + 3000;
   }
 }
 
