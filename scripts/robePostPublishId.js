@@ -2185,6 +2185,8 @@ async function tryOpenActionNeededAtTop(
 }
 
 async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt, skipAdvance = false } = {}) {
+  let phoneVerified = false;
+  try {
   logEvt(nome, source, 'marketplace_phone_flow_start', { skipAdvance: !!skipAdvance });
 
   let screenNow = await detectIdWizardScreen(page);
@@ -2207,8 +2209,10 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     deadlineAt
   });
   if (screen === 'marketplace_phone_success') {
+    phoneVerified = true;
     await clearMarketplacePhoneFlags(nome);
-    const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+    let backOk = false;
+    try { backOk = await clickMarketplaceReturnToListing(page, { deadlineAt }); } catch { backOk = false; }
     logEvt(nome, source, 'marketplace_phone_success_direct', { ok: true, returnClicked: !!backOk });
     return { ok: true, marketplacePhoneVerified: true, returnClicked: !!backOk };
   }
@@ -2352,8 +2356,10 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
       phoneTail: phoneMasked
     });
     if (screen === 'marketplace_phone_success') {
+      phoneVerified = true;
       await clearMarketplacePhoneFlags(nome);
-      const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+      let backOk = false;
+      try { backOk = await clickMarketplaceReturnToListing(page, { deadlineAt }); } catch { backOk = false; }
       logEvt(nome, source, 'marketplace_phone_success_fast', { ok: true, returnClicked: !!backOk, orderTail: orderIdMasked, phoneTail: phoneMasked });
       return { ok: true, marketplacePhoneVerified: true, returnClicked: !!backOk };
     }
@@ -2474,8 +2480,10 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
       return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_success_missing' };
     }
 
+    phoneVerified = true;
     await clearMarketplacePhoneFlags(nome);
-    const backOk = await clickMarketplaceReturnToListing(page, { deadlineAt });
+    let backOk = false;
+    try { backOk = await clickMarketplaceReturnToListing(page, { deadlineAt }); } catch { backOk = false; }
     logEvt(nome, source, 'marketplace_phone_verified', {
       ok: true,
       returnClicked: !!backOk,
@@ -2490,6 +2498,19 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
     text: 'Textverified retornou 10 numeros rejeitados como usados recentemente.'
   });
   return { ok: false, marketplacePhoneError: true, error: 'marketplace_phone_used_recently_10x' };
+  } catch (e) {
+    if (phoneVerified) {
+      return { ok: true, marketplacePhoneVerified: true, returnClicked: false };
+    }
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try {
+      await setMarketplacePhoneFlag(nome, 'error', {
+        reason: 'marketplace_phone_exception',
+        text: `Confirmacao de celular nao concluiu: ${msg.slice(0, 220)}`
+      });
+    } catch {}
+    return { ok: false, marketplacePhoneError: true, error: msg.slice(0, 180) };
+  }
 }
 
 async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
