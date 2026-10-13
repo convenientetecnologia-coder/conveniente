@@ -5,6 +5,7 @@ const os = require('os');
 const { newPageDaConta, resolvePatchCoordsForProfile/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectMarketplaceDisabled, detectLoginRequired } = require('./browser.js');
 const provisionAudit = require('./provisionAudit.js');
+const flowAlertFlags = require('./flowAlertFlags.js');
 
 function makeRobeMarketplaceDisabledError(det = {}) {
   const reason = String((det && det.reason) || 'cannot_buy_or_sell');
@@ -2257,6 +2258,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let marketplaceDisabledAbort = false;
   let page = null;
   let published = false;
+  let postFlowStarted = false;
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
@@ -2332,6 +2334,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = resolvePatchCoordsForProfile(nome, manifest || {});
+    postFlowStarted = true;
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe (veículos)`);
 
@@ -2642,6 +2645,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
+    try { await flowAlertFlags.clearRobePostError(nome); } catch {}
 
     // Confirmar localização usada (após publicar — mantém)
     try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
@@ -2738,6 +2742,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // LOG: evento de sucesso (uma mensagem por account/turno já é suficiente)
     try { await logIssue(nome, 'robe_success', 'Publicação de veículo concluída com sucesso.'); } catch {}
+    try { await flowAlertFlags.clearRobePostError(nome); } catch {}
 
   // ATENÇÃO: MARCAR FOTO COMO USADA (SEM REUSAR JAMAIS NA MESMA CONTA), MESMO SE ERRO/TIMEOUT/BUG.
   // GARANTE FAIL-CLOSED: NUNCA DUPLICA PARA A MESMA CONTA!
@@ -2780,6 +2785,24 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Tipo de issue (no-photo vs erro geral)
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
     const issueType = isNoPhoto ? 'robe_no_photo' : 'robe_error';
+    if (published === true) {
+      try { await flowAlertFlags.clearRobePostError(nome); } catch {}
+    } else if (flowAlertFlags.shouldMarkRobePostError({
+      started: postFlowStarted,
+      published: false,
+      limitPosting: limitPostingHit === true || !!(e && e.LIMIT_POSTING === true),
+      loginRequired: !!(e && e.ROBE_LOGIN_REQUIRED === true),
+      marketplaceDisabled: !!(e && e.ROBE_MARKETPLACE_DISABLED === true),
+      rateLimit: /1675004|marketplace_rate_limit/i.test(errMsg),
+      noPhoto: isNoPhoto
+    })) {
+      try {
+        await flowAlertFlags.setRobePostError(nome, {
+          reason: String(errMsg || 'robe_post_error').slice(0, 140),
+          text: `Postagem nao concluiu: ${String(errMsg || 'robe_post_error').slice(0, 320)}`
+        });
+      } catch {}
+    }
 
     // Registra issue (silencioso)
     try { await logIssue(nome, issueType, errMsg); } catch {}

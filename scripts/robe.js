@@ -5102,6 +5102,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
+    try { await flowAlertFlags.clearRobePostError(nome); } catch {}
 
     // Confirmar localização usada (após publicar — mantém)
     try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
@@ -5230,7 +5231,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
     const isMarketplaceRateLimit = errMsg.includes(MARKETPLACE_RATE_LIMIT_ERR) || /1675004/.test(errMsg);
     const issueType = isNoPhoto ? 'robe_no_photo' : 'robe_error';
-    if (flowAlertFlags.shouldMarkRobePostError({
+    if (published === true) {
+      try { await flowAlertFlags.clearRobePostError(nome); } catch {}
+    } else if (flowAlertFlags.shouldMarkRobePostError({
       started: postFlowStarted,
       published: false,
       limitPosting: limitPostingHit === true || !!(e && e.LIMIT_POSTING === true),
