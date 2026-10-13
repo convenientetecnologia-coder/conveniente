@@ -10,8 +10,10 @@
  *   - applyGlassViewer sem arma humana e no-op (zero CDP).
  *
  * Humano (invocar humano / enterHumanMode):
- *   - enableGlassForHuman arma a page e so ai monta o vidro:
- *     janela maximizada + scale/letterbox + zoom Ctrl+/- + HUD.
+ *   - Nao escala o html e nao troca o viewport da conta por um visor.
+ *   - A janela maximiza e o viewport passa a ser a tela real deste computador.
+ *   - O viewport antidetect fica guardado e volta no Retomar trabalho.
+ *   - Checkpoint, captcha e documento permanecem visiveis, com o painel dentro da tela.
  *
  * Retomar trabalho:
  *   - disableGlassForWork desarma PRIMEIRO, tira o hook, apaga paint/HUD,
@@ -905,7 +907,7 @@ function attachNavHookIfArmed(page) {
       try { clearTimeout(page._ctGlassNavTimer); } catch {}
       page._ctGlassNavTimer = setTimeout(() => {
         if (!isGlassArmed(page)) return;
-        applyGlassViewer(page, { source: 'framenavigated' }).catch(() => {});
+        fitHumanViewportToScreen(page).catch(() => {});
       }, 220);
     } catch {}
   };
@@ -1097,17 +1099,46 @@ async function relockViewportIdentity(page, identity) {
   }
 }
 
+async function fitHumanViewportToScreen(page) {
+  if (!page || pageClosed(page)) return null;
+  snapshotIdentityViewport(page);
+  await clearGlassPaint(page);
+  await clearDeviceMetricsOverride(page);
+  const bounds = await maximizeWindow(page);
+  const bw = Math.floor(num(bounds && bounds.width, 0));
+  const bh = Math.floor(num(bounds && bounds.height, 0));
+  const width = bw >= 800 ? Math.max(800, bw - WIN_MAX_CHROME_DIP) : 0;
+  const height = bh >= 600 ? Math.max(600, bh - WIN_MAX_CHROME_DIP - CHROME_UI_DIP) : 0;
+  if (width >= 800 && height >= 600) {
+    try {
+      await page.setViewport({
+        width,
+        height,
+        deviceScaleFactor: 1,
+        isMobile: false,
+        hasTouch: false,
+        isLandscape: width >= height
+      });
+    } catch {}
+  }
+  await clearGlassPaint(page);
+  if (isGlassArmed(page)) attachNavHookIfArmed(page);
+  page._ctGlassPainted = false;
+  page._ctGlassSettled = true;
+  return { width, height };
+}
+
 async function enableGlassForHuman(page, opts = {}) {
+  void opts;
   if (!page || pageClosed(page)) return null;
   snapshotIdentityViewport(page);
   armGlass(page);
-  writeState(page, { disabled: false, collapsed: false });
+  writeState(page, {
+    zoom: 1, panX: 0, panY: 0, offsetX: 0, offsetY: 0,
+    userZoom: false, disabled: true, collapsed: false
+  });
   try { await page.bringToFront(); } catch {}
-  const st = await applyGlassViewer(page, { source: String((opts && opts.source) || 'human').slice(0, 80) });
-  if (st && st.disabled !== true && st.collapsed !== true && isGlassArmed(page)) {
-    page._ctGlassPainted = true;
-  }
-  return st;
+  return fitHumanViewportToScreen(page);
 }
 
 async function scrubIdleGlassPaint(page) {
