@@ -9,7 +9,7 @@ const { execFileSync } = require('child_process');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
 const gptFallback = require('./gptFallback.js');
-const { readGroqConfig } = require('./groqConfig.js');
+const antiCaptchaClient = require('./antiCaptchaClient.js');
 const provisionAudit = require('./provisionAudit.js');
 const gatewayProxy = require('./gatewayProxy');
 const serverConfig = require('./serverConfig.js');
@@ -6905,24 +6905,54 @@ async function detectCaptchaChallenge(page) {
     const v = await page.evaluate(() => {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
       const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-      const hasPrompt = bodyTxt.includes('digite o texto da imagem') || bodyTxt.includes('type the text from the image');
-      const img = document.querySelector('img[src*="/captcha/tfbimage/"]');
-      const imgSrc = img && img.getAttribute ? String(img.getAttribute('src') || '') : '';
-      const input = document.querySelector('input[type="text"]');
+      const hasPrompt =
+        bodyTxt.includes('digite o texto da imagem') ||
+        bodyTxt.includes('type the text from the image') ||
+        bodyTxt.includes('confirme que voce é uma pessoa') ||
+        bodyTxt.includes('confirme que voce e uma pessoa') ||
+        bodyTxt.includes('confirm that you are a person');
+      const selectors = [
+        'img[src*="/captcha/tfbimage/"]',
+        'img[alt*="captcha" i]',
+        'img[src*="/captcha/"]',
+        'img#captcha'
+      ];
+      let img = null;
+      let imgSelector = '';
+      for (const sel of selectors) {
+        const found = document.querySelector(sel);
+        if (found) {
+          img = found;
+          imgSelector = sel;
+          break;
+        }
+      }
+      const imgSrc = img && img.getAttribute ? String(img.getAttribute('src') || img.src || '') : '';
+      const imageReady = !!(img && img.complete && (img.naturalWidth || 0) > 0);
+      const inputs = Array.from(document.querySelectorAll('input[type="text"], input[inputmode="text"], input:not([type])')).filter((el) => {
+        const type = String(el.getAttribute('type') || '').toLowerCase();
+        const name = String(el.getAttribute('name') || '').toLowerCase();
+        const auto = String(el.getAttribute('autocomplete') || '').toLowerCase();
+        if (type === 'hidden') return false;
+        if (name === 'email') return false;
+        if (auto.includes('username')) return false;
+        return true;
+      });
+      const input = inputs[0] || null;
       const hasInput = !!input;
       const btns = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
       let continueDisabled = null;
       for (const el of btns) {
         const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
         const txt = norm(el.innerText || el.textContent || '');
-        if (aria === 'continuar' || txt === 'continuar') {
+        if (aria === 'continuar' || txt === 'continuar' || aria === 'continue' || txt === 'continue') {
           const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
           const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
           continueDisabled = (ariaDisabled === 'true') || (tabIndex === '-1');
           break;
         }
       }
-      return { hasPrompt, imgSrc, hasInput, continueDisabled };
+      return { hasPrompt, imgSrc, hasInput, continueDisabled, imageReady, imgSelector };
     });
     return { ok: true, present: !!(v && v.hasPrompt && v.imgSrc && v.hasInput), ...(v || {}) };
   } catch (e) {
@@ -7050,29 +7080,26 @@ async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 1
   }
 }
 
-/**
- * Resolve captcha usando Groq OCR (ultra enterprise melhor do mundo).
- * Extrai a imagem do captcha, envia para Groq API, processa resposta e retorna texto limpo.
- */
-async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 1, previousImgSrc = '' } = {}) {
+async function solveCaptchaWithAntiCaptcha(page, { nome = '', operator = '', attempt = 1, previousImgSrc = '' } = {}) {
   try {
-    // 1. Detectar captcha e extrair URL da imagem
     const cap = await detectCaptchaChallenge(page).catch(()=>({ ok: false, present: false }));
     if (!cap || !cap.ok || !cap.present || !cap.imgSrc) {
       return { ok: false, error: 'captcha_not_detected', details: cap };
     }
 
     const imgSrc = String(cap.imgSrc || '').trim();
-    if (!imgSrc || !imgSrc.includes('/captcha/tfbimage/')) {
+    if (!imgSrc || (!imgSrc.includes('/captcha/tfbimage/') && !imgSrc.includes('/captcha/'))) {
       return { ok: false, error: 'invalid_img_src', imgSrc };
     }
 
-    // Esperar imagem REAL estar carregada (evita OCR em imagem “meio atualizando”).
-    // Se previousImgSrc foi informado, esperar virar para uma imagem diferente.
     const prev = String(previousImgSrc || '').trim();
     const imgReady = await page.waitForFunction((p) => {
       try {
-        const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
+        const img =
+          document.querySelector('img[src*=\"/captcha/tfbimage/\"]') ||
+          document.querySelector('img[alt*=\"captcha\" i]') ||
+          document.querySelector('img[src*=\"/captcha/\"]') ||
+          document.querySelector('img#captcha');
         if (!img) return false;
         const src = String(img.getAttribute('src') || img.src || '');
         const loaded = !!(img.complete && (img.naturalWidth || 0) > 0);
@@ -7083,22 +7110,11 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
     }, { timeout: 12_000 }, prev).then(()=>true).catch(()=>false);
     if (!imgReady) return { ok: false, error: 'captcha_image_not_ready', imgSrc, hasPrev: !!prev };
 
-    // 2. Ler configuração Groq
-    const groqCfg = readGroqConfig();
-    if (!groqCfg || !groqCfg.groqApiKey || !groqCfg.groqModel) {
-      return { ok: false, error: 'groq_config_missing', hasKey: !!groqCfg?.groqApiKey, hasModel: !!groqCfg?.groqModel };
-    }
-
-    // 3. Baixar imagem usando puppeteer (mais confiável que fetch para imagens do Facebook)
     let imageBase64 = null;
     try {
-      // Usa evaluate para baixar a imagem via canvas (evita CORS)
-      // Busca a imagem pelo src completo ou parcial
       imageBase64 = await page.evaluate(async (src) => {
         try {
-          // Tenta encontrar a imagem pelo src completo primeiro
           let img = document.querySelector(`img[src="${src}"]`);
-          // Se não encontrar, tenta pelo src parcial
           if (!img) {
             const srcParts = src.split('/captcha/tfbimage/');
             if (srcParts.length > 1) {
@@ -7106,19 +7122,18 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               img = document.querySelector(`img[src*="${partial}"]`);
             }
           }
-          // Última tentativa: qualquer img com /captcha/tfbimage/
           if (!img) {
-            img = document.querySelector('img[src*="/captcha/tfbimage/"]');
+            img =
+              document.querySelector('img[src*="/captcha/tfbimage/"]') ||
+              document.querySelector('img[alt*="captcha" i]') ||
+              document.querySelector('img[src*="/captcha/"]') ||
+              document.querySelector('img#captcha');
           }
           if (!img) return null;
-          
-          // Cria canvas para converter imagem em base64
           const canvas = document.createElement('canvas');
           const ctx = canvas.getContext('2d');
           canvas.width = img.naturalWidth || img.width || 300;
           canvas.height = img.naturalHeight || img.height || 100;
-          
-          // Aguarda imagem carregar
           await new Promise((resolve, reject) => {
             if (img.complete) {
               resolve();
@@ -7128,15 +7143,13 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               setTimeout(reject, 5000);
             }
           });
-          
           ctx.drawImage(img, 0, 0);
-          return canvas.toDataURL('image/png').split(',')[1]; // Remove data:image/png;base64,
+          return canvas.toDataURL('image/png').split(',')[1];
         } catch (e) {
           return null;
         }
       }, imgSrc).catch(()=>null);
 
-      // Fallback: se canvas falhar, tenta baixar via fetch (com cookies da página)
       if (!imageBase64) {
         const response = await page.evaluate(async (src) => {
           try {
@@ -7166,81 +7179,102 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
       return { ok: false, error: 'image_base64_failed' };
     }
 
-    // 4. Chamar Groq API
-    try {
-      const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${groqCfg.groqApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: groqCfg.groqModel,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  // Regra enterprise: retornar somente os caracteres do captcha (sem espaços).
-                  // Se não conseguir ler com 110% certeza, retornar vazio.
-                  text: 'Read this captcha and return ONLY the captcha characters (letters and/or digits). Output ONLY the characters, no spaces, no punctuation, no quotes, no extra text. If unsure, return empty.'
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:image/png;base64,${imageBase64}`
-                  }
-                }
-              ]
-            }
-          ],
-          max_tokens: 50,
-          temperature: 0
-        })
-      });
-
-      if (!groqResponse.ok) {
-        const errorText = await groqResponse.text().catch(()=>'');
-        return { ok: false, error: 'groq_api_error', status: groqResponse.status, details: errorText.slice(0, 200) };
-      }
-
-      const groqData = await groqResponse.json().catch(()=>null);
-      if (!groqData || !groqData.choices || !Array.isArray(groqData.choices) || !groqData.choices[0]) {
-        return { ok: false, error: 'groq_invalid_response', data: groqData };
-      }
-
-      const rawText = String(groqData.choices[0].message?.content || '');
-      if (!rawText) {
-        return { ok: false, error: 'groq_empty_response' };
-      }
-
-      // 5. Processar resposta: extrair apenas o texto (remove comentários, explicações, etc.)
-      // Groq pode retornar coisas como "The text is: ABC123" ou "ABC123" ou "Text: ABC123"
-      // Precisamos extrair apenas os caracteres do captcha
-      const rawTrim = String(rawText || '').trim();
-      const rawHadWhitespace = /\s/.test(rawTrim);
-      let cleanText = rawTrim
-        .replace(/^(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*/i, '')
-        .replace(/\s*(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*$/i, '')
-        .replace(/^["']|["']$/g, '')
-        .trim();
-
-      // Mantém apenas alfanumérico e remove espaços.
-      const used = String(cleanText || '').replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '').trim();
-
-      // Guardrail: captcha típico é curto; rejeita strings longas/lixo.
-      if (!used || used.length < 4 || used.length > 8) {
-        return { ok: false, error: 'groq_text_bad_length', meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: used.length } };
-      }
-
-      return { ok: true, text: used, meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: used.length, imgSrc: imgSrc.slice(0, 120) } };
-    } catch (e) {
-      return { ok: false, error: 'groq_request_exception', details: (e && e.message) ? String(e.message) : String(e) };
+    const solved = await antiCaptchaClient.solveImageCaptcha(imageBase64, {
+      maxWaitMs: 110_000,
+      pollMs: 3_000
+    }).catch(() => ({ ok: false, error: 'anticaptcha_exception' }));
+    if (!solved || solved.ok !== true || !solved.text) {
+      return {
+        ok: false,
+        error: solved && solved.error ? String(solved.error) : 'anticaptcha_failed',
+        meta: {
+          taskId: solved && solved.taskId ? Number(solved.taskId) : null,
+          cost: solved && solved.cost != null ? Number(solved.cost) : null,
+          textLength: solved && solved.textLength != null ? Number(solved.textLength) : 0,
+          imgSrc: imgSrc.slice(0, 120)
+        }
+      };
     }
+
+    const current = await detectCaptchaChallenge(page).catch(() => ({ ok: false, present: false }));
+    const currentSrc = current && current.imgSrc ? String(current.imgSrc) : '';
+    if (current && current.present && currentSrc && currentSrc !== imgSrc) {
+      return {
+        ok: false,
+        error: 'captcha_img_changed',
+        meta: {
+          taskId: solved.taskId || null,
+          cost: solved.cost != null ? Number(solved.cost) : null,
+          textLength: solved.textLength != null ? Number(solved.textLength) : String(solved.text || '').length,
+          imgSrc: imgSrc.slice(0, 120)
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      text: String(solved.text || ''),
+      meta: {
+        taskId: solved.taskId || null,
+        cost: solved.cost != null ? Number(solved.cost) : null,
+        textLength: solved.textLength != null ? Number(solved.textLength) : String(solved.text || '').length,
+        imgSrc: imgSrc.slice(0, 120)
+      }
+    };
   } catch (e) {
     return { ok: false, error: 'solve_captcha_exception', details: (e && e.message) ? String(e.message) : String(e) };
   }
+}
+
+async function solveCaptchaWithGroq(page, opts = {}) {
+  return solveCaptchaWithAntiCaptcha(page, opts);
+}
+
+async function solveFacebookImageCaptcha(page, { nome = '', operator = '', maxAttempts = 2 } = {}) {
+  let previousImgSrc = '';
+  const tries = Math.max(1, Math.min(2, Number(maxAttempts || 0) || 2));
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    const cap = await detectCaptchaChallenge(page).catch(() => ({ ok: false, present: false }));
+    if (!cap || !cap.present) {
+      return { ok: false, error: 'captcha_not_detected', attempt };
+    }
+    const solved = await solveCaptchaWithAntiCaptcha(page, {
+      nome,
+      operator,
+      attempt,
+      previousImgSrc
+    }).catch(() => ({ ok: false, error: 'anticaptcha_exception' }));
+    if (!solved || solved.ok !== true || !solved.text) {
+      previousImgSrc = (solved && solved.meta && solved.meta.imgSrc) ? String(solved.meta.imgSrc) : previousImgSrc;
+      continue;
+    }
+    const fill = await fillCaptchaAndContinue(page, { text: solved.text, maxWaitMs: 12_000 }).catch(() => ({ ok: false, error: 'fill_failed' }));
+    if (!fill || fill.ok !== true) {
+      previousImgSrc = (solved.meta && solved.meta.imgSrc) ? String(solved.meta.imgSrc) : previousImgSrc;
+      continue;
+    }
+    const currentImgSrc = (solved.meta && solved.meta.imgSrc) ? String(solved.meta.imgSrc) : previousImgSrc;
+    const turnover = await waitForCaptchaTurnover(page, {
+      previousImgSrc: currentImgSrc,
+      timeoutMs: 15_000,
+      minStableMs: 1_500
+    }).catch(() => null);
+    const lr = await detectLoginRequired(page).catch(() => ({ loginRequired: false }));
+    if (!lr || lr.loginRequired !== true) {
+      return {
+        ok: true,
+        attempts: attempt,
+        taskId: solved.meta && solved.meta.taskId ? Number(solved.meta.taskId) : null,
+        cost: solved.meta && solved.meta.cost != null ? Number(solved.meta.cost) : null
+      };
+    }
+    const reason = String((lr && lr.reason) || '').toLowerCase();
+    if (!(reason.includes('captcha_persona') || reason.includes('checkpoint_captcha'))) {
+      return { ok: false, error: `captcha_handoff:${reason || 'login_required'}`, attempt };
+    }
+    previousImgSrc = (turnover && turnover.finalImgSrc) ? String(turnover.finalImgSrc || '') : currentImgSrc;
+  }
+  return { ok: false, error: 'captcha_attempts_exhausted', attempts: tries };
 }
 
 
@@ -7939,12 +7973,29 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true,
   try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   // “anti-atropelo”: alguns popups/redirects vêm 1-3s depois
   try { await sleep(2600); } catch {}
-  // Validação “com olhos” (sem falso positivo): se ainda estiver em login_form, falha
-  try {
+  for (let loginCheck = 1; loginCheck <= 3; loginCheck++) {
     const lr = await detectLoginRequired(page).catch(()=>({ loginRequired:false }));
-    if (lr && lr.loginRequired) return { ok: false, error: `still_login_required:${lr.reason||'login'}` };
-  } catch {}
-  return { ok: true };
+    if (!(lr && lr.loginRequired)) return { ok: true };
+    const reason = String((lr && lr.reason) || 'login').toLowerCase();
+    if (reason.includes('captcha_persona_pre_screen')) {
+      return { ok: false, error: 'still_login_required:captcha_persona_pre_screen' };
+    }
+    if (reason.includes('captcha_persona') || reason.includes('checkpoint_captcha')) {
+      const solved = await solveFacebookImageCaptcha(page, {
+        nome,
+        operator: `login_email_pass:${String(nome || '').slice(0, 80)}`,
+        maxAttempts: 2
+      }).catch(() => ({ ok: false, error: 'captcha_solver_exception' }));
+      if (!(solved && solved.ok)) {
+        return { ok: false, error: solved && solved.error ? String(solved.error) : `still_login_required:${reason}` };
+      }
+      try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+      try { await sleep(2600); } catch {}
+      continue;
+    }
+    return { ok: false, error: `still_login_required:${lr.reason||'login'}` };
+  }
+  return { ok: false, error: 'captcha_loop_exhausted' };
 }
 
 async function collectFreshCookies(browser) {
@@ -8270,13 +8321,15 @@ module.exports = {
   detectLoginRequired,
   detectVirtusIdentityBlock,
   tryClickAymhContinuar,
-  // ==== CAPTCHA/CONFIRME-HUMANO (SEM OCR IMPLEMENTADO):
+  // ==== CAPTCHA/CONFIRME-HUMANO:
   clickContinueByLabel,
   waitForContinueEnabled,
   detectCaptchaChallenge,
   focusCaptchaInput,
   fillCaptchaAndContinue,
   waitForCaptchaTurnover,
+  solveCaptchaWithAntiCaptcha,
+  solveFacebookImageCaptcha,
   solveCaptchaWithGroq,
   identityAssistStep,
   hackedAssistStep,

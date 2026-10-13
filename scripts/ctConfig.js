@@ -122,6 +122,8 @@ function readCtConfig() {
   const textVerifiedServiceName = String(j.textVerifiedServiceName || "").trim();
   const textVerifiedServiceNotListedName = String(j.textVerifiedServiceNotListedName || "").trim();
   const textVerifiedMaxPrice = (j.textVerifiedMaxPrice == null || j.textVerifiedMaxPrice === "") ? null : Number(j.textVerifiedMaxPrice);
+  const antiCaptchaApiKey = String(j.antiCaptchaApiKey || "").trim();
+  const antiCaptchaBaseUrl = String(j.antiCaptchaBaseUrl || "").trim();
   return {
     ok: true,
     path: CT_CONFIG_PATH,
@@ -132,7 +134,9 @@ function readCtConfig() {
     textVerifiedBaseUrl: textVerifiedBaseUrl || "",
     textVerifiedServiceName: textVerifiedServiceName || "",
     textVerifiedServiceNotListedName: textVerifiedServiceNotListedName || "",
-    textVerifiedMaxPrice: Number.isFinite(textVerifiedMaxPrice) ? Number(textVerifiedMaxPrice) : null
+    textVerifiedMaxPrice: Number.isFinite(textVerifiedMaxPrice) ? Number(textVerifiedMaxPrice) : null,
+    antiCaptchaApiKey: antiCaptchaApiKey || "",
+    antiCaptchaBaseUrl: antiCaptchaBaseUrl || ""
   };
 }
 
@@ -156,6 +160,10 @@ function pickInboundCtConfig(src) {
     const maxPrice = Number(src.textVerifiedMaxPrice);
     if (Number.isFinite(maxPrice) && maxPrice > 0) patch.textVerifiedMaxPrice = maxPrice;
   }
+  const antiCaptchaApiKey = text(src.antiCaptchaApiKey);
+  if (antiCaptchaApiKey) patch.antiCaptchaApiKey = antiCaptchaApiKey;
+  const antiCaptchaBaseUrl = text(src.antiCaptchaBaseUrl);
+  if (antiCaptchaBaseUrl) patch.antiCaptchaBaseUrl = antiCaptchaBaseUrl;
   return Object.keys(patch).length ? patch : null;
 }
 
@@ -164,7 +172,8 @@ function ctConfigIsComplete(cfg) {
     cfg &&
     String(cfg.ctBaseUrl || "").trim() &&
     String(cfg.textVerifiedApiKey || "").trim() &&
-    String(cfg.textVerifiedApiUsername || "").trim()
+    String(cfg.textVerifiedApiUsername || "").trim() &&
+    String(cfg.antiCaptchaApiKey || "").trim()
   );
 }
 
@@ -179,12 +188,14 @@ function applyInboundCtConfig(src) {
   const hasBase = !!String(confirmed.ctBaseUrl || "").trim();
   const hasTextVerifiedKey = !!String(confirmed.textVerifiedApiKey || "").trim();
   const hasTextVerifiedUsername = !!String(confirmed.textVerifiedApiUsername || "").trim();
+  const hasAntiCaptchaKey = !!String(confirmed.antiCaptchaApiKey || "").trim();
   return {
     ok: true,
     complete: ctConfigIsComplete(confirmed),
     hasBase,
     hasTextVerifiedKey,
-    hasTextVerifiedUsername
+    hasTextVerifiedUsername,
+    hasAntiCaptchaKey
   };
 }
 
@@ -196,7 +207,9 @@ function writeCtConfig({
   textVerifiedBaseUrl,
   textVerifiedServiceName,
   textVerifiedServiceNotListedName,
-  textVerifiedMaxPrice
+  textVerifiedMaxPrice,
+  antiCaptchaApiKey,
+  antiCaptchaBaseUrl
 } = {}) {
   try {
     const curRaw = safeReadJson(CT_CONFIG_PATH) || {};
@@ -223,6 +236,8 @@ function writeCtConfig({
           return Number.isFinite(n) && n > 0 ? n : null;
         })()
         : cur.textVerifiedMaxPrice,
+      antiCaptchaApiKey: (antiCaptchaApiKey !== undefined) ? String(antiCaptchaApiKey || "").trim() : (cur.antiCaptchaApiKey || ""),
+      antiCaptchaBaseUrl: (antiCaptchaBaseUrl !== undefined) ? String(antiCaptchaBaseUrl || "").trim() : (cur.antiCaptchaBaseUrl || ""),
       updatedAt: now
     };
     if (!next.ctBaseUrl && ctBaseRaw && isNgrokCtBaseUrl(ctBaseRaw) && !allowLegacyNgrokCtBase()) {

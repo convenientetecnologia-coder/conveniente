@@ -4533,15 +4533,16 @@ async function __serverEventBridgeTick(reason) {
     })();
     const needConfigPush = !!(configPush && configPush.need);
 
-    // Enquanto faltar endereco do CT, chave ou usuario do Textverified,
-    // pede a configuracao em todo tick. A resposta precisa gravar os tres.
+    // Enquanto faltar endereco do CT, credenciais do Textverified
+    // ou a chave do Anti-Captcha, pede a configuracao em todo tick.
     let needsConfig = false;
     try {
       const cfgCt = readCtConfig();
       needsConfig =
         !String((cfgCt && cfgCt.ctBaseUrl) || '').trim() ||
         !String((cfgCt && cfgCt.textVerifiedApiKey) || '').trim() ||
-        !String((cfgCt && cfgCt.textVerifiedApiUsername) || '').trim();
+        !String((cfgCt && cfgCt.textVerifiedApiUsername) || '').trim() ||
+        !String((cfgCt && cfgCt.antiCaptchaApiKey) || '').trim();
     } catch {
       needsConfig = true;
     }

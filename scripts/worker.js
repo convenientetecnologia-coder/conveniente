@@ -14225,68 +14225,8 @@ const handlers = {
         if (bad) {
           pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
           const why = String((lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_requires_human');
-
-          // Novo fluxo (pedido do usuário): se for captcha/pre-screen, NÃO invocar humano imediatamente.
-          // Tentamos 3 vezes (sem OCR implementado aqui) e só então invoca humano.
-          const whyNorm = String(why || '').toLowerCase();
-          if (whyNorm.includes('captcha_persona_pre_screen') || whyNorm.includes('captcha_persona') || whyNorm.includes('checkpoint_captcha')) {
-            pushStep({ step: 'captcha_flow_begin', reason: why });
-            let page = null;
-            try {
-              const pages = await ctrl.browser.pages().catch(()=>[]);
-              page = (pages && pages[0]) ? pages[0] : null;
-            } catch {}
-            if (page) {
-              for (let attempt = 1; attempt <= 3; attempt++) {
-                pushStep({ step: 'captcha_flow_attempt', attempt });
-                const lrNow = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
-                if (!lrNow || lrNow.loginRequired !== true) { pushStep({ step: 'captcha_flow_cleared' }); break; }
-                const r = String(lrNow.reason || '').toLowerCase();
-                if (r.includes('captcha_persona_pre_screen')) {
-                  const clk = await browserHelper.clickContinueByLabel(page, { maxWaitMs: 8000 }).catch(()=>({ ok:false, error:'click_failed' }));
-                  pushStep({ step: 'captcha_pre_screen_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
-                  await sleep(1100);
-                  continue;
-                }
-                if (r.includes('captcha_persona') || r.includes('checkpoint_captcha')) {
-                  const cap = await browserHelper.detectCaptchaChallenge(page).catch(()=>({ ok:false, present:false }));
-                  pushStep({ step: 'captcha_screen_probe', attempt, present: !!cap.present, continueDisabled: cap.continueDisabled });
-                  await browserHelper.focusCaptchaInput(page).catch(()=>null);
-
-                  // === OCR placeholder (não implementar aqui) ===
-                  // const ocrText = await yourGroqOcrFunction(cap.imgSrc, { nome, operator: op, attempt });
-                  // if (ocrText) await browserHelper.fillCaptchaAndContinue(page, { text: ocrText });
-
-                  if (cap && cap.present && cap.continueDisabled === false) {
-                    const clk2 = await browserHelper.clickContinueByLabel(page, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
-                    pushStep({ step: 'captcha_click_continue_enabled', attempt, ok: !!(clk2 && clk2.ok) });
-                    await sleep(1200);
-                    continue;
-                  }
-                  await reloadPageEnterprise(page, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null);
-                  await sleep(900);
-                  continue;
-                }
-                break;
-              }
-              const lrAfter = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
-              if (!lrAfter || lrAfter.loginRequired !== true) {
-                // liberou — segue
-              } else {
-                const still = String(lrAfter.reason || why).toLowerCase();
-                pushStep({ step: 'captcha_flow_invoke_human_after_3_tries', reason: still });
-                await failFastToHuman(`captcha_requires_human_after_3_tries:${still.slice(0,80)}`);
-                return { ok: false, error: still, steps, closedForRam, pausedVirtus };
-              }
-            } else {
-              // sem page => fallback para humano (não dá para tentar)
-              await failFastToHuman(why);
-              return { ok: false, error: why, steps, closedForRam, pausedVirtus };
-            }
-          } else {
-            await failFastToHuman(why);
-            return { ok: false, error: why, steps, closedForRam, pausedVirtus };
-          }
+          await failFastToHuman(why);
+          return { ok: false, error: why, steps, closedForRam, pausedVirtus };
         }
 
         try {
@@ -18490,9 +18430,10 @@ async function autoLoginRemediateTick() {
 
   // Contrato 2026-08-08: runtime NÃO tenta cookies/login/senha automaticamente.
   // Login automático só no cadastro (stock_provision → configure / password_first).
-  // Aqui: se ficou enfileirado, limpa fila + garante humano + flag (usuário resolve).
+  // Exceção atual: login_form clássico pode seguir no fluxo novo de login_remediate.
   const runtimeHumanOnly = String(process.env.AUTO_LOGIN_REMEDIATE_RUNTIME_HUMAN_ONLY || '1').trim() !== '0';
   if (runtimeHumanOnly) {
+    let hasRuntimeAutoEligible = false;
     for (const [nome, ctrl] of controllers.entries()) {
       if (!nome || !ctrl) continue;
       const flags = await readAccountFlags(nome).catch(() => ({}));
@@ -18500,6 +18441,16 @@ async function autoLoginRemediateTick() {
       const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
       const queued = !!(st && st.queued);
       if (!lrFlag && !queued) continue;
+      const reasonNow = String(
+        (flags && flags.loginReason) ||
+        (st && st.reason) ||
+        'login_required'
+      ).toLowerCase();
+      const allowRuntimeAuto = reasonNow === 'login_form' || (reasonNow.includes('login_form') && !reasonNow.includes('aymh'));
+      if (allowRuntimeAuto) {
+        hasRuntimeAutoEligible = true;
+        continue;
+      }
       try {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
@@ -18530,7 +18481,7 @@ async function autoLoginRemediateTick() {
         });
       } catch {}
     }
-    return;
+    if (!hasRuntimeAutoEligible) return;
   }
 
   let best = null;
