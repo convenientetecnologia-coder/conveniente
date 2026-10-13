@@ -8109,14 +8109,9 @@ async function activateOnce(nome, source = '', operator = '') {
   const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
   const _isStockProvisionOpen = /^stock_provision:/i.test(opTrim);
   let _flagsAtOpenStart = null;
-  let _manualHumanReason = '';
   try {
     _flagsAtOpenStart = await readAccountFlags(nome).catch(() => null);
     const terminalFlag = _terminalFlagFromFlags(_flagsAtOpenStart);
-    if (_isManualOpen) {
-      const holdReason = _overlayReasonFromFlags(_flagsAtOpenStart || {});
-      if (holdReason && holdReason !== 'human_mode') _manualHumanReason = holdReason;
-    }
     if (terminalFlag && !_isManualOpen) {
       try { provisionAudit.append({ ts: Date.now(), event: `activate_skip_${terminalFlag}`, nome: String(nome||''), source: String(source||'') }); } catch {}
       return { ok: false, error: terminalFlag };
@@ -8164,9 +8159,7 @@ async function activateOnce(nome, source = '', operator = '') {
     }
   }
   // Enterprise rule (2026-01): humanHold órfão é só cache.
-  // Exceção do contrato atual: abertura manual com flag persistida reabre direto em humano.
   let _humanHoldAtStart = false;
-  const _manualHumanFromFlags = _isManualOpen && !!_manualHumanReason;
   // Regra do usuário: open_all/login_required continua revalidando do zero; manual preserva flags para inspeção humana.
   if (_isBulkOpen) {
     try {
@@ -8258,7 +8251,7 @@ async function activateOnce(nome, source = '', operator = '') {
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       _humanHoldAtStart = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
-      if (_humanHoldAtStart && !_manualHumanFromFlags) {
+      if (_humanHoldAtStart) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d = d || {};
@@ -8437,15 +8430,11 @@ async function activateOnce(nome, source = '', operator = '') {
           await closeRedundantVirtusTabs(browser, { nome, reason: 'activate_after_launch' });
         } catch {}
 
-        // Regra enterprise: NÃO abrir já em humano/overlay só por humanHold órfão.
-        // Exceção do contrato atual: abertura manual com flag persistida entra em humano na hora.
+        // Regra enterprise: NÃO abrir já em humano/overlay só por hold/cache antigo.
 
         // Enterprise: se este perfil está marcado como "loginRemediateFailed",
         // NÃO invocar humano às cegas: primeiro navegar + revalidar (pode ter virado identidade).
         try {
-          if (_manualHumanFromFlags) {
-            // manual+flag persistida: o operador pediu inspeção humana explícita.
-          } else {
           const flags = await readAccountFlags(nome).catch(()=>({}));
           if (flags && flags.loginRemediateFailed === true) {
             const ctrl = controllers.get(nome);
@@ -8476,7 +8465,6 @@ async function activateOnce(nome, source = '', operator = '') {
                 }
               } catch {}
             }
-          }
           }
         } catch {}
 
@@ -8518,31 +8506,15 @@ async function activateOnce(nome, source = '', operator = '') {
                     try { needsEntry = await pageLooksLikeChromeNetError(p0); } catch { needsEntry = false; }
                   }
                   if (needsEntry) {
-                    // Manual com flag persistida abre direto em Facebook para o humano inspecionar.
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
-                    const preferEntry = _manualHumanFromFlags
-                      ? 'facebook'
-                      : ((_isStockProvisionOpen || desiredEngineAtOpen === 'delta') ? 'facebook_messages' : 'messenger');
+                    const preferEntry = (_isStockProvisionOpen || desiredEngineAtOpen === 'delta') ? 'facebook_messages' : 'messenger';
                     await ensureNonBlankEntryPage(nome, ctrl, {
                       prefer: preferEntry,
-                      reasonBase: _manualHumanFromFlags
-                        ? 'open_manual_flag_entry'
-                        : (_isBulkOpen ? 'open_all_entry' : (_isStockProvisionOpen ? 'open_stock_entry' : 'open_manual_entry'))
+                      reasonBase: _isBulkOpen ? 'open_all_entry' : (_isStockProvisionOpen ? 'open_stock_entry' : 'open_manual_entry')
                     });
                   }
                 } catch {}
-                if (_manualHumanFromFlags) {
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'open_manual_human_from_flags',
-                      nome: String(nome || ''),
-                      source: String(source || ''),
-                      reason: String(_manualHumanReason || '').slice(0, 180)
-                    });
-                  } catch {}
-                  try { await enterHumanMode(nome, ctrl, { reason: _manualHumanReason }); } catch {}
-                } else if (_isBulkOpen || _isManualOpen) {
+                if (_isBulkOpen || _isManualOpen) {
                   try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
                 }
               }
