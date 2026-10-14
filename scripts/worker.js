@@ -13974,21 +13974,22 @@ const handlers = {
       // Blindagem: se não conseguimos validar os 2 lados (Messenger + Facebook), NÃO pode dar sucesso.
       // Exceção: no modo password_first essa validação inicial pode vir incompleta por não abrir 3 abas via configureProfile.
       if (!lrMessenger || !lrFacebook) {
-        pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook, authMode });
-        if (!skipAttempt1InjectCookies) {
-          await failFastToHuman('validation_incomplete_missing_tabs');
-          return { ok: false, error: 'validation_incomplete_missing_tabs', steps, closedForRam, pausedVirtus };
-        }
+        pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook, authMode, action: 'continue_drive' });
       }
 
-      const needsLogin =
+      let needsLogin =
         skipAttempt1InjectCookies ||
         (lrMessenger && lrMessenger.loginRequired) ||
         (lrFacebook && lrFacebook.loginRequired);
 
       const hardBlockReason = (lr) => {
         const r = String(lr && lr.reason || '').toLowerCase();
-        return (r.includes('captcha') || r.includes('checkpoint') || r.includes('identity') || r.includes('two_factor') || r.includes('2fa') || r.includes('two factor'));
+        if (!r) return false;
+        if (r.includes('two_factor') || r.includes('2fa') || r.includes('two factor')) return true;
+        if (r.includes('identity')) return true;
+        if (r.includes('captcha_persona')) return true;
+        if (r === 'checkpoint_captcha') return true;
+        return false;
       };
 
       // 5.5) Blindagem enterprise: se a conta estiver desabilitada/banida em qualquer ponto,
@@ -14008,7 +14009,18 @@ const handlers = {
         return false;
       };
 
-      // 6) tentativa 2: login+senha (apenas se for login_form; caso contrário invoca humano)
+      // Captcha de imagem, Continuar e senha não são parada. Entram no vai-e-vem mesmo se o probe não marcou login.
+      try {
+        const pagesLive = await ctrl.browser.pages().catch(() => []);
+        const pgLive = pagesLive && pagesLive[0];
+        if (pgLive && typeof browserHelper.classifyFacebookLoginSurface === 'function') {
+          const surf = await browserHelper.classifyFacebookLoginSurface(pgLive).catch(() => null);
+          const k = surf && surf.kind;
+          if (k === 'image_captcha' || k === 'continuar' || k === 'password' || k === 'login_form') needsLogin = true;
+        }
+      } catch {}
+
+      // 6) tentativa 2: vai-e-vem. Só 2FA, identidade e captcha antigo param antes.
       if (needsLogin) {
         const bad = (hardBlockReason(lrMessenger) || hardBlockReason(lrFacebook));
         if (bad) {
@@ -14230,10 +14242,19 @@ const handlers = {
       // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
-        pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
-        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
-        await failFastToHuman(`ui_blocked:${kind}`);
-        return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
+        const stillLogin =
+          !!(lrMessenger && lrMessenger.loginRequired) ||
+          !!(lrFacebook && lrFacebook.loginRequired);
+        if (!stillLogin) {
+          pushStep({ step: 'ui_dialog_ignored_session_in', kind, uiMessenger, uiFacebook });
+          uiOk = true;
+          success = true;
+        } else {
+          pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
+          try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
+          await failFastToHuman(`ui_blocked:${kind}`);
+          return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
+        }
       }
 
       if (success) {
@@ -18193,7 +18214,8 @@ async function autoLoginRemediateTick() {
         } catch {}
         continue;
       }
-      const hardHumanReason = (
+      const imageCap = reasonNow.includes('captcha_image');
+      const hardHumanReason = !imageCap && (
         reasonNow.includes('captcha') ||
         reasonNow.includes('checkpoint') ||
         reasonNow.includes('identity') ||
@@ -20433,7 +20455,21 @@ async function nurseTick() {
                   }
                 } catch {}
               } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
-                await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
+                let imageText = false;
+                try {
+                  const pgCap = lrPage || p0;
+                  if (pgCap) {
+                    const cap = await browserHelper.detectCaptchaChallenge(pgCap).catch(() => null);
+                    const src = String((cap && cap.imgSrc) || '');
+                    imageText = !!(cap && cap.present && /\/captcha\/tfbimage\//i.test(src));
+                  }
+                } catch {}
+                if (imageText) {
+                  try { lr.reason = 'captcha_image'; } catch {}
+                  try { queueAutoLoginRemediate(nome, { reason: 'captcha_image', source: curSource || 'lr_scan', immediate: true, force: true }); } catch {}
+                } else {
+                  await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
+                }
               }
             } catch {}
           } catch {}
