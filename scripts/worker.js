@@ -13706,39 +13706,13 @@ const handlers = {
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
         const whyLow = why.toLowerCase();
-        // Se a UI atual é AYMH, não sobrescrever reason com busy_timeout — humano only.
-        let liveAymh = false;
-        try {
-          const c0 = controllers.get(nome);
-          const pages0 = (c0 && c0.browser) ? await c0.browser.pages().catch(() => []) : [];
-          for (const pg0 of (pages0 || []).slice(0, 8)) {
-            const lr0 = await browserHelper.detectLoginRequired(pg0).catch(() => null);
-            const r0 = String((lr0 && lr0.reason) || '').toLowerCase();
-            if (lr0 && lr0.loginRequired && (r0.includes('aymh_continue') || r0 === 'aymh')) {
-              liveAymh = true;
-              break;
-            }
-          }
-        } catch {}
-        if (liveAymh) {
-          try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: 'login_remediate' }); } catch {}
-          try { await clearIdentityFlags(nome); } catch {}
-          try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
-          try {
-            const cA = controllers.get(nome);
-            if (cA) await enterHumanMode(nome, cA, { reason: `aymh_continue:fail_fast:${why.slice(0, 60)}` });
-          } catch {}
-          try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: `aymh_continue:${why.slice(0, 140)}` }); } catch {}
-          try { await snapshotStatusAndWrite(); } catch {}
-          return;
-        }
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh/.test(whyLow);
+        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh|continuar_failed|login_failed|image_captcha_failed|login_drive_exhausted|login_screen_unknown/.test(whyLow);
         // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -20491,26 +20465,18 @@ async function nurseTick() {
                 });
               } catch {}
             } else if (rr.includes('aymh_continue') || rr === 'aymh') {
-              // Contrato: Continuar + Usar outro perfil = LR + invocar humano.
-              // ZERO clique Continuar, ZERO cookies, ZERO auto-login
-              // (evita checkpoint 'verifique que voce e um robo' e pausa global inutil).
+              // Continuar do perfil salvo entra no login: cookie uma vez, depois Continuar/senha/captcha de imagem.
               try {
-                robeMeta[nome] = robeMeta[nome] || {};
-                const nowA = Date.now();
-                const lastHum = Number(robeMeta[nome].lastAymhHumanInvokeAt || 0) || 0;
-                const wantNow = want || ((desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {});
-                const alreadyHold = !!(wantNow && wantNow.humanHold === true) || !!(ctrl && ctrl.humanControl === true);
-                const canInvoke = !alreadyHold && (!lastHum || (nowA - lastHum) > (30 * 60 * 1000));
-                if (canInvoke) {
-                  robeMeta[nome].lastAymhHumanInvokeAt = nowA;
-                  await enterHumanMode(nome, ctrl, { reason: `aymh_continue:${String(rr).slice(0, 80)}` });
-                  try { await issues.append(nome, 'mil_action', 'aymh_continue_human_invoked'); } catch {}
+                const flagsA = await readAccountFlags(nome).catch(() => ({}));
+                if (flagsA && flagsA.loginRemediateFailed === true) {
+                  try { await issues.append(nome, 'mil_action', 'auto_login_remediate_skip(aymh_loginRemediateFailed)'); } catch {}
+                } else if (ctrl && ctrl.humanControl === true) {
+                  try { await issues.append(nome, 'mil_action', 'aymh_continue_skip_already_human'); } catch {}
                 } else {
-                  try { await issues.append(nome, 'mil_action', 'aymh_continue_human_only already_hold_or_debounce'); } catch {}
+                  const okQueue = queueAutoLoginRemediate(nome, { reason: 'aymh_continue', source: lr.domain || 'nurse', immediate: true, force: true });
+                  try { await issues.append(nome, 'mil_action', `aymh_continue_login_queued ok=${!!okQueue}`); } catch {}
                 }
-              } catch {
-                try { await issues.append(nome, 'mil_action', `aymh_continue_human_only reason=${String(rr).slice(0, 80)}`); } catch {}
-              }
+              } catch {}
             } else if (rr === 'login_form' || (rr.includes('login_form') && !rr.includes('aymh'))) {
               // Auto-login SOMENTE formulário clássico email/senha.
               // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
