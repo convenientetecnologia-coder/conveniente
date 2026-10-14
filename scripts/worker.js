@@ -2311,7 +2311,21 @@ function shouldSkipHumanInvokeNavigation(reason) {
     // mandaria a aba 0 (messages) para /marketplace/you/selling.
     r.includes('ui_blocked') ||
     r.includes('login_required') ||
-    r.includes('login_form')
+    r.includes('login_form') ||
+    r.includes('hacked_review') ||
+    r.includes('password_reset') ||
+    r.includes('comecar_failed')
+  );
+}
+
+function isAutoLoginScreenReason(reason) {
+  const r = String(reason || '').toLowerCase();
+  return (
+    r === 'login_form' ||
+    (r.includes('login_form') && !r.includes('aymh')) ||
+    r.includes('hacked_review') ||
+    r.includes('password_reset') ||
+    r.includes('checkpoint_back_to_facebook')
   );
 }
 
@@ -4675,7 +4689,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             return { ok: true, state: 'appeal_submitted', reason: rr2 };
           }
           // Captcha: NÃO invocar humano aqui. Agenda o captcha flow (governança própria + N tentativas).
-          if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+          if ((rr2.includes('captcha') || rr2.includes('checkpoint')) && !rr2.includes('checkpoint_back_to_facebook')) {
             try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_captcha_flow_schedule', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
             try {
               const c = controllers.get(nome);
@@ -4693,9 +4707,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           }
           // login_form: entra na fila na hora. Não espera o vigilante de 5s.
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
-          if (rr2 === 'login_form' || rr2.includes('login_form')) {
-            try { queueAutoLoginRemediate(nome, { reason: 'login_form', source: String(source || 'bootstrap'), immediate: true, force: true }); } catch {}
-            try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_login_form_schedule_login', nome: String(nome || ''), source: String(source || '') }); } catch {}
+          if (isAutoLoginScreenReason(rr2)) {
+            try { queueAutoLoginRemediate(nome, { reason: rr2 || 'login_form', source: String(source || 'bootstrap'), immediate: true, force: true }); } catch {}
+            try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_login_form_schedule_login', nome: String(nome || ''), source: String(source || ''), reason: String(rr2 || '').slice(0, 80) }); } catch {}
           }
           return { ok: true, state: 'login_required', reason: rr2 };
         }
@@ -4799,9 +4813,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
 
     // login_form: entra na fila na hora. Não espera o vigilante de 5s.
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
-    if (rr === 'login_form' || rr.includes('login_form')) {
-      try { queueAutoLoginRemediate(nome, { reason: 'login_form', source: String(source || 'open'), immediate: true, force: true }); } catch {}
-      try { provisionAudit.append({ ts: Date.now(), event: 'open_login_form_schedule_login', nome: String(nome || ''), source: String(source || '') }); } catch {}
+    if (isAutoLoginScreenReason(rr)) {
+      try { queueAutoLoginRemediate(nome, { reason: rr || 'login_form', source: String(source || 'open'), immediate: true, force: true }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_login_form_schedule_login', nome: String(nome || ''), source: String(source || ''), reason: String(rr || '').slice(0, 80) }); } catch {}
     }
     return { ok: true, state: 'login_required', reason: rr };
   } catch (e) {
@@ -13720,7 +13734,7 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh|continuar_failed|login_failed|image_captcha_failed|login_drive_exhausted|login_screen_unknown/.test(whyLow);
+        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh|continuar_failed|comecar_failed|login_failed|image_captcha_failed|login_drive_exhausted|login_screen_unknown/.test(whyLow);
         // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -14024,7 +14038,7 @@ const handlers = {
         if (pgLive && typeof browserHelper.classifyFacebookLoginSurface === 'function') {
           const surf = await browserHelper.classifyFacebookLoginSurface(pgLive).catch(() => null);
           const k = surf && surf.kind;
-          if (k === 'image_captcha' || k === 'continuar' || k === 'password' || k === 'login_form') needsLogin = true;
+          if (k === 'image_captcha' || k === 'continuar' || k === 'comecar' || k === 'password' || k === 'login_form') needsLogin = true;
         }
       } catch {}
 
@@ -14179,8 +14193,8 @@ const handlers = {
       const nonAutomatableReason = (lr) => {
         const r = String(lr && lr.reason || '').toLowerCase();
         if (!r) return '';
-        if (r.includes('captcha')) return r;
-        if (r.includes('checkpoint')) return r;
+        if (r.includes('captcha') && !r.includes('captcha_image')) return r;
+        if (r.includes('checkpoint') && !r.includes('checkpoint_back_to_facebook')) return r;
         if (r.includes('identity')) return r;
         if (r.includes('two_factor') || r.includes('2fa') || r.includes('two factor')) return 'two_factor';
         return '';
@@ -18225,7 +18239,8 @@ async function autoLoginRemediateTick() {
         continue;
       }
       const imageCap = reasonNow.includes('captcha_image');
-      const hardHumanReason = !imageCap && (
+      const unlockScreen = isAutoLoginScreenReason(reasonNow);
+      const hardHumanReason = !imageCap && !unlockScreen && (
         reasonNow.includes('captcha') ||
         reasonNow.includes('checkpoint') ||
         reasonNow.includes('identity') ||
@@ -20466,7 +20481,7 @@ async function nurseTick() {
                     await runIdentityFlow(nome, ctrl, pg, { source: 'lr_scan' }).catch(()=>null);
                   }
                 } catch {}
-              } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
+              } else if ((rr.includes('captcha') || rr.includes('checkpoint')) && !rr.includes('checkpoint_back_to_facebook')) {
                 let imageText = false;
                 try {
                   const pgCap = lrPage || p0;
@@ -20525,7 +20540,7 @@ async function nurseTick() {
                   try { await issues.append(nome, 'mil_action', `aymh_continue_login_queued ok=${!!okQueue}`); } catch {}
                 }
               } catch {}
-            } else if (rr === 'login_form' || (rr.includes('login_form') && !rr.includes('aymh'))) {
+            } else if (isAutoLoginScreenReason(rr)) {
               // Auto-login SOMENTE formulário clássico email/senha.
               // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
               try {

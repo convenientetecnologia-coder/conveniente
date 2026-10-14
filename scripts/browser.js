@@ -6281,12 +6281,22 @@ async function detectLoginRequired(page) {
       const hasHackedReview =
         bodyTxt.includes('analise seus dados de login') ||
         bodyTxt.includes('analisar seus dados de login') ||
+        bodyTxt.includes('verifique suas informacoes de login') ||
+        bodyTxt.includes('confira suas informacoes de login') ||
         bodyTxt.includes('proteja seus detalhes de login') ||
         bodyTxt.includes('conta pode ter sido invadida') ||
         bodyTxt.includes('pode ter sido invadida') ||
+        bodyTxt.includes('restringimos sua conta') ||
         bodyTxt.includes('etapas para voltar ao facebook') ||
         bodyTxt.includes('voltar ao facebook') && bodyTxt.includes('etapas') ||
-        bodyTxt.includes('desbloquear sua conta');
+        bodyTxt.includes('desbloquear sua conta') ||
+        bodyTxt.includes('troque a senha para manter') ||
+        bodyTxt.includes('change your password to keep') ||
+        bodyTxt.includes('verify your login information') ||
+        bodyTxt.includes('check your login information') ||
+        bodyTxt.includes('may have been hacked') ||
+        bodyTxt.includes('we restricted your account') ||
+        bodyTxt.includes('steps to get back');
       const hasPasswordResetRequired =
         bodyTxt.includes('agora crie uma nova senha') ||
         bodyTxt.includes('inserir nova senha') ||
@@ -7599,15 +7609,54 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
         const looksHacked =
           bodyTxt.includes('analise seus dados de login') ||
           bodyTxt.includes('analisar seus dados de login') ||
+          bodyTxt.includes('verifique suas informacoes de login') ||
+          bodyTxt.includes('confira suas informacoes de login') ||
           bodyTxt.includes('proteja seus detalhes de login') ||
           bodyTxt.includes('pode ter sido invadida') ||
           bodyTxt.includes('conta pode ter sido invadida') ||
+          bodyTxt.includes('restringimos sua conta') ||
+          bodyTxt.includes('etapas para voltar ao facebook') ||
+          bodyTxt.includes('desbloquear sua conta') ||
+          bodyTxt.includes('troque a senha para manter') ||
+          bodyTxt.includes('change your password to keep') ||
+          bodyTxt.includes('verify your login information') ||
+          bodyTxt.includes('check your login information') ||
+          bodyTxt.includes('may have been hacked') ||
+          bodyTxt.includes('we restricted your account') ||
+          bodyTxt.includes('steps to get back') ||
           bodyTxt.includes('agora crie uma nova senha') ||
           bodyTxt.includes('inserir nova senha') ||
           bodyTxt.includes('voce desbloqueou a sua conta') ||
           bodyTxt.includes('voce esta de volta ao facebook') ||
           bodyTxt.includes('voltar para o facebook');
         if (!looksHacked) return { ok: false, error: 'not_hacked_context' };
+
+        // Aviso "troque a senha / pode ter sido invadida": não altera senha.
+        // O X (Fechar) recarrega e a sessão segue. "Alterar senha" abre o centro de contas.
+        const passwordNag =
+          (bodyTxt.includes('troque a senha') || bodyTxt.includes('change your password')) &&
+          (bodyTxt.includes('pode ter sido invadida') || bodyTxt.includes('may have been hacked') || bodyTxt.includes('manter sua conta protegida') || bodyTxt.includes('keep your account secure'));
+        if (passwordNag) {
+          const dialog = document.querySelector('div[role="dialog"][aria-modal="true"]') || document.querySelector('div[role="dialog"]') || document;
+          const closers = Array.from(dialog.querySelectorAll('[role="button"],button')).slice(0, 60);
+          for (const el of closers) {
+            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+            if (aria !== 'fechar' && aria !== 'close') continue;
+            const r0 = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (!r0 || r0.width < 8 || r0.height < 8) continue;
+            try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+            const rect = el.getBoundingClientRect();
+            return {
+              ready: true,
+              filled: 0,
+              clicked: 'fechar',
+              text: aria,
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2
+            };
+          }
+          return { ok: false, error: 'fechar_not_found' };
+        }
 
         // 1) Se houver inputs de senha, preencher primeiro (sem clicar em outros elementos).
         let filled = 0;
@@ -7656,27 +7705,43 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
             return true;
           } catch { return false; }
         };
-        const txt = (el) => norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        const labelOf = (el) => {
+          const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+          const inner = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { aria, inner };
+        };
+        const hitLabel = (label, words) => {
+          const t = String(label || '').trim();
+          if (!t || t.length > 60) return false;
+          return words.some((w) => t === w || t.startsWith(w + ' '));
+        };
 
-        // Prioridade militar: salvar senha > voltar > avançar/continuar
+        // Prioridade: salvar senha, voltar ao Facebook, Começar, avançar, continuar.
         const priority = [
-          { key: 'salvar_alteracoes', words: ['salvar alteracoes', 'save changes', 'salvar'] },
+          { key: 'salvar_alteracoes', words: ['salvar alteracoes', 'save changes'] },
           { key: 'voltar_para_fb', words: ['voltar para o facebook', 'back to facebook'] },
-          { key: 'comecar', words: ['comecar', 'começar', 'start'] },
-          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'comecar', words: ['comecar', 'get started', 'start'] },
+          { key: 'avancar', words: ['avancar', 'next'] },
           { key: 'continuar', words: ['continuar', 'continue'] },
         ];
 
         for (const p of priority) {
           for (const el of all) {
             if (!el) continue;
-            const t = txt(el);
-            if (!t) continue;
-            if (!p.words.some(w => t.includes(w))) continue;
+            const lab = labelOf(el);
+            const matched = hitLabel(lab.aria, p.words) || hitLabel(lab.inner, p.words);
+            if (!matched) continue;
             if (isDisabled(el) || !isVis(el)) continue;
             try { el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); } catch {}
-            try { el.click(); } catch { continue; }
-            return { ok: true, filled, clicked: p.key, text: t.slice(0, 60) };
+            const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            return {
+              ready: true,
+              filled,
+              clicked: p.key,
+              text: (lab.aria || lab.inner).slice(0, 60),
+              x: rect ? (rect.left + rect.width / 2) : null,
+              y: rect ? (rect.top + rect.height / 2) : null
+            };
           }
         }
         // Se não clicou nada, mas preencheu senha, consideramos progresso (sem reload).
@@ -7701,6 +7766,10 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
   while ((Date.now() - start) < budget) {
     attempt++;
     const r = await attemptOnce();
+    if (r && r.ready && typeof r.x === 'number' && typeof r.y === 'number') {
+      try { await page.mouse.click(r.x, r.y, { delay: 28 }); } catch {}
+      return { ok: true, ...r, via: 'mouse', waitedMs: Date.now() - start, attempts: attempt };
+    }
     if (r && r.ok) return { ok: true, ...r, waitedMs: Date.now() - start, attempts: attempt };
     lastErr = r && r.error ? String(r.error) : 'error';
     if (attempt >= minTries) {
@@ -7870,8 +7939,12 @@ async function classifyFacebookLoginSurface(page) {
   if (reason.includes('two_factor') || reason.includes('2fa') || reason.includes('two factor')) return { kind: 'terminal', terminal: 'two_factor', lr };
   if (reason.includes('identity')) return { kind: 'terminal', terminal: 'identity', lr };
   if (reason.includes('banned') || reason.includes('suspended') || reason.includes('disabled_checkpoint')) return { kind: 'terminal', terminal: 'banned', lr };
-  if ((reason.includes('captcha_persona') || reason.includes('checkpoint') || (reason.includes('captcha') && !imageText))) {
+  const checkpointTerminal = reason.includes('checkpoint') && !reason.includes('checkpoint_back_to_facebook');
+  if (reason.includes('captcha_persona') || checkpointTerminal || (reason.includes('captcha') && !imageText && !reason.includes('captcha_image'))) {
     return { kind: 'terminal', terminal: 'captcha_persona', lr };
+  }
+  if (reason.includes('hacked_review') || reason.includes('password_reset') || reason.includes('checkpoint_back_to_facebook')) {
+    return { kind: 'comecar', lr };
   }
   if (!(lr && lr.loginRequired) && !(surface && surface.hasPass)) return { kind: 'in', lr };
   if (reason.includes('aymh') || reason.includes('continuar') || reason.includes('pre_screen')) return { kind: 'continuar', lr };
@@ -7883,7 +7956,7 @@ async function classifyFacebookLoginSurface(page) {
 
 /**
  * Reage à tela que estiver na frente, na ordem em que aparecer.
- * Continuar, senha, login+senha e captcha de imagem: até 3 falhas de cada.
+ * Continuar, Começar da conta restringida, senha, login+senha e captcha de imagem: até 3 falhas de cada.
  * Captcha antigo, ban, 2FA e identidade: para na hora (humano).
  */
 async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 } = {}) {
@@ -7915,6 +7988,20 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
       await sleep(1200);
       if (!(clk && clk.ok) && bump('continuar') >= limit) {
         return { ok: false, error: (clk && clk.error) || 'continuar_failed', steps };
+      }
+      continue;
+    }
+    if (kind === 'comecar') {
+      const step = await hackedAssistStep(page, {
+        newPassword: password,
+        maxWaitMs: 12000,
+        tries: 2
+      }).catch(() => ({ ok: false, error: 'comecar_exception' }));
+      await sleep(1200);
+      const clicked = String((step && step.clicked) || '');
+      const advanced = !!(step && step.ok && clicked && clicked !== 'scroll_nudge');
+      if (!advanced && bump('comecar') >= limit) {
+        return { ok: false, error: (step && step.error) || 'comecar_failed', steps };
       }
       continue;
     }
