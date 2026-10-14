@@ -13115,97 +13115,33 @@ const handlers = {
             });
           } catch {}
 
-          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            if (!workPage) {
-              try {
-                const pages = await ctrl.browser.pages().catch(() => []);
-                workPage = (pages && pages[0]) ? pages[0] : null;
-              } catch { workPage = null; }
-            }
-            if (!workPage) break;
-
-            let curReason = '';
-            try {
-              const lrNow = await browserHelper.detectLoginRequired(workPage).catch(() => null);
-              after = lrNow || { loginRequired: false };
-              curReason = String((lrNow && lrNow.reason) || '').toLowerCase();
-              if (!(lrNow && lrNow.loginRequired)) {
-                after = { loginRequired: false };
-                break;
-              }
-            } catch {}
-
-            // Se virou captcha/checkpoint no meio do fallback → para na hora (humano).
-            if (isHumanGateReason(curReason)) {
-              after = after && after.loginRequired ? after : { loginRequired: true, reason: curReason || 'captcha' };
-              break;
-            }
-
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'configure_login_fallback_attempt',
-                nome: String(nome || ''),
-                operator: op || null,
-                attempt,
-                reason: curReason.slice(0, 80)
-              });
-            } catch {}
-
-            // Continuar (AYMH / pre-screen) — só no cadastro ou quando a tela atual pede.
-            // CADASTRO AYMH: tryClickAymhContinuar (Continuar <Nome>, ignora wrapper tabindex=-1).
-            // RUNTIME: este bloco só roda se reason já for aymh/pre_screen; AYMH puro já abortou acima.
-            if (isStockProvision || curReason.includes('aymh') || curReason.includes('continuar') || curReason.includes('pre_screen')) {
-              try {
-                let clk = { ok: false };
-                if (curReason.includes('aymh') || isAymh) {
-                  clk = await browserHelper.tryClickAymhContinuar(workPage).catch(() => ({ ok: false }));
-                }
-                if (!(clk && clk.ok)) {
-                  clk = await browserHelper.clickContinueByLabel(workPage, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
-                }
-                try {
-                  provisionAudit.append({
-                    ts: Date.now(),
-                    event: 'configure_login_fallback_continue_click',
-                    nome: String(nome || ''),
-                    operator: op || null,
-                    attempt,
-                    ok: !!(clk && clk.ok),
-                    error: clk && clk.error ? String(clk.error).slice(0, 80) : null,
-                    via: (curReason.includes('aymh') || isAymh) ? 'aymh_then_label' : 'label'
-                  });
-                } catch {}
-                await sleep(1100);
-                const lrAfterClick = await browserHelper.detectLoginRequired(workPage).catch(() => null);
-                if (!(lrAfterClick && lrAfterClick.loginRequired)) {
-                  after = { loginRequired: false };
-                  break;
-                }
-                after = lrAfterClick || after;
-                curReason = String((lrAfterClick && lrAfterClick.reason) || curReason).toLowerCase();
-              } catch {}
-            }
-
-            try {
-              await browserHelper.ensureFbUiUnblocked(workPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(() => null);
-              // Cadastro: se ainda AYMH, tryLogin pode clicar Continuar; runtime NÃO (allowAymhContinue=false).
-              await browserHelper.tryLoginEmailPass(workPage, {
-                nome,
-                login: login2,
-                password: password2,
-                allowGpt: true,
-                allowAymhContinue: true
-              }).catch(() => null);
-              await sleep(900);
-            } catch {}
-
-            try {
-              const lrAfterLogin = await browserHelper.detectLoginRequired(workPage).catch(() => ({ loginRequired: false }));
-              after = lrAfterLogin || { loginRequired: false };
-              if (!(lrAfterLogin && lrAfterLogin.loginRequired)) break;
-            } catch {}
+          const driven = await browserHelper.driveFacebookLogin(workPage, {
+            nome,
+            login: login2,
+            password: password2,
+            maxPerStep: 3
+          }).catch(() => ({ ok: false, error: 'login_drive_exception' }));
+          if (driven && driven.terminal) {
+            after = { loginRequired: true, reason: String(driven.terminal) };
+          } else if (driven && driven.ok) {
+            after = { loginRequired: false, reason: '' };
+          } else {
+            const lrAfterDrive = await browserHelper.detectLoginRequired(workPage).catch(() => null);
+            after = lrAfterDrive && lrAfterDrive.loginRequired
+              ? lrAfterDrive
+              : { loginRequired: true, reason: String((driven && driven.error) || 'login') };
           }
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_login_drive_done',
+              nome: String(nome || ''),
+              operator: op || null,
+              ok: !!(driven && driven.ok),
+              error: driven && driven.error ? String(driven.error).slice(0, 160) : null,
+              terminal: driven && driven.terminal ? String(driven.terminal).slice(0, 80) : null
+            });
+          } catch {}
 
           try {
             provisionAudit.append({
@@ -14151,88 +14087,31 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
-          // Continuar do perfil salvo (AYMH). Não clica "Usar outro perfil".
-          // Se a senha já apareceu, não navega para longe dessa tela.
-          let passwordReady = false;
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            const lrA = await browserHelper.detectLoginRequired(p0).catch(() => null);
-            const ra = String((lrA && lrA.reason) || '').toLowerCase();
-            if (!(lrA && lrA.loginRequired)) break;
-            if (!(ra.includes('aymh') || ra.includes('pre_screen') || ra.includes('continuar'))) break;
-            let clk = { ok: false };
-            if (ra.includes('aymh')) {
-              clk = await browserHelper.tryClickAymhContinuar(p0).catch(() => ({ ok: false }));
-            }
-            if (!(clk && clk.ok)) {
-              clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
-            }
-            pushStep({ step: 'aymh_continue_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
-            await sleep(1100);
-            passwordReady = await p0.evaluate(() => !!document.querySelector('input[name="pass"], input#pass, input[type="password"]')).catch(() => false);
-            if (passwordReady) break;
-          }
-
-          // Facebook primeiro (tende a refletir no Messenger)
-          pushStep({ step: 'attempt2_login_fb_begin', passwordReady: !!passwordReady });
-          if (!passwordReady) {
-            const isDeltaNow = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
-            const fbLoginTarget = isDeltaNow
-              ? 'https://www.facebook.com/messages'
-              : 'https://www.facebook.com/marketplace/create/item';
-            await p0.goto(fbLoginTarget, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          }
-          await new Promise(r => setTimeout(r, 2600));
-          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
-          if (await checkAndAbortIfBanned(p0, 'before_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, {
+          // Qualquer ordem: Continuar, senha, login+senha, captcha de imagem. Até 3 falhas de cada.
+          // Captcha antigo, ban, 2FA e identidade param na hora.
+          pushStep({ step: 'login_drive_begin' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_drive')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          const driven = await withTimeout('loginFb', browserHelper.driveFacebookLogin(p0, {
             nome,
             login: login2,
             password: password2,
-            allowGpt: true,
-            allowAymhContinue: true
-          }), stageTimeoutMs.loginFb);
-          pushStep({ step: 'attempt2_login_fb_done', result: rfb });
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
-          if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-
-          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
-          try {
-            const lrAfterFb = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-            if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
-              pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
-              await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
-              return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
-            }
-          } catch {}
-
-          // Messenger depois (se necessário)
-          pushStep({ step: 'attempt2_login_msg_begin' });
-          await __gotoMarketplaceTracked(p0, { nome, source: 'login_remediate.attempt2_msg_begin', timeoutMs: 45000, swallow: true });
-          await new Promise(r => setTimeout(r, 2600));
-          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
-          if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, {
-            nome,
-            login: login2,
-            password: password2,
-            allowGpt: true,
-            allowAymhContinue: true
-          }), stageTimeoutMs.loginMsg);
-          pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
-          if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-
-          // Se Messenger cair em estado não automatizável, também fail-fast.
-          try {
-            const lrAfterMsg = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-            if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
-              pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
-              await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
-              return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
-            }
-          } catch {}
+            maxPerStep: 3
+          }), stageTimeoutMs.loginFb + stageTimeoutMs.loginMsg);
+          pushStep({
+            step: 'login_drive_done',
+            ok: !!(driven && driven.ok),
+            error: driven && driven.error ? String(driven.error).slice(0, 160) : null,
+            terminal: driven && driven.terminal ? String(driven.terminal).slice(0, 80) : null
+          });
+          if (await checkAndAbortIfBanned(p0, 'after_login_drive')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          if (driven && driven.terminal) {
+            await failFastToHuman(String(driven.terminal));
+            return { ok: false, error: String(driven.terminal), steps, closedForRam, pausedVirtus };
+          }
+          if (!(driven && driven.ok)) {
+            await failFastToHuman(String((driven && driven.error) || 'login_remediate_failed'));
+            return { ok: false, error: String((driven && driven.error) || 'login_remediate_failed'), steps, closedForRam, pausedVirtus };
+          }
 
           // revalidar
           await new Promise(r => setTimeout(r, 1400));

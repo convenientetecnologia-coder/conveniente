@@ -7851,6 +7851,97 @@ async function _maybeClickCloseX(page) {
   return false;
 }
 
+async function classifyFacebookLoginSurface(page) {
+  const lr = await detectLoginRequired(page).catch(() => ({ loginRequired: false }));
+  const cap = await detectCaptchaChallenge(page).catch(() => ({ present: false }));
+  const imgSrc = String((cap && cap.imgSrc) || '');
+  const imageText = !!(cap && cap.present && /\/captcha\/tfbimage\//i.test(imgSrc));
+  const reason = String((lr && lr.reason) || '').toLowerCase();
+  const surface = await page.evaluate(() => ({
+    hasEmail: !!document.querySelector('input[name="email"], input#email, input[type="email"]'),
+    hasPass: !!document.querySelector('input[name="pass"], input#pass, input[type="password"]')
+  })).catch(() => ({ hasEmail: false, hasPass: false }));
+  const textHint = await page.evaluate(() => {
+    let t = '';
+    try { t = (document.body && (document.body.innerText || document.body.textContent) || '').toLowerCase(); } catch {}
+    return t.includes('digite o texto') || t.includes('type the text from the image');
+  }).catch(() => false);
+  if (imageText || textHint || /\/captcha\/tfbimage\//i.test(imgSrc)) return { kind: 'image_captcha', lr, cap };
+  if (reason.includes('two_factor') || reason.includes('2fa') || reason.includes('two factor')) return { kind: 'terminal', terminal: 'two_factor', lr };
+  if (reason.includes('identity')) return { kind: 'terminal', terminal: 'identity', lr };
+  if (reason.includes('banned') || reason.includes('suspended') || reason.includes('disabled_checkpoint')) return { kind: 'terminal', terminal: 'banned', lr };
+  if ((reason.includes('captcha_persona') || reason.includes('checkpoint') || (reason.includes('captcha') && !imageText))) {
+    return { kind: 'terminal', terminal: 'captcha_persona', lr };
+  }
+  if (!(lr && lr.loginRequired) && !(surface && surface.hasPass)) return { kind: 'in', lr };
+  if (reason.includes('aymh') || reason.includes('continuar') || reason.includes('pre_screen')) return { kind: 'continuar', lr };
+  if (surface && surface.hasPass && !surface.hasEmail) return { kind: 'password', lr };
+  if (surface && surface.hasPass) return { kind: 'login_form', lr };
+  if (lr && lr.loginRequired && (reason === 'login_form' || reason.includes('login'))) return { kind: 'login_form', lr };
+  return { kind: 'unknown', lr };
+}
+
+/**
+ * Reage à tela que estiver na frente, na ordem em que aparecer.
+ * Continuar, senha, login+senha e captcha de imagem: até 3 falhas de cada.
+ * Captcha antigo, ban, 2FA e identidade: para na hora (humano).
+ */
+async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 } = {}) {
+  const fails = {};
+  const steps = [];
+  const bump = (k) => { fails[k] = (Number(fails[k] || 0) || 0) + 1; return fails[k]; };
+  const limit = Math.max(1, Math.min(5, Number(maxPerStep) || 3));
+  for (let i = 1; i <= 12; i++) {
+    const s = await classifyFacebookLoginSurface(page);
+    const kind = s && s.kind ? s.kind : 'unknown';
+    steps.push({ i, kind, reason: s && s.lr ? String(s.lr.reason || '') : '' });
+    if (kind === 'in') return { ok: true, steps };
+    if (kind === 'terminal') return { ok: false, terminal: s.terminal || 'human', error: s.terminal || 'human', steps };
+    if (kind === 'image_captcha') {
+      const solved = await solveFacebookImageCaptcha(page, {
+        nome,
+        operator: `drive_login:${String(nome || '').slice(0, 60)}`,
+        maxAttempts: limit
+      }).catch(() => ({ ok: false, error: 'captcha_solver_exception' }));
+      await sleep(1200);
+      if (!(solved && solved.ok) && bump('image_captcha') >= limit) {
+        return { ok: false, error: (solved && solved.error) || 'image_captcha_failed', steps };
+      }
+      continue;
+    }
+    if (kind === 'continuar') {
+      let clk = await tryClickAymhContinuar(page).catch(() => ({ ok: false }));
+      if (!(clk && clk.ok)) clk = await clickContinueByLabel(page, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+      await sleep(1200);
+      if (!(clk && clk.ok) && bump('continuar') >= limit) {
+        return { ok: false, error: (clk && clk.error) || 'continuar_failed', steps };
+      }
+      continue;
+    }
+    if (kind === 'password' || kind === 'login_form') {
+      const r = await tryLoginEmailPass(page, {
+        login,
+        password,
+        nome,
+        allowGpt: true,
+        allowAymhContinue: true
+      }).catch(() => ({ ok: false, error: 'login_exception' }));
+      await sleep(900);
+      if (!(r && r.ok)) {
+        const err = String((r && r.error) || '');
+        if (/captcha_persona|two_factor|2fa|identity|banned/i.test(err)) {
+          return { ok: false, terminal: err, error: err, steps };
+        }
+        if (bump(kind) >= limit) return { ok: false, error: err || 'login_failed', steps };
+      }
+      continue;
+    }
+    if (bump('unknown') >= limit) return { ok: false, error: 'login_screen_unknown', steps };
+    await sleep(800);
+  }
+  return { ok: false, error: 'login_drive_exhausted', steps };
+}
+
 async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true, allowAymhContinue = false } = {}) {
   const email = String(login || '').trim();
   const pass = String(password || '').trim();
@@ -8362,6 +8453,8 @@ module.exports = {
   identityAssistStep,
   hackedAssistStep,
   tryLoginEmailPass,
+  driveFacebookLogin,
+  classifyFacebookLoginSurface,
   collectFreshCookies,
   detectAccountSuspended,
   detectMarketplaceDisabled,
