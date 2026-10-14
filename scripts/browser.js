@@ -7857,8 +7857,8 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true,
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
 
   // 1) destravar telas comuns:
-  //    - RUNTIME: AYMH (Continuar + Usar outro perfil) = humano-only (NÃO clicar Continuar)
-  //    - CADASTRO (allowAymhContinue): clica Continuar e segue pra senha / email+senha
+  //    - allowAymhContinue: clica Continuar do perfil salvo e segue para a senha.
+  //      Não clica "Usar outro perfil".
   //    - se já tem form → NÃO clica "Usar outro perfil"
   //    - senão, "Usar outro perfil" só para cair no form em branco clássico
   await _maybeClickCloseX(page);

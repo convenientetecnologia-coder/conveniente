@@ -2580,6 +2580,28 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
       return { ok: false, skipped: true, reason: 'human_control' };
     }
+    try {
+      const cap = await browserHelper.detectCaptchaChallenge(pg).catch(() => null);
+      const imgSrc = String((cap && cap.imgSrc) || '');
+      if (cap && cap.present && /\/captcha\/tfbimage\//i.test(imgSrc)) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_image_text_begin', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
+        const solved = await browserHelper.solveFacebookImageCaptcha(pg, {
+          nome,
+          operator: `captcha_flow_image:${id}`,
+          maxAttempts: 2
+        }).catch(() => ({ ok: false }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_image_text_done', nome: String(nome||''), flowId: id, ok: !!(solved && solved.ok), error: solved && solved.error ? String(solved.error).slice(0, 160) : null }); } catch {}
+        if (solved && solved.ok) {
+          const lrAfter = await browserHelper.detectLoginRequired(pg).catch(() => null);
+          const rrAfter = String((lrAfter && lrAfter.reason) || '').toLowerCase();
+          if (lrAfter && lrAfter.loginRequired && (rrAfter === 'login_form' || rrAfter.includes('aymh'))) {
+            try { await setLoginRequiredFlag(nome, { reason: rrAfter || 'login_form', source: 'captcha_image_then_login' }); } catch {}
+            try { queueAutoLoginRemediate(nome, { reason: rrAfter || 'login_form', source: 'captcha_image_then_login', immediate: true, force: true }); } catch {}
+          }
+          return { ok: true, imageCaptcha: true, flowId: id };
+        }
+      }
+    } catch {}
     if (isNonLrAutomationPaused()) {
       // NÃO sobrescrever captchaCheckpointReason com "non_lr_automation_paused":
       // isso mascarava captcha_persona e a limpeza ban/captcha engolia a conta (KEEP falso).
@@ -4665,11 +4687,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           }
           if (rr2.includes('aymh_continue') || rr2 === 'aymh') {
             try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lr2.domain || source }); } catch {}
-            try {
-              const c = controllers.get(nome);
-              if (c) await enterHumanMode(nome, c, { reason: `aymh_continue:bootstrap:${String(source || '').slice(0, 40)}` });
-            } catch {}
-            return { ok: true, state: 'aymh_continue_human', reason: rr2 };
+            try { queueAutoLoginRemediate(nome, { reason: 'aymh_continue', source: String(source || 'bootstrap'), immediate: true, force: true }); } catch {}
+            try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_aymh_schedule_login', nome: String(nome||''), source: String(source||'') }); } catch {}
+            return { ok: true, state: 'aymh_continue_login_scheduled', reason: rr2 };
           }
           // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
@@ -13054,15 +13074,6 @@ const handlers = {
             return { ok: false, error: `configure_blocked_${String(rr || 'captcha').slice(0, 60)}` };
           }
           const isAymh = (rr.includes('aymh_continue') || rr === 'aymh');
-          // RUNTIME (conta já trabalhando): AYMH = humano na hora, zero auto-login.
-          // CADASTRO (stock_provision): AYMH/login é padrão natural → tenta Continuar+senha antes.
-          if (isAymh && !isStockProvision) {
-            try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: best.domain || 'configure' }); } catch {}
-            enteredHuman = true;
-            try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:configure' }); } catch {}
-            try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_aymh_continue', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
-            return { ok: false, error: 'aymh_continue' };
-          }
 
           // Fallback: Continuar (se AYMH) + login/senha.
           // CADASTRO: até 3 tentativas. RUNTIME login_form: 1 tentativa (comportamento antigo).
@@ -13089,7 +13100,7 @@ const handlers = {
             return { ok: false, error: 'missing_credentials' };
           }
 
-          const maxAttempts = isStockProvision ? 3 : 1;
+          const maxAttempts = (isStockProvision || isAymh) ? 3 : 1;
           let after = { loginRequired: true, reason: rr || 'login' };
           let workPage = bestPage;
           try {
@@ -13184,7 +13195,7 @@ const handlers = {
                 login: login2,
                 password: password2,
                 allowGpt: true,
-                allowAymhContinue: !!isStockProvision
+                allowAymhContinue: true
               }).catch(() => null);
               await sleep(900);
             } catch {}
@@ -13907,28 +13918,9 @@ const handlers = {
         return { ok: false, error: 'browser_not_connected', steps };
       }
 
-      // RUNTIME: AYMH = humano only (conta já trabalhava).
-      // CADASTRO (stock_provision): NÃO aborta aqui — segue inject/Continuar/login.
+      // Cookie primeiro. Se cair em Continuar (perfil salvo), clica Continuar e segue na senha.
       const isStockProvisionOp = String(op || '').toLowerCase().startsWith('stock_provision');
-      if (!isStockProvisionOp) {
-        try {
-          const pagesAymh = await ctrl.browser.pages().catch(() => []);
-          for (const pgA of (pagesAymh || []).slice(0, 8)) {
-            const lrA = await browserHelper.detectLoginRequired(pgA).catch(() => null);
-            const ra = String((lrA && lrA.reason) || '').toLowerCase();
-            if (lrA && lrA.loginRequired && (ra.includes('aymh_continue') || ra === 'aymh')) {
-              pushStep({ step: 'aymh_continue_abort_no_inject', reason: ra.slice(0, 80) });
-              try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lrA.domain || 'login_remediate' }); } catch {}
-              try { await enterHumanMode(nome, ctrl, { reason: 'aymh_continue:login_remediate_abort' }); } catch {}
-              try { provisionLock.release({ owner: op }); } catch {}
-              try { await issues.append(nome, 'mil_action', 'login_remediate_aborted_aymh_human_only'); } catch {}
-              return { ok: false, error: 'aymh_continue', steps };
-            }
-          }
-        } catch {}
-      } else {
-        pushStep({ step: 'aymh_stock_provision_allow_continue_login' });
-      }
+      pushStep({ step: 'aymh_continue_then_password_allowed', stock: !!isStockProvisionOp });
 
       // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
       // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
@@ -14159,29 +14151,30 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
-          // CADASTRO: se ainda for AYMH/Continuar, tenta Continuar até 3x antes do login+senha.
-          if (isStockProvisionOp) {
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              const lrA = await browserHelper.detectLoginRequired(p0).catch(() => null);
-              const ra = String((lrA && lrA.reason) || '').toLowerCase();
-              if (!(lrA && lrA.loginRequired)) break;
-              if (!(ra.includes('aymh') || ra.includes('pre_screen') || ra.includes('continuar'))) break;
-              let clk = { ok: false };
-              if (ra.includes('aymh')) {
-                clk = await browserHelper.tryClickAymhContinuar(p0).catch(() => ({ ok: false }));
-              }
-              if (!(clk && clk.ok)) {
-                clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
-              }
-              pushStep({ step: 'stock_aymh_continue_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
-              await sleep(1100);
+          // Continuar do perfil salvo (AYMH). Não clica "Usar outro perfil".
+          // Se a senha já apareceu, não navega para longe dessa tela.
+          let passwordReady = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            const lrA = await browserHelper.detectLoginRequired(p0).catch(() => null);
+            const ra = String((lrA && lrA.reason) || '').toLowerCase();
+            if (!(lrA && lrA.loginRequired)) break;
+            if (!(ra.includes('aymh') || ra.includes('pre_screen') || ra.includes('continuar'))) break;
+            let clk = { ok: false };
+            if (ra.includes('aymh')) {
+              clk = await browserHelper.tryClickAymhContinuar(p0).catch(() => ({ ok: false }));
             }
+            if (!(clk && clk.ok)) {
+              clk = await browserHelper.clickContinueByLabel(p0, { maxWaitMs: 8000 }).catch(() => ({ ok: false }));
+            }
+            pushStep({ step: 'aymh_continue_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
+            await sleep(1100);
+            passwordReady = await p0.evaluate(() => !!document.querySelector('input[name="pass"], input#pass, input[type="password"]')).catch(() => false);
+            if (passwordReady) break;
           }
 
           // Facebook primeiro (tende a refletir no Messenger)
-          pushStep({ step: 'attempt2_login_fb_begin' });
-          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
-          {
+          pushStep({ step: 'attempt2_login_fb_begin', passwordReady: !!passwordReady });
+          if (!passwordReady) {
             const isDeltaNow = (() => { try { return !!isDeltaMotorEnabledRuntime(); } catch { return false; } })();
             const fbLoginTarget = isDeltaNow
               ? 'https://www.facebook.com/messages'
@@ -14197,7 +14190,7 @@ const handlers = {
             login: login2,
             password: password2,
             allowGpt: true,
-            allowAymhContinue: !!isStockProvisionOp
+            allowAymhContinue: true
           }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
@@ -14225,7 +14218,7 @@ const handlers = {
             login: login2,
             password: password2,
             allowGpt: true,
-            allowAymhContinue: !!isStockProvisionOp
+            allowAymhContinue: true
           }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
@@ -18253,14 +18246,6 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
   try {
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
-    // Blindagem: AYMH (Continuar + Usar outro perfil) NUNCA entra em cookies/auto-login.
-    const reasonNorm = String(reason || '').toLowerCase();
-    if (reasonNorm.includes('aymh_continue') || reasonNorm === 'aymh' || reasonNorm.includes('aymh')) {
-      try {
-        issues.append(nome, 'mil_action', `auto_login_remediate_suppressed: aymh_human_only reason=${reasonNorm.slice(0, 80)}`).catch(()=>{});
-      } catch {}
-      return false;
-    }
     robeMeta[nome] = robeMeta[nome] || {};
     const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
     const now = Date.now();
@@ -18361,7 +18346,6 @@ async function autoLoginRemediateTick() {
         reasonNow.includes('identity') ||
         reasonNow.includes('two_factor') ||
         reasonNow.includes('2fa') ||
-        reasonNow.includes('aymh') ||
         reasonNow.includes('banned')
       );
       // login_form e o resíduo genérico login_required seguem no cookie/senha.
@@ -18448,19 +18432,6 @@ async function autoLoginRemediateTick() {
     if (!lrFlag || !queued) {
       continue;
     }
-    // AYMH = humano only: nunca roda cookies/login automático mesmo se ficou enfileirado por engano.
-    try {
-      const lrReason0 = String((flags && flags.loginReason) || '').toLowerCase();
-      if (lrReason0.includes('aymh_continue') || lrReason0 === 'aymh' || lrReason0.includes('aymh')) {
-        try {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
-          robeMeta[nome].autoLoginRemediate.queued = false;
-        } catch {}
-        try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(aymh_human_only)').catch(()=>{}); } catch {}
-        continue;
-      }
-    } catch {}
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
     if (lrFailed) {
       try {
@@ -19064,24 +19035,16 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       });
     } catch {}
 
-    // AYMH (Continuar + Usar outro perfil): LR + humano. ZERO cookies/auto-login.
-    // Forense MAE1: reconcile via só setLoginRequiredFlag → conta presa sem humano.
+    // AYMH (Continuar + Usar outro perfil): cookie, depois Continuar, depois senha.
     if (rr.includes('aymh_continue') || rr === 'aymh') {
       try { await setLoginRequiredFlag(nome, { reason: 'aymh_continue', source: lr.domain || source }); } catch {}
       try { await clearIdentityFlags(nome); } catch {}
-      try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
-      try {
-        robeMeta[nome] = robeMeta[nome] || {};
-        const lastHum = Number(robeMeta[nome].lastAymhHumanInvokeAt || 0) || 0;
-        const alreadyHold = !!(ctrl && ctrl.humanControl === true);
-        const canInvoke = !alreadyHold && (!lastHum || (now - lastHum) > (30 * 60 * 1000));
-        if (canInvoke) {
-          robeMeta[nome].lastAymhHumanInvokeAt = now;
-          await enterHumanMode(nome, ctrl, { reason: `aymh_continue:reconcile:${String(source || '').slice(0, 40)}` });
-          try { provisionAudit.append({ ts: now, event: 'human_reconcile_aymh_enter_human', nome: String(nome||''), source: String(source||'') }); } catch {}
-        }
-      } catch {}
-      return { ok: true, state: 'aymh_continue_human', reason: rr };
+      const flagsNow = await readAccountFlags(nome).catch(() => ({}));
+      if (!(flagsNow && flagsNow.loginRemediateFailed === true)) {
+        try { queueAutoLoginRemediate(nome, { reason: 'aymh_continue', source: String(source || 'reconcile'), immediate: true, force: true }); } catch {}
+        try { provisionAudit.append({ ts: now, event: 'human_reconcile_aymh_schedule_login', nome: String(nome||''), source: String(source||'') }); } catch {}
+      }
+      return { ok: true, state: 'aymh_continue_login_scheduled', reason: rr };
     }
 
     if (rr.includes('identity_submitted')) {
