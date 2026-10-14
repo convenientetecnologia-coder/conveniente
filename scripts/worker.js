@@ -4691,8 +4691,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_aymh_schedule_login', nome: String(nome||''), source: String(source||'') }); } catch {}
             return { ok: true, state: 'aymh_continue_login_scheduled', reason: rr2 };
           }
-          // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
+          // login_form: entra na fila na hora. Não espera o vigilante de 5s.
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
+          if (rr2 === 'login_form' || rr2.includes('login_form')) {
+            try { queueAutoLoginRemediate(nome, { reason: 'login_form', source: String(source || 'bootstrap'), immediate: true, force: true }); } catch {}
+            try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_login_form_schedule_login', nome: String(nome || ''), source: String(source || '') }); } catch {}
+          }
           return { ok: true, state: 'login_required', reason: rr2 };
         }
       } catch {}
@@ -4793,8 +4797,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       return { ok: true, state: 'two_factor', reason: rr };
     }
 
-    // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
+    // login_form: entra na fila na hora. Não espera o vigilante de 5s.
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
+    if (rr === 'login_form' || rr.includes('login_form')) {
+      try { queueAutoLoginRemediate(nome, { reason: 'login_form', source: String(source || 'open'), immediate: true, force: true }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_login_form_schedule_login', nome: String(nome || ''), source: String(source || '') }); } catch {}
+    }
     return { ok: true, state: 'login_required', reason: rr };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
@@ -18135,10 +18143,12 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
     const last = Number(st.lastStartAt || 0) || 0;
     const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
     const prevNext = Number(st.nextAt || 0) || 0;
-    // Já está na fila e o horário já venceu: não empurra nextAt para frente.
-    // O detector reentra a cada ~5s; renovar nextAt=now+2.5s deixava a conta
-    // eternamente "quase pronta" e outra conta furava a fila.
-    const dueWaiting = st.queued === true && prevNext > 0 && prevNext <= now && !force && !immediate;
+    const delayMs = immediate ? AUTO_LR_CFG.immediateDelayMs : 2500;
+    // Já está na fila e o horário já venceu, ou vence no atraso curto desta chamada.
+    // O vigilante reentra a cada ~5s com immediate=true. Recalcular nextAt=now+1.2s
+    // deixava a conta eternamente "daqui a 1 segundo" e o tick, que roda no mesmo
+    // ritmo, nunca a via pronta. Foi o caso do Joaquim: fila desde 21:42 e cookie zero.
+    const dueWaiting = st.queued === true && prevNext > 0 && prevNext <= (now + delayMs) && !force;
     if (dueWaiting) {
       st.reason = String(reason || '').slice(0, 80);
       st.source = String(source || '').slice(0, 80);
@@ -18318,7 +18328,9 @@ async function autoLoginRemediateTick() {
       try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true)').catch(()=>{}); } catch {}
       continue;
     }
-    if (nextAt && nextAt > now) {
+    // nextAt = now+1.2s não é espera de verdade. Se o tick pegou a conta nesse
+    // intervalo, começa agora. Backoff de minutos continua valendo.
+    if (nextAt && nextAt > Date.now() + 1500) {
       continue;
     }
 
