@@ -1971,6 +1971,17 @@ async function generateRobeV2QueueBlock({ reason = 'scheduled' } = {}) {
   };
 }
 
+const ROBE_V2_REGEN_STALE_MS = 3 * 60 * 1000;
+
+function robeV2RegenClaimIsStale(state, now = Date.now()) {
+  if (!state || state.regenPending !== true) return false;
+  const id = String(state.regenInFlightId || '');
+  if (!id) return true;
+  const started = Number(id.split(':')[1] || 0) || 0;
+  if (!started) return true;
+  return (now - started) > ROBE_V2_REGEN_STALE_MS;
+}
+
 async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false } = {}) {
   if (!robeV2RegenPromise) {
     robeV2RegenPromise = (async () => {
@@ -1980,6 +1991,17 @@ async function scheduleRobeV2Regeneration({ reason = 'low_queue', wait = false }
           const now = Date.now();
           const backoffUntil = Number(state.failures && state.failures.backoffUntil || 0) || 0;
           if (backoffUntil > now) return state;
+          if (robeV2RegenClaimIsStale(state, now)) {
+            try {
+              logger.warn('[ROBE][v2] regenPending stale; retomando geracao', {
+                reason: String(reason || '').slice(0, 80),
+                regenInFlightId: String(state.regenInFlightId || '').slice(0, 80),
+                ageMs: now - (Number(String(state.regenInFlightId || '').split(':')[1] || 0) || now)
+              });
+            } catch {}
+            state.regenPending = false;
+            state.regenInFlightId = null;
+          }
           if (state.regenPending === true) return state;
           generationId = `${process.pid}:${now}:${Math.random().toString(16).slice(2, 8)}`;
           state.regenPending = true;
@@ -5266,7 +5288,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         });
       }
       const isChromeSick = (e && e.CHROME_SICK === true) || isChromeProtocolSickError(errMsg);
-      const pause = isMarketplaceRateLimit
+      const isQueueEmpty = errMsg.includes('robe_v2_queue_empty');
+      const pause = isQueueEmpty
+        ? 60 * 1000
+        : isMarketplaceRateLimit
         ? (2 + Math.floor(Math.random() * 4)) * 60 * 1000
         : isChromeSick
           ? (2 + Math.floor(Math.random() * 3)) * 60 * 1000
@@ -5277,7 +5302,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       });
       cooldownApplied = true;
       try {
-        const reason = isMarketplaceRateLimit
+        const reason = isQueueEmpty
+          ? 'fila_vazia_retry_curto'
+          : isMarketplaceRateLimit
           ? 'rate_limit_curto_retry'
           : (isChromeSick ? 'chrome_sick_settle' : 'erro_tecnico_config');
         await logIssue(nome, 'robe_error', `Erro técnico (${reason}); cooldown ${Math.ceil(pause/60000)}min: ${errMsg}`);
@@ -5388,5 +5415,6 @@ module.exports = {
   allocateWeightedCounts,
   buildRobeV4CityPlan,
   computeRobeV2Counts,
-  formatRobeQueueItemLabel
+  formatRobeQueueItemLabel,
+  robeV2RegenClaimIsStale
 };
