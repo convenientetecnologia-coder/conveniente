@@ -6,7 +6,7 @@ const MENU_A = "classificado";
 const MENU_B = "um classificado ao Facebook para";
 const MORE_LABEL = "Mais opções de item";
 const SELLER_HEADING = "Informações do vendedor";
-const CLASSIFICADO_LABEL = "Classificado";
+const CLASSIFICADO_LABEL = "Classificado incorreto";
 const CONCLUIR_LABEL = "Concluir";
 
 function textHasUnavailable(text) {
@@ -165,14 +165,14 @@ function menuProbe() {
 function classificadoProbe() {
   return Array.from(document.querySelectorAll("span")).filter((el) => {
     if (!el || el.childNodes.length !== 1 || !el.childNodes[0] || el.childNodes[0].nodeType !== 3) return false;
-    return String(el.textContent || "").trim() === "Classificado";
-  }).map(() => "Classificado");
+    return String(el.textContent || "").trim() === "Classificado incorreto";
+  }).map(() => "Classificado incorreto");
 }
 
 function clickClassificado() {
   const spans = Array.from(document.querySelectorAll("span")).filter((el) => {
     if (!el || el.childNodes.length !== 1 || !el.childNodes[0] || el.childNodes[0].nodeType !== 3) return false;
-    return String(el.textContent || "").trim() === "Classificado";
+    return String(el.textContent || "").trim() === "Classificado incorreto";
   });
   if (spans.length !== 1) return false;
   spans[0].click();
