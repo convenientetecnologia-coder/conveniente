@@ -24,8 +24,9 @@ const BUDGET_TOTAL_MS = 15 * 60 * 1000;
 const NAV_TIMEOUT_MS = 60000;
 const POLL_GAP_MS = 2000;
 const JUDGE_BUDGET_MS = 90000;
-const CONTROL_BUDGET_MS = 60000;
+const CONTROL_BUDGET_MS = 90000;
 const AFTER_CLICK_MS = 8000;
+const CLICK_SETTLE_MS = 2000;
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -57,6 +58,10 @@ async function waitPoll(deadlineAt, gapMs, read) {
 }
 
 function createPageActions(page) {
+  async function pause(ms, deadlineAt) {
+    const wait = Math.min(Number(ms) || 0, Math.max(0, deadlineAt - Date.now()));
+    if (wait > 0) await sleep(wait);
+  }
   return {
     async open(url, deadlineAt) {
       const timeout = Math.max(1000, Math.min(NAV_TIMEOUT_MS, deadlineAt - Date.now()));
@@ -75,10 +80,13 @@ function createPageActions(page) {
     },
     async denounce(deadlineAt) {
       const buttonDeadline = Math.min(deadlineAt, Date.now() + CONTROL_BUDGET_MS);
-      const buttonIndex = await waitPoll(buttonDeadline, POLL_GAP_MS, async () => {
+      const seenButton = await waitPoll(buttonDeadline, POLL_GAP_MS, async () => {
         const buttons = await page.evaluate(moreOptionsProbe);
         return pickMoreOptions(buttons);
       });
+      if (seenButton == null) return { ok: false, reason: "mais_opcoes_ausente" };
+      await pause(CLICK_SETTLE_MS, buttonDeadline);
+      const buttonIndex = pickMoreOptions(await page.evaluate(moreOptionsProbe));
       if (buttonIndex == null) return { ok: false, reason: "mais_opcoes_ausente" };
       const clickedButton = await page.evaluate((index) => {
         const buttons = Array.from(document.querySelectorAll('[role="button"][aria-label="Mais opções de item"]'));
@@ -90,38 +98,51 @@ function createPageActions(page) {
       }, buttonIndex);
       if (!clickedButton) return { ok: false, reason: "mais_opcoes_ausente" };
       const menuDeadline = Math.min(deadlineAt, Date.now() + CONTROL_BUDGET_MS);
-      const menuIndex = await waitPoll(menuDeadline, POLL_GAP_MS, async () => {
+      const seenMenu = await waitPoll(menuDeadline, POLL_GAP_MS, async () => {
         const texts = await page.evaluate(menuProbe);
         return pickMenuItem(texts);
       });
+      if (seenMenu == null) return { ok: false, reason: "menu_ausente" };
+      await pause(CLICK_SETTLE_MS, menuDeadline);
+      const menuIndex = pickMenuItem(await page.evaluate(menuProbe));
       if (menuIndex == null) return { ok: false, reason: "menu_ausente" };
       const clickedMenu = await page.evaluate((index) => {
         const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
         const item = items[index];
         if (!item) return false;
+        if (item.scrollIntoView) item.scrollIntoView({ block: "center", inline: "nearest" });
         item.click();
         return true;
       }, menuIndex);
       if (!clickedMenu) return { ok: false, reason: "menu_ausente" };
       const rowDeadline = Math.min(deadlineAt, Date.now() + CONTROL_BUDGET_MS);
-      const rowPick = await waitPoll(rowDeadline, POLL_GAP_MS, async () => {
-        const labels = await page.evaluate(classificadoProbe);
-        const picked = pickClassificado(labels);
-        if (picked && typeof picked === "object") return picked;
-        return picked;
-      });
-      if (rowPick == null || (rowPick && rowPick.ambiguous)) {
-        return { ok: false, reason: "classificado_ausente" };
+      let rowPick = null;
+      while (!rowPick && Date.now() < rowDeadline) {
+        const appeared = await waitPoll(rowDeadline, POLL_GAP_MS, async () => {
+          return pickClassificado(await page.evaluate(classificadoProbe));
+        });
+        if (!appeared) break;
+        if (appeared.ambiguous) return { ok: false, reason: "classificado_ausente" };
+        await pause(AFTER_CLICK_MS, rowDeadline);
+        const settled = pickClassificado(await page.evaluate(classificadoProbe));
+        if (settled && settled.ambiguous) return { ok: false, reason: "classificado_ausente" };
+        if (settled && settled.label) rowPick = settled;
       }
-      const clickedRow = await page.evaluate(clickClassificado);
+      if (!rowPick || !rowPick.label) return { ok: false, reason: "classificado_ausente" };
+      const clickedRow = await page.evaluate(clickClassificado, rowPick.label);
       if (!clickedRow) return { ok: false, reason: "classificado_ausente" };
       const finishDeadline = Math.min(deadlineAt, Date.now() + CONTROL_BUDGET_MS);
-      const finishPick = await waitPoll(finishDeadline, POLL_GAP_MS, async () => {
+      const seenFinish = await waitPoll(finishDeadline, POLL_GAP_MS, async () => {
         const buttons = await page.evaluate(concluirProbe);
         const picked = pickConcluir(buttons);
         if (picked && typeof picked === "object") return picked;
         return picked;
       });
+      if (seenFinish == null || (seenFinish && seenFinish.ambiguous)) {
+        return { ok: false, reason: "concluir_ausente" };
+      }
+      await pause(CLICK_SETTLE_MS, finishDeadline);
+      const finishPick = pickConcluir(await page.evaluate(concluirProbe));
       if (finishPick == null || (finishPick && finishPick.ambiguous)) {
         return { ok: false, reason: "concluir_ausente" };
       }
@@ -255,6 +276,7 @@ module.exports = {
   JUDGE_BUDGET_MS,
   CONTROL_BUDGET_MS,
   AFTER_CLICK_MS,
+  CLICK_SETTLE_MS,
   readContext,
   runAnuncio,
   runAuto,

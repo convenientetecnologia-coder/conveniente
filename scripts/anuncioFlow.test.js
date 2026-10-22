@@ -76,11 +76,15 @@ test("mais opções e o item do menu só clicam com um alvo", () => {
     "Denunciar classificado\num classificado ao Facebook para"
   ]), null);
   assert.equal(pickMenuItem(["Salvar"]), null);
-  assert.equal(pickClassificado(["Classificado incorreto"]), 0);
+  assert.deepEqual(pickClassificado(["Classificado incorreto"]), { label: "Classificado incorreto" });
+  assert.deepEqual(pickClassificado(["Sem intenção de venda"]), { label: "Sem intenção de venda" });
+  assert.deepEqual(pickClassificado(["Sem intenção de venda", "Classificado incorreto"]), { label: "Classificado incorreto" });
   assert.equal(pickClassificado(["Classificado"]), null);
   assert.equal(pickClassificado(["classificado incorreto"]), null);
+  assert.equal(pickClassificado(["Sem intencao de venda"]), null);
   assert.equal(pickClassificado(["um classificado ao Facebook para"]), null);
   assert.deepEqual(pickClassificado(["Classificado incorreto", "Classificado incorreto"]), { ambiguous: true });
+  assert.deepEqual(pickClassificado(["Sem intenção de venda", "Sem intenção de venda"]), { ambiguous: true });
   assert.equal(pickConcluir([{ aria: "Concluir", text: "Concluir" }]), 0);
   assert.equal(pickConcluir([{ aria: "Concluir", text: "" }]), null);
   assert.equal(pickConcluir([{ aria: "Concluir", text: "concluir" }]), null);

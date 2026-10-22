@@ -7,6 +7,7 @@ const MENU_B = "um classificado ao Facebook para";
 const MORE_LABEL = "Mais opções de item";
 const SELLER_HEADING = "Informações do vendedor";
 const CLASSIFICADO_LABEL = "Classificado incorreto";
+const SEM_VENDA_LABEL = "Sem intenção de venda";
 const CONCLUIR_LABEL = "Concluir";
 
 function textHasUnavailable(text) {
@@ -61,12 +62,13 @@ function pickMenuItem(texts) {
 }
 
 function pickClassificado(labels) {
-  const hits = [];
-  (Array.isArray(labels) ? labels : []).forEach((text, index) => {
-    if (String(text || "").trim() === CLASSIFICADO_LABEL) hits.push(index);
-  });
-  if (hits.length === 1) return hits[0];
-  if (hits.length > 1) return { ambiguous: true };
+  const list = Array.isArray(labels) ? labels : [];
+  const count = (label) => list.filter((text) => String(text || "").trim() === label).length;
+  const incorreto = count(CLASSIFICADO_LABEL);
+  const semVenda = count(SEM_VENDA_LABEL);
+  if (incorreto > 1 || semVenda > 1) return { ambiguous: true };
+  if (incorreto === 1) return { label: CLASSIFICADO_LABEL };
+  if (semVenda === 1) return { label: SEM_VENDA_LABEL };
   return null;
 }
 
@@ -163,18 +165,25 @@ function menuProbe() {
 }
 
 function classificadoProbe() {
+  const wanted = {
+    "Classificado incorreto": true,
+    "Sem intenção de venda": true
+  };
   return Array.from(document.querySelectorAll("span")).filter((el) => {
     if (!el || el.childNodes.length !== 1 || !el.childNodes[0] || el.childNodes[0].nodeType !== 3) return false;
-    return String(el.textContent || "").trim() === "Classificado incorreto";
-  }).map(() => "Classificado incorreto");
+    return wanted[String(el.textContent || "").trim()] === true;
+  }).map((el) => String(el.textContent || "").trim());
 }
 
-function clickClassificado() {
+function clickClassificado(label) {
+  const wanted = String(label || "");
+  if (wanted !== "Classificado incorreto" && wanted !== "Sem intenção de venda") return false;
   const spans = Array.from(document.querySelectorAll("span")).filter((el) => {
     if (!el || el.childNodes.length !== 1 || !el.childNodes[0] || el.childNodes[0].nodeType !== 3) return false;
-    return String(el.textContent || "").trim() === "Classificado incorreto";
+    return String(el.textContent || "").trim() === wanted;
   });
   if (spans.length !== 1) return false;
+  if (spans[0].scrollIntoView) spans[0].scrollIntoView({ block: "center", inline: "nearest" });
   spans[0].click();
   return true;
 }
@@ -197,6 +206,7 @@ function clickConcluir() {
     });
   });
   if (buttons.length !== 1) return false;
+  if (buttons[0].scrollIntoView) buttons[0].scrollIntoView({ block: "center", inline: "nearest" });
   buttons[0].click();
   return true;
 }
@@ -216,6 +226,7 @@ module.exports = {
   pickClassificado,
   pickConcluir,
   CLASSIFICADO_LABEL,
+  SEM_VENDA_LABEL,
   CONCLUIR_LABEL,
   listingProbe,
   moreOptionsProbe,
