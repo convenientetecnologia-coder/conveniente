@@ -84,6 +84,7 @@ function createPageActions(page) {
         const buttons = Array.from(document.querySelectorAll('[role="button"][aria-label="Mais opções de item"]'));
         const button = buttons[index];
         if (!button) return false;
+        if (button.scrollIntoView) button.scrollIntoView({ block: "center", inline: "nearest" });
         button.click();
         return true;
       }, buttonIndex);

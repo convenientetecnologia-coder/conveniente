@@ -9,7 +9,9 @@ const {
   pickMoreOptions,
   pickMenuItem,
   pickClassificado,
-  pickConcluir
+  pickConcluir,
+  listingProbe,
+  moreOptionsProbe
 } = require("./anuncioSignals");
 const { runAnuncio } = require("./anuncioFlow");
 
@@ -35,9 +37,23 @@ test("nome do vendedor só entra se aria e texto visível forem iguais", () => {
     sellerVisible: "Andressa"
   }).kind, "conflict");
   assert.equal(nomeEhNosso("Andressa Oliveira", ["Andressa Oliveira"]), true);
-  assert.equal(nomeEhNosso("Andressa oliveira", ["Andressa Oliveira"]), false);
+  assert.equal(nomeEhNosso("Andressa oliveira", ["Andressa Oliveira"]), true);
   assert.equal(nomeEhNosso("Andressa", ["Andressa Oliveira"]), false);
   assert.equal(nomeEhNosso("Andressa Oliveira", []), false);
+});
+
+test("nosso exige as mesmas palavras e ignora acento e maiúscula", () => {
+  assert.equal(nomeEhNosso("jose aldo", ["José Aldo"]), true);
+  assert.equal(nomeEhNosso("JOSÉ ALDO", ["jose aldo"]), true);
+  assert.equal(nomeEhNosso("José  dos Santos Aldo", ["jose dos santos aldo"]), true);
+  assert.equal(nomeEhNosso("Conceicao", ["Conceição"]), true);
+  assert.equal(nomeEhNosso("Jose Aldo", ["Jose dos Santos Aldo"]), false);
+  assert.equal(nomeEhNosso("Jose dos Santos Aldo", ["Jose Aldo"]), false);
+  assert.equal(nomeEhNosso("Jose Santos Aldo", ["Jose Aldo"]), false);
+  assert.equal(nomeEhNosso("Jose Aldo", ["Jose Aldo dos Santos"]), false);
+  assert.equal(nomeEhNosso("Jose Silva", ["Jose da Silva"]), false);
+  assert.equal(nomeEhNosso("Maria Luisa", ["Maria Jose Luisa"]), false);
+  assert.equal(nomeEhNosso("Aldo Jose", ["Jose Aldo"]), false);
 });
 
 test("mais opções e o item do menu só clicam com um alvo", () => {
@@ -49,6 +65,10 @@ test("mais opções e o item do menu só clicam com um alvo", () => {
   assert.equal(pickMoreOptions([
     { aria: "Mais opções de item", nearSend: true },
     { aria: "Mais opções de item", nearSend: true }
+  ]), 0);
+  assert.equal(pickMoreOptions([
+    { aria: "Mais opções de item", nearSend: false },
+    { aria: "Mais opções de item", nearSend: false }
   ]), null);
   assert.equal(pickMenuItem(["Enviar mensagem", "classificado\num classificado ao Facebook para"]), 1);
   assert.equal(pickMenuItem([
@@ -164,6 +184,164 @@ test("config não não roda no automático e o humano roda", async () => {
     }
   });
   assert.equal(quebrado.reason, "click_failed");
+});
+
+function textNode(value) {
+  return { nodeType: 3, textContent: value, childNodes: [] };
+}
+
+function matchEl(el, sel) {
+  const attrs = el.attrs || {};
+  if (sel === "span") return el.tag === "span";
+  if (sel === 'a[href*="/marketplace/profile/"]') {
+    return el.tag === "a" && String(attrs.href || "").includes("/marketplace/profile/");
+  }
+  if (sel === '[role="button"][aria-label="Enviar mensagem"]') {
+    return attrs.role === "button" && attrs["aria-label"] === "Enviar mensagem";
+  }
+  if (sel === '[role="button"][aria-label="Mais opções de item"]') {
+    return attrs.role === "button" && attrs["aria-label"] === "Mais opções de item";
+  }
+  return false;
+}
+
+function el(tag, attrs, kids) {
+  const node = {
+    nodeType: 1,
+    tag,
+    attrs: attrs || {},
+    childNodes: [],
+    parentElement: null,
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null;
+    },
+    get textContent() {
+      return this.childNodes.map((child) => child.textContent || "").join("");
+    },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = (current) => {
+        current.childNodes.forEach((child) => {
+          if (child.nodeType !== 1) return;
+          if (matchEl(child, sel)) out.push(child);
+          walk(child);
+        });
+      };
+      walk(this);
+      return out;
+    },
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] || null;
+    },
+    contains(other) {
+      let current = other;
+      while (current) {
+        if (current === this) return true;
+        current = current.parentElement;
+      }
+      return false;
+    }
+  };
+  (kids || []).forEach((kid) => {
+    kid.parentElement = node;
+    node.childNodes.push(kid);
+  });
+  return node;
+}
+
+function nest(depth, leaf) {
+  let box = leaf;
+  for (let i = 0; i < depth; i += 1) box = el("div", {}, [box]);
+  return box;
+}
+
+function installDocument(body) {
+  const previous = global.document;
+  global.document = {
+    body,
+    querySelectorAll(sel) {
+      if (sel === "body *") {
+        const out = [];
+        const walk = (current) => {
+          current.childNodes.forEach((child) => {
+            if (child.nodeType !== 1) return;
+            out.push(child);
+            walk(child);
+          });
+        };
+        walk(body);
+        return out;
+      }
+      return body.querySelectorAll(sel);
+    }
+  };
+  return previous;
+}
+
+test("janela estreita ainda lê o vendedor e o botão repetido", () => {
+  const heading = el("div", {}, [textNode("Informações do vendedor")]);
+  const sellerCard = el("section", {}, [
+    nest(14, el("div", {}, [
+      heading,
+      el("a", { href: "/marketplace/profile/100003565261522/?product_id=1473569581566483" }, [
+        el("span", {}, [textNode("Detalhes do vendedor")])
+      ])
+    ])),
+    el("a", {
+      href: "/marketplace/profile/100003565261522/?product_id=1473569581566483&__tn__=%3C",
+      "aria-label": "Marcos Augusto"
+    }, [el("svg", {}, [])]),
+    el("a", { href: "/marketplace/profile/100003565261522/?product_id=1473569581566483" }, [
+      el("span", {}, [el("span", {}, [textNode("Marcos Augusto")])])
+    ])
+  ]);
+  function actionBar() {
+    const button = el("div", { role: "button", "aria-label": "Mais opções de item" }, [
+      el("i", {}, [])
+    ]);
+    return el("div", {}, [
+      el("div", { role: "button", "aria-label": "Enviar mensagem" }, []),
+      nest(8, button)
+    ]);
+  }
+  const body = el("body", {}, [
+    sellerCard,
+    el("a", { href: "/marketplace/profile/999/?product_id=1", "aria-label": "Outra Pessoa" }, [
+      el("span", {}, [textNode("Outra Pessoa")])
+    ]),
+    el("div", { role: "button", "aria-label": "Abrir o menu" }, []),
+    actionBar(),
+    actionBar()
+  ]);
+  body.innerText = "Informações do vendedor Marcos Augusto";
+  const previous = installDocument(body);
+  try {
+    const raw = listingProbe();
+    assert.equal(raw.hasHeading, true);
+    assert.deepEqual(judgeListing(raw), { kind: "seller", name: "Marcos Augusto" });
+    const picked = pickMoreOptions(moreOptionsProbe());
+    assert.equal(picked, 0);
+  } finally {
+    global.document = previous;
+  }
+});
+
+test("dois perfis no mesmo bloco não viram vendedor", () => {
+  const heading = el("div", {}, [textNode("Informações do vendedor")]);
+  const body = el("body", {}, [
+    el("section", {}, [
+      heading,
+      el("a", { href: "/marketplace/profile/100003565261522/", "aria-label": "Marcos Augusto" }, []),
+      el("a", { href: "/marketplace/profile/222/", "aria-label": "Outra Pessoa" }, [])
+    ])
+  ]);
+  body.innerText = "";
+  const previous = installDocument(body);
+  try {
+    assert.equal(judgeListing(listingProbe()).kind, "conflict");
+  } finally {
+    global.document = previous;
+  }
 });
 
 test("ct sem resposta antes do link nao marca o fluxo como começado", async () => {

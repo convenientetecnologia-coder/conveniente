@@ -24,10 +24,20 @@ function judgeListing({ text, sellerAria, sellerVisible, hasHeading } = {}) {
   return { kind: "waiting" };
 }
 
+function nameTokens(value) {
+  return String(value || "").trim().split(/\s+/).filter(Boolean).map((token) => {
+    return token.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  });
+}
+
 function nomeEhNosso(sellerName, nomes) {
-  const name = String(sellerName || "").trim();
-  if (!name || !Array.isArray(nomes) || !nomes.length) return false;
-  return nomes.some((item) => String(item || "").trim() === name);
+  const seller = nameTokens(sellerName);
+  if (!seller.length || !Array.isArray(nomes) || !nomes.length) return false;
+  return nomes.some((item) => {
+    const listed = nameTokens(item);
+    if (listed.length !== seller.length) return false;
+    return seller.every((token, index) => token === listed[index]);
+  });
 }
 
 function pickMoreOptions(buttons) {
@@ -37,7 +47,7 @@ function pickMoreOptions(buttons) {
     .filter((row) => String(row.button && row.button.aria || "") === MORE_LABEL);
   if (exact.length === 1) return exact[0].index;
   const near = exact.filter((row) => row.button && row.button.nearSend === true);
-  if (near.length === 1) return near[0].index;
+  if (near.length >= 1) return near[0].index;
   return null;
 }
 
@@ -73,23 +83,55 @@ function pickConcluir(buttons) {
 }
 
 function listingProbe() {
+  const HEADING = "Informações do vendedor";
+  const IGNORE = {
+    "Detalhes do vendedor": true,
+    "Informações do vendedor": true,
+    "Enviar mensagem": true,
+    "Enviar": true,
+    "Salvar": true,
+    "Compartilhar": true,
+    "Mais opções de item": true
+  };
   const body = document.body;
   const text = body ? String(body.innerText || "") : "";
   const nodes = Array.from(document.querySelectorAll("body *"));
   const heading = nodes.find((el) => {
     if (!el || el.childNodes.length !== 1 || !el.childNodes[0] || el.childNodes[0].nodeType !== 3) return false;
-    return String(el.textContent || "").trim() === "Informações do vendedor";
+    return String(el.textContent || "").trim() === HEADING;
   });
   let sellerAria = "";
   let sellerVisible = "";
+  function personNames(box) {
+    const links = Array.from(box.querySelectorAll('a[href*="/marketplace/profile/"]'));
+    const ids = [];
+    const names = [];
+    links.forEach((link) => {
+      const href = String(link.getAttribute("href") || "");
+      const match = href.match(/\/marketplace\/profile\/(\d+)/);
+      if (match && ids.indexOf(match[1]) === -1) ids.push(match[1]);
+      const aria = String(link.getAttribute("aria-label") || "").trim();
+      if (aria && !IGNORE[aria] && names.indexOf(aria) === -1) names.push(aria);
+      Array.from(link.querySelectorAll("span")).forEach((span) => {
+        if (!span || span.childNodes.length !== 1 || !span.childNodes[0] || span.childNodes[0].nodeType !== 3) return;
+        const value = String(span.textContent || "").trim();
+        if (value && !IGNORE[value] && names.indexOf(value) === -1) names.push(value);
+      });
+    });
+    return { ids, names };
+  }
   if (heading) {
     let box = heading;
-    for (let depth = 0; depth < 8 && box; depth += 1) {
-      const link = box.querySelector && box.querySelector('a[href*="/marketplace/profile/"]');
-      if (link) {
-        sellerAria = String(link.getAttribute("aria-label") || "").trim();
-        const span = link.querySelector("span");
-        sellerVisible = span ? String(span.textContent || "").trim() : "";
+    for (let depth = 0; depth < 25 && box; depth += 1) {
+      const read = personNames(box);
+      if (read.ids.length > 1 || (read.ids.length === 1 && read.names.length > 1)) {
+        sellerAria = read.names[0] || "conflito";
+        sellerVisible = read.names[1] || "nomes";
+        break;
+      }
+      if (read.ids.length === 1 && read.names.length === 1) {
+        sellerAria = read.names[0];
+        sellerVisible = read.names[0];
         break;
       }
       box = box.parentElement;
@@ -108,7 +150,7 @@ function moreOptionsProbe() {
   return Array.from(document.querySelectorAll('[role="button"][aria-label="Mais opções de item"]')).map((button) => {
     let box = button;
     let nearSend = false;
-    for (let depth = 0; depth < 6 && box && !nearSend; depth += 1) {
+    for (let depth = 0; depth < 12 && box && !nearSend; depth += 1) {
       nearSend = send.some((item) => box.contains(item));
       box = box.parentElement;
     }
