@@ -102,11 +102,11 @@ const ANUNCIO_FLOW_ERRORS = new Set([
 
 const ANUNCIO_ERROR_TEXT = {
   nomes_vazios: 'Lista de nomes veio vazia',
-  nav_failed: 'A pagina do anuncio nao abriu',
-  click_failed: 'O clique do anuncio nao concluiu',
-  pagina_inconclusiva: 'A pagina do anuncio nao fechou',
-  erro: 'O tempo do anuncio acabou antes de concluir',
-  ct_falhou: 'O CT nao confirmou o resultado do anuncio'
+  nav_failed: 'A pagina do denuncio nao abriu',
+  click_failed: 'O clique do denuncio nao concluiu',
+  pagina_inconclusiva: 'A pagina do denuncio nao fechou',
+  erro: 'O tempo do denuncio acabou antes de concluir',
+  ct_falhou: 'O CT nao confirmou o resultado do denuncio'
 };
 
 function shouldMarkAnuncioError(result) {

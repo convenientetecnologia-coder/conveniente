@@ -1562,12 +1562,12 @@
             <div class="muted" style="margin-top:6px;">Independente do fechar/abrir. Se Ativado: ao salvar, cada conta recebe 1 horário aleatório na janela e 1 quantidade de dias de scroll. Depois da postagem Robe (após o ID), se o horário já passou e ainda está Renovou - nao, renova e marca Renovou - sim. A janela pode atravessar a madrugada. Meia-noite (SP) zera o dia automaticamente. Se Desativado: não renova automaticamente e não mostra pills no card; o botão manual continua liberado para teste humano.</div>
           </div>
           <div class="form-row">
-            <label>Anúncio</label>
+            <label>Denuncio</label>
             <select id="srvAnuncioEnabled">
               <option value="0">Não</option>
               <option value="1">Sim</option>
             </select>
-            <div class="muted" style="margin-top:6px;">Depois da postagem Robe, depois do ID e da renovação, a conta pede um classificado ao CT e abre na mesma aba. Não marca a conta. O botão Anúncio do humano invocado roda mesmo com Não.</div>
+            <div class="muted" style="margin-top:6px;">Depois da postagem Robe, depois do ID e da renovação, a conta pede um classificado ao CT e abre na mesma aba. Não marca a conta. O botão Denuncio do humano invocado roda mesmo com Não.</div>
           </div>
         </div>
 
@@ -3438,8 +3438,8 @@
           titleRow.append(pill);
         }
         if (p.anuncioError === true) {
-          const pill = buildPill('Anúncio erro', 'bad');
-          pill.title = p.anuncioErrorText || 'O anuncio começou e nao concluiu';
+          const pill = buildPill('Denuncio erro', 'bad');
+          pill.title = p.anuncioErrorText || 'O denuncio começou e nao concluiu';
           titleRow.append(pill);
         }
 

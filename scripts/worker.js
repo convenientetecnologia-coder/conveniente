@@ -3227,7 +3227,7 @@ async function _installOverlayOnPage(nome, page) {
                     <button id="renewListings" title="Gerenciar classificados → scroll → selecionar → renovar (não fecha o navegador)">Renovar classificado</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
                     <button id="verifyId" title="Envia documento na 1ª ação necessária (não marca ID-sim do dia)">Verificar ID</button>
-                    <button id="anuncio" title="Pede um classificado ao CT. Se o vendedor não for nosso, conclui e avisa o CT. Não marca a conta.">Anúncio</button>
+                    <button id="anuncio" title="Pede um classificado ao CT. Se o vendedor não for nosso, denuncia e avisa o CT. Não marca a conta.">Denuncio</button>
                     <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
                     <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
                     <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluídas)">Excluir conta</button>
@@ -3927,27 +3927,27 @@ async function _installOverlayOnPage(nome, page) {
                 try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'anuncio_click' }); } catch {}
                 try {
                   window.__ctHumanOverlayHintSticky = {
-                    text: 'Anúncio em andamento. A página pode demorar.',
+                    text: 'Denuncio em andamento. A página pode demorar.',
                     until: Date.now() + 900000
                   };
                 } catch {}
-                try { $('hint').textContent = 'Anúncio em andamento. A página pode demorar.'; } catch {}
+                try { $('hint').textContent = 'Denuncio em andamento. A página pode demorar.'; } catch {}
                 try { btn.disabled = true; } catch {}
                 try {
                   if (typeof window.__ctHumanOverlayAnuncio === 'function') {
                     const r = await window.__ctHumanOverlayAnuncio();
                     const msg = (r && r.reason === 'concluido')
-                      ? 'Anúncio concluído. A conta não foi marcada.'
+                      ? 'Denuncio feito. A conta não foi marcada.'
                       : ((r && r.ok)
-                        ? ('Anúncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
-                        : ('Falha Anúncio: ' + String((r && r.error) ? r.error : 'unknown')));
+                        ? ('Denuncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
+                        : ('Falha Denuncio: ' + String((r && r.error) ? r.error : 'unknown')));
                     try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
                     try { $('hint').textContent = msg; } catch {}
                   } else {
-                    try { $('hint').textContent = 'Falha: binding Anúncio indisponível. Aguarde resincronização.'; } catch {}
+                    try { $('hint').textContent = 'Falha: binding Denuncio indisponível. Aguarde resincronização.'; } catch {}
                   }
                 } catch (e) {
-                  try { $('hint').textContent = 'Falha ao executar Anúncio.'; } catch {}
+                  try { $('hint').textContent = 'Falha ao executar Denuncio.'; } catch {}
                 }
                 try { btn.disabled = false; } catch {}
               });
@@ -4018,8 +4018,8 @@ async function _installOverlayOnPage(nome, page) {
                 if (!btns) return;
                 b = document.createElement('button');
                 b.id = 'anuncio';
-                b.textContent = 'Anúncio';
-                b.title = 'Pede um classificado ao CT. Se o vendedor não for nosso, conclui e avisa o CT. Não marca a conta.';
+                b.textContent = 'Denuncio';
+                b.title = 'Pede um classificado ao CT. Se o vendedor não for nosso, denuncia e avisa o CT. Não marca a conta.';
                 const robe24 = shadow.getElementById('robe24h');
                 if (robe24 && robe24.parentNode === btns) btns.insertBefore(b, robe24);
                 else btns.appendChild(b);
@@ -4030,27 +4030,27 @@ async function _installOverlayOnPage(nome, page) {
                 try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'anuncio_click' }); } catch {}
                 try {
                   window.__ctHumanOverlayHintSticky = {
-                    text: 'Anúncio em andamento. A página pode demorar.',
+                    text: 'Denuncio em andamento. A página pode demorar.',
                     until: Date.now() + 900000
                   };
                 } catch {}
-                try { shadow.getElementById('hint').textContent = 'Anúncio em andamento. A página pode demorar.'; } catch {}
+                try { shadow.getElementById('hint').textContent = 'Denuncio em andamento. A página pode demorar.'; } catch {}
                 try { b.disabled = true; } catch {}
                 try {
                   if (typeof window.__ctHumanOverlayAnuncio === 'function') {
                     const r = await window.__ctHumanOverlayAnuncio();
                     const msg = (r && r.reason === 'concluido')
-                      ? 'Anúncio concluído. A conta não foi marcada.'
+                      ? 'Denuncio feito. A conta não foi marcada.'
                       : ((r && r.ok)
-                        ? ('Anúncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
-                        : ('Falha Anúncio: ' + String((r && r.error) ? r.error : 'unknown')));
+                        ? ('Denuncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
+                        : ('Falha Denuncio: ' + String((r && r.error) ? r.error : 'unknown')));
                     try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
                     try { shadow.getElementById('hint').textContent = msg; } catch {}
                   } else {
-                    try { shadow.getElementById('hint').textContent = 'Falha: binding Anúncio indisponível.'; } catch {}
+                    try { shadow.getElementById('hint').textContent = 'Falha: binding Denuncio indisponível.'; } catch {}
                   }
                 } catch {
-                  try { shadow.getElementById('hint').textContent = 'Falha ao executar Anúncio.'; } catch {}
+                  try { shadow.getElementById('hint').textContent = 'Falha ao executar Denuncio.'; } catch {}
                 }
                 try { b.disabled = false; } catch {}
               });
