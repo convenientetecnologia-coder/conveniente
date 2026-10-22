@@ -222,6 +222,7 @@ const {
 } = require('./robeTabHygiene.js');
 const facebookNavHosts = require('./facebookNavHosts.js');
 const robePostPublishId = require('./robePostPublishId.js');
+const anuncioFlow = require('./anuncioFlow.js');
 const flowAlertFlags = require('./flowAlertFlags.js');
 const marketplaceRenewListings = require('./marketplaceRenewListings.js');
 const marketplaceRenewPlan = require('./marketplaceRenewPlan.js');
@@ -3067,6 +3068,33 @@ async function _installOverlayOnPage(nome, page) {
       });
     } catch {}
 
+    try {
+      await page.exposeFunction('__ctHumanOverlayAnuncio', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'anuncio' }); } catch {}
+        try {
+          const r = await handlers['anuncio-run']({ nome });
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'human_overlay_action_done',
+              nome: String(nome || ''),
+              action: 'anuncio',
+              ok: !!(r && r.ok),
+              error: r && r.error ? String(r.error).slice(0, 180) : null,
+              reason: r && r.reason ? String(r.reason).slice(0, 80) : null,
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+          return r && typeof r === 'object' ? r : { ok: false, error: 'anuncio_failed' };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'anuncio', ok: false, error: msg.slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: msg };
+        }
+      });
+    } catch {}
+
     // Renovar classificados — motor Node completo (Gerenciar → Renovar), sem fechar browser.
     try {
       await page.exposeFunction('__ctHumanOverlayRenewListings', async () => {
@@ -3199,6 +3227,7 @@ async function _installOverlayOnPage(nome, page) {
                     <button id="renewListings" title="Gerenciar classificados → scroll → selecionar → renovar (não fecha o navegador)">Renovar classificado</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
                     <button id="verifyId" title="Envia documento na 1ª ação necessária (não marca ID-sim do dia)">Verificar ID</button>
+                    <button id="anuncio" title="Pede um classificado ao CT. Se o vendedor não for nosso, conclui e avisa o CT. Não marca a conta.">Anúncio</button>
                     <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
                     <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
                     <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluídas)">Excluir conta</button>
@@ -3891,6 +3920,39 @@ async function _installOverlayOnPage(nome, page) {
               });
             };
             bindVerifyId($('verifyId'));
+            const bindAnuncio = (btn) => {
+              if (!btn || btn.dataset.bound === '1') return;
+              btn.dataset.bound = '1';
+              btn.addEventListener('click', async () => {
+                try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'anuncio_click' }); } catch {}
+                try {
+                  window.__ctHumanOverlayHintSticky = {
+                    text: 'Anúncio em andamento. A página pode demorar.',
+                    until: Date.now() + 900000
+                  };
+                } catch {}
+                try { $('hint').textContent = 'Anúncio em andamento. A página pode demorar.'; } catch {}
+                try { btn.disabled = true; } catch {}
+                try {
+                  if (typeof window.__ctHumanOverlayAnuncio === 'function') {
+                    const r = await window.__ctHumanOverlayAnuncio();
+                    const msg = (r && r.reason === 'concluido')
+                      ? 'Anúncio concluído. A conta não foi marcada.'
+                      : ((r && r.ok)
+                        ? ('Anúncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
+                        : ('Falha Anúncio: ' + String((r && r.error) ? r.error : 'unknown')));
+                    try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
+                    try { $('hint').textContent = msg; } catch {}
+                  } else {
+                    try { $('hint').textContent = 'Falha: binding Anúncio indisponível. Aguarde resincronização.'; } catch {}
+                  }
+                } catch (e) {
+                  try { $('hint').textContent = 'Falha ao executar Anúncio.'; } catch {}
+                }
+                try { btn.disabled = false; } catch {}
+              });
+            };
+            bindAnuncio($('anuncio'));
 
             return host;
           }
@@ -3947,6 +4009,54 @@ async function _installOverlayOnPage(nome, page) {
             } catch {}
           }
 
+          function ensureAnuncioButton(shadow) {
+            try {
+              if (!shadow) return;
+              let b = shadow.getElementById('anuncio');
+              if (!b) {
+                const btns = shadow.querySelector('.btns');
+                if (!btns) return;
+                b = document.createElement('button');
+                b.id = 'anuncio';
+                b.textContent = 'Anúncio';
+                b.title = 'Pede um classificado ao CT. Se o vendedor não for nosso, conclui e avisa o CT. Não marca a conta.';
+                const robe24 = shadow.getElementById('robe24h');
+                if (robe24 && robe24.parentNode === btns) btns.insertBefore(b, robe24);
+                else btns.appendChild(b);
+              }
+              if (b.dataset.bound === '1') return;
+              b.dataset.bound = '1';
+              b.addEventListener('click', async () => {
+                try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'anuncio_click' }); } catch {}
+                try {
+                  window.__ctHumanOverlayHintSticky = {
+                    text: 'Anúncio em andamento. A página pode demorar.',
+                    until: Date.now() + 900000
+                  };
+                } catch {}
+                try { shadow.getElementById('hint').textContent = 'Anúncio em andamento. A página pode demorar.'; } catch {}
+                try { b.disabled = true; } catch {}
+                try {
+                  if (typeof window.__ctHumanOverlayAnuncio === 'function') {
+                    const r = await window.__ctHumanOverlayAnuncio();
+                    const msg = (r && r.reason === 'concluido')
+                      ? 'Anúncio concluído. A conta não foi marcada.'
+                      : ((r && r.ok)
+                        ? ('Anúncio encerrado: ' + String(r.reason || 'ok') + '. A conta não foi marcada.')
+                        : ('Falha Anúncio: ' + String((r && r.error) ? r.error : 'unknown')));
+                    try { window.__ctHumanOverlayHintSticky = { text: msg, until: Date.now() + 60000 }; } catch {}
+                    try { shadow.getElementById('hint').textContent = msg; } catch {}
+                  } else {
+                    try { shadow.getElementById('hint').textContent = 'Falha: binding Anúncio indisponível.'; } catch {}
+                  }
+                } catch {
+                  try { shadow.getElementById('hint').textContent = 'Falha ao executar Anúncio.'; } catch {}
+                }
+                try { b.disabled = false; } catch {}
+              });
+            } catch {}
+          }
+
           function render() {
             const d = window.__ctHumanOverlayData || null;
             const enabled = !!(d && d.enabled === true);
@@ -3961,6 +4071,7 @@ async function _installOverlayOnPage(nome, page) {
             if (!shadow) return;
             const $ = (id) => shadow.getElementById(id);
             try { ensureVerifyIdButton(shadow); } catch {}
+            try { ensureAnuncioButton(shadow); } catch {}
             const nome = [d.nome, d.label ? `— ${d.label}` : '', d.cidade ? `(${d.cidade})` : ''].filter(Boolean).join(' ');
             $('nome').textContent = nome;
             $('reason').textContent = String(d.reason || '');
@@ -14908,6 +15019,44 @@ const handlers = {
     });
   },
 
+  async ['anuncio-run']({ nome }) {
+    return lockProfileAction(nome, async () => {
+      const n = String(nome || '').trim();
+      if (!n) return { ok: false, error: 'nome_ausente' };
+      const ctrl = controllers.get(n);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        return { ok: false, error: 'browser_not_connected' };
+      }
+      if (robeMeta[n] && robeMeta[n].emExecucao) {
+        return { ok: false, error: 'robe_em_execucao' };
+      }
+      let page = null;
+      try {
+        page = ctrl.mainPage || null;
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+          const pages = await ctrl.browser.pages().catch(() => []);
+          page = (pages && pages[0]) || null;
+        }
+      } catch {
+        page = null;
+      }
+      if (!page) return { ok: false, error: 'no_page' };
+      try {
+        const r = await anuncioFlow.runHuman({
+          page,
+          nome: n,
+          deadlineAt: Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000))
+        });
+        try { await flowAlertFlags.settleAnuncioError(n, r); } catch {}
+        return r;
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        try { await flowAlertFlags.setAnuncioError(n, { reason: 'anuncio_error', text: msg.slice(0, 400) }); } catch {}
+        return { ok: false, error: msg };
+      }
+    });
+  },
+
   async invoke_human({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
@@ -16650,7 +16799,7 @@ const flowAlerts = flowAlertFlags.flagsForToday(man && man.accountFlags);
 if (phoneAlerts.staleError || phoneAlerts.staleNoBalance || phoneAlerts.staleDocError) {
   await robePostPublishId.clearStaleMarketplacePhoneFlags(nome);
 }
-if (flowAlerts.staleRobePostError || flowAlerts.staleRenewError) {
+if (flowAlerts.staleRobePostError || flowAlerts.staleRenewError || flowAlerts.staleAnuncioError) {
   await flowAlertFlags.clearStaleFlowAlertFlags(nome);
 }
 const marketplacePhoneError = phoneAlerts.marketplacePhoneError;
@@ -16673,6 +16822,10 @@ const renewError = flowAlerts.renewError;
 const renewErrorAt = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorAt) || null) : null;
 const renewErrorReason = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorReason) || null) : null;
 const renewErrorText = renewError && man ? ((man.accountFlags && man.accountFlags.renewErrorText) || null) : null;
+const anuncioError = flowAlerts.anuncioError;
+const anuncioErrorAt = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorAt) || null) : null;
+const anuncioErrorReason = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorReason) || null) : null;
+const anuncioErrorText = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorText) || null) : null;
 const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
 const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
 const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
@@ -16743,6 +16896,7 @@ const problem = man
     marketplaceDocError === true ||
     robePostError === true ||
     renewError === true ||
+    anuncioError === true ||
     (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||
@@ -16895,6 +17049,10 @@ perfis.push({
   renewErrorAt,
   renewErrorReason,
   renewErrorText,
+  anuncioError,
+  anuncioErrorAt,
+  anuncioErrorReason,
+  anuncioErrorText,
   marketplacePhoneConfirm,
   marketplacePhoneConfirmAt,
   marketplacePhoneConfirmReason,

@@ -42,6 +42,7 @@ const connectLane = require('./connectLane.js');
 const serverConfig = require('./serverConfig.js');
 const robePostPublishId = require('./robePostPublishId.js');
 const robePostPublishRenew = require('./robePostPublishRenew.js');
+const anuncioFlow = require('./anuncioFlow.js');
 const {
   safeClosePage,
   sweepAboutBlankPages,
@@ -2697,9 +2698,41 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           });
         } catch {}
       }
+      if (postPublishIdResult && postPublishIdResult.marketplacePhoneConfirm === true) {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'marketplace_phone_confirm' });
+      } else {
+        try {
+          const anuncioRes = await anuncioFlow.runAuto({
+            page,
+            nome,
+            deadlineAt: Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000))
+          });
+          try { await flowAlertFlags.settleAnuncioError(nome, anuncioRes); } catch {}
+          stepLog.appendJSONL(nome, 'robe', {
+            attempt: attId,
+            step: 'post_publish_anuncio',
+            ok: !!(anuncioRes && anuncioRes.ok),
+            skipped: !!(anuncioRes && anuncioRes.skipped),
+            reason: (anuncioRes && anuncioRes.reason) || null
+          });
+        } catch (eAnuncio) {
+          try {
+            await flowAlertFlags.setAnuncioError(nome, {
+              reason: 'anuncio_error',
+              text: String((eAnuncio && eAnuncio.message) || eAnuncio).slice(0, 400)
+            });
+          } catch {}
+          stepLog.appendJSONL(nome, 'robe', {
+            attempt: attId,
+            step: 'post_publish_anuncio_err',
+            err: String((eAnuncio && eAnuncio.message) || eAnuncio).slice(0, 220)
+          });
+        }
+      }
     } else {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_id', skipped: true, reason: 'page_gone' });
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_renew', skipped: true, reason: 'page_gone' });
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'page_gone' });
     }
 
     if (!preserveCreatePageForHuman) {

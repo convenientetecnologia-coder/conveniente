@@ -323,6 +323,9 @@ const DEFAULTS = Object.freeze({
     scrollDaysMin: 42,
     scrollDaysMax: 45
   },
+  anuncio: {
+    enabled: false
+  },
   // Limpeza terminal: INDEPENDENTE do renovar/fechar/abrir.
   // Fábrica: enabled + janela curta 00:00-00:20.
   // deleteKinds: o que excluir quando enabled=true (default = legado + id_virtus).
@@ -547,6 +550,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
   const renew = (r.marketplaceRenew && typeof r.marketplaceRenew === "object") ? r.marketplaceRenew : {};
+  const anuncio = (r.anuncio && typeof r.anuncio === "object") ? r.anuncio : {};
   const termClean = (r.terminalAccountCleanup && typeof r.terminalAccountCleanup === "object")
     ? r.terminalAccountCleanup
     : {};
@@ -793,6 +797,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       scrollDaysMin: renewScrollDaysMin,
       scrollDaysMax: renewScrollDaysMax
     },
+    anuncio: {
+      enabled: anuncio.enabled === true
+    },
     terminalAccountCleanup: (() => {
       const defKinds = DEFAULTS.terminalAccountCleanup.deleteKinds || {};
       const rawKinds = (termClean.deleteKinds && typeof termClean.deleteKinds === "object")
@@ -865,6 +872,7 @@ function validateServerConfigPayload(payload) {
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
   const daily = (p.dailyWindow && typeof p.dailyWindow === "object") ? p.dailyWindow : null;
   const renew = (p.marketplaceRenew && typeof p.marketplaceRenew === "object") ? p.marketplaceRenew : null;
+  const anuncio = (p.anuncio && typeof p.anuncio === "object") ? p.anuncio : null;
   const termClean = (p.terminalAccountCleanup && typeof p.terminalAccountCleanup === "object")
     ? p.terminalAccountCleanup
     : null;
@@ -879,7 +887,7 @@ function validateServerConfigPayload(payload) {
     if (typeof p.pais === "string") return { id: p.pais };
     return null;
   })();
-  if (!cap && !robe && !mem && !net && !daily && !renew && !termClean && !log && !countryIn) {
+  if (!cap && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -1080,6 +1088,9 @@ function validateServerConfigPayload(payload) {
       }
     }
   }
+  if (anuncio && anuncio.enabled !== undefined && typeof anuncio.enabled !== "boolean") {
+    errors.push("anuncio.enabled_invalido");
+  }
   if (termClean) {
     if (termClean.enabled !== undefined && typeof termClean.enabled !== "boolean") {
       errors.push("terminalAccountCleanup.enabled_invalido");
@@ -1136,6 +1147,11 @@ function validateServerConfigPayload(payload) {
       ...DEFAULTS.marketplaceRenew,
       ...(existingRaw.marketplaceRenew || {}),
       ...(renew || {})
+    },
+    anuncio: {
+      ...DEFAULTS.anuncio,
+      ...(existingRaw.anuncio || {}),
+      ...(anuncio || {})
     },
     terminalAccountCleanup: {
       ...DEFAULTS.terminalAccountCleanup,
@@ -1275,6 +1291,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       windowEndMinute: v.normalized.marketplaceRenew.windowEndMinute,
       scrollDaysMin: v.normalized.marketplaceRenew.scrollDaysMin,
       scrollDaysMax: v.normalized.marketplaceRenew.scrollDaysMax
+    },
+    anuncio: {
+      enabled: v.normalized.anuncio.enabled === true
     },
     terminalAccountCleanup: {
       enabled: v.normalized.terminalAccountCleanup.enabled === true,

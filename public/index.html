@@ -1561,6 +1561,14 @@
             </div>
             <div class="muted" style="margin-top:6px;">Independente do fechar/abrir. Se Ativado: ao salvar, cada conta recebe 1 horário aleatório na janela e 1 quantidade de dias de scroll. Depois da postagem Robe (após o ID), se o horário já passou e ainda está Renovou - nao, renova e marca Renovou - sim. A janela pode atravessar a madrugada. Meia-noite (SP) zera o dia automaticamente. Se Desativado: não renova automaticamente e não mostra pills no card; o botão manual continua liberado para teste humano.</div>
           </div>
+          <div class="form-row">
+            <label>Anúncio</label>
+            <select id="srvAnuncioEnabled">
+              <option value="0">Não</option>
+              <option value="1">Sim</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Depois da postagem Robe, depois do ID e da renovação, a conta pede um classificado ao CT e abre na mesma aba. Não marca a conta. O botão Anúncio do humano invocado roda mesmo com Não.</div>
+          </div>
         </div>
 
         <div class="srv-cfg-panel" data-srv-cfg-panel="virtus">
@@ -1622,6 +1630,7 @@
       const dailyOpenStartTimeEl = box.querySelector('#srvDailyOpenStartTime');
       const dailyOpenEndTimeEl = box.querySelector('#srvDailyOpenEndTime');
       const renewEnabledEl = box.querySelector('#srvRenewEnabled');
+      const anuncioEnabledEl = box.querySelector('#srvAnuncioEnabled');
       const renewStartTimeEl = box.querySelector('#srvRenewStartTime');
       const renewEndTimeEl = box.querySelector('#srvRenewEndTime');
       const renewScrollMinEl = box.querySelector('#srvRenewScrollMin');
@@ -1848,6 +1857,8 @@
         }
         const renew = (cfg && cfg.marketplaceRenew) ? cfg.marketplaceRenew : {};
         if (renewEnabledEl) renewEnabledEl.value = renew.enabled === true ? '1' : '0';
+        const anuncioCfg = (cfg && cfg.anuncio) ? cfg.anuncio : {};
+        if (anuncioEnabledEl) anuncioEnabledEl.value = anuncioCfg.enabled === true ? '1' : '0';
         if (renewStartTimeEl) {
           const hh = String(Number(renew.windowStartHour != null ? renew.windowStartHour : 8)).padStart(2, '0');
           const mm = String(Number(renew.windowStartMinute != null ? renew.windowStartMinute : 0)).padStart(2, '0');
@@ -2048,6 +2059,7 @@
           const dailyOpenStartRaw = String((dailyOpenStartTimeEl && dailyOpenStartTimeEl.value) || '').trim();
           const dailyOpenEndRaw = String((dailyOpenEndTimeEl && dailyOpenEndTimeEl.value) || '').trim();
           const renewEnabled = String((renewEnabledEl && renewEnabledEl.value) || '0') === '1';
+          const anuncioEnabled = String((anuncioEnabledEl && anuncioEnabledEl.value) || '0') === '1';
           const renewStartRaw = String((renewStartTimeEl && renewStartTimeEl.value) || '').trim();
           const renewEndRaw = String((renewEndTimeEl && renewEndTimeEl.value) || '').trim();
           const renewScrollMin = Math.floor(Number((renewScrollMinEl && renewScrollMinEl.value) || 7));
@@ -2268,6 +2280,9 @@
               windowEndMinute: renewEndHm.m,
               scrollDaysMin: renewScrollMinEffective,
               scrollDaysMax: renewScrollMaxEffective
+            },
+            anuncio: {
+              enabled: anuncioEnabled
             },
             terminalAccountCleanup: {
               enabled: terminalCleanupEnabled,
@@ -3420,6 +3435,11 @@
         if (p.renewError === true) {
           const pill = buildPill('Renovação erro', 'bad');
           pill.title = p.renewErrorText || 'Renovacao de classificados nao concluiu';
+          titleRow.append(pill);
+        }
+        if (p.anuncioError === true) {
+          const pill = buildPill('Anúncio erro', 'bad');
+          pill.title = p.anuncioErrorText || 'O anuncio começou e nao concluiu';
           titleRow.append(pill);
         }
 

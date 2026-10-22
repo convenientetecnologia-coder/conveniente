@@ -4,7 +4,8 @@
  * Pills de monitoramento do dia (America/Sao_Paulo).
  * Robe erro: a postagem abriu o criar item e nao publicou.
  * Renovacao erro: o renovador entrou no fluxo e nao concluiu.
- * Sucesso do proprio fluxo apaga a pill. Meia-noite apaga as duas.
+ * Anuncio erro: o anuncio ja tinha link e nao chegou no Concluir.
+ * Sucesso do proprio fluxo apaga a pill daquela conta. Meia-noite apaga.
  * Limite, login, Marketplace desativado, rate limit, sem foto e pulo
  * (nao estava na hora, sem pagina, humano) nao acendem pill.
  */
@@ -38,13 +39,17 @@ function flagsForToday(flags, now = Date.now()) {
   const f = (flags && typeof flags === 'object') ? flags : {};
   const robeOn = f.robePostError === true;
   const renewOn = f.renewError === true;
+  const anuncioOn = f.anuncioError === true;
   const robeToday = robeOn && isSameSpDay(f.robePostErrorAt, now);
   const renewToday = renewOn && isSameSpDay(f.renewErrorAt, now);
+  const anuncioToday = anuncioOn && isSameSpDay(f.anuncioErrorAt, now);
   return {
     robePostError: robeToday,
     renewError: renewToday,
+    anuncioError: anuncioToday,
     staleRobePostError: robeOn && !robeToday,
-    staleRenewError: renewOn && !renewToday
+    staleRenewError: renewOn && !renewToday,
+    staleAnuncioError: anuncioOn && !anuncioToday
   };
 }
 
@@ -84,6 +89,36 @@ function shouldMarkRenewError(result) {
 
 function shouldClearRenewError(result) {
   return !!(result && result.ok === true && result.skipped !== true);
+}
+
+const ANUNCIO_FLOW_ERRORS = new Set([
+  'nomes_vazios',
+  'nav_failed',
+  'click_failed',
+  'pagina_inconclusiva',
+  'erro',
+  'ct_falhou'
+]);
+
+const ANUNCIO_ERROR_TEXT = {
+  nomes_vazios: 'Lista de nomes veio vazia',
+  nav_failed: 'A pagina do anuncio nao abriu',
+  click_failed: 'O clique do anuncio nao concluiu',
+  pagina_inconclusiva: 'A pagina do anuncio nao fechou',
+  erro: 'O tempo do anuncio acabou antes de concluir',
+  ct_falhou: 'O CT nao confirmou o resultado do anuncio'
+};
+
+function shouldMarkAnuncioError(result) {
+  if (!result || String(result.reason || '') === 'concluido') return false;
+  const reason = String(result.reason || result.error || '').trim();
+  if (!ANUNCIO_FLOW_ERRORS.has(reason)) return false;
+  if (reason === 'ct_falhou') return result.started === true;
+  return true;
+}
+
+function shouldClearAnuncioError(result) {
+  return !!(result && String(result.reason || '') === 'concluido');
 }
 
 async function setRobePostError(nome, { reason = '', text = '' } = {}) {
@@ -168,6 +203,55 @@ async function clearRenewError(nome) {
   }
 }
 
+async function setAnuncioError(nome, { reason = '', text = '' } = {}) {
+  const now = Date.now();
+  const n = String(nome || '').trim();
+  if (!n) return { ok: false };
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.anuncioError = true;
+      m.accountFlags.anuncioErrorAt = now;
+      m.accountFlags.anuncioErrorReason = String(reason || 'anuncio_error').slice(0, 140);
+      m.accountFlags.anuncioErrorText = String(text || '').slice(0, 400);
+      return m;
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function clearAnuncioError(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return { ok: false };
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      const f = (m.accountFlags && typeof m.accountFlags === 'object') ? m.accountFlags : {};
+      delete f.anuncioError;
+      delete f.anuncioErrorAt;
+      delete f.anuncioErrorReason;
+      delete f.anuncioErrorText;
+      if (Object.keys(f).length) m.accountFlags = f;
+      else delete m.accountFlags;
+      return m;
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function settleAnuncioError(nome, result) {
+  if (shouldClearAnuncioError(result)) return clearAnuncioError(nome);
+  if (!shouldMarkAnuncioError(result)) return { ok: true, skipped: true };
+  const reason = String((result && (result.reason || result.error)) || 'anuncio_error');
+  const text = ANUNCIO_ERROR_TEXT[reason] || String((result && result.text) || reason);
+  return setAnuncioError(nome, { reason, text });
+}
+
 async function clearStaleFlowAlertFlags(nome, now = Date.now()) {
   const n = String(nome || '').trim();
   if (!n) return { ok: false };
@@ -189,6 +273,12 @@ async function clearStaleFlowAlertFlags(nome, now = Date.now()) {
         delete f.renewErrorReason;
         delete f.renewErrorText;
       }
+      if (view.staleAnuncioError) {
+        delete f.anuncioError;
+        delete f.anuncioErrorAt;
+        delete f.anuncioErrorReason;
+        delete f.anuncioErrorText;
+      }
       if (Object.keys(f).length) m.accountFlags = f;
       else delete m.accountFlags;
       return m;
@@ -206,9 +296,14 @@ module.exports = {
   shouldMarkRobePostError,
   shouldMarkRenewError,
   shouldClearRenewError,
+  shouldMarkAnuncioError,
+  shouldClearAnuncioError,
   setRobePostError,
   clearRobePostError,
   setRenewError,
   clearRenewError,
+  setAnuncioError,
+  clearAnuncioError,
+  settleAnuncioError,
   clearStaleFlowAlertFlags
 };
