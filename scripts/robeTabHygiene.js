@@ -75,6 +75,14 @@ function isRobeMarketplaceWorkUrl(url) {
   );
 }
 
+function isAnuncioColetaUrl(url) {
+  return /facebook\.com\/marketplace\/[^/?#]+\/search(?:[/?#]|$)/i.test(String(url || ""));
+}
+
+function anuncioColetaHold(browser) {
+  return !!(browser && browser._anuncioColetaHold);
+}
+
 function isLiveWorkUrl(url) {
   const u = String(url || "");
   if (isJunkUrl(u)) return false;
@@ -434,6 +442,7 @@ async function fastClosePage(page) {
 async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}) {
   const pageTargets = listPageTargets(browser);
   if (pageTargets.length <= 1) return { closed: 0 };
+  const coletaOn = anuncioColetaHold(browser);
   const swapping = isVirtusSwapping(browser, nome);
   if (swapping && pageTargets.length <= 2) return { closed: 0 };
   let keepIdx = 0;
@@ -448,6 +457,7 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
   let closed = 0;
   let createKept = false;
   let blankKept = false;
+  let coletaKept = false;
   let swapExtraKept = false;
   let session = null;
   try {
@@ -462,7 +472,13 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
         continue;
       }
     }
-    if (robeOn && isBlankUrl(u) && !isDeadTabUrl(u)) {
+    if (coletaOn && isAnuncioColetaUrl(u)) {
+      if (!coletaKept) {
+        coletaKept = true;
+        continue;
+      }
+    }
+    if ((robeOn || coletaOn) && isBlankUrl(u) && !isDeadTabUrl(u)) {
       if (!blankKept) {
         blankKept = true;
         continue;
@@ -485,6 +501,7 @@ async function closeExtraPageTargets(browser, { nome = "", robeOn = false } = {}
       }
     } catch {}
     if (page) {
+      if (page._anuncioColeta === true && coletaOn) continue;
       const ok = await fastClosePage(page);
       if (ok) closed++;
       continue;
@@ -552,6 +569,7 @@ function isVirtusSwapping(browser, nome) {
 async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", reason = "" } = {}) {
   if (!browser) return { ok: false, closed: 0, error: "no_browser" };
   const robeOn = !!(browser && browser._robeActiveFor);
+  const coletaOn = anuncioColetaHold(browser);
   const listed = await listPagesBounded(browser, 4000);
   if (listed.timedOut) {
     const viaTargets = await closeExtraPageTargets(browser, { nome, robeOn });
@@ -570,13 +588,14 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
   let closed = 0;
   let createKept = null;
   let blankKept = null;
+  let coletaKept = null;
   let swapExtraKept = null;
   const closedUrls = [];
   for (const p of pages) {
     if (!p || p === keep) continue;
     if (p && p._convenienteBlinding === true) continue;
     const u = pageUrlOf(p);
-    if (robeOn && isBlankUrl(u) && !isDeadTabUrl(u)) {
+    if ((robeOn || coletaOn) && isBlankUrl(u) && !isDeadTabUrl(u)) {
       if (!blankKept) {
         blankKept = p;
         continue;
@@ -585,6 +604,12 @@ async function closeRedundantVirtusTabs(browser, { keepPage = null, nome = "", r
     if (robeOn && isRobeMarketplaceWorkUrl(u)) {
       if (!createKept) {
         createKept = p;
+        continue;
+      }
+    }
+    if (coletaOn && (p._anuncioColeta === true || isAnuncioColetaUrl(u))) {
+      if (!coletaKept) {
+        coletaKept = p;
         continue;
       }
     }
@@ -1199,6 +1224,8 @@ module.exports = {
   isJunkUrl,
   isCreateMarketplaceUrl,
   isRobeMarketplaceWorkUrl,
+  isAnuncioColetaUrl,
+  anuncioColetaHold,
   isLiveWorkUrl,
   isChromeErrorUiText,
   isChromeProtocolSickError,

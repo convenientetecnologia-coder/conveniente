@@ -2208,11 +2208,13 @@ function installOneTabGuard(browser, nome, {
         if (!Array.isArray(pages) || pages.length <= 1) return;
 
         const robeOn = !!(browser && browser._robeActiveFor);
-        const lim = resolveOneTabHardCap({
+        const coletaOn = !!(browser && browser._anuncioColetaHold);
+        const limBase = resolveOneTabHardCap({
           allow: !!(allow && allow()),
           limOpt,
           robeOn
         });
+        const lim = coletaOn ? Math.max(limBase, robeOn ? 3 : 2) : limBase;
         if (pages.length <= lim) return;
 
         let keepIdx = 0;
@@ -2228,6 +2230,7 @@ function installOneTabGuard(browser, nome, {
         let remaining = pages.length;
         let createKept = false;
         let blankKept = false;
+        let coletaKept = false;
         for (let i = pages.length - 1; i >= 0; i--) {
           if (remaining <= lim) break;
           if (i === keepIdx) continue;
@@ -2241,7 +2244,13 @@ function installOneTabGuard(browser, nome, {
               continue;
             }
           }
-          if (robeOn && (!u || u === 'about:blank')) {
+          if (coletaOn && ((p && p._anuncioColeta === true) || (hygiene && typeof hygiene.isAnuncioColetaUrl === 'function' && hygiene.isAnuncioColetaUrl(u)))) {
+            if (!coletaKept) {
+              coletaKept = true;
+              continue;
+            }
+          }
+          if ((robeOn || coletaOn) && (!u || u === 'about:blank')) {
             if (!blankKept) {
               blankKept = true;
               continue;
@@ -5955,7 +5964,8 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
             if (ov && Number.isFinite(Number(ov)) && Number(ov) > 0) maxAge = Number(ov);
           } catch {}
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
-          const suppressed = (browser && browser._robeActiveFor === nome) || (sup > now);
+          const coletaHold = !!(browser && browser._anuncioColetaHold === nome);
+          const suppressed = (browser && browser._robeActiveFor === nome) || (sup > now) || coletaHold;
 
           if (suppressed) {
             if (age >= maxAge) {

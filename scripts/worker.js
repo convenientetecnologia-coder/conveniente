@@ -209,6 +209,7 @@ const {
   isDeadTabUrl,
   isCreateMarketplaceUrl,
   isRobeMarketplaceWorkUrl,
+  isAnuncioColetaUrl,
   pagesLookAllJunk,
   listPagesBounded,
   pageAgeMs: hygienePageAgeMs,
@@ -10288,6 +10289,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inHuman = ctrl && ctrl.humanControl === true;
     const inVirtusSwap = !!(browser && browser._virtusSwapUntil && Number(browser._virtusSwapUntil[nome] || 0) > Date.now());
     const gateBusy = Number(browser && browser._convenienteGateInFlight || 0) > 0;
+    const coletaOn = !!(browser && browser._anuncioColetaHold === nome);
     const protectedCtx = !!(sendLockActive || inRobe || inConfig || inHuman || inVirtusSwap || gateBusy);
     const blankMaxAgeMs = Math.max(
       15_000,
@@ -10306,9 +10308,11 @@ async function closeExtraPages(browser, mainPage, nome) {
         let url = '';
         try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (isRobeMarketplaceWorkUrl(url)) continue;
+        if (coletaOn && (isAnuncioColetaUrl(url) || (p && p._anuncioColeta === true))) continue;
         const deadUrl = isDeadTabUrl(url);
         const blank = isBlankUrl(url);
         if (!deadUrl && !blank) continue;
+        if (coletaOn && blank && !deadUrl) continue;
         if (protectedCtx && blank && !deadUrl) {
           const age = __pageAgeMs(browser, p);
           if (age < blankMaxAgeMs) continue;
@@ -10341,6 +10345,7 @@ async function closeExtraPages(browser, mainPage, nome) {
           let url = '';
           try { url = typeof p.url === 'function' ? String(p.url() || '') : ''; } catch {}
           if (isRobeMarketplaceWorkUrl(url)) continue;
+          if (coletaOn && (isAnuncioColetaUrl(url) || (p && p._anuncioColeta === true))) continue;
           await Promise.race([
             p.close({ runBeforeUnload: false }).catch(() => {}),
             new Promise((r) => setTimeout(r, 2500))
@@ -12497,18 +12502,37 @@ async function executarColetaAnuncio({ coletaId, conta, url }) {
         erro = 'conta';
         break;
       }
+      try { agora.browser._anuncioColetaHold = nome; } catch {}
+      try {
+        provisionAudit.append({ ts: Date.now(), event: 'anuncio_coleta_abre', nome, tentativa });
+      } catch {}
       page = await browserHelper.newPageDaConta(agora.browser, nome, { source: 'anuncio_coleta' });
+      try { page._anuncioColeta = true; } catch {}
       ids = await anuncioColeta.coletar(page, link, {
         goto: (p, alvo) => p.goto(alvo, { waitUntil: 'domcontentloaded', timeout: 30000 }),
         lerIds: async (p) => anuncioColeta.extrairIds(await p.content())
       });
       erro = '';
       break;
-    } catch {
+    } catch (e) {
       ids = null;
       erro = 'pagina';
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'anuncio_coleta_pagina',
+          nome,
+          tentativa,
+          error: String((e && e.message) || e || '').slice(0, 220)
+        });
+      } catch {}
     } finally {
       try { if (page && typeof page.close === 'function') await page.close({ runBeforeUnload: false }); } catch {}
+      try {
+        const atual = controllers.get(nome);
+        if (atual && atual.browser && atual.browser._anuncioColetaHold === nome) atual.browser._anuncioColetaHold = '';
+      } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'anuncio_coleta_fecha', nome, tentativa }); } catch {}
     }
   }
   await post(erro ? { ok: false, erro, itemIds: [] } : { ok: true, itemIds: ids || [] });
@@ -17891,6 +17915,7 @@ function copyAccountBrowserRuntimeState(fromBrowser, toBrowser) {
     '_sendLock',
     '_virtusSwapUntil',
     '_suppressBlankKillUntil',
+    '_anuncioColetaHold',
     '_aboutBlankMaxAgeMs',
     '_pageBirth',
     '_fenceEpochMap',
@@ -29854,6 +29879,7 @@ async function periodicAboutBlankCleanup() {
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
             if (!isBlankUrl(url) && !isDeadTabUrl(url)) continue;
             if (isRobeMarketplaceWorkUrl(url)) continue;
+            if (ctrl.browser && ctrl.browser._anuncioColetaHold === nome && isBlankUrl(url) && !isDeadTabUrl(url)) continue;
             if (protectedCtx && isBlankUrl(url) && !isDeadTabUrl(url)) {
               const age = __pageAgeMs(ctrl.browser, p);
               if (age < blankMaxAgeMs) continue;
