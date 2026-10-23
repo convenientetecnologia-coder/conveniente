@@ -62,9 +62,33 @@ async function esperarRobe(ocupado, opts = {}) {
   return true;
 }
 
+function comPrazo(promise, ms, erro) {
+  const limite = Math.max(1, Number(ms) || 0);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(erro || "prazo"));
+    }, limite);
+    Promise.resolve(promise).then((value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 async function aguardarGrade(lerIds, opts = {}) {
   const dormir = opts.dormir || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const agora = opts.now || Date.now;
+  const lerMs = Number(opts.lerMs) > 0 ? Number(opts.lerMs) : 15000;
   const inicio = agora();
   let ids = [];
   let ultimo = -1;
@@ -72,7 +96,7 @@ async function aguardarGrade(lerIds, opts = {}) {
   let primeiroEm = 0;
   while (true) {
     const t = agora();
-    ids = await lerIds();
+    ids = await comPrazo(Promise.resolve().then(() => lerIds()), lerMs, "leitura");
     const n = Array.isArray(ids) ? ids.length : 0;
     if (n > 0 && !primeiroEm) primeiroEm = t;
     if (n !== ultimo) {
@@ -91,7 +115,8 @@ async function coletar(page, url, deps = {}) {
   const goto = deps.goto;
   const ler = deps.lerIds;
   if (typeof goto !== "function" || typeof ler !== "function") throw new Error("coleta sem pagina");
-  await goto(page, url);
+  const gotoMs = Number(deps.gotoMs) > 0 ? Number(deps.gotoMs) : 35000;
+  await comPrazo(Promise.resolve().then(() => goto(page, url)), gotoMs, "goto");
   return aguardarGrade(() => ler(page), deps);
 }
 
@@ -101,5 +126,6 @@ module.exports = {
   esperarRobe,
   aguardarGrade,
   coletar,
+  comPrazo,
   ROBE_MAX_MS
 };

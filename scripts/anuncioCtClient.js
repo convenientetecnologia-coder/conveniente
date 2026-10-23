@@ -7,11 +7,12 @@ function ctBase() {
 }
 
 async function postJson(base, pathname, body, timeoutMs) {
+  const ms = Math.max(1000, Number(timeoutMs) || 20000);
   const ac = new AbortController();
-  const timer = setTimeout(() => {
+  const abortTimer = setTimeout(() => {
     try { ac.abort(); } catch {}
-  }, Math.max(1000, Number(timeoutMs) || 20000));
-  try {
+  }, ms);
+  const trabalho = (async () => {
     const resp = await fetch(`${base}${pathname}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -20,10 +21,21 @@ async function postJson(base, pathname, body, timeoutMs) {
     });
     const data = await resp.json().catch(() => null);
     return { ok: !!(resp.ok && data && data.ok === true), status: resp.status, data: data || null };
-  } catch (error) {
-    return { ok: false, status: 0, data: null, error: (error && error.message) || String(error) };
+  })().catch((error) => ({
+    ok: false,
+    status: 0,
+    data: null,
+    error: (error && error.message) || String(error)
+  }));
+  let raceTimer = null;
+  const teto = new Promise((resolve) => {
+    raceTimer = setTimeout(() => resolve({ ok: false, status: 0, data: null, error: "prazo" }), ms + 1500);
+  });
+  try {
+    return await Promise.race([trabalho, teto]);
   } finally {
-    clearTimeout(timer);
+    clearTimeout(abortTimer);
+    if (raceTimer) clearTimeout(raceTimer);
   }
 }
 

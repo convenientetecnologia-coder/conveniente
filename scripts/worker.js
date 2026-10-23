@@ -12506,7 +12506,11 @@ async function executarColetaAnuncio({ coletaId, conta, url }) {
       try {
         provisionAudit.append({ ts: Date.now(), event: 'anuncio_coleta_abre', nome, tentativa });
       } catch {}
-      page = await browserHelper.newPageDaConta(agora.browser, nome, { source: 'anuncio_coleta' });
+      page = await anuncioColeta.comPrazo(
+        browserHelper.newPageDaConta(agora.browser, nome, { source: 'anuncio_coleta' }),
+        25000,
+        'newpage'
+      );
       try { page._anuncioColeta = true; } catch {}
       ids = await anuncioColeta.coletar(page, link, {
         goto: (p, alvo) => p.goto(alvo, { waitUntil: 'domcontentloaded', timeout: 30000 }),
@@ -12527,7 +12531,11 @@ async function executarColetaAnuncio({ coletaId, conta, url }) {
         });
       } catch {}
     } finally {
-      try { if (page && typeof page.close === 'function') await page.close({ runBeforeUnload: false }); } catch {}
+      try {
+        if (page && typeof page.close === 'function') {
+          await anuncioColeta.comPrazo(page.close({ runBeforeUnload: false }), 10000, 'fecha');
+        }
+      } catch {}
       try {
         const atual = controllers.get(nome);
         if (atual && atual.browser && atual.browser._anuncioColetaHold === nome) atual.browser._anuncioColetaHold = '';
