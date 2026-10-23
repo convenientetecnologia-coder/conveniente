@@ -3772,7 +3772,8 @@ app.post('/api/infra/command-bus', async (req, res) => {
             live = await clusterClient.sendWorkerCommand('anuncio-coleta-task', {
               coletaId,
               conta,
-              url
+              url,
+              nome: conta
             }, { timeoutMs: 8000 });
           } catch (e) {
             live = { ok: false, error: (e && e.message) ? String(e.message) : 'ipc' };

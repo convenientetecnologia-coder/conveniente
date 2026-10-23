@@ -15020,11 +15020,17 @@ const handlers = {
     });
   },
 
-  async ['anuncio-coleta-task']({ coletaId, conta, url }) {
+  async ['anuncio-coleta-task']({ coletaId, conta, url, nome: nomeRota }) {
     const id = String(coletaId || '').trim();
-    const nome = String(conta || '').trim();
+    const nome = String(conta || nomeRota || '').trim();
     const link = String(url || '').trim();
-    if (!id || !nome || !link) return { ok: false, error: 'campos' };
+    if (!id || !nome || !link) return { ok: false, accepted: false, error: 'campos' };
+    const anuncioColeta = require('./anuncioColeta');
+    if (!anuncioColeta.pesquisaValida(link)) return { ok: false, accepted: false, error: 'url' };
+    const ctrl = controllers.get(nome);
+    const browserOk = !!(ctrl && ctrl.browser && (typeof ctrl.browser.isConnected !== 'function' || ctrl.browser.isConnected()));
+    if (!browserOk) return { ok: false, accepted: false, error: 'browser_not_connected' };
+    if (!ctrl.trabalhando || ctrl.humanControl === true) return { ok: false, accepted: false, error: 'conta' };
     setImmediate(() => {
       executarColetaAnuncio({ coletaId: id, conta: nome, url: link }).catch(() => {});
     });

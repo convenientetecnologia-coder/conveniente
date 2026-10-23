@@ -1233,7 +1233,8 @@ async function createCluster() {
   }
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
-    const nome = payload && payload.nome;
+    const nomeCampo = payload && (payload.nome || (type === 'anuncio-coleta-task' ? payload.conta : ''));
+    const nome = nomeCampo ? String(nomeCampo).trim() : '';
     // Comandos globais (não dependem de perfil atribuído).
     // Em modo cluster, comandos sem "nome" caem no roteamento por perfil e geram profile_not_assigned.
     if (!nome) {
@@ -1788,7 +1789,7 @@ async function createCluster() {
       const i = findChildByPerfil(nome);
       const nomeKey = String(nome);
       const live = liveChromeNode.get(nomeKey);
-      const operatorBrowser = type === 'invoke_human' || type === 'human-resume' || type === 'deactivate' || type === 'activate' || type === 'start_work';
+      const operatorBrowser = type === 'invoke_human' || type === 'human-resume' || type === 'deactivate' || type === 'activate' || type === 'start_work' || type === 'anuncio-coleta-task';
       if (operatorBrowser && typeof live === 'number' && live !== i && children[live]) {
         if (type === 'deactivate') {
           const both = await Promise.all([
