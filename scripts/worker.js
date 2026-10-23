@@ -12459,6 +12459,61 @@ try {
   robeQueue.setIdleHook(() => { try { maybeStandbySweepIdleHint(); } catch {} });
 } catch {}
 
+async function executarColetaAnuncio({ coletaId, conta, url }) {
+  const anuncioColeta = require('./anuncioColeta');
+  const { createClient } = require('./anuncioCtClient');
+  const post = (body) => createClient().entregar({ coletaId, ...body });
+  const nome = String(conta || '').trim();
+  const link = String(url || '').trim();
+  if (!anuncioColeta.pesquisaValida(link)) {
+    await post({ ok: false, erro: 'url', itemIds: [] });
+    return;
+  }
+  const ctrl = controllers.get(nome);
+  const browserOk = !!(ctrl && ctrl.browser && (typeof ctrl.browser.isConnected !== 'function' || ctrl.browser.isConnected()));
+  if (!browserOk || !ctrl.trabalhando || ctrl.humanControl === true) {
+    await post({ ok: false, erro: 'conta', itemIds: [] });
+    return;
+  }
+  const livre = await anuncioColeta.esperarRobe(() => !!(robeMeta[nome] && robeMeta[nome].emExecucao));
+  if (!livre) {
+    await post({ ok: false, erro: 'robe', itemIds: [] });
+    return;
+  }
+  const atual = controllers.get(nome);
+  const ainda = !!(atual && atual.browser && atual.trabalhando && atual.humanControl !== true);
+  if (!ainda) {
+    await post({ ok: false, erro: 'conta', itemIds: [] });
+    return;
+  }
+  let ids = null;
+  let erro = 'pagina';
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    let page = null;
+    try {
+      const agora = controllers.get(nome);
+      const segue = !!(agora && agora.browser && agora.trabalhando && agora.humanControl !== true);
+      if (!segue) {
+        erro = 'conta';
+        break;
+      }
+      page = await browserHelper.newPageDaConta(agora.browser, nome, { source: 'anuncio_coleta' });
+      ids = await anuncioColeta.coletar(page, link, {
+        goto: (p, alvo) => p.goto(alvo, { waitUntil: 'domcontentloaded', timeout: 30000 }),
+        lerIds: async (p) => anuncioColeta.extrairIds(await p.content())
+      });
+      erro = '';
+      break;
+    } catch {
+      ids = null;
+      erro = 'pagina';
+    } finally {
+      try { if (page && typeof page.close === 'function') await page.close({ runBeforeUnload: false }); } catch {}
+    }
+  }
+  await post(erro ? { ok: false, erro, itemIds: [] } : { ok: true, itemIds: ids || [] });
+}
+
 const handlers = {
   async ['standby-sweep-probe']() {
     const snap = collectStandbySweepBusy();
@@ -14963,6 +15018,17 @@ const handlers = {
         return { ok: false, error: err || 'force_collect_exception', account_login: n, thread_key: tk };
       }
     });
+  },
+
+  async ['anuncio-coleta-task']({ coletaId, conta, url }) {
+    const id = String(coletaId || '').trim();
+    const nome = String(conta || '').trim();
+    const link = String(url || '').trim();
+    if (!id || !nome || !link) return { ok: false, error: 'campos' };
+    setImmediate(() => {
+      executarColetaAnuncio({ coletaId: id, conta: nome, url: link }).catch(() => {});
+    });
+    return { ok: true, accepted: true };
   },
 
   async ['human-verify-id']({ nome }) {

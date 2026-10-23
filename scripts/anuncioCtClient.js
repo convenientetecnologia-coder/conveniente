@@ -28,11 +28,13 @@ async function postJson(base, pathname, body, timeoutMs) {
 }
 
 function createClient({ base = ctBase(), timeoutMs = 20000, post = postJson } = {}) {
-  async function call(pathname, body) {
+  async function call(pathname, body, tentativas = 2) {
     const root = String(base || "").replace(/\/+$/, "");
     if (!root) return { ok: false, error: "ct_indisponivel" };
     let last = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const vezes = Math.max(1, Number(tentativas) || 2);
+    for (let attempt = 0; attempt < vezes; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
       last = await post(root, pathname, body, timeoutMs);
       if (last && last.ok) return { ok: true, ...(last.data || {}) };
       if (last && last.status && last.status < 500 && last.status !== 0) break;
@@ -47,7 +49,8 @@ function createClient({ base = ctBase(), timeoutMs = 20000, post = postJson } = 
   return {
     base: String(base || ""),
     pedir(body) { return call("/api/anuncio/link", body); },
-    informar(body) { return call("/api/anuncio/resultado", body); }
+    informar(body) { return call("/api/anuncio/resultado", body); },
+    entregar(body) { return call("/api/anuncio/coleta-resultado", body, 4); }
   };
 }
 

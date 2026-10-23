@@ -3754,6 +3754,43 @@ app.post('/api/infra/command-bus', async (req, res) => {
         continue;
       }
 
+      if (t === 'anuncio_coleta') {
+        const p = (cmd.payload && typeof cmd.payload === 'object')
+          ? cmd.payload
+          : ((cmd.data && typeof cmd.data === 'object') ? cmd.data : {});
+        const coletaId = String(p.coletaId || cmd.id || '').trim();
+        const conta = String(p.conta || '').trim();
+        const url = String(p.url || '').trim();
+        const cmdId = String(cmd && cmd.id ? cmd.id : coletaId).trim() || null;
+        if (!coletaId || !conta || !url) {
+          results[i] = { id: cmdId, type: 'anuncio_coleta', ok: false, error: 'campos' };
+          continue;
+        }
+        let live = null;
+        if (clusterClient && typeof clusterClient.sendWorkerCommand === 'function') {
+          try {
+            live = await clusterClient.sendWorkerCommand('anuncio-coleta-task', {
+              coletaId,
+              conta,
+              url
+            }, { timeoutMs: 8000 });
+          } catch (e) {
+            live = { ok: false, error: (e && e.message) ? String(e.message) : 'ipc' };
+          }
+        } else {
+          live = { ok: false, error: 'cluster_unavailable' };
+        }
+        const accepted = !!(live && live.ok === true && live.accepted === true);
+        results[i] = {
+          id: cmdId,
+          type: 'anuncio_coleta',
+          ok: accepted,
+          accepted,
+          error: accepted ? null : String((live && live.error) || 'recusado')
+        };
+        continue;
+      }
+
       // fetch_logs: ACK imediato. Leitura/ingest no porteiro (PID separado).
       // O pai NÃO espera o filho — o CT já polla /api/logs/ingest por requestId.
       if (t === 'fetch_logs' || t === 'fetch_logs_query') {
