@@ -4003,7 +4003,11 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // SUPRESSOR para o killer de about:blank durante patch+goto (20s de guarda)
       armBlankSuppress(browser, nome, 20_000);
 
-      p = await newPageDaConta(browser, nome, { source: 'robe_create' });
+      if (browser && browser.__ctRobeRail) {
+        p = await require('./robeRail').soleCreatePage(browser, nome);
+      } else {
+        p = await newPageDaConta(browser, nome, { source: 'robe_create' });
+      }
       await ensureXPathPolyfill(p);
       try {
         const manifest = await manifestStore.read(nome);
@@ -4631,7 +4635,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     if (require('./mobilePublishProxy').readSettings().enabled === true) {
       try {
-        robeRailHandle = await require('./robeRail').openRobeRail({ nome, cookies: manifest.cookies });
+        const virtusBrowser = browser;
+        robeRailHandle = await require('./robeRail').openRobeRail({
+          nome,
+          cookies: manifest.cookies,
+          liveBrowser: virtusBrowser
+        });
         browser = robeRailHandle.browser;
       } catch (e) {
         const err = new Error('proxy_mobile_unavailable');

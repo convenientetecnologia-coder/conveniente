@@ -167,6 +167,37 @@ function proveThroughRail(port) {
   });
 }
 
+async function collectLiveCookies(liveBrowser) {
+  const found = [];
+  try {
+    if (!liveBrowser || typeof liveBrowser.pages !== 'function') return found;
+    const pages = await liveBrowser.pages();
+    for (const pg of pages || []) {
+      let got = [];
+      try { got = await pg.cookies('https://www.facebook.com'); } catch {}
+      if (Array.isArray(got) && got.length > found.length) {
+        found.length = 0;
+        found.push(...got);
+      }
+    }
+  } catch {}
+  return found;
+}
+
+async function soleCreatePage(browser, nome) {
+  const { blindarPaginaDaConta, newPageDaConta } = require('./browser.js');
+  const pages = await browser.pages();
+  const first = pages && pages[0] ? pages[0] : null;
+  for (const extra of (pages || []).slice(1)) {
+    try { await extra.close({ runBeforeUnload: false }); } catch {}
+  }
+  if (!first || (typeof first.isClosed === 'function' && first.isClosed())) {
+    return newPageDaConta(browser, nome, { source: 'robe_rail_create' });
+  }
+  await blindarPaginaDaConta(first, nome, { source: 'robe_rail_create' });
+  return first;
+}
+
 function killTree(pid) {
   return new Promise((resolve) => {
     if (!pid) return resolve();
@@ -176,7 +207,7 @@ function killTree(pid) {
   });
 }
 
-async function openRobeRail({ nome, cookies }) {
+async function openRobeRail({ nome, cookies, liveBrowser }) {
   const rail = createSwitch();
   let browser = null;
   let userDataDir = '';
@@ -203,11 +234,23 @@ async function openRobeRail({ nome, cookies }) {
         '--lang=pt-BR'
       ]
     });
-    browser.__ctRobeRail = null;
-    const seed = await newPageDaConta(browser, nome, { source: 'robe_rail_seed' });
-    await injectCookies(seed, Array.isArray(cookies) ? cookies : []);
-    await seed.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_open', port }); } catch {}
+    const live = await collectLiveCookies(liveBrowser);
+    const jar = live.length ? live : (Array.isArray(cookies) ? cookies : []);
+    const pages = await browser.pages();
+    const seed = pages && pages[0] ? pages[0] : await newPageDaConta(browser, nome, { source: 'robe_rail_seed' });
+    for (const extra of (pages || []).slice(1)) {
+      try { await extra.close({ runBeforeUnload: false }); } catch {}
+    }
+    await require('./browser.js').blindarPaginaDaConta(seed, nome, { source: 'robe_rail_seed' });
+    await injectCookies(seed, jar);
+    try {
+      stepLog.appendJSONL(nome || 'system', 'robe', {
+        step: 'robe_rail_open',
+        port,
+        cookies: jar.length,
+        cookieSource: live.length ? 'live' : 'manifest'
+      });
+    } catch {}
     const api = {
       browser,
       async armAndProve(page) {
@@ -283,4 +326,4 @@ async function openRobeRail({ nome, cookies }) {
   }
 }
 
-module.exports = { openRobeRail, readExit };
+module.exports = { openRobeRail, readExit, soleCreatePage };
