@@ -277,87 +277,6 @@ async function readDomStorage(page, origin, isLocalStorage) {
   }
 }
 
-async function dumpIndexedDb(page) {
-  const dumped = await Promise.race([
-    page.evaluate(async () => {
-      const out = [];
-      if (!indexedDB || typeof indexedDB.databases !== 'function') return out;
-      const dbs = await indexedDB.databases();
-      for (const info of dbs || []) {
-        if (!info || !info.name) continue;
-        const one = await new Promise((resolve) => {
-          let settled = false;
-          const done = (value) => { if (!settled) { settled = true; resolve(value); } };
-          const req = indexedDB.open(info.name);
-          req.onerror = () => done(null);
-          req.onsuccess = () => {
-            const db = req.result;
-            const names = Array.from(db.objectStoreNames || []);
-            if (!names.length) {
-              const version = db.version || info.version || 1;
-              db.close();
-              done({ name: info.name, version, stores: {} });
-              return;
-            }
-            let tx;
-            try { tx = db.transaction(names, 'readonly'); } catch { db.close(); done(null); return; }
-            const stores = {};
-            let left = names.length;
-            const finishOne = () => {
-              left -= 1;
-              if (left > 0) return;
-              const version = db.version || info.version || 1;
-              try { db.close(); } catch {}
-              done({ name: info.name, version, stores });
-            };
-            tx.onerror = () => { try { db.close(); } catch {} done(null); };
-            for (const name of names) {
-              try {
-                const store = tx.objectStore(name);
-                const meta = { keyPath: store.keyPath || null, autoIncrement: !!store.autoIncrement, rows: [] };
-                const all = store.getAll();
-                const keys = store.getAllKeys();
-                let values = null;
-                let ks = null;
-                let storeDone = false;
-                const finishStore = () => {
-                  if (storeDone) return;
-                  storeDone = true;
-                  finishOne();
-                };
-                const pack = () => {
-                  if (!values || !ks) return;
-                  const n = Math.min(values.length, ks.length);
-                  for (let i = 0; i < n; i++) {
-                    try {
-                      meta.rows.push({
-                        key: JSON.parse(JSON.stringify(ks[i])),
-                        value: JSON.parse(JSON.stringify(values[i]))
-                      });
-                    } catch {}
-                  }
-                  stores[name] = meta;
-                  finishStore();
-                };
-                all.onsuccess = () => { values = all.result || []; pack(); };
-                keys.onsuccess = () => { ks = keys.result || []; pack(); };
-                all.onerror = () => finishStore();
-                keys.onerror = () => finishStore();
-              } catch {
-                finishOne();
-              }
-            }
-          };
-        });
-        if (one) out.push(one);
-      }
-      return out;
-    }),
-    new Promise((resolve) => setTimeout(() => resolve(null), 8000))
-  ]);
-  return Array.isArray(dumped) ? dumped : [];
-}
-
 async function captureAccountStorage(liveBrowser) {
   const bag = {};
   try {
@@ -369,17 +288,8 @@ async function captureAccountStorage(liveBrowser) {
       const local = await readDomStorage(page, origin, true);
       const session = await readDomStorage(page, origin, false);
       if ((local && local.length) || (session && session.length)) {
-        bag[origin] = { local: local || [], session: session || [], idb: [] };
+        bag[origin] = { local: local || [], session: session || [] };
       }
-    }
-    for (const pg of pages || []) {
-      let origin = '';
-      try { origin = new URL(pg.url()).origin; } catch { origin = ''; }
-      if (!STORAGE_ORIGINS.includes(origin)) continue;
-      const idb = await dumpIndexedDb(pg);
-      if (!idb.length) continue;
-      if (!bag[origin]) bag[origin] = { local: [], session: [], idb: [] };
-      bag[origin].idb = idb;
     }
   } catch {}
   try {
@@ -429,60 +339,6 @@ async function installStorageHook(page, bag) {
     } catch {}
   }, slim);
   page.__ctStorageHooked = true;
-}
-
-async function plantIndexedDb(page, databases) {
-  if (!page || !Array.isArray(databases) || !databases.length) return { ok: true, skipped: 'no_idb' };
-  await page.goto('https://www.facebook.com/robots.txt', { waitUntil: 'domcontentloaded', timeout: 15000 });
-  const wrote = await Promise.race([
-    page.evaluate(async (dbs) => {
-      let planted = 0;
-      for (const db of dbs || []) {
-        if (!db || !db.name) continue;
-        try {
-          await new Promise((resolve, reject) => {
-            const req = indexedDB.open(db.name, db.version || 1);
-            req.onerror = () => reject(req.error || new Error('idb_open'));
-            req.onupgradeneeded = () => {
-              const database = req.result;
-              const stores = db.stores || {};
-              for (const name of Object.keys(stores)) {
-                if (database.objectStoreNames.contains(name)) continue;
-                const meta = stores[name] || {};
-                const opts = {};
-                if (meta.keyPath) opts.keyPath = meta.keyPath;
-                if (meta.autoIncrement) opts.autoIncrement = true;
-                try { database.createObjectStore(name, opts); } catch {}
-              }
-            };
-            req.onsuccess = () => {
-              const database = req.result;
-              const names = Object.keys(db.stores || {}).filter((name) => database.objectStoreNames.contains(name));
-              if (!names.length) { database.close(); resolve(); return; }
-              let tx;
-              try { tx = database.transaction(names, 'readwrite'); } catch (e) { database.close(); reject(e); return; }
-              for (const name of names) {
-                const store = tx.objectStore(name);
-                const meta = db.stores[name] || {};
-                for (const row of meta.rows || []) {
-                  try {
-                    if (meta.keyPath) store.put(row.value);
-                    else store.put(row.value, row.key);
-                  } catch {}
-                }
-              }
-              tx.oncomplete = () => { try { database.close(); } catch {} resolve(); };
-              tx.onerror = () => { try { database.close(); } catch {} reject(tx.error || new Error('idb_tx')); };
-            };
-          });
-          planted++;
-        } catch {}
-      }
-      return planted;
-    }, databases),
-    new Promise((resolve) => setTimeout(() => resolve(0), 8000))
-  ]);
-  return { ok: true, dbs: Number(wrote) || 0 };
 }
 
 async function soleCreatePage(browser, nome) {
@@ -550,7 +406,6 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     }
     await installStorageHook(seed, storage);
     const www = storage && storage['https://www.facebook.com'] ? storage['https://www.facebook.com'] : {};
-    let storagePlanted = false;
     try {
       stepLog.appendJSONL(nome || 'system', 'robe', {
         step: 'robe_rail_open',
@@ -559,33 +414,11 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         cookieSource,
         local: Array.isArray(www.local) ? www.local.length : 0,
         session: Array.isArray(www.session) ? www.session.length : 0,
-        idb: Array.isArray(www.idb) ? www.idb.length : 0,
-        idbDropped: !!(storage && storage.__idbDropped),
         profile: 'fixed'
       });
     } catch {}
     const api = {
       browser,
-      async plantStorage(page) {
-        if (storagePlanted) return { ok: true, skipped: 'already' };
-        const idb = www && Array.isArray(www.idb) ? www.idb : [];
-        if (!idb.length) {
-          storagePlanted = true;
-          return { ok: true, skipped: 'no_idb' };
-        }
-        try {
-          const wrote = await plantIndexedDb(page, idb);
-          storagePlanted = !!(wrote && wrote.ok);
-          try {
-            stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_storage', dbs: wrote && wrote.dbs ? wrote.dbs : 0 });
-          } catch {}
-          return wrote;
-        } catch (e) {
-          const error = String((e && e.message) || e).slice(0, 180);
-          try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_storage_fail', error }); } catch {}
-          return { ok: false, error };
-        }
-      },
       async armAndProve(page) {
         const cfg = mobile.readSettings();
         if (!cfg.ready) return { ok: false, reason: 'no_credentials' };

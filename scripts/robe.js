@@ -4032,9 +4032,6 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
         const em = String((e && e.message) || e || '');
         if (/gateway_proxy_required:/i.test(em)) throw e;
       }
-      if (browser && browser.__ctRobeRail && typeof browser.__ctRobeRail.plantStorage === 'function') {
-        await browser.__ctRobeRail.plantStorage(p);
-      }
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
