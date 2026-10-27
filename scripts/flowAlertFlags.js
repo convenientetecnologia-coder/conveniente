@@ -40,16 +40,20 @@ function flagsForToday(flags, now = Date.now()) {
   const robeOn = f.robePostError === true;
   const renewOn = f.renewError === true;
   const anuncioOn = f.anuncioError === true;
+  const proxyOn = f.proxyPublishError === true;
   const robeToday = robeOn && isSameSpDay(f.robePostErrorAt, now);
   const renewToday = renewOn && isSameSpDay(f.renewErrorAt, now);
   const anuncioToday = anuncioOn && isSameSpDay(f.anuncioErrorAt, now);
+  const proxyToday = proxyOn && isSameSpDay(f.proxyPublishErrorAt, now);
   return {
     robePostError: robeToday,
     renewError: renewToday,
     anuncioError: anuncioToday,
+    proxyPublishError: proxyToday,
     staleRobePostError: robeOn && !robeToday,
     staleRenewError: renewOn && !renewToday,
-    staleAnuncioError: anuncioOn && !anuncioToday
+    staleAnuncioError: anuncioOn && !anuncioToday,
+    staleProxyPublishError: proxyOn && !proxyToday
   };
 }
 
@@ -62,6 +66,7 @@ function shouldMarkRobePostError(input) {
   if (x.marketplaceDisabled === true) return false;
   if (x.rateLimit === true) return false;
   if (x.noPhoto === true) return false;
+  if (x.proxyPublish === true) return false;
   return true;
 }
 
@@ -252,6 +257,47 @@ async function settleAnuncioError(nome, result) {
   return setAnuncioError(nome, { reason, text });
 }
 
+async function setProxyPublishError(nome, { reason = '', text = '' } = {}) {
+  const now = Date.now();
+  const n = String(nome || '').trim();
+  if (!n) return { ok: false };
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.proxyPublishError = true;
+      m.accountFlags.proxyPublishErrorAt = now;
+      m.accountFlags.proxyPublishErrorReason = String(reason || 'proxy_publish_error').slice(0, 140);
+      m.accountFlags.proxyPublishErrorText = String(text || '').slice(0, 400);
+      return m;
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function clearProxyPublishError(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return { ok: false };
+  try {
+    await manifestStore.update(n, (m) => {
+      m = m || {};
+      const f = (m.accountFlags && typeof m.accountFlags === 'object') ? m.accountFlags : {};
+      delete f.proxyPublishError;
+      delete f.proxyPublishErrorAt;
+      delete f.proxyPublishErrorReason;
+      delete f.proxyPublishErrorText;
+      if (Object.keys(f).length) m.accountFlags = f;
+      else delete m.accountFlags;
+      return m;
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 async function clearStaleFlowAlertFlags(nome, now = Date.now()) {
   const n = String(nome || '').trim();
   if (!n) return { ok: false };
@@ -279,6 +325,12 @@ async function clearStaleFlowAlertFlags(nome, now = Date.now()) {
         delete f.anuncioErrorReason;
         delete f.anuncioErrorText;
       }
+      if (view.staleProxyPublishError) {
+        delete f.proxyPublishError;
+        delete f.proxyPublishErrorAt;
+        delete f.proxyPublishErrorReason;
+        delete f.proxyPublishErrorText;
+      }
       if (Object.keys(f).length) m.accountFlags = f;
       else delete m.accountFlags;
       return m;
@@ -305,5 +357,7 @@ module.exports = {
   setAnuncioError,
   clearAnuncioError,
   settleAnuncioError,
+  setProxyPublishError,
+  clearProxyPublishError,
   clearStaleFlowAlertFlags
 };

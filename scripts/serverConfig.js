@@ -213,6 +213,7 @@ const DEFAULTS = Object.freeze({
     photoDeletePolicy: "after_all_working_posted",
     itemTitlesPack: ITEM_TITLES_PACK_DEFAULT,
     useItemDescriptionInAds: false,
+    publishWithProxy: false,
     cidadesExtrasGlobais: [
       "Anápolis",
       "Aracaju",
@@ -635,6 +636,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     robe.itemTitlesPack || DEFAULTS.robe.itemTitlesPack
   );
   const useItemDescriptionInAds = robe.useItemDescriptionInAds === true;
+  const publishWithProxy = robe.publishWithProxy === true;
 
   const workerRamDivisorGb = clamp(
     Math.floor(toNum(memRaw.workerRamDivisorGb, DEFAULTS.memory.workerRamDivisorGb)),
@@ -746,6 +748,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       photoDeletePolicy,
       itemTitlesPack,
       useItemDescriptionInAds,
+      publishWithProxy,
       cidadesExtrasGlobais
     },
     networkRotation: {
@@ -955,6 +958,9 @@ function validateServerConfigPayload(payload) {
       if (!isItemTitlesPackId(robe.itemTitlesPack)) {
         errors.push("robe.itemTitlesPack_invalido");
       }
+    }
+    if (robe.publishWithProxy !== undefined && typeof robe.publishWithProxy !== "boolean") {
+      errors.push("robe.publishWithProxy_invalido");
     }
     if (robe.useItemDescriptionInAds !== undefined && typeof robe.useItemDescriptionInAds !== "boolean") {
       errors.push("robe.useItemDescriptionInAds_invalido");
@@ -1253,6 +1259,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       photoDeletePolicy: v.normalized.robe.photoDeletePolicy,
       itemTitlesPack: v.normalized.robe.itemTitlesPack,
       useItemDescriptionInAds: v.normalized.robe.useItemDescriptionInAds,
+      publishWithProxy: v.normalized.robe.publishWithProxy,
       cidadesExtrasGlobais: v.normalized.robe.cidadesExtrasGlobais
     },
     networkRotation: {

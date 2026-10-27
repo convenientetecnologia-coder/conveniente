@@ -4571,8 +4571,8 @@ async function __serverEventBridgeTick(reason) {
     })();
     const needConfigPush = !!(configPush && configPush.need);
 
-    // Enquanto faltar endereco do CT, credenciais do Textverified
-    // ou a chave do Anti-Captcha, pede a configuracao em todo tick.
+    // Enquanto faltar endereco do CT, Textverified, Anti-Captcha
+    // ou o proxy da Oxylabs, pede a configuracao em todo tick.
     let needsConfig = false;
     try {
       const cfgCt = readCtConfig();
@@ -4580,7 +4580,9 @@ async function __serverEventBridgeTick(reason) {
         !String((cfgCt && cfgCt.ctBaseUrl) || '').trim() ||
         !String((cfgCt && cfgCt.textVerifiedApiKey) || '').trim() ||
         !String((cfgCt && cfgCt.textVerifiedApiUsername) || '').trim() ||
-        !String((cfgCt && cfgCt.antiCaptchaApiKey) || '').trim();
+        !String((cfgCt && cfgCt.antiCaptchaApiKey) || '').trim() ||
+        !String((cfgCt && cfgCt.oxylabsProxyUser) || '').trim() ||
+        !String((cfgCt && cfgCt.oxylabsProxyPassword) || '');
     } catch {
       needsConfig = true;
     }

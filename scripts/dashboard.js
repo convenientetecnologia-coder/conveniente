@@ -3543,6 +3543,8 @@ async function execSetCtConfig(cmd) {
   const textVerifiedMaxPrice = (payload.textVerifiedMaxPrice !== undefined) ? payload.textVerifiedMaxPrice : undefined;
   const antiCaptchaApiKey = (payload.antiCaptchaApiKey !== undefined) ? String(payload.antiCaptchaApiKey || '').trim() : undefined;
   const antiCaptchaBaseUrl = (payload.antiCaptchaBaseUrl !== undefined) ? String(payload.antiCaptchaBaseUrl || '').trim() : undefined;
+  const oxylabsProxyUser = (payload.oxylabsProxyUser !== undefined) ? String(payload.oxylabsProxyUser || '').trim() : undefined;
+  const oxylabsProxyPassword = (payload.oxylabsProxyPassword !== undefined) ? String(payload.oxylabsProxyPassword || '') : undefined;
   const isNgrokCtBase = (() => {
     if (!ctBaseUrl) return false;
     try {
@@ -3566,7 +3568,9 @@ async function execSetCtConfig(cmd) {
     textVerifiedServiceNotListedName,
     textVerifiedMaxPrice,
     antiCaptchaApiKey,
-    antiCaptchaBaseUrl
+    antiCaptchaBaseUrl,
+    oxylabsProxyUser,
+    oxylabsProxyPassword
   });
   if (!r || r.ok !== true) throw new Error('set_ct_config_failed');
   return { ok: true };
@@ -4315,10 +4319,10 @@ async function tick(reason = 'interval') {
       status.virtusMetrics = getVirtusMetricsCached(status);
     } catch {}
 
-    // Pede de novo enquanto faltar endereco do CT, credenciais do Textverified
-    // ou a chave do Anti-Captcha.
+    // Pede de novo enquanto faltar endereco do CT, Textverified,
+    // Anti-Captcha ou o proxy da Oxylabs.
     const cfg = readCtConfig();
-    const needsConfig = !cfg.ctBaseUrl || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername || !cfg.antiCaptchaApiKey;
+    const needsConfig = !cfg.ctBaseUrl || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername || !cfg.antiCaptchaApiKey || !cfg.oxylabsProxyUser || !cfg.oxylabsProxyPassword;
     // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
     // Importante: sem segredos no report — apenas boolean/modelo/metadata.
     const groqCfg = readGroqConfig(); // usado em runtime (OCR)

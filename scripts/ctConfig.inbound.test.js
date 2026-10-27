@@ -25,21 +25,32 @@ test("campo ausente fica de fora para nao apagar o que ja existe", () => {
   assert.equal(Object.prototype.hasOwnProperty.call(patch, "antiCaptchaBaseUrl"), false);
 });
 
-test("configuracao so fica completa com endereco, textverified e anti-captcha", () => {
-  assert.equal(ctConfigIsComplete({
+test("configuracao so fica completa com endereco, textverified, anti-captcha e proxy", () => {
+  const full = {
     ctBaseUrl: "https://api.convenientetecnologia.com",
     textVerifiedApiKey: "abc",
     textVerifiedApiUsername: "convenientemailing@gmail.com",
-    antiCaptchaApiKey: "captcha-key"
-  }), true);
+    antiCaptchaApiKey: "captcha-key",
+    oxylabsProxyUser: "mobile_user",
+    oxylabsProxyPassword: "segredo"
+  };
+  assert.equal(ctConfigIsComplete(full), true);
+  const semProxy = { ...full };
+  delete semProxy.oxylabsProxyUser;
+  delete semProxy.oxylabsProxyPassword;
+  assert.equal(ctConfigIsComplete(semProxy), false);
   assert.equal(ctConfigIsComplete({
     ctBaseUrl: "https://api.convenientetecnologia.com",
     textVerifiedApiKey: "abc",
     antiCaptchaApiKey: "captcha-key"
   }), false);
-  assert.equal(ctConfigIsComplete({
+});
+
+test("usuario do proxy sem senha nao entra e nao apaga o que ja existe", () => {
+  const patch = pickInboundCtConfig({
     ctBaseUrl: "https://api.convenientetecnologia.com",
-    textVerifiedApiKey: "abc",
-    textVerifiedApiUsername: "convenientemailing@gmail.com"
-  }), false);
+    oxylabsProxyUser: "mobile_user"
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(patch, "oxylabsProxyUser"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(patch, "oxylabsProxyPassword"), false);
 });

@@ -61,6 +61,14 @@ test('erro de robe e de renovacao saem na virada do dia de SP', () => {
   assert.equal(legacy.renewError, false);
 });
 
+test('falha de proxy nao acende a pill de robe', () => {
+  assert.equal(shouldMarkRobePostError({
+    started: true,
+    published: false,
+    proxyPublish: true
+  }), false);
+});
+
 test('anuncio erro marca so a conta que começou e nao concluiu', () => {
   assert.equal(shouldMarkAnuncioError({ reason: 'disabled' }), false);
   assert.equal(shouldMarkAnuncioError({ reason: 'sem_link' }), false);

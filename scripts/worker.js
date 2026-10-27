@@ -16903,7 +16903,7 @@ const flowAlerts = flowAlertFlags.flagsForToday(man && man.accountFlags);
 if (phoneAlerts.staleError || phoneAlerts.staleNoBalance || phoneAlerts.staleDocError) {
   await robePostPublishId.clearStaleMarketplacePhoneFlags(nome);
 }
-if (flowAlerts.staleRobePostError || flowAlerts.staleRenewError || flowAlerts.staleAnuncioError) {
+if (flowAlerts.staleRobePostError || flowAlerts.staleRenewError || flowAlerts.staleAnuncioError || flowAlerts.staleProxyPublishError) {
   await flowAlertFlags.clearStaleFlowAlertFlags(nome);
 }
 const marketplacePhoneError = phoneAlerts.marketplacePhoneError;
@@ -16930,6 +16930,10 @@ const anuncioError = flowAlerts.anuncioError;
 const anuncioErrorAt = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorAt) || null) : null;
 const anuncioErrorReason = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorReason) || null) : null;
 const anuncioErrorText = anuncioError && man ? ((man.accountFlags && man.accountFlags.anuncioErrorText) || null) : null;
+const proxyPublishError = flowAlerts.proxyPublishError;
+const proxyPublishErrorAt = proxyPublishError && man ? ((man.accountFlags && man.accountFlags.proxyPublishErrorAt) || null) : null;
+const proxyPublishErrorReason = proxyPublishError && man ? ((man.accountFlags && man.accountFlags.proxyPublishErrorReason) || null) : null;
+const proxyPublishErrorText = proxyPublishError && man ? ((man.accountFlags && man.accountFlags.proxyPublishErrorText) || null) : null;
 const marketplacePhoneConfirm = man ? !!(man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) : false;
 const marketplacePhoneConfirmAt = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmAt) || null) : null;
 const marketplacePhoneConfirmReason = man ? ((man.accountFlags && man.accountFlags.marketplacePhoneConfirmReason) || null) : null;
@@ -17001,6 +17005,7 @@ const problem = man
     robePostError === true ||
     renewError === true ||
     anuncioError === true ||
+    proxyPublishError === true ||
     (man.accountFlags && man.accountFlags.marketplacePhoneConfirm === true) ||
     (man.accountFlags && man.accountFlags.captchaCheckpoint === true) ||
     (man.accountFlags && man.accountFlags.idVirtus === true) ||
@@ -17157,6 +17162,10 @@ perfis.push({
   anuncioErrorAt,
   anuncioErrorReason,
   anuncioErrorText,
+  proxyPublishError,
+  proxyPublishErrorAt,
+  proxyPublishErrorReason,
+  proxyPublishErrorText,
   marketplacePhoneConfirm,
   marketplacePhoneConfirmAt,
   marketplacePhoneConfirmReason,

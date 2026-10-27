@@ -1511,6 +1511,14 @@
             <div class="muted" style="margin-top:6px;">Padrão de fábrica: 90. Usado só dentro do bloco dirigido. Ex.: 90 = 90% vai para bairros com localização própria e 10% vira fallback da cidade para bairros selecionados sem localização.</div>
           </div>
           <div class="form-row">
+            <label>Publicar com proxy</label>
+            <select id="srvPublishWithProxy">
+              <option value="0">Não</option>
+              <option value="1">Sim</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Só o envio do anúncio sai pela rede móvel da Claro. Usuário e senha vêm do CT, como as outras chaves. O anúncio é montado no modem. Depois de publicar, a página de classificados volta no modem. Se a rede não for a móvel, não publica e não usa o Wi-Fi.</div>
+          </div>
+          <div class="form-row">
             <label>Robe — títulos de itens</label>
             <select id="srvItemTitlesPack">
               <option value="titulos">Padrão (titulos.json)</option>
@@ -1646,6 +1654,7 @@
       const memProvSpikeEl = box.querySelector('#srvMemProvisionSpike');
       let workerDivisorSupported = false;
       const workModeEl = box.querySelector('#srvRobeWorkMode');
+      const publishWithProxyEl = box.querySelector('#srvPublishWithProxy');
       const v4DirectedPercentEl = box.querySelector('#srvRobeV4DirectedPercent');
       const v4ExactPercentEl = box.querySelector('#srvRobeV4ExactPercent');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
@@ -1921,6 +1930,7 @@
           useItemDescriptionInAdsEl.value = robe.useItemDescriptionInAds === true ? '1' : '0';
         }
         photoPolicyEl.value = String(robe.photoDeletePolicy || 'after_all_working_posted');
+        if (publishWithProxyEl) publishWithProxyEl.value = robe.publishWithProxy === true ? '1' : '0';
         globalCitiesSelected = uniqueCities(robe.cidadesExtrasGlobais || []);
         pinSelectedToCatalog();
         if (memGovEnterEl) memGovEnterEl.value = Number(mem.governorEnterMb != null ? mem.governorEnterMb : 2048);
@@ -2322,6 +2332,7 @@
               itemTitlesPack: String((itemTitlesPackEl && itemTitlesPackEl.value) || 'titulos'),
               useItemDescriptionInAds: String((useItemDescriptionInAdsEl && useItemDescriptionInAdsEl.value) || '0') === '1',
               photoDeletePolicy: String(photoPolicyEl.value || 'after_all_working_posted'),
+              publishWithProxy: String((publishWithProxyEl && publishWithProxyEl.value) || '0') === '1',
               cidadesExtrasGlobais: (() => {
                 syncGlobalSelectedFromChecks();
                 pinSelectedToCatalog();
@@ -3430,6 +3441,11 @@
         if (p.robePostError === true) {
           const pill = buildPill('Robe erro', 'bad');
           pill.title = p.robePostErrorText || 'Postagem do Robe nao concluiu';
+          titleRow.append(pill);
+        }
+        if (p.proxyPublishError === true) {
+          const pill = buildPill('Proxy erro', 'bad');
+          pill.title = p.proxyPublishErrorText || 'Publicacao nao saiu na rede movel';
           titleRow.append(pill);
         }
         if (p.renewError === true) {

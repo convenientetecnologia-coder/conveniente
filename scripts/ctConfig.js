@@ -124,6 +124,8 @@ function readCtConfig() {
   const textVerifiedMaxPrice = (j.textVerifiedMaxPrice == null || j.textVerifiedMaxPrice === "") ? null : Number(j.textVerifiedMaxPrice);
   const antiCaptchaApiKey = String(j.antiCaptchaApiKey || "").trim();
   const antiCaptchaBaseUrl = String(j.antiCaptchaBaseUrl || "").trim();
+  const oxylabsProxyUser = String(j.oxylabsProxyUser || "").trim();
+  const oxylabsProxyPassword = String(j.oxylabsProxyPassword || "");
   return {
     ok: true,
     path: CT_CONFIG_PATH,
@@ -136,7 +138,9 @@ function readCtConfig() {
     textVerifiedServiceNotListedName: textVerifiedServiceNotListedName || "",
     textVerifiedMaxPrice: Number.isFinite(textVerifiedMaxPrice) ? Number(textVerifiedMaxPrice) : null,
     antiCaptchaApiKey: antiCaptchaApiKey || "",
-    antiCaptchaBaseUrl: antiCaptchaBaseUrl || ""
+    antiCaptchaBaseUrl: antiCaptchaBaseUrl || "",
+    oxylabsProxyUser: oxylabsProxyUser || "",
+    oxylabsProxyPassword: oxylabsProxyPassword || ""
   };
 }
 
@@ -164,6 +168,12 @@ function pickInboundCtConfig(src) {
   if (antiCaptchaApiKey) patch.antiCaptchaApiKey = antiCaptchaApiKey;
   const antiCaptchaBaseUrl = text(src.antiCaptchaBaseUrl);
   if (antiCaptchaBaseUrl) patch.antiCaptchaBaseUrl = antiCaptchaBaseUrl;
+  const oxylabsProxyUser = text(src.oxylabsProxyUser);
+  const oxylabsProxyPassword = String(src.oxylabsProxyPassword == null ? "" : src.oxylabsProxyPassword);
+  if (oxylabsProxyUser && oxylabsProxyPassword) {
+    patch.oxylabsProxyUser = oxylabsProxyUser;
+    patch.oxylabsProxyPassword = oxylabsProxyPassword;
+  }
   return Object.keys(patch).length ? patch : null;
 }
 
@@ -173,7 +183,9 @@ function ctConfigIsComplete(cfg) {
     String(cfg.ctBaseUrl || "").trim() &&
     String(cfg.textVerifiedApiKey || "").trim() &&
     String(cfg.textVerifiedApiUsername || "").trim() &&
-    String(cfg.antiCaptchaApiKey || "").trim()
+    String(cfg.antiCaptchaApiKey || "").trim() &&
+    String(cfg.oxylabsProxyUser || "").trim() &&
+    String(cfg.oxylabsProxyPassword || "")
   );
 }
 
@@ -189,13 +201,18 @@ function applyInboundCtConfig(src) {
   const hasTextVerifiedKey = !!String(confirmed.textVerifiedApiKey || "").trim();
   const hasTextVerifiedUsername = !!String(confirmed.textVerifiedApiUsername || "").trim();
   const hasAntiCaptchaKey = !!String(confirmed.antiCaptchaApiKey || "").trim();
+  const hasOxylabsProxy = !!(
+    String(confirmed.oxylabsProxyUser || "").trim() &&
+    String(confirmed.oxylabsProxyPassword || "")
+  );
   return {
     ok: true,
     complete: ctConfigIsComplete(confirmed),
     hasBase,
     hasTextVerifiedKey,
     hasTextVerifiedUsername,
-    hasAntiCaptchaKey
+    hasAntiCaptchaKey,
+    hasOxylabsProxy
   };
 }
 
@@ -209,7 +226,9 @@ function writeCtConfig({
   textVerifiedServiceNotListedName,
   textVerifiedMaxPrice,
   antiCaptchaApiKey,
-  antiCaptchaBaseUrl
+  antiCaptchaBaseUrl,
+  oxylabsProxyUser,
+  oxylabsProxyPassword
 } = {}) {
   try {
     const curRaw = safeReadJson(CT_CONFIG_PATH) || {};
@@ -238,6 +257,8 @@ function writeCtConfig({
         : cur.textVerifiedMaxPrice,
       antiCaptchaApiKey: (antiCaptchaApiKey !== undefined) ? String(antiCaptchaApiKey || "").trim() : (cur.antiCaptchaApiKey || ""),
       antiCaptchaBaseUrl: (antiCaptchaBaseUrl !== undefined) ? String(antiCaptchaBaseUrl || "").trim() : (cur.antiCaptchaBaseUrl || ""),
+      oxylabsProxyUser: (oxylabsProxyUser !== undefined) ? String(oxylabsProxyUser || "").trim() : (cur.oxylabsProxyUser || ""),
+      oxylabsProxyPassword: (oxylabsProxyPassword !== undefined) ? String(oxylabsProxyPassword || "") : (cur.oxylabsProxyPassword || ""),
       updatedAt: now
     };
     if (!next.ctBaseUrl && ctBaseRaw && isNgrokCtBaseUrl(ctBaseRaw) && !allowLegacyNgrokCtBase()) {

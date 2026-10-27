@@ -2431,7 +2431,7 @@ async function clickExactCenter(page, handle) {
   }
 }
 
-async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400 } = {}) {
+async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null } = {}) {
   const sequence = [];
   let publishClicked = false;
   let publishTries = 0;
@@ -2440,6 +2440,9 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
     const btnPub = await findEnabledButton(page, 'Publicar', 700);
     if (btnPub) {
       publishTries++;
+      if (publishTries === 1 && typeof onBeforePublish === 'function') {
+        await onBeforePublish();
+      }
       await clickExactCenter(page, btnPub);
       sequence.push('publicar');
       const stateChange = await page.waitForFunction((label) => {
@@ -4355,11 +4358,35 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
 
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
+  const mobileGate = await require('./mobilePublishProxy').openForPublish(page, nome);
+  if (mobileGate.required && mobileGate.ok !== true) {
+    gql.cleanup && gql.cleanup();
+    return {
+      ok: false,
+      reason: 'proxy_mobile_unavailable',
+      proxyRequired: true,
+      proxySent: false,
+      attempts: mobileGate.attempts || 0
+    };
+  }
 
   // 2. TROQUE O BLOCO CRÍTICO DE publishAndWatch PARA USO DO LAÇO EXATO:
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_start' });
-  const flowRes = await clickFlowExactRetry(page, nome, { maxSteps: 24, publishMaxRetries: 3 });
-  stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked });
+  let flowRes;
+  try {
+    flowRes = await clickFlowExactRetry(page, nome, {
+      maxSteps: 24,
+      publishMaxRetries: 3,
+      onBeforePublish: mobileGate.required ? () => mobileGate.arm() : null
+    });
+  } finally {
+    if (mobileGate.required) await mobileGate.close();
+  }
+  stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked, proxySent: mobileGate.sent() });
+  if (mobileGate.required && flowRes.publishClicked && mobileGate.sent() !== true) {
+    gql.cleanup && gql.cleanup();
+    return { ok: false, reason: 'proxy_publish_blocked', proxyRequired: true, proxySent: false, attempts: mobileGate.attempts || 0 };
+  }
 
   if (!flowRes.sequence.length) {
     await forensicScreenshot(page, nome, 'btn_flow_no_sequence');
@@ -5088,6 +5115,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     for (let i = 0; i < 2 && !published; i++) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
+      if (pubRes && pubRes.proxyRequired === true && pubRes.proxySent !== true) {
+        const err = new Error(String(pubRes.reason || 'proxy_publish_blocked'));
+        err.PROXY_PUBLISH = true;
+        throw err;
+      }
       if (pubRes && pubRes.reason === 'limit_overlay') {
         await applyLimitPostingAndAbort({ page, nome, attId, where: 'publish_race', overlaySnapshot: pubRes.overlay });
       }
@@ -5104,6 +5136,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
       // Publicado: mantém a aba aberta para pós-publish (upsell + ID doc 1x/dia).
       if (pubRes && pubRes.ok) {
+        try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
         published = true;
         break;
       }
@@ -5126,6 +5159,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
     try { await flowAlertFlags.clearRobePostError(nome); } catch {}
+    try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
 
     // Confirmar localização usada (após publicar — mantém)
     try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
@@ -5279,6 +5313,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
 
     const errMsg = (e && e.message) ? e.message : String(e);
+    if (e && e.PROXY_PUBLISH === true) {
+      try {
+        await flowAlertFlags.setProxyPublishError(nome, {
+          reason: String(errMsg || 'proxy_publish_blocked').slice(0, 140),
+          text: 'Publicacao nao saiu na rede movel. Nao foi enviada pelo Wi-Fi.'
+        });
+      } catch {}
+    }
     stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'error', err: (e && e.message) || String(e) });
 
@@ -5295,7 +5337,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       loginRequired: !!(e && e.ROBE_LOGIN_REQUIRED === true),
       marketplaceDisabled: !!(e && e.ROBE_MARKETPLACE_DISABLED === true),
       rateLimit: isMarketplaceRateLimit,
-      noPhoto: isNoPhoto
+      noPhoto: isNoPhoto,
+      proxyPublish: !!(e && e.PROXY_PUBLISH === true)
     })) {
       try {
         await flowAlertFlags.setRobePostError(nome, {
