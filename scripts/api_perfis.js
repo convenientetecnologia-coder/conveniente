@@ -939,6 +939,9 @@ module.exports = (app, workerClient, fileStore) => {
       try { fs.mkdirSync(userDataDir, { recursive: true }); } catch (e) {
         logger.error('Falha ao criar userDataDir externo', { nome, userDataDir, error: e && e.message }, e);
       }
+      try { require('./browser.js').ensureRobeProfile(nome); } catch (e) {
+        logger.warn('Falha ao criar pasta do Robe', { nome, error: (e && e.message) || String(e) });
+      }
 
       const perfilObj = {
         nome, cidade,

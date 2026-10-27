@@ -1929,6 +1929,85 @@ function printChromeLog(chromeLogFile, label = 'CHROME LOG') {
 /**
  * Enforce: garantir que userDataDir esteja em "User Data\Conveniente\NOME".
  */
+function chromeUserDataRoot() {
+  if (process.platform === 'win32') {
+    const la = process.env.LOCALAPPDATA;
+    if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+  }
+  return path.join(os.homedir(), '.config', 'google-chrome');
+}
+
+function robeProfileDir(nome) {
+  const who = String(nome || '').trim();
+  if (!who || !/^[a-z0-9_-]+$/i.test(who)) throw new Error('robe_profile_nome_invalido');
+  return path.join(chromeUserDataRoot(), 'ConvenienteRobe', who);
+}
+
+function ensureRobeProfile(nome) {
+  const dir = robeProfileDir(nome);
+  fs.mkdirSync(dir, { recursive: true });
+  prepareAccountChromeProfile(dir);
+  return dir;
+}
+
+function wipeRobeSiteData(userDataDir) {
+  const def = path.join(String(userDataDir || ''), 'Default');
+  if (!def || !fs.existsSync(def)) return;
+  const dirs = [
+    'Local Storage',
+    'Session Storage',
+    'IndexedDB',
+    'Service Worker',
+    'Cache',
+    'Code Cache',
+    'Storage',
+    'File System',
+    'Shared Dictionary',
+    'Sessions'
+  ];
+  const files = [
+    'Cookies',
+    'Cookies-journal',
+    'History',
+    'History-journal',
+    'Visited Links',
+    'Web Data',
+    'Web Data-journal',
+    'Favicons',
+    'Favicons-journal'
+  ];
+  for (const name of dirs) {
+    try { fs.rmSync(path.join(def, name), { recursive: true, force: true }); } catch {}
+  }
+  for (const name of files) {
+    try { fs.rmSync(path.join(def, name), { force: true }); } catch {}
+  }
+  const net = path.join(def, 'Network');
+  for (const name of ['Cookies', 'Cookies-journal']) {
+    try { fs.rmSync(path.join(net, name), { force: true }); } catch {}
+  }
+}
+
+function releaseProfileLocks(userDataDir) {
+  if (process.platform === 'win32') {
+    try {
+      const expected = normalizePathForCompare(String(userDataDir || '').trim()).replace(/\/+$/g, '');
+      if (expected) {
+        const procs = listChromeProcessesWin();
+        for (const pr of procs || []) {
+          const ud = extractUserDataDirFromCmd(pr && pr.cmd);
+          if (!ud) continue;
+          if (normalizePathForCompare(ud).replace(/\/+$/g, '') === expected) {
+            try { taskkillTreeWin(pr.pid); } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+  cleanupUserDataLocks(userDataDir);
+}
+
 function ensureUserDataDirUnderChrome(manifest) {
   try {
     const chromeRoot = (process.platform === 'win32')
@@ -2433,6 +2512,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     ensureUserDataDirUnderChrome(manifest);
     const userDataDir = manifest.userDataDir;
     const accountNome = String((manifest && manifest.nome) || nome || '').trim();
+    try { ensureRobeProfile(accountNome); } catch {}
     const launchFallbackLocale = resolveServerCountryLocale();
     let launchAntiState = null;
     try { launchAntiState = await syncStealthFromManifest(accountNome, manifest); } catch {}
@@ -8546,6 +8626,10 @@ module.exports = {
   primeAccountStealth,
   prepareAccountChromeProfile,
   maximizeAccountWindow,
+  robeProfileDir,
+  ensureRobeProfile,
+  wipeRobeSiteData,
+  releaseProfileLocks,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)
   pruneHumanToOneTab, // militar: modo humano => 1 aba

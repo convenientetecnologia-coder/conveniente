@@ -1402,6 +1402,22 @@ async function execProfilesPurgeDirs(cmd) {
         if (rr.ok) item.deleted.userDataDir = true;
         else { item.ok = false; item.errors.push({ target: 'userDataDir', error: rr.error }); }
       }
+      try {
+        const browserHelper = require('./browser.js');
+        const robeDir = browserHelper.robeProfileDir(nome);
+        if (robeDir && safeExistsDir(robeDir)) {
+          try { browserHelper.releaseProfileLocks(robeDir); } catch {}
+          const rrRobe = safeRmDir(robeDir);
+          item.deleted.robeProfile = !!rrRobe.ok;
+          if (!rrRobe.ok) {
+            item.ok = false;
+            item.errors.push({ target: 'robeProfile', error: rrRobe.error });
+          }
+        }
+      } catch (e) {
+        item.ok = false;
+        item.errors.push({ target: 'robeProfile', error: (e && e.message) || String(e) });
+      }
     }
 
     results.push(item);

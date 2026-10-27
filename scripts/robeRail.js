@@ -17,7 +17,10 @@ const {
   accountChromeLaunchConfig,
   primeAccountStealth,
   prepareAccountChromeProfile,
-  maximizeAccountWindow
+  maximizeAccountWindow,
+  ensureRobeProfile,
+  wipeRobeSiteData,
+  releaseProfileLocks
 } = require('./browser.js');
 const stepLog = require('./stepLog.js');
 
@@ -417,6 +420,8 @@ async function installStorageHook(page, bag) {
     const row = byOrigin && byOrigin[origin];
     if (!row) return;
     try {
+      localStorage.clear();
+      sessionStorage.clear();
       const local = row.local || [];
       for (let i = 0; i < local.length; i++) localStorage.setItem(local[i][0], local[i][1]);
       const session = row.session || [];
@@ -516,8 +521,9 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
       captureAccountStorage(liveBrowser)
     ]);
     try { await primeAccountStealth(nome); } catch {}
-    userDataDir = path.join(os.tmpdir(), `ct-robe-rail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-    fs.mkdirSync(userDataDir, { recursive: true });
+    userDataDir = ensureRobeProfile(nome);
+    releaseProfileLocks(userDataDir);
+    wipeRobeSiteData(userDataDir);
     prepareAccountChromeProfile(userDataDir);
     browser = await accountPuppeteer.launch(accountChromeLaunchConfig({
       userDataDir,
@@ -554,7 +560,8 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         local: Array.isArray(www.local) ? www.local.length : 0,
         session: Array.isArray(www.session) ? www.session.length : 0,
         idb: Array.isArray(www.idb) ? www.idb.length : 0,
-        idbDropped: !!(storage && storage.__idbDropped)
+        idbDropped: !!(storage && storage.__idbDropped),
+        profile: 'fixed'
       });
     } catch {}
     const api = {
@@ -634,8 +641,8 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         try { if (browser) await browser.close(); } catch {}
         await killTree(pid);
         try { await rail.close(); } catch {}
-        try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
-        try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', pid: pid || null }); } catch {}
+        try { releaseProfileLocks(userDataDir); } catch {}
+        try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', pid: pid || null, kept: true }); } catch {}
       }
     };
     browser.__ctRobeRail = api;
@@ -647,7 +654,7 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
       await killTree(proc && proc.pid);
     } catch {}
     try { await rail.close(); } catch {}
-    try { if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+    try { if (userDataDir) releaseProfileLocks(userDataDir); } catch {}
     throw e;
   }
 }
