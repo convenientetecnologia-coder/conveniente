@@ -109,6 +109,91 @@ function photoCarriesFile(buf) {
   return Buffer.isBuffer(buf) && (buf.length >= 15000 || bodyHasImage(buf));
 }
 
+function multipartBoundary(body, contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(String(contentType || ''));
+  if (match) return String(match[1] || match[2] || '').trim();
+  if (!Buffer.isBuffer(body) || !body.length) return '';
+  const line = body.subarray(0, 180).toString('latin1').match(/^--([^\r\n]+)/);
+  if (!line || line[1].endsWith('--')) return '';
+  return line[1];
+}
+
+function multipartFieldNames(body) {
+  if (!Buffer.isBuffer(body) || !body.length) return '';
+  const text = body.subarray(0, Math.min(body.length, 12000)).toString('latin1');
+  const names = [];
+  const re = /(?:^|[\s;])name="([^"]+)"/gi;
+  let found;
+  while ((found = re.exec(text))) {
+    const lineStart = Math.max(0, text.lastIndexOf('\n', found.index - 1) + 1);
+    const lineEnd = text.indexOf('\n', found.index);
+    const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
+    names.push(/filename\s*=/i.test(line) ? found[1] + ':file' : found[1]);
+    if (names.length >= 12) break;
+  }
+  return names.join(',');
+}
+
+function splicePhotoFile(body, contentType, fileBuf) {
+  if (!Buffer.isBuffer(body) || !Buffer.isBuffer(fileBuf) || fileBuf.length < 3) return null;
+  const boundary = multipartBoundary(body, contentType);
+  if (!boundary) return null;
+  const sep = Buffer.from('--' + boundary);
+  const indexes = [];
+  let from = 0;
+  while (from < body.length) {
+    const at = body.indexOf(sep, from);
+    if (at < 0) break;
+    indexes.push(at);
+    from = at + sep.length;
+  }
+  if (indexes.length < 2) return null;
+  const chunks = [];
+  let replaced = false;
+  for (let i = 0; i < indexes.length; i++) {
+    const at = indexes[i];
+    const next = i + 1 < indexes.length ? indexes[i + 1] : body.length;
+    let part = body.subarray(at, next);
+    const after = body.subarray(at + sep.length, at + sep.length + 2);
+    const isClose = after.length >= 2 && after[0] === 45 && after[1] === 45;
+    if (!isClose && !replaced) {
+      let headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+      let headerLen = 4;
+      if (headerEnd < 0) {
+        headerEnd = part.indexOf(Buffer.from('\n\n'));
+        headerLen = 2;
+      }
+      if (headerEnd > 0 && /filename\s*=/i.test(part.subarray(0, headerEnd).toString('latin1'))) {
+        part = Buffer.concat([
+          part.subarray(0, headerEnd + headerLen),
+          fileBuf,
+          Buffer.from('\r\n')
+        ]);
+        replaced = true;
+      }
+    }
+    chunks.push(part);
+  }
+  if (!replaced) {
+    chunks.splice(Math.max(0, chunks.length - 1), 0, Buffer.concat([
+      Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n'),
+      fileBuf,
+      Buffer.from('\r\n')
+    ]));
+  }
+  const out = Buffer.concat(chunks);
+  return bodyHasImage(out) ? out : null;
+}
+
+function readPhotoFile(filePath) {
+  try {
+    if (!filePath) return null;
+    const buf = fs.readFileSync(filePath);
+    if (buf && buf.length > 100 && bodyHasImage(buf)) return buf;
+  } catch {}
+  return null;
+}
+
 function composerPhotoProblem(text) {
   const t = plain(text);
   if (/nao foi possivel processar|nao foi possivel carregar|nao pode ser processad|could not process|couldn.?t process|could not upload|no se pudo procesar/.test(t)) {
@@ -123,7 +208,7 @@ function judgePhotoResponse(status, body) {
   const t = plain(head);
   if (!code) return { ok: false, reason: 'photo_upload_no_status' };
   if (code >= 400) return { ok: false, reason: 'photo_upload_http_' + code };
-  if (/nao foi possivel|could not process|couldn.?t process|errorSummary|error_code|photo_upload_error/.test(t)) {
+  if (/1357054|nao foi possivel|nao pode ser processad|could not process|couldn.?t process|photo_upload_error/.test(t)) {
     return { ok: false, reason: 'photo_upload_rejected' };
   }
   return { ok: true, reason: 'photo_upload_ok' };
@@ -377,6 +462,10 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
   });
   async function readPausedBody(ev) {
     const req = ev.request || {};
+    let best = Buffer.alloc(0);
+    const take = (buf) => {
+      if (buf && buf.length > best.length) best = buf;
+    };
     const entries = Array.isArray(req.postDataEntries) ? req.postDataEntries : [];
     if (entries.length) {
       const chunks = [];
@@ -386,25 +475,27 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
       if (chunks.length) {
         const buf = Buffer.concat(chunks);
         buf._source = 'base64';
-        return buf;
+        take(buf);
       }
     }
-    try {
-      const extra = await client.send('Fetch.getRequestPostData', { requestId: ev.requestId });
-      if (extra && extra.postData) {
-        const buf = extra.base64Encoded
-          ? Buffer.from(String(extra.postData), 'base64')
-          : Buffer.from(String(extra.postData), 'latin1');
-        buf._source = extra.base64Encoded ? 'base64' : 'latin1';
-        return buf;
+    if (req.hasPostData && best.length < 20000) {
+      try {
+        const extra = await client.send('Fetch.getRequestPostData', { requestId: ev.requestId });
+        if (extra && extra.postData) {
+          const buf = extra.base64Encoded
+            ? Buffer.from(String(extra.postData), 'base64')
+            : Buffer.from(String(extra.postData), 'latin1');
+          buf._source = extra.base64Encoded ? 'base64' : 'latin1';
+          take(buf);
+        }
+      } catch {}
+      if (req.postData) {
+        const buf = Buffer.from(String(req.postData), 'latin1');
+        buf._source = 'latin1';
+        take(buf);
       }
-    } catch {}
-    if (req.postData) {
-      const buf = Buffer.from(String(req.postData), 'latin1');
-      buf._source = 'latin1';
-      return buf;
     }
-    return Buffer.alloc(0);
+    return best;
   }
   async function onPaused(ev) {
     const req = ev.request || {};
@@ -438,17 +529,42 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
       if (lane === 'proxy') {
         const urlSafe = safeUrl(req.url);
         const photoUrl = isPhotoUploadUrl(req.url);
-        const carriesFile = photoUrl && photoCarriesFile(bodyBuf);
         const contentType = headerValue(req.headers, 'content-type');
-        if (req.hasPostData && !bodyBuf.length) {
+        let sendBuf = bodyBuf;
+        let splice = '';
+        let diskBytes = 0;
+        if (photoUrl && !bodyHasImage(bodyBuf)) {
+          const fileBuf = readPhotoFile(state.photoPath);
+          diskBytes = fileBuf ? fileBuf.length : 0;
+          const spliced = fileBuf ? splicePhotoFile(bodyBuf, contentType, fileBuf) : null;
+          if (spliced) {
+            sendBuf = spliced;
+            sendBuf._source = 'disk';
+            splice = 'spliced';
+          } else {
+            splice = fileBuf ? 'splice_failed' : (state.photoPath ? 'disk_not_image' : 'no_path');
+          }
+        }
+        const carriesFile = photoUrl && photoCarriesFile(sendBuf);
+        if (req.hasPostData && !sendBuf.length) {
           if (photoUrl) state.notePhoto({ ok: false, reason: 'photo_body_empty', bodyBytes: 0, bodySource, url: urlSafe, carriesFile: true });
           auditReplay(nome, { url: urlSafe, status: 0, bodyBytes: 0, bodySource, resourceType: ev.resourceType || '', reason: 'empty_body' });
           await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
           return;
         }
-        if (carriesFile && /multipart|image\//i.test(contentType) && !bodyHasImage(bodyBuf)) {
+        if (photoUrl && !bodyHasImage(sendBuf)) {
           state.notePhoto({ ok: false, reason: 'photo_body_not_image', bodyBytes: bodyBuf.length, bodySource, url: urlSafe, carriesFile: true });
-          auditReplay(nome, { url: urlSafe, status: 0, bodyBytes: bodyBuf.length, bodySource, resourceType: ev.resourceType || '', reason: 'photo_body_not_image' });
+          auditReplay(nome, {
+            url: urlSafe,
+            status: 0,
+            bodyBytes: bodyBuf.length,
+            bodySource,
+            resourceType: ev.resourceType || '',
+            reason: 'photo_body_not_image',
+            splice,
+            diskBytes,
+            fields: multipartFieldNames(bodyBuf)
+          });
           await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
           return;
         }
@@ -457,7 +573,7 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           url: req.url,
           method: req.method,
           headers: req.headers,
-          body: bodyBuf,
+          body: sendBuf,
           baseUser,
           password,
           sessid
@@ -466,8 +582,12 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           url: urlSafe,
           status: replay.status || 0,
           exitCode: replay.exitCode,
-          bodyBytes: bodyBuf.length,
-          bodySource,
+          bodyBytes: sendBuf.length,
+          capturedBytes: bodyBuf.length,
+          bodySource: sendBuf._source || bodySource,
+          splice,
+          diskBytes,
+          fields: photoUrl ? multipartFieldNames(bodyBuf) : '',
           up: replay.up,
           down: replay.down,
           ms: Date.now() - started,
@@ -476,11 +596,11 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           curl: hideSecret(hideSecret(replay.error, password), baseUser).slice(0, 180)
         };
         if (photoUrl || bodyBuf.length >= 15000 || !replay.status || replay.status >= 400 || marked) auditReplay(nome, replayRow);
-        if (photoUrl && carriesFile) {
+        if (photoUrl && (carriesFile || splice === 'spliced')) {
           const verdict = judgePhotoResponse(replay.status, replay.body);
           state.notePhoto(Object.assign({
-            bodyBytes: bodyBuf.length,
-            bodySource,
+            bodyBytes: sendBuf.length,
+            bodySource: sendBuf._source || bodySource,
             status: replay.status || 0,
             url: urlSafe,
             carriesFile: true
@@ -594,6 +714,9 @@ async function openForPublish(page, nome) {
     photoResult() {
       return gate && gate.photo ? gate.photo : null;
     },
+    setUploadFile(filePath) {
+      if (gate) gate.photoPath = String(filePath || '');
+    },
     async close() { if (gate) await gate.close(); }
   };
 }
@@ -628,6 +751,8 @@ module.exports = {
   isPhotoUploadUrl,
   bodyHasImage,
   photoCarriesFile,
+  splicePhotoFile,
+  multipartFieldNames,
   composerPhotoProblem,
   judgePhotoResponse,
   readComposerPhotoProblem,

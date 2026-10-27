@@ -2572,6 +2572,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       throw err;
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
+    if (creationGate.required && typeof creationGate.setUploadFile === 'function') {
+      creationGate.setUploadFile(fotoPath);
+    }
     await inputFoto.uploadFile(fotoPath);
     if (creationGate.required) {
       const photoWait = await require('./mobilePublishProxy').waitComposerPhoto(page, creationGate, 170000);
