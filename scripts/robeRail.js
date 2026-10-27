@@ -3,6 +3,7 @@
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const tls = require('tls');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -120,6 +121,52 @@ function createSwitch() {
   };
 }
 
+function proveThroughRail(port) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1');
+    let buf = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      try { sock.destroy(); } catch {}
+      reject(new Error('prove_timeout'));
+    }, 20000);
+    const fail = (err) => {
+      clearTimeout(timer);
+      try { sock.destroy(); } catch {}
+      reject(err);
+    };
+    sock.on('error', fail);
+    const onHead = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const idx = buf.indexOf('\r\n\r\n');
+      if (idx < 0) return;
+      sock.removeListener('data', onHead);
+      const header = buf.slice(0, idx).toString('latin1');
+      const rest = buf.slice(idx + 4);
+      if (!/^HTTP\/1\.[01] 200/i.test(header)) {
+        fail(new Error(header.split('\r\n')[0] || 'prove_connect_failed'));
+        return;
+      }
+      if (rest.length) sock.unshift(rest);
+      const secure = tls.connect({ socket: sock, servername: 'ip.oxylabs.io' }, () => {
+        secure.write('GET /location HTTP/1.1\r\nHost: ip.oxylabs.io\r\nConnection: close\r\n\r\n');
+      });
+      let body = Buffer.alloc(0);
+      secure.on('data', (c) => { body = Buffer.concat([body, c]); });
+      secure.on('error', fail);
+      secure.on('end', () => {
+        clearTimeout(timer);
+        const text = body.toString('utf8');
+        const cut = text.indexOf('\r\n\r\n');
+        resolve(cut >= 0 ? text.slice(cut + 4) : text);
+      });
+    };
+    sock.on('data', onHead);
+    sock.on('connect', () => {
+      sock.write('CONNECT ip.oxylabs.io:443 HTTP/1.1\r\nHost: ip.oxylabs.io:443\r\n\r\n');
+    });
+  });
+}
+
 function killTree(pid) {
   return new Promise((resolve) => {
     if (!pid) return resolve();
@@ -171,27 +218,32 @@ async function openRobeRail({ nome, cookies }) {
         const hop = mobile.upstreamFor(exit.sessid);
         rail.flip(hop);
         await new Promise((r) => setTimeout(r, 500));
-        let packed = null;
+        let raw = '';
         try {
-          packed = await page.evaluate(async () => {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 20000);
-            try {
-              const res = await fetch('https://ip.oxylabs.io/location', { cache: 'no-store', signal: ctrl.signal });
-              const text = await res.text();
-              return { status: res.status, text: text.slice(0, 2000) };
-            } finally {
-              clearTimeout(timer);
-            }
-          });
+          raw = await proveThroughRail(port);
         } catch (e) {
-          return { ok: false, reason: 'prove_failed', error: String((e && e.message) || e).slice(0, 180) };
+          const error = String((e && e.message) || e).slice(0, 180);
+          try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_prove_fail', reason: 'prove_failed', error }); } catch {}
+          return { ok: false, reason: 'prove_failed', error };
         }
         let parsed = null;
-        try { parsed = JSON.parse(packed && packed.text || ''); } catch {}
+        try { parsed = JSON.parse(raw); } catch {}
+        if (!parsed) {
+          const blob = String(raw || '').match(/\{[\s\S]*\}/);
+          if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
+        }
         const seen = readExit(parsed);
-        if (Number(packed && packed.status) !== 200 || !mobile.acceptExit(seen)) {
-          return { ok: false, reason: 'prove_not_mobile', status: packed && packed.status, asn: seen.asn, country: seen.country, ip: seen.ip };
+        if (!mobile.acceptExit(seen)) {
+          try {
+            stepLog.appendJSONL(nome || 'system', 'robe', {
+              step: 'robe_rail_prove_fail',
+              reason: 'prove_not_mobile',
+              asn: seen.asn,
+              country: seen.country,
+              ip: seen.ip
+            });
+          } catch {}
+          return { ok: false, reason: 'prove_not_mobile', asn: seen.asn, country: seen.country, ip: seen.ip, attempts: exit.attempts || 0 };
         }
         try {
           stepLog.appendJSONL(nome || 'system', 'robe', {
