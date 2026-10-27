@@ -19,12 +19,12 @@ test('AS22085 no Brasil entra, outra rede nao entra', () => {
   assert.equal(acceptExit({ asn: '', country: 'BR' }), false);
 });
 
-test('da foto ate o publicar o facebook vai no proxy, e depois volta pro wifi', () => {
+test('no botao publicar o anuncio vai no proxy, e a pagina de vendas volta pro wifi', () => {
   assert.equal(classifyPublishRequest({
-    method: 'POST',
-    url: 'https://upload.facebook.com/ajax/react_composer/attachments/photo/upload',
-    postData: 'foto'
-  }), 'proxy');
+    method: 'GET',
+    url: 'https://www.facebook.com/marketplace/create/item',
+    postData: ''
+  }), 'wifi');
   assert.equal(classifyPublishRequest({
     method: 'POST',
     url: 'https://www.facebook.com/api/graphql/',

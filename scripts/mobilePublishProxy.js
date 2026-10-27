@@ -552,7 +552,7 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
           return;
         }
-        if (photoUrl && !bodyHasImage(sendBuf)) {
+        if (photoUrl && state.photoPath && !bodyHasImage(sendBuf)) {
           state.notePhoto({ ok: false, reason: 'photo_body_not_image', bodyBytes: bodyBuf.length, bodySource, url: urlSafe, carriesFile: true });
           auditReplay(nome, {
             url: urlSafe,
