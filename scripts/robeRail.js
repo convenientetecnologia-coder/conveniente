@@ -156,12 +156,12 @@ async function openRobeRail({ nome, cookies }) {
         '--lang=pt-BR'
       ]
     });
-    browser.__ctRobeRail = rail;
+    browser.__ctRobeRail = null;
     const seed = await newPageDaConta(browser, nome, { source: 'robe_rail_seed' });
     await injectCookies(seed, Array.isArray(cookies) ? cookies : []);
     await seed.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_open', port }); } catch {}
-    return {
+    const api = {
       browser,
       async armAndProve(page) {
         const cfg = mobile.readSettings();
@@ -217,6 +217,8 @@ async function openRobeRail({ nome, cookies }) {
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', pid: pid || null }); } catch {}
       }
     };
+    browser.__ctRobeRail = api;
+    return api;
   } catch (e) {
     try { if (browser) await browser.close(); } catch {}
     try {
