@@ -575,38 +575,51 @@ async function detectLimitReached(page) {
 // Botão habilitado por texto
 async function findEnabledButton(page, label, timeout = 700) {
   const start = Date.now();
-  const xp = `//span[normalize-space()="${label}"]`;
   while (Date.now() - start < timeout) {
-    const spans = await page.$x(xp);
-    for (const sp of spans) {
-      let btn = sp;
-      // Sobe até host BUTTON ou role=button em no máximo 5 níveis
-      for (let up = 0; up < 5 && btn; up++) {
-        // Testa host BUTTON
-        const tagOk = await btn.evaluate(el => el.tagName.toUpperCase() === 'BUTTON');
-        const roleOk = await btn.evaluate(el => el.getAttribute && el.getAttribute('role') === 'button');
-        if (tagOk || roleOk) {
-          // Verifica disponível/habilitado
-          const enabled = await btn.evaluate(el => {
-            const st = window.getComputedStyle(el);
-            if (!st) return false;
-            if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
-            const r = el.getBoundingClientRect();
-            if (!r || r.width < 2 || r.height < 2) return false;
-            if (el.getAttribute('aria-disabled') === 'true') return false;
-            if (el.disabled === true) return false;
-            if (el.getAttribute('tabindex') === '-1') return false;
-            return true;
-          });
-          if (enabled) return btn;
-        }
-        btn = await btn.evaluateHandle(el => el.parentElement);
-        btn = btn.asElement();
+    const handle = await page.evaluateHandle((wanted) => {
+      const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+      const want = norm(wanted);
+      const nodes = Array.from(document.querySelectorAll('button, [role="button"]'));
+      for (const el of nodes) {
+        const byLabel = norm(el.getAttribute('aria-label') || '');
+        const byText = norm(el.innerText || el.textContent || '');
+        if (byLabel !== want && byText !== want) continue;
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        if (el.disabled === true) continue;
+        const st = window.getComputedStyle(el);
+        if (st && (st.display === 'none' || st.visibility === 'hidden')) continue;
+        return el;
       }
-    }
+      return null;
+    }, label).catch(() => null);
+    const el = handle && typeof handle.asElement === 'function' ? handle.asElement() : null;
+    if (el) return el;
+    try { if (handle && typeof handle.dispose === 'function') await handle.dispose(); } catch {}
     await sleep(120);
   }
   return null;
+}
+
+async function dismissListingError(page) {
+  const closed = await page.evaluate(() => {
+    const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'));
+    for (const dialog of dialogs) {
+      const text = norm(dialog.innerText || '');
+      if (!text.includes('ocorreu um erro')) continue;
+      const btn = Array.from(dialog.querySelectorAll('button, [role="button"]')).find((el) => {
+        const label = norm(el.getAttribute('aria-label') || el.innerText || '');
+        return label === 'fechar';
+      });
+      if (btn) {
+        btn.click();
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+  if (closed) await sleep(500);
+  return !!closed;
 }
 
 async function forensicScreenshot(page, nome, label) {
@@ -640,6 +653,7 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
   let publishClicked = false;
   let publishTries = 0;
   for (let step = 1; step <= maxSteps; step++) {
+    try { await dismissListingError(page); } catch {}
     // PUBLICAR — tenta até publishMaxRetries
     const btnPub = await findEnabledButton(page, 'Publicar', 700);
     if (btnPub) {
@@ -649,6 +663,12 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
       }
       await clickExactCenter(page, btnPub);
       sequence.push('publicar');
+      await sleep(700);
+      if (await dismissListingError(page)) {
+        await sleep(400);
+        if (publishTries >= publishMaxRetries) break;
+        continue;
+      }
       const stateChange = await page.waitForFunction((label) => {
         const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
         const buttons = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));

@@ -6706,6 +6706,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   } catch (_) {
     bootStableOk = false;
   }
+  try {
+    const openAfterBoot = await browser.pages().catch(() => []);
+    for (const extra of openAfterBoot || []) {
+      if (!extra || extra === page) continue;
+      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
+    }
+  } catch (_) {}
   let earReadyOk = false;
   try {
     if (cfg && typeof cfg.bootInterlockIsEarReady === "function") {

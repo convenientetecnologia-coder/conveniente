@@ -426,7 +426,7 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         if (!exit.ok) return { ok: false, reason: 'exit_fail', attempts: exit.attempts || 0 };
         const hop = mobile.upstreamFor(exit.sessid);
         rail.flip(hop);
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1500));
         let raw = '';
         try {
           raw = await proveThroughRail(port);
