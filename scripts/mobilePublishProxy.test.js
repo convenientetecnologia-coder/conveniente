@@ -2,7 +2,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyPublishRequest, acceptExit, isPublishMarked } = require('./mobilePublishProxy.js');
+const {
+  classifyPublishRequest,
+  acceptExit,
+  isPublishMarked,
+  isPhotoUploadUrl,
+  bodyHasImage,
+  composerPhotoProblem,
+  judgePhotoResponse
+} = require('./mobilePublishProxy.js');
 
 test('AS22085 no Brasil entra, outra rede nao entra', () => {
   assert.equal(acceptExit({ asn: 'AS22085', country: 'BR' }), true);
@@ -36,4 +44,16 @@ test('da foto ate o publicar o facebook vai no proxy, e depois volta pro wifi', 
   assert.equal(isPublishMarked({
     postData: 'fb_api_req_friendly_name=CometMarketplaceListingCreateMutation'
   }), true);
+});
+
+test('foto recusada pelo Facebook segura o anuncio', () => {
+  assert.equal(composerPhotoProblem('Não foi possível processar a foto'), 'photo_process_failed');
+  assert.equal(composerPhotoProblem('Item para venda\nJorge Matos'), '');
+  assert.equal(isPhotoUploadUrl('https://upload.facebook.com/ajax/react_composer/attachments/photo/upload'), true);
+  assert.equal(isPhotoUploadUrl('https://www.facebook.com/api/graphql/'), false);
+  assert.equal(judgePhotoResponse(200, Buffer.from('{"payload":{"photoID":"1"}}')).ok, true);
+  assert.equal(judgePhotoResponse(200, 'Não foi possível processar a foto').ok, false);
+  assert.equal(judgePhotoResponse(0, Buffer.alloc(0)).reason, 'photo_upload_no_status');
+  assert.equal(bodyHasImage(Buffer.from([0xFF, 0xD8, 0xFF, 0xD9])), true);
+  assert.equal(bodyHasImage(Buffer.from('texto sem imagem')), false);
 });

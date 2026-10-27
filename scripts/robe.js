@@ -5005,6 +5005,28 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
+    if (creationGate.required) {
+      const photoWait = await require('./mobilePublishProxy').waitComposerPhoto(page, creationGate, 170000);
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'dbg_robe_photo_proxy_wait',
+          nome: String(nome || ''),
+          attId: String(attId || ''),
+          ok: !!(photoWait && photoWait.ok === true),
+          reason: photoWait && photoWait.reason ? String(photoWait.reason) : null,
+          waitedMs: photoWait && photoWait.waitedMs || null,
+          status: photoWait && photoWait.status || null,
+          bodyBytes: photoWait && photoWait.bodyBytes || null,
+          bodySource: photoWait && photoWait.bodySource ? String(photoWait.bodySource) : null
+        });
+      } catch {}
+      if (!photoWait || photoWait.ok !== true) {
+        const err = new Error('proxy_photo_failed:' + String((photoWait && photoWait.reason) || 'unknown'));
+        err.PROXY_PUBLISH = true;
+        throw err;
+      }
+    }
     fotoUploaded = true;
     await sleep(jitter(250, 450));
 
@@ -5117,6 +5139,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     localUsada = await preencherLocalizacao(page, cidadePerfil, postingLocationScope);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await waitBeforeComposeAction(composePlan, 'before_publish', { nome, attId });
+    if (creationGate.required) {
+      const photoStill = await require('./mobilePublishProxy').readComposerPhotoProblem(page);
+      if (photoStill) {
+        const err = new Error('proxy_photo_failed:' + photoStill);
+        err.PROXY_PUBLISH = true;
+        throw err;
+      }
+    }
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
 

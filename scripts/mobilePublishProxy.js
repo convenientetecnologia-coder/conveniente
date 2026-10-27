@@ -67,6 +67,136 @@ function acceptExit(payload) {
   return asn === `AS${ASN}` && country === 'BR';
 }
 
+function safeUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return `${u.host}${u.pathname}`.slice(0, 180);
+  } catch {
+    return String(url || '').split('?')[0].slice(0, 180);
+  }
+}
+
+function headerValue(headers, name) {
+  const want = String(name || '').toLowerCase();
+  const src = headers && typeof headers === 'object' ? headers : {};
+  const entries = Array.isArray(src) ? src : Object.entries(src);
+  for (const entry of entries) {
+    const key = Array.isArray(entry) ? entry[0] : entry.name;
+    const value = Array.isArray(entry) ? entry[1] : entry.value;
+    if (String(key || '').toLowerCase() === want) return String(value || '');
+  }
+  return '';
+}
+
+function plain(text) {
+  return String(text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function isPhotoUploadUrl(url) {
+  return /photo\/upload|attachments\/photo|rupload|upload\.facebook|\/ajax\/.*upload|media_upload|composer_photo|upload_photo/i.test(String(url || ''));
+}
+
+function bodyHasImage(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 3) return false;
+  const slice = buf.subarray(0, Math.min(buf.length, 2 * 1024 * 1024));
+  if (slice.indexOf(Buffer.from([0xFF, 0xD8, 0xFF])) >= 0) return true;
+  if (slice.indexOf(Buffer.from([0x89, 0x50, 0x4E, 0x47])) >= 0) return true;
+  if (slice.indexOf(Buffer.from('RIFF')) >= 0 && slice.indexOf(Buffer.from('WEBP')) >= 0) return true;
+  return false;
+}
+
+function photoCarriesFile(buf) {
+  return Buffer.isBuffer(buf) && (buf.length >= 15000 || bodyHasImage(buf));
+}
+
+function composerPhotoProblem(text) {
+  const t = plain(text);
+  if (/nao foi possivel processar|nao foi possivel carregar|nao pode ser processad|could not process|couldn.?t process|could not upload|no se pudo procesar/.test(t)) {
+    return 'photo_process_failed';
+  }
+  return '';
+}
+
+function judgePhotoResponse(status, body) {
+  const code = Number(status) || 0;
+  const head = Buffer.isBuffer(body) ? body.subarray(0, 800).toString('utf8') : String(body || '').slice(0, 800);
+  const t = plain(head);
+  if (!code) return { ok: false, reason: 'photo_upload_no_status' };
+  if (code >= 400) return { ok: false, reason: 'photo_upload_http_' + code };
+  if (/nao foi possivel|could not process|couldn.?t process|errorSummary|error_code|photo_upload_error/.test(t)) {
+    return { ok: false, reason: 'photo_upload_rejected' };
+  }
+  return { ok: true, reason: 'photo_upload_ok' };
+}
+
+function responseNote(buf) {
+  if (!Buffer.isBuffer(buf) || !buf.length) return '';
+  const sample = buf.subarray(0, 180);
+  let weird = 0;
+  for (const b of sample) if (b === 0 || (b > 126 && b < 160)) weird += 1;
+  if (weird > 20) return 'binary:' + sample.subarray(0, 8).toString('hex');
+  return sample.toString('utf8').replace(/\s+/g, ' ').slice(0, 160);
+}
+
+function hideSecret(text, secret) {
+  const raw = String(text || '');
+  const key = String(secret || '');
+  if (key.length < 4) return raw;
+  return raw.split(key).join('');
+}
+
+function auditReplay(nome, row) {
+  try {
+    require('./provisionAudit.js').append(Object.assign({
+      ts: Date.now(),
+      event: 'proxy_publish_replay',
+      nome: String(nome || '')
+    }, row || {}));
+  } catch {}
+}
+
+async function readComposerPhotoProblem(page) {
+  let text = '';
+  try {
+    text = await page.evaluate(() => String((document.body && document.body.innerText) || '').slice(0, 6000));
+  } catch {}
+  return composerPhotoProblem(text);
+}
+
+async function waitComposerPhoto(page, creation, timeoutMs) {
+  const timeout = Math.max(8000, Number(timeoutMs) || 170000);
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const problem = await readComposerPhotoProblem(page);
+    if (problem) return { ok: false, reason: problem, waitedMs: Date.now() - start };
+    const net = creation && typeof creation.photoResult === 'function' ? creation.photoResult() : null;
+    if (net && net.ok === false) return Object.assign({ waitedMs: Date.now() - start }, net);
+    if (net && net.ok === true) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const again = await readComposerPhotoProblem(page);
+      if (again) return { ok: false, reason: again, waitedMs: Date.now() - start, status: net.status || null };
+      return {
+        ok: true,
+        reason: net.reason || 'photo_upload_ok',
+        waitedMs: Date.now() - start,
+        status: net.status || null,
+        bodyBytes: net.bodyBytes || null,
+        bodySource: net.bodySource || null
+      };
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  const net = creation && typeof creation.photoResult === 'function' ? creation.photoResult() : null;
+  return {
+    ok: false,
+    reason: 'photo_process_timeout',
+    waitedMs: Date.now() - start,
+    status: net && net.status || null,
+    bodyBytes: net && net.bodyBytes || null,
+    bodySource: net && net.bodySource || null
+  };
+}
+
 function curl(args) {
   return new Promise((resolve) => {
     const child = spawn('curl.exe', args, { windowsHide: true });
@@ -160,13 +290,16 @@ async function replayThroughProxy({ url, method, headers, body, baseUser, passwo
   const bodyFile = path.join(os.tmpdir(), `oxy-pub-body-${id}`);
   const respBody = path.join(os.tmpdir(), `oxy-pub-resp-${id}`);
   const respHead = path.join(os.tmpdir(), `oxy-pub-head-${id}`);
-  fs.writeFileSync(bodyFile, Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''), 'utf8'));
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''), 'latin1');
+  fs.writeFileSync(bodyFile, payload);
+  const seconds = String(Math.min(180, Math.max(60, Math.ceil(payload.length / 40000) + 45)));
   const args = [
     '-sS', '-D', respHead, '-o', respBody, '-w', '%{http_code} %{size_upload} %{size_download}',
-    '--max-time', '45',
+    '--max-time', seconds,
     '-x', `http://${HOST}:${PORT}`,
     '-U', `${authUser(baseUser, sessid)}:${password}`,
     '-X', method || 'POST',
+    '-H', 'Expect:',
     '--data-binary', `@${bodyFile}`
   ];
   for (const [name, value] of headerList(headers)) args.push('-H', `${name}: ${value}`);
@@ -188,13 +321,29 @@ async function replayThroughProxy({ url, method, headers, body, baseUser, passwo
     if (/^(transfer-encoding|connection|keep-alive|proxy-authenticate|content-length)$/i.test(name)) continue;
     responseHeaders.push({ name, value });
   }
-  return { status, body: resp, responseHeaders, up: meter.up, down: meter.down };
+  return {
+    status,
+    body: resp,
+    responseHeaders,
+    up: meter.up,
+    down: meter.down,
+    exitCode: res.code,
+    error: String(res.stderr || '').replace(/\s+/g, ' ').slice(0, 180)
+  };
 }
 
 async function arm(page, baseUser, password, sessid, nome, meter) {
   const client = await page.target().createCDPSession();
   const note = meter && typeof meter === 'object' ? meter : {};
-  const state = { proxied: 0, proxiedAtClick: null, publishCaptured: false, bytesUp: 0, bytesDown: 0, held: [], inflight: 0, closed: false, client };
+  const state = { proxied: 0, proxiedAtClick: null, publishCaptured: false, photo: null, bytesUp: 0, bytesDown: 0, held: [], inflight: 0, closed: false, client };
+  state.notePhoto = (row) => {
+    if (!row) return;
+    const prev = state.photo;
+    if (prev && prev.ok === false && prev.carriesFile === true) return;
+    if (row.ok === true && row.carriesFile !== true) return;
+    if (prev && prev.ok === true && prev.carriesFile === true && row.ok !== false) return;
+    state.photo = row;
+  };
   state.markClick = () => { state.proxiedAtClick = state.proxied; };
   const patterns = [];
   for (const urlPattern of [
@@ -234,23 +383,36 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
       for (const entry of entries) {
         if (entry && entry.bytes) chunks.push(Buffer.from(String(entry.bytes), 'base64'));
       }
-      if (chunks.length) return Buffer.concat(chunks);
+      if (chunks.length) {
+        const buf = Buffer.concat(chunks);
+        buf._source = 'base64';
+        return buf;
+      }
     }
     try {
       const extra = await client.send('Fetch.getRequestPostData', { requestId: ev.requestId });
       if (extra && extra.postData) {
-        return extra.base64Encoded
+        const buf = extra.base64Encoded
           ? Buffer.from(String(extra.postData), 'base64')
           : Buffer.from(String(extra.postData), 'latin1');
+        buf._source = extra.base64Encoded ? 'base64' : 'latin1';
+        return buf;
       }
     } catch {}
-    if (req.postData) return Buffer.from(String(req.postData), 'latin1');
+    if (req.postData) {
+      const buf = Buffer.from(String(req.postData), 'latin1');
+      buf._source = 'latin1';
+      return buf;
+    }
     return Buffer.alloc(0);
   }
   async function onPaused(ev) {
     const req = ev.request || {};
     const bodyBuf = await readPausedBody(ev);
-    const postData = bodyBuf.toString('latin1');
+    const bodySource = bodyBuf._source || 'empty';
+    const postData = bodyBuf.length > 120000
+      ? bodyBuf.subarray(0, 120000).toString('latin1')
+      : bodyBuf.toString('latin1');
     if (state.broken) {
       try { await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'BlockedByClient' }); } catch {}
       return;
@@ -267,15 +429,30 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
       stepLog.appendJSONL(nome || 'system', 'robe', {
         step: 'proxy_publish_lane',
         lane,
-        op: (operationName(postData) || operationName(headerText(req.headers)) || '').slice(0, 140)
+        op: (operationName(postData) || operationName(headerText(req.headers)) || '').slice(0, 140),
+        bodyBytes: bodyBuf.length,
+        bodySource
       });
     } catch {}
     try {
       if (lane === 'proxy') {
+        const urlSafe = safeUrl(req.url);
+        const photoUrl = isPhotoUploadUrl(req.url);
+        const carriesFile = photoUrl && photoCarriesFile(bodyBuf);
+        const contentType = headerValue(req.headers, 'content-type');
         if (req.hasPostData && !bodyBuf.length) {
+          if (photoUrl) state.notePhoto({ ok: false, reason: 'photo_body_empty', bodyBytes: 0, bodySource, url: urlSafe, carriesFile: true });
+          auditReplay(nome, { url: urlSafe, status: 0, bodyBytes: 0, bodySource, resourceType: ev.resourceType || '', reason: 'empty_body' });
           await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
           return;
         }
+        if (carriesFile && /multipart|image\//i.test(contentType) && !bodyHasImage(bodyBuf)) {
+          state.notePhoto({ ok: false, reason: 'photo_body_not_image', bodyBytes: bodyBuf.length, bodySource, url: urlSafe, carriesFile: true });
+          auditReplay(nome, { url: urlSafe, status: 0, bodyBytes: bodyBuf.length, bodySource, resourceType: ev.resourceType || '', reason: 'photo_body_not_image' });
+          await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
+          return;
+        }
+        const started = Date.now();
         const replay = await replayThroughProxy({
           url: req.url,
           method: req.method,
@@ -285,6 +462,30 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           password,
           sessid
         });
+        const replayRow = {
+          url: urlSafe,
+          status: replay.status || 0,
+          exitCode: replay.exitCode,
+          bodyBytes: bodyBuf.length,
+          bodySource,
+          up: replay.up,
+          down: replay.down,
+          ms: Date.now() - started,
+          resourceType: ev.resourceType || '',
+          note: responseNote(replay.body),
+          curl: hideSecret(hideSecret(replay.error, password), baseUser).slice(0, 180)
+        };
+        if (photoUrl || bodyBuf.length >= 15000 || !replay.status || replay.status >= 400 || marked) auditReplay(nome, replayRow);
+        if (photoUrl && carriesFile) {
+          const verdict = judgePhotoResponse(replay.status, replay.body);
+          state.notePhoto(Object.assign({
+            bodyBytes: bodyBuf.length,
+            bodySource,
+            status: replay.status || 0,
+            url: urlSafe,
+            carriesFile: true
+          }, verdict));
+        }
         if (!replay.status) {
           await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
           return;
@@ -390,6 +591,9 @@ async function openForPublish(page, nome) {
       if (gate.proxiedAtClick == null) return gate.proxied > 0;
       return gate.proxied > gate.proxiedAtClick;
     },
+    photoResult() {
+      return gate && gate.photo ? gate.photo : null;
+    },
     async close() { if (gate) await gate.close(); }
   };
 }
@@ -421,6 +625,13 @@ module.exports = {
   isPublishMarked,
   acceptExit,
   operationName,
+  isPhotoUploadUrl,
+  bodyHasImage,
+  photoCarriesFile,
+  composerPhotoProblem,
+  judgePhotoResponse,
+  readComposerPhotoProblem,
+  waitComposerPhoto,
   MAX_ATTEMPTS,
   ASN,
   openForPublish,

@@ -153,6 +153,7 @@ function logsAllowlist() {
       const sk = safeKey(nome);
       if (!sk) continue;
       allow[`virtus_step_${sk}`] = path.join(perfisDir, nome, 'virtus-step.log');
+      allow[`robe_step_${sk}`] = path.join(perfisDir, nome, 'robe-step.log');
       allow[`chats_respondidos_${sk}`] = path.join(perfisDir, nome, 'chats_respondidos.json');
     }
   } catch {}
