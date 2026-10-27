@@ -6637,26 +6637,44 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
   }
 
-  async function listVirtusPages() {
-    let last = [];
-    for (let i = 0; i < 3; i++) {
-      const listed = await browser.pages().catch(() => []);
-      last = (listed || []).filter((p) => {
-        try { return !(p && typeof p.isClosed === "function" && p.isClosed()); } catch { return false; }
-      });
-      if (last.length) return last;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    return last;
-  }
   function virtusPageUrl(p) {
     try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
   }
+  function virtusPageLive(p) {
+    if (!p) return false;
+    try {
+      if (typeof p.isClosed === "function" && p.isClosed()) return false;
+    } catch {}
+    return true;
+  }
+  async function listVirtusPages() {
+    let last = [];
+    for (let i = 0; i < 10; i++) {
+      const listed = await browser.pages().catch(() => []);
+      last = (listed || []).filter(virtusPageLive);
+      if (last.length) return last;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return last;
+  }
+  async function keepOldestMessagesPage(prefer) {
+    const open = (await browser.pages().catch(() => [])).filter(virtusPageLive);
+    const messages = open.filter((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)));
+    const keep = (prefer && messages.includes(prefer) && messages[0] === prefer)
+      ? prefer
+      : (messages[0] || (prefer && open.includes(prefer) ? prefer : null) || open[0] || null);
+    for (const extra of open) {
+      if (!extra || extra === keep) continue;
+      const url = virtusPageUrl(extra);
+      if (/facebook\.com\/messages/i.test(url) || !url || url === "about:blank") {
+        try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
+      }
+    }
+    return keep || prefer;
+  }
   const pages = await listVirtusPages();
   let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || null;
-  if (!page && pages.length) {
-    page = pages[restrictTab] || pages[0] || null;
-  }
+  if (!page && pages.length) page = pages[0] || null;
   const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
   if (!page) {
     if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
@@ -6693,36 +6711,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       });
     }
   } catch (_) {}
-  try {
-    const openPages = await browser.pages().catch(() => []);
-    for (const extra of openPages || []) {
-      if (!extra || extra === page) continue;
-      let url = "";
-      try { url = virtusPageUrl(extra); } catch { url = ""; }
-      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
-      if (!work) continue;
-      if (/facebook\.com\/messages/i.test(url)) continue;
-      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
-    }
-  } catch (_) {}
+  try { page = await keepOldestMessagesPage(page); } catch (_) {}
+  try { attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome }); } catch (_) {}
   let bootStableOk = false;
   try {
     bootStableOk = (await waitForMessagesBootStable(page, "messages_ready_worker")) === true;
   } catch (_) {
     bootStableOk = false;
   }
-  try {
-    const openAfterBoot = await browser.pages().catch(() => []);
-    for (const extra of openAfterBoot || []) {
-      if (!extra || extra === page) continue;
-      let url = "";
-      try { url = virtusPageUrl(extra); } catch { url = ""; }
-      if (/facebook\.com\/messages/i.test(url)) continue;
-      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
-      if (!work) continue;
-      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
-    }
-  } catch (_) {}
+  try { page = await keepOldestMessagesPage(page); } catch (_) {}
+  try { attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome }); } catch (_) {}
   let earReadyOk = false;
   try {
     if (cfg && typeof cfg.bootInterlockIsEarReady === "function") {
